@@ -429,10 +429,7 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         acceptance: {
           ready: false,
           status: "blocked",
-          blockers: [
-            "command_surface_cases_below_24",
-            "live_provider_generation_not_executed",
-          ],
+          blockers: ["command_surface_cases_below_24", "live_provider_generation_not_executed"],
           requiredEvidence: [
             "core_100_case_runtime_eval",
             "send_stream_command_surface_eval",

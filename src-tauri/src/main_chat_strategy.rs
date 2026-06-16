@@ -29,6 +29,7 @@ use crate::main_chat_runtime_support::{
 };
 use crate::{AppState, SendMessageResult, ToolCallStatus};
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn try_run_main_chat_agent_strategy(
     session_id: &str,
     user_msg: Option<&ChatMessage>,
@@ -223,7 +224,7 @@ pub(crate) async fn try_run_main_chat_agent_strategy(
                 )
                 .await?;
                 execution_transcript.extend(agent_loop_attempt.transcript_entries);
-                if let Some(queue_status) = agent_loop_attempt.queue_status.clone() {
+                if let Some(queue_status) = agent_loop_attempt.queue_status {
                     match queue_status {
                         ExecutionQueueStatus::Completed => {
                             transition_main_chat_action(

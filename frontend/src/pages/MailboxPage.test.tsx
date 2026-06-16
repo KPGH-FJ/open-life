@@ -233,9 +233,7 @@ describe("MailboxPage", () => {
     fireEvent.click(unsupportedAccept);
 
     await waitFor(() => {
-      expect(
-        vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "accept_proposal")
-      ).toBe(false);
+      expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "accept_proposal")).toBe(false);
     });
   });
 

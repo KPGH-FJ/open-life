@@ -51,14 +51,12 @@ fn main_chat_command_surface_test_context() -> tauri::Context<tauri::test::MockR
             .parse()
             .expect("valid mock IPC origin pattern"),
     };
-    context.runtime_authority_mut().__allow_command(
-        "send_message".into(),
-        mock_ipc_origin.clone(),
-    );
-    context.runtime_authority_mut().__allow_command(
-        "start_stream_message".into(),
-        mock_ipc_origin,
-    );
+    context
+        .runtime_authority_mut()
+        .__allow_command("send_message".into(), mock_ipc_origin.clone());
+    context
+        .runtime_authority_mut()
+        .__allow_command("start_stream_message".into(), mock_ipc_origin);
     context
 }
 

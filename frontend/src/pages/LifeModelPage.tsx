@@ -219,7 +219,9 @@ function countBuilderReviewItems(
   pendingProposals: AgentProposal[]
 ): number {
   const diagnosticCount = diagnostics?.pending_builder_review_sessions ?? 0;
-  const proposalCount = pendingProposals.filter(proposal => proposal.source === "builder_review").length;
+  const proposalCount = pendingProposals.filter(
+    proposal => proposal.source === "builder_review"
+  ).length;
   return Math.max(diagnosticCount, proposalCount);
 }
 
@@ -315,9 +317,7 @@ function BuildSection({
         </div>
         <div className="rounded-lg border border-stone-200 bg-white p-4">
           <div className="text-base font-semibold text-stone-950">对话构建</div>
-          <p className="mt-2 min-h-10 text-sm leading-5 text-stone-600">
-            像聊天一样慢慢补全。
-          </p>
+          <p className="mt-2 min-h-10 text-sm leading-5 text-stone-600">像聊天一样慢慢补全。</p>
           <Link
             to="/builder"
             className="mt-4 inline-flex h-9 items-center justify-center gap-2 rounded-md border border-stone-300 bg-white px-3 text-sm font-semibold text-stone-800 hover:bg-stone-50"
@@ -345,7 +345,9 @@ function BuildSection({
         <div className="grid gap-0 divide-y divide-stone-100 md:grid-cols-3 md:divide-x md:divide-y-0">
           <div className="p-4">
             <div className="text-xs font-medium text-stone-500">构建状态</div>
-            <div className="mt-1 text-lg font-semibold text-stone-950">{readinessLabel(overall)}</div>
+            <div className="mt-1 text-lg font-semibold text-stone-950">
+              {readinessLabel(overall)}
+            </div>
             <div className="mt-1 text-xs text-stone-500">{formatPercent(overall)}</div>
           </div>
           <div className="p-4">
@@ -421,7 +423,9 @@ function OverviewSection({
     <section id="life-model-overview" role="tabpanel" className="space-y-4">
       <div>
         <h2 className="text-sm font-semibold text-stone-950">四维摘要</h2>
-        <p className="mt-1 text-sm text-stone-600">只显示短摘要；完整构建和确认仍在 Builder 与邮箱中完成。</p>
+        <p className="mt-1 text-sm text-stone-600">
+          只显示短摘要；完整构建和确认仍在 Builder 与邮箱中完成。
+        </p>
       </div>
       <div className="rounded-lg border border-stone-200 bg-white">
         {dimensions.map((dimension, index) => (
@@ -507,7 +511,9 @@ function EvidenceSection({
             <div className="text-xs font-medium text-stone-500">记忆条数</div>
             <div className="mt-1 text-lg font-semibold text-stone-950">{effectiveMemoryCount}</div>
             <div className="mt-1 text-xs text-stone-500">
-              {tierStats ? `活跃 ${tierStats.tier1 + tierStats.tier2 + tierStats.tier3}` : "只读统计"}
+              {tierStats
+                ? `活跃 ${tierStats.tier1 + tierStats.tier2 + tierStats.tier3}`
+                : "只读统计"}
             </div>
           </div>
           <div className="p-4">
@@ -617,9 +623,8 @@ export default function LifeModelPage() {
   const safeModeReason = getSafeModeReason(state.diagnostics);
   const pendingCount =
     state.pendingProposals.length || state.diagnostics?.pending_proposal_count || 0;
-  const topStatus = state.diagnostics?.life_model_ready && !state.diagnostics?.model_empty
-    ? "本地模型"
-    : "待构建";
+  const topStatus =
+    state.diagnostics?.life_model_ready && !state.diagnostics?.model_empty ? "本地模型" : "待构建";
 
   return (
     <div

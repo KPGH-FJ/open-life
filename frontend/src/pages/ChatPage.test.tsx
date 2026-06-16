@@ -659,9 +659,7 @@ describe("ChatPage", () => {
         })
       );
     });
-    const streamCall = vi
-      .mocked(invoke)
-      .mock.calls.find(([cmd]) => cmd === "start_stream_message");
+    const streamCall = vi.mocked(invoke).mock.calls.find(([cmd]) => cmd === "start_stream_message");
     const eventSessionId = (streamCall?.[1] as any)?.sessionId ?? "session-1";
 
     const doneHandler = listeners.get("stream-message-done");
@@ -703,7 +701,9 @@ describe("ChatPage", () => {
     expect(screen.getByText("Goal")).toBeInTheDocument();
     expect(screen.getByText("Prepare a low energy weekly plan")).toBeInTheDocument();
     expect(screen.getByText("Current plan")).toBeInTheDocument();
-    expect(screen.getByText("Search planning memory, then ask before creating tasks.")).toBeInTheDocument();
+    expect(
+      screen.getByText("Search planning memory, then ask before creating tasks.")
+    ).toBeInTheDocument();
     expect(screen.getByText("Execution queue")).toBeInTheDocument();
     expect(screen.getByText("memory.search")).toBeInTheDocument();
     expect(screen.getByText("Search accepted planning memory")).toBeInTheDocument();
@@ -859,9 +859,7 @@ describe("ChatPage", () => {
         expect.objectContaining({ sessionId: expect.any(String) })
       );
     });
-    const streamCall = vi
-      .mocked(invoke)
-      .mock.calls.find(([cmd]) => cmd === "start_stream_message");
+    const streamCall = vi.mocked(invoke).mock.calls.find(([cmd]) => cmd === "start_stream_message");
     const eventSessionId = (streamCall?.[1] as any)?.sessionId ?? "session-1";
     const doneHandler = listeners.get("stream-message-done");
     expect(doneHandler).toBeDefined();
@@ -983,14 +981,14 @@ describe("ChatPage", () => {
             selectedSkillId: "weekly-planning",
             selected_skill_id: "weekly-planning",
           }),
-        }),
+        })
       );
     });
 
     for (const forbiddenCommand of FORBIDDEN_ORDINARY_CHAT_COMMANDS) {
       expect(
         vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === forbiddenCommand),
-        `${forbiddenCommand} must not be called by ordinary Send`,
+        `${forbiddenCommand} must not be called by ordinary Send`
       ).toBe(false);
     }
   });

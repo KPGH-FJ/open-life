@@ -248,16 +248,12 @@ describe("tauri command argument aliases", () => {
       tool_calls: [],
     });
 
-    await sendMessageV2(
-      "session-skill",
-      [{ role: "user", content: "Summarize this" }],
-      { selectedSkillId: "summarize" }
-    );
-    await startStreamMessage(
-      "session-skill",
-      [{ role: "user", content: "Summarize this" }],
-      { selectedSkillId: "summarize" }
-    );
+    await sendMessageV2("session-skill", [{ role: "user", content: "Summarize this" }], {
+      selectedSkillId: "summarize",
+    });
+    await startStreamMessage("session-skill", [{ role: "user", content: "Summarize this" }], {
+      selectedSkillId: "summarize",
+    });
 
     expect(invoke).toHaveBeenCalledWith(
       "send_message",
@@ -478,10 +474,7 @@ describe("tauri command argument aliases", () => {
       noExternalProviderInvocation: true,
       noAppStoreWrites: true,
       metadataSafeSummary: {
-        liveProviderPreflightBlockers: [
-          "explicit_live_eval_required",
-          "provider_api_key_missing",
-        ],
+        liveProviderPreflightBlockers: ["explicit_live_eval_required", "provider_api_key_missing"],
         liveProviderPreflightModelInvoked: false,
       },
     });
@@ -494,10 +487,10 @@ describe("tauri command argument aliases", () => {
     expect(result.noExternalProviderInvocation).toBe(true);
     expect(result.liveProviderPreflight.modelInvoked).toBe(false);
     expect(result.liveProviderPreflight.requiredEvidence).toContain(
-      "provider_backed_web_agent_loop",
+      "provider_backed_web_agent_loop"
     );
     expect(result.liveProviderPreflight.requiredEvidence).toContain(
-      "provider_backed_mcp_agent_loop",
+      "provider_backed_mcp_agent_loop"
     );
     expect(result.metadataSafeSummary.liveProviderPreflightModelInvoked).toBe(false);
   });

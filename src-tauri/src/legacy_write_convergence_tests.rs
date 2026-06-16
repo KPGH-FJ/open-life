@@ -62,6 +62,11 @@ fn context_for_entry(
 fn extract_rust_function_body(source: &str, signature: &str) -> String {
     let start = source
         .find(signature)
+        .or_else(|| {
+            signature
+                .strip_suffix('(')
+                .and_then(|prefix| source.find(&format!("{prefix}<")))
+        })
         .unwrap_or_else(|| panic!("missing function signature {signature}"));
     let body_start = source[start..]
         .find('{')
@@ -297,6 +302,9 @@ fn legacy_write_convergence_w97_materializer_matrix_matches_current_production_c
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let persist_call_files = [
         "src/lib.rs",
+        "src/main_chat_send.rs",
+        "src/main_chat_streaming.rs",
+        "src/main_chat_legacy_agent_loop.rs",
         "src/commands/builder.rs",
         "src/commands/settings.rs",
         "src/commands/life_model.rs",
@@ -345,6 +353,33 @@ fn legacy_write_convergence_w97_materializer_matrix_matches_current_production_c
         matrix_direct_save_count, actual_direct_save_count,
         "matrix must classify every current production LifeModelManager::save caller"
     );
+}
+
+#[test]
+fn legacy_write_convergence_w97_materializer_matrix_tracks_extracted_main_chat_callers() {
+    let entries = lifemodel_materializer_caller_matrix();
+    for (stable_id, source_file_path, caller_function_name) in [
+        (
+            "ordinary_chat_auto_checkin_source_data",
+            "src-tauri/src/main_chat_send.rs",
+            "send_message_with_state",
+        ),
+        (
+            "ordinary_stream_agent_loop_auto_checkin_source_data",
+            "src-tauri/src/main_chat_legacy_agent_loop.rs",
+            "start_stream_message_with_agent_loop",
+        ),
+        (
+            "ordinary_stream_legacy_auto_checkin_source_data",
+            "src-tauri/src/main_chat_streaming.rs",
+            "start_stream_message_with_state",
+        ),
+    ] {
+        let entry = materializer_entry(&entries, stable_id);
+        assert_eq!(entry.source_file_path, source_file_path);
+        assert_eq!(entry.caller_function_name, caller_function_name);
+        assert_eq!(entry.write_entrypoint, "persist_life_model");
+    }
 }
 
 #[test]

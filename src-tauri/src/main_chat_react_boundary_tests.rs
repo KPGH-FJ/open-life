@@ -290,7 +290,9 @@ async fn fake_capturing_chat_provider_endpoint(
 ) -> (String, std::sync::mpsc::Receiver<String>) {
     let listener =
         std::net::TcpListener::bind("127.0.0.1:0").expect("bind local capturing chat provider");
-    let addr = listener.local_addr().expect("local capturing provider addr");
+    let addr = listener
+        .local_addr()
+        .expect("local capturing provider addr");
     let (request_tx, request_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         if let Ok((mut stream, _)) = listener.accept() {
@@ -554,7 +556,9 @@ async fn main_chat_react_provider_candidate_ranking_masks_sensitive_context_befo
         &life_model,
         &[ChatMessage {
             role: "user".into(),
-            content: "Use this private context only for relevance: alice@example.com and 13800138000.".into(),
+            content:
+                "Use this private context only for relevance: alice@example.com and 13800138000."
+                    .into(),
         }],
         plan,
         true,
@@ -683,8 +687,8 @@ async fn main_chat_react_provider_candidate_ranking_sends_safe_capability_labels
 }
 
 #[tokio::test]
-async fn main_chat_react_provider_candidate_ranking_requires_route_identity_to_match_request_provider()
-{
+async fn main_chat_react_provider_candidate_ranking_requires_route_identity_to_match_request_provider(
+) {
     let provider_base = fake_ordered_chat_provider_endpoint(vec![serde_json::json!({
         "ranked_candidate_ids": ["candidate.beta", "candidate.alpha"]
     })

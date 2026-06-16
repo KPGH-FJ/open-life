@@ -85,9 +85,7 @@ export default function ProposalReviewPage() {
   const location = useLocation();
   const routeState = location.state as ReviewRouteState | null;
   const mainChatTaskSessionId =
-    typeof routeState?.mainChatTaskSessionId === "string"
-      ? routeState.mainChatTaskSessionId
-      : null;
+    typeof routeState?.mainChatTaskSessionId === "string" ? routeState.mainChatTaskSessionId : null;
   const [proposals, setProposals] = useState<AgentProposal[]>([]);
   const [loading, setLoading] = useState(true);
   const [actingId, setActingId] = useState<string | null>(null);

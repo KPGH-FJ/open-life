@@ -1238,10 +1238,7 @@ impl AgentLoop {
                 })
             };
             let target_allowed = if config.tool_action_allowlist.is_empty() {
-                config
-                    .toolset_allowlist
-                    .iter()
-                    .any(|allowed| action.target == *allowed)
+                config.toolset_allowlist.contains(&action.target)
             } else {
                 matched_allowed_action.is_some()
             };

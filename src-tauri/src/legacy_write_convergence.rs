@@ -1271,8 +1271,8 @@ pub(crate) fn lifemodel_materializer_caller_matrix() -> Vec<LifeModelMaterialize
         caller_matrix_entry(
             "ordinary_chat_auto_checkin_source_data",
             "Ordinary Chat daily-goal auto-checkin compatibility materialization",
-            "src-tauri/src/lib.rs",
-            "send_message",
+            "src-tauri/src/main_chat_send.rs",
+            "send_message_with_state",
             "persist_life_model",
             LifeModelMaterializerCallerKind::OrdinaryChatAutoCheckinSourceData,
             LifeModelMaterializerCallerRisk::SourceDataCompatibilityWrite,
@@ -1291,7 +1291,7 @@ pub(crate) fn lifemodel_materializer_caller_matrix() -> Vec<LifeModelMaterialize
         caller_matrix_entry(
             "ordinary_stream_agent_loop_auto_checkin_source_data",
             "Stream AgentLoop daily-goal auto-checkin compatibility materialization",
-            "src-tauri/src/lib.rs",
+            "src-tauri/src/main_chat_legacy_agent_loop.rs",
             "start_stream_message_with_agent_loop",
             "persist_life_model",
             LifeModelMaterializerCallerKind::OrdinaryChatAutoCheckinSourceData,
@@ -1311,8 +1311,8 @@ pub(crate) fn lifemodel_materializer_caller_matrix() -> Vec<LifeModelMaterialize
         caller_matrix_entry(
             "ordinary_stream_legacy_auto_checkin_source_data",
             "Legacy stream daily-goal auto-checkin compatibility materialization",
-            "src-tauri/src/lib.rs",
-            "start_stream_message",
+            "src-tauri/src/main_chat_streaming.rs",
+            "start_stream_message_with_state",
             "persist_life_model",
             LifeModelMaterializerCallerKind::OrdinaryChatAutoCheckinSourceData,
             LifeModelMaterializerCallerRisk::SourceDataCompatibilityWrite,

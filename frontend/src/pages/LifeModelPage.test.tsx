@@ -193,10 +193,7 @@ describe("LifeModelPage", () => {
       "href",
       "/builder"
     );
-    expect(screen.getByRole("link", { name: "开始对话构建" })).toHaveAttribute(
-      "href",
-      "/builder"
-    );
+    expect(screen.getByRole("link", { name: "开始对话构建" })).toHaveAttribute("href", "/builder");
     expect(screen.getByRole("button", { name: "暂不可用" })).toBeDisabled();
 
     fireEvent.click(screen.getByRole("tab", { name: "依据" }));

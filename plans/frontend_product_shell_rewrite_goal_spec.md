@@ -411,4 +411,3 @@ Stop the Goal and report blockers if:
 - frontend typecheck, tests, or build fail and cannot be fixed within the slice;
 - a required backend command does not exist and the UI would need fake product
   truth.
-

@@ -2739,7 +2739,7 @@ pub fn run_main_chat_agent_v1_runtime_eval_suite(
     cases: Vec<MainChatRuntimeEvalCase>,
 ) -> MainChatRuntimeEvalReport {
     let ingress = AgentIngress::default();
-    let policy = ExecutionPolicy::default();
+    let policy = ExecutionPolicy;
     let session_store = match AgentTaskSessionStore::new_in_memory() {
         Ok(store) => store,
         Err(err) => {
@@ -2846,7 +2846,7 @@ pub fn run_main_chat_agent_v1_runtime_eval_suite(
             };
         }
     };
-    let compiler = ContextCompiler::default();
+    let compiler = ContextCompiler;
 
     let total_cases = cases.len();
     let mut runtime_executed_case_count = 0usize;
@@ -4818,7 +4818,7 @@ fn exercise_runtime_eval_task_controls(
         .enqueue(
             &control_session.id,
             ExecutionAction::new("memory.search", "Runtime eval failed action retry"),
-            ExecutionPolicy::default().classify(&ExecutionAction::new(
+            ExecutionPolicy.classify(&ExecutionAction::new(
                 "memory.search",
                 "Runtime eval failed action retry",
             )),
@@ -4939,7 +4939,7 @@ fn exercise_runtime_eval_task_controls(
                 &err.to_string(),
             )
         })?;
-    let pending_policy = ExecutionPolicy::default().classify(&ExecutionAction::new(
+    let pending_policy = ExecutionPolicy.classify(&ExecutionAction::new(
         "external.write",
         "Runtime eval permission preserving resume.",
     ));

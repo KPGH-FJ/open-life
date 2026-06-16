@@ -127,8 +127,10 @@ function riskClass(risk: AgentProposal["riskLevel"]): string {
 
 function statusClass(status: ProposalStatus): string {
   if (status === "accepted") return "border-emerald-200 bg-emerald-50 text-emerald-800";
-  if (status === "rejected" || status === "expired") return "border-stone-200 bg-stone-100 text-stone-600";
-  if (status === "edited" || status === "postponed") return "border-amber-200 bg-amber-50 text-amber-800";
+  if (status === "rejected" || status === "expired")
+    return "border-stone-200 bg-stone-100 text-stone-600";
+  if (status === "edited" || status === "postponed")
+    return "border-amber-200 bg-amber-50 text-amber-800";
   return "border-blue-200 bg-blue-50 text-blue-800";
 }
 
@@ -563,7 +565,9 @@ export default function MailboxPage() {
               <article className="min-h-full">
                 <header className="border-b border-stone-100 px-5 py-4">
                   <div className="flex flex-wrap items-center gap-2 text-xs text-stone-500">
-                    <span className="font-semibold text-stone-950">{senderFor(selectedProposal)}</span>
+                    <span className="font-semibold text-stone-950">
+                      {senderFor(selectedProposal)}
+                    </span>
                     <span>给你</span>
                     <span>{formatDate(selectedProposal.createdAt)}</span>
                   </div>
@@ -605,7 +609,9 @@ export default function MailboxPage() {
                     <div className="text-xs font-semibold uppercase tracking-normal text-stone-400">
                       为什么问你
                     </div>
-                    <p className="mt-2 text-sm leading-6 text-stone-800">{selectedProposal.reason}</p>
+                    <p className="mt-2 text-sm leading-6 text-stone-800">
+                      {selectedProposal.reason}
+                    </p>
                   </section>
 
                   <section className="rounded-lg border border-stone-200 bg-stone-50 p-4">
@@ -625,7 +631,13 @@ export default function MailboxPage() {
                       )}
                       {selectedProposal.runId && (
                         <div className="md:col-span-2">
-                          Run：<a className="text-stone-900 underline" href={`#/runs/${selectedProposal.runId}`}>{selectedProposal.runId}</a>
+                          Run：
+                          <a
+                            className="text-stone-900 underline"
+                            href={`#/runs/${selectedProposal.runId}`}
+                          >
+                            {selectedProposal.runId}
+                          </a>
                         </div>
                       )}
                     </div>
@@ -664,8 +676,7 @@ export default function MailboxPage() {
                       <div className="mt-3 flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
                         <AlertTriangle size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
                         <span>
-                          这封信仍必须由你确认；暂不支持的类型和 Safe Paths
-                          之外的写入不会被同意。
+                          这封信仍必须由你确认；暂不支持的类型和 Safe Paths 之外的写入不会被同意。
                         </span>
                       </div>
                     )}
@@ -717,9 +728,7 @@ export default function MailboxPage() {
                     {!selectedProposal.whyOpenLifeThinksThis &&
                       (selectedProposal.evidenceSummaries?.length ?? 0) === 0 &&
                       (selectedProposal.behaviorChecks?.length ?? 0) === 0 && (
-                        <div className="mt-2 text-sm text-sky-900">
-                          暂无可展示的依据摘要。
-                        </div>
+                        <div className="mt-2 text-sm text-sky-900">暂无可展示的依据摘要。</div>
                       )}
                   </section>
 
@@ -731,7 +740,10 @@ export default function MailboxPage() {
                       <button
                         type="button"
                         onClick={() => runAction(selectedProposal, "accept")}
-                        disabled={!canAccept(selectedProposal, safeModeActive, safePaths) || actingId === selectedProposal.id}
+                        disabled={
+                          !canAccept(selectedProposal, safeModeActive, safePaths) ||
+                          actingId === selectedProposal.id
+                        }
                         title={
                           actionBlockedReason(selectedProposal, safeModeActive, safePaths) ??
                           undefined
@@ -762,7 +774,11 @@ export default function MailboxPage() {
                       <button
                         type="button"
                         onClick={() => startEdit(selectedProposal)}
-                        disabled={safeModeActive || actingId === selectedProposal.id || editingId === selectedProposal.id}
+                        disabled={
+                          safeModeActive ||
+                          actingId === selectedProposal.id ||
+                          editingId === selectedProposal.id
+                        }
                         className="inline-flex h-9 items-center gap-1.5 rounded-md border border-stone-200 bg-white px-3 text-sm font-medium text-stone-700 hover:bg-stone-50 disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         <Edit2 size={15} aria-hidden="true" />
@@ -772,7 +788,10 @@ export default function MailboxPage() {
 
                     {editingId === selectedProposal.id && (
                       <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3">
-                        <label className="text-xs font-medium text-amber-900" htmlFor="mailbox-edit-after">
+                        <label
+                          className="text-xs font-medium text-amber-900"
+                          htmlFor="mailbox-edit-after"
+                        >
                           你想改成什么
                         </label>
                         <textarea
@@ -787,7 +806,9 @@ export default function MailboxPage() {
                           <button
                             type="button"
                             onClick={() => saveEdit(selectedProposal)}
-                            disabled={actingId === selectedProposal.id || editValue.trim().length === 0}
+                            disabled={
+                              actingId === selectedProposal.id || editValue.trim().length === 0
+                            }
                             className="rounded-md bg-stone-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-stone-800 disabled:opacity-50"
                           >
                             保存

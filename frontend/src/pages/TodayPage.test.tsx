@@ -128,7 +128,11 @@ describe("TodayPage", () => {
 
     await waitFor(() => {
       const calledCommands = vi.mocked(invoke).mock.calls.map(([command]) => command);
-      for (const command of ["get_system_diagnostics", "get_daily_goals", "get_pending_proposals"]) {
+      for (const command of [
+        "get_system_diagnostics",
+        "get_daily_goals",
+        "get_pending_proposals",
+      ]) {
         expect(calledCommands).toContain(command);
       }
       expect(calledCommands).not.toContain("count_memory_chunks");
@@ -147,10 +151,9 @@ describe("TodayPage", () => {
     renderPage();
 
     expect(await screen.findByText("今天还没有定下来")).toBeInTheDocument();
-    expect(screen.getAllByRole("link", { name: "和 OpenLife 说一下现在的状态" })[0]).toHaveAttribute(
-      "href",
-      "/companion"
-    );
+    expect(
+      screen.getAllByRole("link", { name: "和 OpenLife 说一下现在的状态" })[0]
+    ).toHaveAttribute("href", "/companion");
   });
 
   it("links pending proposals to mailbox without direct accept or reject actions", async () => {

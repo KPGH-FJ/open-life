@@ -89,7 +89,7 @@ pub(crate) async fn compile_main_chat_context(
         ));
     }
 
-    ContextCompiler::default().compile(ContextCompilerInput {
+    ContextCompiler.compile(ContextCompilerInput {
         strategy: decision.selected_strategy,
         privacy_risk: decision.privacy_risk.clone(),
         active_session_id: Some(task_session_id.to_string()),
@@ -273,6 +273,7 @@ fn push_selected_skill_file(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_known_file(
     candidates: &mut Vec<ContextSourceCandidate>,
     seen: &mut HashSet<String>,

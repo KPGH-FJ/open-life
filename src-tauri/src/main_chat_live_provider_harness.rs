@@ -460,7 +460,7 @@ pub(crate) async fn run_main_chat_live_provider_eval_harness(
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string)
             });
-            if let (Some(proposal_id), Some(ref proposal_arc)) =
+            if let (Some(proposal_id), Some(proposal_arc)) =
                 (proposal_id, state.proposal_store.as_ref())
             {
                 let proposal_store = proposal_arc.lock().await;
@@ -1100,6 +1100,7 @@ fn distinct_registered_mcp_candidate_metadata_trace_present(
         && candidate_targets == action_targets
 }
 
+#[allow(clippy::too_many_arguments)]
 fn provider_ranked_registered_mcp_selection_metadata_trace_present(
     scenario: main_chat_final_gate::MainChatLiveProviderEvalHarnessScenario,
     expected_provider: &str,
@@ -1206,9 +1207,7 @@ fn provider_ranked_registered_mcp_selection_metadata_trace_present(
         && ranked_candidate_set == candidate_set
         && ranked_candidate_ids == candidate_ids
         && ranked_candidate_id_count == candidate_ids.len()
-        && ranked_candidate_ids
-            .iter()
-            .any(|candidate_id| *candidate_id == selected_candidate_id)
+        && ranked_candidate_ids.contains(&selected_candidate_id)
 }
 
 fn metadata_safe_digest_label_present(digest: &str) -> bool {

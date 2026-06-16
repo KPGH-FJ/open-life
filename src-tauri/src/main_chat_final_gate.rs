@@ -290,9 +290,11 @@ pub(crate) fn completed_main_chat_live_provider_eval_harness_report(
         tool_selection_ranking_route_type: synthetic_provider_ranked.then(|| "cloud".into()),
         tool_selection_ranking_provider_backed: synthetic_provider_ranked,
         tool_selection_model_ranking_ignored: false,
-        tool_selection_model_ranking_candidate_ids: synthetic_provider_ranked
-            .then(|| synthetic_candidate_targets.clone())
-            .unwrap_or_default(),
+        tool_selection_model_ranking_candidate_ids: if synthetic_provider_ranked {
+            synthetic_candidate_targets.clone()
+        } else {
+            Vec::new()
+        },
         tool_selection_model_ranking_response_digest: synthetic_provider_ranked
             .then(|| SYNTHETIC_METADATA_SAFE_DIGEST_LABEL.into()),
         model_selected_allowed_tool: react_governance_trace,
@@ -733,9 +735,7 @@ fn live_provider_external_provider_trace_present(
     normalized_external_provider_label(&report.provider).is_some()
 }
 
-fn live_provider_traceable_report_present(
-    report: &MainChatLiveProviderEvalHarnessReport,
-) -> bool {
+fn live_provider_traceable_report_present(report: &MainChatLiveProviderEvalHarnessReport) -> bool {
     report
         .run_id
         .as_ref()
@@ -765,8 +765,7 @@ fn normalized_external_provider_label(provider: &str) -> Option<String> {
     let provider = provider.to_ascii_lowercase();
     if matches!(
         provider.as_str(),
-        ""
-            | "none"
+        "" | "none"
             | "ollama"
             | "local"
             | "localhost"
@@ -1021,12 +1020,10 @@ fn live_provider_capability_labels_trace_present(labels: &str) -> bool {
         && labels
             .split('/')
             .any(|label| label.eq_ignore_ascii_case("read"))
-        && labels
-            .split('/')
-            .all(|label| {
-                live_provider_contract_safe_label(label)
-                    && !live_provider_write_like_capability_label(label)
-            })
+        && labels.split('/').all(|label| {
+            live_provider_contract_safe_label(label)
+                && !live_provider_write_like_capability_label(label)
+        })
 }
 
 fn live_provider_write_like_capability_label(label: &str) -> bool {
@@ -1096,9 +1093,7 @@ fn direct_answer_generation_trace_present(report: &MainChatLiveProviderEvalHarne
         && report
             .model_selected_candidate_capabilities_digest
             .is_none()
-        && report
-            .model_selected_candidate_capability_labels
-            .is_none()
+        && report.model_selected_candidate_capability_labels.is_none()
         && report.model_selected_candidate_match_reason.is_none()
 }
 
@@ -1119,9 +1114,7 @@ fn web_agent_loop_target_trace_present(report: &MainChatLiveProviderEvalHarnessR
         _ => return false,
     };
     let selected_target = match report.model_selected_candidate_target.as_deref() {
-        Some(target)
-            if target.starts_with("web.") && live_provider_contract_safe_label(target) =>
-        {
+        Some(target) if target.starts_with("web.") && live_provider_contract_safe_label(target) => {
             target
         }
         _ => return false,
@@ -1255,8 +1248,7 @@ fn allowed_action_exact_pair(action: &serde_json::Value) -> Option<(&str, &str)>
     }
     let action_type = object.get("actionType")?.as_str()?;
     let target = object.get("target")?.as_str()?;
-    if !live_provider_contract_safe_label(action_type)
-        || !live_provider_contract_safe_label(target)
+    if !live_provider_contract_safe_label(action_type) || !live_provider_contract_safe_label(target)
     {
         return None;
     }
@@ -1299,14 +1291,12 @@ fn allowed_action_types_match_selected(
     if !live_provider_contract_safe_label(selected_action_type) {
         return false;
     }
-    allowed_actions
-        .iter()
-        .all(|action| {
-            matches!(
-                allowed_action_exact_pair(action),
-                Some((action_type, _)) if action_type == selected_action_type
-            )
-        })
+    allowed_actions.iter().all(|action| {
+        matches!(
+            allowed_action_exact_pair(action),
+            Some((action_type, _)) if action_type == selected_action_type
+        )
+    })
 }
 
 fn registered_mcp_distinct_candidate_trace_present(
@@ -1482,9 +1472,7 @@ fn registered_mcp_provider_ranked_selection_trace_present(
         && candidate_set.len() == candidate_ids.len()
         && ranked_candidate_set == candidate_set
         && ranked_candidate_ids == candidate_ids
-        && ranked_candidate_ids
-            .iter()
-            .any(|candidate_id| *candidate_id == selected_candidate_id)
+        && ranked_candidate_ids.contains(&selected_candidate_id)
 }
 
 fn metadata_safe_digest_label_present(digest: &str) -> bool {
@@ -1505,9 +1493,7 @@ fn metadata_safe_digest_label_present(digest: &str) -> bool {
             }
             byte_count.parse::<usize>().ok()
         })
-        .is_some_and(|byte_count| {
-            byte_count > 0
-        });
+        .is_some_and(|byte_count| byte_count > 0);
     bytes_label_present
         && hex_digest.len() == 64
         && hex_digest.chars().all(|ch| ch.is_ascii_hexdigit())
@@ -1516,7 +1502,7 @@ fn metadata_safe_digest_label_present(digest: &str) -> bool {
 fn live_provider_contract_safe_label(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAIN_CHAT_LIVE_PROVIDER_CONTRACT_SAFE_LABEL_MAX_LEN
-        && value.chars().all(|ch| {
-            ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/')
-        })
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/'))
 }

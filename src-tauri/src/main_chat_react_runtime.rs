@@ -534,7 +534,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                 )
                 .unwrap_or_else(|| agent_loop_plan.default_tool_candidate());
             let selected_execution_policy =
-                openlife_core::agent::main_chat_agent_v1::ExecutionPolicy::default().classify(
+                openlife_core::agent::main_chat_agent_v1::ExecutionPolicy.classify(
                     &openlife_core::agent::main_chat_agent_v1::ExecutionAction::new(
                         agent_loop_plan.queue_action_type.clone(),
                         format!(
@@ -556,7 +556,8 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             );
             let selected_capabilities_digest_label =
                 selected_tool_candidate.capabilities_digest_label();
-            let selected_capability_labels_label = selected_tool_candidate.capability_labels_label();
+            let selected_capability_labels_label =
+                selected_tool_candidate.capability_labels_label();
             let selected_manifest_source_label = selected_tool_candidate.manifest_source_label();
             let selected_match_reason_label = selected_tool_candidate.match_reason_label();
             if !selected_execution_policy.execution_allowed {

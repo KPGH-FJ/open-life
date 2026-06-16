@@ -219,7 +219,7 @@ pub(crate) async fn enqueue_main_chat_agent_action(
     description: &str,
     execution_transcript: &mut Vec<ExecutionTranscriptEntry>,
 ) -> Result<QueuedExecutionAction, String> {
-    let policy = ExecutionPolicy::default().classify(&ExecutionAction::new(
+    let policy = ExecutionPolicy.classify(&ExecutionAction::new(
         action_type.to_string(),
         description.to_string(),
     ));

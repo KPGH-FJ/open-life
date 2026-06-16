@@ -952,8 +952,7 @@ fn main_chat_live_provider_harness_evidence_rejects_control_char_response_previe
     );
     multiline_response_trace.response_preview = Some("Live provider\nresponse.".into());
 
-    let evidence =
-        main_chat_live_provider_acceptance_evidence(&[multiline_response_trace.clone()]);
+    let evidence = main_chat_live_provider_acceptance_evidence(&[multiline_response_trace.clone()]);
 
     assert!(!evidence.generation_eval_executed);
 
@@ -1171,8 +1170,7 @@ fn main_chat_live_provider_harness_evidence_rejects_loopback_provider_alias_iden
     loopback_provider_report.provider = "127-0-0-1".into();
     loopback_provider_report.provider_endpoint_kind = "external_provider".into();
 
-    let evidence =
-        main_chat_live_provider_acceptance_evidence(&[loopback_provider_report.clone()]);
+    let evidence = main_chat_live_provider_acceptance_evidence(&[loopback_provider_report.clone()]);
 
     assert!(!evidence.generation_eval_executed);
 
@@ -1191,8 +1189,7 @@ fn main_chat_live_provider_harness_evidence_rejects_embedded_local_provider_alia
     loopback_provider_report.provider = "openai-127-0-0-1".into();
     loopback_provider_report.provider_endpoint_kind = "external_provider".into();
 
-    let evidence =
-        main_chat_live_provider_acceptance_evidence(&[loopback_provider_report.clone()]);
+    let evidence = main_chat_live_provider_acceptance_evidence(&[loopback_provider_report.clone()]);
 
     assert!(!evidence.generation_eval_executed);
 
@@ -1212,8 +1209,7 @@ fn main_chat_live_provider_harness_evidence_rejects_alphanumeric_embedded_local_
     loopback_provider_report.provider = "openai127-0-0-1".into();
     loopback_provider_report.provider_endpoint_kind = "external_provider".into();
 
-    let evidence =
-        main_chat_live_provider_acceptance_evidence(&[loopback_provider_report.clone()]);
+    let evidence = main_chat_live_provider_acceptance_evidence(&[loopback_provider_report.clone()]);
 
     assert!(!evidence.generation_eval_executed);
 
@@ -1264,8 +1260,8 @@ fn main_chat_live_provider_harness_evidence_rejects_wrapping_control_char_extern
 }
 
 #[test]
-fn main_chat_live_provider_harness_evidence_rejects_wrapping_whitespace_external_provider_identity(
-) {
+fn main_chat_live_provider_harness_evidence_rejects_wrapping_whitespace_external_provider_identity()
+{
     let mut wrapped_provider_report = successful_live_provider_harness_report(
         MainChatLiveProviderEvalHarnessScenario::DirectAnswer,
     );
@@ -1345,7 +1341,8 @@ fn main_chat_live_provider_harness_evidence_requires_required_evidence_manifest(
     );
     missing_required_evidence.required_evidence.clear();
 
-    let evidence = main_chat_live_provider_acceptance_evidence(&[missing_required_evidence.clone()]);
+    let evidence =
+        main_chat_live_provider_acceptance_evidence(&[missing_required_evidence.clone()]);
 
     assert!(!evidence.generation_eval_executed);
 
@@ -1544,8 +1541,7 @@ fn main_chat_live_provider_harness_evidence_rejects_wrapping_control_char_ranked
     let mut wrapped_reason_proposal = successful_live_provider_harness_report(
         MainChatLiveProviderEvalHarnessScenario::McpToolPermissionProposal,
     );
-    wrapped_reason_proposal.model_selected_candidate_match_reason =
-        Some("\nplanned_action".into());
+    wrapped_reason_proposal.model_selected_candidate_match_reason = Some("\nplanned_action".into());
 
     let evidence = main_chat_live_provider_acceptance_evidence(&[
         wrapped_source_web.clone(),
@@ -1633,8 +1629,7 @@ fn main_chat_live_provider_harness_evidence_requires_read_candidate_capability_l
     let mut non_read_capability_labels = successful_live_provider_harness_report(
         MainChatLiveProviderEvalHarnessScenario::WebAgentLoop,
     );
-    non_read_capability_labels.model_selected_candidate_capability_labels =
-        Some("utility".into());
+    non_read_capability_labels.model_selected_candidate_capability_labels = Some("utility".into());
 
     let evidence =
         main_chat_live_provider_acceptance_evidence(&[non_read_capability_labels.clone()]);
@@ -1780,8 +1775,7 @@ fn main_chat_live_provider_harness_evidence_rejects_zero_byte_digest_labels() {
     let mut zero_arguments_digest = successful_live_provider_harness_report(
         MainChatLiveProviderEvalHarnessScenario::WebAgentLoop,
     );
-    zero_arguments_digest.model_selected_governed_arguments_digest =
-        Some(zero_byte_digest.into());
+    zero_arguments_digest.model_selected_governed_arguments_digest = Some(zero_byte_digest.into());
 
     let mut zero_capability_digest = successful_live_provider_harness_report(
         MainChatLiveProviderEvalHarnessScenario::McpToolPermissionProposal,
@@ -2175,8 +2169,7 @@ fn main_chat_live_provider_harness_evidence_requires_matching_ranking_model_iden
 }
 
 #[test]
-fn main_chat_live_provider_harness_evidence_rejects_wrapping_control_char_ranking_model_identity()
-{
+fn main_chat_live_provider_harness_evidence_rejects_wrapping_control_char_ranking_model_identity() {
     let mut wrapped_model_mcp = successful_live_provider_harness_report(
         MainChatLiveProviderEvalHarnessScenario::RegisteredMcpAgentLoop,
     );

@@ -2063,6 +2063,11 @@ mod tests {
     fn extract_rust_function_body(source: &str, signature: &str) -> String {
         let start = source
             .find(signature)
+            .or_else(|| {
+                signature
+                    .strip_suffix('(')
+                    .and_then(|prefix| source.find(&format!("{prefix}<")))
+            })
             .unwrap_or_else(|| panic!("missing function signature {signature}"));
         let body_start = source[start..]
             .find('{')

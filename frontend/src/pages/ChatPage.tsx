@@ -1250,13 +1250,7 @@ export default function ChatPage({
       setSending(false);
       emitCompanionStage("error");
     }
-  }, [
-    currentSessionId,
-    messages,
-    selectedSkillId,
-    sending,
-    emitCompanionStage,
-  ]);
+  }, [currentSessionId, messages, selectedSkillId, sending, emitCompanionStage]);
 
   const handleResumeMainChatTask = useCallback(async () => {
     const taskSessionId = currentAgentIngress?.agentTaskSessionId;
@@ -2897,9 +2891,7 @@ export default function ChatPage({
                                 >
                                   {action.status.replace(/_/g, " ")}
                                 </span>
-                                <span className="text-stone-500">
-                                  {action.policy.reasonCode}
-                                </span>
+                                <span className="text-stone-500">{action.policy.reasonCode}</span>
                                 {action.policy.requiresProposal && (
                                   <span className="inline-flex h-5 items-center rounded-md border border-amber-200 bg-amber-50 px-1.5 font-medium text-amber-900">
                                     Proposal required
@@ -2926,9 +2918,7 @@ export default function ChatPage({
                                   </Link>
                                 )}
                               </div>
-                              <div className="mt-1 text-stone-700">
-                                {action.action.description}
-                              </div>
+                              <div className="mt-1 text-stone-700">{action.action.description}</div>
                               {metadataEntries.length > 0 && (
                                 <div className="mt-1 flex flex-wrap gap-1">
                                   {metadataEntries.map(entry => (
