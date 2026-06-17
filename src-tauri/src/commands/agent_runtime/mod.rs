@@ -1845,6 +1845,17 @@ pub async fn run_main_chat_agent_product_maturity_v2_event_gate(
 }
 
 #[tauri::command]
+pub async fn run_main_chat_agent_product_maturity_v2_plan_gate(
+    _state: State<'_, Arc<AppState>>,
+) -> Result<crate::main_chat_plan_interaction_eval::MainChatProductMaturityV2PlanGateReport, String>
+{
+    Ok(
+        crate::main_chat_plan_interaction_eval::run_main_chat_agent_product_maturity_v2_plan_gate()
+            .await,
+    )
+}
+
+#[tauri::command]
 pub async fn run_main_chat_agent_execution_v1_final_acceptance_gate(
     state: State<'_, Arc<AppState>>,
 ) -> Result<MainChatAgentExecutionV1FinalAcceptanceGateCommandReport, String> {

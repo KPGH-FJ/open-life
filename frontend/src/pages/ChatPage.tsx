@@ -63,6 +63,11 @@ import {
   rollbackMemoryAsset,
   listMainChatAgentEvents,
   getMainChatAgentStateSnapshot,
+  finalizePlanExecuteSession,
+  updatePlanExecuteSessionDraft,
+  executePlanExecuteStep,
+  skipPlanExecuteStep,
+  cancelPlanExecuteSession,
 } from "../tauri";
 import type {
   AgentRun,
@@ -1472,12 +1477,12 @@ export default function ChatPage({
   const currentMainChatTaskSessionId = useCallback(() => {
     return (
       currentAgentIngress?.agentTaskSessionId ??
-      currentAgentState?.task.taskId ??
+      currentAgentState?.task?.taskId ??
       currentAgentTaskState?.session?.id
     );
   }, [
     currentAgentIngress?.agentTaskSessionId,
-    currentAgentState?.task.taskId,
+    currentAgentState?.task?.taskId,
     currentAgentTaskState?.session?.id,
   ]);
 
@@ -1700,6 +1705,132 @@ export default function ChatPage({
       }
     },
     [agentTaskControlBusy, currentMainChatTaskSessionId, refreshMainChatControlState]
+  );
+
+  const refreshMainChatSnapshot = useCallback(
+    async (taskSessionId?: string) => {
+      if (!taskSessionId) return;
+      try {
+        const snapshot = await getMainChatAgentStateSnapshot(taskSessionId);
+        applyMainChatAgentStateSnapshot(snapshot, "snapshot_refresh_required");
+      } catch {
+        // Task-state refresh still runs below; snapshot reload is best-effort after controls.
+      }
+      await refreshMainChatControlState(taskSessionId);
+    },
+    [applyMainChatAgentStateSnapshot, refreshMainChatControlState]
+  );
+
+  const handleConfirmPlan = useCallback(
+    async (target: { planSessionId: string; baseRevision: number }) => {
+      if (agentTaskControlBusy) return;
+      const taskSessionId = currentMainChatTaskSessionId();
+      setAgentTaskControlBusy(true);
+      setAgentTaskControlError(null);
+      try {
+        await finalizePlanExecuteSession(target.planSessionId, target.baseRevision);
+        await refreshMainChatSnapshot(taskSessionId);
+      } catch (e) {
+        setAgentTaskControlError(`Confirm plan failed: ${readablePreviewError(e)}`);
+      } finally {
+        setAgentTaskControlBusy(false);
+      }
+    },
+    [agentTaskControlBusy, currentMainChatTaskSessionId, refreshMainChatSnapshot]
+  );
+
+  const handleEditPlanStep = useCallback(
+    async (target: {
+      planSessionId: string;
+      baseRevision: number;
+      stepId: string;
+      title: string;
+    }) => {
+      if (agentTaskControlBusy) return;
+      const nextTitle = window.prompt("Edit plan step", target.title);
+      if (nextTitle === null || !nextTitle.trim()) return;
+      const taskSessionId = currentMainChatTaskSessionId();
+      setAgentTaskControlBusy(true);
+      setAgentTaskControlError(null);
+      try {
+        await updatePlanExecuteSessionDraft({
+          sessionId: target.planSessionId,
+          baseRevision: target.baseRevision,
+          steps: [{ stepId: target.stepId, title: nextTitle.trim() }],
+        });
+        await refreshMainChatSnapshot(taskSessionId);
+      } catch (e) {
+        setAgentTaskControlError(`Edit plan failed: ${readablePreviewError(e)}`);
+      } finally {
+        setAgentTaskControlBusy(false);
+      }
+    },
+    [agentTaskControlBusy, currentMainChatTaskSessionId, refreshMainChatSnapshot]
+  );
+
+  const handleExecutePlanStep = useCallback(
+    async (target: { planSessionId: string; baseRevision: number; stepId: string }) => {
+      if (agentTaskControlBusy) return;
+      const taskSessionId = currentMainChatTaskSessionId();
+      setAgentTaskControlBusy(true);
+      setAgentTaskControlError(null);
+      try {
+        await executePlanExecuteStep({
+          sessionId: target.planSessionId,
+          stepId: target.stepId,
+          baseRevision: target.baseRevision,
+        });
+        await refreshMainChatSnapshot(taskSessionId);
+      } catch (e) {
+        setAgentTaskControlError(`Execute plan step failed: ${readablePreviewError(e)}`);
+      } finally {
+        setAgentTaskControlBusy(false);
+      }
+    },
+    [agentTaskControlBusy, currentMainChatTaskSessionId, refreshMainChatSnapshot]
+  );
+
+  const handleSkipPlanStep = useCallback(
+    async (target: { planSessionId: string; baseRevision: number; stepId: string }) => {
+      if (agentTaskControlBusy) return;
+      const reason = window.prompt("Skip reason", "");
+      if (reason === null || !reason.trim()) return;
+      const taskSessionId = currentMainChatTaskSessionId();
+      setAgentTaskControlBusy(true);
+      setAgentTaskControlError(null);
+      try {
+        await skipPlanExecuteStep({
+          sessionId: target.planSessionId,
+          stepId: target.stepId,
+          baseRevision: target.baseRevision,
+          reason: reason.trim(),
+        });
+        await refreshMainChatSnapshot(taskSessionId);
+      } catch (e) {
+        setAgentTaskControlError(`Skip plan step failed: ${readablePreviewError(e)}`);
+      } finally {
+        setAgentTaskControlBusy(false);
+      }
+    },
+    [agentTaskControlBusy, currentMainChatTaskSessionId, refreshMainChatSnapshot]
+  );
+
+  const handleCancelPlan = useCallback(
+    async (target: { planSessionId: string; baseRevision: number }) => {
+      if (agentTaskControlBusy) return;
+      const taskSessionId = currentMainChatTaskSessionId();
+      setAgentTaskControlBusy(true);
+      setAgentTaskControlError(null);
+      try {
+        await cancelPlanExecuteSession(target.planSessionId, target.baseRevision);
+        await refreshMainChatSnapshot(taskSessionId);
+      } catch (e) {
+        setAgentTaskControlError(`Cancel plan failed: ${readablePreviewError(e)}`);
+      } finally {
+        setAgentTaskControlBusy(false);
+      }
+    },
+    [agentTaskControlBusy, currentMainChatTaskSessionId, refreshMainChatSnapshot]
   );
 
   const readiness = useMemo(() => buildReadinessSummary(diagnostics), [diagnostics]);
@@ -3186,6 +3317,11 @@ export default function ChatPage({
                 onRejectProposal={handleRejectAgentProposal}
                 onEditProposal={handleEditAgentProposal}
                 onRollbackMemory={handleRollbackMemory}
+                onConfirmPlan={handleConfirmPlan}
+                onEditPlanStep={handleEditPlanStep}
+                onExecutePlanStep={handleExecutePlanStep}
+                onSkipPlanStep={handleSkipPlanStep}
+                onCancelPlan={handleCancelPlan}
               />
               {agentTaskControlError && (
                 <div className="border-b border-rose-200 bg-rose-50 px-4 py-2 text-xs text-rose-800">

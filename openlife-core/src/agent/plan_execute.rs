@@ -517,18 +517,48 @@ impl std::fmt::Display for PlanExecuteSessionStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanExecuteStepRecord {
+    #[serde(default)]
+    pub plan_id: String,
     pub step_id: String,
+    #[serde(default)]
+    pub index: usize,
     pub order: usize,
     pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default = "default_step_kind")]
+    pub kind: String,
     pub intent: String,
     pub tool_name: Option<String>,
     pub action_kind: String,
     pub risk_level: RiskLevel,
     pub declared_write: bool,
     pub status: PlanStepStatus,
+    #[serde(default = "default_plan_revision")]
+    pub revision: u64,
+    #[serde(default = "default_plan_revision")]
+    pub base_plan_revision: u64,
     pub linked_proposal_id: Option<String>,
+    #[serde(default)]
+    pub linked_action_ids: Vec<String>,
+    #[serde(default)]
+    pub linked_observation_ids: Vec<String>,
+    #[serde(default)]
+    pub linked_proposal_ids: Vec<String>,
+    #[serde(default)]
+    pub blocker_ids: Vec<String>,
+    #[serde(default)]
+    pub linked_final_delivery_ids: Vec<String>,
+    #[serde(default)]
+    pub skip_reason: Option<String>,
     pub observation_summary: Option<String>,
     pub policy_reason_code: Option<String>,
+    #[serde(default)]
+    pub policy_decision_id: Option<String>,
+    #[serde(default)]
+    pub status_reason: Option<String>,
+    #[serde(default)]
+    pub evidence_ids: Vec<String>,
     pub metadata_safe_summary: Value,
 }
 
@@ -548,10 +578,23 @@ pub struct PlanExecuteStepEdit {
 #[serde(rename_all = "camelCase")]
 pub struct PlanExecuteStepExecutionResult {
     pub session_id: String,
+    pub plan_id: String,
     pub step_id: String,
     pub step_status: PlanStepStatus,
+    pub revision: u64,
+    pub base_plan_revision: u64,
+    pub step_kind: String,
     pub linked_proposal_id: Option<String>,
+    pub linked_action_ids: Vec<String>,
+    pub linked_observation_ids: Vec<String>,
+    pub linked_proposal_ids: Vec<String>,
+    pub blocker_ids: Vec<String>,
+    pub linked_final_delivery_ids: Vec<String>,
+    pub skip_reason: Option<String>,
     pub observation_summary: Option<String>,
+    pub policy_decision_id: Option<String>,
+    pub status_reason: Option<String>,
+    pub evidence_ids: Vec<String>,
     pub metadata_safe_summary: Value,
 }
 
@@ -559,13 +602,27 @@ pub struct PlanExecuteStepExecutionResult {
 #[serde(rename_all = "camelCase")]
 pub struct PlanExecuteSession {
     pub session_id: String,
+    #[serde(default)]
+    pub plan_id: String,
     pub source_agent_run_id: Option<String>,
     pub source_chat_session_id: Option<String>,
     pub scenario: PlanExecuteProductScenario,
     pub status: PlanExecuteSessionStatus,
+    #[serde(default = "default_plan_revision")]
+    pub revision: u64,
+    #[serde(default = "default_revision_id")]
+    pub revision_id: String,
     pub created_at: String,
     pub updated_at: String,
     pub finalized_at: Option<String>,
+    #[serde(default)]
+    pub confirmed_at: Option<String>,
+    #[serde(default)]
+    pub review_id: Option<String>,
+    #[serde(default)]
+    pub source_evidence_ids: Vec<String>,
+    #[serde(default)]
+    pub superseded_by_plan_id: Option<String>,
     pub metadata_safe_objective: String,
     pub step_count: usize,
     pub completed_step_count: usize,
@@ -574,6 +631,22 @@ pub struct PlanExecuteSession {
     pub warnings: Vec<String>,
     pub steps: Vec<PlanExecuteStepRecord>,
     pub metadata_safe_summary: Value,
+}
+
+fn default_plan_revision() -> u64 {
+    1
+}
+
+fn default_revision_id() -> String {
+    revision_id_for(1)
+}
+
+fn default_step_kind() -> String {
+    "read".into()
+}
+
+fn revision_id_for(revision: u64) -> String {
+    format!("rev-{revision}")
 }
 
 impl PlanExecuteSession {
@@ -588,21 +661,32 @@ impl PlanExecuteSession {
         })?;
         let now = Utc::now().to_rfc3339();
         let session_id = format!("plan-session-{}", Uuid::new_v4());
+        let plan_id = format!("plan:{session_id}");
+        let revision = 1;
         let steps: Vec<PlanExecuteStepRecord> = draft
             .steps
             .iter()
             .enumerate()
-            .map(|(index, step)| PlanExecuteStepRecord::from_plan_step(step, index + 1))
+            .map(|(index, step)| {
+                PlanExecuteStepRecord::from_plan_step(step, index + 1, &plan_id, revision)
+            })
             .collect();
         let mut session = Self {
             session_id,
+            plan_id,
             source_agent_run_id,
             source_chat_session_id,
             scenario: contract.scenario,
             status: PlanExecuteSessionStatus::Draft,
+            revision,
+            revision_id: revision_id_for(revision),
             created_at: now.clone(),
             updated_at: now,
             finalized_at: None,
+            confirmed_at: None,
+            review_id: None,
+            source_evidence_ids: Vec::new(),
+            superseded_by_plan_id: None,
             metadata_safe_objective: draft.objective,
             step_count: steps.len(),
             completed_step_count: 0,
@@ -617,10 +701,23 @@ impl PlanExecuteSession {
     }
 
     pub fn apply_draft_edits(&mut self, edits: Vec<PlanExecuteStepEdit>) -> Result<()> {
+        self.ensure_phase_c_defaults();
+        self.apply_draft_edits_at_revision(self.revision, edits)
+    }
+
+    pub fn apply_draft_edits_at_revision(
+        &mut self,
+        base_revision: u64,
+        edits: Vec<PlanExecuteStepEdit>,
+    ) -> Result<()> {
+        self.ensure_phase_c_defaults();
+        self.require_current_revision(base_revision)?;
         if self.status != PlanExecuteSessionStatus::Draft {
             return Err(anyhow::anyhow!("Plan-Execute session is not editable"));
         }
         let contract = PlanExecuteProductContract::weekly_planning();
+        let next_revision = self.revision + 1;
+        let session_id = self.session_id.clone();
         for edit in edits {
             let step = self
                 .steps
@@ -650,7 +747,23 @@ impl PlanExecuteSession {
                 step.risk_level = risk_level;
             }
             validate_step_record(&contract, step)?;
+            step.kind = step_kind_for_record(step);
+            step.description = step_description_for_record(step);
+            step.revision = next_revision;
+            step.base_plan_revision = next_revision;
+            step.status_reason = Some("edited_by_user".into());
+            push_unique(
+                &mut step.evidence_ids,
+                format!(
+                    "plan-step-edit:{}:{}:{}",
+                    session_id, step.step_id, next_revision
+                ),
+            );
             step.metadata_safe_summary = step_record_summary(step);
+        }
+        if !self.steps.is_empty() {
+            self.revision = next_revision;
+            self.revision_id = revision_id_for(next_revision);
         }
         self.touch();
         self.refresh_counts_and_summary();
@@ -658,6 +771,13 @@ impl PlanExecuteSession {
     }
 
     pub fn finalize(&mut self) -> Result<()> {
+        self.ensure_phase_c_defaults();
+        self.finalize_at_revision(self.revision)
+    }
+
+    pub fn finalize_at_revision(&mut self, base_revision: u64) -> Result<()> {
+        self.ensure_phase_c_defaults();
+        self.require_current_revision(base_revision)?;
         if self.status != PlanExecuteSessionStatus::Draft {
             return Err(anyhow::anyhow!(
                 "Plan-Execute session cannot be finalized from current status"
@@ -671,6 +791,7 @@ impl PlanExecuteSession {
         let now = Utc::now().to_rfc3339();
         self.status = PlanExecuteSessionStatus::Finalized;
         self.finalized_at = Some(now.clone());
+        self.confirmed_at = Some(now.clone());
         self.updated_at = now;
         self.refresh_counts_and_summary();
         Ok(())
@@ -697,6 +818,19 @@ impl PlanExecuteSession {
         governor: &LifeModelGovernor,
         proposal_store: &ProposalStore,
     ) -> Result<PlanExecuteStepExecutionResult> {
+        self.ensure_phase_c_defaults();
+        self.execute_step_at_revision(step_id, self.revision, governor, proposal_store)
+    }
+
+    pub fn execute_step_at_revision(
+        &mut self,
+        step_id: &str,
+        base_revision: u64,
+        governor: &LifeModelGovernor,
+        proposal_store: &ProposalStore,
+    ) -> Result<PlanExecuteStepExecutionResult> {
+        self.ensure_phase_c_defaults();
+        self.require_current_revision(base_revision)?;
         if !matches!(
             self.status,
             PlanExecuteSessionStatus::Finalized | PlanExecuteSessionStatus::InProgress
@@ -708,6 +842,7 @@ impl PlanExecuteSession {
 
         let session_id = self.session_id.clone();
         let source_run_id = self.source_agent_run_id.clone();
+        let next_revision = self.revision + 1;
         let mut linked_proposal_id_to_add = None;
         {
             let step = self
@@ -715,6 +850,12 @@ impl PlanExecuteSession {
                 .iter_mut()
                 .find(|step| step.step_id == step_id)
                 .ok_or_else(|| anyhow::anyhow!("Plan-Execute step not found"))?;
+
+            if step.status == PlanStepStatus::Skipped {
+                return Err(anyhow::anyhow!(
+                    "Plan-Execute skipped step cannot be executed"
+                ));
+            }
 
             if matches!(
                 step.status,
@@ -727,7 +868,12 @@ impl PlanExecuteSession {
             let plan_step = step.to_plan_step();
             let decision = governor.govern_tool_action(plan_step.to_tool_governance_input());
             let status = step_status(&plan_step, decision.kind);
-            step.policy_reason_code = Some(policy_reason_code(&decision).into());
+            let policy_reason = policy_reason_code(&decision).to_string();
+            step.policy_reason_code = Some(policy_reason.clone());
+            step.policy_decision_id = Some(format!(
+                "plan-policy:{}:{}:{}",
+                session_id, step.step_id, policy_reason
+            ));
 
             if plan_step.declared_write || status == PlanStepStatus::RequiresProposal {
                 let proposal_id = create_step_proposal(
@@ -738,16 +884,35 @@ impl PlanExecuteSession {
                 )?;
                 step.status = PlanStepStatus::RequiresProposal;
                 step.linked_proposal_id = Some(proposal_id.clone());
+                push_unique(&mut step.linked_proposal_ids, proposal_id.clone());
+                push_unique(&mut step.evidence_ids, proposal_id.clone());
+                step.status_reason = Some("proposal_first_write_boundary".into());
                 linked_proposal_id_to_add = Some(proposal_id);
             } else if status == PlanStepStatus::Executed {
                 let observation = execute_internal_read_only_step(&plan_step);
+                let action_id = plan_step_action_id(&session_id, &step.step_id, next_revision);
+                let observation_id =
+                    plan_step_observation_id(&session_id, &step.step_id, next_revision);
                 step.status = PlanStepStatus::Executed;
                 step.observation_summary = Some(observation.summary);
+                push_unique(&mut step.linked_action_ids, action_id.clone());
+                push_unique(&mut step.linked_observation_ids, observation_id.clone());
+                push_unique(&mut step.evidence_ids, action_id);
+                push_unique(&mut step.evidence_ids, observation_id);
+                step.status_reason = Some("read_only_execution_completed".into());
             } else {
                 step.status = status;
                 step.observation_summary = Some(metadata_safe_step_summary(&plan_step, &decision));
+                let blocker_id = plan_step_blocker_id(&session_id, &step.step_id, next_revision);
+                push_unique(&mut step.blocker_ids, blocker_id.clone());
+                push_unique(&mut step.evidence_ids, blocker_id);
+                step.status_reason = Some(policy_reason);
             }
 
+            step.revision = next_revision;
+            step.base_plan_revision = base_revision;
+            step.kind = step_kind_for_record(step);
+            step.description = step_description_for_record(step);
             step.metadata_safe_summary = step_record_summary(step);
         }
 
@@ -755,6 +920,8 @@ impl PlanExecuteSession {
             push_unique(&mut self.linked_proposal_ids, proposal_id);
         }
         self.status = PlanExecuteSessionStatus::InProgress;
+        self.revision = next_revision;
+        self.revision_id = revision_id_for(next_revision);
         self.touch();
         self.refresh_counts_and_summary();
         if self.steps.iter().all(is_terminal_product_step) {
@@ -768,6 +935,79 @@ impl PlanExecuteSession {
             .iter()
             .find(|step| step.step_id == step_id)
             .expect("step exists after execution");
+        Ok(step_execution_result(&self.session_id, step))
+    }
+
+    pub fn skip_step_at_revision(
+        &mut self,
+        step_id: &str,
+        base_revision: u64,
+        reason: &str,
+    ) -> Result<PlanExecuteStepExecutionResult> {
+        self.ensure_phase_c_defaults();
+        self.require_current_revision(base_revision)?;
+        let reason = reason.trim();
+        if reason.is_empty() {
+            return Err(anyhow::anyhow!("Plan-Execute skip reason is required"));
+        }
+        if matches!(
+            self.status,
+            PlanExecuteSessionStatus::Completed | PlanExecuteSessionStatus::Cancelled
+        ) {
+            return Err(anyhow::anyhow!(
+                "Plan-Execute session cannot skip steps from current status"
+            ));
+        }
+        let session_id = self.session_id.clone();
+        let next_revision = self.revision + 1;
+        {
+            let step = self
+                .steps
+                .iter_mut()
+                .find(|step| step.step_id == step_id)
+                .ok_or_else(|| anyhow::anyhow!("Plan-Execute step not found"))?;
+            if matches!(
+                step.status,
+                PlanStepStatus::Executed
+                    | PlanStepStatus::RequiresProposal
+                    | PlanStepStatus::Blocked
+            ) || step.linked_proposal_id.is_some()
+            {
+                return Err(anyhow::anyhow!(
+                    "Plan-Execute terminal step cannot be skipped"
+                ));
+            }
+            step.status = PlanStepStatus::Skipped;
+            step.skip_reason = Some(reason.into());
+            step.status_reason = Some("skipped_by_user".into());
+            step.revision = next_revision;
+            step.base_plan_revision = base_revision;
+            step.kind = step_kind_for_record(step);
+            step.description = step_description_for_record(step);
+            push_unique(
+                &mut step.evidence_ids,
+                format!(
+                    "plan-step-skip:{}:{}:{}",
+                    session_id, step.step_id, next_revision
+                ),
+            );
+            step.metadata_safe_summary = step_record_summary(step);
+        }
+        self.status = PlanExecuteSessionStatus::InProgress;
+        self.revision = next_revision;
+        self.revision_id = revision_id_for(next_revision);
+        self.touch();
+        self.refresh_counts_and_summary();
+        if self.steps.iter().all(is_terminal_product_step) {
+            self.status = PlanExecuteSessionStatus::Completed;
+            self.touch();
+            self.refresh_counts_and_summary();
+        }
+        let step = self
+            .steps
+            .iter()
+            .find(|step| step.step_id == step_id)
+            .expect("step exists after skip");
         Ok(step_execution_result(&self.session_id, step))
     }
 
@@ -786,7 +1026,65 @@ impl PlanExecuteSession {
         self.updated_at = Utc::now().to_rfc3339();
     }
 
+    fn require_current_revision(&self, base_revision: u64) -> Result<()> {
+        if base_revision != self.revision {
+            return Err(anyhow::anyhow!(
+                "Plan-Execute stale revision: expected {}, got {}",
+                self.revision,
+                base_revision
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_phase_c_defaults(&mut self) {
+        if self.plan_id.trim().is_empty() {
+            self.plan_id = format!("plan:{}", self.session_id);
+        }
+        if self.revision == 0 {
+            self.revision = 1;
+        }
+        if self.revision_id.trim().is_empty() {
+            self.revision_id = revision_id_for(self.revision);
+        }
+        let session_id = self.session_id.clone();
+        let plan_id = self.plan_id.clone();
+        for (index, step) in self.steps.iter_mut().enumerate() {
+            if step.plan_id.trim().is_empty() {
+                step.plan_id = plan_id.clone();
+            }
+            if step.index == 0 {
+                step.index = index + 1;
+            }
+            if step.description.trim().is_empty() {
+                step.description = step_description_for_record(step);
+            }
+            if step.kind.trim().is_empty() {
+                step.kind = step_kind_for_record(step);
+            }
+            if step.revision == 0 {
+                step.revision = self.revision;
+            }
+            if step.base_plan_revision == 0 {
+                step.base_plan_revision = self.revision;
+            }
+            if let Some(proposal_id) = step.linked_proposal_id.clone() {
+                push_unique(&mut step.linked_proposal_ids, proposal_id);
+            }
+            if let Some(policy_reason) = step.policy_reason_code.clone() {
+                if step.policy_decision_id.is_none() {
+                    step.policy_decision_id = Some(format!(
+                        "plan-policy:{}:{}:{}",
+                        session_id, step.step_id, policy_reason
+                    ));
+                }
+            }
+            step.metadata_safe_summary = step_record_summary(step);
+        }
+    }
+
     fn refresh_counts_and_summary(&mut self) {
+        self.ensure_phase_c_defaults();
         self.step_count = self.steps.len();
         self.completed_step_count = self
             .steps
@@ -810,9 +1108,16 @@ impl PlanExecuteSession {
             "planExecuteProductVertical": true,
             "scenarioId": self.scenario.as_id(),
             "planSessionId": self.session_id,
+            "planId": self.plan_id,
+            "revision": self.revision,
+            "revisionId": self.revision_id,
             "sourceAgentRunId": self.source_agent_run_id,
             "sourceChatSessionId": self.source_chat_session_id,
             "status": self.status.to_string(),
+            "confirmedAt": self.confirmed_at,
+            "reviewId": self.review_id,
+            "sourceEvidenceIds": self.source_evidence_ids,
+            "supersededByPlanId": self.superseded_by_plan_id,
             "stepCount": self.step_count,
             "completedStepCount": self.completed_step_count,
             "proposalRequiredStepCount": self.proposal_required_step_count,
@@ -827,20 +1132,35 @@ impl PlanExecuteSession {
 }
 
 impl PlanExecuteStepRecord {
-    fn from_plan_step(step: &PlanStep, order: usize) -> Self {
+    fn from_plan_step(step: &PlanStep, order: usize, plan_id: &str, revision: u64) -> Self {
         let mut record = Self {
+            plan_id: plan_id.into(),
             step_id: step.id.clone(),
+            index: order,
             order,
             title: step.title.clone(),
+            description: step.intent.clone(),
+            kind: step_kind_for_plan_step(step).into(),
             intent: step.intent.clone(),
             tool_name: step.tool_name.clone(),
             action_kind: step.action_kind.clone(),
             risk_level: step.risk_level,
             declared_write: step.declared_write,
             status: PlanStepStatus::Planned,
+            revision,
+            base_plan_revision: revision,
             linked_proposal_id: None,
+            linked_action_ids: Vec::new(),
+            linked_observation_ids: Vec::new(),
+            linked_proposal_ids: Vec::new(),
+            blocker_ids: Vec::new(),
+            linked_final_delivery_ids: Vec::new(),
+            skip_reason: None,
             observation_summary: None,
             policy_reason_code: None,
+            policy_decision_id: None,
+            status_reason: Some("draft_created".into()),
+            evidence_ids: vec![format!("plan-step:{plan_id}:{}", step.id)],
             metadata_safe_summary: Value::Null,
         };
         record.metadata_safe_summary = step_record_summary(&record);
@@ -972,7 +1292,11 @@ impl PlanExecuteSessionStore {
             conn.prepare("SELECT session_json FROM plan_execute_sessions WHERE id = ?1")?;
         let row = stmt.query_row([session_id], |row| row.get::<_, String>(0));
         match row {
-            Ok(json) => Ok(Some(serde_json::from_str(&json)?)),
+            Ok(json) => {
+                let mut session: PlanExecuteSession = serde_json::from_str(&json)?;
+                session.ensure_phase_c_defaults();
+                Ok(Some(session))
+            }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -989,19 +1313,21 @@ impl PlanExecuteSessionStore {
              LIMIT ?1",
         )?;
         let sessions = stmt.query_map([limit], |row| row.get::<_, String>(0))?;
-        sessions
+        let sessions = sessions
             .map(|row| {
                 let json = row?;
-                serde_json::from_str(&json).map_err(|e| {
+                let mut session: PlanExecuteSession = serde_json::from_str(&json).map_err(|e| {
                     rusqlite::Error::FromSqlConversionFailure(
                         0,
                         rusqlite::types::Type::Text,
                         Box::new(e),
                     )
-                })
+                })?;
+                session.ensure_phase_c_defaults();
+                Ok(session)
             })
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| e.into())
+            .collect::<std::result::Result<Vec<_>, rusqlite::Error>>()?;
+        Ok(sessions)
     }
 }
 
@@ -1158,14 +1484,28 @@ fn validate_step_record(
 
 fn step_record_summary(step: &PlanExecuteStepRecord) -> Value {
     json!({
+        "planId": step.plan_id,
         "stepId": step.step_id,
+        "index": step.index,
         "order": step.order,
+        "kind": step.kind,
         "actionKind": step.action_kind,
         "riskLevel": step.risk_level.to_string(),
         "declaredWrite": step.declared_write,
         "status": format!("{:?}", step.status).to_ascii_lowercase(),
+        "revision": step.revision,
+        "basePlanRevision": step.base_plan_revision,
+        "linkedActionIds": step.linked_action_ids,
+        "linkedObservationIds": step.linked_observation_ids,
         "linkedProposalId": step.linked_proposal_id,
+        "linkedProposalIds": step.linked_proposal_ids,
+        "blockerIds": step.blocker_ids,
+        "linkedFinalDeliveryIds": step.linked_final_delivery_ids,
+        "skipReasonPresent": step.skip_reason.is_some(),
         "policyReasonCode": step.policy_reason_code,
+        "policyDecisionId": step.policy_decision_id,
+        "statusReason": step.status_reason,
+        "evidenceIds": step.evidence_ids,
         "metadataSafe": true,
         "rawPromptStored": false,
         "rawToolPayloadStored": false,
@@ -1240,7 +1580,10 @@ fn step_proposal_type(step: &PlanExecuteStepRecord) -> ProposalType {
 fn is_terminal_product_step(step: &PlanExecuteStepRecord) -> bool {
     matches!(
         step.status,
-        PlanStepStatus::Executed | PlanStepStatus::RequiresProposal | PlanStepStatus::Blocked
+        PlanStepStatus::Executed
+            | PlanStepStatus::RequiresProposal
+            | PlanStepStatus::Blocked
+            | PlanStepStatus::Skipped
     ) || step.linked_proposal_id.is_some()
 }
 
@@ -1250,18 +1593,44 @@ fn step_execution_result(
 ) -> PlanExecuteStepExecutionResult {
     PlanExecuteStepExecutionResult {
         session_id: session_id.into(),
+        plan_id: step.plan_id.clone(),
         step_id: step.step_id.clone(),
         step_status: step.status,
+        revision: step.revision,
+        base_plan_revision: step.base_plan_revision,
+        step_kind: step.kind.clone(),
         linked_proposal_id: step.linked_proposal_id.clone(),
+        linked_action_ids: step.linked_action_ids.clone(),
+        linked_observation_ids: step.linked_observation_ids.clone(),
+        linked_proposal_ids: step.linked_proposal_ids.clone(),
+        blocker_ids: step.blocker_ids.clone(),
+        linked_final_delivery_ids: step.linked_final_delivery_ids.clone(),
+        skip_reason: step.skip_reason.clone(),
         observation_summary: step.observation_summary.clone(),
+        policy_decision_id: step.policy_decision_id.clone(),
+        status_reason: step.status_reason.clone(),
+        evidence_ids: step.evidence_ids.clone(),
         metadata_safe_summary: json!({
             "planExecuteProductVertical": true,
             "scenarioId": "weekly_planning",
             "planSessionId": session_id,
+            "planId": step.plan_id,
             "stepId": step.step_id,
             "stepStatus": format!("{:?}", step.status).to_ascii_lowercase(),
+            "revision": step.revision,
+            "basePlanRevision": step.base_plan_revision,
+            "stepKind": step.kind,
+            "linkedActionIds": step.linked_action_ids,
+            "linkedObservationIds": step.linked_observation_ids,
             "linkedProposalId": step.linked_proposal_id,
+            "linkedProposalIds": step.linked_proposal_ids,
+            "blockerIds": step.blocker_ids,
+            "linkedFinalDeliveryIds": step.linked_final_delivery_ids,
+            "skipReasonPresent": step.skip_reason.is_some(),
             "observationSummaryPresent": step.observation_summary.is_some(),
+            "policyDecisionId": step.policy_decision_id,
+            "statusReason": step.status_reason,
+            "evidenceIds": step.evidence_ids,
             "metadataSafe": true,
             "directLifeModelWrites": false,
             "memoryWrites": false,
@@ -1274,6 +1643,52 @@ fn push_unique(values: &mut Vec<String>, value: String) {
     if !values.iter().any(|existing| existing == &value) {
         values.push(value);
     }
+}
+
+fn step_kind_for_plan_step(step: &PlanStep) -> &'static str {
+    if step.declared_write {
+        "proposal"
+    } else if matches!(step.action_kind.as_str(), "reason" | "search" | "plan") {
+        "read"
+    } else {
+        "manual"
+    }
+}
+
+fn step_kind_for_record(step: &PlanExecuteStepRecord) -> String {
+    match step.status {
+        PlanStepStatus::Blocked => "blocked".into(),
+        PlanStepStatus::RequiresConfirmation => "ask_user".into(),
+        _ => {
+            if step.declared_write || step.linked_proposal_id.is_some() {
+                "proposal".into()
+            } else if matches!(step.action_kind.as_str(), "reason" | "search" | "plan") {
+                "read".into()
+            } else {
+                "manual".into()
+            }
+        }
+    }
+}
+
+fn step_description_for_record(step: &PlanExecuteStepRecord) -> String {
+    if !step.intent.trim().is_empty() {
+        step.intent.clone()
+    } else {
+        format!("{} step", step.kind)
+    }
+}
+
+fn plan_step_action_id(session_id: &str, step_id: &str, revision: u64) -> String {
+    format!("plan-action:{session_id}:{step_id}:rev-{revision}")
+}
+
+fn plan_step_observation_id(session_id: &str, step_id: &str, revision: u64) -> String {
+    format!("plan-observation:{session_id}:{step_id}:rev-{revision}")
+}
+
+fn plan_step_blocker_id(session_id: &str, step_id: &str, revision: u64) -> String {
+    format!("plan-blocker:{session_id}:{step_id}:rev-{revision}")
 }
 
 struct PlanStepSpec {

@@ -826,6 +826,390 @@ describe("ChatPage", () => {
     ).toBe(false);
   });
 
+  it("renders command-backed Phase C plan controls only with a valid plan revision", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+    const promptSpy = vi
+      .spyOn(window, "prompt")
+      .mockReturnValueOnce("Review priorities with user edit")
+      .mockReturnValueOnce("Unsupported in Phase C");
+    const phasePlanState = buildMainChatAgentStateSnapshot({
+      task: {
+        ...buildMainChatAgentStateSnapshot().task,
+        taskId: "mainchat-task-plan-phase-c-ui-1",
+        runId: "run-plan-phase-c-ui-1",
+        title: "Plan interaction",
+        strategy: "plan_execute",
+        status: "planning",
+        controls: ["confirm_plan", "edit_plan", "execute_step", "skip_step", "cancel_task"],
+        actionIds: [],
+        observationIds: [],
+        finalDeliveryId: undefined,
+      },
+      route: {
+        strategy: "plan_execute",
+        reason: "phase_c_plan_interaction",
+        confidence: 0.92,
+      },
+      plan: {
+        planId: "plan-phase-c-ui-1",
+        planSessionId: "plan-session-phase-c-ui-1",
+        taskSessionId: "mainchat-task-plan-phase-c-ui-1",
+        runId: "run-plan-phase-c-ui-1",
+        status: "draft",
+        summary: "Review priorities, then run one read-only step.",
+        editable: true,
+        source: "plan_execute",
+        evidenceId: "plan-evidence-phase-c-ui-1",
+        revision: 2,
+        revisionId: "rev-2",
+        controls: ["confirm_plan", "edit_plan", "execute_step", "skip_step", "cancel_task"],
+        steps: [
+          {
+            stepId: "plan-step-phase-c-ui-1",
+            planId: "plan-phase-c-ui-1",
+            index: 1,
+            title: "Review priorities",
+            description: "Read-only planning step.",
+            kind: "read",
+            status: "draft",
+            revision: 2,
+            basePlanRevision: 2,
+            linkedActionIds: [],
+            linkedObservationIds: [],
+            linkedProposalIds: [],
+            blockerIds: [],
+            linkedFinalDeliveryIds: [],
+            evidenceIds: ["plan-evidence-phase-c-ui-1"],
+            controls: ["edit_plan", "execute_step", "skip_step"],
+          },
+        ],
+      },
+      actions: [],
+      observations: [],
+      finalDelivery: undefined,
+    });
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (
+        [
+          "finalize_plan_execute_session",
+          "update_plan_execute_session_draft",
+          "execute_plan_execute_step",
+          "skip_plan_execute_step",
+        ].includes(cmd)
+      ) {
+        return Promise.resolve({ ok: true } as any);
+      }
+      if (cmd === "get_main_chat_agent_state_snapshot") {
+        return Promise.resolve(phasePlanState as any);
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Plan this work before executing" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+    await waitFor(() => {
+      expect(listeners.get("stream-message-done")).toBeDefined();
+    });
+
+    await act(async () => {
+      await listeners.get("stream-message-done")?.({
+        payload: {
+          session_id: "session-1",
+          run_id: "run-plan-phase-c-ui-1",
+          reply: "Here is a runtime-backed plan draft.",
+          reasoning_trace: null,
+          tool_calls: [],
+          agent_state: phasePlanState,
+          execution_transcript: [],
+          legacy_fallback_used: false,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm plan" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Edit step Review priorities" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Execute step Review priorities" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Skip step Review priorities" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "finalize_plan_execute_session",
+        expect.objectContaining({
+          input: { sessionId: "plan-session-phase-c-ui-1", baseRevision: 2 },
+        })
+      );
+      expect(invoke).toHaveBeenCalledWith(
+        "update_plan_execute_session_draft",
+        expect.objectContaining({
+          input: expect.objectContaining({
+            sessionId: "plan-session-phase-c-ui-1",
+            baseRevision: 2,
+            steps: [
+              expect.objectContaining({
+                stepId: "plan-step-phase-c-ui-1",
+                title: "Review priorities with user edit",
+              }),
+            ],
+          }),
+        })
+      );
+      expect(invoke).toHaveBeenCalledWith(
+        "execute_plan_execute_step",
+        expect.objectContaining({
+          input: {
+            sessionId: "plan-session-phase-c-ui-1",
+            stepId: "plan-step-phase-c-ui-1",
+            baseRevision: 2,
+          },
+        })
+      );
+      expect(invoke).toHaveBeenCalledWith(
+        "skip_plan_execute_step",
+        expect.objectContaining({
+          input: {
+            sessionId: "plan-session-phase-c-ui-1",
+            stepId: "plan-step-phase-c-ui-1",
+            baseRevision: 2,
+            reason: "Unsupported in Phase C",
+          },
+        })
+      );
+    });
+    promptSpy.mockRestore();
+  });
+
+  it("hides Phase C plan controls when the runtime plan revision is missing", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+    const invalidRevisionState = buildMainChatAgentStateSnapshot({
+      task: {
+        ...buildMainChatAgentStateSnapshot().task,
+        taskId: "mainchat-task-plan-no-revision-ui-1",
+        runId: "run-plan-no-revision-ui-1",
+        title: "Plan interaction",
+        strategy: "plan_execute",
+        status: "planning",
+        controls: ["confirm_plan", "edit_plan", "execute_step", "skip_step"],
+      },
+      route: {
+        strategy: "plan_execute",
+        reason: "phase_c_plan_interaction",
+        confidence: 0.92,
+      },
+      plan: {
+        planId: "plan-no-revision-ui-1",
+        planSessionId: "plan-session-no-revision-ui-1",
+        taskSessionId: "mainchat-task-plan-no-revision-ui-1",
+        runId: "run-plan-no-revision-ui-1",
+        status: "draft",
+        summary: "Plan exists but has no auditable revision.",
+        editable: true,
+        source: "plan_execute",
+        evidenceId: "plan-evidence-no-revision-ui-1",
+        controls: ["confirm_plan", "edit_plan", "execute_step", "skip_step"],
+        steps: [
+          {
+            stepId: "plan-step-no-revision-ui-1",
+            planId: "plan-no-revision-ui-1",
+            index: 1,
+            title: "Unversioned step",
+            description: "This step must not expose commands.",
+            kind: "read",
+            status: "draft",
+            revision: 1,
+            basePlanRevision: 1,
+            linkedActionIds: [],
+            linkedObservationIds: [],
+            linkedProposalIds: [],
+            blockerIds: [],
+            linkedFinalDeliveryIds: [],
+            controls: ["edit_plan", "execute_step", "skip_step"],
+          },
+        ],
+      },
+      actions: [],
+      observations: [],
+      finalDelivery: undefined,
+    });
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_main_chat_agent_state_snapshot") {
+        return Promise.resolve(invalidRevisionState as any);
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Plan this work before executing" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+    await waitFor(() => {
+      expect(listeners.get("stream-message-done")).toBeDefined();
+    });
+
+    await act(async () => {
+      await listeners.get("stream-message-done")?.({
+        payload: {
+          session_id: "session-1",
+          run_id: "run-plan-no-revision-ui-1",
+          reply: "Here is an incomplete plan payload.",
+          reasoning_trace: null,
+          tool_calls: [],
+          agent_state: invalidRevisionState,
+          execution_transcript: [],
+          legacy_fallback_used: false,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    await screen.findAllByText("Plan interaction");
+    expect(screen.queryByRole("button", { name: "Confirm plan" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Edit step Unversioned step" })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Execute step Unversioned step" })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Skip step Unversioned step" })
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps Phase C step controls available after plan revision advances", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "execute_plan_execute_step") return Promise.resolve({ ok: true } as any);
+      if (cmd === "get_main_chat_agent_state_snapshot") {
+        return Promise.resolve(advancedRevisionState as any);
+      }
+      return mockInvoke(cmd, args);
+    });
+    const advancedRevisionState = buildMainChatAgentStateSnapshot({
+      task: {
+        ...buildMainChatAgentStateSnapshot().task,
+        taskId: "mainchat-task-plan-advanced-revision-ui-1",
+        runId: "run-plan-advanced-revision-ui-1",
+        title: "Plan interaction",
+        strategy: "plan_execute",
+        status: "running",
+      },
+      route: {
+        strategy: "plan_execute",
+        reason: "phase_c_plan_interaction",
+        confidence: 0.92,
+      },
+      plan: {
+        planId: "plan-advanced-revision-ui-1",
+        planSessionId: "plan-session-advanced-revision-ui-1",
+        taskSessionId: "mainchat-task-plan-advanced-revision-ui-1",
+        runId: "run-plan-advanced-revision-ui-1",
+        status: "in_progress",
+        summary: "Continue remaining plan steps.",
+        editable: false,
+        source: "plan_execute",
+        evidenceId: "plan-evidence-advanced-revision-ui-1",
+        revision: 3,
+        revisionId: "rev-3",
+        controls: ["execute_step", "skip_step", "cancel_task"],
+        steps: [
+          {
+            stepId: "plan-step-advanced-revision-ui-1",
+            planId: "plan-advanced-revision-ui-1",
+            index: 2,
+            title: "Continue next read step",
+            description: "Remaining step created before the last execution revision.",
+            kind: "read",
+            status: "planned",
+            revision: 2,
+            basePlanRevision: 2,
+            linkedActionIds: [],
+            linkedObservationIds: [],
+            linkedProposalIds: [],
+            blockerIds: [],
+            linkedFinalDeliveryIds: [],
+            controls: ["execute_step", "skip_step"],
+          },
+        ],
+      },
+      actions: [],
+      observations: [],
+      finalDelivery: undefined,
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Continue this plan" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+    await waitFor(() => {
+      expect(listeners.get("stream-message-done")).toBeDefined();
+    });
+
+    await act(async () => {
+      await listeners.get("stream-message-done")?.({
+        payload: {
+          session_id: "session-1",
+          run_id: "run-plan-advanced-revision-ui-1",
+          reply: "Continue with the next plan step.",
+          reasoning_trace: null,
+          tool_calls: [],
+          agent_state: advancedRevisionState,
+          execution_transcript: [],
+          legacy_fallback_used: false,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Execute step Continue next read step" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "execute_plan_execute_step",
+        expect.objectContaining({
+          input: {
+            sessionId: "plan-session-advanced-revision-ui-1",
+            stepId: "plan-step-advanced-revision-ui-1",
+            baseRevision: 3,
+          },
+        })
+      );
+    });
+  });
+
   it("recovers event sequence gaps through replay and then snapshot fallback", async () => {
     type StreamListener = (event: { payload: any }) => void | Promise<void>;
     const listeners = new Map<string, StreamListener>();

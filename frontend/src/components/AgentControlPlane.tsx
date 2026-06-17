@@ -20,6 +20,14 @@ type ControlTarget = {
   blockerId?: string;
 };
 
+type PlanControlTarget = {
+  planSessionId: string;
+  baseRevision: number;
+  stepId?: string;
+  title?: string;
+  reason?: string;
+};
+
 type ControlHandlers = {
   onResume?: () => void;
   onRetry?: (target?: ControlTarget) => void;
@@ -33,6 +41,13 @@ type ControlHandlers = {
   onRejectProposal?: (proposalId: string) => void;
   onEditProposal?: (proposalId: string) => void;
   onRollbackMemory?: (memoryId: string) => void;
+  onConfirmPlan?: (target: PlanControlTarget) => void;
+  onEditPlanStep?: (target: Required<Pick<PlanControlTarget, "planSessionId" | "baseRevision" | "stepId" | "title">>) => void;
+  onExecutePlanStep?: (target: Required<Pick<PlanControlTarget, "planSessionId" | "baseRevision" | "stepId">>) => void;
+  onSkipPlanStep?: (
+    target: Required<Pick<PlanControlTarget, "planSessionId" | "baseRevision" | "stepId">>
+  ) => void;
+  onCancelPlan?: (target: PlanControlTarget) => void;
   busy?: boolean;
   canResume?: boolean;
   canRetry?: boolean;
@@ -77,17 +92,17 @@ function shortId(value: string): string {
 
 function hasAnyControl(state: MainChatAgentStateSnapshot): boolean {
   return (
-    state.task.controls.length > 0 ||
-    state.blockers.some(blocker => blocker.controls.length) ||
-    state.proposals.some(proposal => proposal.controls.length)
+    (state.task.controls ?? []).length > 0 ||
+    (state.blockers ?? []).some(blocker => (blocker.controls ?? []).length) ||
+    (state.proposals ?? []).some(proposal => (proposal.controls ?? []).length)
   );
 }
 
 function supportsControl(state: MainChatAgentStateSnapshot, names: string[]): boolean {
   const controls = [
-    ...state.task.controls,
-    ...state.blockers.flatMap(blocker => blocker.controls),
-    ...state.proposals.flatMap(proposal => proposal.controls),
+    ...(state.task.controls ?? []),
+    ...(state.blockers ?? []).flatMap(blocker => blocker.controls ?? []),
+    ...(state.proposals ?? []).flatMap(proposal => proposal.controls ?? []),
   ];
   return controls.some(control => names.includes(control));
 }
@@ -248,6 +263,11 @@ export default function AgentControlPlane({
   onRejectProposal,
   onEditProposal,
   onRollbackMemory,
+  onConfirmPlan,
+  onEditPlanStep,
+  onExecutePlanStep,
+  onSkipPlanStep,
+  onCancelPlan,
   busy = false,
   canResume = false,
   canRetry = false,
@@ -258,6 +278,12 @@ export default function AgentControlPlane({
   const retrySupported = supportsControl(state, ["retry_failed_action", "retry_action", "retry"]);
   const cancelSupported = supportsControl(state, ["cancel_task", "cancel"]);
   const hasControls = hasAnyControl(state);
+  const plan = state.plan ?? null;
+  const planSessionId = plan?.planSessionId ?? plan?.planId;
+  const planRevision =
+    typeof plan?.revision === "number" && Number.isFinite(plan.revision) ? plan.revision : null;
+  const planControls = plan?.controls ?? [];
+  const planCommandReady = Boolean(plan && planSessionId && planRevision !== null);
 
   return (
     <section
@@ -389,10 +415,149 @@ export default function AgentControlPlane({
             <div className="min-w-0 border-l border-emerald-300 bg-emerald-50/70 px-2 py-1">
               <div className="font-semibold text-stone-950">Plan</div>
               <div className="mt-1 truncate text-stone-600">{state.plan.summary}</div>
+              {state.plan.revision !== undefined && state.plan.revision !== null && (
+                <div className="mt-1 text-stone-500">
+                  revision {state.plan.revisionId ?? state.plan.revision}
+                </div>
+              )}
             </div>
           )}
         </div>
       )}
+
+      {plan && (plan.steps?.length || planCommandReady) ? (
+        <div className="mt-3 border-l border-emerald-300 bg-emerald-50/70 px-3 py-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="min-w-0">
+              <div className="font-semibold text-stone-950">Plan interaction</div>
+              <div className="mt-1 truncate text-stone-700">{plan.summary}</div>
+            </div>
+            {planCommandReady && (
+              <div className="flex flex-wrap gap-1">
+                {planControls.includes("confirm_plan") &&
+                  onConfirmPlan &&
+                  inlineControlButton({
+                    label: "Confirm plan",
+                    icon: <CheckCircle2 size={13} />,
+                    disabled: busy,
+                    onClick: () =>
+                      onConfirmPlan({
+                        planSessionId: planSessionId!,
+                        baseRevision: planRevision!,
+                      }),
+                  })}
+                {planControls.includes("cancel_task") &&
+                  onCancelPlan &&
+                  inlineControlButton({
+                    label: "Cancel plan",
+                    icon: <Ban size={13} />,
+                    disabled: busy,
+                    onClick: () =>
+                      onCancelPlan({
+                        planSessionId: planSessionId!,
+                        baseRevision: planRevision!,
+                      }),
+                  })}
+              </div>
+            )}
+          </div>
+          {plan.steps?.length ? (
+            <div className="mt-2 divide-y divide-emerald-200 border-y border-emerald-200 bg-white/80">
+              {plan.steps.map(step => {
+                const stepControls = step.controls ?? [];
+                const stepCommandReady = planCommandReady;
+                return (
+                  <div key={step.stepId} className="grid gap-2 py-2 md:grid-cols-[1fr_auto]">
+                    <div className="min-w-0 px-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-semibold text-stone-950">
+                          {step.index}. {step.title}
+                        </span>
+                        <span
+                          className={`inline-flex h-5 items-center rounded-md border px-1.5 font-medium ${statusClass(step.status)}`}
+                        >
+                          {step.status.replace(/_/g, " ")}
+                        </span>
+                        <span className="text-stone-500">{step.kind}</span>
+                      </div>
+                      {step.reason && <div className="mt-1 text-stone-600">{step.reason}</div>}
+                      {step.skipReason && (
+                        <div className="mt-1 text-amber-900">Skipped: {step.skipReason}</div>
+                      )}
+                      {[
+                        ...step.linkedActionIds,
+                        ...step.linkedObservationIds,
+                        ...step.linkedProposalIds,
+                        ...step.blockerIds,
+                      ].length > 0 && (
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          {[
+                            ...step.linkedActionIds,
+                            ...step.linkedObservationIds,
+                            ...step.linkedProposalIds,
+                            ...step.blockerIds,
+                          ].map(id => (
+                            <span
+                              key={`${step.stepId}-${id}`}
+                              className="inline-flex h-5 max-w-full items-center rounded-md border border-stone-200 bg-stone-50 px-1.5 text-stone-600"
+                            >
+                              <span className="truncate">{shortId(id)}</span>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    {stepCommandReady && (
+                      <div className="flex flex-wrap items-start justify-end gap-1 px-2">
+                        {stepControls.includes("edit_plan") &&
+                          onEditPlanStep &&
+                          inlineControlButton({
+                            label: `Edit step ${step.title}`,
+                            icon: <Pencil size={13} />,
+                            disabled: busy,
+                            onClick: () =>
+                              onEditPlanStep({
+                                planSessionId: planSessionId!,
+                                baseRevision: planRevision!,
+                                stepId: step.stepId,
+                                title: step.title,
+                              }),
+                          })}
+                        {stepControls.includes("execute_step") &&
+                          onExecutePlanStep &&
+                          inlineControlButton({
+                            label: `Execute step ${step.title}`,
+                            icon: <Play size={13} />,
+                            disabled: busy,
+                            onClick: () =>
+                              onExecutePlanStep({
+                                planSessionId: planSessionId!,
+                                baseRevision: planRevision!,
+                                stepId: step.stepId,
+                              }),
+                          })}
+                        {stepControls.includes("skip_step") &&
+                          onSkipPlanStep &&
+                          inlineControlButton({
+                            label: `Skip step ${step.title}`,
+                            icon: <Ban size={13} />,
+                            disabled: busy,
+                            onClick: () =>
+                              onSkipPlanStep({
+                                planSessionId: planSessionId!,
+                                baseRevision: planRevision!,
+                                stepId: step.stepId,
+                              }),
+                          })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       {state.actions.length > 0 && (
         <div className="mt-3">

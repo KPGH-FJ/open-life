@@ -62,6 +62,8 @@ pub struct PlanExecuteStepEditInput {
 pub struct UpdatePlanExecuteSessionDraftInput {
     pub session_id: String,
     #[serde(default)]
+    pub base_revision: Option<u64>,
+    #[serde(default)]
     pub steps: Vec<PlanExecuteStepEditInput>,
 }
 
@@ -69,12 +71,16 @@ pub struct UpdatePlanExecuteSessionDraftInput {
 #[serde(rename_all = "camelCase")]
 pub struct FinalizePlanExecuteSessionInput {
     pub session_id: String,
+    #[serde(default)]
+    pub base_revision: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CancelPlanExecuteSessionInput {
     pub session_id: String,
+    #[serde(default)]
+    pub base_revision: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -83,6 +89,8 @@ pub struct ExecutePlanExecuteStepInput {
     pub session_id: String,
     #[serde(default)]
     pub step_id: Option<String>,
+    #[serde(default)]
+    pub base_revision: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -90,6 +98,23 @@ pub struct ExecutePlanExecuteStepInput {
 pub struct ExecutePlanExecuteStepOutput {
     pub session: PlanExecuteSession,
     pub executed_step: PlanExecuteStepExecutionResult,
+    pub metadata_safe_summary: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkipPlanExecuteStepInput {
+    pub session_id: String,
+    pub step_id: String,
+    pub base_revision: u64,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkipPlanExecuteStepOutput {
+    pub session: PlanExecuteSession,
+    pub skipped_step: PlanExecuteStepExecutionResult,
     pub metadata_safe_summary: Value,
 }
 
@@ -147,6 +172,14 @@ pub async fn execute_plan_execute_step(
     state: State<'_, Arc<AppState>>,
 ) -> Result<ExecutePlanExecuteStepOutput, String> {
     execute_plan_execute_step_with_state(input, &state.inner().clone()).await
+}
+
+#[tauri::command]
+pub async fn skip_plan_execute_step(
+    input: SkipPlanExecuteStepInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<SkipPlanExecuteStepOutput, String> {
+    skip_plan_execute_step_with_state(input, &state.inner().clone()).await
 }
 
 pub(crate) async fn create_plan_execute_session_with_state(
@@ -246,6 +279,7 @@ pub(crate) async fn create_plan_execute_session_with_state(
             .create_session(&session)
             .map_err(|e| format!("failed to create Plan-Execute session: {e}"))?;
     }
+    append_plan_created_events(state, &session).await?;
 
     run.hs_selection_audit = hs_selection_audit;
     run.behavior_checks = behavior_checks;
@@ -286,15 +320,28 @@ pub(crate) async fn update_plan_execute_session_draft_with_state(
     state: &Arc<AppState>,
 ) -> Result<PlanExecuteSession, String> {
     let mut session = load_plan_execute_session(state, &input.session_id).await?;
+    ensure_plan_revision_or_append_blocker(state, &session, input.base_revision).await?;
+    let edited_step_ids = input
+        .steps
+        .iter()
+        .map(|step| step.step_id.clone())
+        .collect::<Vec<_>>();
     let edits = input
         .steps
         .into_iter()
         .map(plan_execute_step_edit_from_input)
         .collect::<Result<Vec<_>, _>>()?;
-    session
-        .apply_draft_edits(edits)
-        .map_err(|e| e.to_string())?;
+    if let Some(base_revision) = input.base_revision {
+        session
+            .apply_draft_edits_at_revision(base_revision, edits)
+            .map_err(|e| e.to_string())?;
+    } else {
+        session
+            .apply_draft_edits(edits)
+            .map_err(|e| e.to_string())?;
+    }
     save_plan_execute_session(state, &session).await?;
+    append_plan_updated_events(state, &session, &edited_step_ids).await?;
     update_existing_product_run_for_session(state, &session).await?;
     Ok(session)
 }
@@ -304,8 +351,16 @@ pub(crate) async fn finalize_plan_execute_session_with_state(
     state: &Arc<AppState>,
 ) -> Result<PlanExecuteSession, String> {
     let mut session = load_plan_execute_session(state, &input.session_id).await?;
-    session.finalize().map_err(|e| e.to_string())?;
+    ensure_plan_revision_or_append_blocker(state, &session, input.base_revision).await?;
+    if let Some(base_revision) = input.base_revision {
+        session
+            .finalize_at_revision(base_revision)
+            .map_err(|e| e.to_string())?;
+    } else {
+        session.finalize().map_err(|e| e.to_string())?;
+    }
     save_plan_execute_session(state, &session).await?;
+    append_plan_confirmed_event(state, &session).await?;
     update_existing_product_run_for_session(state, &session).await?;
     Ok(session)
 }
@@ -315,8 +370,10 @@ pub(crate) async fn cancel_plan_execute_session_with_state(
     state: &Arc<AppState>,
 ) -> Result<PlanExecuteSession, String> {
     let mut session = load_plan_execute_session(state, &input.session_id).await?;
+    ensure_plan_revision_or_append_blocker(state, &session, input.base_revision).await?;
     session.cancel().map_err(|e| e.to_string())?;
     save_plan_execute_session(state, &session).await?;
+    append_plan_cancelled_event(state, &session).await?;
     update_existing_product_run_for_session(state, &session).await?;
     Ok(session)
 }
@@ -326,8 +383,12 @@ pub(crate) async fn execute_plan_execute_step_with_state(
     state: &Arc<AppState>,
 ) -> Result<ExecutePlanExecuteStepOutput, String> {
     let mut session = load_plan_execute_session(state, &input.session_id).await?;
+    ensure_plan_revision_or_append_blocker(state, &session, input.base_revision).await?;
     let step_id = match input.step_id {
-        Some(step_id) => step_id,
+        Some(step_id) => {
+            ensure_plan_step_or_append_blocker(state, &session, &step_id).await?;
+            step_id
+        }
         None => session
             .steps
             .iter()
@@ -347,11 +408,18 @@ pub(crate) async fn execute_plan_execute_step_with_state(
         .as_ref()
         .ok_or_else(|| "Proposal store not available for Plan-Execute step".to_string())?;
     let proposal_store = proposal_store_arc.lock().await;
-    let executed_step = session
-        .execute_step(&step_id, &LifeModelGovernor, &proposal_store)
-        .map_err(|e| e.to_string())?;
+    let executed_step = if let Some(base_revision) = input.base_revision {
+        session
+            .execute_step_at_revision(&step_id, base_revision, &LifeModelGovernor, &proposal_store)
+            .map_err(|e| e.to_string())?
+    } else {
+        session
+            .execute_step(&step_id, &LifeModelGovernor, &proposal_store)
+            .map_err(|e| e.to_string())?
+    };
     drop(proposal_store);
     save_plan_execute_session(state, &session).await?;
+    append_plan_step_execution_events(state, &session, &executed_step).await?;
     update_existing_product_run_for_session(state, &session).await?;
     Ok(ExecutePlanExecuteStepOutput {
         metadata_safe_summary: json!({
@@ -366,6 +434,435 @@ pub(crate) async fn execute_plan_execute_step_with_state(
         }),
         session,
         executed_step,
+    })
+}
+
+pub(crate) async fn skip_plan_execute_step_with_state(
+    input: SkipPlanExecuteStepInput,
+    state: &Arc<AppState>,
+) -> Result<SkipPlanExecuteStepOutput, String> {
+    let mut session = load_plan_execute_session(state, &input.session_id).await?;
+    ensure_plan_revision_or_append_blocker(state, &session, Some(input.base_revision)).await?;
+    ensure_plan_step_or_append_blocker(state, &session, &input.step_id).await?;
+    let skipped_step = session
+        .skip_step_at_revision(&input.step_id, input.base_revision, &input.reason)
+        .map_err(|e| e.to_string())?;
+    save_plan_execute_session(state, &session).await?;
+    append_plan_step_skipped_events(state, &session, &skipped_step).await?;
+    update_existing_product_run_for_session(state, &session).await?;
+    Ok(SkipPlanExecuteStepOutput {
+        metadata_safe_summary: json!({
+            "planExecuteProductVertical": true,
+            "scenarioId": session.scenario.as_id(),
+            "planSessionId": session.session_id,
+            "planId": session.plan_id,
+            "skippedStepId": skipped_step.step_id,
+            "revision": session.revision,
+            "metadataSafe": true,
+            "directLifeModelWrites": false,
+            "externalWritesExecuted": false,
+        }),
+        session,
+        skipped_step,
+    })
+}
+
+async fn ensure_plan_revision_or_append_blocker(
+    state: &Arc<AppState>,
+    session: &PlanExecuteSession,
+    base_revision: Option<u64>,
+) -> Result<(), String> {
+    let Some(base_revision) = base_revision else {
+        return Ok(());
+    };
+    if base_revision == session.revision {
+        return Ok(());
+    }
+    let blocker_id = format!(
+        "plan-blocker:{}:stale-revision:{}:{}",
+        session.session_id, base_revision, session.revision
+    );
+    append_plan_runtime_event(
+        state,
+        session,
+        "blocker.created",
+        "blocker",
+        &blocker_id,
+        json!({
+            "blockerId": blocker_id,
+            "reasonCode": "stale_plan_revision",
+            "planId": session.plan_id,
+            "planSessionId": session.session_id,
+            "expectedRevision": session.revision,
+            "baseRevision": base_revision,
+            "metadataSafe": true,
+            "directLifeModelWrites": false,
+            "externalWritesExecuted": false,
+        }),
+    )
+    .await?;
+    Err(format!(
+        "Plan-Execute stale revision: expected {}, got {}",
+        session.revision, base_revision
+    ))
+}
+
+async fn ensure_plan_step_or_append_blocker(
+    state: &Arc<AppState>,
+    session: &PlanExecuteSession,
+    step_id: &str,
+) -> Result<(), String> {
+    if session.steps.iter().any(|step| step.step_id == step_id) {
+        return Ok(());
+    }
+    let blocker_id = format!(
+        "plan-blocker:{}:invalid-step:{}",
+        session.session_id, step_id
+    );
+    append_plan_runtime_event(
+        state,
+        session,
+        "blocker.created",
+        "blocker",
+        &blocker_id,
+        json!({
+            "blockerId": blocker_id,
+            "reasonCode": "invalid_plan_step",
+            "planId": session.plan_id,
+            "planSessionId": session.session_id,
+            "stepId": step_id,
+            "revision": session.revision,
+            "metadataSafe": true,
+            "directLifeModelWrites": false,
+            "externalWritesExecuted": false,
+        }),
+    )
+    .await?;
+    Err("Plan-Execute step not found".into())
+}
+
+async fn append_plan_created_events(
+    state: &Arc<AppState>,
+    session: &PlanExecuteSession,
+) -> Result<(), String> {
+    append_plan_runtime_event(
+        state,
+        session,
+        "plan.created",
+        "plan",
+        &session.plan_id,
+        plan_event_payload(session),
+    )
+    .await?;
+    for step in &session.steps {
+        append_plan_runtime_event(
+            state,
+            session,
+            "step.created",
+            "step",
+            &step.step_id,
+            step_event_payload(session, step),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn append_plan_updated_events(
+    state: &Arc<AppState>,
+    session: &PlanExecuteSession,
+    edited_step_ids: &[String],
+) -> Result<(), String> {
+    append_plan_runtime_event(
+        state,
+        session,
+        "plan.updated",
+        "plan",
+        &session.plan_id,
+        plan_event_payload(session),
+    )
+    .await?;
+    for step_id in edited_step_ids {
+        if let Some(step) = session.steps.iter().find(|step| &step.step_id == step_id) {
+            append_plan_runtime_event(
+                state,
+                session,
+                "step.updated",
+                "step",
+                &step.step_id,
+                step_event_payload(session, step),
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn append_plan_confirmed_event(
+    state: &Arc<AppState>,
+    session: &PlanExecuteSession,
+) -> Result<(), String> {
+    append_plan_runtime_event(
+        state,
+        session,
+        "plan.confirmed",
+        "plan",
+        &session.plan_id,
+        plan_event_payload(session),
+    )
+    .await
+    .map(|_| ())
+}
+
+async fn append_plan_cancelled_event(
+    state: &Arc<AppState>,
+    session: &PlanExecuteSession,
+) -> Result<(), String> {
+    append_plan_runtime_event(
+        state,
+        session,
+        "plan.updated",
+        "plan",
+        &session.plan_id,
+        plan_event_payload(session),
+    )
+    .await
+    .map(|_| ())
+}
+
+async fn append_plan_step_execution_events(
+    state: &Arc<AppState>,
+    session: &PlanExecuteSession,
+    step_result: &PlanExecuteStepExecutionResult,
+) -> Result<(), String> {
+    append_step_updated_event(state, session, step_result).await?;
+    for action_id in &step_result.linked_action_ids {
+        append_plan_runtime_event(
+            state,
+            session,
+            "action.queued",
+            "action",
+            action_id,
+            json!({
+                "actionId": action_id,
+                "planId": step_result.plan_id,
+                "stepId": step_result.step_id,
+                "revision": step_result.revision,
+                "actionType": "plan_execute.read_only",
+                "metadataSafe": true,
+                "directWritesExecuted": false,
+            }),
+        )
+        .await?;
+        append_plan_runtime_event(
+            state,
+            session,
+            "action.completed",
+            "action",
+            action_id,
+            json!({
+                "actionId": action_id,
+                "planId": step_result.plan_id,
+                "stepId": step_result.step_id,
+                "revision": step_result.revision,
+                "observationIds": step_result.linked_observation_ids,
+                "metadataSafe": true,
+                "directWritesExecuted": false,
+            }),
+        )
+        .await?;
+    }
+    for observation_id in &step_result.linked_observation_ids {
+        append_plan_runtime_event(
+            state,
+            session,
+            "observation.created",
+            "observation",
+            observation_id,
+            json!({
+                "observationId": observation_id,
+                "planId": step_result.plan_id,
+                "stepId": step_result.step_id,
+                "revision": step_result.revision,
+                "preview": step_result.observation_summary,
+                "metadataSafe": true,
+                "directWritesExecuted": false,
+            }),
+        )
+        .await?;
+    }
+    for proposal_id in &step_result.linked_proposal_ids {
+        append_plan_runtime_event(
+            state,
+            session,
+            "proposal.created",
+            "proposal",
+            proposal_id,
+            json!({
+                "proposalId": proposal_id,
+                "planId": step_result.plan_id,
+                "stepId": step_result.step_id,
+                "revision": step_result.revision,
+                "metadataSafe": true,
+                "directWritesExecuted": false,
+            }),
+        )
+        .await?;
+    }
+    for blocker_id in &step_result.blocker_ids {
+        append_plan_runtime_event(
+            state,
+            session,
+            "blocker.created",
+            "blocker",
+            blocker_id,
+            json!({
+                "blockerId": blocker_id,
+                "planId": step_result.plan_id,
+                "stepId": step_result.step_id,
+                "revision": step_result.revision,
+                "reasonCode": step_result.status_reason,
+                "metadataSafe": true,
+                "directWritesExecuted": false,
+            }),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn append_plan_step_skipped_events(
+    state: &Arc<AppState>,
+    session: &PlanExecuteSession,
+    step_result: &PlanExecuteStepExecutionResult,
+) -> Result<(), String> {
+    append_step_updated_event(state, session, step_result).await?;
+    append_plan_runtime_event(
+        state,
+        session,
+        "step.skipped",
+        "step",
+        &step_result.step_id,
+        json!({
+            "planId": step_result.plan_id,
+            "stepId": step_result.step_id,
+            "revision": step_result.revision,
+            "basePlanRevision": step_result.base_plan_revision,
+            "skipReason": step_result.skip_reason,
+            "evidenceIds": step_result.evidence_ids,
+            "metadataSafe": true,
+            "directWritesExecuted": false,
+        }),
+    )
+    .await
+    .map(|_| ())
+}
+
+async fn append_step_updated_event(
+    state: &Arc<AppState>,
+    session: &PlanExecuteSession,
+    step_result: &PlanExecuteStepExecutionResult,
+) -> Result<(), String> {
+    append_plan_runtime_event(
+        state,
+        session,
+        "step.updated",
+        "step",
+        &step_result.step_id,
+        json!({
+            "planId": step_result.plan_id,
+            "stepId": step_result.step_id,
+            "status": format!("{:?}", step_result.step_status).to_ascii_lowercase(),
+            "revision": step_result.revision,
+            "basePlanRevision": step_result.base_plan_revision,
+            "linkedActionIds": step_result.linked_action_ids,
+            "linkedObservationIds": step_result.linked_observation_ids,
+            "linkedProposalIds": step_result.linked_proposal_ids,
+            "blockerIds": step_result.blocker_ids,
+            "linkedFinalDeliveryIds": step_result.linked_final_delivery_ids,
+            "skipReasonPresent": step_result.skip_reason.is_some(),
+            "policyDecisionId": step_result.policy_decision_id,
+            "evidenceIds": step_result.evidence_ids,
+            "metadataSafe": true,
+            "directWritesExecuted": false,
+        }),
+    )
+    .await
+    .map(|_| ())
+}
+
+async fn append_plan_runtime_event(
+    state: &Arc<AppState>,
+    session: &PlanExecuteSession,
+    event_type: &str,
+    object_type: &str,
+    object_id: &str,
+    payload: Value,
+) -> Result<crate::main_chat_event_stream::MainChatAgentDurableEvent, String> {
+    crate::main_chat_event_stream::append_main_chat_agent_runtime_event(
+        state,
+        session.session_id.clone(),
+        session
+            .source_agent_run_id
+            .clone()
+            .unwrap_or_else(|| session.session_id.clone()),
+        event_type,
+        object_type,
+        object_id,
+        "plan_runtime",
+        payload,
+    )
+    .await
+}
+
+fn plan_event_payload(session: &PlanExecuteSession) -> Value {
+    json!({
+        "planId": session.plan_id,
+        "planSessionId": session.session_id,
+        "taskSessionId": session.session_id,
+        "runId": session.source_agent_run_id,
+        "status": session.status.to_string(),
+        "revision": session.revision,
+        "revisionId": session.revision_id,
+        "goal": session.metadata_safe_objective,
+        "confirmedAt": session.confirmed_at,
+        "reviewId": session.review_id,
+        "sourceEvidenceIds": session.source_evidence_ids,
+        "supersededByPlanId": session.superseded_by_plan_id,
+        "stepIds": session.steps.iter().map(|step| step.step_id.clone()).collect::<Vec<_>>(),
+        "metadataSafe": true,
+        "directLifeModelWrites": false,
+        "externalWritesExecuted": false,
+    })
+}
+
+fn step_event_payload(
+    session: &PlanExecuteSession,
+    step: &openlife_core::agent::PlanExecuteStepRecord,
+) -> Value {
+    json!({
+        "planId": session.plan_id,
+        "planSessionId": session.session_id,
+        "stepId": step.step_id,
+        "index": step.index,
+        "title": step.title,
+        "description": step.description,
+        "kind": step.kind,
+        "status": format!("{:?}", step.status).to_ascii_lowercase(),
+        "revision": step.revision,
+        "basePlanRevision": step.base_plan_revision,
+        "linkedActionIds": step.linked_action_ids,
+        "linkedObservationIds": step.linked_observation_ids,
+        "linkedProposalIds": step.linked_proposal_ids,
+        "blockerIds": step.blocker_ids,
+        "linkedFinalDeliveryIds": step.linked_final_delivery_ids,
+        "skipReason": step.skip_reason,
+        "policyDecisionId": step.policy_decision_id,
+        "reason": step.status_reason,
+        "evidenceIds": step.evidence_ids,
+        "metadataSafe": true,
+        "directLifeModelWrites": false,
+        "externalWritesExecuted": false,
     })
 }
 
@@ -731,6 +1228,7 @@ mod tests {
             ExecutePlanExecuteStepInput {
                 session_id: session.session_id.clone(),
                 step_id: Some(first_step_id.clone()),
+                base_revision: None,
             },
             &state,
         )
@@ -741,6 +1239,7 @@ mod tests {
         let edited = update_plan_execute_session_draft_with_state(
             UpdatePlanExecuteSessionDraftInput {
                 session_id: session.session_id.clone(),
+                base_revision: None,
                 steps: vec![PlanExecuteStepEditInput {
                     step_id: first_step_id.clone(),
                     title: Some("Review priorities before planning".into()),
@@ -760,6 +1259,7 @@ mod tests {
         let finalized = finalize_plan_execute_session_with_state(
             FinalizePlanExecuteSessionInput {
                 session_id: session.session_id.clone(),
+                base_revision: None,
             },
             &state,
         )
@@ -770,6 +1270,7 @@ mod tests {
         let edit_error = update_plan_execute_session_draft_with_state(
             UpdatePlanExecuteSessionDraftInput {
                 session_id: session.session_id,
+                base_revision: None,
                 steps: vec![PlanExecuteStepEditInput {
                     step_id: first_step_id,
                     title: Some("Too late".into()),
@@ -803,6 +1304,7 @@ mod tests {
         let session = finalize_plan_execute_session_with_state(
             FinalizePlanExecuteSessionInput {
                 session_id: session.session_id.clone(),
+                base_revision: None,
             },
             &state,
         )
@@ -827,6 +1329,7 @@ mod tests {
             ExecutePlanExecuteStepInput {
                 session_id: session.session_id.clone(),
                 step_id: Some(read_step_id),
+                base_revision: None,
             },
             &state,
         )
@@ -843,6 +1346,7 @@ mod tests {
             ExecutePlanExecuteStepInput {
                 session_id: session.session_id.clone(),
                 step_id: Some(write_step_id.clone()),
+                base_revision: None,
             },
             &state,
         )
@@ -852,6 +1356,7 @@ mod tests {
             ExecutePlanExecuteStepInput {
                 session_id: session.session_id.clone(),
                 step_id: Some(write_step_id),
+                base_revision: None,
             },
             &state,
         )

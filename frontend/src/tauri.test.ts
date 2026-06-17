@@ -52,6 +52,7 @@ import {
   runMultiStrategyAgentPreview,
   runMainChatAgentExecutionV1EvalGate,
   runMainChatAgentProductMaturityV2EventGate,
+  runMainChatAgentProductMaturityV2PlanGate,
   runMainChatAgentProductizationV1Gate,
   listMainChatAgentEvents,
   getMainChatAgentStateSnapshot,
@@ -622,6 +623,60 @@ describe("tauri command argument aliases", () => {
     expect(result.ready).toBe(true);
     expect(result.scenarioCount).toBe(8);
     expect(result.proofs[0]?.emittedEventIds).toEqual(result.proofs[0]?.replayedEventIds);
+  });
+
+  it("invokes Product Maturity v2 plan gate as an explicit read-only diagnostic", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      scenarioCount: 7,
+      defaultGateScenarioCount: 7,
+      passedScenarioCount: 7,
+      expectedBlockerCount: 2,
+      ready: true,
+      blockers: [],
+      scenarios: [
+        {
+          id: "PI-01",
+          capabilityGroup: "plan_interaction",
+          prompt: "Plan this work before executing.",
+          preconditions: ["none"],
+          expectedRoute: "plan_execute",
+          requiredRuntimeEvidence: ["plan.created", "step.created"],
+          requiredUiState: ["plan_draft_visible"],
+          requiredControls: ["confirm_plan"],
+          negativeAssertions: ["no_frontend_only_plan"],
+          expectedOutcome: "pass",
+          defaultGate: true,
+        },
+      ],
+      proofs: [
+        {
+          scenarioId: "PI-01",
+          passed: true,
+          expectedBlocker: false,
+          planId: "plan:phase-c",
+          revision: 1,
+          stepIds: ["step-1"],
+          eventTypes: ["plan.created", "step.created"],
+          linkedActionIds: [],
+          linkedObservationIds: [],
+          linkedProposalIds: [],
+          blockerIds: [],
+          controls: ["confirm_plan"],
+          diagnostics: [],
+        },
+      ],
+    });
+
+    const result = await runMainChatAgentProductMaturityV2PlanGate();
+
+    expect(invoke).toHaveBeenCalledWith(
+      "run_main_chat_agent_product_maturity_v2_plan_gate",
+      undefined
+    );
+    expect(result.ready).toBe(true);
+    expect(result.scenarioCount).toBe(7);
+    expect(result.expectedBlockerCount).toBe(2);
+    expect(result.proofs[0]?.eventTypes).toContain("plan.created");
   });
 
   it("invokes runtime strategy registry status as explicit read-only diagnostic", async () => {

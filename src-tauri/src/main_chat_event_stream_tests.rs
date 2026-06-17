@@ -30,6 +30,10 @@ fn event_gate_command_test_context() -> tauri::Context<tauri::test::MockRuntime>
     };
     context.runtime_authority_mut().__allow_command(
         "run_main_chat_agent_product_maturity_v2_event_gate".into(),
+        mock_ipc_origin.clone(),
+    );
+    context.runtime_authority_mut().__allow_command(
+        "run_main_chat_agent_product_maturity_v2_plan_gate".into(),
         mock_ipc_origin,
     );
     context
@@ -340,6 +344,147 @@ async fn main_chat_stream_emits_only_replayable_durable_events() {
     );
 }
 
+#[tokio::test]
+async fn main_chat_event_stream_records_phase_c_plan_interaction_deltas() {
+    let state = crate::test_utils::test_app_state();
+    let session = crate::commands::agent_runtime::create_plan_execute_session_with_state(
+        crate::commands::agent_runtime::CreatePlanExecuteSessionInput {
+            scenario_id: Some("weekly_planning".into()),
+            source_chat_session_id: Some("chat-phase-c-plan".into()),
+            max_steps: Some(5),
+        },
+        &state,
+    )
+    .await
+    .expect("create phase C plan session");
+
+    let create_events = crate::main_chat_event_stream::list_main_chat_agent_events_with_state(
+        &state,
+        session.session_id.clone(),
+        Some(0),
+        Some(100),
+    )
+    .await
+    .expect("replay plan create events");
+    assert!(create_events
+        .iter()
+        .any(|event| event.event_type == "plan.created"
+            && event.object_id == session.plan_id
+            && event.source == "plan_runtime"));
+    assert_eq!(
+        create_events
+            .iter()
+            .filter(|event| event.event_type == "step.created")
+            .count(),
+        session.steps.len()
+    );
+
+    let confirmed = crate::commands::agent_runtime::finalize_plan_execute_session_with_state(
+        crate::commands::agent_runtime::FinalizePlanExecuteSessionInput {
+            session_id: session.session_id.clone(),
+            base_revision: Some(session.revision),
+        },
+        &state,
+    )
+    .await
+    .expect("confirm phase C plan");
+    let read_step_id = confirmed
+        .steps
+        .iter()
+        .find(|step| !step.declared_write)
+        .expect("read step")
+        .step_id
+        .clone();
+    let skip_step_id = confirmed
+        .steps
+        .iter()
+        .find(|step| step.step_id != read_step_id)
+        .expect("step to skip")
+        .step_id
+        .clone();
+
+    let stale_execute = crate::commands::agent_runtime::execute_plan_execute_step_with_state(
+        crate::commands::agent_runtime::ExecutePlanExecuteStepInput {
+            session_id: confirmed.session_id.clone(),
+            step_id: Some(read_step_id.clone()),
+            base_revision: Some(confirmed.revision - 1),
+        },
+        &state,
+    )
+    .await
+    .expect_err("stale revision must fail closed");
+    assert!(stale_execute.contains("stale"));
+
+    let executed = crate::commands::agent_runtime::execute_plan_execute_step_with_state(
+        crate::commands::agent_runtime::ExecutePlanExecuteStepInput {
+            session_id: confirmed.session_id.clone(),
+            step_id: Some(read_step_id.clone()),
+            base_revision: Some(confirmed.revision),
+        },
+        &state,
+    )
+    .await
+    .expect("execute read-only phase C step");
+    assert!(!executed.executed_step.linked_action_ids.is_empty());
+    assert!(!executed.executed_step.linked_observation_ids.is_empty());
+
+    let skipped = crate::commands::agent_runtime::skip_plan_execute_step_with_state(
+        crate::commands::agent_runtime::SkipPlanExecuteStepInput {
+            session_id: executed.session.session_id.clone(),
+            step_id: skip_step_id,
+            base_revision: executed.session.revision,
+            reason: "unsupported in Phase C deterministic fixture".into(),
+        },
+        &state,
+    )
+    .await
+    .expect("skip unsupported phase C step");
+    assert_eq!(
+        skipped.skipped_step.step_status,
+        openlife_core::agent::PlanStepStatus::Skipped
+    );
+
+    let replay = crate::main_chat_event_stream::list_main_chat_agent_events_with_state(
+        &state,
+        confirmed.session_id.clone(),
+        Some(0),
+        Some(250),
+    )
+    .await
+    .expect("replay phase C plan events");
+    let event_types = replay
+        .iter()
+        .map(|event| event.event_type.as_str())
+        .collect::<Vec<_>>();
+    for required in [
+        "plan.created",
+        "plan.confirmed",
+        "step.updated",
+        "action.queued",
+        "action.completed",
+        "observation.created",
+        "step.skipped",
+        "blocker.created",
+    ] {
+        assert!(
+            event_types.contains(&required),
+            "missing {required} in replayed Phase C events: {event_types:?}"
+        );
+    }
+    assert!(
+        replay.iter().all(|event| !event.backfilled),
+        "Phase C command events must be live durable deltas"
+    );
+    assert_eq!(
+        replay
+            .iter()
+            .map(|event| event.sequence)
+            .collect::<Vec<_>>(),
+        (1..=replay.len() as u64).collect::<Vec<_>>(),
+        "Phase C plan event replay must preserve monotonic per-task sequence"
+    );
+}
+
 #[test]
 fn main_chat_event_stream_keeps_backfill_and_live_namespaces_separate() {
     let store = crate::main_chat_event_stream::MainChatAgentEventStore::new_in_memory()
@@ -523,4 +668,116 @@ async fn run_main_chat_product_maturity_v2_event_gate_command_returns_auditable_
             "EV proof must be backed by runtime objects: {proof:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn main_chat_product_maturity_v2_plan_gate_covers_phase_c_pi_matrix() {
+    let report =
+        crate::main_chat_plan_interaction_eval::run_main_chat_agent_product_maturity_v2_plan_gate()
+            .await;
+
+    assert_eq!(report.scenario_count, 7);
+    assert_eq!(report.default_gate_scenario_count, 7);
+    assert_eq!(report.passed_scenario_count, 7, "{:?}", report.proofs);
+    assert_eq!(report.expected_blocker_count, 2);
+    assert!(report.ready, "{:?}", report.blockers);
+
+    for id in [
+        "PI-01",
+        "PI-02",
+        "PI-03",
+        "PI-04",
+        "PI-05",
+        "PI-STALE-01",
+        "PI-INVALID-01",
+    ] {
+        let proof = report
+            .proofs
+            .iter()
+            .find(|proof| proof.scenario_id == id)
+            .unwrap_or_else(|| panic!("missing {id} proof"));
+        assert!(proof.passed, "{id} failed: {:?}", proof.diagnostics);
+        assert!(
+            proof.plan_id.is_some() && proof.revision.is_some() && !proof.step_ids.is_empty(),
+            "{id} must prove a real runtime plan object"
+        );
+        assert!(
+            proof.event_types.iter().any(|event_type| {
+                matches!(
+                    event_type.as_str(),
+                    "plan.created"
+                        | "plan.updated"
+                        | "plan.confirmed"
+                        | "step.created"
+                        | "step.updated"
+                        | "step.skipped"
+                        | "action.completed"
+                        | "observation.created"
+                        | "blocker.created"
+                )
+            }),
+            "{id} must prove durable runtime events: {:?}",
+            proof.event_types
+        );
+    }
+
+    let read_execution = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "PI-04")
+        .expect("PI-04");
+    assert!(!read_execution.linked_action_ids.is_empty());
+    assert!(!read_execution.linked_observation_ids.is_empty());
+
+    let stale = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "PI-STALE-01")
+        .expect("PI-STALE-01");
+    assert!(stale.expected_blocker);
+    assert!(!stale.blocker_ids.is_empty());
+
+    let invalid = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "PI-INVALID-01")
+        .expect("PI-INVALID-01");
+    assert!(invalid.expected_blocker);
+    assert!(!invalid.blocker_ids.is_empty());
+}
+
+#[tokio::test]
+async fn run_main_chat_product_maturity_v2_plan_gate_command_returns_auditable_report() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let app = tauri::test::mock_builder()
+        .manage(state)
+        .invoke_handler(tauri::generate_handler![
+            crate::commands::agent_runtime::run_main_chat_agent_product_maturity_v2_plan_gate
+        ])
+        .build(event_gate_command_test_context())
+        .expect("build mock tauri app");
+    let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+        .build()
+        .expect("build mock webview");
+
+    let response = tauri::test::get_ipc_response(
+        &webview,
+        event_gate_invoke_request(
+            "run_main_chat_agent_product_maturity_v2_plan_gate",
+            serde_json::json!({}),
+        ),
+    )
+    .expect("plan gate response")
+    .deserialize::<serde_json::Value>()
+    .expect("deserialize plan gate response");
+
+    assert_eq!(response["scenarioCount"], 7);
+    assert_eq!(response["defaultGateScenarioCount"], 7);
+    assert_eq!(response["passedScenarioCount"], 7);
+    assert_eq!(response["expectedBlockerCount"], 2);
+    assert!(response["ready"].as_bool().unwrap_or(false));
+    assert!(response["blockers"]
+        .as_array()
+        .expect("blockers array")
+        .is_empty());
 }

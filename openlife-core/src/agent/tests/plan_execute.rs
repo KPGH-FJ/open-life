@@ -544,3 +544,117 @@ fn finalized_session_executes_read_only_steps_and_creates_proposals_for_write_li
     assert_eq!(proposal_store.list_pending_proposals(10).unwrap().len(), 1);
     assert_eq!(session.linked_proposal_ids.len(), 1);
 }
+
+#[test]
+fn phase_c_plan_session_tracks_revisions_step_links_and_skip_evidence() {
+    let service = PlanExecuteService::default();
+    let proposal_store = ProposalStore::new_in_memory().unwrap();
+    let contract = PlanExecuteProductContract::weekly_planning();
+    let draft = service.draft_product_plan(
+        &plan_input(
+            "Use my LifeModel to plan this week.",
+            contract.max_step_count,
+        ),
+        PlanExecuteProductScenario::WeeklyPlanning,
+    );
+    let mut session =
+        PlanExecuteSession::new_draft(None, Some("run-weekly".into()), contract, draft).unwrap();
+    let plan_id = session.plan_id.clone();
+    let initial_revision = session.revision;
+    let first_step_id = session.steps[0].step_id.clone();
+    let second_step_id = session.steps[1].step_id.clone();
+
+    assert!(!plan_id.is_empty());
+    assert_eq!(session.revision_id, "rev-1");
+    assert_eq!(session.steps[0].plan_id, plan_id);
+    assert_eq!(session.steps[0].base_plan_revision, initial_revision);
+    assert_eq!(session.steps[0].linked_action_ids.len(), 0);
+
+    let stale_edit = session.apply_draft_edits_at_revision(
+        initial_revision + 1,
+        vec![PlanExecuteStepEdit {
+            step_id: first_step_id.clone(),
+            title: Some("Stale edit".into()),
+            intent: None,
+            action_kind: None,
+            tool_name: None,
+            declared_write: None,
+            risk_level: None,
+        }],
+    );
+    assert!(stale_edit.unwrap_err().to_string().contains("stale"));
+
+    session
+        .apply_draft_edits_at_revision(
+            initial_revision,
+            vec![PlanExecuteStepEdit {
+                step_id: first_step_id.clone(),
+                title: Some("Review priorities with explicit evidence".into()),
+                intent: Some("read_only_reasoning".into()),
+                action_kind: Some("reason".into()),
+                tool_name: None,
+                declared_write: Some(false),
+                risk_level: Some(RiskLevel::Low),
+            }],
+        )
+        .unwrap();
+    assert!(session.revision > initial_revision);
+    assert_eq!(session.steps[0].revision, session.revision);
+    assert_eq!(
+        session.steps[0].status_reason.as_deref(),
+        Some("edited_by_user")
+    );
+
+    let confirmed_revision = session.revision;
+    session.finalize_at_revision(confirmed_revision).unwrap();
+    assert!(session.confirmed_at.is_some());
+
+    let stale_execute = session.execute_step_at_revision(
+        &first_step_id,
+        confirmed_revision - 1,
+        &LifeModelGovernor::default(),
+        &proposal_store,
+    );
+    assert!(stale_execute.unwrap_err().to_string().contains("stale"));
+
+    let executed = session
+        .execute_step_at_revision(
+            &first_step_id,
+            confirmed_revision,
+            &LifeModelGovernor::default(),
+            &proposal_store,
+        )
+        .unwrap();
+    assert_eq!(executed.step_status, PlanStepStatus::Executed);
+    assert!(!executed.linked_action_ids.is_empty());
+    assert!(!executed.linked_observation_ids.is_empty());
+    assert!(executed.linked_proposal_ids.is_empty());
+
+    let skip_revision = session.revision;
+    let skipped = session
+        .skip_step_at_revision(
+            &second_step_id,
+            skip_revision,
+            "unsupported in this phase; user requested skip",
+        )
+        .unwrap();
+    assert_eq!(skipped.step_status, PlanStepStatus::Skipped);
+    assert_eq!(
+        skipped.skip_reason.as_deref(),
+        Some("unsupported in this phase; user requested skip")
+    );
+    let skipped_step = session
+        .steps
+        .iter()
+        .find(|step| step.step_id == second_step_id)
+        .unwrap();
+    assert_eq!(skipped_step.status, PlanStepStatus::Skipped);
+    assert_eq!(
+        skipped_step.skip_reason.as_deref(),
+        Some("unsupported in this phase; user requested skip")
+    );
+    assert!(skipped_step
+        .evidence_ids
+        .iter()
+        .any(|id| id.contains("skip")));
+}

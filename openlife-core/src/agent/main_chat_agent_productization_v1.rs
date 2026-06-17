@@ -1064,11 +1064,63 @@ pub struct ProviderRouteEvidence {
 #[serde(rename_all = "camelCase")]
 pub struct PlanEvidence {
     pub plan_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
     pub status: String,
     pub summary: String,
     pub editable: bool,
     pub source: String,
     pub evidence_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_id: Option<String>,
+    #[serde(default)]
+    pub source_evidence_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by_plan_id: Option<String>,
+    #[serde(default)]
+    pub controls: Vec<String>,
+    #[serde(default)]
+    pub steps: Vec<PlanStepEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanStepEvidence {
+    pub step_id: String,
+    pub plan_id: String,
+    pub index: usize,
+    pub title: String,
+    pub description: String,
+    pub kind: String,
+    pub status: String,
+    pub revision: u64,
+    pub base_plan_revision: u64,
+    pub linked_action_ids: Vec<String>,
+    pub linked_observation_ids: Vec<String>,
+    pub linked_proposal_ids: Vec<String>,
+    pub blocker_ids: Vec<String>,
+    #[serde(default)]
+    pub linked_final_delivery_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_decision_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub evidence_ids: Vec<String>,
+    #[serde(default)]
+    pub controls: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1654,6 +1706,12 @@ fn plan_from_evidence(
             .and_then(Value::as_str)
             .map(str::to_string)
             .unwrap_or_else(|| format!("plan:{}", session.id)),
+        plan_session_id: plan_entry
+            .and_then(|entry| entry.metadata.get("planExecuteSessionId"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        task_session_id: Some(session.id.clone()),
+        run_id: None,
         status: if session.status == AgentTaskSessionStatus::Completed {
             "completed".into()
         } else {
@@ -1673,6 +1731,21 @@ fn plan_from_evidence(
         evidence_id: plan_entry
             .map(|entry| entry.id.clone())
             .unwrap_or_else(|| session.id.clone()),
+        revision: plan_entry
+            .and_then(|entry| entry.metadata.get("revision"))
+            .and_then(Value::as_u64),
+        revision_id: plan_entry
+            .and_then(|entry| entry.metadata.get("revisionId"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        confirmed_at: None,
+        review_id: None,
+        source_evidence_ids: plan_entry
+            .map(|entry| vec![entry.id.clone()])
+            .unwrap_or_default(),
+        superseded_by_plan_id: None,
+        controls: Vec::new(),
+        steps: Vec::new(),
     })
 }
 

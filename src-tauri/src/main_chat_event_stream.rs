@@ -371,6 +371,35 @@ pub(crate) async fn materialize_optional_main_chat_agent_events(
     }
 }
 
+pub(crate) async fn append_main_chat_agent_runtime_event(
+    state: &Arc<AppState>,
+    task_session_id: impl Into<String>,
+    run_id: impl Into<String>,
+    event_type: impl Into<String>,
+    object_type: impl Into<String>,
+    object_id: impl Into<String>,
+    source: impl Into<String>,
+    payload: Value,
+) -> Result<MainChatAgentDurableEvent, String> {
+    let Some(store_arc) = state.main_chat_agent_event_store.as_ref() else {
+        return Err("main_chat_agent_event_store_unavailable".into());
+    };
+    let store = store_arc.lock().await;
+    store
+        .append(MainChatAgentEventDraft {
+            task_session_id: task_session_id.into(),
+            run_id: run_id.into(),
+            event_type: event_type.into(),
+            object_type: object_type.into(),
+            object_id: object_id.into(),
+            created_at: Utc::now(),
+            source: source.into(),
+            payload,
+            backfilled: false,
+        })
+        .map_err(|err| err.to_string())
+}
+
 pub(crate) async fn list_main_chat_agent_events_with_state(
     state: &Arc<AppState>,
     task_session_id: String,

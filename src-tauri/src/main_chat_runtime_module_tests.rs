@@ -518,6 +518,8 @@ fn default_chat_entrypoints_do_not_call_w19_w60_command_surfaces() {
         "finalize_plan_execute_session",
         "cancel_plan_execute_session",
         "execute_plan_execute_step",
+        "skip_plan_execute_step",
+        "run_main_chat_agent_product_maturity_v2_plan_gate",
         "check_runtime_migration_gate",
         "check_controlled_chat_pilot_eligibility",
         "draft_controlled_chat_migration_plan",

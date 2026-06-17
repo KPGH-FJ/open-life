@@ -34,6 +34,8 @@ pub(crate) mod main_chat_legacy_fallback;
 pub(crate) mod main_chat_live_provider_harness;
 #[allow(dead_code)]
 pub(crate) mod main_chat_memory_lifecycle_eval;
+#[allow(dead_code)]
+pub(crate) mod main_chat_plan_interaction_eval;
 pub(crate) mod main_chat_preprocess;
 pub(crate) mod main_chat_proposal_support;
 pub(crate) mod main_chat_react_execution;
@@ -137,8 +139,9 @@ use commands::agent_runtime::{
     run_default_chat_adapter_controlled_preview, run_default_chat_adapter_dry_run,
     run_main_chat_agent_execution_v1_eval_gate,
     run_main_chat_agent_execution_v1_final_acceptance_gate,
-    run_main_chat_agent_product_maturity_v2_event_gate, run_main_chat_agent_productization_v1_gate,
-    run_multi_strategy_agent_preview, update_plan_execute_session_draft,
+    run_main_chat_agent_product_maturity_v2_event_gate,
+    run_main_chat_agent_product_maturity_v2_plan_gate, run_main_chat_agent_productization_v1_gate,
+    run_multi_strategy_agent_preview, skip_plan_execute_step, update_plan_execute_session_draft,
 };
 
 use commands::builder::{
@@ -617,6 +620,7 @@ pub fn run() {
             run_main_chat_agent_execution_v1_eval_gate,
             run_main_chat_agent_productization_v1_gate,
             run_main_chat_agent_product_maturity_v2_event_gate,
+            run_main_chat_agent_product_maturity_v2_plan_gate,
             run_main_chat_agent_execution_v1_final_acceptance_gate,
             get_runtime_strategy_registry_status,
             get_react_beta_execution_status,
@@ -627,6 +631,7 @@ pub fn run() {
             finalize_plan_execute_session,
             cancel_plan_execute_session,
             execute_plan_execute_step,
+            skip_plan_execute_step,
             check_runtime_migration_gate,
             check_controlled_chat_pilot_eligibility,
             check_controlled_pilot_promotion_readiness,

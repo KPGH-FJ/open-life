@@ -87,6 +87,8 @@ import type {
   UpdatePlanExecuteSessionDraftInput,
   ExecutePlanExecuteStepInput,
   ExecutePlanExecuteStepOutput,
+  SkipPlanExecuteStepInput,
+  SkipPlanExecuteStepOutput,
 } from "./types";
 
 function isTauriEnv(): boolean {
@@ -553,11 +555,42 @@ export interface MainChatAgentStateSnapshot {
   };
   plan?: {
     planId: string;
+    planSessionId?: string | null;
+    taskSessionId?: string | null;
+    runId?: string | null;
     status: string;
     summary: string;
     editable: boolean;
     source: string;
     evidenceId: string;
+    revision?: number | null;
+    revisionId?: string | null;
+    confirmedAt?: string | null;
+    reviewId?: string | null;
+    sourceEvidenceIds?: string[];
+    supersededByPlanId?: string | null;
+    controls?: string[];
+    steps?: Array<{
+      stepId: string;
+      planId: string;
+      index: number;
+      title: string;
+      description: string;
+      kind: string;
+      status: string;
+      revision: number;
+      basePlanRevision: number;
+      linkedActionIds: string[];
+      linkedObservationIds: string[];
+      linkedProposalIds: string[];
+      blockerIds: string[];
+      linkedFinalDeliveryIds?: string[];
+      skipReason?: string | null;
+      policyDecisionId?: string | null;
+      reason?: string | null;
+      evidenceIds?: string[];
+      controls?: string[];
+    }>;
   };
   actions: Array<{
     actionId: string;
@@ -909,6 +942,47 @@ export interface MainChatProductMaturityV2EventGateReport {
   proofs: MainChatProductMaturityV2EventProof[];
 }
 
+export interface MainChatProductMaturityV2PlanScenario {
+  id: string;
+  capabilityGroup: string;
+  prompt: string;
+  preconditions: string[];
+  expectedRoute: string;
+  requiredRuntimeEvidence: string[];
+  requiredUiState: string[];
+  requiredControls: string[];
+  negativeAssertions: string[];
+  expectedOutcome: string;
+  defaultGate: boolean;
+}
+
+export interface MainChatProductMaturityV2PlanProof {
+  scenarioId: string;
+  passed: boolean;
+  expectedBlocker: boolean;
+  planId?: string | null;
+  revision?: number | null;
+  stepIds: string[];
+  eventTypes: string[];
+  linkedActionIds: string[];
+  linkedObservationIds: string[];
+  linkedProposalIds: string[];
+  blockerIds: string[];
+  controls: string[];
+  diagnostics: string[];
+}
+
+export interface MainChatProductMaturityV2PlanGateReport {
+  scenarioCount: number;
+  defaultGateScenarioCount: number;
+  passedScenarioCount: number;
+  expectedBlockerCount: number;
+  ready: boolean;
+  blockers: string[];
+  scenarios: MainChatProductMaturityV2PlanScenario[];
+  proofs: MainChatProductMaturityV2PlanProof[];
+}
+
 export async function sendMessageV2(
   sessionId: string,
   messages: ChatMessage[],
@@ -1015,6 +1089,12 @@ export async function runMainChatAgentProductMaturityV2EventGate(): Promise<Main
   );
 }
 
+export async function runMainChatAgentProductMaturityV2PlanGate(): Promise<MainChatProductMaturityV2PlanGateReport> {
+  return safeInvoke<MainChatProductMaturityV2PlanGateReport>(
+    "run_main_chat_agent_product_maturity_v2_plan_gate"
+  );
+}
+
 export async function createPlanExecuteSession(
   input: CreatePlanExecuteSessionInput
 ): Promise<PlanExecuteSession> {
@@ -1039,9 +1119,21 @@ export async function updatePlanExecuteSessionDraft(
   return safeInvoke<PlanExecuteSession>("update_plan_execute_session_draft", { input });
 }
 
-export async function finalizePlanExecuteSession(sessionId: string): Promise<PlanExecuteSession> {
+export async function finalizePlanExecuteSession(
+  sessionId: string,
+  baseRevision?: number
+): Promise<PlanExecuteSession> {
   return safeInvoke<PlanExecuteSession>("finalize_plan_execute_session", {
-    input: { sessionId },
+    input: { sessionId, ...(baseRevision !== undefined ? { baseRevision } : {}) },
+  });
+}
+
+export async function cancelPlanExecuteSession(
+  sessionId: string,
+  baseRevision?: number
+): Promise<PlanExecuteSession> {
+  return safeInvoke<PlanExecuteSession>("cancel_plan_execute_session", {
+    input: { sessionId, ...(baseRevision !== undefined ? { baseRevision } : {}) },
   });
 }
 
@@ -1049,6 +1141,12 @@ export async function executePlanExecuteStep(
   input: ExecutePlanExecuteStepInput
 ): Promise<ExecutePlanExecuteStepOutput> {
   return safeInvoke<ExecutePlanExecuteStepOutput>("execute_plan_execute_step", { input });
+}
+
+export async function skipPlanExecuteStep(
+  input: SkipPlanExecuteStepInput
+): Promise<SkipPlanExecuteStepOutput> {
+  return safeInvoke<SkipPlanExecuteStepOutput>("skip_plan_execute_step", { input });
 }
 
 export async function checkRuntimeMigrationGate(

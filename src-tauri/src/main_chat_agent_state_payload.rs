@@ -3,8 +3,11 @@ use chrono::Utc;
 use openlife_core::agent::main_chat_agent_productization_v1::{
     assemble_main_chat_agent_state, EvidenceGap, MainChatAgentProductStrategyRoute,
     MainChatAgentProductTaskStatus, MainChatAgentStateAssemblerInput, MainChatAgentStateEvent,
-    MainChatAgentStateEventType, MainChatAgentStateSnapshot, StrategyEvidence, TaskSessionEvidence,
+    MainChatAgentStateEventType, MainChatAgentStateSnapshot, PlanStepEvidence, StrategyEvidence,
+    TaskSessionEvidence,
 };
+use openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind;
+use openlife_core::agent::{PlanExecuteSession, PlanExecuteSessionStatus, PlanStepStatus};
 use std::sync::Arc;
 
 pub(crate) async fn assemble_main_chat_agent_state_for_turn(
@@ -181,6 +184,13 @@ pub(crate) async fn assemble_main_chat_agent_state_for_turn(
             Vec::new()
         };
 
+    let plan_execute_session_id = transcript
+        .iter()
+        .find(|entry| entry.kind == ExecutionTranscriptEntryKind::Plan)
+        .and_then(|entry| entry.metadata.get("planExecuteSessionId"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+
     let mut snapshot = match assemble_main_chat_agent_state(MainChatAgentStateAssemblerInput {
         session,
         run,
@@ -199,8 +209,144 @@ pub(crate) async fn assemble_main_chat_agent_state_for_turn(
             ));
         }
     };
+    if let Some(plan_execute_session_id) = plan_execute_session_id {
+        enrich_plan_evidence_from_plan_execute_session(
+            state,
+            &mut snapshot,
+            &plan_execute_session_id,
+            &mut assembly_diagnostics,
+        )
+        .await;
+    }
     append_diagnostics(&mut snapshot, assembly_diagnostics);
     Some(snapshot)
+}
+
+async fn enrich_plan_evidence_from_plan_execute_session(
+    state: &Arc<AppState>,
+    snapshot: &mut MainChatAgentStateSnapshot,
+    plan_execute_session_id: &str,
+    diagnostics: &mut Vec<EvidenceGap>,
+) {
+    let Some(plan_store_arc) = state.plan_execute_session_store.as_ref() else {
+        diagnostics.push(gap(
+            "agent_state_plan_execute_store_unavailable",
+            "PlanExecute session store is unavailable for plan controls.",
+            Some(plan_execute_session_id.to_string()),
+        ));
+        return;
+    };
+    let plan_session = {
+        let plan_store = plan_store_arc.lock().await;
+        match plan_store.get_session(plan_execute_session_id) {
+            Ok(Some(session)) => session,
+            Ok(None) => {
+                diagnostics.push(gap(
+                    "agent_state_plan_execute_session_not_found",
+                    "Plan evidence referenced a PlanExecute session that was not found.",
+                    Some(plan_execute_session_id.to_string()),
+                ));
+                return;
+            }
+            Err(err) => {
+                diagnostics.push(gap(
+                    "agent_state_plan_execute_session_load_failed",
+                    &format!("PlanExecute session evidence could not be loaded: {err}"),
+                    Some(plan_execute_session_id.to_string()),
+                ));
+                return;
+            }
+        }
+    };
+
+    if let Some(plan) = snapshot.plan.as_mut() {
+        plan.plan_id = plan_session.plan_id.clone();
+        plan.plan_session_id = Some(plan_session.session_id.clone());
+        plan.task_session_id = Some(snapshot.task.task_id.clone());
+        plan.run_id = plan_session.source_agent_run_id.clone();
+        plan.status = plan_session.status.to_string();
+        plan.summary = format!(
+            "PlanExecute {} has {} steps.",
+            plan_session.revision_id, plan_session.step_count
+        );
+        plan.editable = plan_session.status == PlanExecuteSessionStatus::Draft;
+        plan.source = "plan_execute".into();
+        plan.revision = Some(plan_session.revision);
+        plan.revision_id = Some(plan_session.revision_id.clone());
+        plan.confirmed_at = plan_session.confirmed_at.clone();
+        plan.review_id = plan_session.review_id.clone();
+        plan.source_evidence_ids = plan_session.source_evidence_ids.clone();
+        plan.superseded_by_plan_id = plan_session.superseded_by_plan_id.clone();
+        plan.controls = plan_controls(&plan_session);
+        plan.steps = plan_session
+            .steps
+            .iter()
+            .map(|step| PlanStepEvidence {
+                step_id: step.step_id.clone(),
+                plan_id: plan_session.plan_id.clone(),
+                index: step.index,
+                title: step.title.clone(),
+                description: step.description.clone(),
+                kind: step.kind.clone(),
+                status: plan_step_status_label(step.status).into(),
+                revision: step.revision,
+                base_plan_revision: step.base_plan_revision,
+                linked_action_ids: step.linked_action_ids.clone(),
+                linked_observation_ids: step.linked_observation_ids.clone(),
+                linked_proposal_ids: step.linked_proposal_ids.clone(),
+                blocker_ids: step.blocker_ids.clone(),
+                linked_final_delivery_ids: step.linked_final_delivery_ids.clone(),
+                skip_reason: step.skip_reason.clone(),
+                policy_decision_id: step.policy_decision_id.clone(),
+                reason: step.status_reason.clone(),
+                evidence_ids: step.evidence_ids.clone(),
+                controls: step_controls(&plan_session, step.status),
+            })
+            .collect();
+    }
+}
+
+fn plan_controls(session: &PlanExecuteSession) -> Vec<String> {
+    match session.status {
+        PlanExecuteSessionStatus::Draft => vec![
+            "confirm_plan".into(),
+            "edit_plan".into(),
+            "cancel_task".into(),
+            "open_trace".into(),
+        ],
+        PlanExecuteSessionStatus::Finalized | PlanExecuteSessionStatus::InProgress => vec![
+            "execute_step".into(),
+            "skip_step".into(),
+            "cancel_task".into(),
+            "open_trace".into(),
+        ],
+        PlanExecuteSessionStatus::Completed => vec!["review_plan".into(), "open_trace".into()],
+        PlanExecuteSessionStatus::Cancelled => vec!["open_trace".into()],
+    }
+}
+
+fn step_controls(session: &PlanExecuteSession, status: PlanStepStatus) -> Vec<String> {
+    match (session.status, status) {
+        (PlanExecuteSessionStatus::Draft, PlanStepStatus::Planned) => {
+            vec!["edit_plan".into(), "skip_step".into()]
+        }
+        (
+            PlanExecuteSessionStatus::Finalized | PlanExecuteSessionStatus::InProgress,
+            PlanStepStatus::Planned | PlanStepStatus::RequiresConfirmation,
+        ) => vec!["execute_step".into(), "skip_step".into()],
+        _ => Vec::new(),
+    }
+}
+
+fn plan_step_status_label(status: PlanStepStatus) -> &'static str {
+    match status {
+        PlanStepStatus::Planned => "planned",
+        PlanStepStatus::Skipped => "skipped",
+        PlanStepStatus::Blocked => "blocked",
+        PlanStepStatus::RequiresProposal => "requires_proposal",
+        PlanStepStatus::RequiresConfirmation => "requires_confirmation",
+        PlanStepStatus::Executed => "executed",
+    }
 }
 
 fn gap(gap_code: &str, detail: &str, evidence_id: Option<String>) -> EvidenceGap {

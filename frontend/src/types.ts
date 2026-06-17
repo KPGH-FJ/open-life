@@ -422,30 +422,52 @@ export type PlanExecuteStepStatus =
 export type PlanExecuteRiskLevel = "low" | "medium" | "high" | "critical";
 
 export interface PlanExecuteStepRecord {
+  planId?: string;
   stepId: string;
+  index?: number;
   order: number;
   title: string;
+  description?: string;
+  kind?: string;
   intent: string;
   toolName?: string | null;
   actionKind: string;
   riskLevel: PlanExecuteRiskLevel;
   declaredWrite: boolean;
   status: PlanExecuteStepStatus;
+  revision?: number;
+  basePlanRevision?: number;
   linkedProposalId?: string | null;
+  linkedActionIds?: string[];
+  linkedObservationIds?: string[];
+  linkedProposalIds?: string[];
+  blockerIds?: string[];
+  linkedFinalDeliveryIds?: string[];
+  skipReason?: string | null;
   observationSummary?: string | null;
   policyReasonCode?: string | null;
+  policyDecisionId?: string | null;
+  statusReason?: string | null;
+  evidenceIds?: string[];
   metadataSafeSummary?: Record<string, any>;
 }
 
 export interface PlanExecuteSession {
   sessionId: string;
+  planId?: string;
   sourceAgentRunId?: string | null;
   sourceChatSessionId?: string | null;
   scenario: PlanExecuteScenario;
   status: PlanExecuteSessionStatus;
+  revision?: number;
+  revisionId?: string;
   createdAt: string;
   updatedAt: string;
   finalizedAt?: string | null;
+  confirmedAt?: string | null;
+  reviewId?: string | null;
+  sourceEvidenceIds?: string[];
+  supersededByPlanId?: string | null;
   metadataSafeObjective: string;
   stepCount: number;
   completedStepCount: number;
@@ -474,26 +496,54 @@ export interface PlanExecuteStepEditInput {
 
 export interface UpdatePlanExecuteSessionDraftInput {
   sessionId: string;
+  baseRevision?: number;
   steps: PlanExecuteStepEditInput[];
 }
 
 export interface ExecutePlanExecuteStepInput {
   sessionId: string;
   stepId?: string;
+  baseRevision?: number;
 }
 
 export interface PlanExecuteStepExecutionResult {
   sessionId: string;
+  planId?: string;
   stepId: string;
   stepStatus: PlanExecuteStepStatus;
+  revision?: number;
+  basePlanRevision?: number;
+  stepKind?: string;
   linkedProposalId?: string | null;
+  linkedActionIds?: string[];
+  linkedObservationIds?: string[];
+  linkedProposalIds?: string[];
+  blockerIds?: string[];
+  linkedFinalDeliveryIds?: string[];
+  skipReason?: string | null;
   observationSummary?: string | null;
+  policyDecisionId?: string | null;
+  statusReason?: string | null;
+  evidenceIds?: string[];
   metadataSafeSummary?: Record<string, any>;
 }
 
 export interface ExecutePlanExecuteStepOutput {
   session: PlanExecuteSession;
   executedStep: PlanExecuteStepExecutionResult;
+  metadataSafeSummary?: Record<string, any>;
+}
+
+export interface SkipPlanExecuteStepInput {
+  sessionId: string;
+  stepId: string;
+  baseRevision: number;
+  reason: string;
+}
+
+export interface SkipPlanExecuteStepOutput {
+  session: PlanExecuteSession;
+  skippedStep: PlanExecuteStepExecutionResult;
   metadataSafeSummary?: Record<string, any>;
 }
 

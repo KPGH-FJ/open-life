@@ -265,13 +265,20 @@ export const mockPreviewAgentRun = {
 
 const mockPlanExecuteSession = {
   sessionId: "plan-session-1",
+  planId: "plan:plan-session-1",
   sourceAgentRunId: "run-plan-1",
   sourceChatSessionId: "workspace_weekly_planning",
   scenario: "weekly_planning",
   status: "draft",
+  revision: 1,
+  revisionId: "rev-1",
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
   finalizedAt: null,
+  confirmedAt: null,
+  reviewId: null,
+  sourceEvidenceIds: [],
+  supersededByPlanId: null,
   metadataSafeObjective: "scenario=weekly_planning",
   stepCount: 3,
   completedStepCount: 0,
@@ -280,7 +287,9 @@ const mockPlanExecuteSession = {
   warnings: [],
   steps: [
     {
+      planId: "plan:plan-session-1",
       stepId: "step-1",
+      index: 1,
       order: 1,
       title: "Review current priorities",
       intent: "read_only_reasoning",
@@ -289,13 +298,22 @@ const mockPlanExecuteSession = {
       riskLevel: "low",
       declaredWrite: false,
       status: "planned",
+      revision: 1,
+      basePlanRevision: 1,
       linkedProposalId: null,
+      linkedActionIds: [],
+      linkedObservationIds: [],
+      linkedProposalIds: [],
+      blockerIds: [],
+      linkedFinalDeliveryIds: [],
       observationSummary: null,
       policyReasonCode: null,
       metadataSafeSummary: {},
     },
     {
+      planId: "plan:plan-session-1",
       stepId: "step-2",
+      index: 2,
       order: 2,
       title: "Shape this week's focus",
       intent: "read_only_planning",
@@ -304,13 +322,22 @@ const mockPlanExecuteSession = {
       riskLevel: "low",
       declaredWrite: false,
       status: "planned",
+      revision: 1,
+      basePlanRevision: 1,
       linkedProposalId: null,
+      linkedActionIds: [],
+      linkedObservationIds: [],
+      linkedProposalIds: [],
+      blockerIds: [],
+      linkedFinalDeliveryIds: [],
       observationSummary: null,
       policyReasonCode: null,
       metadataSafeSummary: {},
     },
     {
+      planId: "plan:plan-session-1",
       stepId: "step-3",
+      index: 3,
       order: 3,
       title: "Prepare weekly check-in proposal",
       intent: "write_like_schedule_task",
@@ -319,7 +346,14 @@ const mockPlanExecuteSession = {
       riskLevel: "medium",
       declaredWrite: true,
       status: "planned",
+      revision: 1,
+      basePlanRevision: 1,
       linkedProposalId: null,
+      linkedActionIds: [],
+      linkedObservationIds: [],
+      linkedProposalIds: [],
+      blockerIds: [],
+      linkedFinalDeliveryIds: [],
       observationSummary: null,
       policyReasonCode: null,
       metadataSafeSummary: {},
@@ -579,6 +613,47 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           },
         ],
       } as T);
+    case "run_main_chat_agent_product_maturity_v2_plan_gate":
+      return Promise.resolve({
+        scenarioCount: 7,
+        defaultGateScenarioCount: 7,
+        passedScenarioCount: 7,
+        expectedBlockerCount: 2,
+        ready: true,
+        blockers: [],
+        scenarios: [
+          {
+            id: "PI-01",
+            capabilityGroup: "plan_interaction",
+            prompt: "Plan this work before executing.",
+            preconditions: ["none"],
+            expectedRoute: "plan_execute",
+            requiredRuntimeEvidence: ["plan.created", "step.created"],
+            requiredUiState: ["plan_draft_visible"],
+            requiredControls: ["confirm_plan", "edit_plan", "skip_step"],
+            negativeAssertions: ["no_frontend_only_plan"],
+            expectedOutcome: "pass",
+            defaultGate: true,
+          },
+        ],
+        proofs: [
+          {
+            scenarioId: "PI-01",
+            passed: true,
+            expectedBlocker: false,
+            planId: "plan:mock-phase-c",
+            revision: 1,
+            stepIds: ["step-1"],
+            eventTypes: ["plan.created", "step.created"],
+            linkedActionIds: [],
+            linkedObservationIds: [],
+            linkedProposalIds: [],
+            blockerIds: [],
+            controls: ["confirm_plan", "edit_plan", "skip_step"],
+            diagnostics: [],
+          },
+        ],
+      } as T);
     case "list_mcp_servers":
       return Promise.resolve([
         {
@@ -697,6 +772,8 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       return Promise.resolve(mockPlanExecuteSession as T);
     case "finalize_plan_execute_session":
       return Promise.resolve({ ...mockPlanExecuteSession, status: "finalized" } as T);
+    case "cancel_plan_execute_session":
+      return Promise.resolve({ ...mockPlanExecuteSession, status: "cancelled" } as T);
     case "execute_plan_execute_step":
       return Promise.resolve({
         session: {
@@ -722,6 +799,41 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           stepStatus: "executed",
           linkedProposalId: null,
           observationSummary: "read-only internal reasoning completed; raw prompt omitted",
+          metadataSafeSummary: {},
+        },
+        metadataSafeSummary: {},
+      } as T);
+    case "skip_plan_execute_step":
+      return Promise.resolve({
+        session: {
+          ...mockPlanExecuteSession,
+          status: "in_progress",
+          steps: mockPlanExecuteSession.steps.map(step =>
+            step.stepId === _args?.input?.stepId
+              ? {
+                  ...step,
+                  status: "skipped",
+                  skipReason: _args?.input?.reason ?? "skipped",
+                }
+              : step
+          ),
+        },
+        skippedStep: {
+          sessionId: "plan-session-1",
+          planId: "plan:plan-session-1",
+          stepId: _args?.input?.stepId ?? "step-1",
+          stepStatus: "skipped",
+          revision: 2,
+          basePlanRevision: _args?.input?.baseRevision ?? 1,
+          stepKind: "read",
+          linkedProposalId: null,
+          linkedActionIds: [],
+          linkedObservationIds: [],
+          linkedProposalIds: [],
+          blockerIds: [],
+          linkedFinalDeliveryIds: [],
+          skipReason: _args?.input?.reason ?? "skipped",
+          observationSummary: null,
           metadataSafeSummary: {},
         },
         metadataSafeSummary: {},
