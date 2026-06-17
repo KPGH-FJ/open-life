@@ -401,6 +401,7 @@ mod tests {
                 openlife_core::agent::main_chat_agent_v1::ActionQueueStore::new_in_memory()
                     .unwrap(),
             ))),
+            main_chat_agent_event_store: None,
             patch_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
             ))),

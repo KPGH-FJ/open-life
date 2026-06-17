@@ -12,6 +12,7 @@ use crate::legacy_write_convergence::{
 use crate::main_chat_conversation_updates::{
     capture_conversation_signals, try_auto_checkin_daily_goals,
 };
+use crate::main_chat_event_stream::materialize_optional_main_chat_agent_events;
 use crate::main_chat_generation_support::{
     finalize_chat_agent_run, generate_non_stream_fallback, persist_chat_message_if_needed,
     persist_vector_memory_for_message, preview_text,
@@ -204,6 +205,20 @@ pub(crate) async fn start_stream_message_with_state(
                     .await,
                 );
 
+                let agent_state =
+                    crate::main_chat_agent_state_payload::assemble_main_chat_agent_state_for_turn(
+                        state,
+                        main_chat_agent_turn
+                            .decision
+                            .agent_task_session_id
+                            .as_deref(),
+                        Some(&agent_run.id),
+                    )
+                    .await;
+                let durable_events =
+                    materialize_optional_main_chat_agent_events(state, agent_state.as_ref())
+                        .await?;
+
                 emit_stream_event(
                     "stream-message-done",
                     serde_json::json!({
@@ -213,15 +228,17 @@ pub(crate) async fn start_stream_message_with_state(
                         "reasoning_trace": ReasoningTrace::default(),
                         "tool_calls": Vec::<ToolCallResult>::new(),
                         "agent_ingress": main_chat_agent_turn.decision.clone(),
-                        "agent_state": crate::main_chat_agent_state_payload::assemble_main_chat_agent_state_for_turn(
-                            state,
-                            main_chat_agent_turn.decision.agent_task_session_id.as_deref(),
-                            Some(&agent_run.id),
-                        ).await,
+                        "agent_state": agent_state,
                         "execution_transcript": execution_transcript,
                         "legacy_fallback_used": false,
                     }),
                 );
+                for event in durable_events {
+                    emit_stream_event(
+                        "main-chat-agent-event",
+                        serde_json::to_value(event).map_err(|err| err.to_string())?,
+                    );
+                }
                 return Ok(());
             }
         }
@@ -317,6 +334,9 @@ pub(crate) async fn start_stream_message_with_state(
     .await?
     {
         let run_id = result.run_id.clone().unwrap_or_default();
+        let agent_state = result.agent_state.clone();
+        let durable_events =
+            materialize_optional_main_chat_agent_events(state, agent_state.as_ref()).await?;
         emit_stream_event(
             "stream-message-start",
             serde_json::json!({
@@ -325,7 +345,7 @@ pub(crate) async fn start_stream_message_with_state(
                 "reasoning_trace": result.reasoning_trace.clone(),
                 "tool_calls": result.tool_calls.clone(),
                 "agent_ingress": result.agent_ingress.clone(),
-                "agent_state": result.agent_state.clone(),
+                "agent_state": agent_state.clone(),
                 "execution_transcript": result.execution_transcript.clone(),
                 "legacy_fallback_used": result.legacy_fallback_used,
             }),
@@ -347,11 +367,17 @@ pub(crate) async fn start_stream_message_with_state(
                 "reasoning_trace": result.reasoning_trace,
                 "tool_calls": result.tool_calls,
                 "agent_ingress": result.agent_ingress,
-                "agent_state": result.agent_state,
+                "agent_state": agent_state,
                 "execution_transcript": result.execution_transcript,
                 "legacy_fallback_used": result.legacy_fallback_used,
             }),
         );
+        for event in durable_events {
+            emit_stream_event(
+                "main-chat-agent-event",
+                serde_json::to_value(event).map_err(|err| err.to_string())?,
+            );
+        }
         return Ok(());
     }
 
@@ -841,6 +867,19 @@ pub(crate) async fn start_stream_message_with_state(
         .await,
     );
 
+    let agent_state =
+        crate::main_chat_agent_state_payload::assemble_main_chat_agent_state_for_turn(
+            state,
+            main_chat_agent_turn
+                .decision
+                .agent_task_session_id
+                .as_deref(),
+            Some(&agent_run.id),
+        )
+        .await;
+    let durable_events =
+        materialize_optional_main_chat_agent_events(state, agent_state.as_ref()).await?;
+
     emit_stream_event(
         "stream-message-done",
         serde_json::json!({
@@ -850,15 +889,17 @@ pub(crate) async fn start_stream_message_with_state(
             "reasoning_trace": reasoning_trace,
             "tool_calls": tool_calls,
             "agent_ingress": main_chat_agent_turn.decision.clone(),
-            "agent_state": crate::main_chat_agent_state_payload::assemble_main_chat_agent_state_for_turn(
-                state,
-                main_chat_agent_turn.decision.agent_task_session_id.as_deref(),
-                Some(&agent_run.id),
-            ).await,
+            "agent_state": agent_state,
             "execution_transcript": execution_transcript,
             "legacy_fallback_used": legacy_fallback_used,
         }),
     );
+    for event in durable_events {
+        emit_stream_event(
+            "main-chat-agent-event",
+            serde_json::to_value(event).map_err(|err| err.to_string())?,
+        );
+    }
 
     Ok(())
 }

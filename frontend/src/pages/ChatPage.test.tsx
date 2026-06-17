@@ -728,6 +728,294 @@ describe("ChatPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("renders durable event stream status from backend events and ignores duplicates", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Simple direct answer" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "start_stream_message",
+        expect.objectContaining({
+          sessionId: "session-1",
+          session_id: "session-1",
+        })
+      );
+      expect(listeners.get("stream-message-done")).toBeDefined();
+      expect(listeners.get("main-chat-agent-event")).toBeDefined();
+    });
+
+    const snapshot = buildMainChatAgentStateSnapshot({
+      sequence: 1,
+      events: [],
+      task: {
+        ...buildMainChatAgentStateSnapshot().task,
+        taskId: "mainchat-task-event-ui-1",
+        runId: "run-event-ui-1",
+        title: "Simple direct answer",
+        strategy: "direct_answer",
+        actionIds: [],
+        observationIds: [],
+      },
+      route: {
+        strategy: "direct_answer",
+        reason: "ordinary_answer",
+        confidence: 0.9,
+      },
+      actions: [],
+      observations: [],
+    });
+    await act(async () => {
+      await listeners.get("stream-message-done")?.({
+        payload: {
+          session_id: "session-1",
+          run_id: "run-event-ui-1",
+          reply: "A concise direct answer.",
+          reasoning_trace: null,
+          tool_calls: [],
+          agent_state: snapshot,
+          execution_transcript: [],
+          legacy_fallback_used: false,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    const durableEvent = {
+      eventId:
+        "mainchat_event:mainchat-task-event-ui-1:1:final_delivery.created:delivery-product-ui-1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      taskSessionId: "mainchat-task-event-ui-1",
+      runId: "run-event-ui-1",
+      sequence: 1,
+      eventType: "final_delivery.created",
+      objectType: "final_delivery",
+      objectId: "delivery-product-ui-1",
+      createdAt: "2026-06-16T00:00:02.000Z",
+      source: "finalizer",
+      payloadDigest:
+        "bytes:2 hash:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      payload: { evidenceId: "delivery-product-ui-1" },
+      backfilled: false,
+    };
+
+    await act(async () => {
+      await listeners.get("main-chat-agent-event")?.({ payload: durableEvent });
+      await listeners.get("main-chat-agent-event")?.({ payload: durableEvent });
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText("Event stream")).toBeInTheDocument();
+    expect(screen.getByText("receiving_event")).toBeInTheDocument();
+    expect(screen.getByText("final_delivery.created")).toBeInTheDocument();
+    expect(screen.getByText("1 event")).toBeInTheDocument();
+    expect(
+      vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "list_main_chat_agent_events")
+    ).toBe(false);
+  });
+
+  it("recovers event sequence gaps through replay and then snapshot fallback", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "list_main_chat_agent_events") {
+        if (args?.afterSequence === 0 || args?.after_sequence === 0) {
+          return Promise.resolve([
+            {
+              eventId:
+                "mainchat_event:mainchat-task-gap-ui-1:1:task.created:mainchat-task-gap-ui-1:d1",
+              taskSessionId: "mainchat-task-gap-ui-1",
+              runId: "run-gap-ui-1",
+              sequence: 1,
+              eventType: "task.created",
+              objectType: "task",
+              objectId: "mainchat-task-gap-ui-1",
+              createdAt: "2026-06-16T00:00:01.000Z",
+              source: "agent_ingress",
+              payloadDigest:
+                "bytes:2 hash:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              payload: { evidenceId: "mainchat-task-gap-ui-1" },
+              backfilled: false,
+            },
+            {
+              eventId: "mainchat_event:mainchat-task-gap-ui-1:2:route.selected:direct_answer:d2",
+              taskSessionId: "mainchat-task-gap-ui-1",
+              runId: "run-gap-ui-1",
+              sequence: 2,
+              eventType: "route.selected",
+              objectType: "route",
+              objectId: "direct_answer",
+              createdAt: "2026-06-16T00:00:02.000Z",
+              source: "strategy_router",
+              payloadDigest:
+                "bytes:2 hash:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              payload: { evidenceId: "mainchat-task-gap-ui-1" },
+              backfilled: false,
+            },
+            {
+              eventId:
+                "mainchat_event:mainchat-task-gap-ui-1:3:final_delivery.created:delivery-gap:d3",
+              taskSessionId: "mainchat-task-gap-ui-1",
+              runId: "run-gap-ui-1",
+              sequence: 3,
+              eventType: "final_delivery.created",
+              objectType: "final_delivery",
+              objectId: "delivery-gap",
+              createdAt: "2026-06-16T00:00:03.000Z",
+              source: "finalizer",
+              payloadDigest:
+                "bytes:2 hash:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+              payload: { evidenceId: "delivery-gap" },
+              backfilled: false,
+            },
+          ]);
+        }
+        return Promise.resolve([]);
+      }
+      if (cmd === "get_main_chat_agent_state_snapshot") {
+        return Promise.resolve(
+          buildMainChatAgentStateSnapshot({
+            sequence: 5,
+            task: {
+              ...buildMainChatAgentStateSnapshot().task,
+              taskId: "mainchat-task-gap-ui-1",
+              runId: "run-gap-ui-1",
+              title: "Recovered from snapshot",
+            },
+          })
+        );
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Replay a missed event" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "start_stream_message",
+        expect.objectContaining({
+          sessionId: "session-1",
+          session_id: "session-1",
+        })
+      );
+      expect(listeners.get("stream-message-done")).toBeDefined();
+      expect(listeners.get("main-chat-agent-event")).toBeDefined();
+    });
+    await act(async () => {
+      await listeners.get("stream-message-done")?.({
+        payload: {
+          session_id: "session-1",
+          run_id: "run-gap-ui-1",
+          reply: "Done.",
+          reasoning_trace: null,
+          tool_calls: [],
+          agent_state: buildMainChatAgentStateSnapshot({
+            sequence: 1,
+            events: [],
+            task: {
+              ...buildMainChatAgentStateSnapshot().task,
+              taskId: "mainchat-task-gap-ui-1",
+              runId: "run-gap-ui-1",
+            },
+          }),
+          execution_transcript: [],
+          legacy_fallback_used: false,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await listeners.get("main-chat-agent-event")?.({
+        payload: {
+          eventId: "mainchat_event:mainchat-task-gap-ui-1:3:final_delivery.created:delivery-gap:d3",
+          taskSessionId: "mainchat-task-gap-ui-1",
+          runId: "run-gap-ui-1",
+          sequence: 3,
+          eventType: "final_delivery.created",
+          objectType: "final_delivery",
+          objectId: "delivery-gap",
+          createdAt: "2026-06-16T00:00:03.000Z",
+          source: "finalizer",
+          payloadDigest:
+            "bytes:2 hash:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          payload: { evidenceId: "delivery-gap" },
+          backfilled: false,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "list_main_chat_agent_events",
+        expect.objectContaining({
+          taskSessionId: "mainchat-task-gap-ui-1",
+          afterSequence: 0,
+        })
+      );
+    });
+    expect(await screen.findByText("stream_recovered")).toBeInTheDocument();
+    expect(screen.getByText("3 events")).toBeInTheDocument();
+
+    await act(async () => {
+      await listeners.get("main-chat-agent-event")?.({
+        payload: {
+          eventId: "mainchat_event:mainchat-task-gap-ui-1:5:diagnostic.created:gap:d5",
+          taskSessionId: "mainchat-task-gap-ui-1",
+          runId: "run-gap-ui-1",
+          sequence: 5,
+          eventType: "diagnostic.created",
+          objectType: "diagnostic",
+          objectId: "gap",
+          createdAt: "2026-06-16T00:00:05.000Z",
+          source: "diagnostic",
+          payloadDigest:
+            "bytes:2 hash:sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          payload: { evidenceId: "gap" },
+          backfilled: false,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "get_main_chat_agent_state_snapshot",
+        expect.objectContaining({
+          taskSessionId: "mainchat-task-gap-ui-1",
+        })
+      );
+    });
+    expect(await screen.findByText("snapshot_refresh_required")).toBeInTheDocument();
+    expect(screen.getByText("sequence 5")).toBeInTheDocument();
+    expect(screen.getByText("Recovered from snapshot")).toBeInTheDocument();
+  });
+
   it("approves an exact ToolPermission proposal inline and resumes the Main Chat task", async () => {
     type StreamListener = (event: { payload: any }) => void | Promise<void>;
     const listeners = new Map<string, StreamListener>();

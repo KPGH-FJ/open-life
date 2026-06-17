@@ -61,6 +61,8 @@ import {
   cancelMainChatAgentTask,
   retryMainChatAgentAction,
   rollbackMemoryAsset,
+  listMainChatAgentEvents,
+  getMainChatAgentStateSnapshot,
 } from "../tauri";
 import type {
   AgentRun,
@@ -75,6 +77,7 @@ import type {
   MainChatExecutionTranscriptEntry,
   MainChatAgentTaskState,
   MainChatAgentStateSnapshot,
+  MainChatAgentDurableEvent,
 } from "../tauri";
 import type {
   ControlledPilotPromotionEvidenceInput,
@@ -420,6 +423,23 @@ export type ChatPageProps = {
   onCompanionStageChange?: (state: AgentStageState) => void;
 };
 
+type MainChatEventStreamStatus =
+  | "loading_snapshot"
+  | "subscribed"
+  | "receiving_event"
+  | "replaying_events"
+  | "event_gap_detected"
+  | "snapshot_refresh_required"
+  | "stream_disconnected"
+  | "stream_recovered";
+
+type MainChatEventStreamViewState = {
+  status: MainChatEventStreamStatus;
+  taskSessionId?: string;
+  lastAppliedSequence: number;
+  events: MainChatAgentDurableEvent[];
+};
+
 function readablePreviewError(error: unknown): string {
   if (typeof error === "string") return error;
   if (error && typeof error === "object") {
@@ -510,6 +530,8 @@ export default function ChatPage({
   const [currentAgentState, setCurrentAgentState] = useState<MainChatAgentStateSnapshot | null>(
     null
   );
+  const [agentEventStreamState, setAgentEventStreamState] =
+    useState<MainChatEventStreamViewState | null>(null);
   const [agentTaskControlBusy, setAgentTaskControlBusy] = useState(false);
   const [agentTaskControlError, setAgentTaskControlError] = useState<string | null>(null);
   const [legacyFallbackUsed, setLegacyFallbackUsed] = useState(false);
@@ -555,11 +577,166 @@ export default function ChatPage({
   const diagnosticsRef = useRef<SystemDiagnostics | null>(null);
   const streamErrorHandledRef = useRef(false);
   const handledStreamDoneKeysRef = useRef<Set<string>>(new Set());
+  const appliedMainChatEventIdsRef = useRef<Set<string>>(new Set());
+  const lastAppliedMainChatEventSequenceRef = useRef(0);
+  const currentAgentTaskSessionIdRef = useRef<string | null>(null);
   const lastUserMessageRef = useRef<ChatMessage | null>(null);
   const currentSessionIdRef = useRef<string>(currentSessionId);
   const promotedControlledPilotKeysRef = useRef<Record<string, boolean>>({});
   const savedControlledPilotPromotionKeysRef = useRef<Record<string, boolean>>({});
   const inFlightControlledPilotPromotionKeysRef = useRef<Set<string>>(new Set());
+
+  const applyMainChatAgentStateSnapshot = useCallback(
+    (
+      snapshot: MainChatAgentStateSnapshot | null,
+      status: MainChatEventStreamStatus = "subscribed"
+    ) => {
+      setCurrentAgentState(snapshot);
+      if (!snapshot) {
+        currentAgentTaskSessionIdRef.current = null;
+        lastAppliedMainChatEventSequenceRef.current = 0;
+        appliedMainChatEventIdsRef.current = new Set();
+        setAgentEventStreamState(null);
+        return;
+      }
+      currentAgentTaskSessionIdRef.current = snapshot.task.taskId;
+      const snapshotSequence =
+        status === "snapshot_refresh_required" || status === "loading_snapshot"
+          ? snapshot.sequence
+          : 0;
+      lastAppliedMainChatEventSequenceRef.current = snapshotSequence;
+      appliedMainChatEventIdsRef.current = new Set();
+      setAgentEventStreamState({
+        status,
+        taskSessionId: snapshot.task.taskId,
+        lastAppliedSequence: snapshotSequence,
+        events: [],
+      });
+    },
+    []
+  );
+
+  const applyMainChatAgentEvents = useCallback(
+    (
+      events: MainChatAgentDurableEvent[],
+      status: MainChatEventStreamStatus = "receiving_event"
+    ) => {
+      if (events.length === 0) return;
+      setAgentEventStreamState(prev => {
+        const currentTask = currentAgentTaskSessionIdRef.current;
+        if (!currentTask) return prev;
+        const nextEvents = prev?.events ? [...prev.events] : [];
+        let lastSequence = lastAppliedMainChatEventSequenceRef.current;
+        let changed = false;
+        for (const event of events) {
+          if (event.taskSessionId !== currentTask) continue;
+          if (appliedMainChatEventIdsRef.current.has(event.eventId)) continue;
+          if (event.sequence <= lastSequence) continue;
+          appliedMainChatEventIdsRef.current.add(event.eventId);
+          lastSequence = event.sequence;
+          nextEvents.push(event);
+          changed = true;
+        }
+        if (!changed) return prev;
+        lastAppliedMainChatEventSequenceRef.current = lastSequence;
+        return {
+          status,
+          taskSessionId: currentTask,
+          lastAppliedSequence: lastSequence,
+          events: nextEvents.slice(-50),
+        };
+      });
+    },
+    []
+  );
+
+  const handleMainChatAgentEvent = useCallback(
+    async (event: MainChatAgentDurableEvent) => {
+      const currentTask = currentAgentTaskSessionIdRef.current;
+      if (!currentTask || event.taskSessionId !== currentTask) return;
+      if (appliedMainChatEventIdsRef.current.has(event.eventId)) return;
+      const lastSequence = lastAppliedMainChatEventSequenceRef.current;
+      if (event.sequence <= lastSequence) return;
+      if (event.sequence > lastSequence + 1) {
+        setAgentEventStreamState(prev =>
+          prev
+            ? { ...prev, status: "event_gap_detected" }
+            : {
+                status: "event_gap_detected",
+                taskSessionId: currentTask,
+                lastAppliedSequence: lastSequence,
+                events: [],
+              }
+        );
+        try {
+          const replayed = await listMainChatAgentEvents(currentTask, lastSequence, 100);
+          const expectedSequence = lastSequence + 1;
+          const replayCoversGap =
+            replayed.length > 0 &&
+            replayed[0]?.sequence === expectedSequence &&
+            replayed.every(
+              (item, index) => index === 0 || item.sequence === replayed[index - 1].sequence + 1
+            ) &&
+            replayed.some(item => item.sequence >= event.sequence);
+          if (replayCoversGap) {
+            setAgentEventStreamState(prev =>
+              prev
+                ? { ...prev, status: "replaying_events" }
+                : {
+                    status: "replaying_events",
+                    taskSessionId: currentTask,
+                    lastAppliedSequence: lastSequence,
+                    events: [],
+                  }
+            );
+            applyMainChatAgentEvents(replayed, "stream_recovered");
+            return;
+          }
+          setAgentEventStreamState(prev =>
+            prev
+              ? { ...prev, status: "snapshot_refresh_required" }
+              : {
+                  status: "snapshot_refresh_required",
+                  taskSessionId: currentTask,
+                  lastAppliedSequence: lastSequence,
+                  events: [],
+                }
+          );
+          const snapshot = await getMainChatAgentStateSnapshot(currentTask);
+          applyMainChatAgentStateSnapshot(snapshot, "snapshot_refresh_required");
+        } catch {
+          setAgentEventStreamState(prev =>
+            prev
+              ? { ...prev, status: "snapshot_refresh_required" }
+              : {
+                  status: "snapshot_refresh_required",
+                  taskSessionId: currentTask,
+                  lastAppliedSequence: lastSequence,
+                  events: [],
+                }
+          );
+          try {
+            const snapshot = await getMainChatAgentStateSnapshot(currentTask);
+            applyMainChatAgentStateSnapshot(snapshot, "snapshot_refresh_required");
+          } catch {
+            setAgentEventStreamState(prev =>
+              prev
+                ? { ...prev, status: "stream_disconnected" }
+                : {
+                    status: "stream_disconnected",
+                    taskSessionId: currentTask,
+                    lastAppliedSequence: lastSequence,
+                    events: [],
+                  }
+            );
+          }
+        }
+        return;
+      }
+      applyMainChatAgentEvents([event], "receiving_event");
+    },
+    [applyMainChatAgentEvents, applyMainChatAgentStateSnapshot]
+  );
 
   const emitCompanionStage = useCallback(
     (state: AgentStageState) => {
@@ -570,7 +747,7 @@ export default function ChatPage({
 
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId;
-  }, [currentSessionId]);
+  }, [applyMainChatAgentStateSnapshot, currentSessionId]);
 
   useEffect(() => {
     promotedControlledPilotKeysRef.current = promotedControlledPilotKeys;
@@ -773,7 +950,7 @@ export default function ChatPage({
   }, []);
 
   useEffect(() => {
-    setCurrentAgentState(null);
+    applyMainChatAgentStateSnapshot(null);
     setLoadingHistory(true);
     refreshAgentRuns(currentSessionId);
     getChatHistory(currentSessionId)
@@ -816,8 +993,15 @@ export default function ChatPage({
     let unlistenChunk: (() => void) | null = null;
     let unlistenDone: (() => void) | null = null;
     let unlistenError: (() => void) | null = null;
+    let unlistenAgentEvent: (() => void) | null = null;
 
     (async () => {
+      unlistenAgentEvent = await listen<MainChatAgentDurableEvent>(
+        "main-chat-agent-event",
+        async event => {
+          await handleMainChatAgentEvent(event.payload);
+        }
+      );
       unlistenStart = await listen<StreamMessageStartPayload>(
         "stream-message-start",
         async event => {
@@ -831,7 +1015,7 @@ export default function ChatPage({
               }))
             );
             setCurrentAgentIngress(event.payload.agent_ingress ?? null);
-            setCurrentAgentState(event.payload.agent_state ?? null);
+            applyMainChatAgentStateSnapshot(event.payload.agent_state ?? null);
             setCurrentExecutionTranscript(event.payload.execution_transcript ?? []);
             setLegacyFallbackUsed(Boolean(event.payload.legacy_fallback_used));
             await loadMainChatTaskState(
@@ -891,7 +1075,7 @@ export default function ChatPage({
             }))
           );
           setCurrentAgentIngress(event.payload.agent_ingress ?? null);
-          setCurrentAgentState(event.payload.agent_state ?? null);
+          applyMainChatAgentStateSnapshot(event.payload.agent_state ?? null);
           setCurrentExecutionTranscript(event.payload.execution_transcript ?? []);
           setLegacyFallbackUsed(Boolean(event.payload.legacy_fallback_used));
           setStreamInterrupted(false);
@@ -921,7 +1105,7 @@ export default function ChatPage({
             setStreamingReply("");
             setSending(false);
             setStreamInterrupted(true);
-            setCurrentAgentState(null);
+            applyMainChatAgentStateSnapshot(null);
             emitCompanionStage("error");
             await loadAgentRunForSession(event.payload.run_id, event.payload.session_id);
             refreshAgentRuns(event.payload.session_id);
@@ -936,8 +1120,14 @@ export default function ChatPage({
       if (unlistenChunk) unlistenChunk();
       if (unlistenDone) unlistenDone();
       if (unlistenError) unlistenError();
+      if (unlistenAgentEvent) unlistenAgentEvent();
     };
-  }, [currentSessionId, emitCompanionStage]);
+  }, [
+    applyMainChatAgentStateSnapshot,
+    currentSessionId,
+    emitCompanionStage,
+    handleMainChatAgentEvent,
+  ]);
 
   const togglePreferLocal = async () => {
     const next = !preferLocal;
@@ -1185,7 +1375,7 @@ export default function ChatPage({
     setToolCalls([]);
     setShowToolCalls(false);
     setCurrentAgentIngress(null);
-    setCurrentAgentState(null);
+    applyMainChatAgentStateSnapshot(null);
     setCurrentExecutionTranscript([]);
     setCurrentAgentTaskState(null);
     setAgentTaskControlError(null);
@@ -1221,6 +1411,7 @@ export default function ChatPage({
     selectedSkillId,
     tryHandleQuickCommand,
     emitCompanionStage,
+    applyMainChatAgentStateSnapshot,
   ]);
 
   const retryLastUserMessage = useCallback(() => {
@@ -1245,7 +1436,7 @@ export default function ChatPage({
     setToolCalls([]);
     setShowToolCalls(false);
     setCurrentAgentIngress(null);
-    setCurrentAgentState(null);
+    applyMainChatAgentStateSnapshot(null);
     setCurrentExecutionTranscript([]);
     setCurrentAgentTaskState(null);
     setAgentTaskControlError(null);
@@ -1269,7 +1460,14 @@ export default function ChatPage({
       setSending(false);
       emitCompanionStage("error");
     }
-  }, [currentSessionId, messages, selectedSkillId, sending, emitCompanionStage]);
+  }, [
+    currentSessionId,
+    messages,
+    selectedSkillId,
+    sending,
+    emitCompanionStage,
+    applyMainChatAgentStateSnapshot,
+  ]);
 
   const currentMainChatTaskSessionId = useCallback(() => {
     return (
@@ -1277,17 +1475,18 @@ export default function ChatPage({
       currentAgentState?.task.taskId ??
       currentAgentTaskState?.session?.id
     );
-  }, [currentAgentIngress?.agentTaskSessionId, currentAgentState?.task.taskId, currentAgentTaskState?.session?.id]);
+  }, [
+    currentAgentIngress?.agentTaskSessionId,
+    currentAgentState?.task.taskId,
+    currentAgentTaskState?.session?.id,
+  ]);
 
-  const refreshMainChatControlState = useCallback(
-    async (taskSessionId?: string) => {
-      await refreshPendingProposals();
-      if (taskSessionId) {
-        await loadMainChatTaskState(taskSessionId, currentSessionIdRef.current);
-      }
-    },
-    []
-  );
+  const refreshMainChatControlState = useCallback(async (taskSessionId?: string) => {
+    await refreshPendingProposals();
+    if (taskSessionId) {
+      await loadMainChatTaskState(taskSessionId, currentSessionIdRef.current);
+    }
+  }, []);
 
   const handleResumeMainChatTask = useCallback(async () => {
     const taskSessionId = currentMainChatTaskSessionId();
@@ -1322,30 +1521,33 @@ export default function ChatPage({
     }
   }, [agentTaskControlBusy, currentMainChatTaskSessionId]);
 
-  const handleRetryMainChatAction = useCallback(async (target?: { actionId?: string }) => {
-    const taskSessionId = currentMainChatTaskSessionId();
-    const actionId =
-      target?.actionId ??
-      currentAgentState?.blockers.find(blocker => blocker.affectedActionId)?.affectedActionId ??
-      currentAgentTaskState?.actions.find(action => action.status === "failed")?.id;
-    if (!taskSessionId || !actionId || agentTaskControlBusy) return;
-    setAgentTaskControlBusy(true);
-    setAgentTaskControlError(null);
-    try {
-      const state = await retryMainChatAgentAction(taskSessionId, actionId);
-      setCurrentAgentTaskState(state);
-      setCurrentExecutionTranscript(state.transcript ?? []);
-    } catch (e) {
-      setAgentTaskControlError(`Retry failed: ${readablePreviewError(e)}`);
-    } finally {
-      setAgentTaskControlBusy(false);
-    }
-  }, [
-    agentTaskControlBusy,
-    currentAgentState?.blockers,
-    currentMainChatTaskSessionId,
-    currentAgentTaskState?.actions,
-  ]);
+  const handleRetryMainChatAction = useCallback(
+    async (target?: { actionId?: string }) => {
+      const taskSessionId = currentMainChatTaskSessionId();
+      const actionId =
+        target?.actionId ??
+        currentAgentState?.blockers.find(blocker => blocker.affectedActionId)?.affectedActionId ??
+        currentAgentTaskState?.actions.find(action => action.status === "failed")?.id;
+      if (!taskSessionId || !actionId || agentTaskControlBusy) return;
+      setAgentTaskControlBusy(true);
+      setAgentTaskControlError(null);
+      try {
+        const state = await retryMainChatAgentAction(taskSessionId, actionId);
+        setCurrentAgentTaskState(state);
+        setCurrentExecutionTranscript(state.transcript ?? []);
+      } catch (e) {
+        setAgentTaskControlError(`Retry failed: ${readablePreviewError(e)}`);
+      } finally {
+        setAgentTaskControlBusy(false);
+      }
+    },
+    [
+      agentTaskControlBusy,
+      currentAgentState?.blockers,
+      currentMainChatTaskSessionId,
+      currentAgentTaskState?.actions,
+    ]
+  );
 
   const handleApproveOnceMainChatPermission = useCallback(
     async (target: { proposalId: string; actionId: string; blockerId: string }) => {
@@ -1413,7 +1615,11 @@ export default function ChatPage({
       setAgentTaskControlError(null);
       try {
         await acceptProposal(proposalId);
-        if (proposal?.proposalType === "tool_permission" && proposal.actionIds.length > 0 && taskSessionId) {
+        if (
+          proposal?.proposalType === "tool_permission" &&
+          proposal.actionIds.length > 0 &&
+          taskSessionId
+        ) {
           const state = await resumeMainChatAgentTask(taskSessionId);
           setCurrentAgentTaskState(state);
           setCurrentExecutionTranscript(state.transcript ?? []);
@@ -1425,7 +1631,12 @@ export default function ChatPage({
         setAgentTaskControlBusy(false);
       }
     },
-    [agentTaskControlBusy, currentAgentState?.proposals, currentMainChatTaskSessionId, refreshMainChatControlState]
+    [
+      agentTaskControlBusy,
+      currentAgentState?.proposals,
+      currentMainChatTaskSessionId,
+      refreshMainChatControlState,
+    ]
   );
 
   const handleRejectAgentProposal = useCallback(
@@ -2964,6 +3175,7 @@ export default function ChatPage({
                 canResume={Boolean(currentAgentTaskState?.canResume)}
                 canRetry={Boolean(currentAgentTaskState?.canRetry)}
                 canCancel={Boolean(currentAgentTaskState?.canCancel)}
+                eventStream={agentEventStreamState ?? undefined}
                 onResume={handleResumeMainChatTask}
                 onRetry={handleRetryMainChatAction}
                 onCancel={handleCancelMainChatTask}

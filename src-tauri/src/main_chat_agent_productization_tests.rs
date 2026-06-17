@@ -66,7 +66,7 @@ fn main_chat_agent_productization_v1_gate_accounts_for_all_default_scenarios_wit
     assert!(report.future_work.is_empty());
     assert_eq!(
         report.event_semantics,
-        "snapshot_derived_ordered_events_not_live_delta_stream"
+        "durable_replayable_delta_events_available_snapshot_backfill_excluded_from_live_credit"
     );
     assert!(
         report.final_readiness_ready,
@@ -281,7 +281,7 @@ async fn run_main_chat_agent_productization_v1_gate_command_returns_auditable_re
     );
     assert_eq!(
         response["eventSemantics"].as_str().unwrap(),
-        "snapshot_derived_ordered_events_not_live_delta_stream"
+        "durable_replayable_delta_events_available_snapshot_backfill_excluded_from_live_credit"
     );
     assert_eq!(response["externalLiveExcludedCount"], 1);
     assert!(

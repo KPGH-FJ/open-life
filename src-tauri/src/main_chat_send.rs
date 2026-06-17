@@ -11,6 +11,7 @@ use crate::main_chat_agent_state_payload::assemble_main_chat_agent_state_for_tur
 use crate::main_chat_conversation_updates::{
     capture_conversation_signals, try_auto_checkin_daily_goals,
 };
+use crate::main_chat_event_stream::materialize_optional_main_chat_agent_events;
 use crate::main_chat_generation_support::{
     finalize_chat_agent_run, persist_chat_message_if_needed, persist_vector_memory_for_message,
     preview_text,
@@ -170,6 +171,7 @@ pub(crate) async fn send_message_with_state(
                     Some(&agent_run.id),
                 )
                 .await;
+                materialize_optional_main_chat_agent_events(state, agent_state.as_ref()).await?;
 
                 return Ok(SendMessageResult {
                     reply,
@@ -242,11 +244,12 @@ pub(crate) async fn send_message_with_state(
     )
     .await?
     {
+        materialize_optional_main_chat_agent_events(state, result.agent_state.as_ref()).await?;
         return Ok(result);
     }
 
     let ordinary_plan = ordinary_send_chat_execution_plan(layer);
-    send_message_with_legacy_generation(
+    let result = send_message_with_legacy_generation(
         session_id,
         user_msg,
         life_model,
@@ -262,5 +265,7 @@ pub(crate) async fn send_message_with_state(
         main_chat_agent_turn,
         state,
     )
-    .await
+    .await?;
+    materialize_optional_main_chat_agent_events(state, result.agent_state.as_ref()).await?;
+    Ok(result)
 }

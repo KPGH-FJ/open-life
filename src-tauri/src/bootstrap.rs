@@ -2,6 +2,7 @@
 //! Extracted from lib.rs to keep the main entry point focused on Tauri lifecycle.
 
 use crate::a2a_sidecar;
+use crate::main_chat_event_stream::MainChatAgentEventStore;
 use crate::state::AppState;
 use crate::storage::{
     load_mcp_audit_keyring_from_path, load_privacy_policy_from_path, mcp_audit_keyring_path,
@@ -420,6 +421,37 @@ fn init_main_chat_action_queue_store(
     }
 }
 
+fn init_main_chat_agent_event_store(
+    db_path: &Path,
+    startup_warnings: &std::cell::RefCell<Vec<String>>,
+) -> Result<MainChatAgentEventStore, String> {
+    match MainChatAgentEventStore::new(db_path) {
+        Ok(store) => Ok(store),
+        Err(primary_err) => {
+            let fallback = recovery_db_path("main_chat_agent_events.db");
+            startup_warnings.borrow_mut().push(format!(
+                "main_chat_agent_events.db 初始化失败，正在使用临时数据库：{}",
+                primary_err
+            ));
+            match MainChatAgentEventStore::new(&fallback) {
+                Ok(store) => Ok(store),
+                Err(fallback_err) => {
+                    startup_warnings.borrow_mut().push(format!(
+                        "临时 main_chat_agent_events.db 初始化也失败，已降级为内存数据库：{}",
+                        fallback_err
+                    ));
+                    MainChatAgentEventStore::new_in_memory().map_err(|memory_err| {
+                        format!(
+                            "所有 Main Chat agent event store 初始化失败: primary={}, fallback={}, in_memory={}",
+                            primary_err, fallback_err, memory_err
+                        )
+                    })
+                }
+            }
+        }
+    }
+}
+
 /// Bootstrap the entire application: config, stores, routers, engines, AppState.
 /// Returns assembled AppState along with startup warnings.
 pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
@@ -589,6 +621,18 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
         std::process::exit(1);
     });
 
+    let main_chat_agent_events_db_path = data_dir.join("main_chat_agent_events.db");
+    let main_chat_agent_event_store = init_store(
+        || init_main_chat_agent_event_store(&main_chat_agent_events_db_path, &startup_warnings),
+        || MainChatAgentEventStore::new_in_memory().map_err(|e| e.to_string()),
+        "MainChatAgentEventStore",
+        &startup_warnings,
+    )
+    .unwrap_or_else(|e| {
+        log::warn!("[startup] Fatal: {}", e);
+        std::process::exit(1);
+    });
+
     let patches_db_path = data_dir.join("patches.db");
     let patch_store = init_store(
         || {
@@ -716,6 +760,7 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
         plan_execute_session_store: Some(Arc::new(Mutex::new(plan_execute_session_store))),
         main_chat_agent_session_store: Some(Arc::new(Mutex::new(main_chat_agent_session_store))),
         main_chat_action_queue_store: Some(Arc::new(Mutex::new(main_chat_action_queue_store))),
+        main_chat_agent_event_store: Some(Arc::new(Mutex::new(main_chat_agent_event_store))),
         patch_store: Some(Arc::new(Mutex::new(patch_store))),
         rollout_metrics_store,
         tool_permission_store: Arc::new(Mutex::new(tool_permission_store)),

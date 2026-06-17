@@ -51,7 +51,10 @@ import {
   runControlledChatMigrationShadowRun,
   runMultiStrategyAgentPreview,
   runMainChatAgentExecutionV1EvalGate,
+  runMainChatAgentProductMaturityV2EventGate,
   runMainChatAgentProductizationV1Gate,
+  listMainChatAgentEvents,
+  getMainChatAgentStateSnapshot,
   restoreArchivedChunks,
   restoreSnapshot,
   saveChatMessage,
@@ -272,6 +275,33 @@ describe("tauri command argument aliases", () => {
           selectedSkillId: "summarize",
           selected_skill_id: "summarize",
         }),
+      })
+    );
+  });
+
+  it("adds aliases for durable Main Chat event replay commands", async () => {
+    vi.mocked(invoke)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce({ task: { taskId: "mainchat-task-1" } });
+
+    await listMainChatAgentEvents("mainchat-task-1", 7, 50);
+    await getMainChatAgentStateSnapshot("mainchat-task-1");
+
+    expect(invoke).toHaveBeenCalledWith(
+      "list_main_chat_agent_events",
+      expect.objectContaining({
+        taskSessionId: "mainchat-task-1",
+        task_session_id: "mainchat-task-1",
+        afterSequence: 7,
+        after_sequence: 7,
+        limit: 50,
+      })
+    );
+    expect(invoke).toHaveBeenCalledWith(
+      "get_main_chat_agent_state_snapshot",
+      expect.objectContaining({
+        taskSessionId: "mainchat-task-1",
+        task_session_id: "mainchat-task-1",
       })
     );
   });
@@ -533,7 +563,8 @@ describe("tauri command argument aliases", () => {
           diagnostics: [],
         },
       ],
-      eventSemantics: "snapshot_derived_ordered_events_not_live_delta_stream",
+      eventSemantics:
+        "durable_replayable_delta_events_available_snapshot_backfill_excluded_from_live_credit",
       finalReadinessReady: true,
       fullProductizationV1Complete: true,
       futureWork: [],
@@ -547,10 +578,7 @@ describe("tauri command argument aliases", () => {
 
     const result = await runMainChatAgentProductizationV1Gate();
 
-    expect(invoke).toHaveBeenCalledWith(
-      "run_main_chat_agent_productization_v1_gate",
-      undefined
-    );
+    expect(invoke).toHaveBeenCalledWith("run_main_chat_agent_productization_v1_gate", undefined);
     expect(result.finalReadinessReady).toBe(true);
     expect(result.fullProductizationV1Complete).toBe(true);
     expect(result.futureWork).toEqual([]);
@@ -559,6 +587,41 @@ describe("tauri command argument aliases", () => {
     expect(result.runtimeExecutionScope).toBe(
       "default_deterministic_scenarios_runtime_backed_external_live_excluded"
     );
+  });
+
+  it("invokes Product Maturity v2 event gate as an explicit read-only diagnostic", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      scenarioCount: 8,
+      defaultGateScenarioCount: 8,
+      passedScenarioCount: 8,
+      expectedBlockerCount: 0,
+      ready: true,
+      blockers: [],
+      proofs: [
+        {
+          scenarioId: "EV-01",
+          capabilityGroup: "event_delta_stream",
+          passed: true,
+          runtimeObjectCount: 2,
+          emittedEventIds: ["mainchat_event:mock:1:route.selected:direct_answer:d1"],
+          replayedEventIds: ["mainchat_event:mock:1:route.selected:direct_answer:d1"],
+          emittedSequences: [1],
+          replayedSequences: [1],
+          uiState: ["subscribed", "receiving_event"],
+          diagnostics: [],
+        },
+      ],
+    });
+
+    const result = await runMainChatAgentProductMaturityV2EventGate();
+
+    expect(invoke).toHaveBeenCalledWith(
+      "run_main_chat_agent_product_maturity_v2_event_gate",
+      undefined
+    );
+    expect(result.ready).toBe(true);
+    expect(result.scenarioCount).toBe(8);
+    expect(result.proofs[0]?.emittedEventIds).toEqual(result.proofs[0]?.replayedEventIds);
   });
 
   it("invokes runtime strategy registry status as explicit read-only diagnostic", async () => {

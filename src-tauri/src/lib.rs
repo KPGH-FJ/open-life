@@ -24,6 +24,7 @@ pub(crate) mod main_chat_context_loader;
 pub(crate) mod main_chat_conversation_updates;
 #[allow(dead_code)]
 pub(crate) mod main_chat_eval_state;
+pub(crate) mod main_chat_event_stream;
 #[allow(dead_code)]
 pub(crate) mod main_chat_final_gate;
 pub(crate) mod main_chat_generation_support;
@@ -77,6 +78,9 @@ mod main_chat_runtime_module_tests;
 
 #[cfg(test)]
 mod main_chat_agent_productization_tests;
+
+#[cfg(test)]
+mod main_chat_event_stream_tests;
 
 #[cfg(test)]
 pub mod test_utils;
@@ -133,8 +137,8 @@ use commands::agent_runtime::{
     run_default_chat_adapter_controlled_preview, run_default_chat_adapter_dry_run,
     run_main_chat_agent_execution_v1_eval_gate,
     run_main_chat_agent_execution_v1_final_acceptance_gate,
-    run_main_chat_agent_productization_v1_gate, run_multi_strategy_agent_preview,
-    update_plan_execute_session_draft,
+    run_main_chat_agent_product_maturity_v2_event_gate, run_main_chat_agent_productization_v1_gate,
+    run_multi_strategy_agent_preview, update_plan_execute_session_draft,
 };
 
 use commands::builder::{
@@ -199,6 +203,7 @@ use commands::state::{
     record_state, toggle_daily_goal, update_daily_goal,
 };
 use commands::version::{create_snapshot, diff_snapshots, list_snapshots, restore_snapshot};
+use main_chat_event_stream::{get_main_chat_agent_state_snapshot, list_main_chat_agent_events};
 use main_chat_task_controls::{
     cancel_main_chat_agent_task, get_main_chat_agent_task_state, resume_main_chat_agent_task,
     retry_main_chat_agent_action,
@@ -611,6 +616,7 @@ pub fn run() {
             run_multi_strategy_agent_preview,
             run_main_chat_agent_execution_v1_eval_gate,
             run_main_chat_agent_productization_v1_gate,
+            run_main_chat_agent_product_maturity_v2_event_gate,
             run_main_chat_agent_execution_v1_final_acceptance_gate,
             get_runtime_strategy_registry_status,
             get_react_beta_execution_status,
@@ -677,6 +683,8 @@ pub fn run() {
             rebuild_memory_materialized_view,
             send_message,
             start_stream_message,
+            list_main_chat_agent_events,
+            get_main_chat_agent_state_snapshot,
             get_main_chat_agent_task_state,
             resume_main_chat_agent_task,
             cancel_main_chat_agent_task,

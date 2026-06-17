@@ -395,6 +395,42 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         canCancel: false,
         canRetry: false,
       } as T);
+    case "list_main_chat_agent_events":
+      return Promise.resolve([] as T);
+    case "get_main_chat_agent_state_snapshot":
+      return Promise.resolve({
+        task: {
+          taskId: _args?.taskSessionId ?? _args?.task_session_id ?? "mainchat_task_mock",
+          runId: "run_mainchat_mock",
+          title: "mock goal",
+          strategy: "direct_answer",
+          status: "completed",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          actionIds: [],
+          observationIds: [],
+          proposalIds: [],
+          blockerIds: [],
+          pendingControlIds: [],
+        },
+        route: {
+          strategy: "direct_answer",
+          reason: "mock route",
+          confidence: 1,
+        },
+        context: [],
+        provider: undefined,
+        plan: undefined,
+        actions: [],
+        observations: [],
+        blockers: [],
+        proposals: [],
+        finalDelivery: undefined,
+        diagnostics: [],
+        sequence: 1,
+        emittedAt: new Date().toISOString(),
+        events: [],
+      } as T);
     case "resume_main_chat_agent_task":
     case "cancel_main_chat_agent_task":
     case "retry_main_chat_agent_action":
@@ -510,7 +546,8 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         fullDeterministicRuntimeScenarioCount: 92,
         fullDeterministicRuntimeScenarioExecutedCount: 92,
         runtimeRequiredGroupEvidence: [],
-        eventSemantics: "snapshot_derived_ordered_events_not_live_delta_stream",
+        eventSemantics:
+          "durable_replayable_delta_events_available_snapshot_backfill_excluded_from_live_credit",
         finalReadinessReady: true,
         fullProductizationV1Complete: true,
         futureWork: [],
@@ -518,6 +555,29 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         unsupportedScenarios: [],
         failedScenarios: [],
         blockers: [],
+      } as T);
+    case "run_main_chat_agent_product_maturity_v2_event_gate":
+      return Promise.resolve({
+        scenarioCount: 8,
+        defaultGateScenarioCount: 8,
+        passedScenarioCount: 8,
+        expectedBlockerCount: 0,
+        ready: true,
+        blockers: [],
+        proofs: [
+          {
+            scenarioId: "EV-01",
+            capabilityGroup: "event_delta_stream",
+            passed: true,
+            runtimeObjectCount: 2,
+            emittedEventIds: ["mainchat_event:mock:1:route.selected:direct_answer:d1"],
+            replayedEventIds: ["mainchat_event:mock:1:route.selected:direct_answer:d1"],
+            emittedSequences: [1],
+            replayedSequences: [1],
+            uiState: ["subscribed", "receiving_event"],
+            diagnostics: [],
+          },
+        ],
       } as T);
     case "list_mcp_servers":
       return Promise.resolve([

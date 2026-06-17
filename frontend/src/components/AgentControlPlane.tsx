@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
-import type { MainChatAgentStateSnapshot } from "../tauri";
+import type { MainChatAgentDurableEvent, MainChatAgentStateSnapshot } from "../tauri";
 
 type ControlTarget = {
   proposalId?: string;
@@ -41,6 +41,12 @@ type ControlHandlers = {
 
 type Props = ControlHandlers & {
   state: MainChatAgentStateSnapshot;
+  eventStream?: {
+    status: string;
+    taskSessionId?: string;
+    lastAppliedSequence: number;
+    events: MainChatAgentDurableEvent[];
+  };
 };
 
 function statusClass(status: string): string {
@@ -246,6 +252,7 @@ export default function AgentControlPlane({
   canResume = false,
   canRetry = false,
   canCancel = false,
+  eventStream,
 }: Props) {
   const resumeSupported = supportsControl(state, ["resume_task", "continue_task", "resume"]);
   const retrySupported = supportsControl(state, ["retry_failed_action", "retry_action", "retry"]);
@@ -328,6 +335,33 @@ export default function AgentControlPlane({
           </div>
         )}
       </div>
+
+      {eventStream && (
+        <div className="mt-3 border-l border-indigo-300 bg-indigo-50/70 px-2 py-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-semibold text-stone-950">Event stream</span>
+            <span className="inline-flex h-5 items-center rounded-md border border-indigo-200 bg-white px-1.5 font-medium text-indigo-800">
+              {eventStream.status}
+            </span>
+            <span className="text-stone-600">
+              {eventStream.events.length} {eventStream.events.length === 1 ? "event" : "events"}
+            </span>
+            <span className="text-stone-500">sequence {eventStream.lastAppliedSequence}</span>
+          </div>
+          {eventStream.events.length > 0 && (
+            <div className="mt-1 flex flex-wrap gap-1 text-stone-600">
+              {eventStream.events.slice(-4).map(event => (
+                <span
+                  key={event.eventId}
+                  className="inline-flex h-5 max-w-full items-center rounded-md border border-indigo-100 bg-white px-1.5"
+                >
+                  <span className="truncate">{event.eventType}</span>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {(state.context.length > 0 || state.provider || state.plan) && (
         <div className="mt-3 grid gap-2 md:grid-cols-3">

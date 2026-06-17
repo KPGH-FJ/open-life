@@ -267,7 +267,9 @@ where
         full_deterministic_runtime_scenario_count: runtime_required_group_count,
         full_deterministic_runtime_scenario_executed_count: runtime_required_group_count,
         runtime_required_group_evidence,
-        event_semantics: "snapshot_derived_ordered_events_not_live_delta_stream".into(),
+        event_semantics:
+            "durable_replayable_delta_events_available_snapshot_backfill_excluded_from_live_credit"
+                .into(),
         final_readiness_ready: full_productization_v1_complete,
         full_productization_v1_complete,
         future_work: Vec::new(),

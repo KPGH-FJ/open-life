@@ -633,6 +633,21 @@ export interface MainChatAgentStateSnapshot {
   events: Array<{ eventType: string; sequence: number; objectId: string; evidenceId: string }>;
 }
 
+export interface MainChatAgentDurableEvent {
+  eventId: string;
+  taskSessionId: string;
+  runId: string;
+  sequence: number;
+  eventType: string;
+  objectType: string;
+  objectId: string;
+  createdAt: string;
+  source: string;
+  payloadDigest: string;
+  payload: Record<string, unknown> | null;
+  backfilled: boolean;
+}
+
 export type MainChatAgentStrategy =
   | "direct_answer"
   | "react_tool_execution"
@@ -871,6 +886,29 @@ export interface MainChatAgentProductizationV1GateReport {
   blockers: string[];
 }
 
+export interface MainChatProductMaturityV2EventProof {
+  scenarioId: string;
+  capabilityGroup: string;
+  passed: boolean;
+  runtimeObjectCount: number;
+  emittedEventIds: string[];
+  replayedEventIds: string[];
+  emittedSequences: number[];
+  replayedSequences: number[];
+  uiState: string[];
+  diagnostics: string[];
+}
+
+export interface MainChatProductMaturityV2EventGateReport {
+  scenarioCount: number;
+  defaultGateScenarioCount: number;
+  passedScenarioCount: number;
+  expectedBlockerCount: number;
+  ready: boolean;
+  blockers: string[];
+  proofs: MainChatProductMaturityV2EventProof[];
+}
+
 export async function sendMessageV2(
   sessionId: string,
   messages: ChatMessage[],
@@ -922,6 +960,29 @@ export async function retryMainChatAgentAction(
   });
 }
 
+export async function listMainChatAgentEvents(
+  taskSessionId: string,
+  afterSequence: number = 0,
+  limit: number = 100
+): Promise<MainChatAgentDurableEvent[]> {
+  return safeInvoke<MainChatAgentDurableEvent[]>("list_main_chat_agent_events", {
+    taskSessionId,
+    task_session_id: taskSessionId,
+    afterSequence,
+    after_sequence: afterSequence,
+    limit,
+  });
+}
+
+export async function getMainChatAgentStateSnapshot(
+  taskSessionId: string
+): Promise<MainChatAgentStateSnapshot> {
+  return safeInvoke<MainChatAgentStateSnapshot>("get_main_chat_agent_state_snapshot", {
+    taskSessionId,
+    task_session_id: taskSessionId,
+  });
+}
+
 export async function runMultiStrategyAgentPreview(
   input: MultiStrategyAgentPreviewInput
 ): Promise<MultiStrategyAgentPreviewOutput> {
@@ -945,6 +1006,12 @@ export async function runMainChatAgentExecutionV1EvalGate(): Promise<MainChatAge
 export async function runMainChatAgentProductizationV1Gate(): Promise<MainChatAgentProductizationV1GateReport> {
   return safeInvoke<MainChatAgentProductizationV1GateReport>(
     "run_main_chat_agent_productization_v1_gate"
+  );
+}
+
+export async function runMainChatAgentProductMaturityV2EventGate(): Promise<MainChatProductMaturityV2EventGateReport> {
+  return safeInvoke<MainChatProductMaturityV2EventGateReport>(
+    "run_main_chat_agent_product_maturity_v2_event_gate"
   );
 }
 
@@ -2840,9 +2907,7 @@ export interface PatchApplyResult {
   error?: string;
 }
 
-export async function acceptProposal(
-  proposalId: string
-): Promise<{
+export async function acceptProposal(proposalId: string): Promise<{
   success: boolean;
   patchResult: PatchApplyResult;
   memoryLifecycle?: MemoryLifecycleRecord;
@@ -2857,12 +2922,14 @@ export async function rollbackMemoryAsset(
   return safeInvoke("rollback_memory_asset", { memoryId, memory_id: memoryId, reason });
 }
 
-export async function listMemoryAssets(options: {
-  scope?: string;
-  status?: string;
-  limit?: number;
-  offset?: number;
-} = {}): Promise<MemoryLifecycleRecord[]> {
+export async function listMemoryAssets(
+  options: {
+    scope?: string;
+    status?: string;
+    limit?: number;
+    offset?: number;
+  } = {}
+): Promise<MemoryLifecycleRecord[]> {
   return safeInvoke("list_memory_assets", {
     scope: options.scope,
     status: options.status,
