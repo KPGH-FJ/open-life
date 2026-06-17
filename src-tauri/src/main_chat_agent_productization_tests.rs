@@ -34,7 +34,7 @@ fn productization_command_test_context() -> tauri::Context<tauri::test::MockRunt
 }
 
 #[test]
-fn main_chat_agent_productization_v1_gate_accounts_for_default_scenarios_without_live_credit() {
+fn main_chat_agent_productization_v1_gate_accounts_for_all_default_scenarios_without_live_credit() {
     let report =
         crate::main_chat_agent_productization_eval::run_main_chat_agent_productization_v1_gate_report();
 
@@ -44,28 +44,26 @@ fn main_chat_agent_productization_v1_gate_accounts_for_default_scenarios_without
     assert!(report.runtime_payload_snapshot_event_gate_passed);
     assert_eq!(
         report.readiness_semantics,
-        "acceptance_hardening_representative_gate_ready"
+        "full_deterministic_productization_v1_runtime_ready"
     );
     assert_eq!(
         report.runtime_execution_scope,
-        "representative_runtime_groups_only_full_92_scenario_runtime_execution_future_work"
+        "default_deterministic_scenarios_runtime_backed_external_live_excluded"
     );
     assert!(
-        !report.full_productization_v1_complete,
-        "representative acceptance hardening must not be reported as full Productization v1 completion"
+        report.full_productization_v1_complete,
+        "full Productization v1 deterministic completion requires all supported default scenarios to carry runtime proof"
     );
-    assert_eq!(report.representative_runtime_group_count, 11);
-    assert_eq!(report.full_deterministic_runtime_scenario_count, 92);
+    assert_eq!(report.representative_runtime_group_count, 0);
+    assert_eq!(report.representative_runtime_group_passed_count, 0);
+    assert_eq!(report.runtime_required_group_count, 91);
+    assert_eq!(report.runtime_required_group_passed_count, 91);
+    assert_eq!(report.full_deterministic_runtime_scenario_count, 91);
     assert_eq!(
         report.full_deterministic_runtime_scenario_executed_count,
-        11
+        91
     );
-    assert!(
-        report
-            .future_work
-            .contains(&"full_92_scenario_runtime_execution".to_string()),
-        "report must make the remaining full deterministic execution work explicit"
-    );
+    assert!(report.future_work.is_empty());
     assert_eq!(
         report.event_semantics,
         "snapshot_derived_ordered_events_not_live_delta_stream"
@@ -138,36 +136,41 @@ fn main_chat_agent_productization_v1_gate_accounts_for_default_scenarios_without
 }
 
 #[test]
-fn main_chat_agent_productization_v1_gate_requires_runtime_backed_representative_groups() {
+fn main_chat_agent_productization_v1_gate_requires_runtime_backed_default_scenarios() {
     let report =
         crate::main_chat_agent_productization_eval::run_main_chat_agent_productization_v1_gate_report();
+    let scenarios =
+        openlife_core::agent::main_chat_agent_productization_v1::main_chat_agent_product_scenarios(
+        );
 
-    for required_group in [
-        "direct_answer",
-        "file_read",
-        "memory_session_read",
-        "fixture_web_read",
-        "registered_mcp_read",
-        "multi_step_react_two_observations",
-        "plan_execute_mvp",
-        "memory_proposal_lifecycle_or_mp06_unsupported",
-        "permission_request_exact_action",
-        "task_control_resume_retry_cancel",
-        "final_delivery_separation",
-    ] {
+    let supported_default_ids = scenarios
+        .iter()
+        .filter(|scenario| {
+            scenario.included_in_default_gate
+                && scenario.run_mode
+                    == openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentProductScenarioRunMode::DeterministicFixture
+                && scenario.expectation
+                    != openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentProductScenarioExpectation::OptionalUnsupported
+        })
+        .map(|scenario| scenario.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(supported_default_ids.len(), 91);
+    assert_eq!(report.runtime_required_group_evidence.len(), 91);
+
+    for scenario_id in supported_default_ids {
         let proof = report
             .runtime_required_group_evidence
             .iter()
-            .find(|proof| proof.group == required_group)
-            .unwrap_or_else(|| panic!("missing runtime proof for {required_group}"));
+            .find(|proof| proof.scenario_id == scenario_id)
+            .unwrap_or_else(|| panic!("missing runtime proof for {scenario_id}"));
         assert!(
             proof.passed,
-            "runtime proof for {required_group} must pass: {:?}",
+            "runtime proof for {scenario_id} must pass: {:?}",
             proof.diagnostics
         );
         assert!(
             proof.runtime_object_count > 0,
-            "runtime proof for {required_group} must load/create concrete runtime objects"
+            "runtime proof for {scenario_id} must load/create concrete runtime objects"
         );
     }
 }
@@ -234,7 +237,7 @@ async fn run_main_chat_agent_productization_v1_gate_command_returns_auditable_re
             .as_array()
             .expect("runtime evidence array")
             .len(),
-        11
+        91
     );
     assert_eq!(
         response["eventSemantics"].as_str().unwrap(),
@@ -242,10 +245,10 @@ async fn run_main_chat_agent_productization_v1_gate_command_returns_auditable_re
     );
     assert_eq!(response["externalLiveExcludedCount"], 1);
     assert!(
-        !response["fullProductizationV1Complete"]
+        response["fullProductizationV1Complete"]
             .as_bool()
-            .unwrap_or(true),
-        "command report must not claim full Productization v1 completion"
+            .unwrap_or(false),
+        "command report must claim full deterministic Productization v1 completion only after runtime proof passes"
     );
 
     let run_count = state

@@ -830,8 +830,8 @@ export interface ProductScenarioRuntimeProof {
 export interface MainChatAgentProductizationV1GateReport {
   totalScenarioCount: number;
   defaultDeterministicScenarioCount: number;
-  readinessSemantics: "acceptance_hardening_representative_gate_ready";
-  runtimeExecutionScope: "representative_runtime_groups_only_full_92_scenario_runtime_execution_future_work";
+  readinessSemantics: "full_deterministic_productization_v1_runtime_ready";
+  runtimeExecutionScope: "default_deterministic_scenarios_runtime_backed_external_live_excluded";
   executedScenarioCount: number;
   passedScenarioCount: number;
   expectedBlockerScenarioCount: number;

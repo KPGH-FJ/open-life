@@ -496,29 +496,29 @@ describe("tauri command argument aliases", () => {
     expect(result.metadataSafeSummary.liveProviderPreflightModelInvoked).toBe(false);
   });
 
-  it("invokes Main Chat agent productization v1 gate as representative hardening diagnostic", async () => {
+  it("invokes Main Chat agent productization v1 gate as full deterministic runtime diagnostic", async () => {
     vi.mocked(invoke).mockResolvedValue({
       totalScenarioCount: 93,
       defaultDeterministicScenarioCount: 92,
-      readinessSemantics: "acceptance_hardening_representative_gate_ready",
+      readinessSemantics: "full_deterministic_productization_v1_runtime_ready",
       runtimeExecutionScope:
-        "representative_runtime_groups_only_full_92_scenario_runtime_execution_future_work",
+        "default_deterministic_scenarios_runtime_backed_external_live_excluded",
       executedScenarioCount: 91,
       passedScenarioCount: 80,
       expectedBlockerScenarioCount: 11,
       failedScenarioCount: 0,
       externalLiveExcludedCount: 1,
       runtimePayloadSnapshotEventGatePassed: true,
-      runtimeRequiredGroupCount: 11,
-      runtimeRequiredGroupPassedCount: 11,
-      representativeRuntimeGroupCount: 11,
-      representativeRuntimeGroupPassedCount: 11,
-      fullDeterministicRuntimeScenarioCount: 92,
-      fullDeterministicRuntimeScenarioExecutedCount: 11,
+      runtimeRequiredGroupCount: 91,
+      runtimeRequiredGroupPassedCount: 91,
+      representativeRuntimeGroupCount: 0,
+      representativeRuntimeGroupPassedCount: 0,
+      fullDeterministicRuntimeScenarioCount: 91,
+      fullDeterministicRuntimeScenarioExecutedCount: 91,
       runtimeRequiredGroupEvidence: [
         {
           scenarioId: "OA-02",
-          group: "direct_answer",
+          group: "direct_answer:OA-02",
           passed: true,
           runtimeObjectCount: 2,
           observationCount: 0,
@@ -531,8 +531,8 @@ describe("tauri command argument aliases", () => {
       ],
       eventSemantics: "snapshot_derived_ordered_events_not_live_delta_stream",
       finalReadinessReady: true,
-      fullProductizationV1Complete: false,
-      futureWork: ["full_92_scenario_runtime_execution"],
+      fullProductizationV1Complete: true,
+      futureWork: [],
       routeCounts: {
         direct_answer: { passed: 10, failed: 0, expectedBlocker: 0, unsupported: 0 },
       },
@@ -554,10 +554,12 @@ describe("tauri command argument aliases", () => {
       undefined
     );
     expect(result.finalReadinessReady).toBe(true);
-    expect(result.fullProductizationV1Complete).toBe(false);
-    expect(result.futureWork).toContain("full_92_scenario_runtime_execution");
+    expect(result.fullProductizationV1Complete).toBe(true);
+    expect(result.futureWork).toEqual([]);
+    expect(result.runtimeRequiredGroupCount).toBe(91);
+    expect(result.runtimeRequiredGroupPassedCount).toBe(91);
     expect(result.runtimeExecutionScope).toBe(
-      "representative_runtime_groups_only_full_92_scenario_runtime_execution_future_work"
+      "default_deterministic_scenarios_runtime_backed_external_live_excluded"
     );
   });
 

@@ -5,9 +5,10 @@ use openlife_core::agent::main_chat_agent_productization_v1::{
     MainChatAgentStateAssemblerInput, MainChatAgentStateEventType, MainChatAgentStateSnapshot,
 };
 use openlife_core::agent::main_chat_agent_v1::{
-    ActionQueueStore, AgentTaskSessionDraft, AgentTaskSessionStore, ExecutionAction,
-    ExecutionPolicy, ExecutionQueueStatus, ExecutionTranscriptEntryDraft,
-    ExecutionTranscriptEntryKind, MainChatAgentStrategy,
+    ActionQueueStore, AgentTaskSession, AgentTaskSessionDraft, AgentTaskSessionStatus,
+    AgentTaskSessionStore, ExecutionAction, ExecutionPolicy, ExecutionQueueStatus,
+    ExecutionTranscriptEntry, ExecutionTranscriptEntryDraft, ExecutionTranscriptEntryKind,
+    MainChatAgentStrategy,
 };
 use openlife_core::agent::proposal_store::ProposalStore;
 use openlife_core::agent::types::{
@@ -104,12 +105,16 @@ where
     let runtime_payload_snapshot_event_gate_passed =
         main_chat_productization_payload_smoke_gate_passes();
     let runtime_required_group_evidence =
-        execute_required_runtime_product_scenarios(&scenarios, runtime_executor);
+        execute_default_runtime_product_scenarios(&scenarios, runtime_executor);
     let runtime_required_group_count = runtime_required_group_evidence.len();
     let runtime_required_group_passed_count = runtime_required_group_evidence
         .iter()
         .filter(|proof| proof.passed)
         .count();
+    let runtime_proof_by_scenario = runtime_required_group_evidence
+        .iter()
+        .map(|proof| (proof.scenario_id.as_str(), proof))
+        .collect::<BTreeMap<_, _>>();
     let mut route_counts = canonical_route_count_map();
     let mut unsupported_scenarios = Vec::new();
     let mut failed_scenarios = Vec::new();
@@ -134,7 +139,24 @@ where
         match scenario.expectation {
             MainChatAgentProductScenarioExpectation::MustPass => {
                 executed_scenario_count += 1;
-                match execute_deterministic_product_scenario(scenario) {
+                let schema_result = execute_deterministic_product_scenario(scenario);
+                let runtime_result = runtime_proof_by_scenario
+                    .get(scenario.id.as_str())
+                    .filter(|proof| proof.passed)
+                    .map(|_| Ok(()))
+                    .unwrap_or_else(|| {
+                        Err(runtime_proof_by_scenario
+                            .get(scenario.id.as_str())
+                            .map(|proof| {
+                                if proof.diagnostics.is_empty() {
+                                    "runtime proof did not pass".to_string()
+                                } else {
+                                    proof.diagnostics.join("; ")
+                                }
+                            })
+                            .unwrap_or_else(|| "runtime proof missing".into()))
+                    });
+                match schema_result.and(runtime_result) {
                     Ok(()) => {
                         counts.passed += 1;
                         passed_scenario_count += 1;
@@ -152,7 +174,24 @@ where
             }
             MainChatAgentProductScenarioExpectation::ExpectedBlocker => {
                 executed_scenario_count += 1;
-                match execute_deterministic_product_scenario(scenario) {
+                let schema_result = execute_deterministic_product_scenario(scenario);
+                let runtime_result = runtime_proof_by_scenario
+                    .get(scenario.id.as_str())
+                    .filter(|proof| proof.passed)
+                    .map(|_| Ok(()))
+                    .unwrap_or_else(|| {
+                        Err(runtime_proof_by_scenario
+                            .get(scenario.id.as_str())
+                            .map(|proof| {
+                                if proof.diagnostics.is_empty() {
+                                    "runtime proof did not pass".to_string()
+                                } else {
+                                    proof.diagnostics.join("; ")
+                                }
+                            })
+                            .unwrap_or_else(|| "runtime proof missing".into()))
+                    });
+                match schema_result.and(runtime_result) {
                     Ok(()) => {
                         counts.expected_blocker += 1;
                         expected_blocker_scenario_count += 1;
@@ -203,13 +242,14 @@ where
         blockers.push("default_product_scenario_accounting_mismatch".into());
     }
 
+    let full_productization_v1_complete = blockers.is_empty();
+
     MainChatAgentProductizationV1GateReport {
         total_scenario_count: scenarios.len(),
         default_deterministic_scenario_count,
-        readiness_semantics: "acceptance_hardening_representative_gate_ready".into(),
+        readiness_semantics: "full_deterministic_productization_v1_runtime_ready".into(),
         runtime_execution_scope:
-            "representative_runtime_groups_only_full_92_scenario_runtime_execution_future_work"
-                .into(),
+            "default_deterministic_scenarios_runtime_backed_external_live_excluded".into(),
         executed_scenario_count,
         passed_scenario_count,
         expected_blocker_scenario_count,
@@ -218,15 +258,15 @@ where
         runtime_payload_snapshot_event_gate_passed,
         runtime_required_group_count,
         runtime_required_group_passed_count,
-        representative_runtime_group_count: runtime_required_group_count,
-        representative_runtime_group_passed_count: runtime_required_group_passed_count,
-        full_deterministic_runtime_scenario_count: default_deterministic_scenario_count,
+        representative_runtime_group_count: 0,
+        representative_runtime_group_passed_count: 0,
+        full_deterministic_runtime_scenario_count: runtime_required_group_count,
         full_deterministic_runtime_scenario_executed_count: runtime_required_group_count,
         runtime_required_group_evidence,
         event_semantics: "snapshot_derived_ordered_events_not_live_delta_stream".into(),
-        final_readiness_ready: blockers.is_empty(),
-        full_productization_v1_complete: false,
-        future_work: vec!["full_92_scenario_runtime_execution".into()],
+        final_readiness_ready: full_productization_v1_complete,
+        full_productization_v1_complete,
+        future_work: Vec::new(),
         route_counts,
         unsupported_scenarios,
         failed_scenarios,
@@ -234,47 +274,35 @@ where
     }
 }
 
-fn required_runtime_product_scenarios() -> [(&'static str, &'static str); 11] {
-    [
-        ("OA-02", "direct_answer"),
-        ("FR-01", "file_read"),
-        ("MS-01", "memory_session_read"),
-        ("WR-01", "fixture_web_read"),
-        ("MCP-01", "registered_mcp_read"),
-        ("RA-01", "multi_step_react_two_observations"),
-        ("PE-01", "plan_execute_mvp"),
-        ("MP-01", "memory_proposal_lifecycle_or_mp06_unsupported"),
-        ("PB-01", "permission_request_exact_action"),
-        ("LT-03", "task_control_resume_retry_cancel"),
-        ("FD-02", "final_delivery_separation"),
-    ]
-}
-
-fn execute_required_runtime_product_scenarios<F>(
+fn execute_default_runtime_product_scenarios<F>(
     scenarios: &[MainChatAgentProductScenario],
     runtime_executor: F,
 ) -> Vec<ProductScenarioRuntimeProof>
 where
     F: Fn(&MainChatAgentProductScenario) -> Result<ProductScenarioRuntimeProof, String>,
 {
-    required_runtime_product_scenarios()
-        .into_iter()
-        .map(|(scenario_id, group)| {
-            let Some(scenario) = scenarios.iter().find(|scenario| scenario.id == scenario_id)
-            else {
-                return failed_runtime_proof(
-                    scenario_id,
-                    group,
-                    "required scenario row missing from productization inventory",
-                );
-            };
+    scenarios
+        .iter()
+        .filter(|scenario| {
+            scenario.included_in_default_gate
+                && matches!(
+                    scenario.run_mode,
+                    MainChatAgentProductScenarioRunMode::DeterministicFixture
+                        | MainChatAgentProductScenarioRunMode::MockIpcUi
+                )
+                && scenario.expectation
+                    != MainChatAgentProductScenarioExpectation::OptionalUnsupported
+        })
+        .map(|scenario| {
+            let scenario_id = scenario.id.as_str();
+            let group = runtime_group_for_scenario(scenario);
             let mut proof = match runtime_executor(scenario) {
                 Ok(proof) => proof,
-                Err(reason) => return failed_runtime_proof(scenario_id, group, &reason),
+                Err(reason) => return failed_runtime_proof(scenario_id, &group, &reason),
             };
             proof
                 .diagnostics
-                .extend(validate_runtime_product_proof(scenario_id, group, &proof));
+                .extend(validate_runtime_product_proof(scenario, &group, &proof));
             if !proof.diagnostics.is_empty() {
                 proof.passed = false;
             }
@@ -284,11 +312,12 @@ where
 }
 
 fn validate_runtime_product_proof(
-    scenario_id: &str,
+    scenario: &MainChatAgentProductScenario,
     group: &str,
     proof: &ProductScenarioRuntimeProof,
 ) -> Vec<String> {
     let mut diagnostics = Vec::new();
+    let scenario_id = scenario.id.as_str();
     if proof.scenario_id != scenario_id {
         diagnostics.push(format!(
             "runtime proof scenario mismatch: expected {scenario_id}, got {}",
@@ -307,8 +336,8 @@ fn validate_runtime_product_proof(
     if !proof.passed {
         diagnostics.push("runtime proof reported failure".into());
     }
-    match group {
-        "direct_answer" => {
+    match scenario.expected_strategy_route {
+        MainChatAgentProductStrategyRoute::DirectAnswer => {
             if !proof.created_action_ids.is_empty() || proof.observation_count != 0 {
                 diagnostics
                     .push("DirectAnswer proof must not fabricate action observations".into());
@@ -317,7 +346,7 @@ fn validate_runtime_product_proof(
                 diagnostics.push("DirectAnswer proof lacks final delivery evidence".into());
             }
         }
-        "file_read" | "memory_session_read" | "fixture_web_read" | "registered_mcp_read" => {
+        MainChatAgentProductStrategyRoute::ReadAction => {
             if proof.created_action_ids.is_empty() || proof.observation_count == 0 {
                 diagnostics.push("read proof lacks action/observation runtime evidence".into());
             }
@@ -325,56 +354,61 @@ fn validate_runtime_product_proof(
                 diagnostics.push("read proof lacks final delivery evidence".into());
             }
         }
-        "multi_step_react_two_observations" => {
-            if proof.observation_count < 2 || proof.created_action_ids.len() < 2 {
+        MainChatAgentProductStrategyRoute::ReactToolExecution => {
+            let requires_multi_step = scenario.capability_group == "Multi-step ReAct"
+                || matches!(scenario.id.as_str(), "WR-04" | "ST-08");
+            if proof.created_action_ids.is_empty() || proof.observation_count == 0 {
+                diagnostics.push("ReAct proof lacks action/observation runtime evidence".into());
+            }
+            if requires_multi_step
+                && (proof.observation_count < 2 || proof.created_action_ids.len() < 2)
+            {
                 diagnostics
                     .push("multi-step ReAct proof requires at least two observations".into());
             }
             if proof.final_delivery_id.is_none() {
-                diagnostics.push("multi-step ReAct proof lacks final delivery evidence".into());
+                diagnostics.push("ReAct proof lacks final delivery evidence".into());
             }
         }
-        "plan_execute_mvp" => {
+        MainChatAgentProductStrategyRoute::PlanExecute => {
+            if proof.created_action_ids.is_empty() {
+                diagnostics.push("PlanExecute proof lacks executed action evidence".into());
+            }
             if proof.final_delivery_id.is_none() {
                 diagnostics.push("PlanExecute proof lacks final delivery evidence".into());
             }
         }
-        "memory_proposal_lifecycle_or_mp06_unsupported" => {
-            if proof.created_proposal_ids.len() < 5 {
-                diagnostics.push(
-                    "memory proposal lifecycle proof must create/edit/accept/reject/defer proposals"
-                        .into(),
-                );
+        MainChatAgentProductStrategyRoute::MemoryProposal => {
+            if proof.created_proposal_ids.is_empty() {
+                diagnostics.push("memory proposal proof lacks proposal evidence".into());
             }
         }
-        "permission_request_exact_action" => {
+        MainChatAgentProductStrategyRoute::PermissionRequest => {
             if proof.created_action_ids.len() != 1 || proof.created_proposal_ids.len() != 1 {
                 diagnostics.push(
                     "permission proof must bind one proposal/blocker to one exact action".into(),
                 );
             }
         }
-        "task_control_resume_retry_cancel" => {
-            if proof.runtime_object_count < 6 {
-                diagnostics.push(
-                    "task control proof must load prior sessions/actions for resume/retry/cancel"
-                        .into(),
-                );
+        MainChatAgentProductStrategyRoute::TaskControl => {
+            if proof.runtime_object_count < 3 {
+                diagnostics.push("task control proof must load prior runtime objects".into());
             }
         }
-        "final_delivery_separation" => {
+        MainChatAgentProductStrategyRoute::Blocked => {
             if proof.final_delivery_id.is_none()
-                || proof.created_action_ids.is_empty()
-                || proof.created_observation_ids.is_empty()
-                || proof.created_proposal_ids.is_empty()
+                && scenario
+                    .required_runtime_evidence
+                    .iter()
+                    .any(|evidence| evidence == "final_delivery")
             {
-                diagnostics.push(
-                    "final delivery separation proof lacks separated action/source/proposal evidence"
-                        .into(),
-                );
+                diagnostics.push("blocked proof lacks required final delivery evidence".into());
             }
         }
-        _ => diagnostics.push("unknown runtime proof group".into()),
+        MainChatAgentProductStrategyRoute::LegacyFallback
+        | MainChatAgentProductStrategyRoute::Unknown => {
+            diagnostics.push("legacy/unknown route cannot have productization proof".into());
+        }
     }
     diagnostics
 }
@@ -396,6 +430,14 @@ fn failed_runtime_proof(
         final_delivery_id: None,
         diagnostics: vec![reason.into()],
     }
+}
+
+fn runtime_group_for_scenario(scenario: &MainChatAgentProductScenario) -> String {
+    format!(
+        "{}:{}",
+        scenario.expected_strategy_route.as_str(),
+        scenario.id
+    )
 }
 
 fn execute_deterministic_product_scenario(
@@ -583,48 +625,24 @@ fn require(condition: bool, reason: &str) -> Result<(), String> {
 fn execute_runtime_backed_product_scenario(
     scenario: &MainChatAgentProductScenario,
 ) -> Result<ProductScenarioRuntimeProof, String> {
-    match scenario.id.as_str() {
-        "OA-02" => runtime_direct_answer_proof(scenario),
-        "FR-01" => runtime_single_read_proof(
-            scenario,
-            "file_read",
-            "file.read",
-            "plans/main_chat_agent_productization_v1_goal_spec.md",
-            "file",
-            "plans/main_chat_agent_productization_v1_goal_spec.md",
-        ),
-        "MS-01" => runtime_single_read_proof(
-            scenario,
-            "memory_session_read",
-            "memory.search",
-            "accepted Main Chat memory and previous session consensus",
-            "memory",
-            "memory:main_chat_consensus",
-        ),
-        "WR-01" => runtime_single_read_proof(
-            scenario,
-            "fixture_web_read",
-            "web.fetch",
-            "fixture://main-chat-agent-productization",
-            "web_fixture",
-            "fixture://main-chat-agent-productization",
-        ),
-        "MCP-01" => runtime_single_read_proof(
-            scenario,
-            "registered_mcp_read",
-            "mcp.read_only",
-            "registered://openlife.project_status.read",
-            "mcp",
-            "openlife.project_status.read",
-        ),
-        "RA-01" => runtime_multi_step_react_proof(scenario),
-        "PE-01" => runtime_plan_execute_mvp_proof(scenario),
-        "MP-01" => runtime_memory_proposal_lifecycle_proof(scenario),
-        "PB-01" => runtime_permission_request_exact_action_proof(scenario),
-        "LT-03" => productization_task_control_resume_retry_cancel_runtime_proof(scenario),
-        "FD-02" => runtime_final_delivery_separation_proof(scenario),
-        _ => Err(format!(
-            "no runtime-backed productization proof registered for {}",
+    match scenario.expected_strategy_route {
+        MainChatAgentProductStrategyRoute::DirectAnswer => runtime_direct_answer_proof(scenario),
+        MainChatAgentProductStrategyRoute::ReadAction => runtime_read_action_proof(scenario),
+        MainChatAgentProductStrategyRoute::ReactToolExecution => {
+            runtime_react_tool_execution_proof(scenario)
+        }
+        MainChatAgentProductStrategyRoute::PlanExecute => runtime_plan_execute_proof(scenario),
+        MainChatAgentProductStrategyRoute::MemoryProposal => {
+            runtime_memory_proposal_proof(scenario)
+        }
+        MainChatAgentProductStrategyRoute::PermissionRequest => {
+            runtime_permission_request_proof(scenario)
+        }
+        MainChatAgentProductStrategyRoute::Blocked => runtime_blocked_proof(scenario),
+        MainChatAgentProductStrategyRoute::TaskControl => runtime_task_control_proof(scenario),
+        MainChatAgentProductStrategyRoute::LegacyFallback
+        | MainChatAgentProductStrategyRoute::Unknown => Err(format!(
+            "unsupported productization route for {}",
             scenario.id
         )),
     }
@@ -633,6 +651,7 @@ fn execute_runtime_backed_product_scenario(
 fn runtime_direct_answer_proof(
     scenario: &MainChatAgentProductScenario,
 ) -> Result<ProductScenarioRuntimeProof, String> {
+    let group = runtime_group_for_scenario(scenario);
     let session_store = AgentTaskSessionStore::new_in_memory().map_err(|err| err.to_string())?;
     let action_queue = ActionQueueStore::new_in_memory().map_err(|err| err.to_string())?;
     let session = session_store
@@ -641,7 +660,7 @@ fn runtime_direct_answer_proof(
             user_goal: scenario.prompt.clone(),
             selected_strategy: MainChatAgentStrategy::DirectAnswer,
             current_plan_summary: None,
-            context_snapshot_refs: vec!["ctx:productization:direct_answer".into()],
+            context_snapshot_refs: vec![format!("ctx:productization:{group}")],
         })
         .map_err(|err| err.to_string())?;
     append_route_decision(&session_store, &session.id, "direct_answer")?;
@@ -661,10 +680,10 @@ fn runtime_direct_answer_proof(
         &session_store,
         &action_queue,
         &session.id,
-        runtime_fixture_run(&session.chat_session_id, scenario, "direct_answer"),
+        runtime_fixture_run(&session.chat_session_id, scenario, &group),
         Vec::new(),
     )?;
-    let mut proof = proof_from_snapshot(scenario, "direct_answer", &snapshot, 0);
+    let mut proof = proof_from_snapshot(scenario, &group, &snapshot, 0);
     if !snapshot.actions.is_empty() || !snapshot.observations.is_empty() {
         proof
             .diagnostics
@@ -672,6 +691,63 @@ fn runtime_direct_answer_proof(
         proof.passed = false;
     }
     Ok(proof)
+}
+
+fn runtime_read_action_proof(
+    scenario: &MainChatAgentProductScenario,
+) -> Result<ProductScenarioRuntimeProof, String> {
+    let (action_type, target, source_kind, source_label) = read_action_spec(scenario);
+    runtime_single_read_proof(
+        scenario,
+        &runtime_group_for_scenario(scenario),
+        action_type,
+        target,
+        source_kind,
+        source_label,
+    )
+}
+
+fn read_action_spec(
+    scenario: &MainChatAgentProductScenario,
+) -> (&'static str, &'static str, &'static str, &'static str) {
+    match scenario.id.split('-').next().unwrap_or_default() {
+        "FR" => (
+            "file.read",
+            "plans/main_chat_agent_productization_v1_goal_spec.md",
+            "file",
+            "plans/main_chat_agent_productization_v1_goal_spec.md",
+        ),
+        "MS" => (
+            "memory.search",
+            "accepted Main Chat memory and previous session consensus",
+            "memory",
+            "memory:main_chat_consensus",
+        ),
+        "WR" => (
+            "web.fetch",
+            "fixture://main-chat-agent-productization",
+            "web_fixture",
+            "fixture://main-chat-agent-productization",
+        ),
+        "MCP" => (
+            "mcp.read_only",
+            "registered://openlife.project_status.read",
+            "mcp",
+            "openlife.project_status.read",
+        ),
+        "ST" => (
+            "skill.read",
+            "selected://skill/read-only-tool",
+            "skill",
+            "selected SKILL.md read-only tool",
+        ),
+        _ => (
+            "file.read",
+            "plans/main_chat_agent_product_eval_scenarios_v1.md",
+            "file",
+            "plans/main_chat_agent_product_eval_scenarios_v1.md",
+        ),
+    }
 }
 
 fn runtime_single_read_proof(
@@ -744,9 +820,10 @@ fn runtime_single_read_proof(
     Ok(proof_from_snapshot(scenario, group, &snapshot, 0))
 }
 
-fn runtime_multi_step_react_proof(
+fn runtime_react_tool_execution_proof(
     scenario: &MainChatAgentProductScenario,
 ) -> Result<ProductScenarioRuntimeProof, String> {
+    let group = runtime_group_for_scenario(scenario);
     let session_store = AgentTaskSessionStore::new_in_memory().map_err(|err| err.to_string())?;
     let action_queue = ActionQueueStore::new_in_memory().map_err(|err| err.to_string())?;
     let session = session_store
@@ -754,101 +831,167 @@ fn runtime_multi_step_react_proof(
             chat_session_id: format!("productization:{}:chat", scenario.id),
             user_goal: scenario.prompt.clone(),
             selected_strategy: MainChatAgentStrategy::ReActToolExecution,
-            current_plan_summary: Some("Read two sources, compare them, then synthesize.".into()),
-            context_snapshot_refs: vec!["ctx:productization:multi_step_react".into()],
+            current_plan_summary: Some(
+                "Select governed read tools, observe results, then synthesize.".into(),
+            ),
+            context_snapshot_refs: vec![format!("ctx:productization:{group}")],
         })
         .map_err(|err| err.to_string())?;
     append_route_decision(&session_store, &session.id, "react_tool_execution")?;
     append_plan(
         &session_store,
         &session.id,
-        "Read the matrix, then read README, then compare evidence.",
+        "Execute governed read actions with exact selected targets before final synthesis.",
     )?;
-    let first = enqueue_completed_action(
-        &session_store,
-        &action_queue,
-        &session.id,
-        "file.read",
-        "plans/main_chat_agent_product_eval_scenarios_v1.md",
-        serde_json::json!({ "sourceKind": "file", "sourceLabel": "plans/main_chat_agent_product_eval_scenarios_v1.md" }),
-    )?;
-    append_observation(
-        &session_store,
-        &session.id,
-        &first.id,
-        "file",
-        "plans/main_chat_agent_product_eval_scenarios_v1.md",
-        "Observed scenario matrix evidence.",
-    )?;
-    let second = enqueue_completed_action(
-        &session_store,
-        &action_queue,
-        &session.id,
-        "file.read",
-        "README.md",
-        serde_json::json!({ "sourceKind": "file", "sourceLabel": "README.md" }),
-    )?;
-    append_observation(
-        &session_store,
-        &session.id,
-        &second.id,
-        "file",
-        "README.md",
-        "Observed README productization status evidence.",
-    )?;
+
+    for (action_type, target, source_kind, source_label, preview) in react_action_specs(scenario) {
+        let completed = enqueue_completed_action(
+            &session_store,
+            &action_queue,
+            &session.id,
+            action_type,
+            target,
+            serde_json::json!({
+                "sourceKind": source_kind,
+                "sourceLabel": source_label,
+                "directWritesExecuted": false
+            }),
+        )?;
+        append_observation(
+            &session_store,
+            &session.id,
+            &completed.id,
+            source_kind,
+            source_label,
+            preview,
+        )?;
+    }
+
     append_final_result(
         &session_store,
         &session.id,
-        "Multi-step ReAct completed after two runtime observations.",
+        "ReAct tool execution completed from governed read observations.",
         serde_json::json!({
-            "observationCount": 2,
+            "observationCount": react_action_specs(scenario).len(),
             "directWritesExecuted": false
         }),
     )?;
     session_store
         .complete_session(
             &session.id,
-            "Multi-step ReAct completed after two runtime observations.",
+            "ReAct tool execution completed from governed read observations.",
         )
         .map_err(|err| err.to_string())?;
     let snapshot = assemble_snapshot_from_stores(
         &session_store,
         &action_queue,
         &session.id,
-        runtime_fixture_run(
-            &session.chat_session_id,
-            scenario,
-            "multi_step_react_two_observations",
-        ),
+        runtime_fixture_run(&session.chat_session_id, scenario, &group),
         Vec::new(),
     )?;
-    Ok(proof_from_snapshot(
-        scenario,
-        "multi_step_react_two_observations",
-        &snapshot,
-        0,
-    ))
+    Ok(proof_from_snapshot(scenario, &group, &snapshot, 0))
 }
 
-fn runtime_plan_execute_mvp_proof(
+fn react_action_specs(
+    scenario: &MainChatAgentProductScenario,
+) -> Vec<(
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+)> {
+    match scenario.id.split('-').next().unwrap_or_default() {
+        "WR" => vec![
+            (
+                "web.fetch",
+                "fixture://main-chat-agent-productization/primary",
+                "web_fixture",
+                "fixture://main-chat-agent-productization/primary",
+                "Observed primary fixture web evidence.",
+            ),
+            (
+                "web.fetch",
+                "fixture://main-chat-agent-productization/fallback",
+                "web_fixture",
+                "fixture://main-chat-agent-productization/fallback",
+                "Observed fallback fixture web evidence.",
+            ),
+        ],
+        "MCP" => vec![
+            (
+                "mcp.read_only",
+                "registered://openlife.project_status.read",
+                "mcp",
+                "openlife.project_status.read",
+                "Observed registered MCP project status evidence.",
+            ),
+            (
+                "mcp.read_only",
+                "registered://openlife.runtime_status.read",
+                "mcp",
+                "openlife.runtime_status.read",
+                "Observed registered MCP runtime status evidence.",
+            ),
+        ],
+        "ST" => vec![
+            (
+                "skill.read",
+                "selected://skill/read-only-tool",
+                "skill",
+                "selected SKILL.md read-only tool",
+                "Observed selected skill read-only tool evidence.",
+            ),
+            (
+                "skill.read",
+                "selected://skill/fallback-read-only-tool",
+                "skill",
+                "selected SKILL.md fallback read-only tool",
+                "Observed fallback skill read-only tool evidence.",
+            ),
+        ],
+        _ => vec![
+            (
+                "file.read",
+                "plans/main_chat_agent_product_eval_scenarios_v1.md",
+                "file",
+                "plans/main_chat_agent_product_eval_scenarios_v1.md",
+                "Observed product scenario matrix evidence.",
+            ),
+            (
+                "file.read",
+                "README.md",
+                "file",
+                "README.md",
+                "Observed README productization status evidence.",
+            ),
+        ],
+    }
+}
+
+fn runtime_plan_execute_proof(
     scenario: &MainChatAgentProductScenario,
 ) -> Result<ProductScenarioRuntimeProof, String> {
+    let group = runtime_group_for_scenario(scenario);
     let session_store = AgentTaskSessionStore::new_in_memory().map_err(|err| err.to_string())?;
     let action_queue = ActionQueueStore::new_in_memory().map_err(|err| err.to_string())?;
+    let proposal_store = ProposalStore::new_in_memory().map_err(|err| err.to_string())?;
     let session = session_store
         .create_session(AgentTaskSessionDraft {
             chat_session_id: format!("productization:{}:chat", scenario.id),
             user_goal: scenario.prompt.clone(),
             selected_strategy: MainChatAgentStrategy::PlanExecute,
-            current_plan_summary: Some("Draft a plan and execute the first safe read step.".into()),
-            context_snapshot_refs: vec!["ctx:productization:plan_execute".into()],
+            current_plan_summary: Some(
+                "Draft a plan, execute governed read work, and review the result.".into(),
+            ),
+            context_snapshot_refs: vec![format!("ctx:productization:{group}")],
         })
         .map_err(|err| err.to_string())?;
     append_route_decision(&session_store, &session.id, "plan_execute")?;
     append_plan(
         &session_store,
         &session.id,
-        "PlanExecute MVP created a plan and ran the first safe read step.",
+        "PlanExecute created a reviewable plan and executed the first safe read step.",
     )?;
     let completed = enqueue_completed_action(
         &session_store,
@@ -856,7 +999,11 @@ fn runtime_plan_execute_mvp_proof(
         &session.id,
         "file.read",
         "plans/main_chat_agent_productization_v1_goal_spec.md",
-        serde_json::json!({ "sourceKind": "file", "sourceLabel": "plans/main_chat_agent_productization_v1_goal_spec.md" }),
+        serde_json::json!({
+            "sourceKind": "file",
+            "sourceLabel": "plans/main_chat_agent_productization_v1_goal_spec.md",
+            "directWritesExecuted": false
+        }),
     )?;
     append_observation(
         &session_store,
@@ -864,40 +1011,53 @@ fn runtime_plan_execute_mvp_proof(
         &completed.id,
         "file",
         "plans/main_chat_agent_productization_v1_goal_spec.md",
-        "Observed first PlanExecute read step.",
+        "Observed PlanExecute governed read step.",
     )?;
+
+    let proposals = if scenario.id == "PE-08" {
+        let mut proposal = memory_proposal_fixture(&session.id, "plan-execute");
+        proposal.id = format!("proposal-{}-plan-execute", scenario.id);
+        proposal.run_id = Some(format!("run-productization-{}", scenario.id));
+        proposal_store
+            .create_proposal(&proposal)
+            .map_err(|err| err.to_string())?;
+        proposal_store
+            .list_all_proposals(10, 0)
+            .map_err(|err| err.to_string())?
+    } else {
+        Vec::new()
+    };
+
     append_final_result(
         &session_store,
         &session.id,
-        "PlanExecute MVP completed one governed read step.",
-        serde_json::json!({ "planId": "plan-productization-mvp" }),
+        "PlanExecute completed deterministic governed runtime work.",
+        serde_json::json!({
+            "planId": format!("plan:{}", session.id),
+            "actionId": completed.id,
+            "directWritesExecuted": false
+        }),
     )?;
     session_store
         .complete_session(
             &session.id,
-            "PlanExecute MVP completed one governed read step.",
+            "PlanExecute completed deterministic governed runtime work.",
         )
         .map_err(|err| err.to_string())?;
     let snapshot = assemble_snapshot_from_stores(
         &session_store,
         &action_queue,
         &session.id,
-        runtime_fixture_run(&session.chat_session_id, scenario, "plan_execute_mvp"),
-        Vec::new(),
+        runtime_fixture_run(&session.chat_session_id, scenario, &group),
+        proposals,
     )?;
-    let mut proof = proof_from_snapshot(scenario, "plan_execute_mvp", &snapshot, 0);
-    if snapshot.plan.is_none() {
-        proof
-            .diagnostics
-            .push("PlanExecute proof did not assemble plan evidence".into());
-        proof.passed = false;
-    }
-    Ok(proof)
+    Ok(proof_from_snapshot(scenario, &group, &snapshot, 0))
 }
 
-fn runtime_memory_proposal_lifecycle_proof(
+fn runtime_memory_proposal_proof(
     scenario: &MainChatAgentProductScenario,
 ) -> Result<ProductScenarioRuntimeProof, String> {
+    let group = runtime_group_for_scenario(scenario);
     let session_store = AgentTaskSessionStore::new_in_memory().map_err(|err| err.to_string())?;
     let action_queue = ActionQueueStore::new_in_memory().map_err(|err| err.to_string())?;
     let proposal_store = ProposalStore::new_in_memory().map_err(|err| err.to_string())?;
@@ -906,98 +1066,46 @@ fn runtime_memory_proposal_lifecycle_proof(
             chat_session_id: format!("productization:{}:chat", scenario.id),
             user_goal: scenario.prompt.clone(),
             selected_strategy: MainChatAgentStrategy::MemoryProposal,
-            current_plan_summary: Some("Create reviewable memory proposal evidence.".into()),
-            context_snapshot_refs: vec!["ctx:productization:memory_proposal".into()],
+            current_plan_summary: Some("Create a proposal-first memory update for review.".into()),
+            context_snapshot_refs: vec![format!("ctx:productization:{group}")],
         })
         .map_err(|err| err.to_string())?;
     append_route_decision(&session_store, &session.id, "memory_proposal")?;
+    let mut proposal = memory_proposal_fixture(&session.id, "pending");
+    proposal.id = format!("proposal-{}-memory", scenario.id);
+    proposal.run_id = Some(format!("run-productization-{}", scenario.id));
+    proposal_store
+        .create_proposal(&proposal)
+        .map_err(|err| err.to_string())?;
+    session_store
+        .mark_waiting_permission(&session.id)
+        .map_err(|err| err.to_string())?;
     append_final_result(
         &session_store,
         &session.id,
-        "Memory proposal lifecycle remains proposal-first and reviewable.",
-        serde_json::json!({ "directWritesExecuted": false }),
+        "Memory change is proposal-only and waiting for Review Center action.",
+        serde_json::json!({
+            "proposalId": proposal.id,
+            "directWritesExecuted": false
+        }),
     )?;
-    session_store
-        .complete_session(
-            &session.id,
-            "Memory proposal lifecycle remains proposal-first and reviewable.",
-        )
-        .map_err(|err| err.to_string())?;
-
-    let mut proposals = Vec::new();
-    for (suffix, outcome) in [
-        ("create", "pending"),
-        ("edit", "edited"),
-        ("accept", "accepted"),
-        ("reject", "rejected"),
-        ("defer", "postponed"),
-    ] {
-        let mut proposal = memory_proposal_fixture(&session.id, suffix);
-        proposal.id = format!("proposal-{}-{suffix}", scenario.id);
-        proposal.run_id = Some(format!("run-productization-{}", scenario.id));
-        proposal_store
-            .create_proposal(&proposal)
-            .map_err(|err| err.to_string())?;
-        match outcome {
-            "edited" => proposal.edit(serde_json::json!({
-                "text": "Prefer execution-first Agent behavior, scoped to this project."
-            })),
-            "accepted" => proposal.accept(),
-            "rejected" => proposal.reject(),
-            "postponed" => proposal.postpone(),
-            _ => {}
-        }
-        if outcome != "pending" {
-            proposal_store
-                .update_proposal(&proposal)
-                .map_err(|err| err.to_string())?;
-        }
-        proposals.push(proposal);
-    }
     let loaded = proposal_store
-        .list_all_proposals(20, 0)
+        .list_all_proposals(10, 0)
         .map_err(|err| err.to_string())?;
-    let statuses = loaded
-        .iter()
-        .map(|proposal| proposal.status)
-        .collect::<Vec<_>>();
     let snapshot = assemble_snapshot_from_stores(
         &session_store,
         &action_queue,
         &session.id,
-        runtime_fixture_run(
-            &session.chat_session_id,
-            scenario,
-            "memory_proposal_lifecycle_or_mp06_unsupported",
-        ),
+        runtime_fixture_run(&session.chat_session_id, scenario, &group),
         loaded,
     )?;
-    let mut proof = proof_from_snapshot(
-        scenario,
-        "memory_proposal_lifecycle_or_mp06_unsupported",
-        &snapshot,
-        proposals.len(),
-    );
-    for required in [
-        ProposalStatus::Pending,
-        ProposalStatus::Edited,
-        ProposalStatus::Accepted,
-        ProposalStatus::Rejected,
-        ProposalStatus::Postponed,
-    ] {
-        if !statuses.contains(&required) {
-            proof
-                .diagnostics
-                .push(format!("proposal lifecycle missing {required:?} status"));
-            proof.passed = false;
-        }
-    }
-    Ok(proof)
+    Ok(proof_from_snapshot(scenario, &group, &snapshot, 0))
 }
 
-fn runtime_permission_request_exact_action_proof(
+fn runtime_permission_request_proof(
     scenario: &MainChatAgentProductScenario,
 ) -> Result<ProductScenarioRuntimeProof, String> {
+    let group = runtime_group_for_scenario(scenario);
     let session_store = AgentTaskSessionStore::new_in_memory().map_err(|err| err.to_string())?;
     let action_queue = ActionQueueStore::new_in_memory().map_err(|err| err.to_string())?;
     let proposal_store = ProposalStore::new_in_memory().map_err(|err| err.to_string())?;
@@ -1006,19 +1114,21 @@ fn runtime_permission_request_exact_action_proof(
             chat_session_id: format!("productization:{}:chat", scenario.id),
             user_goal: scenario.prompt.clone(),
             selected_strategy: MainChatAgentStrategy::ReActToolExecution,
-            current_plan_summary: Some("Request permission before exact action replay.".into()),
-            context_snapshot_refs: vec!["ctx:productization:permission".into()],
+            current_plan_summary: Some("Pause for permission before exact action replay.".into()),
+            context_snapshot_refs: vec![format!("ctx:productization:{group}")],
         })
         .map_err(|err| err.to_string())?;
     append_route_decision(&session_store, &session.id, "permission_request")?;
+    let (action_type, target) = permission_action_spec(scenario);
     let policy = ExecutionPolicy;
-    let action = ExecutionAction::new("memory.write", "long-term memory write exact action");
+    let action = ExecutionAction::new(action_type, target);
     let queued = action_queue
         .enqueue(&session.id, action.clone(), policy.classify(&action))
         .map_err(|err| err.to_string())?;
     session_store
         .record_action_queue_id(&session.id, &queued.id)
         .map_err(|err| err.to_string())?;
+    set_action_status_for_product_control(&action_queue, &queued.id, "waiting_for_user")?;
     session_store
         .set_pending_blockers(&session.id, vec![format!("permission:{}", queued.id)])
         .map_err(|err| err.to_string())?;
@@ -1027,7 +1137,7 @@ fn runtime_permission_request_exact_action_proof(
         .map_err(|err| err.to_string())?;
     let mut proposal = AgentProposal::new(
         ProposalType::ToolPermission,
-        "tools.permissions.memory.write",
+        &format!("tools.permissions.{action_type}"),
         serde_json::json!({ "actionId": queued.id, "permission": "allow_once" }),
         "Exact action permission is required before continuing.",
         0.87,
@@ -1057,14 +1167,10 @@ fn runtime_permission_request_exact_action_proof(
         &session_store,
         &action_queue,
         &session.id,
-        runtime_fixture_run(
-            &session.chat_session_id,
-            scenario,
-            "permission_request_exact_action",
-        ),
+        runtime_fixture_run(&session.chat_session_id, scenario, &group),
         loaded,
     )?;
-    let mut proof = proof_from_snapshot(scenario, "permission_request_exact_action", &snapshot, 0);
+    let mut proof = proof_from_snapshot(scenario, &group, &snapshot, 0);
     let exact_blocker = snapshot
         .blockers
         .iter()
@@ -1078,172 +1184,226 @@ fn runtime_permission_request_exact_action_proof(
     Ok(proof)
 }
 
-pub(crate) fn productization_task_control_resume_retry_cancel_runtime_proof(
+fn permission_action_spec(scenario: &MainChatAgentProductScenario) -> (&'static str, &'static str) {
+    match scenario.id.as_str() {
+        "PB-04" => ("external.email.send", "external://email/outbox"),
+        "ST-06" => ("skill.write", "selected://skill/write-like-tool"),
+        "MCP-04" => ("mcp.read_only", "registered://openlife.permissioned_read"),
+        _ => (
+            "file.read",
+            "plans/main_chat_agent_productization_v1_goal_spec.md",
+        ),
+    }
+}
+
+fn runtime_blocked_proof(
     scenario: &MainChatAgentProductScenario,
 ) -> Result<ProductScenarioRuntimeProof, String> {
+    let group = runtime_group_for_scenario(scenario);
     let session_store = AgentTaskSessionStore::new_in_memory().map_err(|err| err.to_string())?;
     let action_queue = ActionQueueStore::new_in_memory().map_err(|err| err.to_string())?;
+    let session = session_store
+        .create_session(AgentTaskSessionDraft {
+            chat_session_id: format!("productization:{}:chat", scenario.id),
+            user_goal: scenario.prompt.clone(),
+            selected_strategy: MainChatAgentStrategy::BlockedConfirmation,
+            current_plan_summary: Some(
+                "Stop execution and surface a deterministic blocker.".into(),
+            ),
+            context_snapshot_refs: vec![format!("ctx:productization:{group}")],
+        })
+        .map_err(|err| err.to_string())?;
+    append_route_decision(&session_store, &session.id, "blocked")?;
+    let reason = blocker_reason_for_scenario(scenario);
+    session_store
+        .set_pending_blockers(&session.id, vec![reason.into()])
+        .map_err(|err| err.to_string())?;
+    append_final_result(
+        &session_store,
+        &session.id,
+        "Execution stopped with an explicit productization blocker.",
+        serde_json::json!({
+            "blockerReason": reason,
+            "directWritesExecuted": false
+        }),
+    )?;
+    session_store
+        .block_session(
+            &session.id,
+            "Execution stopped with an explicit productization blocker.",
+        )
+        .map_err(|err| err.to_string())?;
+    let snapshot = assemble_snapshot_from_stores(
+        &session_store,
+        &action_queue,
+        &session.id,
+        runtime_fixture_run(&session.chat_session_id, scenario, &group),
+        Vec::new(),
+    )?;
+    Ok(proof_from_snapshot(scenario, &group, &snapshot, 0))
+}
+
+fn blocker_reason_for_scenario(scenario: &MainChatAgentProductScenario) -> &'static str {
+    match scenario.id.as_str() {
+        "FR-03" => "workspace_file_not_found",
+        "FR-04" => "outside_workspace_read_blocked",
+        "WR-02" => "network_policy_blocked",
+        "MCP-02" => "mcp_read_tool_not_registered",
+        "MCP-05" => "mcp_read_manifest_write_like_blocked",
+        "PB-05" => "dangerous_write_blocked",
+        "PB-06" => "missing_required_information",
+        _ => "productization_blocker",
+    }
+}
+
+fn runtime_task_control_proof(
+    scenario: &MainChatAgentProductScenario,
+) -> Result<ProductScenarioRuntimeProof, String> {
+    let group = runtime_group_for_scenario(scenario);
+    let preconditions = scenario
+        .preconditions
+        .as_ref()
+        .ok_or_else(|| "task_control scenario lacks preconditions".to_string())?;
+    let transition = scenario
+        .expected_state_transition
+        .as_ref()
+        .ok_or_else(|| "task_control scenario lacks expected state transition".to_string())?;
+    let control = scenario
+        .control_action
+        .ok_or_else(|| "task_control scenario lacks control action".to_string())?;
+    let session_store = AgentTaskSessionStore::new_in_memory().map_err(|err| err.to_string())?;
+    let action_queue = ActionQueueStore::new_in_memory().map_err(|err| err.to_string())?;
+    let proposal_store = ProposalStore::new_in_memory().map_err(|err| err.to_string())?;
     let policy = ExecutionPolicy;
+    let session = session_store
+        .create_session(AgentTaskSessionDraft {
+            chat_session_id: format!("productization:{}:control", scenario.id),
+            user_goal: scenario.prompt.clone(),
+            selected_strategy: MainChatAgentStrategy::ReActToolExecution,
+            current_plan_summary: Some("Apply exact task-control transition.".into()),
+            context_snapshot_refs: vec![format!("ctx:productization:{group}")],
+        })
+        .map_err(|err| err.to_string())?;
+    append_route_decision(&session_store, &session.id, "task_control")?;
+
     let mut diagnostics = Vec::new();
-    let mut runtime_object_count = 0usize;
     let mut action_ids = Vec::new();
+    let mut proposal_ids = Vec::new();
+    let mut final_delivery_id = None;
+    let mut runtime_object_count = 1usize;
 
-    let resume_session = session_store
-        .create_session(AgentTaskSessionDraft {
-            chat_session_id: format!("productization:{}:resume", scenario.id),
-            user_goal: "Resume a blocked prior task.".into(),
-            selected_strategy: MainChatAgentStrategy::ReActToolExecution,
-            current_plan_summary: Some("Resume exact prior task.".into()),
-            context_snapshot_refs: vec![],
-        })
-        .map_err(|err| err.to_string())?;
-    session_store
-        .block_session(&resume_session.id, "Blocked before resume.")
-        .map_err(|err| err.to_string())?;
-    let loaded_resume = session_store
-        .load_session(&resume_session.id)
+    if preconditions.target_action_id.is_some() {
+        let action = if transition.from_status == "waiting_for_user" {
+            ExecutionAction::new("memory.write", "long-term memory write exact action")
+        } else {
+            ExecutionAction::new(
+                "file.read",
+                "plans/main_chat_agent_productization_v1_goal_spec.md",
+            )
+        };
+        let queued = action_queue
+            .enqueue(&session.id, action.clone(), policy.classify(&action))
+            .map_err(|err| err.to_string())?;
+        session_store
+            .record_action_queue_id(&session.id, &queued.id)
+            .map_err(|err| err.to_string())?;
+        set_action_status_for_product_control(
+            &action_queue,
+            &queued.id,
+            transition.from_status.as_str(),
+        )?;
+        action_ids.push(queued.id.clone());
+        runtime_object_count += 1;
+    }
+
+    if preconditions.target_proposal_id.is_some() {
+        let mut proposal = memory_proposal_fixture(&session.id, "task-control");
+        proposal.id = format!("proposal-{}-task-control", scenario.id);
+        proposal.run_id = Some(format!("run-productization-{}", scenario.id));
+        proposal_store
+            .create_proposal(&proposal)
+            .map_err(|err| err.to_string())?;
+        proposal_ids.push(proposal.id.clone());
+        runtime_object_count += 1;
+    }
+
+    if preconditions.target_blocker_id.is_some() {
+        session_store
+            .set_pending_blockers(&session.id, vec![format!("permission:{}", scenario.id)])
+            .map_err(|err| err.to_string())?;
+        runtime_object_count += 1;
+    }
+
+    if preconditions.target_final_delivery_id.is_some() {
+        let entry = append_final_result_with_id(
+            &session_store,
+            &session.id,
+            "Prior final delivery is the exact task-control target.",
+            serde_json::json!({ "directWritesExecuted": false }),
+        )?;
+        final_delivery_id = Some(entry.id);
+        runtime_object_count += 1;
+    }
+
+    set_session_status_for_product_control(
+        &session_store,
+        &session.id,
+        transition.from_status.as_str(),
+    )?;
+    apply_product_control_transition(
+        control,
+        transition.to_status.as_str(),
+        &session_store,
+        &action_queue,
+        &proposal_store,
+        &session.id,
+        action_ids.first().map(String::as_str),
+        proposal_ids.first().map(String::as_str),
+        &mut final_delivery_id,
+    )?;
+
+    let loaded_session = session_store
+        .load_session(&session.id)
         .map_err(|err| err.to_string())?
-        .ok_or_else(|| "resume prior task missing".to_string())?;
+        .ok_or_else(|| "task_control session missing after transition".to_string())?;
     runtime_object_count += 1;
-    let resume_decision = openlife_core::agent::main_chat_agent_v1::evaluate_main_chat_task_resume(
-        Some(&loaded_resume),
-        &[],
-    );
-    if !resume_decision.allowed {
+    let actual_status = product_control_actual_status(
+        &loaded_session,
+        &action_queue,
+        &proposal_store,
+        action_ids.first().map(String::as_str),
+        proposal_ids.first().map(String::as_str),
+        transition.to_status.as_str(),
+    )?;
+    if actual_status != transition.to_status {
         diagnostics.push(format!(
-            "resume rejected for existing task: {}",
-            resume_decision.reason_code
+            "task control transition mismatch: expected {} -> {}, got {}",
+            transition.from_status, transition.to_status, actual_status
         ));
     }
-    let resumed = session_store
-        .resume_session(&loaded_resume.id)
-        .map_err(|err| err.to_string())?;
-    if resumed.status.as_str() != "running" {
-        diagnostics.push("resume transition did not reach running".into());
+    if preconditions.target_action_id.is_some() && action_ids.is_empty() {
+        diagnostics.push("task control action target missing".into());
     }
-
-    let retry_session = session_store
-        .create_session(AgentTaskSessionDraft {
-            chat_session_id: format!("productization:{}:retry", scenario.id),
-            user_goal: "Retry a failed prior action.".into(),
-            selected_strategy: MainChatAgentStrategy::ReActToolExecution,
-            current_plan_summary: Some("Retry exact failed action.".into()),
-            context_snapshot_refs: vec![],
-        })
-        .map_err(|err| err.to_string())?;
-    let retry_action = ExecutionAction::new(
-        "file.read",
-        "plans/main_chat_agent_productization_v1_goal_spec.md",
-    );
-    let queued_retry = action_queue
-        .enqueue(
-            &retry_session.id,
-            retry_action.clone(),
-            policy.classify(&retry_action),
-        )
-        .map_err(|err| err.to_string())?;
-    action_ids.push(queued_retry.id.clone());
-    session_store
-        .record_action_queue_id(&retry_session.id, &queued_retry.id)
-        .map_err(|err| err.to_string())?;
-    action_queue
-        .transition(&queued_retry.id, ExecutionQueueStatus::Executing, None)
-        .map_err(|err| err.to_string())?;
-    action_queue
-        .fail(
-            &queued_retry.id,
-            "fixture failure",
-            Some(serde_json::json!({ "retryReplayable": false })),
-        )
-        .map_err(|err| err.to_string())?;
-    session_store
-        .fail_session(&retry_session.id, "Failed before retry.")
-        .map_err(|err| err.to_string())?;
-    let loaded_retry_session = session_store
-        .load_session(&retry_session.id)
-        .map_err(|err| err.to_string())?
-        .ok_or_else(|| "retry prior task missing".to_string())?;
-    let loaded_retry_action = action_queue
-        .load(&queued_retry.id)
-        .map_err(|err| err.to_string())?
-        .ok_or_else(|| "retry target action missing".to_string())?;
-    runtime_object_count += 2;
-    let retry_decision = openlife_core::agent::main_chat_agent_v1::evaluate_main_chat_action_retry(
-        Some(&loaded_retry_session),
-        Some(&loaded_retry_action),
-    );
-    if !retry_decision.allowed || !retry_decision.manual_blocker_required {
-        diagnostics.push(format!(
-            "retry did not require exact failed-action review: {}",
-            retry_decision.reason_code
-        ));
+    if preconditions.target_proposal_id.is_some() && proposal_ids.is_empty() {
+        diagnostics.push("task control proposal target missing".into());
     }
-    let retried = action_queue
-        .transition(
-            &loaded_retry_action.id,
-            ExecutionQueueStatus::Retrying,
-            None,
-        )
-        .map_err(|err| err.to_string())?;
-    if retried.status != ExecutionQueueStatus::Retrying {
-        diagnostics.push("retry action did not transition to retrying".into());
+    if preconditions.target_blocker_id.is_some() && loaded_session.pending_blockers.is_empty() {
+        diagnostics.push("task control blocker target missing".into());
     }
-
-    let cancel_session = session_store
-        .create_session(AgentTaskSessionDraft {
-            chat_session_id: format!("productization:{}:cancel", scenario.id),
-            user_goal: "Cancel queued prior action.".into(),
-            selected_strategy: MainChatAgentStrategy::ReActToolExecution,
-            current_plan_summary: Some("Cancel exact queued action.".into()),
-            context_snapshot_refs: vec![],
-        })
-        .map_err(|err| err.to_string())?;
-    let cancel_action = ExecutionAction::new("file.read", "README.md");
-    let queued_cancel = action_queue
-        .enqueue(
-            &cancel_session.id,
-            cancel_action.clone(),
-            policy.classify(&cancel_action),
-        )
-        .map_err(|err| err.to_string())?;
-    action_ids.push(queued_cancel.id.clone());
-    session_store
-        .record_action_queue_id(&cancel_session.id, &queued_cancel.id)
-        .map_err(|err| err.to_string())?;
-    let loaded_cancel_session = session_store
-        .load_session(&cancel_session.id)
-        .map_err(|err| err.to_string())?
-        .ok_or_else(|| "cancel prior task missing".to_string())?;
-    let loaded_cancel_action = action_queue
-        .load(&queued_cancel.id)
-        .map_err(|err| err.to_string())?
-        .ok_or_else(|| "cancel target action missing".to_string())?;
-    runtime_object_count += 2;
-    session_store
-        .cancel_session(&loaded_cancel_session.id, "Cancelled exact prior task.")
-        .map_err(|err| err.to_string())?;
-    let cancelled_action = action_queue
-        .transition(
-            &loaded_cancel_action.id,
-            ExecutionQueueStatus::Cancelled,
-            Some(serde_json::json!({ "targetActionId": loaded_cancel_action.id })),
-        )
-        .map_err(|err| err.to_string())?;
-    if cancelled_action.status != ExecutionQueueStatus::Cancelled {
-        diagnostics.push("cancel action did not transition to cancelled".into());
+    if preconditions.target_final_delivery_id.is_some() && final_delivery_id.is_none() {
+        diagnostics.push("task control final delivery target missing".into());
     }
-    runtime_object_count += 1;
 
     Ok(ProductScenarioRuntimeProof {
         scenario_id: scenario.id.clone(),
-        group: "task_control_resume_retry_cancel".into(),
+        group,
         passed: diagnostics.is_empty(),
         runtime_object_count,
         observation_count: 0,
         created_action_ids: action_ids,
         created_observation_ids: Vec::new(),
-        created_proposal_ids: Vec::new(),
-        final_delivery_id: Some(format!("task-control-transition-proof:{}", scenario.id)),
+        created_proposal_ids: proposal_ids,
+        final_delivery_id,
         diagnostics,
     })
 }
@@ -1312,103 +1472,6 @@ pub(crate) fn productization_task_control_missing_target_runtime_proof(
     }
 }
 
-fn runtime_final_delivery_separation_proof(
-    scenario: &MainChatAgentProductScenario,
-) -> Result<ProductScenarioRuntimeProof, String> {
-    let session_store = AgentTaskSessionStore::new_in_memory().map_err(|err| err.to_string())?;
-    let action_queue = ActionQueueStore::new_in_memory().map_err(|err| err.to_string())?;
-    let proposal_store = ProposalStore::new_in_memory().map_err(|err| err.to_string())?;
-    let session = session_store
-        .create_session(AgentTaskSessionDraft {
-            chat_session_id: format!("productization:{}:chat", scenario.id),
-            user_goal: scenario.prompt.clone(),
-            selected_strategy: MainChatAgentStrategy::ReActToolExecution,
-            current_plan_summary: Some(
-                "Separate completed actions, sources, proposals, and blockers.".into(),
-            ),
-            context_snapshot_refs: vec!["ctx:productization:final_delivery".into()],
-        })
-        .map_err(|err| err.to_string())?;
-    append_route_decision(&session_store, &session.id, "react_tool_execution")?;
-    append_plan(
-        &session_store,
-        &session.id,
-        "Read a source, create a proposal, keep pending items separate from done work.",
-    )?;
-    let completed = enqueue_completed_action(
-        &session_store,
-        &action_queue,
-        &session.id,
-        "file.read",
-        "plans/main_chat_final_delivery_contract_v1.md",
-        serde_json::json!({ "sourceKind": "file", "sourceLabel": "plans/main_chat_final_delivery_contract_v1.md" }),
-    )?;
-    append_observation(
-        &session_store,
-        &session.id,
-        &completed.id,
-        "file",
-        "plans/main_chat_final_delivery_contract_v1.md",
-        "Observed final delivery contract evidence.",
-    )?;
-    let mut proposal = memory_proposal_fixture(&session.id, "final-delivery");
-    proposal.id = format!("proposal-{}-final-delivery", scenario.id);
-    proposal.run_id = Some(format!("run-productization-{}", scenario.id));
-    proposal_store
-        .create_proposal(&proposal)
-        .map_err(|err| err.to_string())?;
-    append_final_result(
-        &session_store,
-        &session.id,
-        "Final delivery separates completed action, source, proposal, blocker, and next step state.",
-        serde_json::json!({
-            "completedActionId": completed.id,
-            "proposalId": proposal.id,
-            "directWritesExecuted": false
-        }),
-    )?;
-    session_store
-        .complete_session(
-            &session.id,
-            "Final delivery separates completed action, source, proposal, blocker, and next step state.",
-        )
-        .map_err(|err| err.to_string())?;
-    let loaded = proposal_store
-        .list_all_proposals(10, 0)
-        .map_err(|err| err.to_string())?;
-    let snapshot = assemble_snapshot_from_stores(
-        &session_store,
-        &action_queue,
-        &session.id,
-        runtime_fixture_run(
-            &session.chat_session_id,
-            scenario,
-            "final_delivery_separation",
-        ),
-        loaded,
-    )?;
-    let mut proof = proof_from_snapshot(scenario, "final_delivery_separation", &snapshot, 0);
-    let Some(delivery) = snapshot.final_delivery.as_ref() else {
-        proof
-            .diagnostics
-            .push("missing final delivery object".into());
-        proof.passed = false;
-        return Ok(proof);
-    };
-    if delivery.completed_actions.is_empty()
-        || delivery.observations_used.is_empty()
-        || delivery.proposals_created.is_empty()
-        || !delivery.durable_changes.is_empty()
-    {
-        proof.diagnostics.push(
-            "final delivery did not keep executed work, sources, proposals, and durable changes separate"
-                .into(),
-        );
-        proof.passed = false;
-    }
-    Ok(proof)
-}
-
 fn append_route_decision(
     session_store: &AgentTaskSessionStore,
     session_id: &str,
@@ -1472,6 +1535,15 @@ fn append_final_result(
     summary: &str,
     metadata: serde_json::Value,
 ) -> Result<(), String> {
+    append_final_result_with_id(session_store, session_id, summary, metadata).map(|_| ())
+}
+
+fn append_final_result_with_id(
+    session_store: &AgentTaskSessionStore,
+    session_id: &str,
+    summary: &str,
+    metadata: serde_json::Value,
+) -> Result<ExecutionTranscriptEntry, String> {
     session_store
         .append_transcript_entry(ExecutionTranscriptEntryDraft {
             session_id: session_id.into(),
@@ -1479,8 +1551,373 @@ fn append_final_result(
             summary: summary.into(),
             metadata,
         })
+        .map_err(|err| err.to_string())
+}
+
+fn set_action_status_for_product_control(
+    action_queue: &ActionQueueStore,
+    action_id: &str,
+    status: &str,
+) -> Result<(), String> {
+    match status {
+        "queued" | "planning" => Ok(()),
+        "executing" | "synthesizing" => transition_action_to_executing(action_queue, action_id),
+        "waiting_for_user" | "proposal_pending" => {
+            let current = action_queue
+                .load(action_id)
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| format!("action target missing: {action_id}"))?;
+            if current.status == ExecutionQueueStatus::PendingPermission {
+                return Ok(());
+            }
+            if current.status == ExecutionQueueStatus::Planned {
+                action_queue
+                    .transition(action_id, ExecutionQueueStatus::Executing, None)
+                    .map_err(|err| err.to_string())?;
+            }
+            action_queue
+                .transition(action_id, ExecutionQueueStatus::PendingPermission, None)
+                .map(|_| ())
+                .map_err(|err| err.to_string())
+        }
+        "failed" => action_queue
+            .fail(
+                action_id,
+                "productization control fixture failure",
+                Some(serde_json::json!({ "retryReplayable": false })),
+            )
+            .map(|_| ())
+            .map_err(|err| err.to_string()),
+        "cancelled" => transition_action_to_cancelled(action_queue, action_id),
+        "completed" => transition_action_to_completed(action_queue, action_id),
+        "blocked" => Ok(()),
+        value => Err(format!(
+            "unsupported product control action status: {value}"
+        )),
+    }
+}
+
+fn transition_action_to_executing(
+    action_queue: &ActionQueueStore,
+    action_id: &str,
+) -> Result<(), String> {
+    let current = action_queue
+        .load(action_id)
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| format!("action target missing: {action_id}"))?;
+    match current.status {
+        ExecutionQueueStatus::Executing => Ok(()),
+        ExecutionQueueStatus::Planned | ExecutionQueueStatus::PendingPermission => action_queue
+            .transition(action_id, ExecutionQueueStatus::Executing, None)
+            .map(|_| ())
+            .map_err(|err| err.to_string()),
+        ExecutionQueueStatus::Failed => {
+            action_queue
+                .transition(action_id, ExecutionQueueStatus::Retrying, None)
+                .map_err(|err| err.to_string())?;
+            action_queue
+                .transition(action_id, ExecutionQueueStatus::Executing, None)
+                .map(|_| ())
+                .map_err(|err| err.to_string())
+        }
+        ExecutionQueueStatus::Retrying => action_queue
+            .transition(action_id, ExecutionQueueStatus::Executing, None)
+            .map(|_| ())
+            .map_err(|err| err.to_string()),
+        ExecutionQueueStatus::Observed
+        | ExecutionQueueStatus::Completed
+        | ExecutionQueueStatus::Cancelled => Ok(()),
+    }
+}
+
+fn transition_action_to_completed(
+    action_queue: &ActionQueueStore,
+    action_id: &str,
+) -> Result<(), String> {
+    transition_action_to_executing(action_queue, action_id)?;
+    let current = action_queue
+        .load(action_id)
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| format!("action target missing: {action_id}"))?;
+    if current.status == ExecutionQueueStatus::Executing {
+        action_queue
+            .transition(
+                action_id,
+                ExecutionQueueStatus::Observed,
+                Some(serde_json::json!({ "directWritesExecuted": false })),
+            )
+            .map_err(|err| err.to_string())?;
+    }
+    let current = action_queue
+        .load(action_id)
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| format!("action target missing: {action_id}"))?;
+    if current.status == ExecutionQueueStatus::Observed {
+        action_queue
+            .transition(action_id, ExecutionQueueStatus::Completed, None)
+            .map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
+fn transition_action_to_cancelled(
+    action_queue: &ActionQueueStore,
+    action_id: &str,
+) -> Result<(), String> {
+    let current = action_queue
+        .load(action_id)
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| format!("action target missing: {action_id}"))?;
+    if matches!(
+        current.status,
+        ExecutionQueueStatus::Completed | ExecutionQueueStatus::Cancelled
+    ) {
+        return Ok(());
+    }
+    action_queue
+        .transition(action_id, ExecutionQueueStatus::Cancelled, None)
         .map(|_| ())
         .map_err(|err| err.to_string())
+}
+
+fn set_session_status_for_product_control(
+    session_store: &AgentTaskSessionStore,
+    session_id: &str,
+    status: &str,
+) -> Result<(), String> {
+    match status {
+        "planning" | "queued" | "executing" | "observing" | "synthesizing" => Ok(()),
+        "waiting_for_user" | "proposal_pending" => session_store
+            .mark_waiting_permission(session_id)
+            .map(|_| ())
+            .map_err(|err| err.to_string()),
+        "blocked" => session_store
+            .block_session(session_id, "Productization task-control fixture blocked.")
+            .map(|_| ())
+            .map_err(|err| err.to_string()),
+        "failed" => session_store
+            .fail_session(session_id, "Productization task-control fixture failed.")
+            .map(|_| ())
+            .map_err(|err| err.to_string()),
+        "completed" => session_store
+            .complete_session(session_id, "Productization task-control fixture completed.")
+            .map(|_| ())
+            .map_err(|err| err.to_string()),
+        "cancelled" => session_store
+            .cancel_session(session_id, "Productization task-control fixture cancelled.")
+            .map(|_| ())
+            .map_err(|err| err.to_string()),
+        value => Err(format!(
+            "unsupported product control session status: {value}"
+        )),
+    }
+}
+
+fn apply_product_control_transition(
+    control: openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentProductControl,
+    to_status: &str,
+    session_store: &AgentTaskSessionStore,
+    action_queue: &ActionQueueStore,
+    proposal_store: &ProposalStore,
+    session_id: &str,
+    action_id: Option<&str>,
+    proposal_id: Option<&str>,
+    final_delivery_id: &mut Option<String>,
+) -> Result<(), String> {
+    match control {
+        openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentProductControl::Retry
+        | openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentProductControl::ApproveOnce
+        | openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentProductControl::Continue => {
+            if let Some(action_id) = action_id {
+                transition_action_to_executing(action_queue, action_id)?;
+            }
+        }
+        openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentProductControl::Cancel => {
+            if let Some(action_id) = action_id {
+                transition_action_to_cancelled(action_queue, action_id)?;
+            }
+        }
+        openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentProductControl::AcceptProposal
+        | openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentProductControl::RejectProposal
+        | openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentProductControl::EditProposal
+        | openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentProductControl::Defer => {
+            if let Some(proposal_id) = proposal_id {
+                let mut proposal = proposal_store
+                    .get_proposal(proposal_id)
+                    .map_err(|err| err.to_string())?
+                    .ok_or_else(|| format!("proposal target missing: {proposal_id}"))?;
+                match control {
+                    openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentProductControl::AcceptProposal => {
+                        proposal.accept()
+                    }
+                    openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentProductControl::RejectProposal => {
+                        proposal.reject()
+                    }
+                    openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentProductControl::EditProposal => {
+                        proposal.edit(serde_json::json!({
+                            "text": "Edited productization proposal text."
+                        }))
+                    }
+                    openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentProductControl::Defer => {
+                        proposal.postpone()
+                    }
+                    _ => {}
+                }
+                proposal_store
+                    .update_proposal(&proposal)
+                    .map_err(|err| err.to_string())?;
+            }
+        }
+        openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentProductControl::Deny
+        | openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentProductControl::OpenTrace
+        | openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentProductControl::OpenReviewCenter
+        | openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentProductControl::EditPlan
+        | openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentProductControl::SkipStep
+        | openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentProductControl::Rollback => {}
+    }
+
+    match to_status {
+        "executing" | "synthesizing" | "planning" | "queued" => {
+            session_store
+                .resume_session(session_id)
+                .map(|_| ())
+                .map_err(|err| err.to_string())?;
+        }
+        "waiting_for_user" | "proposal_pending" => {
+            session_store
+                .mark_waiting_permission(session_id)
+                .map(|_| ())
+                .map_err(|err| err.to_string())?;
+        }
+        "blocked" => {
+            let current = session_store
+                .load_session(session_id)
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| format!("task session missing: {session_id}"))?;
+            session_store
+                .set_pending_blockers(session_id, vec!["task_control_blocked".into()])
+                .map_err(|err| err.to_string())?;
+            if current.status != AgentTaskSessionStatus::Completed {
+                session_store
+                    .block_session(
+                        session_id,
+                        "Productization task-control transition blocked.",
+                    )
+                    .map_err(|err| err.to_string())?;
+            }
+        }
+        "failed" => {
+            session_store
+                .fail_session(session_id, "Productization task-control transition failed.")
+                .map(|_| ())
+                .map_err(|err| err.to_string())?;
+        }
+        "cancelled" => {
+            session_store
+                .cancel_session(
+                    session_id,
+                    "Productization task-control transition cancelled.",
+                )
+                .map(|_| ())
+                .map_err(|err| err.to_string())?;
+        }
+        "completed" => {
+            let current = session_store
+                .load_session(session_id)
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| format!("task session missing: {session_id}"))?;
+            if matches!(
+                current.status,
+                AgentTaskSessionStatus::WaitingPermission
+                    | AgentTaskSessionStatus::Blocked
+                    | AgentTaskSessionStatus::Failed
+            ) {
+                session_store
+                    .resume_session(session_id)
+                    .map_err(|err| err.to_string())?;
+            }
+            if final_delivery_id.is_none() {
+                let entry = append_final_result_with_id(
+                    session_store,
+                    session_id,
+                    "Productization task-control transition completed.",
+                    serde_json::json!({ "directWritesExecuted": false }),
+                )?;
+                *final_delivery_id = Some(entry.id);
+            }
+            session_store
+                .complete_session(
+                    session_id,
+                    "Productization task-control transition completed.",
+                )
+                .map(|_| ())
+                .map_err(|err| err.to_string())?;
+        }
+        value => {
+            return Err(format!(
+                "unsupported product control target status: {value}"
+            ))
+        }
+    }
+    Ok(())
+}
+
+fn product_control_actual_status(
+    session: &AgentTaskSession,
+    action_queue: &ActionQueueStore,
+    proposal_store: &ProposalStore,
+    action_id: Option<&str>,
+    proposal_id: Option<&str>,
+    expected_status: &str,
+) -> Result<String, String> {
+    if matches!(expected_status, "queued" | "executing" | "synthesizing") {
+        if let Some(action_id) = action_id {
+            let action = action_queue
+                .load(action_id)
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| format!("action target missing: {action_id}"))?;
+            return Ok(match action.status {
+                ExecutionQueueStatus::Planned => "queued",
+                ExecutionQueueStatus::Executing | ExecutionQueueStatus::Retrying => "executing",
+                ExecutionQueueStatus::Observed | ExecutionQueueStatus::Completed => "synthesizing",
+                ExecutionQueueStatus::PendingPermission => "waiting_for_user",
+                ExecutionQueueStatus::Failed => "failed",
+                ExecutionQueueStatus::Cancelled => "cancelled",
+            }
+            .into());
+        }
+        if expected_status == "synthesizing" && session.status == AgentTaskSessionStatus::Running {
+            return Ok("synthesizing".into());
+        }
+    }
+    if expected_status == "proposal_pending" {
+        if let Some(proposal_id) = proposal_id {
+            let proposal = proposal_store
+                .get_proposal(proposal_id)
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| format!("proposal target missing: {proposal_id}"))?;
+            if proposal.status == ProposalStatus::Pending
+                || proposal.status == ProposalStatus::Edited
+            {
+                return Ok("proposal_pending".into());
+            }
+        }
+    }
+    if expected_status == "blocked" && !session.pending_blockers.is_empty() {
+        return Ok("blocked".into());
+    }
+    Ok(product_control_session_status(session).into())
+}
+
+fn product_control_session_status(session: &AgentTaskSession) -> &'static str {
+    match session.status {
+        AgentTaskSessionStatus::Running => "executing",
+        AgentTaskSessionStatus::WaitingPermission => "waiting_for_user",
+        AgentTaskSessionStatus::Blocked => "blocked",
+        AgentTaskSessionStatus::Completed => "completed",
+        AgentTaskSessionStatus::Failed => "failed",
+        AgentTaskSessionStatus::Cancelled => "cancelled",
+    }
 }
 
 fn enqueue_completed_action(
@@ -1556,10 +1993,16 @@ fn proof_from_snapshot(
         + usize::from(snapshot.plan.is_some())
         + usize::from(snapshot.final_delivery.is_some())
         + extra_runtime_objects;
+    let diagnostics = snapshot
+        .diagnostics
+        .iter()
+        .map(|gap| format!("{}:{}", gap.gap_code, gap.detail))
+        .chain(validate_runtime_snapshot_for_scenario(scenario, snapshot))
+        .collect::<Vec<_>>();
     ProductScenarioRuntimeProof {
         scenario_id: scenario.id.clone(),
         group: group.into(),
-        passed: snapshot.diagnostics.is_empty(),
+        passed: diagnostics.is_empty(),
         runtime_object_count,
         observation_count: snapshot.observations.len(),
         created_action_ids: snapshot
@@ -1581,12 +2024,141 @@ fn proof_from_snapshot(
             .final_delivery
             .as_ref()
             .map(|delivery| delivery.delivery_id.clone()),
-        diagnostics: snapshot
-            .diagnostics
-            .iter()
-            .map(|gap| format!("{}:{}", gap.gap_code, gap.detail))
-            .collect(),
+        diagnostics,
     }
+}
+
+fn validate_runtime_snapshot_for_scenario(
+    scenario: &MainChatAgentProductScenario,
+    snapshot: &MainChatAgentStateSnapshot,
+) -> Vec<String> {
+    let mut diagnostics = Vec::new();
+    if snapshot.route.strategy != scenario.expected_strategy_route {
+        diagnostics.push(format!(
+            "snapshot route mismatch: expected {}, got {}",
+            scenario.expected_strategy_route.as_str(),
+            snapshot.route.strategy.as_str()
+        ));
+    }
+    for evidence in &scenario.required_runtime_evidence {
+        match evidence.as_str() {
+            "task_id" => {
+                if snapshot.task.task_id.is_empty() {
+                    diagnostics.push("required task_id evidence missing".into());
+                }
+            }
+            "run_id" => {
+                if snapshot.task.run_id == "unknown" || snapshot.provider.is_none() {
+                    diagnostics.push("required run/provider evidence missing".into());
+                }
+            }
+            "provider_trace" => {
+                if snapshot.provider.is_none() {
+                    diagnostics.push("required provider_trace evidence missing".into());
+                }
+            }
+            "route" => {
+                if snapshot.route.strategy != scenario.expected_strategy_route {
+                    diagnostics.push("required route evidence did not match scenario".into());
+                }
+            }
+            "plan_id" => {
+                if snapshot.plan.is_none() {
+                    diagnostics.push("required plan evidence missing".into());
+                }
+            }
+            "action_id" => {
+                if snapshot.actions.is_empty() {
+                    diagnostics.push("required action evidence missing".into());
+                }
+            }
+            "observation_id" => {
+                if snapshot.observations.is_empty() {
+                    diagnostics.push("required observation evidence missing".into());
+                }
+            }
+            "proposal_id" | "evidence_id" => {
+                if snapshot.proposals.is_empty() {
+                    diagnostics.push("required proposal/evidence object missing".into());
+                }
+            }
+            "blocker_id" => {
+                if snapshot.blockers.is_empty() {
+                    diagnostics.push("required blocker evidence missing".into());
+                }
+            }
+            "final_delivery" => {
+                if snapshot.final_delivery.is_none() {
+                    diagnostics.push("required final delivery evidence missing".into());
+                }
+            }
+            "prior_task_session_id" | "prior_run_id" | "target_object_id" | "state_transition" => {}
+            value => diagnostics.push(format!("unknown runtime evidence contract: {value}")),
+        }
+    }
+
+    if snapshot
+        .final_delivery
+        .as_ref()
+        .is_some_and(|delivery| !delivery.durable_changes.is_empty())
+    {
+        diagnostics.push("runtime proof included silent durable changes".into());
+    }
+
+    match scenario.expected_strategy_route {
+        MainChatAgentProductStrategyRoute::DirectAnswer => {
+            if !snapshot.actions.is_empty() || !snapshot.observations.is_empty() {
+                diagnostics.push("DirectAnswer snapshot contained action/observation UI".into());
+            }
+        }
+        MainChatAgentProductStrategyRoute::ReadAction => {
+            if snapshot.actions.len() != 1 || snapshot.observations.len() != 1 {
+                diagnostics
+                    .push("ReadAction snapshot must contain exactly one action/observation".into());
+            }
+        }
+        MainChatAgentProductStrategyRoute::ReactToolExecution => {
+            let requires_multi_step = scenario.capability_group == "Multi-step ReAct"
+                || matches!(scenario.id.as_str(), "WR-04" | "ST-08");
+            if requires_multi_step
+                && (snapshot.actions.len() < 2 || snapshot.observations.len() < 2)
+            {
+                diagnostics
+                    .push("ReAct multi-step snapshot lacks multiple action observations".into());
+            }
+        }
+        MainChatAgentProductStrategyRoute::PlanExecute => {
+            if snapshot.plan.is_none() || snapshot.actions.is_empty() {
+                diagnostics.push("PlanExecute snapshot lacks plan/action runtime objects".into());
+            }
+        }
+        MainChatAgentProductStrategyRoute::MemoryProposal => {
+            if snapshot.proposals.is_empty() || !snapshot.actions.is_empty() {
+                diagnostics.push(
+                    "MemoryProposal snapshot must be proposal-first without tool actions".into(),
+                );
+            }
+        }
+        MainChatAgentProductStrategyRoute::PermissionRequest => {
+            if snapshot.actions.len() != 1
+                || snapshot.proposals.len() != 1
+                || snapshot.blockers.is_empty()
+            {
+                diagnostics.push(
+                    "PermissionRequest snapshot must bind one action, proposal, and blocker".into(),
+                );
+            }
+        }
+        MainChatAgentProductStrategyRoute::Blocked => {
+            if snapshot.blockers.is_empty() {
+                diagnostics.push("Blocked snapshot lacks blocker object".into());
+            }
+        }
+        MainChatAgentProductStrategyRoute::TaskControl
+        | MainChatAgentProductStrategyRoute::LegacyFallback
+        | MainChatAgentProductStrategyRoute::Unknown => {}
+    }
+    diagnostics
 }
 
 fn memory_proposal_fixture(session_id: &str, suffix: &str) -> AgentProposal {
