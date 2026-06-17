@@ -49,6 +49,16 @@ function agentState(
         sourceLabel: "main_chat_final_delivery_contract_v1.md",
         preview: "Final delivery separates executed, proposed, blocked, and pending items.",
         citationAvailable: true,
+        readExecution: {
+          kind: "file_system_read",
+          sourceKind: "file",
+          sourceLabel: "main_chat_final_delivery_contract_v1.md",
+          target: "plans/main_chat_final_delivery_contract_v1.md",
+          realReadOnlyExecution: true,
+          fixtureBacked: false,
+          networkReadAttempted: false,
+          directWritesExecuted: false,
+        },
         createdAt: "2026-06-16T00:00:01.000Z",
       },
     ],
@@ -224,5 +234,15 @@ describe("AgentControlPlane", () => {
     expect(screen.getByText("agent_state_action_queue_store_unavailable")).toBeInTheDocument();
     expect(screen.queryByText("Actions")).not.toBeInTheDocument();
     expect(screen.queryByText("Observations")).not.toBeInTheDocument();
+  });
+
+  it("renders real read-only observation evidence without adding action controls", () => {
+    renderPanel(agentState());
+
+    expect(screen.getByText("file_system_read")).toBeInTheDocument();
+    expect(screen.getByText("real read")).toBeInTheDocument();
+    expect(screen.getByText("no writes")).toBeInTheDocument();
+    expect(screen.queryByText("fixture")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /approve|reject|rollback/i })).not.toBeInTheDocument();
   });
 });

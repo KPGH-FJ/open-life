@@ -9,6 +9,26 @@ use crate::main_chat_live_provider_harness::{
 };
 
 #[test]
+fn live_provider_external_eval_uses_only_openlife_live_env_names() {
+    let forbidden_env_name = concat!("OPENAI", "_API_KEY");
+    for (path, source) in [
+        (
+            "src-tauri/src/main_chat_live_provider_tests.rs",
+            include_str!("main_chat_live_provider_tests.rs"),
+        ),
+        (
+            "src-tauri/src/main_chat_final_acceptance_tests.rs",
+            include_str!("main_chat_final_acceptance_tests.rs"),
+        ),
+    ] {
+        assert!(
+            !source.contains(forbidden_env_name),
+            "external live-provider acceptance must not fall back to {forbidden_env_name} in {path}"
+        );
+    }
+}
+
+#[test]
 fn main_chat_live_provider_command_surface_tests_are_not_concentrated_in_lib_rs() {
     let lib_rs_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
     let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
@@ -445,14 +465,10 @@ async fn main_chat_live_provider_eval_harness_invokes_external_direct_answer_whe
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     {
         let mut config = state.config.lock().await;
-        config.llm.provider =
-            std::env::var("OPENLIFE_LIVE_EVAL_PROVIDER").unwrap_or_else(|_| "openai".into());
-        config.llm.openai_base = std::env::var("OPENLIFE_LIVE_EVAL_BASE")
-            .unwrap_or_else(|_| "https://api.openai.com/v1".into());
-        config.llm.chat_model =
-            std::env::var("OPENLIFE_LIVE_EVAL_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into());
-        config.llm.openai_key = std::env::var("OPENLIFE_LIVE_EVAL_API_KEY")
-            .unwrap_or_else(|_| std::env::var("OPENAI_API_KEY").unwrap_or_default());
+        config.llm.provider = std::env::var("OPENLIFE_LIVE_EVAL_PROVIDER").unwrap_or_default();
+        config.llm.openai_base = std::env::var("OPENLIFE_LIVE_EVAL_BASE").unwrap_or_default();
+        config.llm.chat_model = std::env::var("OPENLIFE_LIVE_EVAL_MODEL").unwrap_or_default();
+        config.llm.openai_key = std::env::var("OPENLIFE_LIVE_EVAL_API_KEY").unwrap_or_default();
         config.system.network_policy.enabled = true;
     }
     {

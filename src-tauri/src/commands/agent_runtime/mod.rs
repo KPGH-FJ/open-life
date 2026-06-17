@@ -1898,6 +1898,7 @@ pub(crate) async fn run_main_chat_agent_execution_v1_final_acceptance_gate_with_
         "liveProviderAttempted": explicit_live_eval_requested,
         "liveProviderReportCount": final_gate.live_provider_report_count,
         "liveProviderReadyCount": final_gate.live_provider_ready_count,
+        "liveProviderScenarioReports": final_gate.live_provider_scenario_reports.clone(),
         "liveProviderPreflightReady": live_provider_preflight.ready,
         "liveProviderPreflightStatus": live_provider_preflight.status,
         "liveProviderPreflightProvider": live_provider_preflight.provider,

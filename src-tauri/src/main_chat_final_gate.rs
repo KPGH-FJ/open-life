@@ -330,6 +330,37 @@ pub(crate) fn completed_main_chat_live_provider_eval_harness_report(
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MainChatLiveProviderScenarioReport {
+    pub(crate) scenario: String,
+    pub(crate) ready: bool,
+    pub(crate) credited: bool,
+    pub(crate) status: String,
+    pub(crate) provider_endpoint_kind: String,
+    pub(crate) blockers: Vec<String>,
+    pub(crate) live_provider_invocation_allowed: bool,
+    pub(crate) main_chat_invoked: bool,
+    pub(crate) model_invoked: bool,
+    pub(crate) direct_writes_executed: bool,
+    pub(crate) legacy_fallback_used: bool,
+    pub(crate) agent_loop_succeeded: bool,
+    pub(crate) single_step_fallback_used: bool,
+    pub(crate) agent_loop_action_status: Option<String>,
+    pub(crate) mcp_read_target_resolved: bool,
+    pub(crate) tool_permission_proposal_created: bool,
+    pub(crate) tool_selection_candidate_count: usize,
+    pub(crate) model_selected_allowed_tool: bool,
+    pub(crate) model_selected_execution_policy_validated: bool,
+    pub(crate) model_selected_execution_allowed: bool,
+    pub(crate) model_selected_governed_arguments: bool,
+    pub(crate) model_selected_candidate_id: Option<String>,
+    pub(crate) model_selected_candidate_target: Option<String>,
+    pub(crate) run_id_present: bool,
+    pub(crate) task_session_id_present: bool,
+    pub(crate) response_preview_present: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MainChatAgentExecutionV1FinalGateReport {
     pub(crate) runtime_total_cases: usize,
     pub(crate) command_surface_total_cases: usize,
@@ -340,6 +371,7 @@ pub struct MainChatAgentExecutionV1FinalGateReport {
     pub(crate) live_provider_model_invoked_count: usize,
     pub(crate) live_provider_direct_writes_executed: bool,
     pub(crate) live_provider_blockers: Vec<String>,
+    pub(crate) live_provider_scenario_reports: Vec<MainChatLiveProviderScenarioReport>,
     pub(crate) acceptance: MainChatAgentExecutionV1AcceptanceReport,
 }
 
@@ -370,6 +402,7 @@ pub(crate) fn build_main_chat_agent_execution_v1_final_gate_report(
     let live_provider_direct_writes_executed = live_reports
         .iter()
         .any(|report| report.direct_writes_executed);
+    let live_provider_scenario_reports = main_chat_live_provider_scenario_reports(&live_reports);
     let mut live_provider_blockers = Vec::new();
     for report in &live_reports {
         for blocker in main_chat_live_provider_report_blockers(report) {
@@ -423,8 +456,73 @@ pub(crate) fn build_main_chat_agent_execution_v1_final_gate_report(
         live_provider_model_invoked_count,
         live_provider_direct_writes_executed,
         live_provider_blockers,
+        live_provider_scenario_reports,
         acceptance,
     }
+}
+
+fn main_chat_live_provider_scenario_reports(
+    reports: &[MainChatLiveProviderEvalHarnessReport],
+) -> Vec<MainChatLiveProviderScenarioReport> {
+    reports
+        .iter()
+        .map(|report| MainChatLiveProviderScenarioReport {
+            scenario: report.scenario.as_str().to_string(),
+            ready: report.ready,
+            credited: live_provider_report_has_creditable_scenario_evidence(report),
+            status: live_provider_summary_label(&report.status)
+                .unwrap_or_else(|| "contract_unsafe_status".into()),
+            provider_endpoint_kind: live_provider_summary_label(&report.provider_endpoint_kind)
+                .unwrap_or_else(|| "contract_unsafe_endpoint_kind".into()),
+            blockers: main_chat_live_provider_report_blockers(report)
+                .into_iter()
+                .map(live_provider_summary_blocker_label)
+                .collect(),
+            live_provider_invocation_allowed: report.live_provider_invocation_allowed,
+            main_chat_invoked: report.main_chat_invoked,
+            model_invoked: report.model_invoked,
+            direct_writes_executed: report.direct_writes_executed,
+            legacy_fallback_used: report.legacy_fallback_used,
+            agent_loop_succeeded: report.agent_loop_succeeded,
+            single_step_fallback_used: report.single_step_fallback_used,
+            agent_loop_action_status: report
+                .agent_loop_action_status
+                .as_deref()
+                .and_then(live_provider_summary_label),
+            mcp_read_target_resolved: report.mcp_read_target_resolved,
+            tool_permission_proposal_created: report.tool_permission_proposal_created,
+            tool_selection_candidate_count: report.tool_selection_candidate_count,
+            model_selected_allowed_tool: report.model_selected_allowed_tool,
+            model_selected_execution_policy_validated: report
+                .model_selected_execution_policy_validated,
+            model_selected_execution_allowed: report.model_selected_execution_allowed,
+            model_selected_governed_arguments: report.model_selected_governed_arguments,
+            model_selected_candidate_id: report
+                .model_selected_candidate_id
+                .as_deref()
+                .and_then(live_provider_summary_label),
+            model_selected_candidate_target: report
+                .model_selected_candidate_target
+                .as_deref()
+                .and_then(live_provider_summary_label),
+            run_id_present: report.run_id.is_some(),
+            task_session_id_present: report.task_session_id.is_some(),
+            response_preview_present: report.response_preview.is_some(),
+        })
+        .collect()
+}
+
+fn live_provider_summary_label(value: &str) -> Option<String> {
+    live_provider_contract_safe_label(value).then(|| value.to_string())
+}
+
+fn live_provider_summary_blocker_label(blocker: String) -> String {
+    if live_provider_contract_safe_label(&blocker) {
+        return blocker;
+    }
+    let (bytes, hash) = openlife_core::agent::react_beta::metadata_safe_text_digest(&blocker);
+    let hash = hash.strip_prefix("sha256:").unwrap_or(hash.as_str());
+    format!("unsafe_blocker_bytes_{bytes}_sha256_{hash}")
 }
 
 pub(crate) fn command_surface_evidence_with_live_provider(

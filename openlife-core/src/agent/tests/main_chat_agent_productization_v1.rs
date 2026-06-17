@@ -229,7 +229,19 @@ fn main_chat_agent_productization_v1_assembles_snapshot_and_ordered_events_from_
                 "actionId": completed_action.id,
                 "sourceKind": "file",
                 "sourceLabel": "plans/main_chat_agent_productization_v1_goal_spec.md",
-                "preview": "Runtime payload/snapshot/event/evidence-gap gate is required."
+                "preview": "Runtime payload/snapshot/event/evidence-gap gate is required.",
+                "structuredResult": {
+                    "readExecutionEvidence": {
+                        "kind": "file_system_read",
+                        "sourceKind": "file",
+                        "sourceLabel": "plans/main_chat_agent_productization_v1_goal_spec.md",
+                        "target": "plans/main_chat_agent_productization_v1_goal_spec.md",
+                        "realReadOnlyExecution": true,
+                        "fixtureBacked": false,
+                        "networkReadAttempted": false,
+                        "directWritesExecuted": false
+                    }
+                }
             }),
         })
         .expect("observation transcript");
@@ -287,6 +299,20 @@ fn main_chat_agent_productization_v1_assembles_snapshot_and_ordered_events_from_
     );
     assert_eq!(snapshot.actions.len(), 1);
     assert_eq!(snapshot.observations.len(), 1);
+    let snapshot_json = serde_json::to_value(&snapshot).expect("serialize snapshot");
+    assert_eq!(
+        snapshot_json["observations"][0]["readExecution"]["kind"],
+        "file_system_read",
+        "agent_state observations must preserve real read-only execution evidence for the visible control plane"
+    );
+    assert_eq!(
+        snapshot_json["observations"][0]["readExecution"]["realReadOnlyExecution"],
+        true
+    );
+    assert_eq!(
+        snapshot_json["observations"][0]["readExecution"]["fixtureBacked"],
+        false
+    );
     assert_eq!(snapshot.proposals.len(), 1);
     assert!(
         snapshot.final_delivery.is_some(),

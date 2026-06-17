@@ -745,6 +745,48 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                 .as_ref()
                 .ok_or_else(|| "missing file.read observation metadata".to_string())?;
             if metadata
+                .get("sourceKind")
+                .and_then(serde_json::Value::as_str)
+                != Some("file")
+                || metadata
+                    .get("sourceLabel")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(str::is_empty)
+                || metadata
+                    .get("preview")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(str::is_empty)
+            {
+                return Err(
+                    "file read observation must expose source metadata for the control plane"
+                        .into(),
+                );
+            }
+            let read_evidence = metadata
+                .get("structuredResult")
+                .and_then(|value| value.get("readExecutionEvidence"))
+                .ok_or_else(|| {
+                    "file read observation missing read execution evidence".to_string()
+                })?;
+            if read_evidence
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                != Some("file_system_read")
+                || read_evidence
+                    .get("realReadOnlyExecution")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
+                || read_evidence
+                    .get("fixtureBacked")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(false)
+            {
+                return Err(
+                    "file read observation did not prove real read-only file execution".into(),
+                );
+            }
+            assert_response_agent_state_read_execution(response, "file_system_read", true, false)?;
+            if metadata
                 .get("agentLoopSucceeded")
                 .and_then(serde_json::Value::as_bool)
                 != Some(true)
@@ -1011,6 +1053,51 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                 .as_ref()
                 .ok_or_else(|| "missing web AgentLoop success metadata".to_string())?;
             if metadata
+                .get("sourceKind")
+                .and_then(serde_json::Value::as_str)
+                != Some("web")
+                || metadata
+                    .get("sourceLabel")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("web.search")
+                || metadata
+                    .get("preview")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(str::is_empty)
+            {
+                return Err(
+                    "web AgentLoop observation must expose source metadata for the control plane"
+                        .into(),
+                );
+            }
+            let read_evidence = metadata
+                .get("structuredResult")
+                .and_then(|value| value.get("readExecutionEvidence"))
+                .ok_or_else(|| {
+                    "web AgentLoop observation missing read execution evidence".to_string()
+                })?;
+            if read_evidence
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                != Some("web_search_fixture")
+                || read_evidence
+                    .get("realReadOnlyExecution")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(false)
+                || read_evidence
+                    .get("fixtureBacked")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
+            {
+                return Err("fixture-backed web AgentLoop success must not be counted as real web read evidence".into());
+            }
+            assert_response_agent_state_read_execution(
+                response,
+                "web_search_fixture",
+                false,
+                true,
+            )?;
+            if metadata
                 .get("agentLoopSucceeded")
                 .and_then(serde_json::Value::as_bool)
                 != Some(true)
@@ -1059,10 +1146,10 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
             }
         }
         MainChatCommandSurfaceEvalScenario::RegisteredMcpReadSuccess => {
-            assert_mcp_read_success_action(actions, false)?;
+            assert_mcp_read_success_action(actions, response, false)?;
         }
         MainChatCommandSurfaceEvalScenario::RegisteredMcpAgentLoopSuccess => {
-            assert_mcp_read_success_action(actions, true)?;
+            assert_mcp_read_success_action(actions, response, true)?;
             let completed_entry = transcript
                 .iter()
                 .find(|entry| entry.summary.contains("Governed ReAct AgentLoop completed"))
@@ -1137,6 +1224,7 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
 
 fn assert_mcp_read_success_action(
     actions: &[openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction],
+    response: Option<&serde_json::Value>,
     require_agent_loop: bool,
 ) -> Result<(), String> {
     let mcp_action = actions
@@ -1152,6 +1240,46 @@ fn assert_mcp_read_success_action(
         .observation_metadata
         .as_ref()
         .ok_or_else(|| "missing MCP observation metadata".to_string())?;
+    if metadata
+        .get("sourceKind")
+        .and_then(serde_json::Value::as_str)
+        != Some("mcp")
+        || metadata
+            .get("sourceLabel")
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(str::is_empty)
+        || metadata
+            .get("preview")
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(str::is_empty)
+    {
+        return Err(
+            "registered MCP read observation must expose source metadata for the control plane"
+                .into(),
+        );
+    }
+    let read_evidence = metadata
+        .get("structuredResult")
+        .and_then(|value| value.get("readExecutionEvidence"))
+        .ok_or_else(|| {
+            "registered MCP read observation missing read execution evidence".to_string()
+        })?;
+    if read_evidence
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        != Some("registered_mcp_read")
+        || read_evidence
+            .get("realReadOnlyExecution")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        || read_evidence
+            .get("fixtureBacked")
+            .and_then(serde_json::Value::as_bool)
+            != Some(false)
+    {
+        return Err("registered MCP read observation did not prove real MCP read execution".into());
+    }
+    assert_response_agent_state_read_execution(response, "registered_mcp_read", true, false)?;
     if metadata
         .get("mcpReadTargetResolved")
         .and_then(serde_json::Value::as_bool)
@@ -1183,6 +1311,52 @@ fn assert_mcp_read_success_action(
                 != Some("builtin_echo"))
     {
         return Err("MCP AgentLoop observation metadata incomplete".into());
+    }
+    Ok(())
+}
+
+fn assert_response_agent_state_read_execution(
+    response: Option<&serde_json::Value>,
+    expected_kind: &str,
+    expected_real_read: bool,
+    expected_fixture: bool,
+) -> Result<(), String> {
+    let response = response.ok_or_else(|| "missing command response payload".to_string())?;
+    let observations = response
+        .get("agent_state")
+        .and_then(|value| value.get("observations"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "command response missing agent_state observations".to_string())?;
+    let read_execution = observations
+        .iter()
+        .filter_map(|observation| observation.get("readExecution"))
+        .find(|read_execution| {
+            read_execution
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                == Some(expected_kind)
+        })
+        .ok_or_else(|| {
+            format!(
+                "agent_state observations missing readExecution kind {expected_kind}: {observations:?}"
+            )
+        })?;
+    if read_execution
+        .get("realReadOnlyExecution")
+        .and_then(serde_json::Value::as_bool)
+        != Some(expected_real_read)
+        || read_execution
+            .get("fixtureBacked")
+            .and_then(serde_json::Value::as_bool)
+            != Some(expected_fixture)
+        || read_execution
+            .get("directWritesExecuted")
+            .and_then(serde_json::Value::as_bool)
+            != Some(false)
+    {
+        return Err(format!(
+            "agent_state readExecution evidence mismatch for {expected_kind}: {read_execution:?}"
+        ));
     }
     Ok(())
 }

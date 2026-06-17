@@ -579,6 +579,16 @@ export interface MainChatAgentStateSnapshot {
     sourceLabel: string;
     preview: string;
     citationAvailable: boolean;
+    readExecution?: {
+      kind: string;
+      sourceKind: string;
+      sourceLabel: string;
+      target: string;
+      realReadOnlyExecution: boolean;
+      fixtureBacked: boolean;
+      networkReadAttempted: boolean;
+      directWritesExecuted: boolean;
+    };
     createdAt: string;
   }>;
   blockers: Array<{

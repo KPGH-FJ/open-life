@@ -1090,7 +1090,22 @@ pub struct ObservationEvidence {
     pub source_label: String,
     pub preview: String,
     pub citation_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_execution: Option<ReadExecutionEvidence>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadExecutionEvidence {
+    pub kind: String,
+    pub source_kind: String,
+    pub source_label: String,
+    pub target: String,
+    pub real_read_only_execution: bool,
+    pub fixture_backed: bool,
+    pub network_read_attempted: bool,
+    pub direct_writes_executed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1757,6 +1772,11 @@ fn observations_from_evidence(
             .get("preview")
             .and_then(Value::as_str)
             .unwrap_or(&entry.summary);
+        let read_execution = entry
+            .metadata
+            .get("structuredResult")
+            .and_then(|structured| structured.get("readExecutionEvidence"))
+            .and_then(read_execution_from_metadata);
         observations.push(ObservationEvidence {
             observation_id: entry.id.clone(),
             action_id,
@@ -1764,10 +1784,35 @@ fn observations_from_evidence(
             source_label: source_label.into(),
             preview: bounded(preview, 240),
             citation_available: !source_label.is_empty(),
+            read_execution,
             created_at: entry.created_at,
         });
     }
     observations
+}
+
+fn read_execution_from_metadata(value: &Value) -> Option<ReadExecutionEvidence> {
+    let object = value.as_object()?;
+    let kind = object.get("kind").and_then(Value::as_str)?;
+    let source_kind = object.get("sourceKind").and_then(Value::as_str)?;
+    let source_label = object.get("sourceLabel").and_then(Value::as_str)?;
+    let target = object.get("target").and_then(Value::as_str)?;
+    Some(ReadExecutionEvidence {
+        kind: bounded(kind, 80),
+        source_kind: bounded(source_kind, 80),
+        source_label: bounded(source_label, 180),
+        target: bounded(target, 180),
+        real_read_only_execution: object
+            .get("realReadOnlyExecution")
+            .and_then(Value::as_bool)?,
+        fixture_backed: object.get("fixtureBacked").and_then(Value::as_bool)?,
+        network_read_attempted: object
+            .get("networkReadAttempted")
+            .and_then(Value::as_bool)?,
+        direct_writes_executed: object
+            .get("directWritesExecuted")
+            .and_then(Value::as_bool)?,
+    })
 }
 
 fn blockers_from_evidence(

@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use crate::main_chat_generation_support::preview_text;
-use crate::main_chat_react_runtime::{blocked_main_chat_observation, MainChatObservation};
+use crate::main_chat_react_runtime::{
+    attach_main_chat_read_observation_metadata, blocked_main_chat_observation, MainChatObservation,
+};
 use crate::main_chat_react_tool_selection::{
     resolve_main_chat_mcp_read_target, MainChatReactActionPlan,
 };
@@ -210,6 +212,16 @@ pub(crate) async fn execute_main_chat_react_action_with_executor(
             && openlife_core::agent::main_chat_agent_v1::main_chat_action_type_supports_automatic_retry(&plan.queue_action_type),
         "directWritesExecuted": false,
     });
+    attach_main_chat_read_observation_metadata(
+        &mut metadata,
+        &plan.queue_action_type,
+        &mcp_read_resolution.target,
+        &mcp_read_resolution.arguments,
+        &output_preview,
+        result.observation.structured_result.clone(),
+        web_search_fixture_output.is_some() && plan.queue_action_type == "web.search",
+        executor_status == openlife_core::agent::ActionExecutionStatus::Succeeded,
+    );
     if let Some(ref proposal_id) = proposal_id {
         if let Some(object) = metadata.as_object_mut() {
             object.insert("proposalId".into(), serde_json::json!(proposal_id));

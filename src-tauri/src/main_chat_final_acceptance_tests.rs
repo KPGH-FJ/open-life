@@ -200,14 +200,10 @@ pub(crate) fn main_chat_agent_execution_v1_final_gate_report_from_parts(
 pub(crate) async fn configure_live_provider_eval_state(state: &Arc<AppState>) {
     {
         let mut config = state.config.lock().await;
-        config.llm.provider =
-            std::env::var("OPENLIFE_LIVE_EVAL_PROVIDER").unwrap_or_else(|_| "openai".into());
-        config.llm.openai_base = std::env::var("OPENLIFE_LIVE_EVAL_BASE")
-            .unwrap_or_else(|_| "https://api.openai.com/v1".into());
-        config.llm.chat_model =
-            std::env::var("OPENLIFE_LIVE_EVAL_MODEL").unwrap_or_else(|_| "gpt-4o-mini".into());
-        config.llm.openai_key = std::env::var("OPENLIFE_LIVE_EVAL_API_KEY")
-            .unwrap_or_else(|_| std::env::var("OPENAI_API_KEY").unwrap_or_default());
+        config.llm.provider = std::env::var("OPENLIFE_LIVE_EVAL_PROVIDER").unwrap_or_default();
+        config.llm.openai_base = std::env::var("OPENLIFE_LIVE_EVAL_BASE").unwrap_or_default();
+        config.llm.chat_model = std::env::var("OPENLIFE_LIVE_EVAL_MODEL").unwrap_or_default();
+        config.llm.openai_key = std::env::var("OPENLIFE_LIVE_EVAL_API_KEY").unwrap_or_default();
         config.system.network_policy.enabled = true;
     }
     {
@@ -615,6 +611,29 @@ fn main_chat_final_acceptance_gate_report_preserves_live_provider_failure_audit(
     assert!(report
         .live_provider_blockers
         .contains(&"network_disabled".to_string()));
+    assert_eq!(report.live_provider_scenario_reports.len(), 2);
+    assert!(report
+        .live_provider_scenario_reports
+        .iter()
+        .any(|scenario| {
+            scenario.scenario == "direct-answer"
+                && scenario.status == "blocked"
+                && scenario
+                    .blockers
+                    .contains(&"provider_api_key_missing".to_string())
+                && !scenario.main_chat_invoked
+                && !scenario.model_invoked
+        }));
+    assert!(report
+        .live_provider_scenario_reports
+        .iter()
+        .any(|scenario| {
+            scenario.scenario == "direct-answer"
+                && scenario.status == "blocked"
+                && scenario.blockers.contains(&"network_disabled".to_string())
+                && !scenario.main_chat_invoked
+                && !scenario.model_invoked
+        }));
     assert!(!report.acceptance.ready);
 }
 
@@ -824,25 +843,26 @@ async fn main_chat_final_acceptance_gate_runner_accepts_external_live_provider_w
         MainChatLiveProviderEvalConfigMode::FromEnvironment,
     )
     .await;
+    let live_audit = serde_json::to_string_pretty(&serde_json::json!({
+        "liveProviderBlockers": report.live_provider_blockers,
+        "liveProviderScenarioReports": report.live_provider_scenario_reports,
+        "acceptanceBlockers": report.acceptance.blockers,
+    }))
+    .unwrap_or_else(|error| format!("serialize live audit failed: {error}"));
 
-    assert_eq!(report.live_provider_report_count, 4);
-    assert_eq!(report.live_provider_ready_count, 4);
-    assert_eq!(report.live_provider_main_chat_invoked_count, 4);
-    assert_eq!(report.live_provider_model_invoked_count, 4);
-    assert!(!report.live_provider_direct_writes_executed);
-    assert!(
-        report.live_provider_blockers.is_empty(),
-        "live provider blockers: {:?}",
-        report.live_provider_blockers
+    assert_eq!(report.live_provider_report_count, 4, "{live_audit}");
+    assert_eq!(report.live_provider_ready_count, 4, "{live_audit}");
+    assert_eq!(
+        report.live_provider_main_chat_invoked_count, 4,
+        "{live_audit}"
     );
-    assert!(
-        report.acceptance.ready,
-        "final acceptance blockers: {:?}",
-        report.acceptance.blockers
-    );
-    assert!(report.acceptance.live_provider_gate_ready);
-    assert!(report.acceptance.command_surface_gate_ready);
-    assert!(report.acceptance.runtime_gate_ready);
+    assert_eq!(report.live_provider_model_invoked_count, 4, "{live_audit}");
+    assert!(!report.live_provider_direct_writes_executed, "{live_audit}");
+    assert!(report.live_provider_blockers.is_empty(), "{live_audit}");
+    assert!(report.acceptance.ready, "{live_audit}");
+    assert!(report.acceptance.live_provider_gate_ready, "{live_audit}");
+    assert!(report.acceptance.command_surface_gate_ready, "{live_audit}");
+    assert!(report.acceptance.runtime_gate_ready, "{live_audit}");
 }
 
 #[test]

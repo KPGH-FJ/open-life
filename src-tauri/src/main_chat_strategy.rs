@@ -20,8 +20,9 @@ use crate::main_chat_proposal_support::{
 };
 use crate::main_chat_react_execution::execute_main_chat_react_action_with_executor;
 use crate::main_chat_react_runtime::{
-    main_chat_permission_blocker_reason, synthesize_main_chat_react_follow_up,
-    tool_call_from_action, try_run_main_chat_react_agent_loop,
+    bind_main_chat_observation_metadata_to_queue_action, main_chat_permission_blocker_reason,
+    synthesize_main_chat_react_follow_up, tool_call_from_action,
+    try_run_main_chat_react_agent_loop,
 };
 use crate::main_chat_react_tool_selection::build_main_chat_react_action_plan;
 use crate::main_chat_runtime_support::{
@@ -225,6 +226,11 @@ pub(crate) async fn try_run_main_chat_agent_strategy(
                 )
                 .await?;
                 execution_transcript.extend(agent_loop_attempt.transcript_entries);
+                let mut agent_loop_metadata = agent_loop_attempt.metadata.clone();
+                bind_main_chat_observation_metadata_to_queue_action(
+                    &mut agent_loop_metadata,
+                    &queued.id,
+                );
                 if let Some(queue_status) = agent_loop_attempt.queue_status {
                     match queue_status {
                         ExecutionQueueStatus::Completed => {
@@ -232,7 +238,7 @@ pub(crate) async fn try_run_main_chat_agent_strategy(
                                 state,
                                 &queued.id,
                                 ExecutionQueueStatus::Observed,
-                                Some(agent_loop_attempt.metadata.clone()),
+                                Some(agent_loop_metadata.clone()),
                             )
                             .await?;
                             transition_main_chat_action(
@@ -257,7 +263,7 @@ pub(crate) async fn try_run_main_chat_agent_strategy(
                                     task_session_id,
                                     &action_plan,
                                     Some(&permission_blocker),
-                                    agent_loop_attempt.metadata.clone(),
+                                    agent_loop_metadata.clone(),
                                 )
                                 .await?;
                             execution_transcript.extend(permission_transcript);
@@ -271,8 +277,7 @@ pub(crate) async fn try_run_main_chat_agent_strategy(
                             pending_blockers.push(permission_blocker);
                         }
                         ExecutionQueueStatus::Failed => {
-                            if agent_loop_attempt
-                                .metadata
+                            if agent_loop_metadata
                                 .get("agentLoopActionStatus")
                                 .and_then(serde_json::Value::as_str)
                                 == Some("blocked")
@@ -288,7 +293,7 @@ pub(crate) async fn try_run_main_chat_agent_strategy(
                                 state,
                                 &queued.id,
                                 &blocker_reason,
-                                agent_loop_attempt.metadata.clone(),
+                                agent_loop_metadata.clone(),
                             )
                             .await?;
                         }
@@ -301,10 +306,22 @@ pub(crate) async fn try_run_main_chat_agent_strategy(
                                 state,
                                 &queued.id,
                                 "agent_loop_action_incomplete",
-                                agent_loop_attempt.metadata.clone(),
+                                agent_loop_metadata.clone(),
                             )
                             .await?;
                         }
+                    }
+                    if agent_loop_metadata.get("sourceKind").is_some() {
+                        execution_transcript.extend(
+                            append_main_chat_agent_transcript(
+                                state,
+                                Some(task_session_id),
+                                ExecutionTranscriptEntryKind::Observation,
+                                "Governed ReAct AgentLoop observation recorded for the queued action.",
+                                agent_loop_metadata.clone(),
+                            )
+                            .await,
+                        );
                     }
                     if let Some(model_route) = agent_loop_attempt.model_route {
                         model_route_override = Some(model_route);
@@ -326,6 +343,10 @@ pub(crate) async fn try_run_main_chat_agent_strategy(
                     {
                         Ok(observation) => {
                             let mut observation_metadata = observation.metadata.clone();
+                            bind_main_chat_observation_metadata_to_queue_action(
+                                &mut observation_metadata,
+                                &queued.id,
+                            );
                             if observation.executor_status
                                 == openlife_core::agent::ActionExecutionStatus::Succeeded
                             {

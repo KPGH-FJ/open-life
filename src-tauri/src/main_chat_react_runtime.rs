@@ -45,6 +45,91 @@ pub(crate) struct MainChatReactAgentLoopAttempt {
     pub(crate) blocker_reason: Option<String>,
 }
 
+pub(crate) fn attach_main_chat_read_observation_metadata(
+    metadata: &mut serde_json::Value,
+    queue_action_type: &str,
+    execution_target: &str,
+    arguments: &serde_json::Value,
+    output_preview: &str,
+    structured_result: Option<serde_json::Value>,
+    fixture_backed: bool,
+    succeeded: bool,
+) {
+    let source_kind = match queue_action_type {
+        "file.read" => "file",
+        "web.search" | "web.fetch" => "web",
+        "mcp.read_only" => "mcp",
+        "memory.search" => "memory",
+        "session.search" => "session",
+        _ => "tool",
+    };
+    let source_label = match queue_action_type {
+        "file.read" => arguments
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(execution_target),
+        "mcp.read_only" => execution_target,
+        _ => execution_target,
+    };
+    let evidence_kind = match queue_action_type {
+        "file.read" => "file_system_read",
+        "web.search" if fixture_backed => "web_search_fixture",
+        "web.search" => "web_search_network",
+        "web.fetch" => "web_fetch_network",
+        "mcp.read_only" => "registered_mcp_read",
+        "memory.search" => "memory_read",
+        "session.search" => "session_read",
+        _ => "governed_read",
+    };
+    let network_read_attempted =
+        matches!(queue_action_type, "web.search" | "web.fetch") && !fixture_backed;
+    let real_read_only_execution = succeeded && !fixture_backed;
+    let preview = if output_preview.trim().is_empty() {
+        format!("{source_kind} read completed from {source_label}")
+    } else {
+        preview_text(output_preview, 500)
+    };
+    let read_evidence = serde_json::json!({
+        "kind": evidence_kind,
+        "sourceKind": source_kind,
+        "sourceLabel": source_label,
+        "target": execution_target,
+        "realReadOnlyExecution": real_read_only_execution,
+        "fixtureBacked": fixture_backed,
+        "networkReadAttempted": network_read_attempted,
+        "directWritesExecuted": false,
+    });
+
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert("sourceKind".into(), serde_json::json!(source_kind));
+        object.insert("sourceLabel".into(), serde_json::json!(source_label));
+        object.insert("preview".into(), serde_json::json!(preview));
+        let mut structured = structured_result.unwrap_or_else(|| serde_json::json!({}));
+        if let Some(structured_object) = structured.as_object_mut() {
+            structured_object.insert("readExecutionEvidence".into(), read_evidence);
+            structured_object.insert("directWritesExecuted".into(), serde_json::json!(false));
+        } else {
+            structured = serde_json::json!({
+                "readExecutionEvidence": read_evidence,
+                "directWritesExecuted": false,
+            });
+        }
+        object.insert("structuredResult".into(), structured);
+    }
+}
+
+pub(crate) fn bind_main_chat_observation_metadata_to_queue_action(
+    metadata: &mut serde_json::Value,
+    queued_action_id: &str,
+) {
+    if let Some(object) = metadata.as_object_mut() {
+        if let Some(executor_action_id) = object.get("actionId").cloned() {
+            object.insert("executorActionId".into(), executor_action_id);
+        }
+        object.insert("actionId".into(), serde_json::json!(queued_action_id));
+    }
+}
+
 fn attach_tool_selection_ranking_metadata(
     metadata: &mut serde_json::Value,
     ranking: &MainChatReactToolSelectionRanking,
@@ -742,6 +827,22 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                     );
                 }
             }
+            let observed_output_preview = observed_observation
+                .map(|observation| observation.content.as_str())
+                .unwrap_or(&result.final_response);
+            let observed_structured_result =
+                observed_observation.and_then(|observation| observation.structured_result.clone());
+            attach_main_chat_read_observation_metadata(
+                &mut metadata,
+                &agent_loop_plan.queue_action_type,
+                &selected_tool_candidate.target,
+                &selected_tool_candidate.arguments,
+                observed_output_preview,
+                observed_structured_result,
+                web_search_fixture_output.is_some()
+                    && agent_loop_plan.queue_action_type == "web.search",
+                observed_action_status == "succeeded",
+            );
             transcript_entries.extend(
                 append_main_chat_agent_transcript(
                     state,

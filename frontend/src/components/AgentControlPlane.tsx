@@ -89,6 +89,19 @@ function secondaryText(value: unknown, keys: string[]): string | null {
   return parts.length ? parts.join(" · ") : null;
 }
 
+function readExecutionBadges(
+  readExecution?: MainChatAgentStateSnapshot["observations"][number]["readExecution"]
+) {
+  if (!readExecution) return [];
+  return [
+    readExecution.kind,
+    readExecution.realReadOnlyExecution ? "real read" : null,
+    readExecution.fixtureBacked ? "fixture" : null,
+    readExecution.networkReadAttempted ? "network attempted" : null,
+    readExecution.directWritesExecuted ? "writes recorded" : "no writes",
+  ].filter((badge): badge is string => Boolean(badge));
+}
+
 function controlList(controls: string[], keyPrefix: string, reviewState?: unknown) {
   const unique = Array.from(new Set(controls)).filter(control => control === "open_review_center");
   if (unique.length === 0) return null;
@@ -301,6 +314,14 @@ export default function AgentControlPlane({
                   <span className="font-semibold text-stone-950">
                     {observation.sourceKind}: {observation.sourceLabel}
                   </span>
+                  {readExecutionBadges(observation.readExecution).map(badge => (
+                    <span
+                      key={`${observation.observationId}-${badge}`}
+                      className="inline-flex h-5 items-center rounded-md border border-stone-200 bg-stone-50 px-1.5 text-stone-600"
+                    >
+                      {badge}
+                    </span>
+                  ))}
                   {observation.citationAvailable && (
                     <span className="inline-flex h-5 items-center rounded-md border border-stone-200 bg-stone-50 px-1.5 text-stone-600">
                       citation
