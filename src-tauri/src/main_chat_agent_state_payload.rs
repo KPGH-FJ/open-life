@@ -303,6 +303,7 @@ async fn enrich_plan_evidence_from_plan_execute_session(
                 controls: step_controls(&plan_session, step.status),
             })
             .collect();
+        plan.review_summary = plan_session.review_summary.clone();
     }
 }
 
@@ -346,6 +347,7 @@ fn plan_step_status_label(status: PlanStepStatus) -> &'static str {
         PlanStepStatus::RequiresProposal => "requires_proposal",
         PlanStepStatus::RequiresConfirmation => "requires_confirmation",
         PlanStepStatus::Executed => "executed",
+        PlanStepStatus::Cancelled => "cancelled",
     }
 }
 

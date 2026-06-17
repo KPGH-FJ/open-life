@@ -1,9 +1,11 @@
 use crate::commands::agent_runtime::{
-    create_plan_execute_session_with_state, execute_plan_execute_step_with_state,
-    finalize_plan_execute_session_with_state, skip_plan_execute_step_with_state,
-    update_plan_execute_session_draft_with_state, CreatePlanExecuteSessionInput,
-    ExecutePlanExecuteStepInput, FinalizePlanExecuteSessionInput, PlanExecuteStepEditInput,
-    SkipPlanExecuteStepInput, UpdatePlanExecuteSessionDraftInput,
+    cancel_plan_execute_session_with_state, create_plan_execute_session_with_state,
+    execute_plan_execute_step_with_state, finalize_plan_execute_session_with_state,
+    review_plan_execute_session_with_state, skip_plan_execute_step_with_state,
+    update_plan_execute_session_draft_with_state, CancelPlanExecuteSessionInput,
+    CreatePlanExecuteSessionInput, ExecutePlanExecuteStepInput, FinalizePlanExecuteSessionInput,
+    PlanExecuteStepEditInput, ReviewPlanExecuteSessionInput, SkipPlanExecuteStepInput,
+    UpdatePlanExecuteSessionDraftInput,
 };
 use crate::main_chat_event_stream::list_main_chat_agent_events_with_state;
 use openlife_core::agent::PlanStepStatus;
@@ -113,6 +115,44 @@ pub(crate) fn main_chat_product_maturity_v2_plan_scenarios(
             &["skipped_step_visible"],
             &["skip_step"],
             &["no_silent_skip"],
+            "pass",
+        ),
+        plan_scenario(
+            "PI-06",
+            "Run a write-like step.",
+            &["plan_id", "base_revision", "write_like_step_id"],
+            &[
+                "step.updated",
+                "proposal.created",
+                "linked_proposal_or_blocker",
+            ],
+            &["proposal_first_write_boundary_visible"],
+            &["open_review_center"],
+            &[
+                "no_direct_lifemodel_write",
+                "no_direct_memory_write",
+                "no_file_or_external_write",
+            ],
+            "expected_blocker",
+        ),
+        plan_scenario(
+            "PI-07",
+            "Cancel remaining steps.",
+            &["plan_id", "base_revision", "remaining_step_ids"],
+            &["plan.updated", "step.updated", "step.cancelled"],
+            &["cancelled_step_visible"],
+            &["open_trace"],
+            &["no_execute_or_skip_control_for_cancelled_step"],
+            "pass",
+        ),
+        plan_scenario(
+            "PI-08",
+            "Review what happened.",
+            &["plan_id", "base_revision", "reviewable_runtime_evidence"],
+            &["plan.reviewed", "review_sections"],
+            &["review_summary_visible"],
+            &["open_trace"],
+            &["no_completion_claim_without_linked_evidence"],
             "pass",
         ),
         plan_scenario(
@@ -400,6 +440,149 @@ async fn run_plan_runtime_proofs() -> Result<Vec<MainChatProductMaturityV2PlanPr
         && skipped.skipped_step.skip_reason.is_some();
     proofs.push(pi05);
 
+    let write_step_id = skipped
+        .session
+        .steps
+        .iter()
+        .find(|step| step.declared_write && step.status == PlanStepStatus::Planned)
+        .map(|step| step.step_id.clone())
+        .ok_or_else(|| "phase C plan fixture missing write-like step".to_string())?;
+    let write_like = execute_plan_execute_step_with_state(
+        ExecutePlanExecuteStepInput {
+            session_id: skipped.session.session_id.clone(),
+            step_id: Some(write_step_id),
+            base_revision: Some(skipped.session.revision),
+        },
+        &state,
+    )
+    .await?;
+    let write_events = events_for(&state, &write_like.session.session_id).await?;
+    let mut pi06 = proof_for_events(
+        "PI-06",
+        &write_like.session,
+        write_events.clone(),
+        &["step.updated", "proposal.created"],
+        vec!["open_review_center".into()],
+        true,
+    );
+    pi06.linked_proposal_ids = write_like.executed_step.linked_proposal_ids.clone();
+    pi06.blocker_ids = write_like.executed_step.blocker_ids.clone();
+    pi06.linked_action_ids = write_like.executed_step.linked_action_ids.clone();
+    pi06.linked_observation_ids = write_like.executed_step.linked_observation_ids.clone();
+    pi06.passed = pi06.passed
+        && write_like.executed_step.step_status == PlanStepStatus::RequiresProposal
+        && (!pi06.linked_proposal_ids.is_empty() || !pi06.blocker_ids.is_empty())
+        && pi06.linked_action_ids.is_empty()
+        && pi06.linked_observation_ids.is_empty()
+        && events_prove_no_direct_writes(&write_events);
+    if !events_prove_no_direct_writes(&write_events) {
+        pi06.diagnostics
+            .push("write_like_direct_write_detected".into());
+    }
+    proofs.push(pi06);
+
+    let reviewed = review_plan_execute_session_with_state(
+        ReviewPlanExecuteSessionInput {
+            session_id: write_like.session.session_id.clone(),
+            base_revision: Some(write_like.session.revision),
+        },
+        &state,
+    )
+    .await?;
+    let review_events = events_for(&state, &reviewed.session.session_id).await?;
+    let mut pi08 = proof_for_events(
+        "PI-08",
+        &reviewed.session,
+        review_events.clone(),
+        &["plan.reviewed"],
+        vec!["open_trace".into()],
+        false,
+    );
+    let required_sections_present = !reviewed.summary.completed_steps.is_empty()
+        && !reviewed.summary.skipped_steps.is_empty()
+        && !reviewed.summary.proposals_created.is_empty()
+        && !reviewed.summary.observations_used.is_empty()
+        && !reviewed.summary.recommended_next_action.is_empty()
+        && reviewed.summary.unresolved.is_empty()
+        && reviewed.summary.completion_claimed;
+    pi08.passed = pi08.passed
+        && required_sections_present
+        && review_events.iter().any(|event| {
+            event.event_type == "plan.reviewed" && event.object_id == reviewed.summary.review_id
+        });
+    if !required_sections_present {
+        pi08.diagnostics
+            .push("review_summary_sections_missing_or_unbacked".into());
+    }
+    proofs.push(pi08);
+
+    let cancel_session = create_plan_execute_session_with_state(
+        CreatePlanExecuteSessionInput {
+            scenario_id: Some("weekly_planning".into()),
+            source_chat_session_id: Some("phase-c-plan-cancel-gate".into()),
+            max_steps: Some(5),
+        },
+        &state,
+    )
+    .await?;
+    let cancel_confirmed = finalize_plan_execute_session_with_state(
+        FinalizePlanExecuteSessionInput {
+            session_id: cancel_session.session_id.clone(),
+            base_revision: Some(cancel_session.revision),
+        },
+        &state,
+    )
+    .await?;
+    let cancel_read_step_id = cancel_confirmed
+        .steps
+        .iter()
+        .find(|step| !step.declared_write)
+        .map(|step| step.step_id.clone())
+        .ok_or_else(|| "phase C cancel fixture missing read step".to_string())?;
+    let cancel_executed = execute_plan_execute_step_with_state(
+        ExecutePlanExecuteStepInput {
+            session_id: cancel_confirmed.session_id.clone(),
+            step_id: Some(cancel_read_step_id),
+            base_revision: Some(cancel_confirmed.revision),
+        },
+        &state,
+    )
+    .await?;
+    let cancelled = cancel_plan_execute_session_with_state(
+        CancelPlanExecuteSessionInput {
+            session_id: cancel_executed.session.session_id.clone(),
+            base_revision: Some(cancel_executed.session.revision),
+        },
+        &state,
+    )
+    .await?;
+    let cancel_events = events_for(&state, &cancelled.session_id).await?;
+    let mut pi07 = proof_for_events(
+        "PI-07",
+        &cancelled,
+        cancel_events,
+        &["plan.updated", "step.updated", "step.cancelled"],
+        vec!["open_trace".into()],
+        false,
+    );
+    pi07.passed = pi07.passed
+        && cancelled
+            .steps
+            .iter()
+            .filter(|step| step.status == PlanStepStatus::Cancelled)
+            .all(|step| {
+                step.status_reason.as_deref() == Some("cancelled_by_user")
+                    && step
+                        .evidence_ids
+                        .iter()
+                        .any(|id| id.contains("plan-step-cancel"))
+            })
+        && cancelled
+            .steps
+            .iter()
+            .any(|step| step.status == PlanStepStatus::Cancelled);
+    proofs.push(pi07);
+
     Ok(proofs)
 }
 
@@ -465,6 +648,33 @@ fn has_blocker_reason(
                 .get("reasonCode")
                 .and_then(|value| value.as_str())
                 == Some(reason_code)
+    })
+}
+
+fn events_prove_no_direct_writes(
+    events: &[crate::main_chat_event_stream::MainChatAgentDurableEvent],
+) -> bool {
+    events.iter().all(|event| {
+        event
+            .payload
+            .get("directLifeModelWrites")
+            .and_then(|value| value.as_bool())
+            != Some(true)
+            && event
+                .payload
+                .get("memoryWrites")
+                .and_then(|value| value.as_bool())
+                != Some(true)
+            && event
+                .payload
+                .get("externalWritesExecuted")
+                .and_then(|value| value.as_bool())
+                != Some(true)
+            && event
+                .payload
+                .get("directWritesExecuted")
+                .and_then(|value| value.as_bool())
+                != Some(true)
     })
 }
 

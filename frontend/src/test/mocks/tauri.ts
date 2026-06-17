@@ -615,10 +615,10 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       } as T);
     case "run_main_chat_agent_product_maturity_v2_plan_gate":
       return Promise.resolve({
-        scenarioCount: 7,
-        defaultGateScenarioCount: 7,
-        passedScenarioCount: 7,
-        expectedBlockerCount: 2,
+        scenarioCount: 10,
+        defaultGateScenarioCount: 10,
+        passedScenarioCount: 10,
+        expectedBlockerCount: 3,
         ready: true,
         blockers: [],
         scenarios: [
@@ -774,6 +774,44 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       return Promise.resolve({ ...mockPlanExecuteSession, status: "finalized" } as T);
     case "cancel_plan_execute_session":
       return Promise.resolve({ ...mockPlanExecuteSession, status: "cancelled" } as T);
+    case "review_plan_execute_session":
+      return Promise.resolve({
+        session: {
+          ...mockPlanExecuteSession,
+          reviewId: "plan-review-mock-1",
+          reviewSummary: {
+            reviewId: "plan-review-mock-1",
+            planId: mockPlanExecuteSession.planId,
+            planSessionId: mockPlanExecuteSession.sessionId,
+            planStatus: mockPlanExecuteSession.status,
+            basePlanRevision: _args?.input?.baseRevision ?? mockPlanExecuteSession.revision,
+            completedSteps: [],
+            skippedSteps: [],
+            blockedSteps: [],
+            proposalsCreated: [],
+            observationsUsed: [],
+            unresolved: [],
+            recommendedNextAction: ["No remaining plan action is required."],
+            completionClaimed: false,
+          },
+        },
+        summary: {
+          reviewId: "plan-review-mock-1",
+          planId: mockPlanExecuteSession.planId,
+          planSessionId: mockPlanExecuteSession.sessionId,
+          planStatus: mockPlanExecuteSession.status,
+          basePlanRevision: _args?.input?.baseRevision ?? mockPlanExecuteSession.revision,
+          completedSteps: [],
+          skippedSteps: [],
+          blockedSteps: [],
+          proposalsCreated: [],
+          observationsUsed: [],
+          unresolved: [],
+          recommendedNextAction: ["No remaining plan action is required."],
+          completionClaimed: false,
+        },
+        metadataSafeSummary: {},
+      } as T);
     case "execute_plan_execute_step":
       return Promise.resolve({
         session: {

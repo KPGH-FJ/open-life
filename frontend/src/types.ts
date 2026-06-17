@@ -418,8 +418,38 @@ export type PlanExecuteStepStatus =
   | "blocked"
   | "requires_proposal"
   | "requires_confirmation"
-  | "executed";
+  | "executed"
+  | "cancelled";
 export type PlanExecuteRiskLevel = "low" | "medium" | "high" | "critical";
+
+export interface PlanExecuteReviewItem {
+  stepId: string;
+  title: string;
+  status: string;
+  evidenceIds: string[];
+  linkedActionIds: string[];
+  linkedObservationIds: string[];
+  linkedProposalIds: string[];
+  blockerIds: string[];
+}
+
+export interface PlanExecuteReviewSummary {
+  reviewId: string;
+  planId: string;
+  planSessionId: string;
+  planStatus: string;
+  basePlanRevision: number;
+  reviewedAt?: string;
+  completedSteps: PlanExecuteReviewItem[];
+  skippedSteps: PlanExecuteReviewItem[];
+  blockedSteps: PlanExecuteReviewItem[];
+  proposalsCreated: PlanExecuteReviewItem[];
+  observationsUsed: PlanExecuteReviewItem[];
+  unresolved: PlanExecuteReviewItem[];
+  recommendedNextAction: string[];
+  completionClaimed: boolean;
+  metadataSafeSummary?: Record<string, any>;
+}
 
 export interface PlanExecuteStepRecord {
   planId?: string;
@@ -466,6 +496,7 @@ export interface PlanExecuteSession {
   finalizedAt?: string | null;
   confirmedAt?: string | null;
   reviewId?: string | null;
+  reviewSummary?: PlanExecuteReviewSummary | null;
   sourceEvidenceIds?: string[];
   supersededByPlanId?: string | null;
   metadataSafeObjective: string;
@@ -544,6 +575,12 @@ export interface SkipPlanExecuteStepInput {
 export interface SkipPlanExecuteStepOutput {
   session: PlanExecuteSession;
   skippedStep: PlanExecuteStepExecutionResult;
+  metadataSafeSummary?: Record<string, any>;
+}
+
+export interface ReviewPlanExecuteSessionOutput {
+  session: PlanExecuteSession;
+  summary: PlanExecuteReviewSummary;
   metadataSafeSummary?: Record<string, any>;
 }
 

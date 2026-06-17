@@ -676,10 +676,10 @@ async fn main_chat_product_maturity_v2_plan_gate_covers_phase_c_pi_matrix() {
         crate::main_chat_plan_interaction_eval::run_main_chat_agent_product_maturity_v2_plan_gate()
             .await;
 
-    assert_eq!(report.scenario_count, 7);
-    assert_eq!(report.default_gate_scenario_count, 7);
-    assert_eq!(report.passed_scenario_count, 7, "{:?}", report.proofs);
-    assert_eq!(report.expected_blocker_count, 2);
+    assert_eq!(report.scenario_count, 10);
+    assert_eq!(report.default_gate_scenario_count, 10);
+    assert_eq!(report.passed_scenario_count, 10, "{:?}", report.proofs);
+    assert_eq!(report.expected_blocker_count, 3);
     assert!(report.ready, "{:?}", report.blockers);
 
     for id in [
@@ -688,6 +688,9 @@ async fn main_chat_product_maturity_v2_plan_gate_covers_phase_c_pi_matrix() {
         "PI-03",
         "PI-04",
         "PI-05",
+        "PI-06",
+        "PI-07",
+        "PI-08",
         "PI-STALE-01",
         "PI-INVALID-01",
     ] {
@@ -711,8 +714,11 @@ async fn main_chat_product_maturity_v2_plan_gate_covers_phase_c_pi_matrix() {
                         | "step.created"
                         | "step.updated"
                         | "step.skipped"
+                        | "step.cancelled"
                         | "action.completed"
                         | "observation.created"
+                        | "proposal.created"
+                        | "plan.reviewed"
                         | "blocker.created"
                 )
             }),
@@ -744,6 +750,38 @@ async fn main_chat_product_maturity_v2_plan_gate_covers_phase_c_pi_matrix() {
         .expect("PI-INVALID-01");
     assert!(invalid.expected_blocker);
     assert!(!invalid.blocker_ids.is_empty());
+
+    let write_like = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "PI-06")
+        .expect("PI-06");
+    assert!(write_like.expected_blocker);
+    assert!(!write_like.linked_proposal_ids.is_empty() || !write_like.blocker_ids.is_empty());
+    assert!(
+        write_like.linked_action_ids.is_empty() && write_like.linked_observation_ids.is_empty(),
+        "PI-06 must be proposal/blocker first without direct action/observation execution"
+    );
+
+    let cancelled = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "PI-07")
+        .expect("PI-07");
+    assert!(cancelled
+        .event_types
+        .iter()
+        .any(|event| event == "step.cancelled"));
+
+    let reviewed = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "PI-08")
+        .expect("PI-08");
+    assert!(reviewed
+        .event_types
+        .iter()
+        .any(|event| event == "plan.reviewed"));
 }
 
 #[tokio::test]
@@ -771,10 +809,10 @@ async fn run_main_chat_product_maturity_v2_plan_gate_command_returns_auditable_r
     .deserialize::<serde_json::Value>()
     .expect("deserialize plan gate response");
 
-    assert_eq!(response["scenarioCount"], 7);
-    assert_eq!(response["defaultGateScenarioCount"], 7);
-    assert_eq!(response["passedScenarioCount"], 7);
-    assert_eq!(response["expectedBlockerCount"], 2);
+    assert_eq!(response["scenarioCount"], 10);
+    assert_eq!(response["defaultGateScenarioCount"], 10);
+    assert_eq!(response["passedScenarioCount"], 10);
+    assert_eq!(response["expectedBlockerCount"], 3);
     assert!(response["ready"].as_bool().unwrap_or(false));
     assert!(response["blockers"]
         .as_array()

@@ -517,6 +517,7 @@ fn default_chat_entrypoints_do_not_call_w19_w60_command_surfaces() {
         "update_plan_execute_session_draft",
         "finalize_plan_execute_session",
         "cancel_plan_execute_session",
+        "review_plan_execute_session",
         "execute_plan_execute_step",
         "skip_plan_execute_step",
         "run_main_chat_agent_product_maturity_v2_plan_gate",

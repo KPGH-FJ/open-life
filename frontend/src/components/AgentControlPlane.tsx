@@ -13,6 +13,7 @@ import {
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import type { MainChatAgentDurableEvent, MainChatAgentStateSnapshot } from "../tauri";
+import type { PlanExecuteReviewItem } from "../types";
 
 type ControlTarget = {
   proposalId?: string;
@@ -48,6 +49,7 @@ type ControlHandlers = {
     target: Required<Pick<PlanControlTarget, "planSessionId" | "baseRevision" | "stepId">>
   ) => void;
   onCancelPlan?: (target: PlanControlTarget) => void;
+  onReviewPlan?: (target: PlanControlTarget) => void;
   busy?: boolean;
   canResume?: boolean;
   canRetry?: boolean;
@@ -251,6 +253,43 @@ function finalDeliverySection(
   );
 }
 
+function reviewSummarySection(title: string, items: PlanExecuteReviewItem[]) {
+  return (
+    <div className="min-w-0 border-l border-emerald-300 bg-white/80 px-2 py-1">
+      <div className="font-semibold text-stone-950">{title}</div>
+      <div className="mt-1 space-y-1">
+        {items.length > 0 ? (
+          items.map(item => (
+            <div key={`${title}-${item.stepId}`} className="min-w-0">
+              <div className="truncate text-stone-700">{item.title}</div>
+              <div className="mt-0.5 flex flex-wrap gap-1 text-stone-500">
+                <span>{item.status.replace(/_/g, " ")}</span>
+                {[
+                  ...item.linkedActionIds,
+                  ...item.linkedObservationIds,
+                  ...item.linkedProposalIds,
+                  ...item.blockerIds,
+                ]
+                  .slice(0, 3)
+                  .map(id => (
+                    <span
+                      key={`${title}-${item.stepId}-${id}`}
+                      className="inline-flex h-5 max-w-full items-center rounded-md border border-stone-200 bg-stone-50 px-1.5"
+                    >
+                      <span className="truncate">{shortId(id)}</span>
+                    </span>
+                  ))}
+              </div>
+            </div>
+          ))
+        ) : (
+          <div className="text-stone-500">none</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function AgentControlPlane({
   state,
   onResume,
@@ -268,6 +307,7 @@ export default function AgentControlPlane({
   onExecutePlanStep,
   onSkipPlanStep,
   onCancelPlan,
+  onReviewPlan,
   busy = false,
   canResume = false,
   canRetry = false,
@@ -284,6 +324,7 @@ export default function AgentControlPlane({
     typeof plan?.revision === "number" && Number.isFinite(plan.revision) ? plan.revision : null;
   const planControls = plan?.controls ?? [];
   const planCommandReady = Boolean(plan && planSessionId && planRevision !== null);
+  const reviewSummary = plan?.reviewSummary ?? null;
 
   return (
     <section
@@ -458,6 +499,18 @@ export default function AgentControlPlane({
                         baseRevision: planRevision!,
                       }),
                   })}
+                {planControls.includes("review_plan") &&
+                  onReviewPlan &&
+                  inlineControlButton({
+                    label: "Review plan",
+                    icon: <CheckCircle2 size={13} />,
+                    disabled: busy,
+                    onClick: () =>
+                      onReviewPlan({
+                        planSessionId: planSessionId!,
+                        baseRevision: planRevision!,
+                      }),
+                  })}
               </div>
             )}
           </div>
@@ -556,6 +609,41 @@ export default function AgentControlPlane({
               })}
             </div>
           ) : null}
+          {reviewSummary && (
+            <div className="mt-3 border-t border-emerald-200 pt-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="font-semibold text-stone-950">Review summary</div>
+                <span
+                  className={`inline-flex h-5 items-center rounded-md border px-1.5 font-medium ${statusClass(
+                    reviewSummary.planStatus
+                  )}`}
+                >
+                  {reviewSummary.planStatus.replace(/_/g, " ")}
+                </span>
+                <span className="text-stone-500">
+                  revision {reviewSummary.basePlanRevision}
+                </span>
+              </div>
+              <div className="mt-2 grid gap-2 md:grid-cols-3">
+                {reviewSummarySection("Completed", reviewSummary.completedSteps)}
+                {reviewSummarySection("Skipped", reviewSummary.skippedSteps)}
+                {reviewSummarySection("Blocked", reviewSummary.blockedSteps)}
+                {reviewSummarySection("Proposals created", reviewSummary.proposalsCreated)}
+                {reviewSummarySection("Observations used", reviewSummary.observationsUsed)}
+                {reviewSummarySection("Unresolved", reviewSummary.unresolved)}
+              </div>
+              {reviewSummary.recommendedNextAction.length > 0 && (
+                <div className="mt-2 border-l border-emerald-300 bg-white/80 px-2 py-1">
+                  <div className="font-semibold text-stone-950">Recommended next action</div>
+                  <div className="mt-1 space-y-1 text-stone-700">
+                    {reviewSummary.recommendedNextAction.map(action => (
+                      <div key={action}>{action}</div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       ) : null}
 

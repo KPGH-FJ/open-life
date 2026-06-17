@@ -89,6 +89,8 @@ import type {
   ExecutePlanExecuteStepOutput,
   SkipPlanExecuteStepInput,
   SkipPlanExecuteStepOutput,
+  ReviewPlanExecuteSessionOutput,
+  PlanExecuteReviewSummary,
 } from "./types";
 
 function isTauriEnv(): boolean {
@@ -567,6 +569,7 @@ export interface MainChatAgentStateSnapshot {
     revisionId?: string | null;
     confirmedAt?: string | null;
     reviewId?: string | null;
+    reviewSummary?: PlanExecuteReviewSummary | null;
     sourceEvidenceIds?: string[];
     supersededByPlanId?: string | null;
     controls?: string[];
@@ -1133,6 +1136,15 @@ export async function cancelPlanExecuteSession(
   baseRevision?: number
 ): Promise<PlanExecuteSession> {
   return safeInvoke<PlanExecuteSession>("cancel_plan_execute_session", {
+    input: { sessionId, ...(baseRevision !== undefined ? { baseRevision } : {}) },
+  });
+}
+
+export async function reviewPlanExecuteSession(
+  sessionId: string,
+  baseRevision?: number
+): Promise<ReviewPlanExecuteSessionOutput> {
+  return safeInvoke<ReviewPlanExecuteSessionOutput>("review_plan_execute_session", {
     input: { sessionId, ...(baseRevision !== undefined ? { baseRevision } : {}) },
   });
 }

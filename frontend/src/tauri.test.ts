@@ -627,10 +627,10 @@ describe("tauri command argument aliases", () => {
 
   it("invokes Product Maturity v2 plan gate as an explicit read-only diagnostic", async () => {
     vi.mocked(invoke).mockResolvedValue({
-      scenarioCount: 7,
-      defaultGateScenarioCount: 7,
-      passedScenarioCount: 7,
-      expectedBlockerCount: 2,
+      scenarioCount: 10,
+      defaultGateScenarioCount: 10,
+      passedScenarioCount: 10,
+      expectedBlockerCount: 3,
       ready: true,
       blockers: [],
       scenarios: [
@@ -674,8 +674,8 @@ describe("tauri command argument aliases", () => {
       undefined
     );
     expect(result.ready).toBe(true);
-    expect(result.scenarioCount).toBe(7);
-    expect(result.expectedBlockerCount).toBe(2);
+    expect(result.scenarioCount).toBe(10);
+    expect(result.expectedBlockerCount).toBe(3);
     expect(result.proofs[0]?.eventTypes).toContain("plan.created");
   });
 

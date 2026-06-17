@@ -306,6 +306,7 @@ pub enum PlanStepStatus {
     RequiresProposal,
     RequiresConfirmation,
     Executed,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -600,6 +601,51 @@ pub struct PlanExecuteStepExecutionResult {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PlanExecuteCancelResult {
+    pub session_id: String,
+    pub plan_id: String,
+    pub revision: u64,
+    pub base_plan_revision: u64,
+    pub cancelled_step_ids: Vec<String>,
+    pub evidence_ids: Vec<String>,
+    pub metadata_safe_summary: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanExecuteReviewItem {
+    pub step_id: String,
+    pub title: String,
+    pub status: String,
+    pub evidence_ids: Vec<String>,
+    pub linked_action_ids: Vec<String>,
+    pub linked_observation_ids: Vec<String>,
+    pub linked_proposal_ids: Vec<String>,
+    pub blocker_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanExecuteReviewSummary {
+    pub review_id: String,
+    pub plan_id: String,
+    pub plan_session_id: String,
+    pub plan_status: String,
+    pub base_plan_revision: u64,
+    pub reviewed_at: String,
+    pub completed_steps: Vec<PlanExecuteReviewItem>,
+    pub skipped_steps: Vec<PlanExecuteReviewItem>,
+    pub blocked_steps: Vec<PlanExecuteReviewItem>,
+    pub proposals_created: Vec<PlanExecuteReviewItem>,
+    pub observations_used: Vec<PlanExecuteReviewItem>,
+    pub unresolved: Vec<PlanExecuteReviewItem>,
+    pub recommended_next_action: Vec<String>,
+    pub completion_claimed: bool,
+    pub metadata_safe_summary: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlanExecuteSession {
     pub session_id: String,
     #[serde(default)]
@@ -619,6 +665,8 @@ pub struct PlanExecuteSession {
     pub confirmed_at: Option<String>,
     #[serde(default)]
     pub review_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_summary: Option<PlanExecuteReviewSummary>,
     #[serde(default)]
     pub source_evidence_ids: Vec<String>,
     #[serde(default)]
@@ -685,6 +733,7 @@ impl PlanExecuteSession {
             finalized_at: None,
             confirmed_at: None,
             review_id: None,
+            review_summary: None,
             source_evidence_ids: Vec::new(),
             superseded_by_plan_id: None,
             metadata_safe_objective: draft.objective,
@@ -797,7 +846,14 @@ impl PlanExecuteSession {
         Ok(())
     }
 
-    pub fn cancel(&mut self) -> Result<()> {
+    pub fn cancel(&mut self) -> Result<PlanExecuteCancelResult> {
+        self.ensure_phase_c_defaults();
+        self.cancel_at_revision(self.revision)
+    }
+
+    pub fn cancel_at_revision(&mut self, base_revision: u64) -> Result<PlanExecuteCancelResult> {
+        self.ensure_phase_c_defaults();
+        self.require_current_revision(base_revision)?;
         if matches!(
             self.status,
             PlanExecuteSessionStatus::Completed | PlanExecuteSessionStatus::Cancelled
@@ -806,10 +862,60 @@ impl PlanExecuteSession {
                 "Plan-Execute session cannot be cancelled from current status"
             ));
         }
+        let session_id = self.session_id.clone();
+        let plan_id = self.plan_id.clone();
+        let next_revision = self.revision + 1;
+        let mut cancelled_step_ids = Vec::new();
+        let mut evidence_ids = Vec::new();
+        for step in &mut self.steps {
+            if is_terminal_product_step(step) {
+                continue;
+            }
+            step.status = PlanStepStatus::Cancelled;
+            step.status_reason = Some("cancelled_by_user".into());
+            step.revision = next_revision;
+            step.base_plan_revision = base_revision;
+            step.kind = step_kind_for_record(step);
+            step.description = step_description_for_record(step);
+            let evidence_id = format!(
+                "plan-step-cancel:{}:{}:{}",
+                session_id, step.step_id, next_revision
+            );
+            push_unique(&mut step.evidence_ids, evidence_id.clone());
+            cancelled_step_ids.push(step.step_id.clone());
+            evidence_ids.push(evidence_id);
+            step.metadata_safe_summary = step_record_summary(step);
+        }
         self.status = PlanExecuteSessionStatus::Cancelled;
+        self.revision = next_revision;
+        self.revision_id = revision_id_for(next_revision);
+        self.review_id = None;
+        self.review_summary = None;
         self.touch();
         self.refresh_counts_and_summary();
-        Ok(())
+        let metadata_safe_summary = json!({
+            "planExecuteProductVertical": true,
+            "scenarioId": self.scenario.as_id(),
+            "planSessionId": self.session_id,
+            "planId": self.plan_id,
+            "revision": self.revision,
+            "basePlanRevision": base_revision,
+            "cancelledStepIds": cancelled_step_ids.clone(),
+            "evidenceIds": evidence_ids.clone(),
+            "metadataSafe": true,
+            "directLifeModelWrites": false,
+            "memoryWrites": false,
+            "externalWritesExecuted": false,
+        });
+        Ok(PlanExecuteCancelResult {
+            session_id,
+            plan_id,
+            revision: self.revision,
+            base_plan_revision: base_revision,
+            cancelled_step_ids,
+            evidence_ids,
+            metadata_safe_summary,
+        })
     }
 
     pub fn execute_step(
@@ -851,9 +957,12 @@ impl PlanExecuteSession {
                 .find(|step| step.step_id == step_id)
                 .ok_or_else(|| anyhow::anyhow!("Plan-Execute step not found"))?;
 
-            if step.status == PlanStepStatus::Skipped {
+            if matches!(
+                step.status,
+                PlanStepStatus::Skipped | PlanStepStatus::Cancelled
+            ) {
                 return Err(anyhow::anyhow!(
-                    "Plan-Execute skipped step cannot be executed"
+                    "Plan-Execute skipped or cancelled step cannot be executed"
                 ));
             }
 
@@ -971,6 +1080,7 @@ impl PlanExecuteSession {
                 PlanStepStatus::Executed
                     | PlanStepStatus::RequiresProposal
                     | PlanStepStatus::Blocked
+                    | PlanStepStatus::Cancelled
             ) || step.linked_proposal_id.is_some()
             {
                 return Err(anyhow::anyhow!(
@@ -1009,6 +1119,25 @@ impl PlanExecuteSession {
             .find(|step| step.step_id == step_id)
             .expect("step exists after skip");
         Ok(step_execution_result(&self.session_id, step))
+    }
+
+    pub fn review_at_revision(&mut self, base_revision: u64) -> Result<PlanExecuteReviewSummary> {
+        self.ensure_phase_c_defaults();
+        self.require_current_revision(base_revision)?;
+        if matches!(
+            self.status,
+            PlanExecuteSessionStatus::Draft | PlanExecuteSessionStatus::Finalized
+        ) {
+            return Err(anyhow::anyhow!(
+                "Plan-Execute review requires runtime step evidence"
+            ));
+        }
+        let summary = build_review_summary(self, base_revision)?;
+        self.review_id = Some(summary.review_id.clone());
+        self.review_summary = Some(summary.clone());
+        self.touch();
+        self.refresh_counts_and_summary();
+        Ok(summary)
     }
 
     pub fn to_plan_draft(&self) -> PlanDraft {
@@ -1484,31 +1613,33 @@ fn validate_step_record(
 
 fn step_record_summary(step: &PlanExecuteStepRecord) -> Value {
     json!({
-        "planId": step.plan_id,
-        "stepId": step.step_id,
-        "index": step.index,
-        "order": step.order,
-        "kind": step.kind,
-        "actionKind": step.action_kind,
-        "riskLevel": step.risk_level.to_string(),
-        "declaredWrite": step.declared_write,
-        "status": format!("{:?}", step.status).to_ascii_lowercase(),
-        "revision": step.revision,
-        "basePlanRevision": step.base_plan_revision,
-        "linkedActionIds": step.linked_action_ids,
-        "linkedObservationIds": step.linked_observation_ids,
-        "linkedProposalId": step.linked_proposal_id,
-        "linkedProposalIds": step.linked_proposal_ids,
-        "blockerIds": step.blocker_ids,
-        "linkedFinalDeliveryIds": step.linked_final_delivery_ids,
-        "skipReasonPresent": step.skip_reason.is_some(),
-        "policyReasonCode": step.policy_reason_code,
-        "policyDecisionId": step.policy_decision_id,
-        "statusReason": step.status_reason,
-        "evidenceIds": step.evidence_ids,
-        "metadataSafe": true,
+    "planId": step.plan_id,
+    "stepId": step.step_id,
+    "index": step.index,
+    "order": step.order,
+    "kind": step.kind,
+    "actionKind": step.action_kind,
+    "riskLevel": step.risk_level.to_string(),
+    "declaredWrite": step.declared_write,
+    "status": format!("{:?}", step.status).to_ascii_lowercase(),
+    "revision": step.revision,
+    "basePlanRevision": step.base_plan_revision,
+    "linkedActionIds": step.linked_action_ids,
+    "linkedObservationIds": step.linked_observation_ids,
+    "linkedProposalId": step.linked_proposal_id,
+    "linkedProposalIds": step.linked_proposal_ids,
+    "blockerIds": step.blocker_ids,
+    "linkedFinalDeliveryIds": step.linked_final_delivery_ids,
+    "skipReasonPresent": step.skip_reason.is_some(),
+    "policyReasonCode": step.policy_reason_code,
+    "policyDecisionId": step.policy_decision_id,
+    "statusReason": step.status_reason,
+    "evidenceIds": step.evidence_ids,
+    "metadataSafe": true,
         "rawPromptStored": false,
         "rawToolPayloadStored": false,
+        "directLifeModelWrites": false,
+        "memoryWrites": false,
         "externalWritesExecuted": false,
     })
 }
@@ -1584,7 +1715,170 @@ fn is_terminal_product_step(step: &PlanExecuteStepRecord) -> bool {
             | PlanStepStatus::RequiresProposal
             | PlanStepStatus::Blocked
             | PlanStepStatus::Skipped
+            | PlanStepStatus::Cancelled
     ) || step.linked_proposal_id.is_some()
+}
+
+fn build_review_summary(
+    session: &PlanExecuteSession,
+    base_revision: u64,
+) -> Result<PlanExecuteReviewSummary> {
+    let mut completed_steps = Vec::new();
+    let mut skipped_steps = Vec::new();
+    let mut blocked_steps = Vec::new();
+    let mut proposals_created = Vec::new();
+    let mut observations_used = Vec::new();
+    let mut unresolved = Vec::new();
+
+    for step in &session.steps {
+        let item = review_item_for_step(step);
+        match step.status {
+            PlanStepStatus::Executed => {
+                if !step.linked_action_ids.is_empty() || !step.linked_observation_ids.is_empty() {
+                    completed_steps.push(item.clone());
+                    if !step.linked_observation_ids.is_empty() {
+                        observations_used.push(item);
+                    }
+                } else {
+                    unresolved.push(item);
+                }
+            }
+            PlanStepStatus::Skipped => {
+                if step
+                    .evidence_ids
+                    .iter()
+                    .any(|id| id.contains("plan-step-skip"))
+                {
+                    skipped_steps.push(item);
+                } else {
+                    unresolved.push(item);
+                }
+            }
+            PlanStepStatus::RequiresProposal => {
+                if !step.linked_proposal_ids.is_empty() {
+                    proposals_created.push(item);
+                } else {
+                    unresolved.push(item);
+                }
+            }
+            PlanStepStatus::Blocked => {
+                if !step.blocker_ids.is_empty() {
+                    blocked_steps.push(item);
+                } else {
+                    unresolved.push(item);
+                }
+            }
+            PlanStepStatus::Cancelled => {
+                unresolved.push(item);
+            }
+            PlanStepStatus::Planned | PlanStepStatus::RequiresConfirmation => {
+                unresolved.push(item);
+            }
+        }
+    }
+
+    let has_runtime_evidence = completed_steps
+        .iter()
+        .chain(skipped_steps.iter())
+        .chain(blocked_steps.iter())
+        .chain(proposals_created.iter())
+        .chain(observations_used.iter())
+        .chain(unresolved.iter())
+        .any(|item| {
+            !item.evidence_ids.is_empty()
+                || !item.linked_action_ids.is_empty()
+                || !item.linked_observation_ids.is_empty()
+                || !item.linked_proposal_ids.is_empty()
+                || !item.blocker_ids.is_empty()
+        });
+    if !has_runtime_evidence {
+        return Err(anyhow::anyhow!(
+            "Plan-Execute review requires linked runtime evidence"
+        ));
+    }
+
+    let completion_claimed =
+        session.status == PlanExecuteSessionStatus::Completed && unresolved.is_empty();
+    let recommended_next_action = recommended_next_action_for_review(
+        session,
+        &unresolved,
+        &proposals_created,
+        &blocked_steps,
+    );
+    let reviewed_at = Utc::now().to_rfc3339();
+    let review_id = format!("plan-review:{}:rev-{}", session.session_id, base_revision);
+    let metadata_safe_summary = json!({
+        "planExecuteProductVertical": true,
+        "scenarioId": session.scenario.as_id(),
+        "reviewId": review_id,
+        "planId": session.plan_id,
+        "planSessionId": session.session_id,
+        "planStatus": session.status.to_string(),
+        "basePlanRevision": base_revision,
+        "completedStepCount": completed_steps.len(),
+        "skippedStepCount": skipped_steps.len(),
+        "blockedStepCount": blocked_steps.len(),
+        "proposalCreatedCount": proposals_created.len(),
+        "observationUsedCount": observations_used.len(),
+        "unresolvedCount": unresolved.len(),
+        "completionClaimed": completion_claimed,
+        "metadataSafe": true,
+        "directLifeModelWrites": false,
+        "memoryWrites": false,
+        "externalWritesExecuted": false,
+    });
+
+    Ok(PlanExecuteReviewSummary {
+        review_id,
+        plan_id: session.plan_id.clone(),
+        plan_session_id: session.session_id.clone(),
+        plan_status: session.status.to_string(),
+        base_plan_revision: base_revision,
+        reviewed_at,
+        completed_steps,
+        skipped_steps,
+        blocked_steps,
+        proposals_created,
+        observations_used,
+        unresolved,
+        recommended_next_action,
+        completion_claimed,
+        metadata_safe_summary,
+    })
+}
+
+fn review_item_for_step(step: &PlanExecuteStepRecord) -> PlanExecuteReviewItem {
+    PlanExecuteReviewItem {
+        step_id: step.step_id.clone(),
+        title: step.title.clone(),
+        status: format!("{:?}", step.status).to_ascii_lowercase(),
+        evidence_ids: step.evidence_ids.clone(),
+        linked_action_ids: step.linked_action_ids.clone(),
+        linked_observation_ids: step.linked_observation_ids.clone(),
+        linked_proposal_ids: step.linked_proposal_ids.clone(),
+        blocker_ids: step.blocker_ids.clone(),
+    }
+}
+
+fn recommended_next_action_for_review(
+    session: &PlanExecuteSession,
+    unresolved: &[PlanExecuteReviewItem],
+    proposals_created: &[PlanExecuteReviewItem],
+    blocked_steps: &[PlanExecuteReviewItem],
+) -> Vec<String> {
+    if session.status == PlanExecuteSessionStatus::Cancelled {
+        return vec!["Review cancelled steps before starting a new plan.".into()];
+    }
+    if !blocked_steps.is_empty() {
+        return vec!["Resolve blockers before continuing this plan.".into()];
+    }
+    if !proposals_created.is_empty() {
+        return vec!["Review created proposals before applying any changes.".into()];
+    }
+    if !unresolved.is_empty() {
+        return vec!["Decide whether to skip, execute, or cancel unresolved steps.".into()];
+    }
+    vec!["No remaining plan action is required.".into()]
 }
 
 fn step_execution_result(

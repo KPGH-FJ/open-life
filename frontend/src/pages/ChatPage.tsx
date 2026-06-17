@@ -68,6 +68,7 @@ import {
   executePlanExecuteStep,
   skipPlanExecuteStep,
   cancelPlanExecuteSession,
+  reviewPlanExecuteSession,
 } from "../tauri";
 import type {
   AgentRun,
@@ -1833,6 +1834,24 @@ export default function ChatPage({
     [agentTaskControlBusy, currentMainChatTaskSessionId, refreshMainChatSnapshot]
   );
 
+  const handleReviewPlan = useCallback(
+    async (target: { planSessionId: string; baseRevision: number }) => {
+      if (agentTaskControlBusy) return;
+      const taskSessionId = currentMainChatTaskSessionId();
+      setAgentTaskControlBusy(true);
+      setAgentTaskControlError(null);
+      try {
+        await reviewPlanExecuteSession(target.planSessionId, target.baseRevision);
+        await refreshMainChatSnapshot(taskSessionId);
+      } catch (e) {
+        setAgentTaskControlError(`Review plan failed: ${readablePreviewError(e)}`);
+      } finally {
+        setAgentTaskControlBusy(false);
+      }
+    },
+    [agentTaskControlBusy, currentMainChatTaskSessionId, refreshMainChatSnapshot]
+  );
+
   const readiness = useMemo(() => buildReadinessSummary(diagnostics), [diagnostics]);
   const governedPreviewSummaryEntries = useMemo(
     () => safeSummaryEntries(governedPreviewResult?.metadataSafeSummary ?? {}),
@@ -3322,6 +3341,7 @@ export default function ChatPage({
                 onExecutePlanStep={handleExecutePlanStep}
                 onSkipPlanStep={handleSkipPlanStep}
                 onCancelPlan={handleCancelPlan}
+                onReviewPlan={handleReviewPlan}
               />
               {agentTaskControlError && (
                 <div className="border-b border-rose-200 bg-rose-50 px-4 py-2 text-xs text-rose-800">

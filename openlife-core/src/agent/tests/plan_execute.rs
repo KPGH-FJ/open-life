@@ -546,6 +546,207 @@ fn finalized_session_executes_read_only_steps_and_creates_proposals_for_write_li
 }
 
 #[test]
+fn phase_c_write_like_steps_are_proposal_first_without_direct_writes() {
+    let service = PlanExecuteService::default();
+    let proposal_store = ProposalStore::new_in_memory().unwrap();
+    let contract = PlanExecuteProductContract::weekly_planning();
+    let draft = service.draft_product_plan(
+        &plan_input(
+            "Use my LifeModel to plan this week.",
+            contract.max_step_count,
+        ),
+        PlanExecuteProductScenario::WeeklyPlanning,
+    );
+    let mut session =
+        PlanExecuteSession::new_draft(None, Some("run-weekly".into()), contract, draft).unwrap();
+    session.finalize().unwrap();
+    let write_step_id = session
+        .steps
+        .iter()
+        .find(|step| step.declared_write)
+        .unwrap()
+        .step_id
+        .clone();
+
+    let write_result = session
+        .execute_step(
+            &write_step_id,
+            &LifeModelGovernor::default(),
+            &proposal_store,
+        )
+        .unwrap();
+
+    assert_eq!(write_result.step_status, PlanStepStatus::RequiresProposal);
+    assert!(write_result.linked_action_ids.is_empty());
+    assert!(write_result.linked_observation_ids.is_empty());
+    assert!(!write_result.linked_proposal_ids.is_empty());
+    assert_eq!(
+        write_result.status_reason.as_deref(),
+        Some("proposal_first_write_boundary")
+    );
+    assert_eq!(
+        write_result.metadata_safe_summary["directLifeModelWrites"],
+        false
+    );
+    assert_eq!(write_result.metadata_safe_summary["memoryWrites"], false);
+    assert_eq!(
+        write_result.metadata_safe_summary["externalWritesExecuted"],
+        false
+    );
+    let proposals = proposal_store.list_pending_proposals(10).unwrap();
+    assert_eq!(proposals.len(), 1);
+    assert_eq!(proposals[0].after["externalWriteExecuted"], false);
+    assert_eq!(
+        session.linked_proposal_ids,
+        write_result.linked_proposal_ids
+    );
+}
+
+#[test]
+fn phase_c_cancel_marks_remaining_steps_cancelled_with_evidence() {
+    let service = PlanExecuteService::default();
+    let proposal_store = ProposalStore::new_in_memory().unwrap();
+    let contract = PlanExecuteProductContract::weekly_planning();
+    let draft = service.draft_product_plan(
+        &plan_input(
+            "Use my LifeModel to plan this week.",
+            contract.max_step_count,
+        ),
+        PlanExecuteProductScenario::WeeklyPlanning,
+    );
+    let mut session =
+        PlanExecuteSession::new_draft(None, Some("run-weekly".into()), contract, draft).unwrap();
+    session.finalize().unwrap();
+    let read_step_id = session
+        .steps
+        .iter()
+        .find(|step| !step.declared_write)
+        .unwrap()
+        .step_id
+        .clone();
+    session
+        .execute_step(
+            &read_step_id,
+            &LifeModelGovernor::default(),
+            &proposal_store,
+        )
+        .unwrap();
+    let cancel_revision = session.revision;
+
+    let cancel_result = session.cancel_at_revision(cancel_revision).unwrap();
+
+    assert_eq!(session.status, PlanExecuteSessionStatus::Cancelled);
+    assert_eq!(cancel_result.base_plan_revision, cancel_revision);
+    assert!(!cancel_result.cancelled_step_ids.is_empty());
+    for step in session
+        .steps
+        .iter()
+        .filter(|step| cancel_result.cancelled_step_ids.contains(&step.step_id))
+    {
+        assert_eq!(step.status, PlanStepStatus::Cancelled);
+        assert_eq!(step.status_reason.as_deref(), Some("cancelled_by_user"));
+        assert!(step
+            .evidence_ids
+            .iter()
+            .any(|id| id.contains("plan-step-cancel")));
+    }
+    assert!(session.steps.iter().all(|step| {
+        matches!(
+            step.status,
+            PlanStepStatus::Executed
+                | PlanStepStatus::RequiresProposal
+                | PlanStepStatus::Blocked
+                | PlanStepStatus::Skipped
+                | PlanStepStatus::Cancelled
+        )
+    }));
+}
+
+#[test]
+fn phase_c_review_summary_separates_evidence_backed_outcomes() {
+    let service = PlanExecuteService::default();
+    let proposal_store = ProposalStore::new_in_memory().unwrap();
+    let contract = PlanExecuteProductContract::weekly_planning();
+    let draft = service.draft_product_plan(
+        &plan_input(
+            "Use my LifeModel to plan this week.",
+            contract.max_step_count,
+        ),
+        PlanExecuteProductScenario::WeeklyPlanning,
+    );
+    let mut session =
+        PlanExecuteSession::new_draft(None, Some("run-weekly".into()), contract, draft).unwrap();
+    session.finalize().unwrap();
+    let read_step_id = session
+        .steps
+        .iter()
+        .find(|step| !step.declared_write)
+        .unwrap()
+        .step_id
+        .clone();
+    session
+        .execute_step(
+            &read_step_id,
+            &LifeModelGovernor::default(),
+            &proposal_store,
+        )
+        .unwrap();
+    let write_step_id = session
+        .steps
+        .iter()
+        .find(|step| step.declared_write)
+        .unwrap()
+        .step_id
+        .clone();
+    session
+        .execute_step(
+            &write_step_id,
+            &LifeModelGovernor::default(),
+            &proposal_store,
+        )
+        .unwrap();
+    let remaining_step_id = session
+        .steps
+        .iter()
+        .find(|step| step.status == PlanStepStatus::Planned)
+        .unwrap()
+        .step_id
+        .clone();
+    let skip_revision = session.revision;
+    session
+        .skip_step_at_revision(
+            &remaining_step_id,
+            skip_revision,
+            "not needed for this review",
+        )
+        .unwrap();
+    let review_revision = session.revision;
+
+    let summary = session.review_at_revision(review_revision).unwrap();
+
+    assert_eq!(summary.base_plan_revision, review_revision);
+    assert_eq!(
+        session.review_id.as_deref(),
+        Some(summary.review_id.as_str())
+    );
+    assert_eq!(session.review_summary.as_ref(), Some(&summary));
+    assert!(!summary.completed_steps.is_empty());
+    assert!(!summary.skipped_steps.is_empty());
+    assert!(summary.blocked_steps.is_empty());
+    assert!(!summary.proposals_created.is_empty());
+    assert!(!summary.observations_used.is_empty());
+    assert!(summary.unresolved.is_empty());
+    assert!(!summary.recommended_next_action.is_empty());
+    assert!(summary.completed_steps.iter().all(|item| {
+        !item.linked_action_ids.is_empty() || !item.linked_observation_ids.is_empty()
+    }));
+    assert!(summary
+        .proposals_created
+        .iter()
+        .all(|item| { !item.linked_proposal_ids.is_empty() && item.linked_action_ids.is_empty() }));
+}
+
+#[test]
 fn phase_c_plan_session_tracks_revisions_step_links_and_skip_evidence() {
     let service = PlanExecuteService::default();
     let proposal_store = ProposalStore::new_in_memory().unwrap();

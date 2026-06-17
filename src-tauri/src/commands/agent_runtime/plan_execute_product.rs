@@ -85,6 +85,14 @@ pub struct CancelPlanExecuteSessionInput {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ReviewPlanExecuteSessionInput {
+    pub session_id: String,
+    #[serde(default)]
+    pub base_revision: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExecutePlanExecuteStepInput {
     pub session_id: String,
     #[serde(default)]
@@ -115,6 +123,14 @@ pub struct SkipPlanExecuteStepInput {
 pub struct SkipPlanExecuteStepOutput {
     pub session: PlanExecuteSession,
     pub skipped_step: PlanExecuteStepExecutionResult,
+    pub metadata_safe_summary: Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewPlanExecuteSessionOutput {
+    pub session: PlanExecuteSession,
+    pub summary: openlife_core::agent::PlanExecuteReviewSummary,
     pub metadata_safe_summary: Value,
 }
 
@@ -164,6 +180,14 @@ pub async fn cancel_plan_execute_session(
     state: State<'_, Arc<AppState>>,
 ) -> Result<PlanExecuteSession, String> {
     cancel_plan_execute_session_with_state(input, &state.inner().clone()).await
+}
+
+#[tauri::command]
+pub async fn review_plan_execute_session(
+    input: ReviewPlanExecuteSessionInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<ReviewPlanExecuteSessionOutput, String> {
+    review_plan_execute_session_with_state(input, &state.inner().clone()).await
 }
 
 #[tauri::command]
@@ -371,11 +395,54 @@ pub(crate) async fn cancel_plan_execute_session_with_state(
 ) -> Result<PlanExecuteSession, String> {
     let mut session = load_plan_execute_session(state, &input.session_id).await?;
     ensure_plan_revision_or_append_blocker(state, &session, input.base_revision).await?;
-    session.cancel().map_err(|e| e.to_string())?;
+    let cancel_result = if let Some(base_revision) = input.base_revision {
+        session
+            .cancel_at_revision(base_revision)
+            .map_err(|e| e.to_string())?
+    } else {
+        session.cancel().map_err(|e| e.to_string())?
+    };
     save_plan_execute_session(state, &session).await?;
-    append_plan_cancelled_event(state, &session).await?;
+    append_plan_cancelled_events(state, &session, &cancel_result.cancelled_step_ids).await?;
     update_existing_product_run_for_session(state, &session).await?;
     Ok(session)
+}
+
+pub(crate) async fn review_plan_execute_session_with_state(
+    input: ReviewPlanExecuteSessionInput,
+    state: &Arc<AppState>,
+) -> Result<ReviewPlanExecuteSessionOutput, String> {
+    let mut session = load_plan_execute_session(state, &input.session_id).await?;
+    ensure_plan_revision_or_append_blocker(state, &session, input.base_revision).await?;
+    let summary = if let Some(base_revision) = input.base_revision {
+        session
+            .review_at_revision(base_revision)
+            .map_err(|e| e.to_string())?
+    } else {
+        let base_revision = session.revision;
+        session
+            .review_at_revision(base_revision)
+            .map_err(|e| e.to_string())?
+    };
+    save_plan_execute_session(state, &session).await?;
+    append_plan_reviewed_event(state, &session, &summary).await?;
+    update_existing_product_run_for_session(state, &session).await?;
+    Ok(ReviewPlanExecuteSessionOutput {
+        metadata_safe_summary: json!({
+            "planExecuteProductVertical": true,
+            "scenarioId": session.scenario.as_id(),
+            "planSessionId": session.session_id,
+            "planId": session.plan_id,
+            "reviewId": summary.review_id,
+            "revision": session.revision,
+            "metadataSafe": true,
+            "directLifeModelWrites": false,
+            "memoryWrites": false,
+            "externalWritesExecuted": false,
+        }),
+        session,
+        summary,
+    })
 }
 
 pub(crate) async fn execute_plan_execute_step_with_state(
@@ -398,6 +465,7 @@ pub(crate) async fn execute_plan_execute_step_with_state(
                     PlanStepStatus::Executed
                         | PlanStepStatus::RequiresProposal
                         | PlanStepStatus::Blocked
+                        | PlanStepStatus::Cancelled
                 ) && step.linked_proposal_id.is_none()
             })
             .map(|step| step.step_id.clone())
@@ -614,9 +682,10 @@ async fn append_plan_confirmed_event(
     .map(|_| ())
 }
 
-async fn append_plan_cancelled_event(
+async fn append_plan_cancelled_events(
     state: &Arc<AppState>,
     session: &PlanExecuteSession,
+    cancelled_step_ids: &[String],
 ) -> Result<(), String> {
     append_plan_runtime_event(
         state,
@@ -626,8 +695,43 @@ async fn append_plan_cancelled_event(
         &session.plan_id,
         plan_event_payload(session),
     )
-    .await
-    .map(|_| ())
+    .await?;
+    for step_id in cancelled_step_ids {
+        if let Some(step) = session.steps.iter().find(|step| &step.step_id == step_id) {
+            append_plan_runtime_event(
+                state,
+                session,
+                "step.updated",
+                "step",
+                &step.step_id,
+                step_event_payload(session, step),
+            )
+            .await?;
+            append_plan_runtime_event(
+                state,
+                session,
+                "step.cancelled",
+                "step",
+                &step.step_id,
+                json!({
+                    "planId": session.plan_id,
+                    "planSessionId": session.session_id,
+                    "stepId": step.step_id,
+                    "revision": step.revision,
+                    "basePlanRevision": step.base_plan_revision,
+                    "status": "cancelled",
+                    "reasonCode": step.status_reason,
+                    "evidenceIds": step.evidence_ids,
+                    "metadataSafe": true,
+                    "directLifeModelWrites": false,
+                    "memoryWrites": false,
+                    "externalWritesExecuted": false,
+                }),
+            )
+            .await?;
+        }
+    }
+    Ok(())
 }
 
 async fn append_plan_step_execution_events(
@@ -758,6 +862,41 @@ async fn append_plan_step_skipped_events(
     .map(|_| ())
 }
 
+async fn append_plan_reviewed_event(
+    state: &Arc<AppState>,
+    session: &PlanExecuteSession,
+    summary: &openlife_core::agent::PlanExecuteReviewSummary,
+) -> Result<(), String> {
+    append_plan_runtime_event(
+        state,
+        session,
+        "plan.reviewed",
+        "plan_review",
+        &summary.review_id,
+        json!({
+            "reviewId": summary.review_id,
+            "planId": summary.plan_id,
+            "planSessionId": summary.plan_session_id,
+            "planStatus": summary.plan_status,
+            "basePlanRevision": summary.base_plan_revision,
+            "completedStepCount": summary.completed_steps.len(),
+            "skippedStepCount": summary.skipped_steps.len(),
+            "blockedStepCount": summary.blocked_steps.len(),
+            "proposalCreatedCount": summary.proposals_created.len(),
+            "observationUsedCount": summary.observations_used.len(),
+            "unresolvedCount": summary.unresolved.len(),
+            "recommendedNextActionCount": summary.recommended_next_action.len(),
+            "completionClaimed": summary.completion_claimed,
+            "metadataSafe": true,
+            "directLifeModelWrites": false,
+            "memoryWrites": false,
+            "externalWritesExecuted": false,
+        }),
+    )
+    .await
+    .map(|_| ())
+}
+
 async fn append_step_updated_event(
     state: &Arc<AppState>,
     session: &PlanExecuteSession,
@@ -827,11 +966,13 @@ fn plan_event_payload(session: &PlanExecuteSession) -> Value {
         "goal": session.metadata_safe_objective,
         "confirmedAt": session.confirmed_at,
         "reviewId": session.review_id,
+        "reviewSummaryPresent": session.review_summary.is_some(),
         "sourceEvidenceIds": session.source_evidence_ids,
         "supersededByPlanId": session.superseded_by_plan_id,
         "stepIds": session.steps.iter().map(|step| step.step_id.clone()).collect::<Vec<_>>(),
         "metadataSafe": true,
         "directLifeModelWrites": false,
+        "memoryWrites": false,
         "externalWritesExecuted": false,
     })
 }
@@ -863,6 +1004,7 @@ fn step_event_payload(
         "metadataSafe": true,
         "directLifeModelWrites": false,
         "externalWritesExecuted": false,
+        "memoryWrites": false,
     })
 }
 
@@ -1055,7 +1197,9 @@ fn plan_execute_trace_metadata(session: &PlanExecuteSession) -> Value {
             PlanStepStatus::Executed => executed += 1,
             PlanStepStatus::RequiresProposal => proposal_required += 1,
             PlanStepStatus::Blocked => blocked += 1,
-            PlanStepStatus::Skipped | PlanStepStatus::RequiresConfirmation => {}
+            PlanStepStatus::Skipped
+            | PlanStepStatus::RequiresConfirmation
+            | PlanStepStatus::Cancelled => {}
         }
     }
     json!({
@@ -1391,5 +1535,143 @@ mod tests {
         assert_eq!(trace["generatedProposalIds"][0], proposals[0].id);
         assert_eq!(trace["externalWritesExecuted"], false);
         assert_eq!(trace["directLifeModelWrites"], false);
+        drop(agent_run_store);
+
+        let replay = crate::main_chat_event_stream::list_main_chat_agent_events_with_state(
+            &state,
+            session.session_id.clone(),
+            Some(0),
+            Some(250),
+        )
+        .await
+        .unwrap();
+        let proposal_event = replay
+            .iter()
+            .find(|event| {
+                event.event_type == "proposal.created" && event.object_id == proposals[0].id
+            })
+            .expect("write-like plan step must append proposal.created event");
+        assert_eq!(proposal_event.payload["directWritesExecuted"], false);
+        assert!(
+            !replay.iter().any(|event| {
+                event
+                    .payload
+                    .get("directLifeModelWrites")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                    || event
+                        .payload
+                        .get("externalWritesExecuted")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+            }),
+            "Plan-Execute command events must not claim direct LifeModel or external writes"
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_execute_cancel_and_review_commands_persist_step_state_and_events() {
+        let state = crate::test_utils::test_app_state();
+        let session = create_plan_execute_session_with_state(
+            CreatePlanExecuteSessionInput {
+                scenario_id: Some("weekly_planning".into()),
+                source_chat_session_id: Some("chat-weekly".into()),
+                max_steps: Some(5),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let session = finalize_plan_execute_session_with_state(
+            FinalizePlanExecuteSessionInput {
+                session_id: session.session_id.clone(),
+                base_revision: Some(session.revision),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let read_step_id = session
+            .steps
+            .iter()
+            .find(|step| !step.declared_write)
+            .unwrap()
+            .step_id
+            .clone();
+        let executed = execute_plan_execute_step_with_state(
+            ExecutePlanExecuteStepInput {
+                session_id: session.session_id.clone(),
+                step_id: Some(read_step_id),
+                base_revision: Some(session.revision),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let cancelled = cancel_plan_execute_session_with_state(
+            CancelPlanExecuteSessionInput {
+                session_id: executed.session.session_id.clone(),
+                base_revision: Some(executed.session.revision),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        assert_eq!(cancelled.status, PlanExecuteSessionStatus::Cancelled);
+        assert!(cancelled
+            .steps
+            .iter()
+            .filter(|step| step.status == PlanStepStatus::Cancelled)
+            .all(|step| !step.evidence_ids.is_empty()));
+
+        let review = review_plan_execute_session_with_state(
+            ReviewPlanExecuteSessionInput {
+                session_id: cancelled.session_id.clone(),
+                base_revision: Some(cancelled.revision),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        assert_eq!(review.summary.plan_status, "cancelled");
+        assert!(!review.summary.completed_steps.is_empty());
+        assert!(!review.summary.unresolved.is_empty());
+        assert!(!review.summary.recommended_next_action.is_empty());
+        assert_eq!(
+            review.session.review_id.as_deref(),
+            Some(review.summary.review_id.as_str())
+        );
+
+        let replay = crate::main_chat_event_stream::list_main_chat_agent_events_with_state(
+            &state,
+            cancelled.session_id.clone(),
+            Some(0),
+            Some(250),
+        )
+        .await
+        .unwrap();
+        let event_types = replay
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>();
+        for required in [
+            "plan.updated",
+            "step.updated",
+            "step.cancelled",
+            "plan.reviewed",
+        ] {
+            assert!(
+                event_types.contains(&required),
+                "missing {required} in Plan-Execute cancel/review events: {event_types:?}"
+            );
+        }
+        let review_event = replay
+            .iter()
+            .find(|event| event.event_type == "plan.reviewed")
+            .expect("review event");
+        assert_eq!(review_event.payload["reviewId"], review.summary.review_id);
+        assert_eq!(review_event.payload["directLifeModelWrites"], false);
+        assert_eq!(review_event.payload["externalWritesExecuted"], false);
     }
 }

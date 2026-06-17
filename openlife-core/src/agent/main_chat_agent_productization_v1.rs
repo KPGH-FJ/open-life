@@ -4,6 +4,7 @@ use crate::agent::main_chat_agent_v1::{
     QueuedExecutionAction,
 };
 use crate::agent::memory_lifecycle::{MemoryLifecycleRecord, MemoryLifecycleStatus};
+use crate::agent::plan_execute::PlanExecuteReviewSummary;
 use crate::agent::types::{AgentProposal, AgentRun, ProposalStatus, ProposalType};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -1091,6 +1092,8 @@ pub struct PlanEvidence {
     pub controls: Vec<String>,
     #[serde(default)]
     pub steps: Vec<PlanStepEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_summary: Option<PlanExecuteReviewSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1746,6 +1749,7 @@ fn plan_from_evidence(
         superseded_by_plan_id: None,
         controls: Vec::new(),
         steps: Vec::new(),
+        review_summary: None,
     })
 }
 

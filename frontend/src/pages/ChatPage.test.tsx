@@ -1210,6 +1210,189 @@ describe("ChatPage", () => {
     });
   });
 
+  it("shows cancelled Phase C plan state and review summary without invalid step controls", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+    const cancelledPlanState = buildMainChatAgentStateSnapshot({
+      task: {
+        ...buildMainChatAgentStateSnapshot().task,
+        taskId: "mainchat-task-plan-cancelled-ui-1",
+        runId: "run-plan-cancelled-ui-1",
+        title: "Plan interaction",
+        strategy: "plan_execute",
+        status: "cancelled",
+        controls: [],
+        actionIds: [],
+        observationIds: [],
+        finalDeliveryId: undefined,
+      },
+      route: {
+        strategy: "plan_execute",
+        reason: "phase_c_plan_cancelled",
+        confidence: 0.92,
+      },
+      plan: {
+        planId: "plan-cancelled-ui-1",
+        planSessionId: "plan-session-cancelled-ui-1",
+        taskSessionId: "mainchat-task-plan-cancelled-ui-1",
+        runId: "run-plan-cancelled-ui-1",
+        status: "cancelled",
+        summary: "Plan was cancelled after one read-only step.",
+        editable: false,
+        source: "plan_execute",
+        evidenceId: "plan-evidence-cancelled-ui-1",
+        revision: 4,
+        revisionId: "rev-4",
+        reviewId: "plan-review-cancelled-ui-1",
+        controls: ["open_trace"],
+        reviewSummary: {
+          reviewId: "plan-review-cancelled-ui-1",
+          planId: "plan-cancelled-ui-1",
+          planSessionId: "plan-session-cancelled-ui-1",
+          planStatus: "cancelled",
+          basePlanRevision: 4,
+          completedSteps: [
+            {
+              stepId: "plan-step-cancelled-ui-1",
+              title: "Review priorities",
+              status: "executed",
+              evidenceIds: ["plan-action-cancelled-ui-1", "plan-observation-cancelled-ui-1"],
+              linkedActionIds: ["plan-action-cancelled-ui-1"],
+              linkedObservationIds: ["plan-observation-cancelled-ui-1"],
+              linkedProposalIds: [],
+              blockerIds: [],
+            },
+          ],
+          skippedSteps: [],
+          blockedSteps: [],
+          proposalsCreated: [],
+          observationsUsed: [
+            {
+              stepId: "plan-step-cancelled-ui-1",
+              title: "Review priorities",
+              status: "executed",
+              evidenceIds: ["plan-observation-cancelled-ui-1"],
+              linkedActionIds: [],
+              linkedObservationIds: ["plan-observation-cancelled-ui-1"],
+              linkedProposalIds: [],
+              blockerIds: [],
+            },
+          ],
+          unresolved: [
+            {
+              stepId: "plan-step-cancelled-ui-2",
+              title: "Prepare weekly proposal",
+              status: "cancelled",
+              evidenceIds: ["plan-step-cancel-cancelled-ui-2"],
+              linkedActionIds: [],
+              linkedObservationIds: [],
+              linkedProposalIds: [],
+              blockerIds: [],
+            },
+          ],
+          recommendedNextAction: ["Review cancelled steps before starting a new plan."],
+          completionClaimed: false,
+        },
+        steps: [
+          {
+            stepId: "plan-step-cancelled-ui-1",
+            planId: "plan-cancelled-ui-1",
+            index: 1,
+            title: "Review priorities",
+            description: "Read-only planning step.",
+            kind: "read",
+            status: "executed",
+            revision: 3,
+            basePlanRevision: 2,
+            linkedActionIds: ["plan-action-cancelled-ui-1"],
+            linkedObservationIds: ["plan-observation-cancelled-ui-1"],
+            linkedProposalIds: [],
+            blockerIds: [],
+            linkedFinalDeliveryIds: [],
+            evidenceIds: ["plan-action-cancelled-ui-1", "plan-observation-cancelled-ui-1"],
+            controls: [],
+          },
+          {
+            stepId: "plan-step-cancelled-ui-2",
+            planId: "plan-cancelled-ui-1",
+            index: 2,
+            title: "Prepare weekly proposal",
+            description: "Write-like proposal step.",
+            kind: "proposal",
+            status: "cancelled",
+            revision: 4,
+            basePlanRevision: 3,
+            linkedActionIds: [],
+            linkedObservationIds: [],
+            linkedProposalIds: [],
+            blockerIds: [],
+            linkedFinalDeliveryIds: [],
+            evidenceIds: ["plan-step-cancel-cancelled-ui-2"],
+            controls: [],
+          },
+        ],
+      },
+      actions: [],
+      observations: [],
+      finalDelivery: undefined,
+    });
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_main_chat_agent_state_snapshot") {
+        return Promise.resolve(cancelledPlanState as any);
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Review what happened" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+    await waitFor(() => {
+      expect(listeners.get("stream-message-done")).toBeDefined();
+    });
+
+    await act(async () => {
+      await listeners.get("stream-message-done")?.({
+        payload: {
+          session_id: "session-1",
+          run_id: "run-plan-cancelled-ui-1",
+          reply: "Here is the plan review.",
+          reasoning_trace: null,
+          tool_calls: [],
+          agent_state: cancelledPlanState,
+          execution_transcript: [],
+          legacy_fallback_used: false,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    await screen.findAllByText("cancelled");
+    expect(screen.getAllByText("cancelled").length).toBeGreaterThan(0);
+    expect(screen.getByText("Review summary")).toBeInTheDocument();
+    expect(screen.getByText("Completed")).toBeInTheDocument();
+    expect(screen.getByText("Observations used")).toBeInTheDocument();
+    expect(screen.getByText("Unresolved")).toBeInTheDocument();
+    expect(screen.getByText("Review cancelled steps before starting a new plan.")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Execute step Prepare weekly proposal" })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Skip step Prepare weekly proposal" })
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel plan" })).not.toBeInTheDocument();
+  });
+
   it("recovers event sequence gaps through replay and then snapshot fallback", async () => {
     type StreamListener = (event: { payload: any }) => void | Promise<void>;
     const listeners = new Map<string, StreamListener>();
