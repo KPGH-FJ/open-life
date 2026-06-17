@@ -83,6 +83,7 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
         main_chat_agent_event_store: Some(Arc::new(Mutex::new(
             crate::main_chat_event_stream::MainChatAgentEventStore::new_in_memory().unwrap(),
         ))),
+        main_chat_selected_skill_ids: Arc::new(Mutex::new(HashMap::new())),
         patch_store: Some(Arc::new(Mutex::new(
             openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
         ))),

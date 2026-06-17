@@ -761,6 +761,7 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
         main_chat_agent_session_store: Some(Arc::new(Mutex::new(main_chat_agent_session_store))),
         main_chat_action_queue_store: Some(Arc::new(Mutex::new(main_chat_action_queue_store))),
         main_chat_agent_event_store: Some(Arc::new(Mutex::new(main_chat_agent_event_store))),
+        main_chat_selected_skill_ids: Arc::new(Mutex::new(std::collections::HashMap::new())),
         patch_store: Some(Arc::new(Mutex::new(patch_store))),
         rollout_metrics_store,
         tool_permission_store: Arc::new(Mutex::new(tool_permission_store)),

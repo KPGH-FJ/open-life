@@ -312,6 +312,103 @@ async fn main_chat_product_maturity_v2_task_continuity_eval_covers_lt2_matrix() 
 }
 
 #[tokio::test]
+async fn main_chat_product_maturity_v2_skills_tool_eval_covers_sk2_matrix() {
+    let report =
+        crate::main_chat_skills_tools::run_main_chat_agent_product_maturity_v2_skills_gate().await;
+
+    assert_eq!(report.scenario_count, 8);
+    assert_eq!(report.default_gate_scenario_count, 8);
+    assert_eq!(report.passed_scenario_count, 8, "{:?}", report.proofs);
+    assert_eq!(report.expected_blocker_count, 2);
+    assert!(report.ready, "{:?}", report.blockers);
+    for id in [
+        "SK2-01", "SK2-02", "SK2-03", "SK2-04", "SK2-05", "SK2-06", "SK2-07", "SK2-08",
+    ] {
+        let proof = report
+            .proofs
+            .iter()
+            .find(|proof| proof.scenario_id == id)
+            .unwrap_or_else(|| panic!("missing {id}"));
+        assert!(
+            proof.runtime_object_count > 0,
+            "{id} must create or load real runtime objects, not schema-only proof: {:?}",
+            proof
+        );
+        assert!(
+            !proof.ui_state.is_empty(),
+            "{id} must include UI-state proof: {:?}",
+            proof
+        );
+    }
+
+    let selected = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "SK2-01")
+        .expect("SK2-01 selected skill proof");
+    assert_eq!(selected.selected_skill_ids, vec!["phase_e_review"]);
+    assert!(
+        selected
+            .runtime_evidence
+            .contains(&"bounded_instruction_digest".to_string())
+            && selected
+                .runtime_evidence
+                .contains(&"selected_skill_context_included".to_string()),
+        "selected skill proof must include bounded context digest evidence: {:?}",
+        selected
+    );
+    assert!(
+        selected
+            .negative_assertions
+            .contains(&"skill_does_not_override_policy".to_string()),
+        "selected skill must remain context, not authority: {:?}",
+        selected
+    );
+
+    let unselected = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "SK2-05")
+        .expect("SK2-05 unselected proof");
+    assert!(
+        unselected
+            .negative_assertions
+            .contains(&"unselected_skill_not_injected".to_string()),
+        "unselected skills must be absent from prompt/context evidence: {:?}",
+        unselected
+    );
+
+    let write_like = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "SK2-04")
+        .expect("SK2-04 write-like proof");
+    assert!(
+        write_like.expected_blocker
+            && write_like.blocker_ids.len() == 1
+            && write_like
+                .negative_assertions
+                .contains(&"write_like_tool_not_rendered_as_safe_read".to_string()),
+        "write-like tools must be blocker/proposal/permission paths, not normal safe reads: {:?}",
+        write_like
+    );
+
+    let failure = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "SK2-07")
+        .expect("SK2-07 failure proof");
+    assert!(
+        failure
+            .controls
+            .iter()
+            .any(|control| control == "retry_tool" || control == "switch_tool"),
+        "tool failure must expose retry or alternative control: {:?}",
+        failure
+    );
+}
+
+#[tokio::test]
 async fn run_main_chat_agent_productization_v1_gate_command_returns_auditable_read_only_report() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let app = tauri::test::mock_builder()

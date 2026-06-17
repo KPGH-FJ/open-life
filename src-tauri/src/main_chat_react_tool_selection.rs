@@ -992,7 +992,7 @@ pub(crate) fn resolve_main_chat_mcp_read_target(
     }
 }
 
-fn main_chat_governed_mcp_read_tool_candidates(
+pub(crate) fn main_chat_governed_mcp_read_tool_candidates(
     registry: &openlife_core::mcp::McpRegistry,
     selection_query: &str,
     limit: usize,
@@ -1110,7 +1110,7 @@ fn main_chat_generic_selection_term(term: &str) -> bool {
     )
 }
 
-fn main_chat_manifest_is_governed_read_candidate(
+pub(crate) fn main_chat_manifest_is_governed_read_candidate(
     manifest: &openlife_core::tool_manifest::ToolManifest,
 ) -> bool {
     if manifest.name == "mcp.call_tool" || !manifest.enabled || manifest.declarative_only {
@@ -1217,7 +1217,7 @@ fn main_chat_contract_label_or(value: &str, allow_colon: bool, fallback: &str) -
     }
 }
 
-fn main_chat_manifest_has_write_like_surface(
+pub(crate) fn main_chat_manifest_has_write_like_surface(
     manifest: &openlife_core::tool_manifest::ToolManifest,
 ) -> bool {
     std::iter::once(manifest.id.as_str())
@@ -1228,7 +1228,7 @@ fn main_chat_manifest_has_write_like_surface(
         .any(main_chat_surface_contains_write_like_term)
 }
 
-fn main_chat_surface_contains_write_like_term(value: &str) -> bool {
+pub(crate) fn main_chat_surface_contains_write_like_term(value: &str) -> bool {
     let surface = normalize_main_chat_selection_text(value);
     matches!(
         surface.as_str(),

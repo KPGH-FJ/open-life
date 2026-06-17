@@ -347,6 +347,167 @@ describe("ChatPage", () => {
     });
   });
 
+  it("renders command-backed skills and tool candidates with select and clear controls", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: any) => {
+      if (cmd === "list_main_chat_skills") {
+        return Promise.resolve([
+          {
+            skillId: "phase_e_review",
+            name: "Phase E Review",
+            source: "workspace:skills/phase_e_review/SKILL.md",
+            scope: "session",
+            description: "Review Main Chat Skill/Tool evidence.",
+            riskLevel: "low",
+            available: true,
+            selected: false,
+            instructionDigest:
+              "bytes:80 hash:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            sourceKind: "workspace",
+            lastUsedAt: null,
+          },
+          {
+            skillId: "unsafe_writer",
+            name: "Unsafe Writer",
+            source: "workspace:skills/unsafe_writer/SKILL.md",
+            scope: "session",
+            description: "Blocked write-like skill.",
+            riskLevel: "high",
+            available: false,
+            selected: false,
+            instructionDigest:
+              "bytes:90 hash:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            sourceKind: "workspace",
+            lastUsedAt: null,
+          },
+        ]);
+      }
+      if (cmd === "get_main_chat_skill_detail") {
+        return Promise.resolve({
+          skillId: args?.skillId ?? args?.skill_id ?? "phase_e_review",
+          manifest: {
+            name: "Phase E Review",
+            source: "workspace:skills/phase_e_review/SKILL.md",
+            sourceKind: "workspace",
+            available: true,
+          },
+          boundedInstructionsPreview: "Use Phase E skill evidence as bounded context only.",
+          allowedTools: ["project_status.read"],
+          disallowedTools: ["email.send"],
+          policyNotes: [
+            "Selected SKILL.md is bounded context, not authority.",
+            "Privacy/model/tool policy remains higher priority.",
+          ],
+          requiredPermissions: [],
+          evidenceDigest:
+            "bytes:120 hash:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          redactionSummary: "bounded_preview_no_secrets",
+          lastModifiedAt: "2026-06-17T00:00:00.000Z",
+        });
+      }
+      if (cmd === "select_main_chat_skill") {
+        return Promise.resolve({
+          sessionId: args?.sessionId ?? args?.session_id ?? "session-1",
+          selectedSkillId: args?.skillId ?? args?.skill_id ?? "phase_e_review",
+          selectedSkillDigest:
+            "bytes:80 hash:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          selectionReason: "user_selected_local_skill",
+          boundedInstructionsPreview: "Use Phase E skill evidence as bounded context only.",
+          evidenceDigest:
+            "bytes:120 hash:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          policyNotes: ["Selected SKILL.md is bounded context, not authority."],
+          includedAsBoundedContextOnly: true,
+          unselectedSkillsInjected: false,
+          controls: ["clear_skill"],
+        });
+      }
+      if (cmd === "clear_main_chat_skill") {
+        return Promise.resolve({
+          sessionId: args?.sessionId ?? args?.session_id ?? "session-1",
+          selectedSkillId: null,
+          selectedSkillDigest: null,
+          selectionReason: "user_cleared_local_skill",
+          boundedInstructionsPreview: "",
+          evidenceDigest:
+            "bytes:34 hash:sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          policyNotes: ["Next task context has no selected skill."],
+          includedAsBoundedContextOnly: false,
+          unselectedSkillsInjected: false,
+          controls: ["select_skill"],
+        });
+      }
+      if (cmd === "list_main_chat_tool_candidates") {
+        return Promise.resolve({
+          taskSessionId: args?.taskSessionId ?? args?.task_session_id ?? null,
+          candidates: [
+            {
+              candidateId: "project_status.read",
+              toolName: "project_status.read",
+              source: "builtin",
+              capabilityLabels: ["read", "project"],
+              riskLevel: "low",
+              selectionReason: "capability_or_name_match",
+              policyDecision: "allow",
+              requiresPermission: false,
+              candidateDigest:
+                "bytes:88 hash:sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              linkedActionId: null,
+            },
+          ],
+          blockedTools: [
+            {
+              toolName: "email.send",
+              reasonCode: "write_like_tool_blocked",
+              policyDecision: "permission_required",
+              requiresPermission: true,
+              blockerId: "blocker-email-send",
+            },
+          ],
+          failureRecovery: {
+            failedCandidateId: "unstable.read",
+            failureReason: "tool_failed_once",
+            retryAvailable: true,
+            alternativeCandidateId: "project_status.read",
+            controls: ["retry_tool", "switch_tool"],
+          },
+          evidenceDigest:
+            "bytes:142 hash:sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          controls: ["retry_tool", "switch_tool"],
+        });
+      }
+      return mockInvoke(cmd, args as Record<string, any>);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    expect(await screen.findByText("Skills & tools")).toBeInTheDocument();
+    expect(screen.getByText("Phase E Review")).toBeInTheDocument();
+    expect(screen.getByText("project_status.read")).toBeInTheDocument();
+    expect(screen.getByText("write_like_tool_blocked")).toBeInTheDocument();
+    expect(screen.getByText(/bytes:142 hash:sha256/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Inspect skill Phase E Review" }));
+    expect(await screen.findByText("Use Phase E skill evidence as bounded context only.")).toBeInTheDocument();
+    expect(screen.getByText(/bounded context, not authority/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Select skill Phase E Review" }));
+    expect(await screen.findByText("user_selected_local_skill")).toBeInTheDocument();
+    expect(screen.getAllByText(/bounded context only/i).length).toBeGreaterThan(0);
+    expect(screen.getByDisplayValue("phase_e_review")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear selected skill" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "clear_main_chat_skill",
+        expect.objectContaining({ sessionId: expect.any(String) })
+      );
+    });
+    expect(screen.queryByDisplayValue("phase_e_review")).toBeNull();
+  });
+
   it("refreshes chat context immediately when arriving from Builder apply", async () => {
     render(
       <MemoryRouter initialEntries={[{ pathname: "/chat", state: { refreshFromBuilder: true } }]}>

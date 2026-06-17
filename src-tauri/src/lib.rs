@@ -43,6 +43,7 @@ pub(crate) mod main_chat_react_runtime;
 pub(crate) mod main_chat_react_tool_selection;
 pub(crate) mod main_chat_runtime_support;
 pub(crate) mod main_chat_send;
+pub(crate) mod main_chat_skills_tools;
 pub(crate) mod main_chat_strategy;
 pub(crate) mod main_chat_streaming;
 #[allow(dead_code)]
@@ -111,7 +112,7 @@ use commands::agent_runtime::{
     check_default_chat_adapter_implementation_readiness,
     check_default_chat_adapter_narrow_implementation_discussion_gate,
     check_default_chat_adapter_narrow_implementation_plan_approval_readiness,
-    check_runtime_migration_gate, create_plan_execute_session,
+    check_runtime_migration_gate, clear_main_chat_skill, create_plan_execute_session,
     draft_controlled_chat_migration_plan, draft_default_chat_adapter_activation_plan,
     draft_default_chat_adapter_cutover_implementation_plan,
     draft_default_chat_adapter_narrow_implementation_plan, execute_plan_execute_step,
@@ -126,9 +127,9 @@ use commands::agent_runtime::{
     get_default_chat_adapter_narrow_implementation_plan_review_summary,
     get_default_chat_adapter_ordinary_entry_preflight_status,
     get_default_chat_adapter_routing_status, get_default_chat_runtime_boundary_status,
-    get_plan_execute_session, get_react_beta_execution_status,
-    get_runtime_strategy_registry_status, list_plan_execute_sessions,
-    record_controlled_chat_cutover_candidate_review_decision,
+    get_main_chat_skill_detail, get_plan_execute_session, get_react_beta_execution_status,
+    get_runtime_strategy_registry_status, list_main_chat_skills, list_main_chat_tool_candidates,
+    list_plan_execute_sessions, record_controlled_chat_cutover_candidate_review_decision,
     record_controlled_chat_migration_review_decision,
     record_controlled_chat_migration_shadow_review_decision,
     record_controlled_pilot_promotion_evidence,
@@ -142,8 +143,10 @@ use commands::agent_runtime::{
     run_default_chat_adapter_dry_run, run_main_chat_agent_execution_v1_eval_gate,
     run_main_chat_agent_execution_v1_final_acceptance_gate,
     run_main_chat_agent_product_maturity_v2_event_gate,
-    run_main_chat_agent_product_maturity_v2_plan_gate, run_main_chat_agent_productization_v1_gate,
-    run_multi_strategy_agent_preview, skip_plan_execute_step, update_plan_execute_session_draft,
+    run_main_chat_agent_product_maturity_v2_plan_gate,
+    run_main_chat_agent_product_maturity_v2_skills_gate,
+    run_main_chat_agent_productization_v1_gate, run_multi_strategy_agent_preview,
+    select_main_chat_skill, skip_plan_execute_step, update_plan_execute_session_draft,
 };
 
 use commands::builder::{
@@ -624,9 +627,15 @@ pub fn run() {
             run_main_chat_agent_productization_v1_gate,
             run_main_chat_agent_product_maturity_v2_event_gate,
             run_main_chat_agent_product_maturity_v2_plan_gate,
+            run_main_chat_agent_product_maturity_v2_skills_gate,
             run_main_chat_agent_execution_v1_final_acceptance_gate,
             get_runtime_strategy_registry_status,
             get_react_beta_execution_status,
+            list_main_chat_skills,
+            get_main_chat_skill_detail,
+            select_main_chat_skill,
+            clear_main_chat_skill,
+            list_main_chat_tool_candidates,
             create_plan_execute_session,
             get_plan_execute_session,
             list_plan_execute_sessions,

@@ -2138,6 +2138,7 @@ mod tests {
                     .unwrap(),
             ))),
             main_chat_agent_event_store: None,
+            main_chat_selected_skill_ids: Arc::new(Mutex::new(std::collections::HashMap::new())),
             patch_store: Some(Arc::new(Mutex::new(
                 openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
             ))),

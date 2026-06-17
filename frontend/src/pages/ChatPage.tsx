@@ -23,6 +23,7 @@ import {
   RotateCw,
   Ban,
   Play,
+  FileText,
 } from "lucide-react";
 import type { ChatMessage, LifeModel } from "../types";
 import LoadingSpinner from "../components/LoadingSpinner";
@@ -72,6 +73,11 @@ import {
   skipPlanExecuteStep,
   cancelPlanExecuteSession,
   reviewPlanExecuteSession,
+  listMainChatSkills,
+  getMainChatSkillDetail,
+  selectMainChatSkill,
+  clearMainChatSkill,
+  listMainChatToolCandidates,
 } from "../tauri";
 import type {
   AgentRun,
@@ -89,6 +95,10 @@ import type {
   MainChatTaskDetail,
   MainChatAgentStateSnapshot,
   MainChatAgentDurableEvent,
+  MainChatSkillSummary,
+  MainChatSkillDetail,
+  MainChatSelectedSkill,
+  MainChatToolCandidateList,
 } from "../tauri";
 import type {
   ControlledPilotPromotionEvidenceInput,
@@ -543,6 +553,17 @@ export default function ChatPage({
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [selectedSkillId, setSelectedSkillId] = useState("");
+  const [skillSummaries, setSkillSummaries] = useState<MainChatSkillSummary[]>([]);
+  const [selectedSkillEvidence, setSelectedSkillEvidence] =
+    useState<MainChatSelectedSkill | null>(null);
+  const [inspectedSkillDetail, setInspectedSkillDetail] = useState<MainChatSkillDetail | null>(
+    null
+  );
+  const [toolCandidateSurface, setToolCandidateSurface] =
+    useState<MainChatToolCandidateList | null>(null);
+  const [skillToolSurfaceAvailable, setSkillToolSurfaceAvailable] = useState(false);
+  const [skillToolBusy, setSkillToolBusy] = useState(false);
+  const [skillToolError, setSkillToolError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [preferLocal, setPreferLocal] = useState<boolean>(true);
@@ -1565,6 +1586,88 @@ export default function ChatPage({
     currentAgentState?.task?.taskId,
     currentAgentTaskState?.session?.id,
   ]);
+
+  const loadSkillToolSurface = useCallback(
+    async (taskSessionId?: string) => {
+      try {
+        const [skills, candidates] = await Promise.all([
+          listMainChatSkills(currentSessionIdRef.current),
+          listMainChatToolCandidates(taskSessionId),
+        ]);
+        setSkillSummaries(skills);
+        setToolCandidateSurface(candidates);
+        setSkillToolSurfaceAvailable(
+          skills.length > 0 ||
+            candidates.candidates.length > 0 ||
+            candidates.blockedTools.length > 0 ||
+            Boolean(candidates.failureRecovery)
+        );
+        setSkillToolError(null);
+        const selected = skills.find(skill => skill.selected);
+        if (selected && selected.skillId !== selectedSkillId) {
+          setSelectedSkillId(selected.skillId);
+        }
+      } catch {
+        setSkillToolSurfaceAvailable(false);
+        setSkillSummaries([]);
+        setToolCandidateSurface(null);
+      }
+    },
+    [selectedSkillId]
+  );
+
+  useEffect(() => {
+    if (companionMode) return;
+    void loadSkillToolSurface(currentMainChatTaskSessionId());
+  }, [companionMode, currentMainChatTaskSessionId, currentSessionId, loadSkillToolSurface]);
+
+  const handleInspectSkill = useCallback(async (skillId: string) => {
+    setSkillToolBusy(true);
+    setSkillToolError(null);
+    try {
+      const detail = await getMainChatSkillDetail(skillId);
+      setInspectedSkillDetail(detail);
+    } catch (error) {
+      setSkillToolError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSkillToolBusy(false);
+    }
+  }, []);
+
+  const handleSelectSkill = useCallback(
+    async (skillId: string) => {
+      setSkillToolBusy(true);
+      setSkillToolError(null);
+      try {
+        const selection = await selectMainChatSkill(currentSessionIdRef.current, skillId);
+        setSelectedSkillEvidence(selection);
+        setSelectedSkillId(selection.selectedSkillId ?? "");
+        const detail = await getMainChatSkillDetail(skillId);
+        setInspectedSkillDetail(detail);
+        await loadSkillToolSurface(currentMainChatTaskSessionId());
+      } catch (error) {
+        setSkillToolError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setSkillToolBusy(false);
+      }
+    },
+    [currentMainChatTaskSessionId, loadSkillToolSurface]
+  );
+
+  const handleClearSelectedSkill = useCallback(async () => {
+    setSkillToolBusy(true);
+    setSkillToolError(null);
+    try {
+      const selection = await clearMainChatSkill(currentSessionIdRef.current);
+      setSelectedSkillEvidence(selection);
+      setSelectedSkillId("");
+      await loadSkillToolSurface(currentMainChatTaskSessionId());
+    } catch (error) {
+      setSkillToolError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSkillToolBusy(false);
+    }
+  }, [currentMainChatTaskSessionId, loadSkillToolSurface]);
 
   const refreshMainChatControlState = useCallback(async (taskSessionId?: string) => {
     await refreshPendingProposals();
@@ -3749,6 +3852,241 @@ export default function ChatPage({
                 )}
               </div>
             </div>
+          )}
+          {!companionMode && skillToolSurfaceAvailable && (
+            <section className="px-4 py-2" aria-label="Skills and tools">
+              <div className="border-y border-stone-200 bg-white px-3 py-3 text-xs text-stone-700">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="inline-flex h-6 items-center gap-1 rounded-md bg-stone-950 px-2 font-semibold text-white">
+                        <Hammer size={13} />
+                        Skills & tools
+                      </span>
+                      {selectedSkillId.trim() ? (
+                        <span className="inline-flex h-6 max-w-full items-center rounded-md border border-emerald-200 bg-emerald-50 px-2 font-medium text-emerald-900">
+                          <span className="truncate">Selected {selectedSkillId.trim()}</span>
+                        </span>
+                      ) : (
+                        <span className="inline-flex h-6 items-center rounded-md border border-stone-200 bg-stone-50 px-2 font-medium text-stone-600">
+                          No selected skill
+                        </span>
+                      )}
+                      {selectedSkillEvidence?.selectionReason && (
+                        <span className="text-stone-500">
+                          {selectedSkillEvidence.selectionReason}
+                        </span>
+                      )}
+                    </div>
+                    {selectedSkillEvidence && (
+                      <div className="mt-2 flex flex-wrap gap-1 text-stone-600">
+                        {selectedSkillEvidence.selectedSkillDigest && (
+                          <span className="inline-flex h-5 max-w-full items-center rounded-md border border-stone-200 bg-stone-50 px-1.5">
+                            <span className="truncate">
+                              {selectedSkillEvidence.selectedSkillDigest}
+                            </span>
+                          </span>
+                        )}
+                        <span className="inline-flex h-5 items-center rounded-md border border-stone-200 bg-stone-50 px-1.5">
+                          {selectedSkillEvidence.includedAsBoundedContextOnly
+                            ? "bounded context only"
+                            : "no selected skill context"}
+                        </span>
+                        <span className="inline-flex h-5 items-center rounded-md border border-stone-200 bg-stone-50 px-1.5">
+                          unselected injected:{" "}
+                          {selectedSkillEvidence.unselectedSkillsInjected ? "yes" : "no"}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                  {selectedSkillId.trim() && (
+                    <button
+                      type="button"
+                      aria-label="Clear selected skill"
+                      title="Clear selected skill"
+                      disabled={skillToolBusy}
+                      onClick={handleClearSelectedSkill}
+                      className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      <X size={14} />
+                    </button>
+                  )}
+                </div>
+
+                {skillToolError && (
+                  <div className="mt-2 border-l-2 border-rose-400 bg-rose-50 px-2 py-1 text-rose-900">
+                    {skillToolError}
+                  </div>
+                )}
+
+                {skillSummaries.length > 0 && (
+                  <div className="mt-3">
+                    <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-stone-500">
+                      Local skills
+                    </div>
+                    <div className="divide-y divide-stone-200 border-y border-stone-200 bg-white">
+                      {skillSummaries.slice(0, 6).map(skill => (
+                        <div
+                          key={skill.skillId}
+                          className="grid gap-2 py-2 md:grid-cols-[1fr_auto]"
+                        >
+                          <div className="min-w-0 px-2">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-semibold text-stone-950">{skill.name}</span>
+                              <span className="text-stone-500">{skill.skillId}</span>
+                              <span
+                                className={classNames(
+                                  "inline-flex h-5 items-center rounded-md border px-1.5 font-medium",
+                                  skill.available
+                                    ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                                    : "border-amber-200 bg-amber-50 text-amber-900"
+                                )}
+                              >
+                                {skill.available ? "available" : "blocked"}
+                              </span>
+                              <span className="text-stone-500">{skill.sourceKind}</span>
+                            </div>
+                            <div className="mt-1 line-clamp-2 text-stone-600">
+                              {skill.description}
+                            </div>
+                            <div className="mt-1 truncate text-stone-500">
+                              {skill.instructionDigest}
+                            </div>
+                          </div>
+                          <div className="flex items-start justify-end gap-1 px-2">
+                            <button
+                              type="button"
+                              aria-label={`Inspect skill ${skill.name}`}
+                              title="Inspect skill"
+                              disabled={skillToolBusy}
+                              onClick={() => handleInspectSkill(skill.skillId)}
+                              className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              <FileText size={14} />
+                            </button>
+                            {skill.available && !skill.selected && (
+                              <button
+                                type="button"
+                                aria-label={`Select skill ${skill.name}`}
+                                title="Select skill"
+                                disabled={skillToolBusy}
+                                onClick={() => handleSelectSkill(skill.skillId)}
+                                className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-40"
+                              >
+                                <CheckCircle2 size={14} />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {inspectedSkillDetail && (
+                  <div className="mt-3 border-l border-emerald-300 bg-emerald-50/70 px-3 py-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-semibold text-stone-950">
+                        {inspectedSkillDetail.skillId}
+                      </span>
+                      <span className="text-stone-500">
+                        {inspectedSkillDetail.redactionSummary}
+                      </span>
+                      <span className="text-stone-500">{inspectedSkillDetail.evidenceDigest}</span>
+                    </div>
+                    <div className="mt-2 whitespace-pre-wrap text-stone-700">
+                      {inspectedSkillDetail.boundedInstructionsPreview}
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      {inspectedSkillDetail.policyNotes.map(note => (
+                        <span
+                          key={note}
+                          className="inline-flex min-h-5 max-w-full items-center rounded-md border border-emerald-200 bg-white px-1.5 text-emerald-900"
+                        >
+                          <span className="truncate">{note}</span>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {toolCandidateSurface && (
+                  <div className="mt-3 grid gap-2 md:grid-cols-2">
+                    {toolCandidateSurface.candidates.length > 0 && (
+                      <div className="min-w-0 border-l border-sky-300 bg-sky-50/70 px-2 py-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-semibold text-stone-950">
+                            Safe read candidates
+                          </span>
+                          <span className="text-stone-500">
+                            {toolCandidateSurface.evidenceDigest}
+                          </span>
+                        </div>
+                        <div className="mt-1 space-y-1">
+                          {toolCandidateSurface.candidates.slice(0, 5).map(candidate => (
+                            <div key={candidate.candidateId} className="min-w-0">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="font-semibold text-stone-800">
+                                  {candidate.toolName}
+                                </span>
+                                <span className="text-stone-500">
+                                  {candidate.policyDecision}
+                                </span>
+                                <span className="text-stone-500">
+                                  {candidate.selectionReason}
+                                </span>
+                              </div>
+                              <div className="truncate text-stone-500">
+                                {candidate.candidateDigest}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {(toolCandidateSurface.blockedTools.length > 0 ||
+                      toolCandidateSurface.failureRecovery) && (
+                      <div className="min-w-0 border-l border-amber-300 bg-amber-50/70 px-2 py-1">
+                        <div className="font-semibold text-stone-950">Policy and recovery</div>
+                        {toolCandidateSurface.blockedTools.slice(0, 5).map(tool => (
+                          <div key={`${tool.toolName}-${tool.reasonCode}`} className="mt-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-semibold text-amber-950">
+                                {tool.toolName}
+                              </span>
+                              <span className="text-amber-900">{tool.reasonCode}</span>
+                            </div>
+                          </div>
+                        ))}
+                        {toolCandidateSurface.failureRecovery && (
+                          <div className="mt-2 border-t border-amber-200 pt-2 text-amber-950">
+                            <div className="font-semibold">
+                              {toolCandidateSurface.failureRecovery.failureReason}
+                            </div>
+                            <div className="mt-1">
+                              failed: {toolCandidateSurface.failureRecovery.failedCandidateId}
+                              {toolCandidateSurface.failureRecovery.alternativeCandidateId
+                                ? ` · alternative: ${toolCandidateSurface.failureRecovery.alternativeCandidateId}`
+                                : ""}
+                            </div>
+                            <div className="mt-1 flex flex-wrap gap-1">
+                              {toolCandidateSurface.failureRecovery.controls.map(control => (
+                                <span
+                                  key={control}
+                                  className="inline-flex h-5 items-center rounded-md border border-amber-200 bg-white px-1.5 text-amber-900"
+                                >
+                                  {control}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </section>
           )}
           {!companionMode && (taskContinuitySummaries.length > 0 || taskContinuityError) && (
             <div className="px-4 py-2">

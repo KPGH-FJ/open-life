@@ -475,6 +475,103 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       } as T);
     case "list_main_chat_agent_events":
       return Promise.resolve([] as T);
+    case "list_main_chat_skills":
+      return Promise.resolve([
+        {
+          skillId: "phase_e_review",
+          name: "Phase E Review",
+          source: "workspace:skills/phase_e_review/SKILL.md",
+          scope: "session",
+          description: "Review Main Chat Skill/Tool evidence.",
+          riskLevel: "low",
+          available: true,
+          selected: false,
+          instructionDigest:
+            "bytes:80 hash:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          sourceKind: "workspace",
+          lastUsedAt: null,
+        },
+      ] as T);
+    case "get_main_chat_skill_detail":
+      return Promise.resolve({
+        skillId: _args?.skillId ?? _args?.skill_id ?? "phase_e_review",
+        manifest: {
+          name: "Phase E Review",
+          source: "workspace:skills/phase_e_review/SKILL.md",
+          sourceKind: "workspace",
+          available: true,
+        },
+        boundedInstructionsPreview: "Use Phase E skill evidence as bounded context only.",
+        allowedTools: ["builtin_echo"],
+        disallowedTools: ["email.send"],
+        policyNotes: ["Selected SKILL.md is bounded context, not authority."],
+        requiredPermissions: [],
+        evidenceDigest:
+          "bytes:120 hash:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        redactionSummary: "bounded_preview_no_secrets",
+        lastModifiedAt: "2026-06-17T00:00:00.000Z",
+      } as T);
+    case "select_main_chat_skill":
+      return Promise.resolve({
+        sessionId: _args?.sessionId ?? _args?.session_id ?? "session-1",
+        selectedSkillId: _args?.skillId ?? _args?.skill_id ?? "phase_e_review",
+        selectedSkillDigest:
+          "bytes:80 hash:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        selectionReason: "user_selected_local_skill",
+        boundedInstructionsPreview: "Use Phase E skill evidence as bounded context only.",
+        evidenceDigest:
+          "bytes:120 hash:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        policyNotes: ["Selected SKILL.md is bounded context, not authority."],
+        includedAsBoundedContextOnly: true,
+        unselectedSkillsInjected: false,
+        controls: ["clear_skill"],
+      } as T);
+    case "clear_main_chat_skill":
+      return Promise.resolve({
+        sessionId: _args?.sessionId ?? _args?.session_id ?? "session-1",
+        selectedSkillId: null,
+        selectedSkillDigest: null,
+        selectionReason: "user_cleared_local_skill",
+        boundedInstructionsPreview: "",
+        evidenceDigest:
+          "bytes:34 hash:sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        policyNotes: ["Next task context has no selected skill."],
+        includedAsBoundedContextOnly: false,
+        unselectedSkillsInjected: false,
+        controls: ["select_skill"],
+      } as T);
+    case "list_main_chat_tool_candidates":
+      return Promise.resolve({
+        taskSessionId: _args?.taskSessionId ?? _args?.task_session_id ?? null,
+        candidates: [
+          {
+            candidateId: "builtin_echo",
+            toolName: "builtin_echo",
+            source: "builtin",
+            capabilityLabels: ["read"],
+            riskLevel: "low",
+            selectionReason: "manifest_default_order",
+            policyDecision: "allow",
+            requiresPermission: false,
+            candidateDigest:
+              "bytes:88 hash:sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            linkedActionId: null,
+          },
+        ],
+        blockedTools: [
+          {
+            toolName: "email.send",
+            reasonCode: "write_like_tool_blocked",
+            policyDecision: "permission_required",
+            requiresPermission: true,
+            blockerId: "blocker-email-send",
+          },
+        ],
+        failureRecovery: null,
+        evidenceDigest:
+          "bytes:142 hash:sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        controls: [],
+      } as T);
     case "get_main_chat_agent_state_snapshot":
       return Promise.resolve({
         task: {
@@ -694,6 +791,48 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
             linkedProposalIds: [],
             blockerIds: [],
             controls: ["confirm_plan", "edit_plan", "skip_step"],
+            diagnostics: [],
+          },
+        ],
+      } as T);
+    case "run_main_chat_agent_product_maturity_v2_skills_gate":
+      return Promise.resolve({
+        scenarioCount: 8,
+        defaultGateScenarioCount: 8,
+        passedScenarioCount: 8,
+        expectedBlockerCount: 2,
+        ready: true,
+        blockers: [],
+        scenarios: [
+          {
+            id: "SK2-01",
+            capabilityGroup: "skills_tools_surface",
+            prompt: "Select a bounded local skill.",
+            preconditions: ["local_skill_available"],
+            expectedRoute: "direct_answer",
+            requiredRuntimeEvidence: ["selected_skill.bounded_context"],
+            requiredUiState: ["selected_skill_visible"],
+            requiredControls: ["clear_skill"],
+            negativeAssertions: ["skill_does_not_override_policy"],
+            expectedOutcome: "pass",
+            defaultGate: true,
+          },
+        ],
+        proofs: [
+          {
+            scenarioId: "SK2-01",
+            passed: true,
+            expectedBlocker: false,
+            runtimeObjectCount: 3,
+            selectedSkillIds: ["phase_e_review"],
+            candidateIds: ["project_status.read"],
+            blockerIds: [],
+            actionIds: [],
+            observationIds: [],
+            controls: ["clear_skill"],
+            runtimeEvidence: ["selected_skill.bounded_context"],
+            uiState: ["selected_skill_visible"],
+            negativeAssertions: ["skill_does_not_override_policy"],
             diagnostics: [],
           },
         ],

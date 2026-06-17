@@ -1039,6 +1039,166 @@ export interface MainChatProductMaturityV2PlanGateReport {
   proofs: MainChatProductMaturityV2PlanProof[];
 }
 
+export interface MainChatSkillSummary {
+  skillId: string;
+  name: string;
+  source: string;
+  scope: string;
+  description: string;
+  riskLevel: string;
+  available: boolean;
+  selected: boolean;
+  instructionDigest: string;
+  sourceKind: "global" | "workspace" | "project" | "bundled" | string;
+  lastUsedAt?: string | null;
+}
+
+export interface MainChatSkillDetail {
+  skillId: string;
+  manifest: Record<string, unknown>;
+  boundedInstructionsPreview: string;
+  allowedTools: string[];
+  disallowedTools: string[];
+  policyNotes: string[];
+  requiredPermissions: string[];
+  evidenceDigest: string;
+  redactionSummary: string;
+  lastModifiedAt?: string | null;
+}
+
+export interface MainChatSelectedSkill {
+  sessionId: string;
+  selectedSkillId?: string | null;
+  selectedSkillDigest?: string | null;
+  selectionReason: string;
+  boundedInstructionsPreview: string;
+  evidenceDigest: string;
+  policyNotes: string[];
+  includedAsBoundedContextOnly: boolean;
+  unselectedSkillsInjected: boolean;
+  controls: string[];
+}
+
+export interface MainChatToolCandidate {
+  candidateId: string;
+  toolName: string;
+  source: string;
+  capabilityLabels: string[];
+  riskLevel: string;
+  selectionReason: string;
+  policyDecision: string;
+  requiresPermission: boolean;
+  candidateDigest: string;
+  linkedActionId?: string | null;
+}
+
+export interface MainChatBlockedTool {
+  toolName: string;
+  reasonCode: string;
+  policyDecision: string;
+  requiresPermission: boolean;
+  blockerId?: string | null;
+}
+
+export interface MainChatToolFailureRecovery {
+  failedCandidateId: string;
+  failureReason: string;
+  retryAvailable: boolean;
+  alternativeCandidateId?: string | null;
+  controls: string[];
+}
+
+export interface MainChatToolCandidateList {
+  taskSessionId?: string | null;
+  candidates: MainChatToolCandidate[];
+  blockedTools: MainChatBlockedTool[];
+  failureRecovery?: MainChatToolFailureRecovery | null;
+  evidenceDigest: string;
+  controls: string[];
+}
+
+export interface MainChatProductMaturityV2SkillsProof {
+  scenarioId: string;
+  passed: boolean;
+  expectedBlocker: boolean;
+  runtimeObjectCount: number;
+  selectedSkillIds: string[];
+  candidateIds: string[];
+  blockerIds: string[];
+  actionIds: string[];
+  observationIds: string[];
+  controls: string[];
+  runtimeEvidence: string[];
+  uiState: string[];
+  negativeAssertions: string[];
+  diagnostics: string[];
+}
+
+export interface MainChatProductMaturityV2SkillsScenario {
+  id: string;
+  capabilityGroup: string;
+  prompt: string;
+  preconditions: string[];
+  expectedRoute: string;
+  requiredRuntimeEvidence: string[];
+  requiredUiState: string[];
+  requiredControls: string[];
+  negativeAssertions: string[];
+  expectedOutcome: string;
+  defaultGate: boolean;
+}
+
+export interface MainChatProductMaturityV2SkillsGateReport {
+  scenarioCount: number;
+  defaultGateScenarioCount: number;
+  passedScenarioCount: number;
+  expectedBlockerCount: number;
+  ready: boolean;
+  blockers: string[];
+  scenarios: MainChatProductMaturityV2SkillsScenario[];
+  proofs: MainChatProductMaturityV2SkillsProof[];
+}
+
+export async function listMainChatSkills(sessionId?: string): Promise<MainChatSkillSummary[]> {
+  return safeInvoke<MainChatSkillSummary[]>("list_main_chat_skills", {
+    ...optionalDualArg("sessionId", "session_id", sessionId),
+  });
+}
+
+export async function getMainChatSkillDetail(skillId: string): Promise<MainChatSkillDetail> {
+  return safeInvoke<MainChatSkillDetail>("get_main_chat_skill_detail", {
+    skillId,
+    skill_id: skillId,
+  });
+}
+
+export async function selectMainChatSkill(
+  sessionId: string,
+  skillId: string
+): Promise<MainChatSelectedSkill> {
+  return safeInvoke<MainChatSelectedSkill>("select_main_chat_skill", {
+    sessionId,
+    session_id: sessionId,
+    skillId,
+    skill_id: skillId,
+  });
+}
+
+export async function clearMainChatSkill(sessionId: string): Promise<MainChatSelectedSkill> {
+  return safeInvoke<MainChatSelectedSkill>("clear_main_chat_skill", {
+    sessionId,
+    session_id: sessionId,
+  });
+}
+
+export async function listMainChatToolCandidates(
+  taskSessionId?: string
+): Promise<MainChatToolCandidateList> {
+  return safeInvoke<MainChatToolCandidateList>("list_main_chat_tool_candidates", {
+    ...optionalDualArg("taskSessionId", "task_session_id", taskSessionId),
+  });
+}
+
 export async function sendMessageV2(
   sessionId: string,
   messages: ChatMessage[],
@@ -1178,6 +1338,12 @@ export async function runMainChatAgentProductMaturityV2EventGate(): Promise<Main
 export async function runMainChatAgentProductMaturityV2PlanGate(): Promise<MainChatProductMaturityV2PlanGateReport> {
   return safeInvoke<MainChatProductMaturityV2PlanGateReport>(
     "run_main_chat_agent_product_maturity_v2_plan_gate"
+  );
+}
+
+export async function runMainChatAgentProductMaturityV2SkillsGate(): Promise<MainChatProductMaturityV2SkillsGateReport> {
+  return safeInvoke<MainChatProductMaturityV2SkillsGateReport>(
+    "run_main_chat_agent_product_maturity_v2_skills_gate"
   );
 }
 
