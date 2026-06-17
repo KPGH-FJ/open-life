@@ -31,6 +31,8 @@ pub(crate) mod main_chat_generation_support;
 pub(crate) mod main_chat_hs_runtime;
 pub(crate) mod main_chat_legacy_agent_loop;
 pub(crate) mod main_chat_legacy_fallback;
+#[allow(dead_code)]
+pub(crate) mod main_chat_live_productization_eval;
 pub(crate) mod main_chat_live_provider_harness;
 #[allow(dead_code)]
 pub(crate) mod main_chat_memory_lifecycle_eval;
@@ -145,8 +147,9 @@ use commands::agent_runtime::{
     run_main_chat_agent_product_maturity_v2_event_gate,
     run_main_chat_agent_product_maturity_v2_plan_gate,
     run_main_chat_agent_product_maturity_v2_skills_gate,
-    run_main_chat_agent_productization_v1_gate, run_multi_strategy_agent_preview,
-    select_main_chat_skill, skip_plan_execute_step, update_plan_execute_session_draft,
+    run_main_chat_agent_productization_v1_gate, run_main_chat_external_live_productization_gate,
+    run_multi_strategy_agent_preview, select_main_chat_skill, skip_plan_execute_step,
+    update_plan_execute_session_draft,
 };
 
 use commands::builder::{
@@ -625,6 +628,7 @@ pub fn run() {
             run_multi_strategy_agent_preview,
             run_main_chat_agent_execution_v1_eval_gate,
             run_main_chat_agent_productization_v1_gate,
+            run_main_chat_external_live_productization_gate,
             run_main_chat_agent_product_maturity_v2_event_gate,
             run_main_chat_agent_product_maturity_v2_plan_gate,
             run_main_chat_agent_product_maturity_v2_skills_gate,

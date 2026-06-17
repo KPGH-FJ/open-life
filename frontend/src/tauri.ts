@@ -975,6 +975,49 @@ export interface MainChatAgentProductizationV1GateReport {
   blockers: string[];
 }
 
+export interface MainChatLiveProductScenarioProof {
+  scenarioId: string;
+  passed: boolean;
+  status: string;
+  provider: string;
+  providerModel?: string | null;
+  providerEndpointKind: string;
+  taskSessionId?: string | null;
+  runId?: string | null;
+  actionIds: string[];
+  observationIds: string[];
+  proposalIds: string[];
+  blockerIds: string[];
+  finalDeliveryId?: string | null;
+  eventTypes: string[];
+  eventSequenceStart?: number | null;
+  eventSequenceEnd?: number | null;
+  uiStateAssertions: string[];
+  runtimeEvidence: string[];
+  controls: string[];
+  negativeAssertions: string[];
+  blockers: string[];
+}
+
+export interface MainChatExternalLiveProductizationGateReport {
+  reportKind: "main_chat_external_live_productization_gate";
+  scenarioCount: number;
+  defaultGateScenarioCount: number;
+  readinessSemantics: "opt_in_external_live_product_evidence_only_default_readiness_unchanged";
+  runMode: "external_live_opt_in";
+  liveProviderAttempted: boolean;
+  passedScenarioCount: number;
+  blockedScenarioCount: number;
+  failedScenarioCount: number;
+  ready: boolean;
+  externalProviderInvoked: boolean;
+  directWritesExecuted: boolean;
+  legacyFallbackUsed: boolean;
+  deterministicReadinessUnchanged: boolean;
+  blockers: string[];
+  proofs: MainChatLiveProductScenarioProof[];
+}
+
 export interface MainChatProductMaturityV2EventProof {
   scenarioId: string;
   capabilityGroup: string;
@@ -1326,6 +1369,12 @@ export async function runMainChatAgentExecutionV1EvalGate(): Promise<MainChatAge
 export async function runMainChatAgentProductizationV1Gate(): Promise<MainChatAgentProductizationV1GateReport> {
   return safeInvoke<MainChatAgentProductizationV1GateReport>(
     "run_main_chat_agent_productization_v1_gate"
+  );
+}
+
+export async function runMainChatExternalLiveProductizationGate(): Promise<MainChatExternalLiveProductizationGateReport> {
+  return safeInvoke<MainChatExternalLiveProductizationGateReport>(
+    "run_main_chat_external_live_productization_gate"
   );
 }
 

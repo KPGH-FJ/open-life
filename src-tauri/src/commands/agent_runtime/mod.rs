@@ -1838,6 +1838,20 @@ pub async fn run_main_chat_agent_productization_v1_gate(
 }
 
 #[tauri::command]
+pub async fn run_main_chat_external_live_productization_gate(
+    state: State<'_, Arc<AppState>>,
+) -> Result<
+    crate::main_chat_live_productization_eval::MainChatExternalLiveProductizationGateReport,
+    String,
+> {
+    crate::main_chat_live_productization_eval::run_main_chat_external_live_productization_gate_with_state(
+        &state.inner().clone(),
+        crate::main_chat_live_provider_harness::main_chat_live_provider_eval_opt_in_from_env(),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn run_main_chat_agent_product_maturity_v2_event_gate(
     _state: State<'_, Arc<AppState>>,
 ) -> Result<crate::main_chat_event_stream::MainChatProductMaturityV2EventGateReport, String> {

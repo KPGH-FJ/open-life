@@ -55,6 +55,7 @@ import {
   getMainChatSkillDetail,
   listMainChatSkills,
   listMainChatToolCandidates,
+  runMainChatExternalLiveProductizationGate,
   runMainChatAgentProductMaturityV2EventGate,
   runMainChatAgentProductMaturityV2PlanGate,
   runMainChatAgentProductMaturityV2SkillsGate,
@@ -594,6 +595,64 @@ describe("tauri command argument aliases", () => {
     expect(result.runtimeExecutionScope).toBe(
       "default_deterministic_scenarios_runtime_backed_external_live_excluded"
     );
+  });
+
+  it("invokes external live productization gate as opt-in non-default evidence", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      reportKind: "main_chat_external_live_productization_gate",
+      scenarioCount: 6,
+      defaultGateScenarioCount: 0,
+      readinessSemantics:
+        "opt_in_external_live_product_evidence_only_default_readiness_unchanged",
+      runMode: "external_live_opt_in",
+      liveProviderAttempted: false,
+      passedScenarioCount: 0,
+      blockedScenarioCount: 6,
+      failedScenarioCount: 0,
+      ready: false,
+      externalProviderInvoked: false,
+      directWritesExecuted: false,
+      legacyFallbackUsed: false,
+      deterministicReadinessUnchanged: true,
+      blockers: ["explicit_live_eval_required"],
+      proofs: [
+        {
+          scenarioId: "LIVE-PROD-01",
+          passed: false,
+          status: "blocked",
+          provider: "",
+          providerModel: null,
+          providerEndpointKind: "",
+          taskSessionId: null,
+          runId: null,
+          actionIds: [],
+          observationIds: [],
+          proposalIds: [],
+          blockerIds: [],
+          finalDeliveryId: null,
+          eventTypes: [],
+          eventSequenceStart: null,
+          eventSequenceEnd: null,
+          uiStateAssertions: [],
+          runtimeEvidence: [],
+          controls: [],
+          negativeAssertions: [],
+          blockers: ["explicit_live_eval_required"],
+        },
+      ],
+    });
+
+    const result = await runMainChatExternalLiveProductizationGate();
+
+    expect(invoke).toHaveBeenCalledWith(
+      "run_main_chat_external_live_productization_gate",
+      undefined
+    );
+    expect(result.defaultGateScenarioCount).toBe(0);
+    expect(result.ready).toBe(false);
+    expect(result.liveProviderAttempted).toBe(false);
+    expect(result.deterministicReadinessUnchanged).toBe(true);
+    expect(result.blockers).toContain("explicit_live_eval_required");
   });
 
   it("invokes Product Maturity v2 event gate as an explicit read-only diagnostic", async () => {

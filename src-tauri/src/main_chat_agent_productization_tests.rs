@@ -28,6 +28,10 @@ fn productization_command_test_context() -> tauri::Context<tauri::test::MockRunt
     };
     context.runtime_authority_mut().__allow_command(
         "run_main_chat_agent_productization_v1_gate".into(),
+        mock_ipc_origin.clone(),
+    );
+    context.runtime_authority_mut().__allow_command(
+        "run_main_chat_external_live_productization_gate".into(),
         mock_ipc_origin,
     );
     context
@@ -408,6 +412,225 @@ async fn main_chat_product_maturity_v2_skills_tool_eval_covers_sk2_matrix() {
     );
 }
 
+#[test]
+fn main_chat_external_live_productization_gate_defines_six_opt_in_live_prod_rows() {
+    let scenarios = crate::main_chat_live_productization_eval::main_chat_live_product_scenarios();
+    let ids = scenarios
+        .iter()
+        .map(|scenario| scenario.id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        ids,
+        vec![
+            "LIVE-PROD-01",
+            "LIVE-PROD-02",
+            "LIVE-PROD-03",
+            "LIVE-PROD-04",
+            "LIVE-PROD-05",
+            "LIVE-PROD-06",
+        ]
+    );
+    assert!(scenarios.iter().all(|scenario| !scenario.default_gate));
+    assert!(scenarios
+        .iter()
+        .all(|scenario| scenario.run_mode == "external_live_opt_in"));
+    assert!(scenarios
+        .iter()
+        .all(|scenario| scenario.expected_outcome == "pass"));
+}
+
+#[test]
+fn main_chat_external_live_productization_gate_blocks_without_opt_in() {
+    let report = crate::main_chat_live_productization_eval::
+        build_main_chat_external_live_productization_gate_report(
+            false,
+            vec!["explicit_live_eval_required".into()],
+            Vec::new(),
+        );
+
+    assert_eq!(report.scenario_count, 6);
+    assert_eq!(report.default_gate_scenario_count, 0);
+    assert!(!report.ready);
+    assert!(!report.live_provider_attempted);
+    assert_eq!(report.passed_scenario_count, 0);
+    assert_eq!(report.blocked_scenario_count, 6);
+    assert!(report
+        .blockers
+        .contains(&"explicit_live_eval_required".to_string()));
+    assert!(report
+        .proofs
+        .iter()
+        .all(|proof| proof.status == "blocked" && !proof.passed));
+}
+
+#[test]
+fn main_chat_external_live_productization_gate_rejects_local_provider_credit() {
+    let mut evidence =
+        crate::main_chat_live_productization_eval::test_live_product_evidence_for_scenario(
+            "LIVE-PROD-01",
+        );
+    evidence.provider = "local_test_http".into();
+    evidence.provider_endpoint_kind = "local_test_http".into();
+
+    let report = crate::main_chat_live_productization_eval::
+        build_main_chat_external_live_productization_gate_report(true, Vec::new(), vec![evidence]);
+
+    assert!(!report.ready);
+    assert_eq!(report.passed_scenario_count, 0);
+    assert!(report
+        .blockers
+        .contains(&"live_product_external_provider_missing".to_string()));
+    let proof = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "LIVE-PROD-01")
+        .expect("LIVE-PROD-01 proof");
+    assert!(!proof.passed);
+    assert!(proof
+        .blockers
+        .contains(&"live_product_external_provider_missing".to_string()));
+}
+
+#[test]
+fn main_chat_external_live_productization_gate_requires_product_runtime_mapping() {
+    let evidence = [
+        "LIVE-PROD-01",
+        "LIVE-PROD-02",
+        "LIVE-PROD-03",
+        "LIVE-PROD-04",
+        "LIVE-PROD-05",
+        "LIVE-PROD-06",
+    ]
+    .into_iter()
+    .map(crate::main_chat_live_productization_eval::test_live_product_evidence_for_scenario)
+    .collect::<Vec<_>>();
+
+    let report = crate::main_chat_live_productization_eval::
+        build_main_chat_external_live_productization_gate_report(true, Vec::new(), evidence);
+
+    assert!(report.ready, "{:?}", report.blockers);
+    assert!(report.live_provider_attempted);
+    assert_eq!(report.scenario_count, 6);
+    assert_eq!(report.passed_scenario_count, 6, "{:?}", report.proofs);
+    assert_eq!(report.blocked_scenario_count, 0);
+    assert_eq!(report.failed_scenario_count, 0);
+    assert!(report.external_provider_invoked);
+    assert!(!report.direct_writes_executed);
+    assert!(!report.legacy_fallback_used);
+    assert_eq!(
+        report.readiness_semantics,
+        "opt_in_external_live_product_evidence_only_default_readiness_unchanged"
+    );
+
+    let direct = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "LIVE-PROD-01")
+        .expect("LIVE-PROD-01 proof");
+    assert!(direct.final_delivery_id.is_some());
+    assert!(direct.action_ids.is_empty());
+    assert!(direct.observation_ids.is_empty());
+    assert!(direct
+        .ui_state_assertions
+        .contains(&"direct_answer_no_tool_timeline".to_string()));
+
+    let web = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "LIVE-PROD-02")
+        .expect("LIVE-PROD-02 proof");
+    assert!(!web.action_ids.is_empty());
+    assert!(!web.observation_ids.is_empty());
+    assert!(web
+        .runtime_evidence
+        .contains(&"web_observation_source".to_string()));
+    assert!(web
+        .negative_assertions
+        .contains(&"no_fake_source".to_string()));
+
+    let mcp = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "LIVE-PROD-03")
+        .expect("LIVE-PROD-03 proof");
+    assert!(mcp
+        .runtime_evidence
+        .contains(&"candidate_ranking_trace".to_string()));
+    assert!(mcp
+        .runtime_evidence
+        .contains(&"selected_target".to_string()));
+
+    let proposal = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "LIVE-PROD-04")
+        .expect("LIVE-PROD-04 proof");
+    assert_eq!(proposal.proposal_ids.len(), 1);
+    assert!(proposal
+        .runtime_evidence
+        .contains(&"exact_action_proposal".to_string()));
+    assert!(proposal
+        .negative_assertions
+        .contains(&"no_overlapping_read_success".to_string()));
+
+    let recovery = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "LIVE-PROD-05")
+        .expect("LIVE-PROD-05 proof");
+    assert!(!recovery.blocker_ids.is_empty());
+    assert!(recovery.controls.contains(&"retry".to_string()));
+    assert!(recovery.controls.contains(&"cancel".to_string()));
+
+    let deltas = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "LIVE-PROD-06")
+        .expect("LIVE-PROD-06 proof");
+    assert!(deltas.event_sequence_start.is_some());
+    assert!(deltas.event_sequence_end > deltas.event_sequence_start);
+    for event_type in [
+        "route.selected",
+        "action.queued",
+        "observation.created",
+        "final_delivery.created",
+    ] {
+        assert!(
+            deltas.event_types.contains(&event_type.to_string()),
+            "LIVE-PROD-06 must include {event_type}: {:?}",
+            deltas.event_types
+        );
+    }
+}
+
+#[test]
+fn main_chat_external_live_productization_gate_allows_tool_permission_proposal_observation() {
+    let mut evidence =
+        crate::main_chat_live_productization_eval::test_live_product_evidence_for_scenario(
+            "LIVE-PROD-04",
+        );
+    evidence.observation_ids = vec!["proposal-observation".into()];
+    evidence.ui_state_assertions.push("observation_card".into());
+
+    let report = crate::main_chat_live_productization_eval::
+        build_main_chat_external_live_productization_gate_report(true, Vec::new(), vec![evidence]);
+
+    let proof = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "LIVE-PROD-04")
+        .expect("LIVE-PROD-04 proof");
+    assert!(
+        proof.passed,
+        "proposal observation should not count as read-success overlap: {:?}",
+        proof.blockers
+    );
+    assert!(!proof
+        .blockers
+        .contains(&"live_product_tool_permission_read_overlap".to_string()));
+}
+
 #[tokio::test]
 async fn run_main_chat_agent_productization_v1_gate_command_returns_auditable_read_only_report() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
@@ -479,6 +702,139 @@ async fn run_main_chat_agent_productization_v1_gate_command_returns_auditable_re
         proposal_count, 0,
         "gate command must not write app proposal state"
     );
+}
+
+#[tokio::test]
+async fn run_main_chat_external_live_productization_gate_command_fails_closed_without_opt_in() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let app = tauri::test::mock_builder()
+        .manage(state.clone())
+        .invoke_handler(tauri::generate_handler![
+            crate::commands::agent_runtime::run_main_chat_external_live_productization_gate
+        ])
+        .build(productization_command_test_context())
+        .expect("build mock tauri app");
+    let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+        .build()
+        .expect("build mock webview");
+
+    let response = tauri::test::get_ipc_response(
+        &webview,
+        productization_invoke_request(
+            "run_main_chat_external_live_productization_gate",
+            serde_json::json!({}),
+        ),
+    )
+    .expect("live productization gate response")
+    .deserialize::<serde_json::Value>()
+    .expect("deserialize live productization gate response");
+
+    assert_eq!(
+        response["reportKind"].as_str().unwrap(),
+        "main_chat_external_live_productization_gate"
+    );
+    assert_eq!(response["scenarioCount"].as_u64().unwrap(), 6);
+    assert_eq!(response["defaultGateScenarioCount"].as_u64().unwrap(), 0);
+    assert!(!response["ready"].as_bool().unwrap());
+    assert!(!response["liveProviderAttempted"].as_bool().unwrap());
+    assert_eq!(response["blockedScenarioCount"].as_u64().unwrap(), 6);
+    assert!(response["blockers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|blocker| blocker.as_str() == Some("explicit_live_eval_required")));
+    assert!(response["deterministicReadinessUnchanged"]
+        .as_bool()
+        .unwrap());
+
+    let run_count = state
+        .agent_run_store
+        .as_ref()
+        .expect("agent run store")
+        .lock()
+        .await
+        .list_runs(10, 0)
+        .expect("list runs")
+        .len();
+    let event_count = state
+        .main_chat_agent_event_store
+        .as_ref()
+        .expect("event store")
+        .lock()
+        .await
+        .list("missing-live-product-task", 0, 100)
+        .expect("list events")
+        .len();
+    assert_eq!(run_count, 0);
+    assert_eq!(event_count, 0);
+}
+
+#[tokio::test]
+#[ignore = "requires OPENLIFE_MAIN_CHAT_LIVE_PROVIDER_EVAL=1, network, and a real external provider API key"]
+async fn main_chat_external_live_productization_gate_invokes_external_provider_when_opted_in() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    {
+        let mut config = state.config.lock().await;
+        config.llm.provider = std::env::var("OPENLIFE_LIVE_EVAL_PROVIDER").unwrap_or_default();
+        config.llm.openai_base = std::env::var("OPENLIFE_LIVE_EVAL_BASE").unwrap_or_default();
+        config.llm.chat_model = std::env::var("OPENLIFE_LIVE_EVAL_MODEL").unwrap_or_default();
+        config.llm.openai_key = std::env::var("OPENLIFE_LIVE_EVAL_API_KEY").unwrap_or_default();
+        config.system.network_policy.enabled = true;
+    }
+    {
+        let config = state.config.lock().await.clone();
+        let mut scheduler = state.scheduler.lock().await;
+        *scheduler = openlife_core::scheduler::InferenceScheduler::new(
+            config.local_model.clone(),
+            false,
+            config.llm.provider.clone(),
+            config.llm.openai_base.clone(),
+            config.llm.openai_key.clone(),
+            config.llm.chat_model.clone(),
+            config.llm.embedding_model.clone(),
+            false,
+        );
+    }
+
+    let report =
+        crate::main_chat_live_productization_eval::run_main_chat_external_live_productization_gate_with_state(
+            &state,
+            true,
+        )
+        .await
+        .expect("external live productization report");
+    let audit = serde_json::to_string_pretty(&serde_json::json!({
+        "ready": report.ready,
+        "blockers": report.blockers,
+        "proofs": report.proofs,
+    }))
+    .unwrap_or_else(|error| format!("serialize live product audit failed: {error}"));
+
+    assert!(report.ready, "{audit}");
+    assert_eq!(report.scenario_count, 6, "{audit}");
+    assert_eq!(report.passed_scenario_count, 6, "{audit}");
+    assert_eq!(report.default_gate_scenario_count, 0, "{audit}");
+    assert!(report.live_provider_attempted, "{audit}");
+    assert!(report.external_provider_invoked, "{audit}");
+    assert!(!report.direct_writes_executed, "{audit}");
+    assert!(!report.legacy_fallback_used, "{audit}");
+    assert!(report.deterministic_readiness_unchanged, "{audit}");
+    for id in [
+        "LIVE-PROD-01",
+        "LIVE-PROD-02",
+        "LIVE-PROD-03",
+        "LIVE-PROD-04",
+        "LIVE-PROD-05",
+        "LIVE-PROD-06",
+    ] {
+        assert!(
+            report
+                .proofs
+                .iter()
+                .any(|proof| proof.scenario_id == id && proof.passed),
+            "{id} must pass with external live product evidence: {audit}"
+        );
+    }
 }
 
 #[test]
