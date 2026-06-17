@@ -72,6 +72,28 @@ pub(crate) async fn compile_main_chat_context(
     candidates.extend(load_current_workspace_knowledge_context_candidates(
         selected_skill_id.as_deref(),
     ));
+    if let Some(lifecycle_store) = state.memory_lifecycle_store.as_ref() {
+        let store = lifecycle_store.lock().await;
+        if let Ok(records) = store.list_active_records(None, 8) {
+            for record in records {
+                candidates.push(ContextSourceCandidate::new(
+                    ContextSourceKind::SelectedPersonalContext,
+                    &record.memory_id,
+                    format!(
+                        "Accepted memory [{}:{}]: {}",
+                        record.scope, record.category, record.content
+                    ),
+                    format!(
+                        "accepted memory lifecycle; materialized view {} version {}",
+                        record.materialized_view_id.as_deref().unwrap_or("unknown"),
+                        record.materialized_view_version.unwrap_or_default()
+                    ),
+                    "private",
+                    16,
+                ));
+            }
+        }
+    }
     if let Ok(sessions) = {
         let store = state.memory_store.lock().await;
         store.list_sessions(5)

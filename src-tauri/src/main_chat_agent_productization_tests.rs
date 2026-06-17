@@ -56,12 +56,12 @@ fn main_chat_agent_productization_v1_gate_accounts_for_all_default_scenarios_wit
     );
     assert_eq!(report.representative_runtime_group_count, 0);
     assert_eq!(report.representative_runtime_group_passed_count, 0);
-    assert_eq!(report.runtime_required_group_count, 91);
-    assert_eq!(report.runtime_required_group_passed_count, 91);
-    assert_eq!(report.full_deterministic_runtime_scenario_count, 91);
+    assert_eq!(report.runtime_required_group_count, 92);
+    assert_eq!(report.runtime_required_group_passed_count, 92);
+    assert_eq!(report.full_deterministic_runtime_scenario_count, 92);
     assert_eq!(
         report.full_deterministic_runtime_scenario_executed_count,
-        91
+        92
     );
     assert!(report.future_work.is_empty());
     assert_eq!(
@@ -130,9 +130,11 @@ fn main_chat_agent_productization_v1_gate_accounts_for_all_default_scenarios_wit
         "blocked scenarios should pass as expected blockers, not successful execution"
     );
 
-    assert_eq!(report.unsupported_scenarios.len(), 1);
-    assert_eq!(report.unsupported_scenarios[0].scenario_id, "MP-06");
-    assert!(report.unsupported_scenarios[0].reason.contains("Rollback"));
+    assert!(
+        report.unsupported_scenarios.is_empty(),
+        "Phase A requires MP-06 rollback to be supported by real lifecycle/materialized context evidence: {:?}",
+        report.unsupported_scenarios
+    );
 }
 
 #[test]
@@ -154,8 +156,8 @@ fn main_chat_agent_productization_v1_gate_requires_runtime_backed_default_scenar
         })
         .map(|scenario| scenario.id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(supported_default_ids.len(), 91);
-    assert_eq!(report.runtime_required_group_evidence.len(), 91);
+    assert_eq!(supported_default_ids.len(), 92);
+    assert_eq!(report.runtime_required_group_evidence.len(), 92);
 
     for scenario_id in supported_default_ids {
         let proof = report
@@ -188,6 +190,10 @@ fn main_chat_agent_productization_v1_gate_fails_schema_only_runtime_executor() {
                 created_action_ids: Vec::new(),
                 created_observation_ids: Vec::new(),
                 created_proposal_ids: Vec::new(),
+                created_memory_ids: Vec::new(),
+                rollback_event_ids: Vec::new(),
+                materialized_view_versions: Vec::new(),
+                inactive_memory_ids: Vec::new(),
                 final_delivery_id: None,
                 diagnostics: Vec::new(),
             }),
@@ -204,6 +210,40 @@ fn main_chat_agent_productization_v1_gate_fails_schema_only_runtime_executor() {
         "missing runtime objects should be a visible readiness blocker: {:?}",
         report.blockers
     );
+}
+
+#[test]
+fn main_chat_product_maturity_v2_memory_lifecycle_eval_covers_mr_matrix() {
+    let report = crate::main_chat_memory_lifecycle_eval::run_main_chat_memory_lifecycle_eval_gate();
+
+    assert_eq!(report.scenario_count, 8);
+    assert_eq!(report.default_gate_scenario_count, 8);
+    assert_eq!(report.executed_scenario_count, 8);
+    assert_eq!(report.passed_scenario_count, 8, "{:?}", report.proofs);
+    assert_eq!(report.expected_blocker_count, 2);
+    assert!(report.ready, "{:?}", report.blockers);
+    for id in [
+        "MR-01", "MR-02", "MR-03", "MR-04", "MR-05", "MR-06", "MR-07", "MR-08",
+    ] {
+        assert!(
+            report.proofs.iter().any(|proof| proof.scenario_id == id),
+            "missing {id}"
+        );
+    }
+    let rollback = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "MR-03")
+        .expect("MR-03 rollback proof");
+    assert_eq!(rollback.rollback_event_ids.len(), 1);
+    assert_eq!(rollback.memory_ids.len(), 1);
+    assert!(
+        rollback.materialized_view_versions.len() >= 2
+            && rollback.materialized_view_versions[1] > rollback.materialized_view_versions[0],
+        "MR-03 must prove changed materialized view version: {:?}",
+        rollback.materialized_view_versions
+    );
+    assert!(rollback.ui_state.contains(&"memory_inactive".to_string()));
 }
 
 #[tokio::test]
@@ -237,7 +277,7 @@ async fn run_main_chat_agent_productization_v1_gate_command_returns_auditable_re
             .as_array()
             .expect("runtime evidence array")
             .len(),
-        91
+        92
     );
     assert_eq!(
         response["eventSemantics"].as_str().unwrap(),

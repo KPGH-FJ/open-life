@@ -3,6 +3,7 @@ use crate::agent::main_chat_agent_v1::{
     ExecutionTranscriptEntryKind, MainChatAgentStrategy, MainChatPolicyLevel,
     QueuedExecutionAction,
 };
+use crate::agent::memory_lifecycle::{MemoryLifecycleRecord, MemoryLifecycleStatus};
 use crate::agent::types::{AgentProposal, AgentRun, ProposalStatus, ProposalType};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -578,8 +579,8 @@ pub fn main_chat_agent_product_scenarios() -> Vec<MainChatAgentProductScenario> 
             "回滚刚才接受的记忆。",
             MainChatAgentProductControl::Rollback,
             "completed",
-            "blocked",
-            MainChatAgentProductScenarioExpectation::OptionalUnsupported,
+            "rolled_back",
+            MainChatAgentProductScenarioExpectation::MustPass,
         ),
     ] {
         let mut scenario = task_control_scenario(TaskControlScenarioInput {
@@ -592,9 +593,14 @@ pub fn main_chat_agent_product_scenarios() -> Vec<MainChatAgentProductScenario> 
             to_status: to,
             expectation,
         });
-        if expectation == MainChatAgentProductScenarioExpectation::OptionalUnsupported {
-            scenario.unsupported_reason =
-                Some("Rollback mutation may remain optional unsupported until implemented.".into());
+        if id == "MP-06" {
+            scenario.required_runtime_evidence.extend([
+                "memory_id".into(),
+                "rollback_event_id".into(),
+                "inactive_memory".into(),
+                "materialized_view_version".into(),
+            ]);
+            scenario.required_ui_states.push("memory_inactive".into());
         }
         scenarios.push(scenario);
     }
@@ -1131,6 +1137,8 @@ pub struct ProposalEvidence {
     pub evidence_ids: Vec<String>,
     pub action_ids: Vec<String>,
     pub controls: Vec<MainChatAgentProductControl>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_lifecycle: Option<MemoryLifecycleRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1311,6 +1319,7 @@ pub struct MainChatAgentStateAssemblerInput {
     pub transcript: Vec<ExecutionTranscriptEntry>,
     pub actions: Vec<QueuedExecutionAction>,
     pub proposals: Vec<AgentProposal>,
+    pub memory_lifecycle_records: Vec<MemoryLifecycleRecord>,
 }
 
 pub fn assemble_main_chat_agent_state(
@@ -1363,7 +1372,11 @@ pub fn assemble_main_chat_agent_state(
     }
 
     let mut blockers = blockers_from_evidence(&input.session, &input.actions);
-    let proposals = proposals_from_evidence(&input.proposals, &input.actions);
+    let proposals = proposals_from_evidence(
+        &input.proposals,
+        &input.actions,
+        &input.memory_lifecycle_records,
+    );
     if route.strategy == MainChatAgentProductStrategyRoute::PermissionRequest
         && blockers.is_empty()
         && !input.actions.is_empty()
@@ -1922,11 +1935,16 @@ fn blocker_controls(reason: &str) -> Vec<MainChatAgentProductControl> {
 fn proposals_from_evidence(
     proposals: &[AgentProposal],
     actions: &[QueuedExecutionAction],
+    memory_lifecycle_records: &[MemoryLifecycleRecord],
 ) -> Vec<ProposalEvidence> {
     proposals
         .iter()
         .map(|proposal| {
             let status = MainChatAgentProductProposalStatus::from_runtime_status(proposal.status);
+            let memory_lifecycle = memory_lifecycle_records
+                .iter()
+                .find(|record| record.proposal_id == proposal.id)
+                .cloned();
             ProposalEvidence {
                 proposal_id: proposal.id.clone(),
                 proposal_type: product_proposal_type(proposal.proposal_type).into(),
@@ -1939,7 +1957,12 @@ fn proposals_from_evidence(
                     .map(|source| vec![source.clone()])
                     .unwrap_or_default(),
                 action_ids: action_ids_for_proposal(proposal, actions),
-                controls: proposal_controls(status),
+                controls: proposal_controls(
+                    status,
+                    proposal.proposal_type,
+                    memory_lifecycle.as_ref(),
+                ),
+                memory_lifecycle,
             }
         })
         .collect()
@@ -1998,6 +2021,8 @@ fn product_proposal_type(proposal_type: ProposalType) -> &'static str {
 
 fn proposal_controls(
     status: MainChatAgentProductProposalStatus,
+    proposal_type: ProposalType,
+    memory_lifecycle: Option<&MemoryLifecycleRecord>,
 ) -> Vec<MainChatAgentProductControl> {
     match status {
         MainChatAgentProductProposalStatus::PendingReview => vec![
@@ -2007,10 +2032,25 @@ fn proposal_controls(
             MainChatAgentProductControl::Defer,
             MainChatAgentProductControl::OpenReviewCenter,
         ],
-        MainChatAgentProductProposalStatus::Accepted => vec![
-            MainChatAgentProductControl::Rollback,
-            MainChatAgentProductControl::OpenReviewCenter,
-        ],
+        MainChatAgentProductProposalStatus::Accepted => {
+            let rollback_available = matches!(
+                proposal_type,
+                ProposalType::MemoryWrite
+                    | ProposalType::MemoryArchive
+                    | ProposalType::PreferenceUpdate
+            ) && memory_lifecycle.is_some_and(|record| {
+                record.status == MemoryLifecycleStatus::Materialized
+                    && record.runtime_context_excluded_at.is_none()
+            });
+            if rollback_available {
+                vec![
+                    MainChatAgentProductControl::Rollback,
+                    MainChatAgentProductControl::OpenReviewCenter,
+                ]
+            } else {
+                vec![MainChatAgentProductControl::OpenReviewCenter]
+            }
+        }
         _ => vec![MainChatAgentProductControl::OpenReviewCenter],
     }
 }

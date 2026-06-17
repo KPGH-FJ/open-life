@@ -31,6 +31,8 @@ pub(crate) mod main_chat_hs_runtime;
 pub(crate) mod main_chat_legacy_agent_loop;
 pub(crate) mod main_chat_legacy_fallback;
 pub(crate) mod main_chat_live_provider_harness;
+#[allow(dead_code)]
+pub(crate) mod main_chat_memory_lifecycle_eval;
 pub(crate) mod main_chat_preprocess;
 pub(crate) mod main_chat_proposal_support;
 pub(crate) mod main_chat_react_execution;
@@ -181,8 +183,9 @@ use commands::memory::{
 use commands::metrics::{get_rollout_errors, get_rollout_metrics, get_rollout_summary};
 use commands::proactive::get_proactive_suggestions;
 use commands::proposal::{
-    accept_proposal, batch_accept_low_risk_proposals, edit_proposal, get_pending_proposals,
-    list_proposals, postpone_proposal, reject_proposal,
+    accept_proposal, batch_accept_low_risk_proposals, edit_proposal, get_memory_asset,
+    get_memory_lifecycle_events, get_pending_proposals, list_memory_assets, list_proposals,
+    postpone_proposal, rebuild_memory_materialized_view, reject_proposal, rollback_memory_asset,
 };
 use commands::router::get_model_router_status;
 use commands::settings::{
@@ -667,6 +670,11 @@ pub fn run() {
             reject_proposal,
             edit_proposal,
             postpone_proposal,
+            rollback_memory_asset,
+            list_memory_assets,
+            get_memory_asset,
+            get_memory_lifecycle_events,
+            rebuild_memory_materialized_view,
             send_message,
             start_stream_message,
             get_main_chat_agent_task_state,

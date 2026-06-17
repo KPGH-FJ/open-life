@@ -15,6 +15,9 @@ use openlife_core::agent::types::{
     AgentProposal, AgentRun, AgentRunStatus, AgentTaskKind, ContextSummary, ModelRouteTrace,
     ProposalSource, ProposalStatus, ProposalType, RedactionLevel, RiskLevel,
 };
+use openlife_core::agent::{
+    MemoryLifecycleAcceptanceInput, MemoryLifecycleStatus, MemoryLifecycleStore,
+};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -54,6 +57,10 @@ pub struct ProductScenarioRuntimeProof {
     pub created_action_ids: Vec<String>,
     pub created_observation_ids: Vec<String>,
     pub created_proposal_ids: Vec<String>,
+    pub created_memory_ids: Vec<String>,
+    pub rollback_event_ids: Vec<String>,
+    pub materialized_view_versions: Vec<i64>,
+    pub inactive_memory_ids: Vec<String>,
     pub final_delivery_id: Option<String>,
     pub diagnostics: Vec<String>,
 }
@@ -231,11 +238,8 @@ where
     if runtime_required_group_passed_count != runtime_required_group_count {
         blockers.push("runtime_required_scenarios_not_executed".into());
     }
-    if unsupported_scenarios
-        .iter()
-        .any(|scenario| scenario.scenario_id != "MP-06")
-    {
-        blockers.push("unexpected_unsupported_scenario_present".into());
+    if !unsupported_scenarios.is_empty() {
+        blockers.push("unsupported_scenario_present".into());
     }
     if executed_scenario_count + unsupported_scenarios.len() != default_deterministic_scenario_count
     {
@@ -394,6 +398,32 @@ fn validate_runtime_product_proof(
             if proof.runtime_object_count < 3 {
                 diagnostics.push("task control proof must load prior runtime objects".into());
             }
+            if scenario.id == "MP-06" {
+                if proof.created_memory_ids.len() != 1 {
+                    diagnostics
+                        .push("MP-06 rollback proof must bind one accepted memory id".into());
+                }
+                if proof.rollback_event_ids.len() != 1 {
+                    diagnostics.push("MP-06 rollback proof lacks rollback event id".into());
+                }
+                if proof
+                    .materialized_view_versions
+                    .iter()
+                    .all(|version| *version <= 0)
+                {
+                    diagnostics.push("MP-06 rollback proof lacks materialized view version".into());
+                }
+                let selected_memory_id = proof.created_memory_ids.first();
+                if selected_memory_id.is_none()
+                    || selected_memory_id
+                        .is_some_and(|memory_id| !proof.inactive_memory_ids.contains(memory_id))
+                {
+                    diagnostics.push(
+                        "MP-06 rollback proof must exclude the accepted memory from active context"
+                            .into(),
+                    );
+                }
+            }
         }
         MainChatAgentProductStrategyRoute::Blocked => {
             if proof.final_delivery_id.is_none()
@@ -427,6 +457,10 @@ fn failed_runtime_proof(
         created_action_ids: Vec::new(),
         created_observation_ids: Vec::new(),
         created_proposal_ids: Vec::new(),
+        created_memory_ids: Vec::new(),
+        rollback_event_ids: Vec::new(),
+        materialized_view_versions: Vec::new(),
+        inactive_memory_ids: Vec::new(),
         final_delivery_id: None,
         diagnostics: vec![reason.into()],
     }
@@ -569,6 +603,15 @@ fn validate_success_scenario_evidence(
                     && evidence("state_transition"),
                 "task control requires prior object and exact state transition evidence",
             )?;
+            if scenario.id == "MP-06" {
+                require(
+                    evidence("memory_id")
+                        && evidence("rollback_event_id")
+                        && evidence("inactive_memory")
+                        && evidence("materialized_view_version"),
+                    "MP-06 rollback requires memory lifecycle, rollback event, inactive memory, and materialized view evidence",
+                )?;
+            }
         }
         MainChatAgentProductStrategyRoute::Blocked => {
             require(
@@ -681,6 +724,7 @@ fn runtime_direct_answer_proof(
         &action_queue,
         &session.id,
         runtime_fixture_run(&session.chat_session_id, scenario, &group),
+        Vec::new(),
         Vec::new(),
     )?;
     let mut proof = proof_from_snapshot(scenario, &group, &snapshot, 0);
@@ -816,6 +860,7 @@ fn runtime_single_read_proof(
         &session.id,
         runtime_fixture_run(&session.chat_session_id, scenario, group),
         Vec::new(),
+        Vec::new(),
     )?;
     Ok(proof_from_snapshot(scenario, group, &snapshot, 0))
 }
@@ -887,6 +932,7 @@ fn runtime_react_tool_execution_proof(
         &action_queue,
         &session.id,
         runtime_fixture_run(&session.chat_session_id, scenario, &group),
+        Vec::new(),
         Vec::new(),
     )?;
     Ok(proof_from_snapshot(scenario, &group, &snapshot, 0))
@@ -1050,6 +1096,7 @@ fn runtime_plan_execute_proof(
         &session.id,
         runtime_fixture_run(&session.chat_session_id, scenario, &group),
         proposals,
+        Vec::new(),
     )?;
     Ok(proof_from_snapshot(scenario, &group, &snapshot, 0))
 }
@@ -1098,6 +1145,7 @@ fn runtime_memory_proposal_proof(
         &session.id,
         runtime_fixture_run(&session.chat_session_id, scenario, &group),
         loaded,
+        Vec::new(),
     )?;
     Ok(proof_from_snapshot(scenario, &group, &snapshot, 0))
 }
@@ -1169,6 +1217,7 @@ fn runtime_permission_request_proof(
         &session.id,
         runtime_fixture_run(&session.chat_session_id, scenario, &group),
         loaded,
+        Vec::new(),
     )?;
     let mut proof = proof_from_snapshot(scenario, &group, &snapshot, 0);
     let exact_blocker = snapshot
@@ -1239,6 +1288,7 @@ fn runtime_blocked_proof(
         &session.id,
         runtime_fixture_run(&session.chat_session_id, scenario, &group),
         Vec::new(),
+        Vec::new(),
     )?;
     Ok(proof_from_snapshot(scenario, &group, &snapshot, 0))
 }
@@ -1259,6 +1309,10 @@ fn blocker_reason_for_scenario(scenario: &MainChatAgentProductScenario) -> &'sta
 fn runtime_task_control_proof(
     scenario: &MainChatAgentProductScenario,
 ) -> Result<ProductScenarioRuntimeProof, String> {
+    if scenario.id == "MP-06" {
+        return runtime_memory_rollback_proof(scenario);
+    }
+
     let group = runtime_group_for_scenario(scenario);
     let preconditions = scenario
         .preconditions
@@ -1403,7 +1457,154 @@ fn runtime_task_control_proof(
         created_action_ids: action_ids,
         created_observation_ids: Vec::new(),
         created_proposal_ids: proposal_ids,
+        created_memory_ids: Vec::new(),
+        rollback_event_ids: Vec::new(),
+        materialized_view_versions: Vec::new(),
+        inactive_memory_ids: Vec::new(),
         final_delivery_id,
+        diagnostics,
+    })
+}
+
+fn runtime_memory_rollback_proof(
+    scenario: &MainChatAgentProductScenario,
+) -> Result<ProductScenarioRuntimeProof, String> {
+    let group = runtime_group_for_scenario(scenario);
+    let session_store = AgentTaskSessionStore::new_in_memory().map_err(|err| err.to_string())?;
+    let action_queue = ActionQueueStore::new_in_memory().map_err(|err| err.to_string())?;
+    let proposal_store = ProposalStore::new_in_memory().map_err(|err| err.to_string())?;
+    let memory_lifecycle_store =
+        MemoryLifecycleStore::new_in_memory().map_err(|err| err.to_string())?;
+    let session = session_store
+        .create_session(AgentTaskSessionDraft {
+            chat_session_id: format!("productization:{}:memory-rollback", scenario.id),
+            user_goal: scenario.prompt.clone(),
+            selected_strategy: MainChatAgentStrategy::ReActToolExecution,
+            current_plan_summary: Some(
+                "Rollback an exact accepted memory lifecycle record.".into(),
+            ),
+            context_snapshot_refs: vec![format!("ctx:productization:{group}")],
+        })
+        .map_err(|err| err.to_string())?;
+    append_route_decision(&session_store, &session.id, "task_control")?;
+
+    let mut proposal = memory_proposal_fixture(&session.id, "rollback");
+    proposal.id = format!("proposal-{}-memory-rollback", scenario.id);
+    proposal.run_id = Some(format!("run-productization-{}", scenario.id));
+    proposal.source_detail = Some(session.id.clone());
+    proposal_store
+        .create_proposal(&proposal)
+        .map_err(|err| err.to_string())?;
+    proposal.accept();
+    proposal_store
+        .update_proposal(&proposal)
+        .map_err(|err| err.to_string())?;
+
+    let accepted = memory_lifecycle_store
+        .accept_memory_proposal(MemoryLifecycleAcceptanceInput::from_memory_proposal(
+            &proposal,
+            "User prefers accepted memory rollback to remove active runtime context.".into(),
+        ))
+        .map_err(|err| err.to_string())?;
+    let rollback = memory_lifecycle_store
+        .rollback_memory_asset(
+            &accepted.record.memory_id,
+            "user",
+            "productization MP-06 deterministic rollback fixture",
+        )
+        .map_err(|err| err.to_string())?;
+    let inactive_memory = !memory_lifecycle_store
+        .is_memory_active(&accepted.record.memory_id)
+        .map_err(|err| err.to_string())?;
+    let mut diagnostics = Vec::new();
+    if rollback.record.status != MemoryLifecycleStatus::RolledBack {
+        diagnostics.push("rollback record did not enter rolled_back state".into());
+    }
+    if rollback.record.rolled_back_by_event_id.as_deref()
+        != Some(rollback.rollback_event.rollback_event_id.as_str())
+    {
+        diagnostics.push("rollback record/event identity mismatch".into());
+    }
+    if rollback
+        .materialized_view
+        .active_memory_ids
+        .contains(&accepted.record.memory_id)
+    {
+        diagnostics.push("rolled back memory remained in materialized active ids".into());
+    }
+    if !inactive_memory {
+        diagnostics.push("rolled back memory remained active in runtime context".into());
+    }
+    if rollback.materialized_view.version <= accepted.materialized_view.version {
+        diagnostics.push("rollback did not advance materialized view version".into());
+    }
+
+    let final_entry = append_final_result_with_id(
+        &session_store,
+        &session.id,
+        "Accepted memory was rolled back and removed from active runtime context.",
+        serde_json::json!({
+            "directWritesExecuted": false,
+            "controlAction": "rollback",
+            "memoryId": accepted.record.memory_id,
+            "rollbackEventId": rollback.rollback_event.rollback_event_id,
+            "materializedViewId": rollback.materialized_view.materialized_view_id,
+            "materializedViewVersion": rollback.materialized_view.version,
+            "inactiveMemory": inactive_memory,
+            "runtimeContextExcludedAt": rollback.record.runtime_context_excluded_at
+        }),
+    )?;
+    session_store
+        .complete_session(
+            &session.id,
+            "Accepted memory rollback completed with lifecycle evidence.",
+        )
+        .map_err(|err| err.to_string())?;
+
+    let snapshot = assemble_snapshot_from_stores(
+        &session_store,
+        &action_queue,
+        &session.id,
+        runtime_fixture_run(&session.chat_session_id, scenario, &group),
+        vec![proposal],
+        vec![rollback.record.clone()],
+    )?;
+    diagnostics.extend(
+        snapshot
+            .diagnostics
+            .iter()
+            .map(|gap| format!("{}:{}", gap.gap_code, gap.detail)),
+    );
+    diagnostics.extend(validate_runtime_snapshot_for_scenario(scenario, &snapshot));
+    Ok(ProductScenarioRuntimeProof {
+        scenario_id: scenario.id.clone(),
+        group,
+        passed: diagnostics.is_empty(),
+        runtime_object_count: 1
+            + snapshot.context.len()
+            + snapshot.proposals.len()
+            + usize::from(snapshot.final_delivery.is_some())
+            + 3,
+        observation_count: snapshot.observations.len(),
+        created_action_ids: Vec::new(),
+        created_observation_ids: Vec::new(),
+        created_proposal_ids: snapshot
+            .proposals
+            .iter()
+            .map(|proposal| proposal.proposal_id.clone())
+            .collect(),
+        created_memory_ids: vec![accepted.record.memory_id],
+        rollback_event_ids: vec![rollback.rollback_event.rollback_event_id],
+        materialized_view_versions: vec![
+            accepted.materialized_view.version,
+            rollback.materialized_view.version,
+        ],
+        inactive_memory_ids: if inactive_memory {
+            vec![rollback.record.memory_id]
+        } else {
+            Vec::new()
+        },
+        final_delivery_id: Some(final_entry.id),
         diagnostics,
     })
 }
@@ -1467,6 +1668,10 @@ pub(crate) fn productization_task_control_missing_target_runtime_proof(
         created_action_ids: Vec::new(),
         created_observation_ids: Vec::new(),
         created_proposal_ids: Vec::new(),
+        created_memory_ids: Vec::new(),
+        rollback_event_ids: Vec::new(),
+        materialized_view_versions: Vec::new(),
+        inactive_memory_ids: Vec::new(),
         final_delivery_id: None,
         diagnostics: vec!["target_object_missing".into(), retry_decision.reason_code],
     }
@@ -1957,6 +2162,7 @@ fn assemble_snapshot_from_stores(
     session_id: &str,
     run: AgentRun,
     proposals: Vec<AgentProposal>,
+    memory_lifecycle_records: Vec<openlife_core::agent::MemoryLifecycleRecord>,
 ) -> Result<MainChatAgentStateSnapshot, String> {
     let session = session_store
         .load_session(session_id)
@@ -1974,6 +2180,7 @@ fn assemble_snapshot_from_stores(
         transcript,
         actions,
         proposals,
+        memory_lifecycle_records,
     })
     .map_err(|err| err.to_string())
 }
@@ -2020,6 +2227,10 @@ fn proof_from_snapshot(
             .iter()
             .map(|proposal| proposal.proposal_id.clone())
             .collect(),
+        created_memory_ids: Vec::new(),
+        rollback_event_ids: Vec::new(),
+        materialized_view_versions: Vec::new(),
+        inactive_memory_ids: Vec::new(),
         final_delivery_id: snapshot
             .final_delivery
             .as_ref()
@@ -2092,7 +2303,14 @@ fn validate_runtime_snapshot_for_scenario(
                     diagnostics.push("required final delivery evidence missing".into());
                 }
             }
-            "prior_task_session_id" | "prior_run_id" | "target_object_id" | "state_transition" => {}
+            "prior_task_session_id"
+            | "prior_run_id"
+            | "target_object_id"
+            | "state_transition"
+            | "memory_id"
+            | "rollback_event_id"
+            | "inactive_memory"
+            | "materialized_view_version" => {}
             value => diagnostics.push(format!("unknown runtime evidence contract: {value}")),
         }
     }
@@ -2364,6 +2582,7 @@ fn main_chat_productization_payload_smoke_gate_passes() -> bool {
         transcript,
         actions,
         proposals: Vec::new(),
+        memory_lifecycle_records: Vec::new(),
     }) {
         Ok(snapshot) => snapshot,
         Err(_) => return false,

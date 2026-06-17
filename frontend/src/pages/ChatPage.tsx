@@ -60,6 +60,7 @@ import {
   resumeMainChatAgentTask,
   cancelMainChatAgentTask,
   retryMainChatAgentAction,
+  rollbackMemoryAsset,
 } from "../tauri";
 import type {
   AgentRun,
@@ -1467,6 +1468,27 @@ export default function ChatPage({
       pendingProposals,
       refreshMainChatControlState,
     ]
+  );
+
+  const handleRollbackMemory = useCallback(
+    async (memoryId: string) => {
+      if (agentTaskControlBusy) return;
+      const taskSessionId = currentMainChatTaskSessionId();
+      setAgentTaskControlBusy(true);
+      setAgentTaskControlError(null);
+      try {
+        await rollbackMemoryAsset(
+          memoryId,
+          "User requested rollback from Main Chat control plane."
+        );
+        await refreshMainChatControlState(taskSessionId);
+      } catch (e) {
+        setAgentTaskControlError(`Rollback failed: ${readablePreviewError(e)}`);
+      } finally {
+        setAgentTaskControlBusy(false);
+      }
+    },
+    [agentTaskControlBusy, currentMainChatTaskSessionId, refreshMainChatControlState]
   );
 
   const readiness = useMemo(() => buildReadinessSummary(diagnostics), [diagnostics]);
@@ -2951,6 +2973,7 @@ export default function ChatPage({
                 onAcceptProposal={handleAcceptAgentProposal}
                 onRejectProposal={handleRejectAgentProposal}
                 onEditProposal={handleEditAgentProposal}
+                onRollbackMemory={handleRollbackMemory}
               />
               {agentTaskControlError && (
                 <div className="border-b border-rose-200 bg-rose-50 px-4 py-2 text-xs text-rose-800">

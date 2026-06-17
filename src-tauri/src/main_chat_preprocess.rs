@@ -14,6 +14,50 @@ use crate::main_chat_generation_support::{
 use crate::main_chat_hs_runtime::classify_hs_policy_topic;
 use crate::AppState;
 
+const MEMORY_LIFECYCLE_SOURCE_PREFIX: &str = "memory_lifecycle:";
+
+pub(crate) async fn filter_lifecycle_active_memory_results(
+    results: Vec<(MemoryChunk, f32)>,
+    state: &Arc<AppState>,
+) -> Vec<(MemoryChunk, f32)> {
+    let lifecycle_ids = results
+        .iter()
+        .filter_map(|(chunk, _)| lifecycle_memory_id_from_source(&chunk.source))
+        .collect::<Vec<_>>();
+    if lifecycle_ids.is_empty() {
+        return results;
+    }
+    let Some(store_arc) = state.memory_lifecycle_store.as_ref() else {
+        return results
+            .into_iter()
+            .filter(|(chunk, _)| lifecycle_memory_id_from_source(&chunk.source).is_none())
+            .collect();
+    };
+    let store = store_arc.lock().await;
+    results
+        .into_iter()
+        .filter(|(chunk, _)| {
+            lifecycle_memory_id_from_source(&chunk.source)
+                .map(|memory_id| store.is_memory_active(memory_id).unwrap_or(false))
+                .unwrap_or(true)
+        })
+        .collect()
+}
+
+fn lifecycle_memory_id_from_source(source: &str) -> Option<&str> {
+    let memory_id = source.strip_prefix(MEMORY_LIFECYCLE_SOURCE_PREFIX)?;
+    if memory_id.starts_with("memory:")
+        && !memory_id.is_empty()
+        && !memory_id
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_whitespace())
+    {
+        Some(memory_id)
+    } else {
+        None
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Shared preprocessing for chat commands:
 /// saves user message, loads model/tools/config, applies privacy filter,
@@ -135,7 +179,11 @@ pub(crate) async fn preprocess_chat_input(
                 }
             };
 
-            let results = merge_memory_hits(vector_hits, text_hits, 3);
+            let results = filter_lifecycle_active_memory_results(
+                merge_memory_hits(vector_hits, text_hits, 3),
+                state,
+            )
+            .await;
             memory_hit_count = results.len();
             memory_sources = results
                 .iter()

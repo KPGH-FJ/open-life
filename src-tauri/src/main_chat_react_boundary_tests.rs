@@ -318,6 +318,71 @@ async fn fake_ordered_chat_provider_endpoint(replies: Vec<String>) -> String {
     format!("http://{addr}/v1")
 }
 
+async fn fake_ranked_then_ordered_chat_provider_endpoint(
+    ranking_reply: String,
+    generation_replies: Vec<String>,
+) -> String {
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("bind local ranked chat provider");
+    let addr = listener.local_addr().expect("local ranked provider addr");
+    std::thread::spawn(move || {
+        let _ = listener.set_nonblocking(true);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut handled_generation = 0usize;
+        let mut handled_total = 0usize;
+        while handled_total < generation_replies.len().saturating_add(4)
+            && std::time::Instant::now() < deadline
+        {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(2)));
+                    let request_bytes = read_http_request(&mut stream);
+                    let request = String::from_utf8_lossy(&request_bytes);
+                    let reply = if request.contains("Return ranked_candidate_ids now")
+                        || request.contains("Metadata-safe candidate contract")
+                    {
+                        ranking_reply.clone()
+                    } else {
+                        let reply = generation_replies
+                            .get(handled_generation)
+                            .or_else(|| generation_replies.last())
+                            .cloned()
+                            .unwrap_or_else(|| "{}".into());
+                        handled_generation += 1;
+                        reply
+                    };
+                    handled_total += 1;
+                    let body = serde_json::json!({
+                        "id": "chatcmpl-main-chat-provider-ranked",
+                        "object": "chat.completion",
+                        "choices": [{
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": reply
+                            },
+                            "finish_reason": "stop"
+                        }]
+                    })
+                    .to_string();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    format!("http://{addr}/v1")
+}
+
 async fn fake_capturing_chat_provider_endpoint(
     reply: String,
 ) -> (String, std::sync::mpsc::Receiver<String>) {
@@ -381,32 +446,34 @@ async fn main_chat_react_registered_mcp_agent_loop_uses_provider_ranked_candidat
         );
         candidate_ids
     };
-    let provider_base = fake_ordered_chat_provider_endpoint(vec![
+    let provider_base = fake_ranked_then_ordered_chat_provider_endpoint(
         serde_json::json!({
             "ranked_candidate_ids": provider_ranked_candidate_ids
         })
         .to_string(),
-        serde_json::json!({
-            "final": "I will use the provider-ranked read candidate.",
-            "actions": [{
-                "name": "tool.list_available",
-                "action_type": "mcp_tool",
-                "arguments": {
-                    "ignored": "model supplied arguments must not execute"
-                }
-            }],
-            "thought_summary": "Select the first provider-ranked governed read candidate.",
-            "warnings": []
-        })
-        .to_string(),
-        serde_json::json!({
-            "final": "The provider-ranked read candidate completed.",
-            "actions": [],
-            "thought_summary": "Finish after observing the governed read result.",
-            "warnings": []
-        })
-        .to_string(),
-    ])
+        vec![
+            serde_json::json!({
+                "final": "I will use the provider-ranked read candidate.",
+                "actions": [{
+                    "name": "tool.list_available",
+                    "action_type": "mcp_tool",
+                    "arguments": {
+                        "ignored": "model supplied arguments must not execute"
+                    }
+                }],
+                "thought_summary": "Select the first provider-ranked governed read candidate.",
+                "warnings": []
+            })
+            .to_string(),
+            serde_json::json!({
+                "final": "The provider-ranked read candidate completed.",
+                "actions": [],
+                "thought_summary": "Finish after observing the governed read result.",
+                "warnings": []
+            })
+            .to_string(),
+        ],
+    )
     .await;
     configure_http_provider_scheduler(&state, &provider_base, "gpt-provider-ranked-selection")
         .await;

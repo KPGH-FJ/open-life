@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import React from "react";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import AgentControlPlane from "./AgentControlPlane";
@@ -363,6 +364,50 @@ describe("AgentControlPlane", () => {
       "href",
       "/review"
     );
+  });
+
+  it("renders rollback for accepted memory only when a real rollback handler is supplied", () => {
+    const onRollbackMemory = vi.fn();
+    render(
+      <MemoryRouter>
+        {React.createElement(AgentControlPlane as any, {
+          state: agentState({
+            proposals: [
+              {
+                proposalId: "proposal-accepted-1",
+                proposalType: "memory",
+                status: "accepted",
+                title: "memory proposal",
+                summary: "Accepted memory proposal.",
+                evidenceIds: ["proposal-accepted-1", "memory-accepted-1"],
+                actionIds: [],
+                controls: ["rollback", "open_review_center"],
+                memoryLifecycle: {
+                  memoryId: "memory-accepted-1",
+                  proposalId: "proposal-accepted-1",
+                  content: "Accepted memory proposal.",
+                  scope: "global",
+                  category: "preference",
+                  riskLevel: "low",
+                  status: "materialized",
+                  materializationStatus: "materialized",
+                  createdBy: "agent",
+                  evidenceIds: ["proposal-accepted-1"],
+                  confidence: 0.82,
+                  conflictIds: [],
+                  materializedViewVersion: 2,
+                },
+              },
+            ],
+          }),
+          onRollbackMemory,
+        })}
+      </MemoryRouter>
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Rollback memory" }));
+
+    expect(onRollbackMemory).toHaveBeenCalledWith("memory-accepted-1");
   });
 
   it("renders assembly diagnostics when governed runtime evidence is missing", () => {

@@ -14,6 +14,7 @@ pub mod main_chat_agent_productization_v1;
 pub mod main_chat_agent_v1;
 pub mod maturation;
 mod maturation_domain;
+pub mod memory_lifecycle;
 pub mod memory_service;
 pub mod metrics;
 pub mod model_router;
@@ -129,6 +130,12 @@ pub use maturation::{
     MaturationEngineCandidate, MaturationEngineV1Input, MaturationEngineV1Report,
     MaturationGovernanceAudit, MaturationGovernanceSummary, MaturationInput, MaturationOutput,
     MaturationProposalCandidate, MaturationReport, MaturationService,
+};
+pub use memory_lifecycle::{
+    MemoryLifecycleAcceptanceInput, MemoryLifecycleAcceptanceReport, MemoryLifecycleCategory,
+    MemoryLifecycleEvent, MemoryLifecycleRecord, MemoryLifecycleRiskLevel, MemoryLifecycleScope,
+    MemoryLifecycleStatus, MemoryLifecycleStore, MemoryMaterializationStatus,
+    MemoryMaterializedView, MemoryRollbackEvent, MemoryRollbackReport,
 };
 pub use memory_service::{EmbeddingConfig, MemoryContext, MemoryService};
 pub use metrics::{RolloutMetric, RolloutMetricsStore, RolloutSummary};

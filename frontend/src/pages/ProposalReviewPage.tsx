@@ -24,8 +24,11 @@ import {
   getSystemDiagnostics,
   getConfig,
   resumeMainChatAgentTask,
+  listMemoryAssets,
+  rollbackMemoryAsset,
   type AgentProposal,
   type AppConfig,
+  type MemoryLifecycleRecord,
 } from "../tauri";
 import { isSafeMode, getSafeModeReason } from "../utils/safeMode";
 
@@ -101,6 +104,8 @@ export default function ProposalReviewPage() {
   const [batchAccepting, setBatchAccepting] = useState(false);
   const [diagnostics, setDiagnostics] = useState<any>(null);
   const [safePaths, setSafePaths] = useState<string[]>([]);
+  const [memoryAssets, setMemoryAssets] = useState<MemoryLifecycleRecord[]>([]);
+  const [actingMemoryId, setActingMemoryId] = useState<string | null>(null);
 
   const safeMode = isSafeMode(diagnostics);
   const safeModeReason = getSafeModeReason(diagnostics);
@@ -143,14 +148,16 @@ export default function ProposalReviewPage() {
     setLoading(true);
     setError(null);
     try {
-      const [data, diag, config] = await Promise.all([
+      const [data, diag, config, lifecycleRecords] = await Promise.all([
         listProposals("pending", filterType || undefined, filterRisk || undefined, 100),
         getSystemDiagnostics().catch(() => null),
         getConfig().catch(() => null),
+        listMemoryAssets({ limit: 100 }).catch(() => []),
       ]);
       setProposals(data);
       setDiagnostics(diag);
       setSafePaths((config as AppConfig | null)?.system?.safe_paths ?? []);
+      setMemoryAssets(Array.isArray(lifecycleRecords) ? lifecycleRecords : []);
       setSelectedIds(new Set());
     } catch (e) {
       setError(`加载 Proposal 失败：${String(e)}`);
@@ -232,6 +239,31 @@ export default function ProposalReviewPage() {
       setError(`恢复 Main Chat task 失败：${String(e)}`);
     } finally {
       setMainChatResumeBusy(false);
+    }
+  };
+
+  const canRollbackMemory = (record: MemoryLifecycleRecord): boolean =>
+    record.status === "materialized" &&
+    record.materializationStatus === "materialized" &&
+    !record.runtimeContextExcludedAt;
+
+  const rollbackMemory = async (record: MemoryLifecycleRecord) => {
+    setActingMemoryId(record.memoryId);
+    setError(null);
+    setNotice(null);
+    try {
+      const report = await rollbackMemoryAsset(
+        record.memoryId,
+        "User requested rollback from Review Center."
+      );
+      setNotice(
+        `Memory rollback recorded: ${report.rollbackEvent.rollbackEventId.slice(-12)}`
+      );
+      await load();
+    } catch (e) {
+      setError(`回滚记忆失败：${String(e)}`);
+    } finally {
+      setActingMemoryId(null);
     }
   };
 
@@ -423,6 +455,65 @@ export default function ProposalReviewPage() {
             </button>
           )}
         </div>
+
+        {memoryAssets.length > 0 && (
+          <section className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold text-stone-950">Memory lifecycle</div>
+                <div className="mt-1 text-xs text-stone-500">
+                  Accepted memories, materialized view status, and rollback history.
+                </div>
+              </div>
+              <span className="rounded-full bg-stone-100 px-2.5 py-1 text-[11px] text-stone-600">
+                {memoryAssets.length} records
+              </span>
+            </div>
+            <div className="mt-4 divide-y divide-stone-200 border-y border-stone-200">
+              {memoryAssets.slice(0, 8).map(record => (
+                <div
+                  key={record.memoryId}
+                  className="grid gap-3 py-3 text-sm md:grid-cols-[1fr_auto]"
+                >
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium text-stone-950">
+                        {record.content || record.memoryId}
+                      </span>
+                      <span className="rounded-full border border-stone-200 bg-stone-50 px-2 py-0.5 text-[11px] text-stone-600">
+                        {record.status.replace(/_/g, " ")}
+                      </span>
+                      <span className="rounded-full border border-stone-200 bg-stone-50 px-2 py-0.5 text-[11px] text-stone-600">
+                        view v{record.materializedViewVersion ?? 0}
+                      </span>
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-stone-500">
+                      <span>{record.scope}</span>
+                      <span>{record.category}</span>
+                      <span>{record.materializationStatus.replace(/_/g, " ")}</span>
+                      {record.rolledBackByEventId && (
+                        <span>rollback {record.rolledBackByEventId.slice(-12)}</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {canRollbackMemory(record) && (
+                      <button
+                        type="button"
+                        onClick={() => rollbackMemory(record)}
+                        disabled={actingMemoryId === record.memoryId}
+                        className="inline-flex items-center gap-1.5 rounded-full border border-stone-200 px-3 py-1.5 text-xs font-medium text-stone-700 hover:bg-stone-50 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <RefreshCw size={13} />
+                        Rollback memory
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
 
         {loading ? (
           <div className="rounded-3xl border border-stone-200 bg-white p-8 text-sm text-stone-500">

@@ -9,7 +9,7 @@ use crate::storage::{
 };
 use openlife_core::agent::{
     main_chat_agent_v1::{ActionQueueStore, AgentTaskSessionStore},
-    PlanExecuteSessionStore, ProposalEngine, ProposalStore,
+    MemoryLifecycleStore, PlanExecuteSessionStore, ProposalEngine, ProposalStore,
 };
 use openlife_core::builder::BuilderSessionStore;
 use openlife_core::config::AppConfig;
@@ -296,6 +296,37 @@ fn init_proposal_store(
     }
 }
 
+fn init_memory_lifecycle_store(
+    db_path: &Path,
+    startup_warnings: &std::cell::RefCell<Vec<String>>,
+) -> Result<MemoryLifecycleStore, String> {
+    match MemoryLifecycleStore::new(db_path) {
+        Ok(store) => Ok(store),
+        Err(primary_err) => {
+            let fallback = recovery_db_path("memory_lifecycle.db");
+            startup_warnings.borrow_mut().push(format!(
+                "memory_lifecycle.db 初始化失败，正在使用临时数据库：{}",
+                primary_err
+            ));
+            match MemoryLifecycleStore::new(&fallback) {
+                Ok(store) => Ok(store),
+                Err(fallback_err) => {
+                    startup_warnings.borrow_mut().push(format!(
+                        "临时 memory_lifecycle.db 初始化也失败，已降级为内存数据库：{}",
+                        fallback_err
+                    ));
+                    MemoryLifecycleStore::new_in_memory().map_err(|memory_err| {
+                        format!(
+                            "所有 memory lifecycle store 初始化失败: primary={}, fallback={}, in_memory={}",
+                            primary_err, fallback_err, memory_err
+                        )
+                    })
+                }
+            }
+        }
+    }
+}
+
 fn init_plan_execute_session_store(
     db_path: &Path,
     startup_warnings: &std::cell::RefCell<Vec<String>>,
@@ -510,6 +541,18 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
         std::process::exit(1);
     });
 
+    let memory_lifecycle_db_path = data_dir.join("memory_lifecycle.db");
+    let memory_lifecycle_store = init_store(
+        || init_memory_lifecycle_store(&memory_lifecycle_db_path, &startup_warnings),
+        || MemoryLifecycleStore::new_in_memory().map_err(|e| e.to_string()),
+        "MemoryLifecycleStore",
+        &startup_warnings,
+    )
+    .unwrap_or_else(|e| {
+        log::warn!("[startup] Fatal: {}", e);
+        std::process::exit(1);
+    });
+
     let plan_execute_sessions_db_path = data_dir.join("plan_execute_sessions.db");
     let plan_execute_session_store = init_store(
         || init_plan_execute_session_store(&plan_execute_sessions_db_path, &startup_warnings),
@@ -669,6 +712,7 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
         heuristic_store: Arc::new(Mutex::new(heuristic_store)),
         policy_store: Arc::new(policy_store),
         proposal_store: Some(Arc::new(Mutex::new(proposal_store))),
+        memory_lifecycle_store: Some(Arc::new(Mutex::new(memory_lifecycle_store))),
         plan_execute_session_store: Some(Arc::new(Mutex::new(plan_execute_session_store))),
         main_chat_agent_session_store: Some(Arc::new(Mutex::new(main_chat_agent_session_store))),
         main_chat_action_queue_store: Some(Arc::new(Mutex::new(main_chat_action_queue_store))),

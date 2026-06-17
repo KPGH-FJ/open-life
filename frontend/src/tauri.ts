@@ -609,6 +609,7 @@ export interface MainChatAgentStateSnapshot {
     evidenceIds: string[];
     actionIds: string[];
     controls: string[];
+    memoryLifecycle?: MemoryLifecycleRecord;
   }>;
   finalDelivery?: {
     deliveryId: string;
@@ -834,6 +835,10 @@ export interface ProductScenarioRuntimeProof {
   createdActionIds: string[];
   createdObservationIds: string[];
   createdProposalIds: string[];
+  createdMemoryIds: string[];
+  rollbackEventIds: string[];
+  materializedViewVersions: number[];
+  inactiveMemoryIds: string[];
   finalDeliveryId?: string;
   diagnostics: string[];
 }
@@ -2767,6 +2772,62 @@ export interface AgentProposal {
   expiresAt?: string;
 }
 
+export interface MemoryLifecycleRecord {
+  memoryId: string;
+  proposalId: string;
+  sourceTaskSessionId?: string;
+  sourceRunId?: string;
+  content: string;
+  scope: string;
+  category: string;
+  riskLevel: string;
+  status: string;
+  materializationStatus: string;
+  materializationErrorCode?: string;
+  createdBy: string;
+  acceptedBy?: string;
+  acceptedAt?: string;
+  materializedViewId?: string;
+  materializedViewVersion?: number;
+  evidenceIds: string[];
+  confidence: number;
+  conflictIds: string[];
+  supersedesMemoryId?: string;
+  replacementMemoryId?: string;
+  rolledBackByEventId?: string;
+  runtimeContextExcludedAt?: string;
+}
+
+export interface MemoryRollbackEvent {
+  rollbackEventId: string;
+  memoryId: string;
+  proposalId: string;
+  requestedBy: string;
+  reason: string;
+  previousStatus: string;
+  nextStatus: string;
+  affectedMaterializedViewIds: string[];
+  affectedRuntimeSurfaceIds: string[];
+  createdAt: string;
+  auditDigest: string;
+}
+
+export interface MemoryMaterializedView {
+  materializedViewId: string;
+  scope?: string;
+  version: number;
+  activeMemoryIds: string[];
+  runtimeSurfaceIds: string[];
+  updatedAt: string;
+  contentDigest: string;
+}
+
+export interface MemoryRollbackReport {
+  record: MemoryLifecycleRecord;
+  rollbackEvent: MemoryRollbackEvent;
+  materializedView: MemoryMaterializedView;
+}
+
 export async function getPendingProposals(limit: number = 50): Promise<AgentProposal[]> {
   return safeInvoke<AgentProposal[]>("get_pending_proposals", { limit });
 }
@@ -2781,8 +2842,37 @@ export interface PatchApplyResult {
 
 export async function acceptProposal(
   proposalId: string
-): Promise<{ success: boolean; patchResult: PatchApplyResult }> {
+): Promise<{
+  success: boolean;
+  patchResult: PatchApplyResult;
+  memoryLifecycle?: MemoryLifecycleRecord;
+}> {
   return safeInvoke("accept_proposal", { proposalId, proposal_id: proposalId });
+}
+
+export async function rollbackMemoryAsset(
+  memoryId: string,
+  reason: string
+): Promise<MemoryRollbackReport> {
+  return safeInvoke("rollback_memory_asset", { memoryId, memory_id: memoryId, reason });
+}
+
+export async function listMemoryAssets(options: {
+  scope?: string;
+  status?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<MemoryLifecycleRecord[]> {
+  return safeInvoke("list_memory_assets", {
+    scope: options.scope,
+    status: options.status,
+    limit: options.limit ?? 100,
+    offset: options.offset ?? 0,
+  });
+}
+
+export async function getMemoryAsset(memoryId: string): Promise<MemoryLifecycleRecord> {
+  return safeInvoke("get_memory_asset", { memoryId, memory_id: memoryId });
 }
 
 export async function rejectProposal(proposalId: string): Promise<void> {

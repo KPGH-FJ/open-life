@@ -158,12 +158,36 @@ pub(crate) async fn assemble_main_chat_agent_state_for_turn(
         Vec::new()
     };
 
+    let memory_lifecycle_records =
+        if let Some(memory_lifecycle_store_arc) = state.memory_lifecycle_store.as_ref() {
+            let memory_lifecycle_store = memory_lifecycle_store_arc.lock().await;
+            let mut records = Vec::new();
+            for proposal in &proposals {
+                match memory_lifecycle_store.get_record_by_proposal_id(&proposal.id) {
+                    Ok(Some(record)) => records.push(record),
+                    Ok(None) => {}
+                    Err(err) => assembly_diagnostics.push(gap(
+                        "agent_state_memory_lifecycle_load_failed",
+                        &format!(
+                            "Memory lifecycle evidence could not be loaded for proposal {}: {err}",
+                            proposal.id
+                        ),
+                        Some(proposal.id.clone()),
+                    )),
+                }
+            }
+            records
+        } else {
+            Vec::new()
+        };
+
     let mut snapshot = match assemble_main_chat_agent_state(MainChatAgentStateAssemblerInput {
         session,
         run,
         transcript,
         actions,
         proposals,
+        memory_lifecycle_records,
     }) {
         Ok(snapshot) => snapshot,
         Err(err) => {

@@ -32,6 +32,7 @@ type ControlHandlers = {
   onAcceptProposal?: (proposalId: string) => void;
   onRejectProposal?: (proposalId: string) => void;
   onEditProposal?: (proposalId: string) => void;
+  onRollbackMemory?: (memoryId: string) => void;
   busy?: boolean;
   canResume?: boolean;
   canRetry?: boolean;
@@ -240,6 +241,7 @@ export default function AgentControlPlane({
   onAcceptProposal,
   onRejectProposal,
   onEditProposal,
+  onRollbackMemory,
   busy = false,
   canResume = false,
   canRetry = false,
@@ -563,6 +565,18 @@ export default function AgentControlPlane({
                         icon: <Clock size={13} />,
                         disabled: busy,
                         onClick: () => onDefer({ proposalId: proposal.proposalId }),
+                      })}
+                    {proposal.status === "accepted" &&
+                      proposal.proposalType === "memory" &&
+                      proposal.controls.includes("rollback") &&
+                      proposal.memoryLifecycle?.status === "materialized" &&
+                      proposal.memoryLifecycle.memoryId &&
+                      onRollbackMemory &&
+                      inlineControlButton({
+                        label: "Rollback memory",
+                        icon: <RotateCw size={13} />,
+                        disabled: busy,
+                        onClick: () => onRollbackMemory(proposal.memoryLifecycle!.memoryId),
                       })}
                   </div>
                   {reviewCenterLink(

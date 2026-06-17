@@ -503,18 +503,18 @@ describe("tauri command argument aliases", () => {
       readinessSemantics: "full_deterministic_productization_v1_runtime_ready",
       runtimeExecutionScope:
         "default_deterministic_scenarios_runtime_backed_external_live_excluded",
-      executedScenarioCount: 91,
-      passedScenarioCount: 80,
+      executedScenarioCount: 92,
+      passedScenarioCount: 81,
       expectedBlockerScenarioCount: 11,
       failedScenarioCount: 0,
       externalLiveExcludedCount: 1,
       runtimePayloadSnapshotEventGatePassed: true,
-      runtimeRequiredGroupCount: 91,
-      runtimeRequiredGroupPassedCount: 91,
+      runtimeRequiredGroupCount: 92,
+      runtimeRequiredGroupPassedCount: 92,
       representativeRuntimeGroupCount: 0,
       representativeRuntimeGroupPassedCount: 0,
-      fullDeterministicRuntimeScenarioCount: 91,
-      fullDeterministicRuntimeScenarioExecutedCount: 91,
+      fullDeterministicRuntimeScenarioCount: 92,
+      fullDeterministicRuntimeScenarioExecutedCount: 92,
       runtimeRequiredGroupEvidence: [
         {
           scenarioId: "OA-02",
@@ -525,6 +525,10 @@ describe("tauri command argument aliases", () => {
           createdActionIds: [],
           createdObservationIds: [],
           createdProposalIds: [],
+          createdMemoryIds: [],
+          rollbackEventIds: [],
+          materializedViewVersions: [],
+          inactiveMemoryIds: [],
           finalDeliveryId: "delivery-direct",
           diagnostics: [],
         },
@@ -536,13 +540,7 @@ describe("tauri command argument aliases", () => {
       routeCounts: {
         direct_answer: { passed: 10, failed: 0, expectedBlocker: 0, unsupported: 0 },
       },
-      unsupportedScenarios: [
-        {
-          scenarioId: "MP-06",
-          route: "task_control",
-          reason: "Rollback mutation may remain optional unsupported until implemented.",
-        },
-      ],
+      unsupportedScenarios: [],
       failedScenarios: [],
       blockers: [],
     });
@@ -556,8 +554,8 @@ describe("tauri command argument aliases", () => {
     expect(result.finalReadinessReady).toBe(true);
     expect(result.fullProductizationV1Complete).toBe(true);
     expect(result.futureWork).toEqual([]);
-    expect(result.runtimeRequiredGroupCount).toBe(91);
-    expect(result.runtimeRequiredGroupPassedCount).toBe(91);
+    expect(result.runtimeRequiredGroupCount).toBe(92);
+    expect(result.runtimeRequiredGroupPassedCount).toBe(92);
     expect(result.runtimeExecutionScope).toBe(
       "default_deterministic_scenarios_runtime_backed_external_live_excluded"
     );

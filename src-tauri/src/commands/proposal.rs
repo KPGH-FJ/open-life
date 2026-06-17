@@ -5,8 +5,9 @@ use crate::legacy_write_convergence::{
 use crate::main_chat_hs_runtime::classify_hs_policy_topic;
 use crate::{persist_life_model, storage::app_data_dir, AppState};
 use openlife_core::agent::{
-    AgentProposal, MaturationProposalOutcome, ProposalSource, ProposalStatus, ProposalType,
-    RiskLevel,
+    AgentProposal, MaturationProposalOutcome, MemoryLifecycleAcceptanceInput,
+    MemoryLifecycleRecord, MemoryLifecycleScope, MemoryLifecycleStatus, MemoryRollbackReport,
+    ProposalSource, ProposalStatus, ProposalType, RiskLevel,
 };
 use openlife_core::life_model::patch::PatchSource;
 use openlife_core::life_model::LifeModel;
@@ -20,6 +21,10 @@ const EXTERNAL_WRITE_MAX_SIZE: usize = 100 * 1024;
 
 fn proposal_store_missing() -> String {
     "Proposal store is unavailable. Please check Settings > 试用就绪检查.".to_string()
+}
+
+fn memory_lifecycle_store_missing() -> String {
+    "Memory lifecycle store is unavailable. Accepted memory rollback is blocked.".to_string()
 }
 
 fn check_safe_mode(state: &Arc<AppState>) -> Result<(), String> {
@@ -1075,7 +1080,7 @@ async fn apply_proposal_to_state(
             ProposalType::MemoryWrite => {
                 let content = memory_content(&after)?;
                 let session_id = memory_session_id(&after);
-                let source = memory_source(&after);
+                let original_source = memory_source(&after);
 
                 // Check for duplicate content in memory store
                 {
@@ -1096,12 +1101,29 @@ async fn apply_proposal_to_state(
                     }
                 }
 
+                let lifecycle_report = {
+                    let lifecycle_store = state
+                        .memory_lifecycle_store
+                        .as_ref()
+                        .ok_or_else(memory_lifecycle_store_missing)?;
+                    let store = lifecycle_store.lock().await;
+                    store
+                        .accept_memory_proposal(
+                            MemoryLifecycleAcceptanceInput::from_memory_proposal(
+                                proposal,
+                                content.clone(),
+                            ),
+                        )
+                        .map_err(|e| e.to_string())?
+                };
+                let lifecycle_source =
+                    format!("memory_lifecycle:{}", lifecycle_report.record.memory_id);
                 let embedding_id = {
                     match embed_proposal_memory_with_privacy(&content, state).await {
                         Ok(embedding) if !embedding.is_empty() => {
                             let store = state.vector_store.lock().await;
                             store
-                                .insert(&session_id, &content, &embedding, &source)
+                                .insert(&session_id, &content, &embedding, &lifecycle_source)
                                 .map_err(|e| e.to_string())
                                 .ok()
                         }
@@ -1113,14 +1135,15 @@ async fn apply_proposal_to_state(
                     let tags = vec![
                         "proposal".to_string(),
                         format!("proposal_id:{}", proposal.id),
-                        format!("source:{}", source),
+                        format!("source:{}", original_source),
+                        format!("memory_id:{}", lifecycle_report.record.memory_id),
                     ];
                     store
                         .save_memory_record(
                             &session_id,
                             &content,
                             "proposal_memory",
-                            &source,
+                            &lifecycle_source,
                             &tags,
                             "private",
                             embedding_id,
@@ -1595,6 +1618,15 @@ pub(crate) async fn accept_proposal_with_state(
         "success": true,
         "patch_result": result,
     });
+    if proposal.proposal_type == ProposalType::MemoryWrite {
+        if let Some(lifecycle_store) = state.memory_lifecycle_store.as_ref() {
+            let store = lifecycle_store.lock().await;
+            if let Ok(Some(record)) = store.get_record_by_proposal_id(&proposal.id) {
+                response["memoryLifecycle"] =
+                    serde_json::to_value(&record).unwrap_or_else(|_| serde_json::Value::Null);
+            }
+        }
+    }
     if let Some(blocked) = blocked_action_info {
         if let Ok(parsed) = serde_json::from_str::<Value>(&blocked) {
             response["blocked_action"] = parsed;
@@ -1694,6 +1726,139 @@ pub(crate) async fn postpone_proposal_with_state(
     ensure_pending_or_postponed(&proposal)?;
     proposal.postpone();
     update_proposal_with_state(state, &proposal).await
+}
+
+fn ensure_exact_memory_id(memory_id: &str) -> Result<(), String> {
+    let trimmed = memory_id.trim();
+    if trimmed != memory_id
+        || trimmed.is_empty()
+        || !trimmed.starts_with("memory:")
+        || trimmed
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_whitespace())
+    {
+        return Err(
+            "rollback_memory_asset requires an exact accepted memory id, not a text query."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn parse_memory_lifecycle_scope(scope: Option<String>) -> Option<MemoryLifecycleScope> {
+    match scope.as_deref() {
+        Some("global") => Some(MemoryLifecycleScope::Global),
+        Some("workspace") => Some(MemoryLifecycleScope::Workspace),
+        Some("conversation") => Some(MemoryLifecycleScope::Conversation),
+        Some("project") => Some(MemoryLifecycleScope::Project),
+        _ => None,
+    }
+}
+
+fn parse_memory_lifecycle_status(status: Option<String>) -> Option<MemoryLifecycleStatus> {
+    match status.as_deref() {
+        Some("candidate") => Some(MemoryLifecycleStatus::Candidate),
+        Some("pending_review") => Some(MemoryLifecycleStatus::PendingReview),
+        Some("edited_pending_review") => Some(MemoryLifecycleStatus::EditedPendingReview),
+        Some("accepted") => Some(MemoryLifecycleStatus::Accepted),
+        Some("pending_materialization") => Some(MemoryLifecycleStatus::PendingMaterialization),
+        Some("materialized") => Some(MemoryLifecycleStatus::Materialized),
+        Some("materialization_failed") => Some(MemoryLifecycleStatus::MaterializationFailed),
+        Some("rejected") => Some(MemoryLifecycleStatus::Rejected),
+        Some("deferred") => Some(MemoryLifecycleStatus::Deferred),
+        Some("superseded") => Some(MemoryLifecycleStatus::Superseded),
+        Some("rolled_back") => Some(MemoryLifecycleStatus::RolledBack),
+        _ => None,
+    }
+}
+
+pub(crate) async fn rollback_memory_asset_with_state(
+    memory_id: String,
+    reason: String,
+    state: &Arc<AppState>,
+) -> Result<MemoryRollbackReport, String> {
+    ensure_exact_memory_id(&memory_id)?;
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err("rollback_memory_asset requires a rollback reason.".into());
+    }
+    let lifecycle_store = state
+        .memory_lifecycle_store
+        .as_ref()
+        .ok_or_else(memory_lifecycle_store_missing)?;
+    let store = lifecycle_store.lock().await;
+    store
+        .rollback_memory_asset(&memory_id, "user", reason)
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) async fn list_memory_assets_with_state(
+    scope: Option<String>,
+    status: Option<String>,
+    limit: i64,
+    offset: i64,
+    state: &Arc<AppState>,
+) -> Result<Vec<MemoryLifecycleRecord>, String> {
+    let lifecycle_store = state
+        .memory_lifecycle_store
+        .as_ref()
+        .ok_or_else(memory_lifecycle_store_missing)?;
+    let store = lifecycle_store.lock().await;
+    store
+        .list_records(
+            parse_memory_lifecycle_scope(scope),
+            parse_memory_lifecycle_status(status),
+            limit,
+            offset.max(0),
+        )
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) async fn get_memory_asset_with_state(
+    memory_id: String,
+    state: &Arc<AppState>,
+) -> Result<MemoryLifecycleRecord, String> {
+    ensure_exact_memory_id(&memory_id)?;
+    let lifecycle_store = state
+        .memory_lifecycle_store
+        .as_ref()
+        .ok_or_else(memory_lifecycle_store_missing)?;
+    let store = lifecycle_store.lock().await;
+    store
+        .get_record(&memory_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Memory asset not found: {memory_id}"))
+}
+
+pub(crate) async fn get_memory_lifecycle_events_with_state(
+    memory_id: String,
+    state: &Arc<AppState>,
+) -> Result<serde_json::Value, String> {
+    ensure_exact_memory_id(&memory_id)?;
+    let lifecycle_store = state
+        .memory_lifecycle_store
+        .as_ref()
+        .ok_or_else(memory_lifecycle_store_missing)?;
+    let store = lifecycle_store.lock().await;
+    let events = store
+        .lifecycle_events(&memory_id)
+        .map_err(|e| e.to_string())?;
+    serde_json::to_value(events).map_err(|e| e.to_string())
+}
+
+pub(crate) async fn rebuild_memory_materialized_view_with_state(
+    scope: Option<String>,
+    state: &Arc<AppState>,
+) -> Result<serde_json::Value, String> {
+    let lifecycle_store = state
+        .memory_lifecycle_store
+        .as_ref()
+        .ok_or_else(memory_lifecycle_store_missing)?;
+    let store = lifecycle_store.lock().await;
+    let view = store
+        .rebuild_materialized_view(parse_memory_lifecycle_scope(scope))
+        .map_err(|e| e.to_string())?;
+    serde_json::to_value(view).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1836,6 +2001,50 @@ pub async fn postpone_proposal(
     postpone_proposal_with_state(proposal_id, state.inner()).await
 }
 
+#[tauri::command]
+pub async fn rollback_memory_asset(
+    memory_id: String,
+    reason: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<MemoryRollbackReport, String> {
+    rollback_memory_asset_with_state(memory_id, reason, state.inner()).await
+}
+
+#[tauri::command]
+pub async fn list_memory_assets(
+    scope: Option<String>,
+    status: Option<String>,
+    limit: i64,
+    offset: i64,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<MemoryLifecycleRecord>, String> {
+    list_memory_assets_with_state(scope, status, limit, offset, state.inner()).await
+}
+
+#[tauri::command]
+pub async fn get_memory_asset(
+    memory_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<MemoryLifecycleRecord, String> {
+    get_memory_asset_with_state(memory_id, state.inner()).await
+}
+
+#[tauri::command]
+pub async fn get_memory_lifecycle_events(
+    memory_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
+    get_memory_lifecycle_events_with_state(memory_id, state.inner()).await
+}
+
+#[tauri::command]
+pub async fn rebuild_memory_materialized_view(
+    scope: Option<String>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
+    rebuild_memory_materialized_view_with_state(scope, state.inner()).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1913,6 +2122,9 @@ mod tests {
             policy_store: Arc::new(openlife_core::agent::PolicyStore::mvp_builtin()),
             proposal_store: Some(Arc::new(Mutex::new(
                 ProposalStore::new_in_memory().unwrap(),
+            ))),
+            memory_lifecycle_store: Some(Arc::new(Mutex::new(
+                openlife_core::agent::MemoryLifecycleStore::new_in_memory().unwrap(),
             ))),
             plan_execute_session_store: Some(Arc::new(Mutex::new(
                 openlife_core::agent::PlanExecuteSessionStore::new_in_memory().unwrap(),
@@ -2841,6 +3053,130 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.status, ProposalStatus::Accepted);
+    }
+
+    #[tokio::test]
+    async fn accept_memory_write_proposal_returns_lifecycle_materialization_evidence() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let proposal = AgentProposal::new(
+            ProposalType::MemoryWrite,
+            "memory.records",
+            serde_json::json!({
+                "session_id": "proposal-lifecycle-session",
+                "content": "用户偏好 execution-first agents",
+                "source": "review_center"
+            }),
+            "用户确认写入长期记忆",
+            0.8,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        let id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        let result = accept_proposal_with_state(id.clone(), &state)
+            .await
+            .unwrap();
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["memoryLifecycle"]["proposalId"], id);
+        assert!(
+            result["memoryLifecycle"]["memoryId"]
+                .as_str()
+                .is_some_and(|memory_id| !memory_id.trim().is_empty()),
+            "accepted memory must expose a concrete lifecycle memory id: {result:?}"
+        );
+        assert_eq!(result["memoryLifecycle"]["status"], "materialized");
+        assert_eq!(
+            result["memoryLifecycle"]["materializationStatus"],
+            "materialized"
+        );
+        assert!(
+            result["memoryLifecycle"]["materializedViewVersion"]
+                .as_i64()
+                .is_some_and(|version| version > 0),
+            "accepted memory must expose materialized context update evidence: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_memory_asset_requires_exact_id_and_updates_lifecycle_context() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let proposal = AgentProposal::new(
+            ProposalType::MemoryWrite,
+            "memory.records",
+            serde_json::json!({
+                "session_id": "proposal-rollback-session",
+                "content": "User prefers execution-first agents.",
+                "source": "review_center"
+            }),
+            "User confirmed a long-term memory.",
+            0.8,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        let id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+        let accepted = accept_proposal_with_state(id, &state).await.unwrap();
+        let memory_id = accepted["memoryLifecycle"]["memoryId"]
+            .as_str()
+            .expect("accepted memory id")
+            .to_string();
+        let accepted_view_version = accepted["memoryLifecycle"]["materializedViewVersion"]
+            .as_i64()
+            .expect("accepted materialized view version");
+
+        let ambiguous = rollback_memory_asset_with_state(
+            "execution-first agents".into(),
+            "not needed".into(),
+            &state,
+        )
+        .await;
+        assert!(
+            ambiguous
+                .unwrap_err()
+                .contains("requires an exact accepted memory id"),
+            "rollback must not accept text queries"
+        );
+
+        let rolled_back = rollback_memory_asset_with_state(
+            memory_id.clone(),
+            "User requested rollback.".into(),
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(rolled_back.record.memory_id, memory_id);
+        assert_eq!(rolled_back.record.status, MemoryLifecycleStatus::RolledBack);
+        assert_eq!(rolled_back.rollback_event.memory_id, memory_id);
+        assert!(
+            rolled_back.materialized_view.version > accepted_view_version,
+            "rollback must update materialized context version"
+        );
+        assert!(
+            !rolled_back
+                .materialized_view
+                .active_memory_ids
+                .contains(&memory_id),
+            "rolled back memory must be excluded from active materialized context"
+        );
     }
 
     #[tokio::test]

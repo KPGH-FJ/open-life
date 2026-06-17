@@ -97,6 +97,30 @@ fn main_chat_agent_productization_v1_scenario_fixture_uses_canonical_routes() {
         .filter(|scenario| scenario.included_in_default_gate)
         .count();
     assert_eq!(deterministic_default_count, 92);
+
+    let rollback = scenarios
+        .iter()
+        .find(|scenario| scenario.id == "MP-06")
+        .expect("MP-06 rollback fixture must exist");
+    assert_eq!(
+        rollback.expectation,
+        crate::agent::main_chat_agent_productization_v1::MainChatAgentProductScenarioExpectation::MustPass,
+        "Phase A requires MP-06 to move from optional unsupported to real rollback"
+    );
+    for required in [
+        "memory_id",
+        "rollback_event_id",
+        "materialized_view_version",
+        "inactive_memory",
+    ] {
+        assert!(
+            rollback
+                .required_runtime_evidence
+                .iter()
+                .any(|evidence| evidence == required),
+            "MP-06 must require {required} evidence"
+        );
+    }
 }
 
 #[test]
@@ -290,6 +314,7 @@ fn main_chat_agent_productization_v1_assembles_snapshot_and_ordered_events_from_
             .list_for_session(&action.session_id)
             .expect("actions"),
         proposals: vec![proposal],
+        memory_lifecycle_records: Vec::new(),
     })
     .expect("assemble product state");
 
@@ -395,6 +420,7 @@ fn main_chat_agent_productization_v1_fails_closed_when_observation_lacks_action_
         transcript,
         actions: vec![],
         proposals: vec![],
+        memory_lifecycle_records: Vec::new(),
     })
     .expect("assemble gap state");
 
@@ -450,6 +476,7 @@ fn main_chat_agent_productization_v1_does_not_promote_assistant_text_to_runtime_
         transcript: Vec::new(),
         actions: Vec::new(),
         proposals: Vec::new(),
+        memory_lifecycle_records: Vec::new(),
     })
     .expect("assemble fake text state");
 
@@ -553,6 +580,7 @@ fn main_chat_agent_productization_v1_links_tool_permission_proposal_to_pending_a
             .list_for_session(&action.session_id)
             .expect("actions"),
         proposals: vec![proposal],
+        memory_lifecycle_records: Vec::new(),
     })
     .expect("assemble state");
 

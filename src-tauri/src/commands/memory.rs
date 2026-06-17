@@ -1,6 +1,6 @@
 use crate::errors::AppError;
 use crate::main_chat_hs_runtime::classify_hs_policy_topic;
-use crate::main_chat_preprocess::merge_memory_hits;
+use crate::main_chat_preprocess::{filter_lifecycle_active_memory_results, merge_memory_hits};
 use crate::AppState;
 use openlife_core::memory_cache::HotMemoryCache;
 use openlife_core::vectors::{
@@ -151,7 +151,11 @@ pub(crate) async fn search_memory_with_state(
         }
         Err(_) => vec![],
     };
-    Ok(merge_memory_hits(vector_hits, text_hits, top_k))
+    Ok(filter_lifecycle_active_memory_results(
+        merge_memory_hits(vector_hits, text_hits, top_k),
+        state,
+    )
+    .await)
 }
 
 #[tauri::command]
