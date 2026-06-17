@@ -13,6 +13,7 @@ mod lifemodel_backend_completion;
 mod lifemodel_maturation_non_default_invocation;
 mod lifemodel_maturation_readiness;
 mod low_energy_collaboration_rule_candidate;
+mod main_chat_agent_productization_v1;
 mod main_chat_agent_v1;
 mod maturation_engine_v1;
 mod maturation_loop;

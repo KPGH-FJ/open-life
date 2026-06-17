@@ -1825,6 +1825,19 @@ pub(crate) async fn run_main_chat_agent_execution_v1_eval_gate_with_state(
 }
 
 #[tauri::command]
+pub async fn run_main_chat_agent_productization_v1_gate(
+    _state: State<'_, Arc<AppState>>,
+) -> Result<
+    crate::main_chat_agent_productization_eval::MainChatAgentProductizationV1GateReport,
+    String,
+> {
+    Ok(
+        crate::main_chat_agent_productization_eval::run_main_chat_agent_productization_v1_gate_report(
+        ),
+    )
+}
+
+#[tauri::command]
 pub async fn run_main_chat_agent_execution_v1_final_acceptance_gate(
     state: State<'_, Arc<AppState>>,
 ) -> Result<MainChatAgentExecutionV1FinalAcceptanceGateCommandReport, String> {

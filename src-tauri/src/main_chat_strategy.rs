@@ -8,6 +8,7 @@ use openlife_core::llm::ChatMessage;
 use openlife_core::privacy::PrivacyEngine;
 
 use crate::commands;
+use crate::main_chat_agent_state_payload::assemble_main_chat_agent_state_for_turn;
 use crate::main_chat_context_loader::compile_main_chat_context;
 use crate::main_chat_generation_support::{
     finalize_chat_agent_run, generate_non_stream_fallback, main_chat_provider_endpoint_kind,
@@ -835,6 +836,9 @@ pub(crate) async fn try_run_main_chat_agent_strategy(
         )
         .await,
     );
+    let agent_state =
+        assemble_main_chat_agent_state_for_turn(state, Some(task_session_id), Some(&agent_run.id))
+            .await;
 
     Ok(Some(SendMessageResult {
         reply,
@@ -842,6 +846,7 @@ pub(crate) async fn try_run_main_chat_agent_strategy(
         tool_calls,
         run_id: Some(agent_run.id),
         agent_ingress: Some(main_chat_agent_turn.decision.clone()),
+        agent_state,
         execution_transcript,
         legacy_fallback_used: false,
     }))

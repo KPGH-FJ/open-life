@@ -171,6 +171,7 @@ pub(crate) async fn send_message_with_agent_loop(
                 tool_calls: Vec::new(),
                 run_id: Some(agent_run.id),
                 agent_ingress: None,
+                agent_state: None,
                 execution_transcript: Vec::new(),
                 legacy_fallback_used: true,
             });
@@ -216,6 +217,7 @@ pub(crate) async fn send_message_with_agent_loop(
         tool_calls,
         run_id: Some(agent_run.id.clone()),
         agent_ingress: None,
+        agent_state: None,
         execution_transcript: Vec::new(),
         legacy_fallback_used: false,
     })

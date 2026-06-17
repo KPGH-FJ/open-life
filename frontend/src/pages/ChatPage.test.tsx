@@ -6,7 +6,7 @@ import ProposalReviewPage from "./ProposalReviewPage";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { mockInvoke, mockLifeModel } from "@/test/mocks/tauri";
-import type { SystemDiagnostics } from "../tauri";
+import type { MainChatAgentStateSnapshot, SystemDiagnostics } from "../tauri";
 import { FORBIDDEN_ORDINARY_CHAT_COMMANDS } from "@/test/ordinaryChatForbiddenCommands";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -16,6 +16,128 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn().mockResolvedValue(() => {}),
 }));
+
+function buildMainChatAgentStateSnapshot(
+  overrides: Partial<MainChatAgentStateSnapshot> = {}
+): MainChatAgentStateSnapshot {
+  const base: MainChatAgentStateSnapshot = {
+    task: {
+      taskId: "mainchat-task-product-ui-1",
+      runId: "run-product-ui-1",
+      conversationId: "session-1",
+      userMessageId: "message-product-ui-1",
+      title: "Workspace planning read",
+      strategy: "react_tool_execution",
+      status: "completed",
+      createdAt: "2026-06-16T00:00:00.000Z",
+      updatedAt: "2026-06-16T00:00:02.000Z",
+      traceAvailable: true,
+      controls: ["retry_failed_action", "cancel_task"],
+      actionIds: ["action-product-ui-1"],
+      observationIds: ["observation-product-ui-1"],
+      blockerIds: [],
+      proposalIds: [],
+      finalDeliveryId: "delivery-product-ui-1",
+    },
+    route: {
+      strategy: "react_tool_execution",
+      reason: "read_workspace_context",
+      confidence: 0.91,
+    },
+    context: [
+      {
+        contextId: "context-product-ui-1",
+        sourceKind: "workspace",
+        sourceLabel: "AGENTS.md bounded context",
+        evidenceId: "evidence-context-product-ui-1",
+      },
+    ],
+    provider: {
+      provider: "scripted_eval_provider",
+      model: "scripted-main-chat",
+      routeType: "local_eval",
+      reason: "eval_trace",
+      evidenceId: "evidence-provider-product-ui-1",
+    },
+    plan: {
+      planId: "plan-product-ui-1",
+      status: "completed",
+      summary: "Read the workspace context and synthesize the next step.",
+      editable: false,
+      source: "agent_loop",
+      evidenceId: "evidence-plan-product-ui-1",
+    },
+    actions: [
+      {
+        actionId: "action-product-ui-1",
+        actionType: "file.read",
+        target: "AGENTS.md",
+        label: "Read workspace guidance",
+        status: "completed",
+        riskLevel: "low",
+        policyDecisionId: "policy-product-ui-1",
+        startedAt: "2026-06-16T00:00:00.500Z",
+        finishedAt: "2026-06-16T00:00:01.000Z",
+        observationIds: ["observation-product-ui-1"],
+        retryable: false,
+      },
+    ],
+    observations: [
+      {
+        observationId: "observation-product-ui-1",
+        actionId: "action-product-ui-1",
+        sourceKind: "workspace_file",
+        sourceLabel: "AGENTS.md",
+        preview: "Main Chat Agent v1 stays proposal-first and evidence-backed.",
+        citationAvailable: true,
+        createdAt: "2026-06-16T00:00:01.200Z",
+      },
+    ],
+    blockers: [],
+    proposals: [],
+    finalDelivery: {
+      deliveryId: "delivery-product-ui-1",
+      taskId: "mainchat-task-product-ui-1",
+      runId: "run-product-ui-1",
+      status: "delivered",
+      headline: "Workspace guidance summarized",
+      answer: "Use the bounded workspace guidance without creating durable writes.",
+      completedActions: ["action-product-ui-1"],
+      observationsUsed: ["observation-product-ui-1"],
+      proposalsCreated: [],
+      blockers: [],
+      pendingUserActions: [],
+      durableChanges: [],
+      nextSteps: ["Keep proposal-first boundaries visible."],
+      traceAvailable: true,
+    },
+    diagnostics: [],
+    sequence: 11,
+    emittedAt: "2026-06-16T00:00:02.000Z",
+    events: [
+      {
+        eventType: "task.created",
+        sequence: 1,
+        objectId: "mainchat-task-product-ui-1",
+        evidenceId: "evidence-task-product-ui-1",
+      },
+      {
+        eventType: "action.updated",
+        sequence: 6,
+        objectId: "action-product-ui-1",
+        evidenceId: "evidence-action-product-ui-1",
+      },
+      {
+        eventType: "final_delivery.created",
+        sequence: 10,
+        objectId: "delivery-product-ui-1",
+        evidenceId: "evidence-delivery-product-ui-1",
+      },
+    ],
+  };
+
+  return { ...base, ...overrides };
+}
 
 describe("ChatPage", () => {
   beforeEach(() => {
@@ -541,6 +663,188 @@ describe("ChatPage", () => {
     });
 
     expect(screen.getAllByText("今天是星期一。")).toHaveLength(1);
+  });
+
+  it("renders the productized agent control plane from stream agent_state evidence", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Read the workspace guidance" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "start_stream_message",
+        expect.objectContaining({
+          sessionId: "session-1",
+          session_id: "session-1",
+        })
+      );
+    });
+
+    const doneHandler = listeners.get("stream-message-done");
+    expect(doneHandler).toBeDefined();
+    await act(async () => {
+      await doneHandler?.({
+        payload: {
+          session_id: "session-1",
+          run_id: "run-product-ui-1",
+          reply: "I read the workspace guidance and kept writes reviewable.",
+          reasoning_trace: null,
+          tool_calls: [],
+          agent_state: buildMainChatAgentStateSnapshot(),
+          execution_transcript: [],
+          legacy_fallback_used: false,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText("Agent Control Plane")).toBeInTheDocument();
+    expect(screen.getByText("Workspace planning read")).toBeInTheDocument();
+    expect(screen.getByText("react_tool_execution")).toBeInTheDocument();
+    expect(screen.getByText("AGENTS.md bounded context")).toBeInTheDocument();
+    expect(screen.getByText("Read workspace guidance")).toBeInTheDocument();
+    expect(screen.getByText("file.read")).toBeInTheDocument();
+    expect(screen.getByText("AGENTS.md")).toBeInTheDocument();
+    expect(
+      screen.getByText("Main Chat Agent v1 stays proposal-first and evidence-backed.")
+    ).toBeInTheDocument();
+    expect(screen.getByText("Workspace guidance summarized")).toBeInTheDocument();
+    expect(
+      screen.getByText("Use the bounded workspace guidance without creating durable writes.")
+    ).toBeInTheDocument();
+  });
+
+  it("does not infer productized actions or observations from assistant text", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+    const sparseState = buildMainChatAgentStateSnapshot({
+      task: {
+        taskId: "mainchat-task-product-ui-2",
+        runId: "run-product-ui-2",
+        conversationId: "session-1",
+        userMessageId: "message-product-ui-2",
+        title: "Direct response with no tool evidence",
+        strategy: "direct_answer",
+        status: "completed",
+        createdAt: "2026-06-16T00:01:00.000Z",
+        updatedAt: "2026-06-16T00:01:01.000Z",
+        traceAvailable: true,
+        controls: [],
+        actionIds: [],
+        observationIds: [],
+        blockerIds: [],
+        proposalIds: [],
+        finalDeliveryId: "delivery-product-ui-2",
+      },
+      route: {
+        strategy: "direct_answer",
+        reason: "ordinary_answer",
+        confidence: 0.75,
+      },
+      context: [],
+      provider: undefined,
+      plan: undefined,
+      actions: [],
+      observations: [],
+      blockers: [],
+      proposals: [],
+      finalDelivery: {
+        deliveryId: "delivery-product-ui-2",
+        taskId: "mainchat-task-product-ui-2",
+        runId: "run-product-ui-2",
+        status: "delivered",
+        headline: "Direct answer delivered",
+        answer: "This answer has no runtime-backed tool observations.",
+        completedActions: [],
+        observationsUsed: [],
+        proposalsCreated: [],
+        blockers: [],
+        pendingUserActions: [],
+        durableChanges: [],
+        nextSteps: [],
+        traceAvailable: true,
+      },
+      diagnostics: [],
+      events: [
+        {
+          eventType: "task.created",
+          sequence: 1,
+          objectId: "mainchat-task-product-ui-2",
+          evidenceId: "evidence-task-product-ui-2",
+        },
+        {
+          eventType: "final_delivery.created",
+          sequence: 5,
+          objectId: "delivery-product-ui-2",
+          evidenceId: "evidence-delivery-product-ui-2",
+        },
+      ],
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Answer without tools" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "start_stream_message",
+        expect.objectContaining({
+          sessionId: "session-1",
+          session_id: "session-1",
+        })
+      );
+    });
+
+    const doneHandler = listeners.get("stream-message-done");
+    expect(doneHandler).toBeDefined();
+    await act(async () => {
+      await doneHandler?.({
+        payload: {
+          session_id: "session-1",
+          run_id: "run-product-ui-2",
+          reply: "I used fake.file.read and saw Ghost observation.",
+          reasoning_trace: null,
+          tool_calls: [],
+          agent_state: sparseState,
+          execution_transcript: [],
+          legacy_fallback_used: false,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText("Agent Control Plane")).toBeInTheDocument();
+    expect(screen.getByText("Direct response with no tool evidence")).toBeInTheDocument();
+    expect(screen.getByText("Direct answer delivered")).toBeInTheDocument();
+    expect(screen.queryByText("fake.file.read")).not.toBeInTheDocument();
+    expect(screen.queryByText("Ghost observation")).not.toBeInTheDocument();
+    expect(screen.queryByText("Actions")).not.toBeInTheDocument();
+    expect(screen.queryByText("Observations")).not.toBeInTheDocument();
   });
 
   it("renders main chat agent execution state as a task panel", async () => {

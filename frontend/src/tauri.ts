@@ -478,6 +478,7 @@ export interface SendMessageResult {
   tool_calls: ToolCallResult[];
   run_id?: string;
   agent_ingress?: MainChatAgentIngressDecision;
+  agent_state?: MainChatAgentStateSnapshot;
   execution_transcript?: MainChatExecutionTranscriptEntry[];
   legacy_fallback_used?: boolean;
 }
@@ -488,6 +489,7 @@ export interface StreamMessageStartPayload {
   reasoning_trace: ReasoningTrace;
   tool_calls: ToolCallResult[];
   agent_ingress?: MainChatAgentIngressDecision;
+  agent_state?: MainChatAgentStateSnapshot;
   execution_transcript?: MainChatExecutionTranscriptEntry[];
   legacy_fallback_used?: boolean;
 }
@@ -499,8 +501,124 @@ export interface StreamMessageDonePayload {
   reasoning_trace: ReasoningTrace;
   tool_calls: ToolCallResult[];
   agent_ingress?: MainChatAgentIngressDecision;
+  agent_state?: MainChatAgentStateSnapshot;
   execution_transcript?: MainChatExecutionTranscriptEntry[];
   legacy_fallback_used?: boolean;
+}
+
+export type MainChatAgentProductStrategyRoute =
+  | "direct_answer"
+  | "read_action"
+  | "react_tool_execution"
+  | "plan_execute"
+  | "memory_proposal"
+  | "permission_request"
+  | "task_control"
+  | "blocked"
+  | "legacy_fallback"
+  | "unknown";
+
+export interface MainChatAgentStateSnapshot {
+  task: {
+    taskId: string;
+    runId: string;
+    conversationId: string;
+    userMessageId: string;
+    title: string;
+    strategy: MainChatAgentProductStrategyRoute;
+    status: string;
+    createdAt: string;
+    updatedAt: string;
+    traceAvailable: boolean;
+    controls: string[];
+    actionIds: string[];
+    observationIds: string[];
+    blockerIds: string[];
+    proposalIds: string[];
+    finalDeliveryId?: string;
+  };
+  route: { strategy: MainChatAgentProductStrategyRoute; reason: string; confidence?: number };
+  context: Array<{
+    contextId: string;
+    sourceKind: string;
+    sourceLabel: string;
+    evidenceId: string;
+  }>;
+  provider?: {
+    provider: string;
+    model: string;
+    routeType: string;
+    reason: string;
+    evidenceId: string;
+  };
+  plan?: {
+    planId: string;
+    status: string;
+    summary: string;
+    editable: boolean;
+    source: string;
+    evidenceId: string;
+  };
+  actions: Array<{
+    actionId: string;
+    actionType: string;
+    target: string;
+    label: string;
+    status: string;
+    riskLevel: string;
+    policyDecisionId: string;
+    startedAt?: string;
+    finishedAt?: string;
+    observationIds: string[];
+    retryable: boolean;
+  }>;
+  observations: Array<{
+    observationId: string;
+    actionId: string;
+    sourceKind: string;
+    sourceLabel: string;
+    preview: string;
+    citationAvailable: boolean;
+    createdAt: string;
+  }>;
+  blockers: Array<{
+    blockerId: string;
+    reasonCode: string;
+    title: string;
+    detail: string;
+    affectedActionId?: string;
+    recoverable: boolean;
+    controls: string[];
+  }>;
+  proposals: Array<{
+    proposalId: string;
+    proposalType: string;
+    status: string;
+    title: string;
+    summary: string;
+    evidenceIds: string[];
+    controls: string[];
+  }>;
+  finalDelivery?: {
+    deliveryId: string;
+    taskId: string;
+    runId: string;
+    status: string;
+    headline: string;
+    answer: string;
+    completedActions: unknown[];
+    observationsUsed: unknown[];
+    proposalsCreated: unknown[];
+    blockers: unknown[];
+    pendingUserActions: unknown[];
+    durableChanges: unknown[];
+    nextSteps: string[];
+    traceAvailable: boolean;
+  };
+  diagnostics: Array<{ gapId: string; gapCode: string; detail: string; evidenceId?: string }>;
+  sequence: number;
+  emittedAt: string;
+  events: Array<{ eventType: string; sequence: number; objectId: string; evidenceId: string }>;
 }
 
 export type MainChatAgentStrategy =
@@ -677,6 +795,66 @@ export interface MainChatAgentExecutionV1EvalGateReport {
   metadataSafeSummary: Record<string, unknown>;
 }
 
+export interface MainChatAgentProductizationRouteCount {
+  passed: number;
+  failed: number;
+  expectedBlocker: number;
+  unsupported: number;
+}
+
+export interface MainChatAgentProductizationUnsupportedScenario {
+  scenarioId: string;
+  route: string;
+  reason: string;
+}
+
+export interface MainChatAgentProductizationFailedScenario {
+  scenarioId: string;
+  route: string;
+  reason: string;
+}
+
+export interface ProductScenarioRuntimeProof {
+  scenarioId: string;
+  group: string;
+  passed: boolean;
+  runtimeObjectCount: number;
+  observationCount: number;
+  createdActionIds: string[];
+  createdObservationIds: string[];
+  createdProposalIds: string[];
+  finalDeliveryId?: string;
+  diagnostics: string[];
+}
+
+export interface MainChatAgentProductizationV1GateReport {
+  totalScenarioCount: number;
+  defaultDeterministicScenarioCount: number;
+  readinessSemantics: "acceptance_hardening_representative_gate_ready";
+  runtimeExecutionScope: "representative_runtime_groups_only_full_92_scenario_runtime_execution_future_work";
+  executedScenarioCount: number;
+  passedScenarioCount: number;
+  expectedBlockerScenarioCount: number;
+  failedScenarioCount: number;
+  externalLiveExcludedCount: number;
+  runtimePayloadSnapshotEventGatePassed: boolean;
+  runtimeRequiredGroupCount: number;
+  runtimeRequiredGroupPassedCount: number;
+  representativeRuntimeGroupCount: number;
+  representativeRuntimeGroupPassedCount: number;
+  fullDeterministicRuntimeScenarioCount: number;
+  fullDeterministicRuntimeScenarioExecutedCount: number;
+  runtimeRequiredGroupEvidence: ProductScenarioRuntimeProof[];
+  eventSemantics: string;
+  finalReadinessReady: boolean;
+  fullProductizationV1Complete: boolean;
+  futureWork: string[];
+  routeCounts: Record<string, MainChatAgentProductizationRouteCount>;
+  unsupportedScenarios: MainChatAgentProductizationUnsupportedScenario[];
+  failedScenarios: MainChatAgentProductizationFailedScenario[];
+  blockers: string[];
+}
+
 export async function sendMessageV2(
   sessionId: string,
   messages: ChatMessage[],
@@ -745,6 +923,12 @@ export async function getReactBetaExecutionStatus(): Promise<ReactBetaExecutionS
 export async function runMainChatAgentExecutionV1EvalGate(): Promise<MainChatAgentExecutionV1EvalGateReport> {
   return safeInvoke<MainChatAgentExecutionV1EvalGateReport>(
     "run_main_chat_agent_execution_v1_eval_gate"
+  );
+}
+
+export async function runMainChatAgentProductizationV1Gate(): Promise<MainChatAgentProductizationV1GateReport> {
+  return safeInvoke<MainChatAgentProductizationV1GateReport>(
+    "run_main_chat_agent_productization_v1_gate"
   );
 }
 

@@ -69,6 +69,7 @@ import type {
   MainChatAgentIngressDecision,
   MainChatExecutionTranscriptEntry,
   MainChatAgentTaskState,
+  MainChatAgentStateSnapshot,
 } from "../tauri";
 import type {
   ControlledPilotPromotionEvidenceInput,
@@ -81,6 +82,7 @@ import { listen } from "@tauri-apps/api/event";
 import ReasoningTracePanel from "../components/ReasoningTracePanel";
 import ToolCallCard from "../components/ToolCallCard";
 import AgentStateIndicator from "../components/AgentStateIndicator";
+import AgentControlPlane from "../components/AgentControlPlane";
 import type { AgentStageState } from "../components/AgentStage";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
 import ChatSidebar from "./chat/ChatSidebar";
@@ -500,6 +502,9 @@ export default function ChatPage({
   const [currentAgentTaskState, setCurrentAgentTaskState] = useState<MainChatAgentTaskState | null>(
     null
   );
+  const [currentAgentState, setCurrentAgentState] = useState<MainChatAgentStateSnapshot | null>(
+    null
+  );
   const [agentTaskControlBusy, setAgentTaskControlBusy] = useState(false);
   const [legacyFallbackUsed, setLegacyFallbackUsed] = useState(false);
   const [pendingProposals, setPendingProposals] = useState<AgentProposal[]>([]);
@@ -762,6 +767,7 @@ export default function ChatPage({
   }, []);
 
   useEffect(() => {
+    setCurrentAgentState(null);
     setLoadingHistory(true);
     refreshAgentRuns(currentSessionId);
     getChatHistory(currentSessionId)
@@ -819,6 +825,7 @@ export default function ChatPage({
               }))
             );
             setCurrentAgentIngress(event.payload.agent_ingress ?? null);
+            setCurrentAgentState(event.payload.agent_state ?? null);
             setCurrentExecutionTranscript(event.payload.execution_transcript ?? []);
             setLegacyFallbackUsed(Boolean(event.payload.legacy_fallback_used));
             await loadMainChatTaskState(
@@ -878,6 +885,7 @@ export default function ChatPage({
             }))
           );
           setCurrentAgentIngress(event.payload.agent_ingress ?? null);
+          setCurrentAgentState(event.payload.agent_state ?? null);
           setCurrentExecutionTranscript(event.payload.execution_transcript ?? []);
           setLegacyFallbackUsed(Boolean(event.payload.legacy_fallback_used));
           setStreamInterrupted(false);
@@ -907,6 +915,7 @@ export default function ChatPage({
             setStreamingReply("");
             setSending(false);
             setStreamInterrupted(true);
+            setCurrentAgentState(null);
             emitCompanionStage("error");
             await loadAgentRunForSession(event.payload.run_id, event.payload.session_id);
             refreshAgentRuns(event.payload.session_id);
@@ -1170,6 +1179,7 @@ export default function ChatPage({
     setToolCalls([]);
     setShowToolCalls(false);
     setCurrentAgentIngress(null);
+    setCurrentAgentState(null);
     setCurrentExecutionTranscript([]);
     setCurrentAgentTaskState(null);
     setLegacyFallbackUsed(false);
@@ -1228,6 +1238,7 @@ export default function ChatPage({
     setToolCalls([]);
     setShowToolCalls(false);
     setCurrentAgentIngress(null);
+    setCurrentAgentState(null);
     setCurrentExecutionTranscript([]);
     setCurrentAgentTaskState(null);
     setLegacyFallbackUsed(false);
@@ -2761,7 +2772,21 @@ export default function ChatPage({
               </div>
             </div>
           )}
-          {!companionMode && currentAgentIngress && (
+          {!companionMode && currentAgentState && (
+            <div className="px-4 py-2">
+              <AgentControlPlane
+                state={currentAgentState}
+                busy={agentTaskControlBusy}
+                canResume={Boolean(currentAgentTaskState?.canResume)}
+                canRetry={Boolean(currentAgentTaskState?.canRetry)}
+                canCancel={Boolean(currentAgentTaskState?.canCancel)}
+                onResume={handleResumeMainChatTask}
+                onRetry={handleRetryMainChatAction}
+                onCancel={handleCancelMainChatTask}
+              />
+            </div>
+          )}
+          {!companionMode && !currentAgentState && currentAgentIngress && (
             <div className="px-4 py-2">
               <div className="border-y border-stone-200 bg-stone-50/75 px-3 py-3 text-xs text-stone-700">
                 <div className="flex flex-wrap items-start gap-2">

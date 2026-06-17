@@ -490,6 +490,41 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           metadataSafe: true,
         },
       } as T);
+    case "run_main_chat_agent_productization_v1_gate":
+      return Promise.resolve({
+        totalScenarioCount: 93,
+        defaultDeterministicScenarioCount: 92,
+        readinessSemantics: "acceptance_hardening_representative_gate_ready",
+        runtimeExecutionScope:
+          "representative_runtime_groups_only_full_92_scenario_runtime_execution_future_work",
+        executedScenarioCount: 91,
+        passedScenarioCount: 80,
+        expectedBlockerScenarioCount: 11,
+        failedScenarioCount: 0,
+        externalLiveExcludedCount: 1,
+        runtimePayloadSnapshotEventGatePassed: true,
+        runtimeRequiredGroupCount: 11,
+        runtimeRequiredGroupPassedCount: 11,
+        representativeRuntimeGroupCount: 11,
+        representativeRuntimeGroupPassedCount: 11,
+        fullDeterministicRuntimeScenarioCount: 92,
+        fullDeterministicRuntimeScenarioExecutedCount: 11,
+        runtimeRequiredGroupEvidence: [],
+        eventSemantics: "snapshot_derived_ordered_events_not_live_delta_stream",
+        finalReadinessReady: true,
+        fullProductizationV1Complete: false,
+        futureWork: ["full_92_scenario_runtime_execution"],
+        routeCounts: {},
+        unsupportedScenarios: [
+          {
+            scenarioId: "MP-06",
+            route: "task_control",
+            reason: "Rollback mutation may remain optional unsupported until implemented.",
+          },
+        ],
+        failedScenarios: [],
+        blockers: [],
+      } as T);
     case "list_mcp_servers":
       return Promise.resolve([
         {

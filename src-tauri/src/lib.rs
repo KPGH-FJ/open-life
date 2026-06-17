@@ -16,6 +16,9 @@ pub(crate) mod default_chat_adapter;
 pub mod errors;
 pub(crate) mod legacy_write_convergence;
 #[allow(dead_code)]
+pub(crate) mod main_chat_agent_productization_eval;
+pub(crate) mod main_chat_agent_state_payload;
+#[allow(dead_code)]
 pub(crate) mod main_chat_command_surface_eval;
 pub(crate) mod main_chat_context_loader;
 pub(crate) mod main_chat_conversation_updates;
@@ -71,6 +74,9 @@ mod main_chat_context_loader_tests;
 mod main_chat_runtime_module_tests;
 
 #[cfg(test)]
+mod main_chat_agent_productization_tests;
+
+#[cfg(test)]
 pub mod test_utils;
 
 pub use state::AppState;
@@ -124,7 +130,8 @@ use commands::agent_runtime::{
     run_controlled_chat_cutover_candidate, run_controlled_chat_migration_shadow_run,
     run_default_chat_adapter_controlled_preview, run_default_chat_adapter_dry_run,
     run_main_chat_agent_execution_v1_eval_gate,
-    run_main_chat_agent_execution_v1_final_acceptance_gate, run_multi_strategy_agent_preview,
+    run_main_chat_agent_execution_v1_final_acceptance_gate,
+    run_main_chat_agent_productization_v1_gate, run_multi_strategy_agent_preview,
     update_plan_execute_session_draft,
 };
 
@@ -231,6 +238,8 @@ pub struct SendMessageResult {
     pub tool_calls: Vec<ToolCallResult>,
     pub run_id: Option<String>,
     pub agent_ingress: Option<openlife_core::agent::main_chat_agent_v1::AgentIngressDecision>,
+    pub agent_state:
+        Option<openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentStateSnapshot>,
     pub execution_transcript:
         Vec<openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry>,
     pub legacy_fallback_used: bool,
@@ -598,6 +607,7 @@ pub fn run() {
             replay_agent_action,
             run_multi_strategy_agent_preview,
             run_main_chat_agent_execution_v1_eval_gate,
+            run_main_chat_agent_productization_v1_gate,
             run_main_chat_agent_execution_v1_final_acceptance_gate,
             get_runtime_strategy_registry_status,
             get_react_beta_execution_status,

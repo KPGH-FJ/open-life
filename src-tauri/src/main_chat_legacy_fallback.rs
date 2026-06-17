@@ -5,6 +5,7 @@ use openlife_core::privacy::PrivacyEngine;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::main_chat_agent_state_payload::assemble_main_chat_agent_state_for_turn;
 use crate::main_chat_generation_support::{
     finalize_chat_agent_run, generate_non_stream_fallback, preview_text,
 };
@@ -202,6 +203,15 @@ pub(crate) async fn send_message_with_legacy_generation(
         )
         .await,
     );
+    let agent_state = assemble_main_chat_agent_state_for_turn(
+        state,
+        main_chat_agent_turn
+            .decision
+            .agent_task_session_id
+            .as_deref(),
+        Some(&agent_run.id),
+    )
+    .await;
 
     Ok(SendMessageResult {
         reply,
@@ -209,6 +219,7 @@ pub(crate) async fn send_message_with_legacy_generation(
         tool_calls: Vec::new(),
         run_id: Some(agent_run.id.clone()),
         agent_ingress: Some(main_chat_agent_turn.decision),
+        agent_state,
         execution_transcript,
         legacy_fallback_used,
     })
