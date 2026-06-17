@@ -607,6 +607,7 @@ export interface MainChatAgentStateSnapshot {
     title: string;
     summary: string;
     evidenceIds: string[];
+    actionIds: string[];
     controls: string[];
   }>;
   finalDelivery?: {

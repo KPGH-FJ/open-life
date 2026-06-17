@@ -728,6 +728,228 @@ describe("ChatPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("approves an exact ToolPermission proposal inline and resumes the Main Chat task", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_main_chat_agent_task_state") {
+        return Promise.resolve({
+          session: {
+            id: args?.taskSessionId ?? "mainchat-task-permission-inline-1",
+            chatSessionId: "session-1",
+            userGoal: "Read a registered MCP note.",
+            selectedStrategy: "react_tool_execution",
+            status: "waiting_permission",
+            currentPlanSummary: "Wait for ToolPermission, then resume the read.",
+            actionQueueIds: ["action-mcp-read-1"],
+            pendingBlockers: ["tool_permission_required"],
+            contextSnapshotRefs: [],
+            createdAt: "2026-06-16T00:00:00.000Z",
+            updatedAt: "2026-06-16T00:00:01.000Z",
+          },
+          actions: [
+            {
+              id: "action-mcp-read-1",
+              sessionId: "mainchat-task-permission-inline-1",
+              action: {
+                actionType: "mcp.read_only",
+                description: "Read registered MCP note",
+              },
+              policy: {
+                level: "medium",
+                reasonCode: "tool_permission_required",
+                executionAllowed: false,
+                requiresConfirmation: true,
+                requiresProposal: true,
+                requiresBlocker: true,
+                silentWriteAllowed: false,
+              },
+              status: "pending_permission",
+              attempts: 1,
+              observationMetadata: {
+                proposalId: "proposal-tool-permission-inline-1",
+                directWritesExecuted: false,
+              },
+              createdAt: "2026-06-16T00:00:00.000Z",
+              updatedAt: "2026-06-16T00:00:01.000Z",
+            },
+          ],
+          transcript: [],
+          pendingApprovalCount: 1,
+          activeToolCount: 0,
+          canResume: true,
+          canCancel: true,
+          canRetry: false,
+        });
+      }
+      if (cmd === "accept_proposal") {
+        return Promise.resolve({ success: true });
+      }
+      if (cmd === "resume_main_chat_agent_task") {
+        return Promise.resolve({
+          session: {
+            id: args?.taskSessionId ?? "mainchat-task-permission-inline-1",
+            chatSessionId: "session-1",
+            userGoal: "Read a registered MCP note.",
+            selectedStrategy: "react_tool_execution",
+            status: "running",
+            currentPlanSummary: "ToolPermission accepted; replaying the exact read.",
+            actionQueueIds: ["action-mcp-read-1"],
+            pendingBlockers: [],
+            contextSnapshotRefs: [],
+            createdAt: "2026-06-16T00:00:00.000Z",
+            updatedAt: "2026-06-16T00:00:02.000Z",
+          },
+          actions: [],
+          transcript: [],
+          pendingApprovalCount: 0,
+          activeToolCount: 0,
+          canResume: false,
+          canCancel: true,
+          canRetry: false,
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Read the registered MCP note" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "start_stream_message",
+        expect.objectContaining({ sessionId: expect.any(String) })
+      );
+    });
+    const streamCall = vi.mocked(invoke).mock.calls.find(([cmd]) => cmd === "start_stream_message");
+    const eventSessionId = (streamCall?.[1] as any)?.sessionId ?? "session-1";
+    const permissionState = buildMainChatAgentStateSnapshot({
+      task: {
+        ...buildMainChatAgentStateSnapshot().task,
+        taskId: "mainchat-task-permission-inline-1",
+        status: "waiting_for_user",
+        controls: ["approve_once", "deny", "defer", "cancel", "open_trace"],
+        actionIds: ["action-mcp-read-1"],
+        blockerIds: ["blocker-permission-inline-1"],
+        proposalIds: ["proposal-tool-permission-inline-1"],
+        finalDeliveryId: undefined,
+      },
+      route: {
+        strategy: "permission_request",
+        reason: "tool_permission_required",
+        confidence: 0.88,
+      },
+      actions: [
+        {
+          actionId: "action-mcp-read-1",
+          actionType: "mcp.read_only",
+          target: "registered_mcp://notes.read",
+          label: "Read registered MCP note",
+          status: "pending_permission",
+          riskLevel: "medium",
+          policyDecisionId: "policy-mcp-read-1",
+          observationIds: [],
+          retryable: false,
+        },
+      ],
+      observations: [],
+      blockers: [
+        {
+          blockerId: "blocker-permission-inline-1",
+          reasonCode: "tool_permission_required",
+          title: "Permission required",
+          detail: "Read registered MCP note",
+          affectedActionId: "action-mcp-read-1",
+          recoverable: true,
+          controls: ["approve_once", "deny", "defer", "cancel", "open_trace"],
+        },
+      ],
+      proposals: [
+        {
+          proposalId: "proposal-tool-permission-inline-1",
+          proposalType: "tool_permission",
+          status: "pending_review",
+          title: "tool_permission proposal",
+          summary: "Allow the pending registered MCP read action once.",
+          evidenceIds: ["blocker-permission-inline-1"],
+          actionIds: ["action-mcp-read-1"],
+          controls: ["accept_proposal", "reject_proposal", "defer", "open_review_center"],
+        },
+      ],
+      finalDelivery: undefined,
+      diagnostics: [],
+    });
+    const doneHandler = listeners.get("stream-message-done");
+    expect(doneHandler).toBeDefined();
+    await act(async () => {
+      await doneHandler?.({
+        payload: {
+          session_id: eventSessionId,
+          run_id: "run-permission-inline-1",
+          reply: "I need approval before reading that registered MCP note.",
+          reasoning_trace: null,
+          tool_calls: [],
+          agent_ingress: {
+            requestId: "req-permission-inline-1",
+            sourceSessionId: "session-1",
+            taskKind: "conversation",
+            selectedStrategy: "react_tool_execution",
+            confidence: 0.88,
+            reasonSummary: "Permission required before MCP read.",
+            fallbackEligible: true,
+            privacyRisk: {
+              riskLevel: "medium",
+              privacyClass: "workspace",
+              policyReasonCode: "tool_permission_required",
+              localOnlyRequired: false,
+              writeLike: false,
+              externalWriteLike: false,
+            },
+            agentTaskSessionId: "mainchat-task-permission-inline-1",
+          },
+          agent_state: permissionState,
+          execution_transcript: [],
+          legacy_fallback_used: false,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Approve once" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "accept_proposal",
+        expect.objectContaining({
+          proposalId: "proposal-tool-permission-inline-1",
+          proposal_id: "proposal-tool-permission-inline-1",
+        })
+      );
+      expect(invoke).toHaveBeenCalledWith(
+        "resume_main_chat_agent_task",
+        expect.objectContaining({
+          taskSessionId: "mainchat-task-permission-inline-1",
+          task_session_id: "mainchat-task-permission-inline-1",
+        })
+      );
+    });
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "grant_tool_permission")).toBe(
+      false
+    );
+  });
+
   it("does not infer productized actions or observations from assistant text", async () => {
     type StreamListener = (event: { payload: any }) => void | Promise<void>;
     const listeners = new Map<string, StreamListener>();

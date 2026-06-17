@@ -1,11 +1,37 @@
-import { Ban, CheckCircle2, FileText, Play, RotateCw, ShieldAlert, Wrench } from "lucide-react";
+import {
+  Ban,
+  CheckCircle2,
+  Clock,
+  FileText,
+  Pencil,
+  Play,
+  RotateCw,
+  ShieldAlert,
+  Wrench,
+  XCircle,
+} from "lucide-react";
+import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import type { MainChatAgentStateSnapshot } from "../tauri";
 
+type ControlTarget = {
+  proposalId?: string;
+  actionId?: string;
+  blockerId?: string;
+};
+
 type ControlHandlers = {
   onResume?: () => void;
-  onRetry?: () => void;
+  onRetry?: (target?: ControlTarget) => void;
   onCancel?: () => void;
+  onApproveOnce?: (
+    target: Required<Pick<ControlTarget, "proposalId" | "actionId" | "blockerId">>
+  ) => void;
+  onDeny?: (target: ControlTarget) => void;
+  onDefer?: (target: ControlTarget) => void;
+  onAcceptProposal?: (proposalId: string) => void;
+  onRejectProposal?: (proposalId: string) => void;
+  onEditProposal?: (proposalId: string) => void;
   busy?: boolean;
   canResume?: boolean;
   canRetry?: boolean;
@@ -43,7 +69,11 @@ function shortId(value: string): string {
 }
 
 function hasAnyControl(state: MainChatAgentStateSnapshot): boolean {
-  return state.task.controls.length > 0 || state.blockers.some(blocker => blocker.controls.length);
+  return (
+    state.task.controls.length > 0 ||
+    state.blockers.some(blocker => blocker.controls.length) ||
+    state.proposals.some(proposal => proposal.controls.length)
+  );
 }
 
 function supportsControl(state: MainChatAgentStateSnapshot, names: string[]): boolean {
@@ -102,22 +132,74 @@ function readExecutionBadges(
   ].filter((badge): badge is string => Boolean(badge));
 }
 
-function controlList(controls: string[], keyPrefix: string, reviewState?: unknown) {
-  const unique = Array.from(new Set(controls)).filter(control => control === "open_review_center");
-  if (unique.length === 0) return null;
+function shouldShowReviewCenterLink(controls: string[]): boolean {
+  return controls.some(control =>
+    [
+      "open_review_center",
+      "approve_once",
+      "deny",
+      "defer",
+      "accept_proposal",
+      "reject_proposal",
+      "edit_proposal",
+      "rollback",
+    ].includes(control)
+  );
+}
+
+function reviewCenterLink(controls: string[], keyPrefix: string, reviewState?: unknown) {
+  if (!shouldShowReviewCenterLink(controls)) return null;
   return (
     <div className="mt-2 flex flex-wrap gap-1">
-      {unique.map(control => (
-        <Link
-          key={`${keyPrefix}-${control}`}
-          to="/review"
-          state={reviewState}
-          className="inline-flex min-h-5 items-center rounded-md border border-stone-200 bg-white px-1.5 font-medium text-stone-800 hover:bg-stone-100"
-        >
-          {control}
-        </Link>
-      ))}
+      <Link
+        key={`${keyPrefix}-open-review-center`}
+        to="/review"
+        state={reviewState}
+        className="inline-flex min-h-6 items-center rounded-md border border-stone-200 bg-white px-2 font-medium text-stone-800 hover:bg-stone-100"
+      >
+        Open Review Center
+      </Link>
     </div>
+  );
+}
+
+function inlineControlButton({
+  label,
+  icon,
+  disabled,
+  onClick,
+}: {
+  label: string;
+  icon: ReactNode;
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      className="inline-flex min-h-6 items-center gap-1 rounded-md border border-stone-200 bg-white px-2 font-medium text-stone-800 hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-40"
+    >
+      {icon}
+      <span>{label}</span>
+    </button>
+  );
+}
+
+function matchingPermissionProposal(
+  state: MainChatAgentStateSnapshot,
+  blocker: MainChatAgentStateSnapshot["blockers"][number]
+) {
+  const actionId = blocker.affectedActionId;
+  if (!actionId) return null;
+  return (
+    state.proposals.find(
+      proposal =>
+        proposal.proposalType === "tool_permission" &&
+        proposal.status === "pending_review" &&
+        proposal.actionIds.includes(actionId)
+    ) ?? null
   );
 }
 
@@ -152,6 +234,12 @@ export default function AgentControlPlane({
   onResume,
   onRetry,
   onCancel,
+  onApproveOnce,
+  onDeny,
+  onDefer,
+  onAcceptProposal,
+  onRejectProposal,
+  onEditProposal,
   busy = false,
   canResume = false,
   canRetry = false,
@@ -217,7 +305,7 @@ export default function AgentControlPlane({
                 aria-label="Retry failed action"
                 title="Retry failed action"
                 disabled={!onRetry || !canRetry || busy}
-                onClick={onRetry}
+                onClick={() => onRetry?.()}
                 className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 <RotateCw size={14} />
@@ -346,7 +434,78 @@ export default function AgentControlPlane({
               <div key={blocker.blockerId} className="py-2">
                 <div className="font-semibold text-amber-950">{blocker.title}</div>
                 <div className="mt-1 text-amber-900">{blocker.detail}</div>
-                {controlList(blocker.controls, blocker.blockerId, {
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {(() => {
+                    const permissionProposal = matchingPermissionProposal(state, blocker);
+                    const actionId = blocker.affectedActionId;
+                    const canActOnPermission = Boolean(permissionProposal && actionId);
+                    return (
+                      <>
+                        {blocker.controls.includes("approve_once") &&
+                          permissionProposal &&
+                          actionId &&
+                          onApproveOnce &&
+                          inlineControlButton({
+                            label: "Approve once",
+                            icon: <CheckCircle2 size={13} />,
+                            disabled: busy,
+                            onClick: () =>
+                              onApproveOnce({
+                                proposalId: permissionProposal.proposalId,
+                                actionId,
+                                blockerId: blocker.blockerId,
+                              }),
+                          })}
+                        {blocker.controls.includes("deny") &&
+                          canActOnPermission &&
+                          onDeny &&
+                          inlineControlButton({
+                            label: "Deny",
+                            icon: <XCircle size={13} />,
+                            disabled: busy,
+                            onClick: () =>
+                              onDeny({
+                                proposalId: permissionProposal?.proposalId,
+                                actionId,
+                                blockerId: blocker.blockerId,
+                              }),
+                          })}
+                        {blocker.controls.includes("defer") &&
+                          canActOnPermission &&
+                          onDefer &&
+                          inlineControlButton({
+                            label: "Defer",
+                            icon: <Clock size={13} />,
+                            disabled: busy,
+                            onClick: () =>
+                              onDefer({
+                                proposalId: permissionProposal?.proposalId,
+                                actionId,
+                                blockerId: blocker.blockerId,
+                              }),
+                          })}
+                        {blocker.controls.includes("retry") &&
+                          blocker.affectedActionId &&
+                          onRetry &&
+                          inlineControlButton({
+                            label: "Retry",
+                            icon: <RotateCw size={13} />,
+                            disabled: busy,
+                            onClick: () => onRetry({ actionId: blocker.affectedActionId }),
+                          })}
+                        {blocker.controls.includes("cancel") &&
+                          onCancel &&
+                          inlineControlButton({
+                            label: "Cancel",
+                            icon: <Ban size={13} />,
+                            disabled: busy || !canCancel,
+                            onClick: onCancel,
+                          })}
+                      </>
+                    );
+                  })()}
+                </div>
+                {reviewCenterLink(blocker.controls, blocker.blockerId, {
                   mainChatTaskSessionId: state.task.taskId,
                   returnTo: "/chat",
                 })}
@@ -368,7 +527,45 @@ export default function AgentControlPlane({
                 <div className="min-w-0">
                   <div className="font-semibold text-stone-950">{proposal.title}</div>
                   <div className="mt-1 text-stone-600">{proposal.summary}</div>
-                  {controlList(
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {proposal.status === "pending_review" &&
+                      proposal.controls.includes("accept_proposal") &&
+                      onAcceptProposal &&
+                      inlineControlButton({
+                        label: "Accept proposal",
+                        icon: <CheckCircle2 size={13} />,
+                        disabled: busy,
+                        onClick: () => onAcceptProposal(proposal.proposalId),
+                      })}
+                    {proposal.status === "pending_review" &&
+                      proposal.controls.includes("reject_proposal") &&
+                      onRejectProposal &&
+                      inlineControlButton({
+                        label: "Reject proposal",
+                        icon: <XCircle size={13} />,
+                        disabled: busy,
+                        onClick: () => onRejectProposal(proposal.proposalId),
+                      })}
+                    {proposal.status === "pending_review" &&
+                      proposal.controls.includes("edit_proposal") &&
+                      onEditProposal &&
+                      inlineControlButton({
+                        label: "Edit proposal",
+                        icon: <Pencil size={13} />,
+                        disabled: busy,
+                        onClick: () => onEditProposal(proposal.proposalId),
+                      })}
+                    {proposal.status === "pending_review" &&
+                      proposal.controls.includes("defer") &&
+                      onDefer &&
+                      inlineControlButton({
+                        label: "Defer",
+                        icon: <Clock size={13} />,
+                        disabled: busy,
+                        onClick: () => onDefer({ proposalId: proposal.proposalId }),
+                      })}
+                  </div>
+                  {reviewCenterLink(
                     proposal.controls.includes("open_review_center")
                       ? proposal.controls
                       : [...proposal.controls, "open_review_center"],

@@ -5,8 +5,9 @@ use crate::agent::main_chat_agent_productization_v1::{
 };
 use crate::agent::main_chat_agent_v1::{
     ActionQueueStore, AgentTaskSessionDraft, AgentTaskSessionStatus, AgentTaskSessionStore,
-    ExecutionAction, ExecutionPolicy, ExecutionQueueStatus, ExecutionTranscriptEntryDraft,
-    ExecutionTranscriptEntryKind, MainChatAgentStrategy,
+    ExecutionAction, ExecutionPolicy, ExecutionPolicyDecision, ExecutionQueueStatus,
+    ExecutionTranscriptEntryDraft, ExecutionTranscriptEntryKind, MainChatAgentStrategy,
+    MainChatPolicyLevel,
 };
 use crate::agent::types::{
     AgentProposal, AgentRun, AgentRunStatus, AgentTaskKind, ContextSummary, ModelRouteTrace,
@@ -466,4 +467,103 @@ fn main_chat_agent_productization_v1_does_not_promote_assistant_text_to_runtime_
         .collect::<Vec<_>>();
     assert!(gap_codes.contains(&"missing_run_identity"));
     assert!(gap_codes.contains(&"missing_final_delivery"));
+}
+
+#[test]
+fn main_chat_agent_productization_v1_links_tool_permission_proposal_to_pending_action() {
+    let session_store = AgentTaskSessionStore::new_in_memory().expect("session store");
+    let action_queue = ActionQueueStore::new_in_memory().expect("action queue");
+
+    let session = session_store
+        .create_session(AgentTaskSessionDraft {
+            chat_session_id: "chat-productization-permission".into(),
+            user_goal: "Read a registered MCP resource after approval.".into(),
+            selected_strategy: MainChatAgentStrategy::ReActToolExecution,
+            current_plan_summary: Some(
+                "Wait for permission, then replay exact read action.".into(),
+            ),
+            context_snapshot_refs: vec![],
+        })
+        .expect("create session");
+    let action = action_queue
+        .enqueue(
+            &session.id,
+            ExecutionAction::new("mcp.read_only", "registered_mcp://notes.read"),
+            ExecutionPolicyDecision {
+                level: MainChatPolicyLevel::L2ProposalFirst,
+                reason_code: "tool_permission_required".into(),
+                execution_allowed: false,
+                requires_confirmation: true,
+                requires_proposal: true,
+                requires_blocker: true,
+                silent_write_allowed: false,
+            },
+        )
+        .expect("enqueue action");
+    session_store
+        .record_action_queue_id(&session.id, &action.id)
+        .expect("record action id");
+    let action = action_queue
+        .transition(
+            &action.id,
+            ExecutionQueueStatus::PendingPermission,
+            Some(serde_json::json!({
+                "proposalId": "proposal-tool-permission-action-link",
+                "permissionProposalCreated": true,
+                "directWritesExecuted": false
+            })),
+        )
+        .expect("pending permission action");
+    session_store
+        .mark_waiting_permission(&session.id)
+        .expect("waiting permission");
+
+    let mut proposal = AgentProposal::new(
+        ProposalType::ToolPermission,
+        "tool_permission.registered_mcp.notes_read",
+        serde_json::json!({
+            "permission": "allow_once",
+            "tool_name": "notes.read",
+            "source": "registered_mcp",
+            "risk_level": "medium",
+            "action_type": "mcp_tool"
+        }),
+        "Allow exactly the pending registered MCP read action once.",
+        0.83,
+        RiskLevel::Medium,
+        ProposalSource::ChatConversation,
+    );
+    proposal.id = "proposal-tool-permission-action-link".into();
+    proposal.source_detail = Some(format!("main_chat_agent_task_session:{}", session.id));
+
+    let session = session_store
+        .load_session(&session.id)
+        .expect("load session")
+        .expect("session");
+    let snapshot = assemble_main_chat_agent_state(MainChatAgentStateAssemblerInput {
+        session,
+        run: Some(fixture_run(
+            "chat-productization-permission",
+            "Permission is pending.",
+        )),
+        transcript: session_store
+            .list_transcript_entries(&action.session_id)
+            .expect("transcript"),
+        actions: action_queue
+            .list_for_session(&action.session_id)
+            .expect("actions"),
+        proposals: vec![proposal],
+    })
+    .expect("assemble state");
+
+    let proposal = snapshot
+        .proposals
+        .iter()
+        .find(|proposal| proposal.proposal_id == "proposal-tool-permission-action-link")
+        .expect("proposal evidence");
+    assert_eq!(
+        proposal.action_ids,
+        vec![action.id.clone()],
+        "ToolPermission proposal evidence must expose the exact pending action it can approve"
+    );
 }

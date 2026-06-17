@@ -1,6 +1,6 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import AgentControlPlane from "./AgentControlPlane";
 import type { MainChatAgentStateSnapshot } from "../tauri";
 
@@ -71,6 +71,7 @@ function agentState(
         title: "Remember execution-first preference",
         summary: "Create a memory proposal after review.",
         evidenceIds: ["observation-1"],
+        actionIds: [],
         controls: ["accept_proposal", "reject_proposal", "edit_proposal", "defer"],
       },
     ],
@@ -187,7 +188,178 @@ describe("AgentControlPlane", () => {
     expect(screen.queryByText("reject_proposal")).not.toBeInTheDocument();
     expect(screen.queryByText("edit_proposal")).not.toBeInTheDocument();
     expect(screen.queryByText("rollback")).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "open_review_center" })).toHaveAttribute(
+    expect(screen.getAllByRole("link", { name: "Open Review Center" })[0]).toHaveAttribute(
+      "href",
+      "/review"
+    );
+  });
+
+  it("wires proposal controls only when real handlers are supplied", () => {
+    const onAcceptProposal = vi.fn();
+    const onRejectProposal = vi.fn();
+    const onEditProposal = vi.fn();
+    const onDefer = vi.fn();
+    render(
+      <MemoryRouter>
+        <AgentControlPlane
+          state={agentState()}
+          onAcceptProposal={onAcceptProposal}
+          onRejectProposal={onRejectProposal}
+          onEditProposal={onEditProposal}
+          onDefer={onDefer}
+        />
+      </MemoryRouter>
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Accept proposal" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reject proposal" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit proposal" }));
+    fireEvent.click(screen.getByRole("button", { name: "Defer" }));
+
+    expect(onAcceptProposal).toHaveBeenCalledWith("proposal-1");
+    expect(onRejectProposal).toHaveBeenCalledWith("proposal-1");
+    expect(onEditProposal).toHaveBeenCalledWith("proposal-1");
+    expect(onDefer).toHaveBeenCalledWith({ proposalId: "proposal-1" });
+  });
+
+  it("approves permission only for a ToolPermission proposal linked to the affected action", () => {
+    const onApproveOnce = vi.fn();
+    const onDeny = vi.fn();
+    const onDefer = vi.fn();
+    render(
+      <MemoryRouter>
+        <AgentControlPlane
+          state={agentState({
+            task: {
+              ...agentState().task,
+              status: "waiting_for_user",
+              controls: ["approve_once", "deny", "defer", "cancel", "open_trace"],
+              blockerIds: ["blocker-permission-1"],
+              proposalIds: ["proposal-tool-permission-1"],
+            },
+            blockers: [
+              {
+                blockerId: "blocker-permission-1",
+                reasonCode: "tool_permission_required",
+                title: "Permission required",
+                detail: "Read registered MCP notes.",
+                affectedActionId: "action-1",
+                recoverable: true,
+                controls: ["approve_once", "deny", "defer", "cancel", "open_trace"],
+              },
+            ],
+            proposals: [
+              {
+                proposalId: "proposal-tool-permission-1",
+                proposalType: "tool_permission",
+                status: "pending_review",
+                title: "tool_permission proposal",
+                summary: "Allow this exact read once.",
+                evidenceIds: ["blocker-permission-1"],
+                actionIds: ["action-1"],
+                controls: ["accept_proposal", "reject_proposal", "defer", "open_review_center"],
+              },
+            ],
+          })}
+          onApproveOnce={onApproveOnce}
+          onDeny={onDeny}
+          onDefer={onDefer}
+        />
+      </MemoryRouter>
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Approve once" }));
+    fireEvent.click(screen.getByRole("button", { name: "Deny" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Defer" })[0]);
+
+    expect(onApproveOnce).toHaveBeenCalledWith({
+      proposalId: "proposal-tool-permission-1",
+      actionId: "action-1",
+      blockerId: "blocker-permission-1",
+    });
+    expect(onDeny).toHaveBeenCalledWith({
+      proposalId: "proposal-tool-permission-1",
+      actionId: "action-1",
+      blockerId: "blocker-permission-1",
+    });
+    expect(onDefer).toHaveBeenCalledWith({
+      proposalId: "proposal-tool-permission-1",
+      actionId: "action-1",
+      blockerId: "blocker-permission-1",
+    });
+  });
+
+  it("does not approve permission when the proposal action target changed", () => {
+    render(
+      <MemoryRouter>
+        <AgentControlPlane
+          state={agentState({
+            task: {
+              ...agentState().task,
+              status: "waiting_for_user",
+              controls: ["approve_once", "deny", "defer", "cancel", "open_trace"],
+              blockerIds: ["blocker-permission-1"],
+              proposalIds: ["proposal-tool-permission-1"],
+            },
+            blockers: [
+              {
+                blockerId: "blocker-permission-1",
+                reasonCode: "tool_permission_required",
+                title: "Permission required",
+                detail: "Read registered MCP notes.",
+                affectedActionId: "action-1",
+                recoverable: true,
+                controls: ["approve_once", "deny", "defer", "cancel", "open_trace"],
+              },
+            ],
+            proposals: [
+              {
+                proposalId: "proposal-tool-permission-1",
+                proposalType: "tool_permission",
+                status: "pending_review",
+                title: "tool_permission proposal",
+                summary: "Allow a different read.",
+                evidenceIds: ["blocker-permission-1"],
+                actionIds: ["changed-action"],
+                controls: ["accept_proposal", "reject_proposal", "defer", "open_review_center"],
+              },
+            ],
+          })}
+          onApproveOnce={vi.fn()}
+          onDeny={vi.fn()}
+          onDefer={vi.fn()}
+        />
+      </MemoryRouter>
+    );
+
+    expect(screen.queryByRole("button", { name: "Approve once" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Deny" })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: "Open Review Center" })[0]).toHaveAttribute(
+      "href",
+      "/review"
+    );
+  });
+
+  it("keeps rollback hidden unless a real rollback command is implemented", () => {
+    renderPanel(
+      agentState({
+        proposals: [
+          {
+            proposalId: "proposal-accepted-1",
+            proposalType: "memory",
+            status: "accepted",
+            title: "memory proposal",
+            summary: "Accepted memory proposal.",
+            evidenceIds: ["proposal-accepted-1"],
+            actionIds: [],
+            controls: ["rollback", "open_review_center"],
+          },
+        ],
+      })
+    );
+
+    expect(screen.queryByRole("button", { name: /rollback/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open Review Center" })).toHaveAttribute(
       "href",
       "/review"
     );

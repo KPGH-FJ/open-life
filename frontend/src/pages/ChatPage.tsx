@@ -49,6 +49,10 @@ import {
   listAgentRunsForSession,
   getAgentRun,
   getPendingProposals,
+  acceptProposal,
+  rejectProposal,
+  editProposal,
+  postponeProposal,
   runMultiStrategyAgentPreview,
   checkControlledChatPilotEligibility,
   recordControlledPilotPromotionEvidence,
@@ -506,6 +510,7 @@ export default function ChatPage({
     null
   );
   const [agentTaskControlBusy, setAgentTaskControlBusy] = useState(false);
+  const [agentTaskControlError, setAgentTaskControlError] = useState<string | null>(null);
   const [legacyFallbackUsed, setLegacyFallbackUsed] = useState(false);
   const [pendingProposals, setPendingProposals] = useState<AgentProposal[]>([]);
   const [feedbackGiven, setFeedbackGiven] = useState<Record<number, "up" | "down">>({});
@@ -1182,6 +1187,7 @@ export default function ChatPage({
     setCurrentAgentState(null);
     setCurrentExecutionTranscript([]);
     setCurrentAgentTaskState(null);
+    setAgentTaskControlError(null);
     setLegacyFallbackUsed(false);
     emitCompanionStage("sorting");
 
@@ -1241,6 +1247,7 @@ export default function ChatPage({
     setCurrentAgentState(null);
     setCurrentExecutionTranscript([]);
     setCurrentAgentTaskState(null);
+    setAgentTaskControlError(null);
     setLegacyFallbackUsed(false);
     emitCompanionStage("sorting");
     try {
@@ -1263,49 +1270,204 @@ export default function ChatPage({
     }
   }, [currentSessionId, messages, selectedSkillId, sending, emitCompanionStage]);
 
+  const currentMainChatTaskSessionId = useCallback(() => {
+    return (
+      currentAgentIngress?.agentTaskSessionId ??
+      currentAgentState?.task.taskId ??
+      currentAgentTaskState?.session?.id
+    );
+  }, [currentAgentIngress?.agentTaskSessionId, currentAgentState?.task.taskId, currentAgentTaskState?.session?.id]);
+
+  const refreshMainChatControlState = useCallback(
+    async (taskSessionId?: string) => {
+      await refreshPendingProposals();
+      if (taskSessionId) {
+        await loadMainChatTaskState(taskSessionId, currentSessionIdRef.current);
+      }
+    },
+    []
+  );
+
   const handleResumeMainChatTask = useCallback(async () => {
-    const taskSessionId = currentAgentIngress?.agentTaskSessionId;
+    const taskSessionId = currentMainChatTaskSessionId();
     if (!taskSessionId || agentTaskControlBusy) return;
     setAgentTaskControlBusy(true);
+    setAgentTaskControlError(null);
     try {
       const state = await resumeMainChatAgentTask(taskSessionId);
       setCurrentAgentTaskState(state);
       setCurrentExecutionTranscript(state.transcript ?? []);
+      await refreshPendingProposals();
+    } catch (e) {
+      setAgentTaskControlError(`Resume failed: ${readablePreviewError(e)}`);
     } finally {
       setAgentTaskControlBusy(false);
     }
-  }, [agentTaskControlBusy, currentAgentIngress?.agentTaskSessionId]);
+  }, [agentTaskControlBusy, currentMainChatTaskSessionId]);
 
   const handleCancelMainChatTask = useCallback(async () => {
-    const taskSessionId = currentAgentIngress?.agentTaskSessionId;
+    const taskSessionId = currentMainChatTaskSessionId();
     if (!taskSessionId || agentTaskControlBusy) return;
     setAgentTaskControlBusy(true);
+    setAgentTaskControlError(null);
     try {
       const state = await cancelMainChatAgentTask(taskSessionId);
       setCurrentAgentTaskState(state);
       setCurrentExecutionTranscript(state.transcript ?? []);
+    } catch (e) {
+      setAgentTaskControlError(`Cancel failed: ${readablePreviewError(e)}`);
     } finally {
       setAgentTaskControlBusy(false);
     }
-  }, [agentTaskControlBusy, currentAgentIngress?.agentTaskSessionId]);
+  }, [agentTaskControlBusy, currentMainChatTaskSessionId]);
 
-  const handleRetryMainChatAction = useCallback(async () => {
-    const taskSessionId = currentAgentIngress?.agentTaskSessionId;
-    const actionId = currentAgentTaskState?.actions.find(action => action.status === "failed")?.id;
+  const handleRetryMainChatAction = useCallback(async (target?: { actionId?: string }) => {
+    const taskSessionId = currentMainChatTaskSessionId();
+    const actionId =
+      target?.actionId ??
+      currentAgentState?.blockers.find(blocker => blocker.affectedActionId)?.affectedActionId ??
+      currentAgentTaskState?.actions.find(action => action.status === "failed")?.id;
     if (!taskSessionId || !actionId || agentTaskControlBusy) return;
     setAgentTaskControlBusy(true);
+    setAgentTaskControlError(null);
     try {
       const state = await retryMainChatAgentAction(taskSessionId, actionId);
       setCurrentAgentTaskState(state);
       setCurrentExecutionTranscript(state.transcript ?? []);
+    } catch (e) {
+      setAgentTaskControlError(`Retry failed: ${readablePreviewError(e)}`);
     } finally {
       setAgentTaskControlBusy(false);
     }
   }, [
     agentTaskControlBusy,
-    currentAgentIngress?.agentTaskSessionId,
+    currentAgentState?.blockers,
+    currentMainChatTaskSessionId,
     currentAgentTaskState?.actions,
   ]);
+
+  const handleApproveOnceMainChatPermission = useCallback(
+    async (target: { proposalId: string; actionId: string; blockerId: string }) => {
+      const taskSessionId = currentMainChatTaskSessionId();
+      if (!taskSessionId || agentTaskControlBusy) return;
+      setAgentTaskControlBusy(true);
+      setAgentTaskControlError(null);
+      try {
+        await acceptProposal(target.proposalId);
+        const state = await resumeMainChatAgentTask(taskSessionId);
+        setCurrentAgentTaskState(state);
+        setCurrentExecutionTranscript(state.transcript ?? []);
+        await refreshMainChatControlState(taskSessionId);
+      } catch (e) {
+        setAgentTaskControlError(`Approve once failed: ${readablePreviewError(e)}`);
+      } finally {
+        setAgentTaskControlBusy(false);
+      }
+    },
+    [agentTaskControlBusy, currentMainChatTaskSessionId, refreshMainChatControlState]
+  );
+
+  const handleDenyMainChatControl = useCallback(
+    async (target: { proposalId?: string }) => {
+      if (!target.proposalId || agentTaskControlBusy) return;
+      const taskSessionId = currentMainChatTaskSessionId();
+      setAgentTaskControlBusy(true);
+      setAgentTaskControlError(null);
+      try {
+        await rejectProposal(target.proposalId);
+        await refreshMainChatControlState(taskSessionId);
+      } catch (e) {
+        setAgentTaskControlError(`Deny failed: ${readablePreviewError(e)}`);
+      } finally {
+        setAgentTaskControlBusy(false);
+      }
+    },
+    [agentTaskControlBusy, currentMainChatTaskSessionId, refreshMainChatControlState]
+  );
+
+  const handleDeferMainChatControl = useCallback(
+    async (target: { proposalId?: string }) => {
+      if (!target.proposalId || agentTaskControlBusy) return;
+      const taskSessionId = currentMainChatTaskSessionId();
+      setAgentTaskControlBusy(true);
+      setAgentTaskControlError(null);
+      try {
+        await postponeProposal(target.proposalId);
+        await refreshMainChatControlState(taskSessionId);
+      } catch (e) {
+        setAgentTaskControlError(`Defer failed: ${readablePreviewError(e)}`);
+      } finally {
+        setAgentTaskControlBusy(false);
+      }
+    },
+    [agentTaskControlBusy, currentMainChatTaskSessionId, refreshMainChatControlState]
+  );
+
+  const handleAcceptAgentProposal = useCallback(
+    async (proposalId: string) => {
+      if (agentTaskControlBusy) return;
+      const taskSessionId = currentMainChatTaskSessionId();
+      const proposal = currentAgentState?.proposals.find(item => item.proposalId === proposalId);
+      setAgentTaskControlBusy(true);
+      setAgentTaskControlError(null);
+      try {
+        await acceptProposal(proposalId);
+        if (proposal?.proposalType === "tool_permission" && proposal.actionIds.length > 0 && taskSessionId) {
+          const state = await resumeMainChatAgentTask(taskSessionId);
+          setCurrentAgentTaskState(state);
+          setCurrentExecutionTranscript(state.transcript ?? []);
+        }
+        await refreshMainChatControlState(taskSessionId);
+      } catch (e) {
+        setAgentTaskControlError(`Accept proposal failed: ${readablePreviewError(e)}`);
+      } finally {
+        setAgentTaskControlBusy(false);
+      }
+    },
+    [agentTaskControlBusy, currentAgentState?.proposals, currentMainChatTaskSessionId, refreshMainChatControlState]
+  );
+
+  const handleRejectAgentProposal = useCallback(
+    async (proposalId: string) => {
+      await handleDenyMainChatControl({ proposalId });
+    },
+    [handleDenyMainChatControl]
+  );
+
+  const handleEditAgentProposal = useCallback(
+    async (proposalId: string) => {
+      if (agentTaskControlBusy) return;
+      const taskSessionId = currentMainChatTaskSessionId();
+      setAgentTaskControlBusy(true);
+      setAgentTaskControlError(null);
+      try {
+        const proposal =
+          pendingProposals.find(item => item.id === proposalId) ??
+          (await getPendingProposals(100)).find(item => item.id === proposalId);
+        if (!proposal) {
+          throw new Error("proposal evidence not found");
+        }
+        const draft = window.prompt(
+          "Edit proposal JSON",
+          JSON.stringify(proposal.after ?? {}, null, 2)
+        );
+        if (draft === null) return;
+        const parsed = JSON.parse(draft);
+        await editProposal(proposalId, parsed);
+        await refreshMainChatControlState(taskSessionId);
+      } catch (e) {
+        setAgentTaskControlError(`Edit proposal failed: ${readablePreviewError(e)}`);
+      } finally {
+        setAgentTaskControlBusy(false);
+      }
+    },
+    [
+      agentTaskControlBusy,
+      currentMainChatTaskSessionId,
+      pendingProposals,
+      refreshMainChatControlState,
+    ]
+  );
 
   const readiness = useMemo(() => buildReadinessSummary(diagnostics), [diagnostics]);
   const governedPreviewSummaryEntries = useMemo(
@@ -2783,7 +2945,18 @@ export default function ChatPage({
                 onResume={handleResumeMainChatTask}
                 onRetry={handleRetryMainChatAction}
                 onCancel={handleCancelMainChatTask}
+                onApproveOnce={handleApproveOnceMainChatPermission}
+                onDeny={handleDenyMainChatControl}
+                onDefer={handleDeferMainChatControl}
+                onAcceptProposal={handleAcceptAgentProposal}
+                onRejectProposal={handleRejectAgentProposal}
+                onEditProposal={handleEditAgentProposal}
               />
+              {agentTaskControlError && (
+                <div className="border-b border-rose-200 bg-rose-50 px-4 py-2 text-xs text-rose-800">
+                  {agentTaskControlError}
+                </div>
+              )}
             </div>
           )}
           {!companionMode && !currentAgentState && currentAgentIngress && (
@@ -2865,7 +3038,7 @@ export default function ChatPage({
                         aria-label="Retry failed action"
                         title="Retry failed action"
                         disabled={!currentAgentTaskState.canRetry || agentTaskControlBusy}
-                        onClick={handleRetryMainChatAction}
+                        onClick={() => handleRetryMainChatAction()}
                         className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
                       >
                         <RotateCw size={14} />
@@ -2887,6 +3060,11 @@ export default function ChatPage({
                   <div className="mt-2 border-l-2 border-amber-400 bg-amber-50 px-2 py-1 text-amber-900">
                     <span className="font-semibold">Fallback notice</span>: response used the
                     visible legacy fallback path.
+                  </div>
+                )}
+                {agentTaskControlError && (
+                  <div className="mt-2 border-l-2 border-rose-400 bg-rose-50 px-2 py-1 text-rose-900">
+                    {agentTaskControlError}
                   </div>
                 )}
                 {currentAgentTaskState?.actions?.length ? (

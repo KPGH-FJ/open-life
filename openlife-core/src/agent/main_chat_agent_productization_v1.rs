@@ -1129,6 +1129,7 @@ pub struct ProposalEvidence {
     pub title: String,
     pub summary: String,
     pub evidence_ids: Vec<String>,
+    pub action_ids: Vec<String>,
     pub controls: Vec<MainChatAgentProductControl>,
 }
 
@@ -1362,7 +1363,7 @@ pub fn assemble_main_chat_agent_state(
     }
 
     let mut blockers = blockers_from_evidence(&input.session, &input.actions);
-    let proposals = proposals_from_evidence(&input.proposals);
+    let proposals = proposals_from_evidence(&input.proposals, &input.actions);
     if route.strategy == MainChatAgentProductStrategyRoute::PermissionRequest
         && blockers.is_empty()
         && !input.actions.is_empty()
@@ -1918,7 +1919,10 @@ fn blocker_controls(reason: &str) -> Vec<MainChatAgentProductControl> {
     }
 }
 
-fn proposals_from_evidence(proposals: &[AgentProposal]) -> Vec<ProposalEvidence> {
+fn proposals_from_evidence(
+    proposals: &[AgentProposal],
+    actions: &[QueuedExecutionAction],
+) -> Vec<ProposalEvidence> {
     proposals
         .iter()
         .map(|proposal| {
@@ -1934,10 +1938,45 @@ fn proposals_from_evidence(proposals: &[AgentProposal]) -> Vec<ProposalEvidence>
                     .as_ref()
                     .map(|source| vec![source.clone()])
                     .unwrap_or_default(),
+                action_ids: action_ids_for_proposal(proposal, actions),
                 controls: proposal_controls(status),
             }
         })
         .collect()
+}
+
+fn action_ids_for_proposal(
+    proposal: &AgentProposal,
+    actions: &[QueuedExecutionAction],
+) -> Vec<String> {
+    let mut ids = actions
+        .iter()
+        .filter(|action| action_metadata_references_proposal(action, &proposal.id))
+        .map(|action| action.id.clone())
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn action_metadata_references_proposal(action: &QueuedExecutionAction, proposal_id: &str) -> bool {
+    action
+        .observation_metadata
+        .as_ref()
+        .is_some_and(|metadata| metadata_references_proposal_id(metadata, proposal_id))
+}
+
+fn metadata_references_proposal_id(value: &Value, proposal_id: &str) -> bool {
+    match value {
+        Value::Object(map) => map.iter().any(|(key, value)| {
+            ((key == "proposalId" || key == "proposal_id") && value.as_str() == Some(proposal_id))
+                || metadata_references_proposal_id(value, proposal_id)
+        }),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| metadata_references_proposal_id(value, proposal_id)),
+        _ => false,
+    }
 }
 
 fn product_proposal_type(proposal_type: ProposalType) -> &'static str {

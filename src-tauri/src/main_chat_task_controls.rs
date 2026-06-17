@@ -176,9 +176,11 @@ async fn main_chat_pending_action_permission_ready_for_resume(
     {
         return Ok(false);
     }
-    if !main_chat_pending_action_has_accepted_tool_permission_proposal(state, action).await? {
+    let Some(accepted_scope) =
+        main_chat_pending_action_accepted_tool_permission_scope(state, action).await?
+    else {
         return Ok(false);
-    }
+    };
 
     let plan = build_main_chat_react_action_plan(&session.chat_session_id, &session.user_goal)?;
     if plan.queue_action_type != action.action.action_type {
@@ -189,6 +191,9 @@ async fn main_chat_pending_action_permission_ready_for_resume(
         let registry = state.mcp_registry.lock().await;
         let resolution = resolve_main_chat_mcp_read_target(&registry, &plan);
         if resolution.blocker_reason.is_some() {
+            return Ok(false);
+        }
+        if !accepted_scope.matches_current_resolution(&plan, &resolution) {
             return Ok(false);
         }
         let Some(manifest) = registry.list_manifests().into_iter().find(|manifest| {
@@ -221,30 +226,118 @@ async fn main_chat_pending_action_permission_ready_for_resume(
     Ok(decision.allowed && decision.policy_id.is_some())
 }
 
-async fn main_chat_pending_action_has_accepted_tool_permission_proposal(
+struct AcceptedToolPermissionScope {
+    blocked_action_scope_present: bool,
+    action_type: Option<String>,
+    requested_target: Option<String>,
+    resolved_target: Option<String>,
+    input_hash: Option<String>,
+    input_length_bytes: Option<u64>,
+}
+
+impl AcceptedToolPermissionScope {
+    fn from_proposal(proposal: &openlife_core::agent::AgentProposal) -> Self {
+        let Some(blocked_action) = proposal
+            .after
+            .get("blocked_action")
+            .or_else(|| proposal.after.get("blockedAction"))
+        else {
+            return Self {
+                blocked_action_scope_present: false,
+                action_type: None,
+                requested_target: None,
+                resolved_target: None,
+                input_hash: None,
+                input_length_bytes: None,
+            };
+        };
+
+        Self {
+            blocked_action_scope_present: true,
+            action_type: blocked_action
+                .get("action_type")
+                .or_else(|| blocked_action.get("actionType"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            requested_target: blocked_action
+                .get("target")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            resolved_target: blocked_action
+                .get("resolved_target")
+                .or_else(|| blocked_action.get("resolvedTarget"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            input_hash: blocked_action
+                .get("input_hash")
+                .or_else(|| blocked_action.get("inputHash"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            input_length_bytes: blocked_action
+                .get("input_length_bytes")
+                .or_else(|| blocked_action.get("inputLengthBytes"))
+                .and_then(serde_json::Value::as_u64),
+        }
+    }
+
+    fn matches_current_resolution(
+        &self,
+        plan: &crate::main_chat_react_tool_selection::MainChatReactActionPlan,
+        resolution: &crate::main_chat_react_tool_selection::MainChatMcpReadResolution,
+    ) -> bool {
+        if !self.blocked_action_scope_present {
+            return true;
+        }
+        let (
+            Some(action_type),
+            Some(requested_target),
+            Some(resolved_target),
+            Some(input_hash),
+            Some(input_length_bytes),
+        ) = (
+            self.action_type.as_deref(),
+            self.requested_target.as_deref(),
+            self.resolved_target.as_deref(),
+            self.input_hash.as_deref(),
+            self.input_length_bytes,
+        )
+        else {
+            return false;
+        };
+        let (current_length_bytes, current_input_hash) =
+            openlife_core::agent::react_beta::metadata_safe_value_digest(&resolution.arguments);
+        action_type == plan.queue_action_type
+            && requested_target == plan.target
+            && resolved_target == resolution.target
+            && input_hash == current_input_hash
+            && input_length_bytes == current_length_bytes as u64
+    }
+}
+
+async fn main_chat_pending_action_accepted_tool_permission_scope(
     state: &Arc<AppState>,
     action: &openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
-) -> Result<bool, String> {
+) -> Result<Option<AcceptedToolPermissionScope>, String> {
     let proposal_ids = main_chat_action_proposal_ids(action);
     if proposal_ids.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     let Some(ref proposal_store_arc) = state.proposal_store else {
-        return Ok(false);
+        return Ok(None);
     };
     let proposal_store = proposal_store_arc.lock().await;
     for proposal_id in proposal_ids {
         let proposal = proposal_store
             .get_proposal(&proposal_id)
             .map_err(|err| format!("load ToolPermission proposal for resume failed: {err}"))?;
-        if proposal.is_some_and(|proposal| {
+        if let Some(proposal) = proposal.filter(|proposal| {
             proposal.proposal_type == openlife_core::agent::ProposalType::ToolPermission
                 && proposal.status == openlife_core::agent::ProposalStatus::Accepted
         }) {
-            return Ok(true);
+            return Ok(Some(AcceptedToolPermissionScope::from_proposal(&proposal)));
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 fn main_chat_action_proposal_ids(
