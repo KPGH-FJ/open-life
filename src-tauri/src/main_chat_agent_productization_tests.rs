@@ -247,6 +247,71 @@ fn main_chat_product_maturity_v2_memory_lifecycle_eval_covers_mr_matrix() {
 }
 
 #[tokio::test]
+async fn main_chat_product_maturity_v2_task_continuity_eval_covers_lt2_matrix() {
+    let report =
+        crate::main_chat_task_continuity_eval::run_main_chat_agent_product_maturity_v2_task_continuity_gate()
+            .await;
+
+    assert_eq!(report.scenario_count, 8);
+    assert_eq!(report.default_gate_scenario_count, 8);
+    assert_eq!(report.passed_scenario_count, 8, "{:?}", report.proofs);
+    assert_eq!(report.expected_blocker_count, 3);
+    assert!(report.ready, "{:?}", report.blockers);
+    for id in [
+        "LT2-01", "LT2-02", "LT2-03", "LT2-04", "LT2-05", "LT2-06", "LT2-07", "LT2-08",
+    ] {
+        assert!(
+            report.proofs.iter().any(|proof| proof.scenario_id == id),
+            "missing {id}"
+        );
+    }
+    let stale = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "LT2-06")
+        .expect("LT2-06 stale proof");
+    assert!(
+        stale.diagnostics.contains(&"stale_context".to_string()),
+        "LT2-06 must prove stale context diagnostic: {:?}",
+        stale
+    );
+    assert!(
+        stale
+            .negative_assertions
+            .contains(&"no_automatic_replay".to_string()),
+        "LT2-06 must prove stale tasks are not automatically replayed: {:?}",
+        stale
+    );
+    let changed_target = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "LT2-04")
+        .expect("LT2-04 changed-target proof");
+    assert!(
+        changed_target
+            .diagnostics
+            .contains(&"permission_scope_mismatch".to_string()),
+        "LT2-04 must prove exact permission scope mismatch: {:?}",
+        changed_target
+    );
+    let reopened = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "LT2-08")
+        .expect("LT2-08 reopen proof");
+    assert!(
+        reopened
+            .runtime_evidence
+            .contains(&"fresh_app_state_instance".to_string())
+            && reopened
+                .runtime_evidence
+                .contains(&"persisted_task_detail".to_string()),
+        "LT2-08 must prove task detail loads from a fresh app/state instance: {:?}",
+        reopened
+    );
+}
+
+#[tokio::test]
 async fn run_main_chat_agent_productization_v1_gate_command_returns_auditable_read_only_report() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let app = tauri::test::mock_builder()

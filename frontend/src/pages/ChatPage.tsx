@@ -60,6 +60,9 @@ import {
   resumeMainChatAgentTask,
   cancelMainChatAgentTask,
   retryMainChatAgentAction,
+  listMainChatAgentTasks,
+  getMainChatAgentTaskDetail,
+  refreshMainChatAgentTaskContext,
   rollbackMemoryAsset,
   listMainChatAgentEvents,
   getMainChatAgentStateSnapshot,
@@ -82,6 +85,8 @@ import type {
   MainChatAgentIngressDecision,
   MainChatExecutionTranscriptEntry,
   MainChatAgentTaskState,
+  MainChatTaskSummary,
+  MainChatTaskDetail,
   MainChatAgentStateSnapshot,
   MainChatAgentDurableEvent,
 } from "../tauri";
@@ -406,6 +411,37 @@ function mainChatActionStatusClass(status: string): string {
   }
 }
 
+function mainChatTaskStatusClass(status: string, staleState?: string): string {
+  if (staleState === "stale") return "border-amber-200 bg-amber-50 text-amber-900";
+  switch (status) {
+    case "completed":
+      return "border-emerald-200 bg-emerald-50 text-emerald-800";
+    case "blocked":
+    case "waiting_permission":
+      return "border-amber-200 bg-amber-50 text-amber-900";
+    case "failed":
+    case "cancelled":
+      return "border-rose-200 bg-rose-50 text-rose-800";
+    case "running":
+      return "border-blue-200 bg-blue-50 text-blue-800";
+    default:
+      return "border-stone-200 bg-white text-stone-700";
+  }
+}
+
+function formatContinuityControl(control: string): string {
+  switch (control) {
+    case "refresh_context":
+      return "refresh context";
+    case "open_trace":
+      return "open trace";
+    case "review_permission":
+      return "review permission";
+    default:
+      return control.replace(/_/g, " ");
+  }
+}
+
 const PLANNING_STAGE_PATTERN =
   /(规划|计划|安排|今日|今天|目标|日程|下一步|拆解|里程碑|weekly|plan|goal|schedule)/i;
 const MEMORY_STAGE_PATTERN = /(记忆|人生模型|life\s*model|lifemodel|加入记忆|依据|回忆|memory)/i;
@@ -533,6 +569,14 @@ export default function ChatPage({
   const [currentAgentTaskState, setCurrentAgentTaskState] = useState<MainChatAgentTaskState | null>(
     null
   );
+  const [taskContinuitySummaries, setTaskContinuitySummaries] = useState<MainChatTaskSummary[]>(
+    []
+  );
+  const [taskContinuityDetail, setTaskContinuityDetail] = useState<MainChatTaskDetail | null>(
+    null
+  );
+  const [taskContinuityBusy, setTaskContinuityBusy] = useState(false);
+  const [taskContinuityError, setTaskContinuityError] = useState<string | null>(null);
   const [currentAgentState, setCurrentAgentState] = useState<MainChatAgentStateSnapshot | null>(
     null
   );
@@ -813,6 +857,37 @@ export default function ChatPage({
     }
   };
 
+  const loadTaskContinuityList = useCallback(async () => {
+    try {
+      const summaries = await listMainChatAgentTasks(
+        {
+          includeTerminal: true,
+          includeStale: true,
+        },
+        50,
+        0
+      );
+      setTaskContinuitySummaries(summaries);
+      setTaskContinuityError(null);
+    } catch (e) {
+      setTaskContinuitySummaries([]);
+      setTaskContinuityError(`Task continuity failed: ${readablePreviewError(e)}`);
+    }
+  }, []);
+
+  const loadTaskContinuityDetail = useCallback(async (taskSessionId: string) => {
+    setTaskContinuityBusy(true);
+    setTaskContinuityError(null);
+    try {
+      const detail = await getMainChatAgentTaskDetail(taskSessionId);
+      setTaskContinuityDetail(detail);
+    } catch (e) {
+      setTaskContinuityError(`Task detail failed: ${readablePreviewError(e)}`);
+    } finally {
+      setTaskContinuityBusy(false);
+    }
+  }, []);
+
   const refreshPendingProposals = async () => {
     try {
       const proposals = await getPendingProposals(10);
@@ -902,7 +977,8 @@ export default function ChatPage({
       .then(setModel)
       .catch(() => {});
     refreshPendingProposals();
-  }, []);
+    loadTaskContinuityList();
+  }, [loadTaskContinuityList]);
 
   useEffect(() => {
     const refreshChatContext = () => {
@@ -914,6 +990,7 @@ export default function ChatPage({
         .catch(() => {});
       loadSessions(currentSessionIdRef.current);
       refreshPendingProposals();
+      loadTaskContinuityList();
     };
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
@@ -926,7 +1003,7 @@ export default function ChatPage({
       window.removeEventListener("focus", refreshChatContext);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, []);
+  }, [loadTaskContinuityList]);
 
   useEffect(() => {
     if (!(location.state as { refreshFromBuilder?: boolean } | null)?.refreshFromBuilder) return;
@@ -957,8 +1034,10 @@ export default function ChatPage({
 
   useEffect(() => {
     applyMainChatAgentStateSnapshot(null);
+    setTaskContinuityDetail(null);
     setLoadingHistory(true);
     refreshAgentRuns(currentSessionId);
+    loadTaskContinuityList();
     getChatHistory(currentSessionId)
       .then(history => {
         if (history.length === 0) {
@@ -984,7 +1063,7 @@ export default function ChatPage({
         ]);
       })
       .finally(() => setLoadingHistory(false));
-  }, [currentSessionId]);
+  }, [currentSessionId, applyMainChatAgentStateSnapshot, loadTaskContinuityList]);
 
   // Scroll on significant changes only; avoid smooth scroll during streaming
   useEffect(() => {
@@ -1492,7 +1571,8 @@ export default function ChatPage({
     if (taskSessionId) {
       await loadMainChatTaskState(taskSessionId, currentSessionIdRef.current);
     }
-  }, []);
+    await loadTaskContinuityList();
+  }, [loadTaskContinuityList]);
 
   const handleResumeMainChatTask = useCallback(async () => {
     const taskSessionId = currentMainChatTaskSessionId();
@@ -1554,6 +1634,96 @@ export default function ChatPage({
       currentAgentTaskState?.actions,
     ]
   );
+
+  const handleRefreshTaskContinuityContext = useCallback(async () => {
+    const taskSessionId = taskContinuityDetail?.taskSession.id;
+    if (!taskSessionId || taskContinuityBusy) return;
+    setTaskContinuityBusy(true);
+    setTaskContinuityError(null);
+    try {
+      const detail = await refreshMainChatAgentTaskContext(taskSessionId);
+      setTaskContinuityDetail(detail);
+      await loadTaskContinuityList();
+    } catch (e) {
+      setTaskContinuityError(`Refresh context failed: ${readablePreviewError(e)}`);
+    } finally {
+      setTaskContinuityBusy(false);
+    }
+  }, [loadTaskContinuityList, taskContinuityBusy, taskContinuityDetail?.taskSession.id]);
+
+  const handleResumeTaskContinuityDetail = useCallback(async () => {
+    const taskSessionId = taskContinuityDetail?.taskSession.id;
+    if (!taskSessionId || taskContinuityBusy) return;
+    setTaskContinuityBusy(true);
+    setTaskContinuityError(null);
+    try {
+      const state = await resumeMainChatAgentTask(taskSessionId);
+      setCurrentAgentTaskState(state);
+      setCurrentExecutionTranscript(state.transcript ?? []);
+      await loadTaskContinuityDetail(taskSessionId);
+      await loadTaskContinuityList();
+    } catch (e) {
+      setTaskContinuityError(`Resume failed: ${readablePreviewError(e)}`);
+    } finally {
+      setTaskContinuityBusy(false);
+    }
+  }, [
+    loadTaskContinuityDetail,
+    loadTaskContinuityList,
+    taskContinuityBusy,
+    taskContinuityDetail?.taskSession.id,
+  ]);
+
+  const handleRetryTaskContinuityDetail = useCallback(async () => {
+    const taskSessionId = taskContinuityDetail?.taskSession.id;
+    const actionId =
+      taskContinuityDetail?.lastSafeResumePoint ??
+      taskContinuityDetail?.actions.find(action => action.status === "failed")?.id;
+    if (!taskSessionId || !actionId || taskContinuityBusy) return;
+    setTaskContinuityBusy(true);
+    setTaskContinuityError(null);
+    try {
+      const state = await retryMainChatAgentAction(taskSessionId, actionId);
+      setCurrentAgentTaskState(state);
+      setCurrentExecutionTranscript(state.transcript ?? []);
+      await loadTaskContinuityDetail(taskSessionId);
+      await loadTaskContinuityList();
+    } catch (e) {
+      setTaskContinuityError(`Retry failed: ${readablePreviewError(e)}`);
+    } finally {
+      setTaskContinuityBusy(false);
+    }
+  }, [
+    loadTaskContinuityDetail,
+    loadTaskContinuityList,
+    taskContinuityBusy,
+    taskContinuityDetail?.actions,
+    taskContinuityDetail?.lastSafeResumePoint,
+    taskContinuityDetail?.taskSession.id,
+  ]);
+
+  const handleCancelTaskContinuityDetail = useCallback(async () => {
+    const taskSessionId = taskContinuityDetail?.taskSession.id;
+    if (!taskSessionId || taskContinuityBusy) return;
+    setTaskContinuityBusy(true);
+    setTaskContinuityError(null);
+    try {
+      const state = await cancelMainChatAgentTask(taskSessionId);
+      setCurrentAgentTaskState(state);
+      setCurrentExecutionTranscript(state.transcript ?? []);
+      await loadTaskContinuityDetail(taskSessionId);
+      await loadTaskContinuityList();
+    } catch (e) {
+      setTaskContinuityError(`Cancel failed: ${readablePreviewError(e)}`);
+    } finally {
+      setTaskContinuityBusy(false);
+    }
+  }, [
+    loadTaskContinuityDetail,
+    loadTaskContinuityList,
+    taskContinuityBusy,
+    taskContinuityDetail?.taskSession.id,
+  ]);
 
   const handleApproveOnceMainChatPermission = useCallback(
     async (target: { proposalId: string; actionId: string; blockerId: string }) => {
@@ -3577,6 +3747,224 @@ export default function ChatPage({
                     </div>
                   </div>
                 )}
+              </div>
+            </div>
+          )}
+          {!companionMode && (taskContinuitySummaries.length > 0 || taskContinuityError) && (
+            <div className="px-4 py-2">
+              <div className="border-y border-stone-200 bg-white px-3 py-3 text-xs text-stone-700">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="inline-flex h-6 items-center rounded-md bg-stone-900 px-2 font-semibold text-white">
+                    Task continuity
+                  </span>
+                  <span className="text-stone-500">
+                    {taskContinuitySummaries.length} tracked
+                  </span>
+                  {taskContinuityBusy && (
+                    <span className="inline-flex items-center gap-1 text-stone-500">
+                      <Loader2 size={12} className="animate-spin" />
+                      Loading
+                    </span>
+                  )}
+                </div>
+                {taskContinuityError && (
+                  <div className="mt-2 border-l-2 border-rose-400 bg-rose-50 px-2 py-1 text-rose-900">
+                    {taskContinuityError}
+                  </div>
+                )}
+                <div className="mt-3 grid gap-3 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]">
+                  <div className="min-w-0 divide-y divide-stone-200 border-y border-stone-200">
+                    {taskContinuitySummaries.map(summary => (
+                      <button
+                        key={summary.taskSessionId}
+                        type="button"
+                        aria-label={`Open task ${summary.title}`}
+                        onClick={() => loadTaskContinuityDetail(summary.taskSessionId)}
+                        className={classNames(
+                          "grid w-full min-w-0 gap-2 px-2 py-2 text-left hover:bg-stone-50",
+                          taskContinuityDetail?.taskSession.id === summary.taskSessionId &&
+                            "bg-stone-50"
+                        )}
+                      >
+                        <div className="flex min-w-0 flex-wrap items-center gap-2">
+                          <span className="truncate font-semibold text-stone-950">
+                            {summary.title}
+                          </span>
+                          <span
+                            className={classNames(
+                              "inline-flex h-5 items-center rounded-md border px-1.5 font-medium",
+                              mainChatTaskStatusClass(summary.status, summary.staleState)
+                            )}
+                          >
+                            {summary.staleState === "stale"
+                              ? "stale"
+                              : summary.status.replace(/_/g, " ")}
+                          </span>
+                          <span className="text-stone-500">
+                            {formatMainChatStrategy(summary.strategy)}
+                          </span>
+                          <span className="text-stone-500">
+                            next {formatContinuityControl(summary.nextRecommendedControl)}
+                          </span>
+                        </div>
+                        <div className="min-w-0 truncate text-stone-600">
+                          {summary.lastObservationPreview}
+                        </div>
+                        <div className="flex min-w-0 flex-wrap gap-2 text-[11px] text-stone-500">
+                          <span>{summary.pendingBlockerCount} blockers</span>
+                          <span>{summary.pendingProposalCount} proposals</span>
+                          <span className="truncate">digest {summary.resumeSafetyDigest}</span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                  {taskContinuityDetail && (
+                    <div className="min-w-0 border-y border-stone-200 bg-stone-50/80 px-2 py-2">
+                      <div className="flex flex-wrap items-start gap-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate font-semibold text-stone-950">
+                            {taskContinuityDetail.taskSession.userGoal}
+                          </div>
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            <span
+                              className={classNames(
+                                "inline-flex h-5 items-center rounded-md border px-1.5 font-medium",
+                                mainChatTaskStatusClass(
+                                  taskContinuityDetail.taskSession.status,
+                                  taskContinuityDetail.continuityDiagnostics.staleContext
+                                    ? "stale"
+                                    : "fresh"
+                                )
+                              )}
+                            >
+                              {taskContinuityDetail.continuityDiagnostics.staleContext
+                                ? "stale"
+                                : taskContinuityDetail.taskSession.status.replace(/_/g, " ")}
+                            </span>
+                            <span className="inline-flex h-5 items-center rounded-md bg-white px-1.5 text-stone-600">
+                              next{" "}
+                              {formatContinuityControl(
+                                taskContinuityDetail.nextRecommendedControl
+                              )}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="flex shrink-0 flex-wrap gap-1">
+                          {taskContinuityDetail.allowedControls.includes("resume") && (
+                            <button
+                              type="button"
+                              aria-label="Resume task from continuity detail"
+                              disabled={taskContinuityBusy}
+                              onClick={handleResumeTaskContinuityDetail}
+                              className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              <Play size={14} />
+                            </button>
+                          )}
+                          {taskContinuityDetail.allowedControls.includes("retry") && (
+                            <button
+                              type="button"
+                              aria-label="Retry task action"
+                              disabled={taskContinuityBusy}
+                              onClick={handleRetryTaskContinuityDetail}
+                              className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              <RotateCw size={14} />
+                            </button>
+                          )}
+                          {taskContinuityDetail.allowedControls.includes("cancel") && (
+                            <button
+                              type="button"
+                              aria-label="Cancel task from continuity detail"
+                              disabled={taskContinuityBusy}
+                              onClick={handleCancelTaskContinuityDetail}
+                              className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              <Ban size={14} />
+                            </button>
+                          )}
+                          {taskContinuityDetail.allowedControls.includes("refresh_context") && (
+                            <button
+                              type="button"
+                              aria-label="Refresh task context"
+                              disabled={taskContinuityBusy}
+                              onClick={handleRefreshTaskContinuityContext}
+                              className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              <RotateCw size={14} />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      {taskContinuityDetail.blockers.length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-1">
+                          {taskContinuityDetail.blockers.map(blocker => (
+                            <span
+                              key={blocker}
+                              className="inline-flex h-6 items-center rounded-md border border-amber-200 bg-amber-50 px-2 font-medium text-amber-900"
+                            >
+                              {blocker}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      {taskContinuityDetail.continuityDiagnostics.reasonCodes.length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-1">
+                          {taskContinuityDetail.continuityDiagnostics.reasonCodes.map(code => (
+                            <span
+                              key={code}
+                              className="inline-flex h-5 items-center rounded-md bg-white px-1.5 text-stone-600"
+                            >
+                              {code}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                        <div className="min-w-0">
+                          <div className="text-[10px] font-semibold uppercase tracking-wide text-stone-500">
+                            Last safe point
+                          </div>
+                          <div className="truncate text-stone-800">
+                            {taskContinuityDetail.lastSafeResumePoint ?? "none"}
+                          </div>
+                        </div>
+                        <div className="min-w-0">
+                          <div className="text-[10px] font-semibold uppercase tracking-wide text-stone-500">
+                            Context digest
+                          </div>
+                          <div className="truncate text-stone-800">
+                            {taskContinuityDetail.contextDigest}
+                          </div>
+                        </div>
+                      </div>
+                      {taskContinuityDetail.actions.length > 0 && (
+                        <div className="mt-2 divide-y divide-stone-200 border-y border-stone-200 bg-white/70">
+                          {taskContinuityDetail.actions.map(action => (
+                            <div key={action.id} className="grid gap-1 px-2 py-1">
+                              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                                <span className="font-semibold text-stone-900">
+                                  {action.action.actionType}
+                                </span>
+                                <span
+                                  className={classNames(
+                                    "inline-flex h-5 items-center rounded-md border px-1.5 font-medium",
+                                    mainChatActionStatusClass(action.status)
+                                  )}
+                                >
+                                  {action.status.replace(/_/g, " ")}
+                                </span>
+                              </div>
+                              <div className="truncate text-stone-600">
+                                {action.action.description}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           )}

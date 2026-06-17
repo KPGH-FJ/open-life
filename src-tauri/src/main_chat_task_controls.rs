@@ -10,7 +10,7 @@ use crate::main_chat_runtime_support::{
 };
 use crate::AppState;
 
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MainChatAgentTaskState {
     pub session: Option<openlife_core::agent::main_chat_agent_v1::AgentTaskSession>,
@@ -23,12 +23,856 @@ pub struct MainChatAgentTaskState {
     pub can_retry: bool,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MainChatAgentTaskFilter {
+    #[serde(default)]
+    pub statuses: Vec<openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus>,
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+    #[serde(default = "default_true")]
+    pub include_terminal: bool,
+    #[serde(default = "default_true")]
+    pub include_stale: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskSummary {
+    pub task_session_id: String,
+    pub conversation_id: String,
+    pub run_id: String,
+    pub title: String,
+    pub strategy: openlife_core::agent::main_chat_agent_v1::MainChatAgentStrategy,
+    pub status: openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus,
+    pub last_updated_at: chrono::DateTime<chrono::Utc>,
+    pub last_observation_preview: String,
+    pub pending_blocker_count: usize,
+    pub pending_proposal_count: usize,
+    pub next_recommended_control: String,
+    pub stale_state: String,
+    pub resume_safety_digest: String,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContinuityDiagnostics {
+    pub stale_context: bool,
+    pub missing_action_evidence: bool,
+    pub permission_scope_mismatch: bool,
+    pub terminal_no_resume: bool,
+    pub provider_unavailable: bool,
+    pub tool_unavailable: bool,
+    pub requires_user_decision: bool,
+    #[serde(default)]
+    pub selected_skill_context_digest_mismatch: bool,
+    #[serde(default)]
+    pub plan_revision_mismatch: bool,
+    #[serde(default)]
+    pub reason_codes: Vec<String>,
+    #[serde(default)]
+    pub automatic_replay_allowed: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskDetail {
+    pub task_session: openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    pub actions: Vec<openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction>,
+    pub transcript: Vec<openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry>,
+    pub proposals: Vec<openlife_core::agent::AgentProposal>,
+    pub blockers: Vec<String>,
+    #[serde(default)]
+    pub final_delivery: Option<serde_json::Value>,
+    pub continuity_diagnostics: ContinuityDiagnostics,
+    pub allowed_controls: Vec<String>,
+    pub next_recommended_control: String,
+    #[serde(default)]
+    pub last_safe_resume_point: Option<String>,
+    pub context_digest: String,
+    #[serde(default)]
+    pub selected_skill_digest: Option<String>,
+    pub tool_manifest_digest: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[tauri::command]
 pub(crate) async fn get_main_chat_agent_task_state(
     task_session_id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<MainChatAgentTaskState, String> {
     load_main_chat_agent_task_state(&task_session_id, &state).await
+}
+
+#[tauri::command]
+pub(crate) async fn list_main_chat_agent_tasks(
+    filter: Option<MainChatAgentTaskFilter>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<TaskSummary>, String> {
+    list_main_chat_agent_tasks_with_state(filter, limit, offset, &state).await
+}
+
+#[tauri::command]
+pub(crate) async fn get_main_chat_agent_task_detail(
+    task_session_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<TaskDetail, String> {
+    get_main_chat_agent_task_detail_with_state(&task_session_id, &state).await
+}
+
+#[tauri::command]
+pub(crate) async fn refresh_main_chat_agent_task_context(
+    task_session_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<TaskDetail, String> {
+    append_main_chat_agent_transcript(
+        &state,
+        Some(&task_session_id),
+        openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Observation,
+        "Task continuity context refresh recomputed resume diagnostics without replaying actions.",
+        serde_json::json!({
+            "taskContinuityRefresh": true,
+            "automaticReplayStarted": false,
+            "directWritesExecuted": false,
+        }),
+    )
+    .await;
+    get_main_chat_agent_task_detail_with_state(&task_session_id, &state).await
+}
+
+pub(crate) async fn list_main_chat_agent_tasks_with_state(
+    filter: Option<MainChatAgentTaskFilter>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    state: &Arc<AppState>,
+) -> Result<Vec<TaskSummary>, String> {
+    let filter = filter.unwrap_or(MainChatAgentTaskFilter {
+        statuses: Vec::new(),
+        conversation_id: None,
+        include_terminal: true,
+        include_stale: true,
+    });
+    let limit = limit.unwrap_or(50).clamp(1, 100);
+    let offset = offset.unwrap_or(0);
+    let sessions = {
+        let store_arc = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .ok_or_else(|| "Main Chat task session store not available".to_string())?;
+        let store = store_arc.lock().await;
+        store
+            .list_sessions(None, 200, 0)
+            .map_err(|err| format!("list Main Chat tasks failed: {err}"))?
+    };
+
+    let mut summaries = Vec::new();
+    for session in sessions {
+        if !filter.statuses.is_empty() && !filter.statuses.contains(&session.status) {
+            continue;
+        }
+        if let Some(conversation_id) = filter.conversation_id.as_deref() {
+            if session.chat_session_id != conversation_id {
+                continue;
+            }
+        }
+        if !filter.include_terminal && main_chat_task_status_is_terminal(session.status) {
+            continue;
+        }
+        let detail = build_main_chat_agent_task_detail(state, session).await?;
+        if !filter.include_stale && detail.continuity_diagnostics.stale_context {
+            continue;
+        }
+        summaries.push(task_summary_from_detail(&detail));
+    }
+
+    Ok(summaries.into_iter().skip(offset).take(limit).collect())
+}
+
+pub(crate) async fn get_main_chat_agent_task_detail_with_state(
+    task_session_id: &str,
+    state: &Arc<AppState>,
+) -> Result<TaskDetail, String> {
+    let session = {
+        let store_arc = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .ok_or_else(|| "Main Chat task session store not available".to_string())?;
+        let store = store_arc.lock().await;
+        store
+            .load_session(task_session_id)
+            .map_err(|err| format!("load Main Chat task failed: {err}"))?
+            .ok_or_else(|| format!("Main Chat task session not found: {task_session_id}"))?
+    };
+    build_main_chat_agent_task_detail(state, session).await
+}
+
+async fn build_main_chat_agent_task_detail(
+    state: &Arc<AppState>,
+    session: openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+) -> Result<TaskDetail, String> {
+    let transcript = {
+        let store_arc = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .ok_or_else(|| "Main Chat task session store not available".to_string())?;
+        let store = store_arc.lock().await;
+        store
+            .list_transcript_entries(&session.id)
+            .map_err(|err| format!("load Main Chat transcript failed: {err}"))?
+    };
+    let actions = if let Some(ref queue_arc) = state.main_chat_action_queue_store {
+        let queue = queue_arc.lock().await;
+        queue
+            .list_for_session(&session.id)
+            .map_err(|err| format!("load Main Chat actions failed: {err}"))?
+    } else {
+        Vec::new()
+    };
+    let proposals = load_main_chat_task_linked_proposals(state, &actions, &transcript).await?;
+    let blockers = task_blockers_from_evidence(&session, &actions);
+    let context_digest = main_chat_context_digest(&session, &transcript);
+    let tool_manifest_digest = main_chat_tool_manifest_digest(state).await;
+    let selected_skill_digest = main_chat_selected_skill_digest(state, &transcript).await?;
+    let continuity_diagnostics = continuity_diagnostics_for_task(
+        state,
+        &session,
+        &actions,
+        &transcript,
+        &context_digest,
+        selected_skill_digest.as_deref(),
+    )
+    .await?;
+    let allowed_controls = allowed_controls_for_task(&session, &actions, &continuity_diagnostics);
+    let next_recommended_control =
+        next_recommended_control_for_task(&session, &actions, &continuity_diagnostics);
+    let last_safe_resume_point = last_safe_resume_point_for_task(&actions, &continuity_diagnostics);
+    let final_delivery = final_delivery_from_task(&session, &transcript);
+
+    Ok(TaskDetail {
+        task_session: session,
+        actions,
+        transcript,
+        proposals,
+        blockers,
+        final_delivery,
+        continuity_diagnostics,
+        allowed_controls,
+        next_recommended_control,
+        last_safe_resume_point,
+        context_digest,
+        selected_skill_digest,
+        tool_manifest_digest,
+    })
+}
+
+async fn load_main_chat_task_linked_proposals(
+    state: &Arc<AppState>,
+    actions: &[openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction],
+    transcript: &[openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry],
+) -> Result<Vec<openlife_core::agent::AgentProposal>, String> {
+    let mut proposal_ids = Vec::new();
+    for action in actions {
+        proposal_ids.extend(main_chat_action_proposal_ids(action));
+    }
+    for entry in transcript {
+        collect_main_chat_proposal_ids(&entry.metadata, &mut proposal_ids);
+    }
+    proposal_ids.sort();
+    proposal_ids.dedup();
+    let Some(ref proposal_store_arc) = state.proposal_store else {
+        return Ok(Vec::new());
+    };
+    let proposal_store = proposal_store_arc.lock().await;
+    let mut proposals = Vec::new();
+    for proposal_id in proposal_ids {
+        if let Some(proposal) = proposal_store
+            .get_proposal(&proposal_id)
+            .map_err(|err| format!("load linked proposal failed: {err}"))?
+        {
+            proposals.push(proposal);
+        }
+    }
+    Ok(proposals)
+}
+
+async fn continuity_diagnostics_for_task(
+    state: &Arc<AppState>,
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    actions: &[openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction],
+    transcript: &[openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry],
+    context_digest: &str,
+    selected_skill_digest: Option<&str>,
+) -> Result<ContinuityDiagnostics, String> {
+    let action_ids = actions
+        .iter()
+        .map(|action| action.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let missing_action_evidence = session
+        .action_queue_ids
+        .iter()
+        .any(|id| !action_ids.contains(id.as_str()));
+    let stale_context = stale_context_detected(session, transcript, context_digest);
+    let permission_scope_mismatch =
+        permission_scope_mismatch_detected(state, session, actions).await?;
+    let tool_unavailable = tool_unavailable_detected(state, actions).await?;
+    let provider_unavailable = provider_unavailable_detected(state).await;
+    let selected_skill_context_digest_mismatch =
+        selected_skill_context_digest_mismatch_detected(transcript, selected_skill_digest);
+    let plan_revision_mismatch = plan_revision_mismatch_detected(state, transcript).await?;
+    let terminal_no_resume = main_chat_task_status_is_terminal(session.status);
+    let requires_user_decision = matches!(
+        session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+            | openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
+    ) || !session.pending_blockers.is_empty()
+        || actions.iter().any(|action| {
+            action.status
+                == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::PendingPermission
+        });
+    let mut diagnostics = ContinuityDiagnostics {
+        stale_context,
+        missing_action_evidence,
+        permission_scope_mismatch,
+        terminal_no_resume,
+        provider_unavailable,
+        tool_unavailable,
+        requires_user_decision,
+        selected_skill_context_digest_mismatch,
+        plan_revision_mismatch,
+        reason_codes: Vec::new(),
+        automatic_replay_allowed: false,
+    };
+    for (enabled, code) in [
+        (diagnostics.stale_context, "stale_context"),
+        (
+            diagnostics.missing_action_evidence,
+            "missing_action_evidence",
+        ),
+        (
+            diagnostics.permission_scope_mismatch,
+            "permission_scope_mismatch",
+        ),
+        (diagnostics.terminal_no_resume, "terminal_no_resume"),
+        (diagnostics.provider_unavailable, "provider_unavailable"),
+        (diagnostics.tool_unavailable, "tool_unavailable"),
+        (
+            diagnostics.selected_skill_context_digest_mismatch,
+            "selected_skill_context_digest_mismatch",
+        ),
+        (diagnostics.plan_revision_mismatch, "plan_revision_mismatch"),
+        (diagnostics.requires_user_decision, "requires_user_decision"),
+    ] {
+        if enabled {
+            diagnostics.reason_codes.push(code.into());
+        }
+    }
+    diagnostics.automatic_replay_allowed =
+        continuity_hard_resume_blocker(&diagnostics).is_none()
+            && actions.iter().any(|action| {
+                matches!(
+                    action.status,
+                    openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed
+                        | openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::PendingPermission
+                ) && openlife_core::agent::main_chat_agent_v1::main_chat_action_type_supports_automatic_retry(
+                    &action.action.action_type,
+                )
+            });
+    Ok(diagnostics)
+}
+
+fn task_summary_from_detail(detail: &TaskDetail) -> TaskSummary {
+    let resume_safety_digest = digest_label(&serde_json::json!({
+        "taskSessionId": detail.task_session.id,
+        "status": detail.task_session.status,
+        "contextDigest": detail.context_digest,
+        "selectedSkillDigest": detail.selected_skill_digest,
+        "toolManifestDigest": detail.tool_manifest_digest,
+        "diagnostics": detail.continuity_diagnostics.reason_codes,
+        "allowedControls": detail.allowed_controls,
+    }));
+    TaskSummary {
+        task_session_id: detail.task_session.id.clone(),
+        conversation_id: detail.task_session.chat_session_id.clone(),
+        run_id: run_id_from_detail(detail).unwrap_or_else(|| "unknown".into()),
+        title: bounded_text(&detail.task_session.user_goal, 96),
+        strategy: detail.task_session.selected_strategy,
+        status: detail.task_session.status,
+        last_updated_at: detail.task_session.updated_at,
+        last_observation_preview: last_observation_preview(
+            &detail.transcript,
+            &detail.task_session,
+        ),
+        pending_blocker_count: detail.blockers.len(),
+        pending_proposal_count: detail
+            .proposals
+            .iter()
+            .filter(|proposal| proposal.status == openlife_core::agent::ProposalStatus::Pending)
+            .count(),
+        next_recommended_control: detail.next_recommended_control.clone(),
+        stale_state: stale_state_for_detail(detail),
+        resume_safety_digest,
+    }
+}
+
+fn run_id_from_detail(detail: &TaskDetail) -> Option<String> {
+    detail
+        .transcript
+        .iter()
+        .rev()
+        .find_map(|entry| string_from_metadata(&entry.metadata, &["runId", "run_id"]))
+}
+
+fn stale_state_for_detail(detail: &TaskDetail) -> String {
+    if detail.continuity_diagnostics.terminal_no_resume {
+        "terminal".into()
+    } else if detail.continuity_diagnostics.stale_context {
+        "stale".into()
+    } else {
+        "fresh".into()
+    }
+}
+
+fn allowed_controls_for_task(
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    actions: &[openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction],
+    diagnostics: &ContinuityDiagnostics,
+) -> Vec<String> {
+    let mut controls = vec!["open_trace".to_string(), "refresh_context".to_string()];
+    if diagnostics.terminal_no_resume {
+        return vec!["open_trace".into()];
+    }
+    controls.push("cancel".into());
+    if continuity_hard_resume_blocker(diagnostics).is_none() {
+        if actions.iter().any(|action| {
+            action.status
+                == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed
+                && openlife_core::agent::main_chat_agent_v1::main_chat_action_type_supports_automatic_retry(
+                    &action.action.action_type,
+                )
+        }) {
+            controls.push("retry".into());
+        }
+        if matches!(
+            session.status,
+            openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+                | openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
+                | openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Failed
+        ) && actions.iter().any(|action| {
+            action.status
+                == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::PendingPermission
+        }) {
+            controls.push("resume".into());
+        }
+    }
+    controls.sort();
+    controls.dedup();
+    controls
+}
+
+fn next_recommended_control_for_task(
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    actions: &[openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction],
+    diagnostics: &ContinuityDiagnostics,
+) -> String {
+    if diagnostics.terminal_no_resume {
+        return "open_trace".into();
+    }
+    if diagnostics.stale_context
+        || diagnostics.permission_scope_mismatch
+        || diagnostics.selected_skill_context_digest_mismatch
+        || diagnostics.plan_revision_mismatch
+    {
+        return "refresh_context".into();
+    }
+    if actions.iter().any(|action| {
+        action.status == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed
+            && openlife_core::agent::main_chat_agent_v1::main_chat_action_type_supports_automatic_retry(
+                &action.action.action_type,
+            )
+    }) {
+        return "retry".into();
+    }
+    if matches!(
+        session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+    ) {
+        return "review_permission".into();
+    }
+    if matches!(
+        session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
+            | openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Failed
+    ) {
+        return "resume".into();
+    }
+    "open_trace".into()
+}
+
+fn last_safe_resume_point_for_task(
+    actions: &[openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction],
+    diagnostics: &ContinuityDiagnostics,
+) -> Option<String> {
+    if continuity_hard_resume_blocker(diagnostics).is_some() {
+        return None;
+    }
+    actions
+        .iter()
+        .rev()
+        .find(|action| {
+            matches!(
+                action.status,
+                openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed
+                    | openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::PendingPermission
+                    | openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Planned
+            )
+        })
+        .map(|action| action.id.clone())
+}
+
+fn continuity_hard_resume_blocker(diagnostics: &ContinuityDiagnostics) -> Option<&'static str> {
+    if diagnostics.terminal_no_resume {
+        Some("terminal_no_resume")
+    } else if diagnostics.stale_context {
+        Some("stale_context")
+    } else if diagnostics.missing_action_evidence {
+        Some("missing_action_evidence")
+    } else if diagnostics.permission_scope_mismatch {
+        Some("permission_scope_mismatch")
+    } else if diagnostics.provider_unavailable {
+        Some("provider_unavailable")
+    } else if diagnostics.tool_unavailable {
+        Some("tool_unavailable")
+    } else if diagnostics.selected_skill_context_digest_mismatch {
+        Some("selected_skill_context_digest_mismatch")
+    } else if diagnostics.plan_revision_mismatch {
+        Some("plan_revision_mismatch")
+    } else {
+        None
+    }
+}
+
+fn main_chat_task_status_is_terminal(
+    status: openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus,
+) -> bool {
+    matches!(
+        status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
+            | openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Cancelled
+    )
+}
+
+fn task_blockers_from_evidence(
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    actions: &[openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction],
+) -> Vec<String> {
+    let mut blockers = session.pending_blockers.clone();
+    if matches!(
+        session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
+            | openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Failed
+    ) {
+        if let Some(summary) = session.final_summary.as_ref() {
+            blockers.push(summary.clone());
+        }
+    }
+    for action in actions {
+        match action.status {
+            openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::PendingPermission => {
+                blockers.push(format!("pending_permission:{}", action.id));
+            }
+            openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed => {
+                blockers.push(
+                    action
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| format!("action_failed:{}", action.id)),
+                );
+            }
+            _ => {}
+        }
+    }
+    blockers.sort();
+    blockers.dedup();
+    blockers
+}
+
+fn final_delivery_from_task(
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    transcript: &[openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry],
+) -> Option<serde_json::Value> {
+    let final_entry = transcript.iter().rev().find(|entry| {
+        entry.kind
+            == openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::FinalResult
+    });
+    final_entry
+        .map(|entry| {
+            serde_json::json!({
+                "transcriptEntryId": entry.id,
+                "summary": entry.summary,
+                "metadata": entry.metadata,
+            })
+        })
+        .or_else(|| {
+            session.final_summary.as_ref().map(|summary| {
+                serde_json::json!({
+                    "summary": summary,
+                    "source": "task_session_final_summary",
+                })
+            })
+        })
+}
+
+fn last_observation_preview(
+    transcript: &[openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry],
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+) -> String {
+    transcript
+        .iter()
+        .rev()
+        .find(|entry| {
+            matches!(
+                entry.kind,
+                openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Observation
+                    | openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Error
+                    | openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::FinalResult
+                    | openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::PermissionRequest
+            )
+        })
+        .map(|entry| bounded_text(&entry.summary, 180))
+        .or_else(|| session.final_summary.as_ref().map(|summary| bounded_text(summary, 180)))
+        .unwrap_or_else(|| "No observation recorded yet.".into())
+}
+
+fn stale_context_detected(
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    transcript: &[openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry],
+    context_digest: &str,
+) -> bool {
+    for entry in transcript {
+        if let Some(stored) = string_from_metadata(
+            &entry.metadata,
+            &["continuityContextDigest", "contextDigest"],
+        ) {
+            if stored != context_digest {
+                return true;
+            }
+        }
+        if let Some(context_ref) = string_from_metadata(&entry.metadata, &["contextSnapshotRef"]) {
+            if !session.context_snapshot_refs.is_empty()
+                && !session
+                    .context_snapshot_refs
+                    .iter()
+                    .any(|current| current == &context_ref)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+async fn permission_scope_mismatch_detected(
+    state: &Arc<AppState>,
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    actions: &[openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction],
+) -> Result<bool, String> {
+    use openlife_core::agent::main_chat_agent_v1::{ExecutionQueueStatus, MainChatAgentStrategy};
+    if session.selected_strategy != MainChatAgentStrategy::ReActToolExecution {
+        return Ok(false);
+    }
+    for action in actions.iter().filter(|action| {
+        action.status == ExecutionQueueStatus::PendingPermission
+            && openlife_core::agent::main_chat_agent_v1::main_chat_action_type_supports_automatic_retry(
+                &action.action.action_type,
+            )
+    }) {
+        let Some(scope) = main_chat_pending_action_accepted_tool_permission_scope(state, action).await?
+        else {
+            continue;
+        };
+        if !scope.blocked_action_scope_present {
+            continue;
+        }
+        let plan = build_main_chat_react_action_plan(&session.chat_session_id, &session.user_goal)?;
+        let registry = state.mcp_registry.lock().await;
+        let resolution = resolve_main_chat_mcp_read_target(&registry, &plan);
+        if resolution.blocker_reason.is_some() {
+            return Ok(true);
+        }
+        if !scope.matches_current_resolution(&plan, &resolution) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+async fn tool_unavailable_detected(
+    state: &Arc<AppState>,
+    actions: &[openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction],
+) -> Result<bool, String> {
+    let registry = state.mcp_registry.lock().await;
+    let manifests = registry.list_manifests();
+    for action in actions
+        .iter()
+        .filter(|action| action.action.action_type.contains("mcp"))
+    {
+        let target = action.observation_metadata.as_ref().and_then(|metadata| {
+            string_from_metadata(
+                metadata,
+                &["toolName", "tool_name", "target", "resolvedTarget"],
+            )
+        });
+        if let Some(target) = target {
+            let available = manifests
+                .iter()
+                .any(|manifest| manifest.name == target || manifest.id == target);
+            if !available {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+async fn provider_unavailable_detected(state: &Arc<AppState>) -> bool {
+    let scheduler = state.scheduler.lock().await;
+    let no_remote = scheduler.effective_api_key().trim().is_empty()
+        || scheduler.provider.trim().eq_ignore_ascii_case("none");
+    let no_local = scheduler.local_model.trim().is_empty();
+    no_remote && no_local
+}
+
+async fn main_chat_selected_skill_digest(
+    state: &Arc<AppState>,
+    transcript: &[openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry],
+) -> Result<Option<String>, String> {
+    let Some(skill_id) = transcript.iter().rev().find_map(|entry| {
+        string_from_metadata(&entry.metadata, &["selectedSkillId", "selected_skill_id"])
+    }) else {
+        return Ok(None);
+    };
+    let registry = state.skill_registry.lock().await;
+    let Some(manifest) = registry.get(&skill_id) else {
+        return Ok(Some("missing".into()));
+    };
+    Ok(Some(digest_label(
+        &serde_json::to_value(manifest)
+            .map_err(|err| format!("serialize skill manifest for digest failed: {err}"))?,
+    )))
+}
+
+fn selected_skill_context_digest_mismatch_detected(
+    transcript: &[openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry],
+    current_digest: Option<&str>,
+) -> bool {
+    let stored = transcript.iter().rev().find_map(|entry| {
+        string_from_metadata(
+            &entry.metadata,
+            &[
+                "selectedSkillDigest",
+                "selected_skill_digest",
+                "selectedSkillInstructionDigest",
+            ],
+        )
+    });
+    match (stored, current_digest) {
+        (Some(stored), Some(current)) => stored != current,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
+async fn plan_revision_mismatch_detected(
+    state: &Arc<AppState>,
+    transcript: &[openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry],
+) -> Result<bool, String> {
+    let Some((plan_session_id, revision)) = transcript.iter().rev().find_map(|entry| {
+        let plan_session_id = string_from_metadata(&entry.metadata, &["planExecuteSessionId"])?;
+        let revision = entry
+            .metadata
+            .get("revision")
+            .and_then(serde_json::Value::as_u64)?;
+        Some((plan_session_id, revision))
+    }) else {
+        return Ok(false);
+    };
+    let Some(ref plan_store_arc) = state.plan_execute_session_store else {
+        return Ok(true);
+    };
+    let plan_store = plan_store_arc.lock().await;
+    let Some(plan_session) = plan_store
+        .get_session(&plan_session_id)
+        .map_err(|err| format!("load Plan-Execute session for continuity failed: {err}"))?
+    else {
+        return Ok(true);
+    };
+    Ok(plan_session.revision != revision)
+}
+
+fn main_chat_context_digest(
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    transcript: &[openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry],
+) -> String {
+    let transcript_context_refs = transcript
+        .iter()
+        .filter_map(|entry| string_from_metadata(&entry.metadata, &["contextSnapshotRef"]))
+        .collect::<Vec<_>>();
+    digest_label(&serde_json::json!({
+        "contextSnapshotRefs": session.context_snapshot_refs,
+        "transcriptContextRefs": transcript_context_refs,
+    }))
+}
+
+async fn main_chat_tool_manifest_digest(state: &Arc<AppState>) -> String {
+    let registry = state.mcp_registry.lock().await;
+    let mut manifests = registry
+        .list_manifests()
+        .into_iter()
+        .map(|manifest| {
+            serde_json::json!({
+                "id": manifest.id,
+                "name": manifest.name,
+                "source": manifest.source,
+                "riskLevel": manifest.risk_level,
+                "actionType": manifest.action_type,
+                "capabilities": manifest.capabilities,
+            })
+        })
+        .collect::<Vec<_>>();
+    manifests.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+    digest_label(&serde_json::Value::Array(manifests))
+}
+
+fn string_from_metadata(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    let object = value.as_object()?;
+    for key in keys {
+        if let Some(value) = object.get(*key).and_then(serde_json::Value::as_str) {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn digest_label(value: &serde_json::Value) -> String {
+    let (bytes, hash) = openlife_core::agent::react_beta::metadata_safe_value_digest(value);
+    format!("bytes:{bytes} hash:{hash}")
+}
+
+fn bounded_text(value: &str, limit: usize) -> String {
+    if value.chars().count() <= limit {
+        return value.to_string();
+    }
+    let mut output = value
+        .chars()
+        .take(limit.saturating_sub(1))
+        .collect::<String>();
+    output.push_str("...");
+    output
 }
 
 #[tauri::command]
@@ -54,6 +898,46 @@ pub(crate) async fn resume_main_chat_agent_task(
     } else {
         Vec::new()
     };
+    if session.is_some() {
+        let detail = get_main_chat_agent_task_detail_with_state(&task_session_id, &state).await?;
+        if let Some(reason_code) = continuity_hard_resume_blocker(&detail.continuity_diagnostics) {
+            append_main_chat_agent_transcript(
+                &state,
+                Some(&task_session_id),
+                openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Error,
+                "Task resume was blocked by continuity diagnostics before any replay.",
+                serde_json::json!({
+                    "resumeRequested": true,
+                    "resumeBlockedByContinuityDiagnostics": true,
+                    "resumeReasonCode": reason_code,
+                    "continuityDiagnostics": detail.continuity_diagnostics.reason_codes,
+                    "automaticReplayStarted": false,
+                    "directWritesExecuted": false,
+                }),
+            )
+            .await;
+            if reason_code == "permission_scope_mismatch" {
+                append_main_chat_agent_transcript(
+                    &state,
+                    Some(&task_session_id),
+                    openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::PermissionRequest,
+                    "Task resume was requested but pending permission blockers remain.",
+                    serde_json::json!({
+                        "resumeRequested": true,
+                        "resumeBlockedByPendingPermission": true,
+                        "resumeBlockedByContinuityDiagnostics": true,
+                        "resumeReasonCode": reason_code,
+                        "continuityDiagnostics": detail.continuity_diagnostics.reason_codes,
+                        "automaticReplayStarted": false,
+                        "directWritesExecuted": false,
+                    }),
+                )
+                .await;
+                return load_main_chat_agent_task_state(&task_session_id, &state).await;
+            }
+            return Err(format!("resume Main Chat task rejected: {reason_code}"));
+        }
+    }
     let resume_decision = openlife_core::agent::main_chat_agent_v1::evaluate_main_chat_task_resume(
         session.as_ref(),
         &actions,
@@ -914,27 +1798,23 @@ async fn load_main_chat_agent_task_state(
             )
         })
         .count();
-    let can_resume = session.as_ref().is_some_and(|session| {
-        matches!(
-            session.status,
-            openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
-                | openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
-                | openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Failed
-        )
-    });
-    let can_cancel = session.as_ref().is_some_and(|session| {
-        !matches!(
-            session.status,
-            openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Cancelled
-                | openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
-        )
-    });
-    let can_retry = actions.iter().any(|action| {
-        matches!(
-            action.status,
-            openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed
-        )
-    });
+    let diagnostic_allowed_controls = if let Some(session_ref) = session.as_ref() {
+        build_main_chat_agent_task_detail(state, session_ref.clone())
+            .await
+            .map(|detail| detail.allowed_controls)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let can_resume = diagnostic_allowed_controls
+        .iter()
+        .any(|control| control == "resume");
+    let can_cancel = diagnostic_allowed_controls
+        .iter()
+        .any(|control| control == "cancel");
+    let can_retry = diagnostic_allowed_controls
+        .iter()
+        .any(|control| control == "retry");
 
     Ok(MainChatAgentTaskState {
         session,

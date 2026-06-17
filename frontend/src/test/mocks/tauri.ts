@@ -429,6 +429,50 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         canCancel: false,
         canRetry: false,
       } as T);
+    case "list_main_chat_agent_tasks":
+      return Promise.resolve([] as T);
+    case "get_main_chat_agent_task_detail":
+    case "refresh_main_chat_agent_task_context":
+      return Promise.resolve({
+        taskSession: {
+          id: _args?.taskSessionId ?? _args?.task_session_id ?? "mainchat_task_mock",
+          chatSessionId: "session-1",
+          userGoal: "mock goal",
+          selectedStrategy: "direct_answer",
+          status: "completed",
+          currentPlanSummary: undefined,
+          actionQueueIds: [],
+          pendingBlockers: [],
+          contextSnapshotRefs: [],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          finalSummary: "mock complete",
+        },
+        actions: [],
+        transcript: [],
+        proposals: [],
+        blockers: [],
+        finalDelivery: null,
+        continuityDiagnostics: {
+          staleContext: false,
+          missingActionEvidence: false,
+          permissionScopeMismatch: false,
+          terminalNoResume: true,
+          providerUnavailable: false,
+          toolUnavailable: false,
+          requiresUserDecision: false,
+          selectedSkillContextDigestMismatch: false,
+          planRevisionMismatch: false,
+          reasonCodes: ["terminal_no_resume"],
+          automaticReplayAllowed: false,
+        },
+        allowedControls: ["open_trace"],
+        nextRecommendedControl: "open_trace",
+        lastSafeResumePoint: null,
+        contextDigest: "bytes:2 hash:sha256:mock",
+        selectedSkillDigest: null,
+        toolManifestDigest: "bytes:2 hash:sha256:mock",
+      } as T);
     case "list_main_chat_agent_events":
       return Promise.resolve([] as T);
     case "get_main_chat_agent_state_snapshot":

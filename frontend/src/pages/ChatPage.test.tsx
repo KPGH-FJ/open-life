@@ -165,6 +165,188 @@ describe("ChatPage", () => {
     expect(screen.getByText("会话 2")).toBeInTheDocument();
   });
 
+  it("renders evidence-backed task continuity list and gated controls", async () => {
+    const blockedSummary = {
+      taskSessionId: "task-continuity-blocked",
+      conversationId: "session-1",
+      runId: "run-continuity-blocked",
+      title: "Blocked safe read",
+      strategy: "react_tool_execution",
+      status: "blocked",
+      lastUpdatedAt: "2026-06-17T01:00:00.000Z",
+      lastObservationPreview: "Last observation came from queued action evidence.",
+      pendingBlockerCount: 1,
+      pendingProposalCount: 0,
+      nextRecommendedControl: "retry",
+      staleState: "fresh",
+      resumeSafetyDigest: "bytes:48 hash:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    };
+    const staleSummary = {
+      taskSessionId: "task-continuity-stale",
+      conversationId: "session-1",
+      runId: "unknown",
+      title: "Stale context task",
+      strategy: "direct_answer",
+      status: "blocked",
+      lastUpdatedAt: "2026-06-16T01:00:00.000Z",
+      lastObservationPreview: "Original context digest was recorded before a context change.",
+      pendingBlockerCount: 1,
+      pendingProposalCount: 0,
+      nextRecommendedControl: "refresh_context",
+      staleState: "stale",
+      resumeSafetyDigest: "bytes:47 hash:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    };
+    const blockedDetail = {
+      taskSession: {
+        id: blockedSummary.taskSessionId,
+        chatSessionId: "session-1",
+        userGoal: blockedSummary.title,
+        selectedStrategy: "react_tool_execution",
+        status: "blocked",
+        currentPlanSummary: "Read before continuing.",
+        actionQueueIds: ["action-continuity-read"],
+        pendingBlockers: ["safe_read_failed"],
+        contextSnapshotRefs: ["context:v1"],
+        createdAt: "2026-06-17T00:59:00.000Z",
+        updatedAt: blockedSummary.lastUpdatedAt,
+        finalSummary: "The safe read failed and can be retried.",
+      },
+      actions: [
+        {
+          id: "action-continuity-read",
+          sessionId: blockedSummary.taskSessionId,
+          action: { actionType: "file.read", description: "Read a safe workspace file." },
+          policy: {
+            level: "l1_read_only_auto",
+            reasonCode: "read_only_action_allowed",
+            executionAllowed: true,
+            requiresConfirmation: false,
+            requiresProposal: false,
+            requiresBlocker: false,
+            silentWriteAllowed: false,
+          },
+          status: "failed",
+          attempts: 0,
+          observationMetadata: { target: "AGENTS.md", directWritesExecuted: false },
+          error: "fixture read failed",
+          createdAt: "2026-06-17T00:59:10.000Z",
+          updatedAt: "2026-06-17T00:59:20.000Z",
+        },
+      ],
+      transcript: [
+        {
+          id: "transcript-continuity-observation",
+          sessionId: blockedSummary.taskSessionId,
+          kind: "observation",
+          summary: blockedSummary.lastObservationPreview,
+          metadata: { actionId: "action-continuity-read" },
+          createdAt: "2026-06-17T00:59:30.000Z",
+        },
+      ],
+      proposals: [],
+      blockers: ["safe_read_failed"],
+      finalDelivery: null,
+      continuityDiagnostics: {
+        staleContext: false,
+        missingActionEvidence: false,
+        permissionScopeMismatch: false,
+        terminalNoResume: false,
+        providerUnavailable: false,
+        toolUnavailable: false,
+        requiresUserDecision: true,
+        selectedSkillContextDigestMismatch: false,
+        planRevisionMismatch: false,
+        reasonCodes: ["requires_user_decision"],
+        automaticReplayAllowed: false,
+      },
+      allowedControls: ["retry", "cancel", "refresh_context", "open_trace"],
+      nextRecommendedControl: "retry",
+      lastSafeResumePoint: "action-continuity-read",
+      contextDigest: "bytes:12 hash:sha256:context",
+      selectedSkillDigest: null,
+      toolManifestDigest: "bytes:12 hash:sha256:tools",
+    };
+    const staleDetail = {
+      ...blockedDetail,
+      taskSession: {
+        ...blockedDetail.taskSession,
+        id: staleSummary.taskSessionId,
+        userGoal: staleSummary.title,
+        actionQueueIds: [],
+        contextSnapshotRefs: ["context:v2"],
+        finalSummary: "Context requires review.",
+      },
+      actions: [],
+      transcript: [
+        {
+          id: "transcript-stale-observation",
+          sessionId: staleSummary.taskSessionId,
+          kind: "observation",
+          summary: staleSummary.lastObservationPreview,
+          metadata: { continuityContextDigest: "bytes:12 hash:sha256:old" },
+          createdAt: "2026-06-16T00:59:30.000Z",
+        },
+      ],
+      blockers: ["stale_context"],
+      continuityDiagnostics: {
+        ...blockedDetail.continuityDiagnostics,
+        staleContext: true,
+        requiresUserDecision: true,
+        reasonCodes: ["stale_context", "requires_user_decision"],
+      },
+      allowedControls: ["refresh_context", "open_trace"],
+      nextRecommendedControl: "refresh_context",
+      lastSafeResumePoint: null,
+      contextDigest: "bytes:14 hash:sha256:new-context",
+    };
+
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: any) => {
+      if (cmd === "list_main_chat_agent_tasks") {
+        return Promise.resolve([blockedSummary, staleSummary]);
+      }
+      if (cmd === "get_main_chat_agent_task_detail") {
+        return Promise.resolve(
+          args?.taskSessionId === staleSummary.taskSessionId ? staleDetail : blockedDetail
+        );
+      }
+      if (cmd === "refresh_main_chat_agent_task_context") {
+        return Promise.resolve(staleDetail);
+      }
+      return mockInvoke(cmd, args as Record<string, any>);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    expect(await screen.findByText("Task continuity")).toBeInTheDocument();
+    expect(screen.getByText("Blocked safe read")).toBeInTheDocument();
+    expect(screen.getByText("Stale context task")).toBeInTheDocument();
+    expect(screen.getByText("Last observation came from queued action evidence.")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open task Blocked safe read" }));
+    expect(await screen.findByText("safe_read_failed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry task action" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Resume task from continuity detail" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open task Stale context task" }));
+    await waitFor(() => {
+      expect(screen.getAllByText("stale_context").length).toBeGreaterThanOrEqual(1);
+    });
+    expect(screen.getByRole("button", { name: "Refresh task context" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Resume task from continuity detail" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh task context" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "refresh_main_chat_agent_task_context",
+        expect.objectContaining({ taskSessionId: staleSummary.taskSessionId })
+      );
+    });
+  });
+
   it("refreshes chat context immediately when arriving from Builder apply", async () => {
     render(
       <MemoryRouter initialEntries={[{ pathname: "/chat", state: { refreshFromBuilder: true } }]}>

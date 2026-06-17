@@ -21,6 +21,54 @@ use crate::agent::{
 use crate::llm::ChatMessage;
 
 #[test]
+fn main_chat_agent_task_store_lists_sessions_for_continuity_read_model() {
+    let store = AgentTaskSessionStore::new_in_memory().expect("session store");
+    let first = store
+        .create_session(AgentTaskSessionDraft {
+            chat_session_id: "chat-continuity-a".into(),
+            user_goal: "First continuity task".into(),
+            selected_strategy: MainChatAgentStrategy::DirectAnswer,
+            current_plan_summary: None,
+            context_snapshot_refs: vec!["context:a".into()],
+        })
+        .expect("first session");
+    let second = store
+        .create_session(AgentTaskSessionDraft {
+            chat_session_id: "chat-continuity-b".into(),
+            user_goal: "Second continuity task".into(),
+            selected_strategy: MainChatAgentStrategy::ReActToolExecution,
+            current_plan_summary: Some("Read evidence before continuing.".into()),
+            context_snapshot_refs: vec!["context:b".into()],
+        })
+        .expect("second session");
+    store
+        .block_session(&second.id, "Waiting on tool evidence.")
+        .expect("block second session");
+
+    let all = store
+        .list_sessions(None, 10, 0)
+        .expect("list all sessions for continuity");
+    assert_eq!(all.len(), 2);
+    assert_eq!(
+        all[0].id, second.id,
+        "newer updated tasks should sort first"
+    );
+    assert_eq!(all[1].id, first.id);
+
+    let blocked = store
+        .list_sessions(Some(AgentTaskSessionStatus::Blocked), 10, 0)
+        .expect("list blocked sessions");
+    assert_eq!(blocked.len(), 1);
+    assert_eq!(blocked[0].id, second.id);
+
+    let paged = store
+        .list_sessions(None, 1, 1)
+        .expect("list sessions with offset");
+    assert_eq!(paged.len(), 1);
+    assert_eq!(paged[0].id, first.id);
+}
+
+#[test]
 fn first_40_seed_cases_are_encoded_before_route_cutover() {
     let cases = first_40_seed_eval_cases();
 

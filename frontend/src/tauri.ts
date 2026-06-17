@@ -809,6 +809,59 @@ export interface MainChatAgentTaskState {
   canRetry: boolean;
 }
 
+export interface MainChatAgentTaskFilter {
+  statuses?: MainChatAgentTaskStatus[];
+  conversationId?: string | null;
+  includeTerminal?: boolean;
+  includeStale?: boolean;
+}
+
+export interface MainChatTaskSummary {
+  taskSessionId: string;
+  conversationId: string;
+  runId: string;
+  title: string;
+  strategy: MainChatAgentStrategy;
+  status: MainChatAgentTaskStatus;
+  lastUpdatedAt: string;
+  lastObservationPreview: string;
+  pendingBlockerCount: number;
+  pendingProposalCount: number;
+  nextRecommendedControl: string;
+  staleState: string;
+  resumeSafetyDigest: string;
+}
+
+export interface MainChatContinuityDiagnostics {
+  staleContext: boolean;
+  missingActionEvidence: boolean;
+  permissionScopeMismatch: boolean;
+  terminalNoResume: boolean;
+  providerUnavailable: boolean;
+  toolUnavailable: boolean;
+  requiresUserDecision: boolean;
+  selectedSkillContextDigestMismatch?: boolean;
+  planRevisionMismatch?: boolean;
+  reasonCodes: string[];
+  automaticReplayAllowed: boolean;
+}
+
+export interface MainChatTaskDetail {
+  taskSession: MainChatAgentTaskSession;
+  actions: MainChatQueuedExecutionAction[];
+  transcript: MainChatExecutionTranscriptEntry[];
+  proposals: AgentProposal[];
+  blockers: string[];
+  finalDelivery?: Record<string, unknown> | null;
+  continuityDiagnostics: MainChatContinuityDiagnostics;
+  allowedControls: string[];
+  nextRecommendedControl: string;
+  lastSafeResumePoint?: string | null;
+  contextDigest: string;
+  selectedSkillDigest?: string | null;
+  toolManifestDigest: string;
+}
+
 export interface MainChatRuntimeEvalReport {
   totalCases: number;
   runtimeExecutedCaseCount: number;
@@ -1002,6 +1055,36 @@ export async function getMainChatAgentTaskState(
   taskSessionId: string
 ): Promise<MainChatAgentTaskState> {
   return safeInvoke<MainChatAgentTaskState>("get_main_chat_agent_task_state", {
+    taskSessionId,
+    task_session_id: taskSessionId,
+  });
+}
+
+export async function listMainChatAgentTasks(
+  filter?: MainChatAgentTaskFilter,
+  limit = 50,
+  offset = 0
+): Promise<MainChatTaskSummary[]> {
+  return safeInvoke<MainChatTaskSummary[]>("list_main_chat_agent_tasks", {
+    filter: filter ?? null,
+    limit,
+    offset,
+  });
+}
+
+export async function getMainChatAgentTaskDetail(
+  taskSessionId: string
+): Promise<MainChatTaskDetail> {
+  return safeInvoke<MainChatTaskDetail>("get_main_chat_agent_task_detail", {
+    taskSessionId,
+    task_session_id: taskSessionId,
+  });
+}
+
+export async function refreshMainChatAgentTaskContext(
+  taskSessionId: string
+): Promise<MainChatTaskDetail> {
+  return safeInvoke<MainChatTaskDetail>("refresh_main_chat_agent_task_context", {
     taskSessionId,
     task_session_id: taskSessionId,
   });

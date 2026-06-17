@@ -835,6 +835,48 @@ impl AgentTaskSessionStore {
         }
     }
 
+    pub fn list_sessions(
+        &self,
+        status_filter: Option<AgentTaskSessionStatus>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<AgentTaskSession>> {
+        let limit = i64::try_from(limit.min(200)).unwrap_or(200);
+        let offset = i64::try_from(offset).unwrap_or(0).max(0);
+        let conn = self.lock_conn()?;
+        if let Some(status) = status_filter {
+            let mut stmt = conn.prepare(
+                "SELECT id, chat_session_id, user_goal, selected_strategy, status,
+                        current_plan_summary, action_queue_ids_json, pending_blockers_json,
+                        context_snapshot_refs_json, created_at, updated_at, final_summary
+                 FROM agent_task_sessions
+                 WHERE status = ?1
+                 ORDER BY updated_at DESC, created_at DESC
+                 LIMIT ?2 OFFSET ?3",
+            )?;
+            let sessions = stmt.query_map(
+                params![status.as_str(), limit, offset],
+                row_to_agent_task_session,
+            )?;
+            return sessions
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Into::into);
+        }
+
+        let mut stmt = conn.prepare(
+            "SELECT id, chat_session_id, user_goal, selected_strategy, status,
+                    current_plan_summary, action_queue_ids_json, pending_blockers_json,
+                    context_snapshot_refs_json, created_at, updated_at, final_summary
+             FROM agent_task_sessions
+             ORDER BY updated_at DESC, created_at DESC
+             LIMIT ?1 OFFSET ?2",
+        )?;
+        let sessions = stmt.query_map(params![limit, offset], row_to_agent_task_session)?;
+        sessions
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn resume_session(&self, id: &str) -> Result<AgentTaskSession> {
         let current = self
             .load_session(id)?

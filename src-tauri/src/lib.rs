@@ -45,6 +45,8 @@ pub(crate) mod main_chat_runtime_support;
 pub(crate) mod main_chat_send;
 pub(crate) mod main_chat_strategy;
 pub(crate) mod main_chat_streaming;
+#[allow(dead_code)]
+pub(crate) mod main_chat_task_continuity_eval;
 pub(crate) mod main_chat_task_controls;
 pub mod scheduler_runner;
 pub mod state;
@@ -208,7 +210,8 @@ use commands::state::{
 use commands::version::{create_snapshot, diff_snapshots, list_snapshots, restore_snapshot};
 use main_chat_event_stream::{get_main_chat_agent_state_snapshot, list_main_chat_agent_events};
 use main_chat_task_controls::{
-    cancel_main_chat_agent_task, get_main_chat_agent_task_state, resume_main_chat_agent_task,
+    cancel_main_chat_agent_task, get_main_chat_agent_task_detail, get_main_chat_agent_task_state,
+    list_main_chat_agent_tasks, refresh_main_chat_agent_task_context, resume_main_chat_agent_task,
     retry_main_chat_agent_action,
 };
 use storage::app_data_dir;
@@ -691,6 +694,9 @@ pub fn run() {
             start_stream_message,
             list_main_chat_agent_events,
             get_main_chat_agent_state_snapshot,
+            list_main_chat_agent_tasks,
+            get_main_chat_agent_task_detail,
+            refresh_main_chat_agent_task_context,
             get_main_chat_agent_task_state,
             resume_main_chat_agent_task,
             cancel_main_chat_agent_task,
