@@ -1202,6 +1202,68 @@ export interface MainChatProductMaturityV2SkillsGateReport {
   proofs: MainChatProductMaturityV2SkillsProof[];
 }
 
+export interface MainChatProductMaturityV2ScenarioStatus {
+  scenarioId: string;
+  phaseId: string;
+  capabilityGroup: string;
+  status: string;
+  reason: string;
+}
+
+export interface MainChatProductMaturityV2PhaseCount {
+  phaseId: string;
+  phaseLabel: string;
+  capabilityGroup: string;
+  scenarioCount: number;
+  passed: number;
+  expectedBlocker: number;
+  failed: number;
+  blocked: number;
+  status: string;
+  ready: boolean;
+  defaultGate: boolean;
+  optInOnly: boolean;
+  blockers: string[];
+  supportedScenarios: string[];
+  blockedScenarios: string[];
+  unsupportedScenarios: string[];
+  futureScenarios: string[];
+}
+
+export interface MainChatProductMaturityV2FinalReadinessReport {
+  reportKind: "main_chat_agent_product_maturity_v2_final_readiness_gate";
+  readinessSemantics: "phase_g_final_readiness_default_deterministic_live_product_opt_in_separate";
+  defaultReadinessScope: "MR_EV_PI_LT2_SK2_deterministic_only";
+  optInLiveReadinessScope: "LIVE_PROD_external_live_opt_in_only";
+  finalReady: boolean;
+  deterministicReady: boolean;
+  optInLiveReady: boolean;
+  finalReadinessStatus: string;
+  deterministicReadinessStatus: string;
+  optInLiveReadinessStatus: string;
+  defaultDeterministicScenarioCount: number;
+  defaultLiveProdExcludedCount: number;
+  externalLiveScenarioCount: number;
+  defaultScenarioPassedCount: number;
+  defaultScenarioExpectedBlockerCount: number;
+  defaultScenarioFailedCount: number;
+  defaultScenarioBlockedCount: number;
+  externalLivePassedCount: number;
+  externalLiveBlockedCount: number;
+  externalLiveFailedCount: number;
+  phaseCounts: MainChatProductMaturityV2PhaseCount[];
+  supportedScenarios: MainChatProductMaturityV2ScenarioStatus[];
+  blockedScenarios: MainChatProductMaturityV2ScenarioStatus[];
+  unsupportedScenarios: MainChatProductMaturityV2ScenarioStatus[];
+  futureScenarios: MainChatProductMaturityV2ScenarioStatus[];
+  blockers: string[];
+  deterministicBlockers: string[];
+  optInLiveBlockers: string[];
+  directWritesExecuted: boolean;
+  noSilentDurableWrites: boolean;
+  defaultLiveProdExcluded: boolean;
+}
+
 export async function listMainChatSkills(sessionId?: string): Promise<MainChatSkillSummary[]> {
   return safeInvoke<MainChatSkillSummary[]>("list_main_chat_skills", {
     ...optionalDualArg("sessionId", "session_id", sessionId),
@@ -1393,6 +1455,12 @@ export async function runMainChatAgentProductMaturityV2PlanGate(): Promise<MainC
 export async function runMainChatAgentProductMaturityV2SkillsGate(): Promise<MainChatProductMaturityV2SkillsGateReport> {
   return safeInvoke<MainChatProductMaturityV2SkillsGateReport>(
     "run_main_chat_agent_product_maturity_v2_skills_gate"
+  );
+}
+
+export async function runMainChatAgentProductMaturityV2FinalReadinessGate(): Promise<MainChatProductMaturityV2FinalReadinessReport> {
+  return safeInvoke<MainChatProductMaturityV2FinalReadinessReport>(
+    "run_main_chat_agent_product_maturity_v2_final_readiness_gate"
   );
 }
 

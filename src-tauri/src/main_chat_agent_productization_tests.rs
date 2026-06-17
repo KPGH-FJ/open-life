@@ -32,6 +32,10 @@ fn productization_command_test_context() -> tauri::Context<tauri::test::MockRunt
     );
     context.runtime_authority_mut().__allow_command(
         "run_main_chat_external_live_productization_gate".into(),
+        mock_ipc_origin.clone(),
+    );
+    context.runtime_authority_mut().__allow_command(
+        "run_main_chat_agent_product_maturity_v2_final_readiness_gate".into(),
         mock_ipc_origin,
     );
     context
@@ -767,6 +771,216 @@ async fn run_main_chat_external_live_productization_gate_command_fails_closed_wi
         .len();
     assert_eq!(run_count, 0);
     assert_eq!(event_count, 0);
+}
+
+#[tokio::test]
+async fn main_chat_product_maturity_v2_final_readiness_aggregates_all_phase_gates_with_live_separate(
+) {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let report = crate::main_chat_product_maturity_v2_final_readiness::run_main_chat_agent_product_maturity_v2_final_readiness_report_with_state(
+        &state,
+        false,
+    )
+    .await
+    .expect("final readiness report");
+
+    assert_eq!(
+        report.report_kind,
+        "main_chat_agent_product_maturity_v2_final_readiness_gate"
+    );
+    assert_eq!(report.default_deterministic_scenario_count, 42);
+    assert_eq!(report.external_live_scenario_count, 6);
+    assert_eq!(
+        report.default_readiness_scope,
+        "MR_EV_PI_LT2_SK2_deterministic_only"
+    );
+    assert_eq!(
+        report.opt_in_live_readiness_scope,
+        "LIVE_PROD_external_live_opt_in_only"
+    );
+    assert_eq!(report.default_live_prod_excluded_count, 6);
+    assert_eq!(report.deterministic_readiness_status, "ready");
+    assert!(report.deterministic_ready);
+    assert_eq!(report.opt_in_live_readiness_status, "blocked");
+    assert!(!report.opt_in_live_ready);
+    assert_eq!(
+        report.final_readiness_status,
+        "blocked_live_productization_not_ready"
+    );
+    assert!(!report.final_ready);
+    assert!(report.unsupported_scenarios.is_empty());
+    assert!(report.future_scenarios.is_empty());
+    assert!(report
+        .blockers
+        .contains(&"explicit_live_eval_required".to_string()));
+
+    let phase_ids = report
+        .phase_counts
+        .iter()
+        .map(|phase| phase.phase_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        phase_ids,
+        vec!["phase_a", "phase_b", "phase_c", "phase_d", "phase_e", "phase_f"]
+    );
+
+    let memory = report
+        .phase_counts
+        .iter()
+        .find(|phase| phase.capability_group == "memory_lifecycle")
+        .expect("memory lifecycle phase");
+    assert_eq!(memory.scenario_count, 8);
+    assert_eq!(memory.passed, 6);
+    assert_eq!(memory.expected_blocker, 2);
+    assert_eq!(memory.failed, 0);
+    assert_eq!(memory.blocked, 0);
+    assert_eq!(memory.status, "ready");
+    assert!(memory.unsupported_scenarios.is_empty());
+
+    let event = report
+        .phase_counts
+        .iter()
+        .find(|phase| phase.capability_group == "event_delta_stream")
+        .expect("event delta phase");
+    assert_eq!(event.scenario_count, 8);
+    assert_eq!(event.passed, 8);
+    assert_eq!(event.expected_blocker, 0);
+    assert_eq!(event.status, "ready");
+
+    let plan = report
+        .phase_counts
+        .iter()
+        .find(|phase| phase.capability_group == "plan_interaction")
+        .expect("plan phase");
+    assert_eq!(plan.scenario_count, 10);
+    assert_eq!(plan.passed, 7);
+    assert_eq!(plan.expected_blocker, 3);
+
+    let task = report
+        .phase_counts
+        .iter()
+        .find(|phase| phase.capability_group == "task_continuity")
+        .expect("task phase");
+    assert_eq!(task.scenario_count, 8);
+    assert_eq!(task.passed, 5);
+    assert_eq!(task.expected_blocker, 3);
+
+    let skills = report
+        .phase_counts
+        .iter()
+        .find(|phase| phase.capability_group == "skills_tools_surface")
+        .expect("skills phase");
+    assert_eq!(skills.scenario_count, 8);
+    assert_eq!(skills.passed, 6);
+    assert_eq!(skills.expected_blocker, 2);
+
+    let live = report
+        .phase_counts
+        .iter()
+        .find(|phase| phase.capability_group == "external_live_productization")
+        .expect("live phase");
+    assert_eq!(live.scenario_count, 6);
+    assert_eq!(live.passed, 0);
+    assert_eq!(live.expected_blocker, 0);
+    assert_eq!(live.failed, 0);
+    assert_eq!(live.blocked, 6);
+    assert_eq!(live.status, "blocked");
+    assert!(live
+        .blockers
+        .contains(&"explicit_live_eval_required".to_string()));
+
+    assert!(report
+        .supported_scenarios
+        .iter()
+        .any(|scenario| scenario.scenario_id == "MR-03"));
+    assert!(report
+        .supported_scenarios
+        .iter()
+        .any(|scenario| scenario.scenario_id == "EV-05"));
+    assert!(report
+        .blocked_scenarios
+        .iter()
+        .any(|scenario| scenario.scenario_id == "MR-04" && scenario.reason == "expected_blocker"));
+    assert!(report
+        .blocked_scenarios
+        .iter()
+        .any(|scenario| scenario.scenario_id == "LIVE-PROD-01"
+            && scenario.reason == "explicit_live_eval_required"));
+}
+
+#[tokio::test]
+async fn run_main_chat_product_maturity_v2_final_readiness_command_returns_read_only_report() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let app = tauri::test::mock_builder()
+        .manage(state.clone())
+        .invoke_handler(tauri::generate_handler![
+            crate::commands::agent_runtime::run_main_chat_agent_product_maturity_v2_final_readiness_gate
+        ])
+        .build(productization_command_test_context())
+        .expect("build mock tauri app");
+    let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+        .build()
+        .expect("build mock webview");
+
+    let response = tauri::test::get_ipc_response(
+        &webview,
+        productization_invoke_request(
+            "run_main_chat_agent_product_maturity_v2_final_readiness_gate",
+            serde_json::json!({}),
+        ),
+    )
+    .expect("final readiness response")
+    .deserialize::<serde_json::Value>()
+    .expect("deserialize final readiness response");
+
+    assert_eq!(
+        response["reportKind"].as_str().unwrap(),
+        "main_chat_agent_product_maturity_v2_final_readiness_gate"
+    );
+    assert_eq!(
+        response["deterministicReadinessStatus"].as_str().unwrap(),
+        "ready"
+    );
+    assert_eq!(
+        response["optInLiveReadinessStatus"].as_str().unwrap(),
+        "blocked"
+    );
+    assert_eq!(
+        response["finalReadinessStatus"].as_str().unwrap(),
+        "blocked_live_productization_not_ready"
+    );
+    assert_eq!(
+        response["defaultDeterministicScenarioCount"]
+            .as_u64()
+            .unwrap(),
+        42
+    );
+    assert_eq!(response["externalLiveScenarioCount"].as_u64().unwrap(), 6);
+    assert!(response["unsupportedScenarios"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    let run_count = state
+        .agent_run_store
+        .as_ref()
+        .expect("agent run store")
+        .lock()
+        .await
+        .list_runs(10, 0)
+        .expect("list runs")
+        .len();
+    let proposal_count = state
+        .proposal_store
+        .as_ref()
+        .expect("proposal store")
+        .lock()
+        .await
+        .list_all_proposals(10, 0)
+        .expect("list proposals")
+        .len();
+    assert_eq!(run_count, 0);
+    assert_eq!(proposal_count, 0);
 }
 
 #[tokio::test]

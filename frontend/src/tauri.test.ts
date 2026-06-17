@@ -56,6 +56,7 @@ import {
   listMainChatSkills,
   listMainChatToolCandidates,
   runMainChatExternalLiveProductizationGate,
+  runMainChatAgentProductMaturityV2FinalReadinessGate,
   runMainChatAgentProductMaturityV2EventGate,
   runMainChatAgentProductMaturityV2PlanGate,
   runMainChatAgentProductMaturityV2SkillsGate,
@@ -921,6 +922,113 @@ describe("tauri command argument aliases", () => {
     expect(selected.includedAsBoundedContextOnly).toBe(true);
     expect(cleared.selectedSkillId).toBeNull();
     expect(tools.blockedTools[0]?.reasonCode).toBe("write_like_tool_blocked");
+  });
+
+  it("invokes Product Maturity v2 final readiness gate with deterministic and opt-in live readiness separated", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      reportKind: "main_chat_agent_product_maturity_v2_final_readiness_gate",
+      readinessSemantics:
+        "phase_g_final_readiness_default_deterministic_live_product_opt_in_separate",
+      defaultReadinessScope: "MR_EV_PI_LT2_SK2_deterministic_only",
+      optInLiveReadinessScope: "LIVE_PROD_external_live_opt_in_only",
+      finalReady: false,
+      deterministicReady: true,
+      optInLiveReady: false,
+      finalReadinessStatus: "blocked_live_productization_not_ready",
+      deterministicReadinessStatus: "ready",
+      optInLiveReadinessStatus: "blocked",
+      defaultDeterministicScenarioCount: 42,
+      defaultLiveProdExcludedCount: 6,
+      externalLiveScenarioCount: 6,
+      defaultScenarioPassedCount: 32,
+      defaultScenarioExpectedBlockerCount: 10,
+      defaultScenarioFailedCount: 0,
+      defaultScenarioBlockedCount: 0,
+      externalLivePassedCount: 0,
+      externalLiveBlockedCount: 6,
+      externalLiveFailedCount: 0,
+      phaseCounts: [
+        {
+          phaseId: "phase_a",
+          phaseLabel: "Phase A Memory lifecycle",
+          capabilityGroup: "memory_lifecycle",
+          scenarioCount: 8,
+          passed: 6,
+          expectedBlocker: 2,
+          failed: 0,
+          blocked: 0,
+          status: "ready",
+          ready: true,
+          defaultGate: true,
+          optInOnly: false,
+          blockers: [],
+          supportedScenarios: ["MR-01", "MR-02", "MR-03", "MR-06", "MR-07", "MR-08"],
+          blockedScenarios: ["MR-04", "MR-05"],
+          unsupportedScenarios: [],
+          futureScenarios: [],
+        },
+        {
+          phaseId: "phase_f",
+          phaseLabel: "Phase F External live product evidence",
+          capabilityGroup: "external_live_productization",
+          scenarioCount: 6,
+          passed: 0,
+          expectedBlocker: 0,
+          failed: 0,
+          blocked: 6,
+          status: "blocked",
+          ready: false,
+          defaultGate: false,
+          optInOnly: true,
+          blockers: ["explicit_live_eval_required"],
+          supportedScenarios: [],
+          blockedScenarios: ["LIVE-PROD-01"],
+          unsupportedScenarios: [],
+          futureScenarios: [],
+        },
+      ],
+      supportedScenarios: [
+        {
+          scenarioId: "MR-03",
+          phaseId: "phase_a",
+          capabilityGroup: "memory_lifecycle",
+          status: "supported",
+          reason: "passed",
+        },
+      ],
+      blockedScenarios: [
+        {
+          scenarioId: "LIVE-PROD-01",
+          phaseId: "phase_f",
+          capabilityGroup: "external_live_productization",
+          status: "blocked",
+          reason: "explicit_live_eval_required",
+        },
+      ],
+      unsupportedScenarios: [],
+      futureScenarios: [],
+      blockers: ["explicit_live_eval_required"],
+      deterministicBlockers: [],
+      optInLiveBlockers: ["explicit_live_eval_required"],
+      directWritesExecuted: false,
+      noSilentDurableWrites: true,
+      defaultLiveProdExcluded: true,
+    });
+
+    const result = await runMainChatAgentProductMaturityV2FinalReadinessGate();
+
+    expect(invoke).toHaveBeenCalledWith(
+      "run_main_chat_agent_product_maturity_v2_final_readiness_gate",
+      undefined
+    );
+    expect(result.deterministicReady).toBe(true);
+    expect(result.optInLiveReady).toBe(false);
+    expect(result.finalReadinessStatus).toBe("blocked_live_productization_not_ready");
+    expect(result.defaultLiveProdExcludedCount).toBe(6);
+    expect(result.unsupportedScenarios).toEqual([]);
+    expect(result.phaseCounts[0]?.passed).toBe(6);
+    expect(result.phaseCounts[0]?.expectedBlocker).toBe(2);
+    expect(result.phaseCounts[1]?.blocked).toBe(6);
   });
 
   it("invokes runtime strategy registry status as explicit read-only diagnostic", async () => {

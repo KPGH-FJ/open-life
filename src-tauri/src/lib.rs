@@ -39,6 +39,7 @@ pub(crate) mod main_chat_memory_lifecycle_eval;
 #[allow(dead_code)]
 pub(crate) mod main_chat_plan_interaction_eval;
 pub(crate) mod main_chat_preprocess;
+pub(crate) mod main_chat_product_maturity_v2_final_readiness;
 pub(crate) mod main_chat_proposal_support;
 pub(crate) mod main_chat_react_execution;
 pub(crate) mod main_chat_react_runtime;
@@ -145,6 +146,7 @@ use commands::agent_runtime::{
     run_default_chat_adapter_dry_run, run_main_chat_agent_execution_v1_eval_gate,
     run_main_chat_agent_execution_v1_final_acceptance_gate,
     run_main_chat_agent_product_maturity_v2_event_gate,
+    run_main_chat_agent_product_maturity_v2_final_readiness_gate,
     run_main_chat_agent_product_maturity_v2_plan_gate,
     run_main_chat_agent_product_maturity_v2_skills_gate,
     run_main_chat_agent_productization_v1_gate, run_main_chat_external_live_productization_gate,
@@ -632,6 +634,7 @@ pub fn run() {
             run_main_chat_agent_product_maturity_v2_event_gate,
             run_main_chat_agent_product_maturity_v2_plan_gate,
             run_main_chat_agent_product_maturity_v2_skills_gate,
+            run_main_chat_agent_product_maturity_v2_final_readiness_gate,
             run_main_chat_agent_execution_v1_final_acceptance_gate,
             get_runtime_strategy_registry_status,
             get_react_beta_execution_status,

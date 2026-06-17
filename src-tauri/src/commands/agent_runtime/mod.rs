@@ -1939,6 +1939,19 @@ pub async fn run_main_chat_agent_product_maturity_v2_skills_gate(
 }
 
 #[tauri::command]
+pub async fn run_main_chat_agent_product_maturity_v2_final_readiness_gate(
+    state: State<'_, Arc<AppState>>,
+) -> Result<
+    crate::main_chat_product_maturity_v2_final_readiness::MainChatProductMaturityV2FinalReadinessReport,
+    String,
+>{
+    crate::main_chat_product_maturity_v2_final_readiness::run_main_chat_agent_product_maturity_v2_final_readiness_report(
+        &state.inner().clone(),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn run_main_chat_agent_execution_v1_final_acceptance_gate(
     state: State<'_, Arc<AppState>>,
 ) -> Result<MainChatAgentExecutionV1FinalAcceptanceGateCommandReport, String> {
