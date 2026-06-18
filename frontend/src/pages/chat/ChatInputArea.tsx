@@ -179,6 +179,7 @@ export default function ChatInputArea({
               <FileText size={12} className="shrink-0 text-gray-400" />
               <span className="shrink-0 font-medium text-gray-500">SKILL.md</span>
               <input
+                data-testid="skill-context-input"
                 aria-label="Skill context"
                 value={selectedSkillId}
                 onChange={e => onSelectedSkillIdChange(e.target.value)}
@@ -200,6 +201,7 @@ export default function ChatInputArea({
         )}
         <div className="flex gap-3">
           <textarea
+            data-testid="chat-input"
             value={input}
             onChange={e => onInputChange(e.target.value)}
             onFocus={onComposerFocus}
@@ -218,6 +220,7 @@ export default function ChatInputArea({
             }
           />
           <button
+            data-testid="send-button"
             onClick={onSend}
             disabled={sending || !input.trim()}
             className={

@@ -2,6 +2,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use crate::AppState;
 
 const BROWSER_E2E_REPORT_PATH: &str = "frontend/test-results/main-chat-stage1-dogfood-report.json";
 const BROWSER_E2E_MAX_AGE_HOURS: i64 = 24;
@@ -58,6 +61,19 @@ pub(crate) struct MainChatAgentStage1DogfoodScenarioEvidence {
     pub live_provider_evidence: Option<String>,
     pub passed: bool,
     pub failure_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MainChatAgentStage1BrowserDogfoodPrepReport {
+    pub prepared: bool,
+    pub evidence_source: String,
+    pub task_session_ids: BTreeMap<String, String>,
+    pub direct_writes_executed: bool,
+    pub durable_lifemodel_writes_executed: bool,
+    pub file_or_external_writes_executed: bool,
+    pub generated_at: String,
+    pub blockers: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -446,47 +462,46 @@ pub(crate) fn passing_stage1_browser_e2e_evidence_for_tests() -> MainChatStage1B
     let journeys = required_browser_journeys();
     let run_id = format!("stage1-browser-e2e-test-{}", uuid::Uuid::new_v4());
     let generated_at = chrono::Utc::now().to_rfc3339();
-    let report_digest = digest_label(
-        serde_json::json!({
-            "runId": run_id,
-            "requiredJourneys": journeys,
-            "source": "tauri_command_surface_browser_observed"
-        })
-        .to_string()
-        .as_bytes(),
-    );
     let observed_scenarios = stage1_scenarios()
         .into_iter()
         .filter(|scenario| !scenario.live)
-        .map(|scenario| MainChatStage1BrowserScenarioEvidence {
-            scenario_id: scenario.id.into(),
-            observed_via: "real_tauri_chat_or_control_path".into(),
-            entry_point: scenario_entry_point(&scenario).into(),
-            task_session_id: format!("browser-task-{}", scenario.id),
-            run_id: format!("browser-run-{}", scenario.id),
-            route_strategy: scenario.route.into(),
-            runtime_events: runtime_events_for_scenario(&scenario),
-            visible_ui_states: scenario
-                .ui_states
-                .iter()
-                .map(|value| (*value).into())
-                .collect(),
-            final_delivery_sections: scenario
-                .final_delivery
-                .iter()
-                .map(|value| (*value).into())
-                .collect(),
-            visible_blockers: scenario.blocker.into_iter().map(str::to_string).collect(),
-            runtime_evidence_observed: true,
-            ui_state_observed: true,
-            final_delivery_observed: true,
-            non_fake_evidence_observed: true,
-            legacy_fallback_used: false,
-            silent_durable_write_detected: false,
-            fake_execution_detected: false,
+        .map(|scenario| {
+            let mut runtime_events = runtime_events_for_scenario(&scenario);
+            if scenario.scenario_type == "chat_e2e" {
+                runtime_events.push("visible_control.chat_send".into());
+            } else if scenario.scenario_type == "seeded_task_control_e2e" {
+                runtime_events.push(seeded_visible_control_event_for_test(scenario.id).into());
+            }
+            MainChatStage1BrowserScenarioEvidence {
+                scenario_id: scenario.id.into(),
+                observed_via: "real_tauri_chat_or_control_path".into(),
+                entry_point: scenario_entry_point(&scenario).into(),
+                task_session_id: format!("browser-task-{}", scenario.id),
+                run_id: format!("browser-run-{}", scenario.id),
+                route_strategy: scenario.route.into(),
+                runtime_events,
+                visible_ui_states: scenario
+                    .ui_states
+                    .iter()
+                    .map(|value| (*value).into())
+                    .collect(),
+                final_delivery_sections: scenario
+                    .final_delivery
+                    .iter()
+                    .map(|value| (*value).into())
+                    .collect(),
+                visible_blockers: scenario.blocker.into_iter().map(str::to_string).collect(),
+                runtime_evidence_observed: true,
+                ui_state_observed: true,
+                final_delivery_observed: true,
+                non_fake_evidence_observed: true,
+                legacy_fallback_used: false,
+                silent_durable_write_detected: false,
+                fake_execution_detected: false,
+            }
         })
         .collect::<Vec<_>>();
-    MainChatStage1BrowserE2eEvidence {
+    let mut evidence = MainChatStage1BrowserE2eEvidence {
         environment_ready: true,
         self_contained_runner: true,
         smoke_passed: true,
@@ -495,13 +510,511 @@ pub(crate) fn passing_stage1_browser_e2e_evidence_for_tests() -> MainChatStage1B
         run_id: Some(run_id),
         generated_at: Some(generated_at),
         commit: None,
-        report_digest: Some(report_digest),
+        report_digest: None,
         required_journeys: journeys.clone(),
         passed_journeys: journeys,
         failed_journeys: Vec::new(),
         observed_scenarios,
         blockers: Vec::new(),
+    };
+    evidence.report_digest = stage1_browser_report_digest(&evidence);
+    evidence
+}
+
+pub(crate) async fn prepare_main_chat_agent_stage1_browser_dogfood_state_with_state(
+    state: &Arc<AppState>,
+) -> Result<MainChatAgentStage1BrowserDogfoodPrepReport, String> {
+    let prep_run_id = format!("stage1-browser-prep-{}", uuid::Uuid::new_v4());
+    let mut task_session_ids = BTreeMap::new();
+
+    task_session_ids.insert(
+        "D13".into(),
+        seed_stage1_browser_permission_resume_task(state, &prep_run_id).await?,
+    );
+    task_session_ids.insert(
+        "D14".into(),
+        seed_stage1_browser_failed_read_task(state, &prep_run_id, "D14").await?,
+    );
+    task_session_ids.insert(
+        "D15".into(),
+        seed_stage1_browser_cancellable_task(state, &prep_run_id).await?,
+    );
+    task_session_ids.insert(
+        "D19".into(),
+        seed_stage1_browser_terminal_mixed_task(state, &prep_run_id, "D19").await?,
+    );
+    task_session_ids.insert(
+        "D20".into(),
+        seed_stage1_browser_event_replay_task(state, &prep_run_id).await?,
+    );
+    task_session_ids.insert(
+        "D27".into(),
+        seed_stage1_browser_stale_task(state, &prep_run_id).await?,
+    );
+    task_session_ids.insert(
+        "D28".into(),
+        seed_stage1_browser_terminal_mixed_task(state, &prep_run_id, "D28").await?,
+    );
+
+    Ok(MainChatAgentStage1BrowserDogfoodPrepReport {
+        prepared: true,
+        evidence_source: "real_app_state_task_continuity_seed".into(),
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        task_session_ids,
+        direct_writes_executed: false,
+        durable_lifemodel_writes_executed: false,
+        file_or_external_writes_executed: false,
+        blockers: Vec::new(),
+    })
+}
+
+async fn seed_stage1_browser_permission_resume_task(
+    state: &Arc<AppState>,
+    prep_run_id: &str,
+) -> Result<String, String> {
+    use openlife_core::agent::main_chat_agent_v1::{
+        ExecutionAction, ExecutionQueueStatus, ExecutionTranscriptEntryKind, MainChatAgentStrategy,
+    };
+    use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
+
+    crate::main_chat_command_surface_eval::grant_builtin_echo_read_once(state).await?;
+
+    let proposal = AgentProposal::new(
+        ProposalType::ToolPermission,
+        "tool_permission.builtin.builtin_echo",
+        serde_json::json!({
+            "tool_name": "builtin_echo",
+            "source": "builtin",
+            "risk_level": "low",
+            "action_type": "read",
+            "permission": "allow_once"
+        }),
+        "Stage 1 browser dogfood seed grants one governed MCP read replay.",
+        0.7,
+        RiskLevel::Medium,
+        ProposalSource::ChatConversation,
+    );
+    let proposal_id = proposal.id.clone();
+    {
+        let proposal_store = state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(|| "proposal store missing".to_string())?;
+        proposal_store
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .map_err(|err| err.to_string())?;
     }
+    crate::commands::proposal::accept_proposal_with_state(proposal_id.clone(), state)
+        .await
+        .map_err(|err| err.to_string())?;
+
+    let session = create_stage1_browser_task_session(
+        state,
+        prep_run_id,
+        "D13",
+        "Use mcp builtin_echo read-only now.",
+        MainChatAgentStrategy::ReActToolExecution,
+        Some("Waiting for accepted ToolPermission replay.".into()),
+        vec!["stage1-browser-permission-context".into()],
+    )
+    .await?;
+    let action = ExecutionAction::new("mcp.read_only", "Pending MCP read action.");
+    let queued = enqueue_stage1_browser_action(state, &session.id, action).await?;
+    transition_stage1_browser_action(state, &queued.id, ExecutionQueueStatus::Executing, None)
+        .await?;
+    transition_stage1_browser_action(
+        state,
+        &queued.id,
+        ExecutionQueueStatus::PendingPermission,
+        Some(serde_json::json!({
+            "proposalId": proposal_id,
+            "toolName": "builtin_echo",
+            "resumeReplayable": true,
+            "directWritesExecuted": false,
+        })),
+    )
+    .await?;
+    record_stage1_browser_action(state, &session.id, &queued.id).await?;
+    append_stage1_browser_transcript(
+        state,
+        &session.id,
+        ExecutionTranscriptEntryKind::PermissionRequest,
+        "Stage 1 seeded permission task is ready for visible resume.",
+        serde_json::json!({
+            "proposalId": proposal_id,
+            "actionId": queued.id,
+            "directWritesExecuted": false,
+        }),
+    )
+    .await?;
+    {
+        let store_arc = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .ok_or_else(|| "session store missing".to_string())?;
+        let store = store_arc.lock().await;
+        store
+            .set_pending_blockers(&session.id, vec!["tool_permission_required".into()])
+            .map_err(|err| err.to_string())?;
+        store
+            .mark_waiting_permission(&session.id)
+            .map_err(|err| err.to_string())?;
+    }
+    Ok(session.id)
+}
+
+async fn seed_stage1_browser_failed_read_task(
+    state: &Arc<AppState>,
+    prep_run_id: &str,
+    scenario_id: &str,
+) -> Result<String, String> {
+    use openlife_core::agent::main_chat_agent_v1::{
+        ExecutionAction, ExecutionQueueStatus, ExecutionTranscriptEntryKind, MainChatAgentStrategy,
+    };
+
+    let session = create_stage1_browser_task_session(
+        state,
+        prep_run_id,
+        scenario_id,
+        "Read AGENTS.md for Stage 1 retry proof.",
+        MainChatAgentStrategy::ReActToolExecution,
+        Some("Retry a safe workspace read.".into()),
+        vec!["stage1-browser-read-context".into()],
+    )
+    .await?;
+    let action = ExecutionAction::new("file.read", "Read AGENTS.md for Stage 1 retry proof.");
+    let queued = enqueue_stage1_browser_action(state, &session.id, action).await?;
+    transition_stage1_browser_action(
+        state,
+        &queued.id,
+        ExecutionQueueStatus::Failed,
+        Some(serde_json::json!({
+            "target": "AGENTS.md",
+            "retryReplayable": true,
+            "directWritesExecuted": false,
+        })),
+    )
+    .await?;
+    record_stage1_browser_action(state, &session.id, &queued.id).await?;
+    append_stage1_browser_transcript(
+        state,
+        &session.id,
+        ExecutionTranscriptEntryKind::Observation,
+        "Stage 1 seeded safe read failed with retryable action evidence.",
+        serde_json::json!({
+            "actionId": queued.id,
+            "contextSnapshotRef": "stage1-browser-read-context",
+            "directWritesExecuted": false,
+        }),
+    )
+    .await?;
+    {
+        let store_arc = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .ok_or_else(|| "session store missing".to_string())?;
+        let store = store_arc.lock().await;
+        store
+            .block_session(&session.id, "safe_read_failed")
+            .map_err(|err| err.to_string())?;
+    }
+    Ok(session.id)
+}
+
+async fn seed_stage1_browser_cancellable_task(
+    state: &Arc<AppState>,
+    prep_run_id: &str,
+) -> Result<String, String> {
+    use openlife_core::agent::main_chat_agent_v1::{
+        ExecutionAction, ExecutionTranscriptEntryKind, MainChatAgentStrategy,
+    };
+
+    let session = create_stage1_browser_task_session(
+        state,
+        prep_run_id,
+        "D15",
+        "Stage 1 seeded non-terminal task.",
+        MainChatAgentStrategy::ReActToolExecution,
+        Some("Queued action is intentionally non-terminal for visible cancel.".into()),
+        vec!["stage1-browser-cancel-context".into()],
+    )
+    .await?;
+    let action = ExecutionAction::new("file.read", "Queued safe read waiting for cancel.");
+    let queued = enqueue_stage1_browser_action(state, &session.id, action).await?;
+    record_stage1_browser_action(state, &session.id, &queued.id).await?;
+    append_stage1_browser_transcript(
+        state,
+        &session.id,
+        ExecutionTranscriptEntryKind::Action,
+        "Stage 1 seeded non-terminal action is queued and cancellable.",
+        serde_json::json!({
+            "actionId": queued.id,
+            "directWritesExecuted": false,
+        }),
+    )
+    .await?;
+    {
+        let store_arc = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .ok_or_else(|| "session store missing".to_string())?;
+        let store = store_arc.lock().await;
+        store
+            .set_pending_blockers(&session.id, vec!["stage1_cancel_blocked_work".into()])
+            .map_err(|err| err.to_string())?;
+    }
+    Ok(session.id)
+}
+
+async fn seed_stage1_browser_terminal_mixed_task(
+    state: &Arc<AppState>,
+    prep_run_id: &str,
+    scenario_id: &str,
+) -> Result<String, String> {
+    use openlife_core::agent::main_chat_agent_v1::{
+        ExecutionTranscriptEntryKind, MainChatAgentStrategy,
+    };
+
+    let session = create_stage1_browser_task_session(
+        state,
+        prep_run_id,
+        scenario_id,
+        &format!("Stage 1 seeded terminal mixed task {scenario_id}."),
+        MainChatAgentStrategy::PlanExecute,
+        Some("Completed, proposed, blocked, skipped, and durable sections are separated.".into()),
+        vec!["stage1-browser-terminal-context".into()],
+    )
+    .await?;
+    append_stage1_browser_transcript(
+        state,
+        &session.id,
+        ExecutionTranscriptEntryKind::FinalResult,
+        "Completed work recorded. Proposals created. Blockers recorded. Skipped work recorded. Durable changes recorded. Recommended next action recorded.",
+        serde_json::json!({
+            "completedActions": ["summarized seeded task outcome"],
+            "proposalsCreated": ["review center proposal remains separate"],
+            "blockers": ["external write was blocked"],
+            "skippedWork": ["unsupported external publish step skipped"],
+            "skippedActions": ["unsupported external publish step skipped"],
+            "durableChanges": ["accepted memory rollback evidence is listed only as audited change"],
+            "nextSteps": ["review remaining proposal"],
+            "sections": ["completed", "proposed", "blocked", "skipped", "durable"],
+            "directWritesExecuted": false,
+        }),
+    )
+    .await?;
+    {
+        let store_arc = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .ok_or_else(|| "session store missing".to_string())?;
+        let store = store_arc.lock().await;
+        store
+            .complete_session(&session.id, "Stage 1 terminal mixed task completed.")
+            .map_err(|err| err.to_string())?;
+    }
+    Ok(session.id)
+}
+
+async fn seed_stage1_browser_event_replay_task(
+    state: &Arc<AppState>,
+    prep_run_id: &str,
+) -> Result<String, String> {
+    use openlife_core::agent::main_chat_agent_v1::{
+        ExecutionTranscriptEntryKind, MainChatAgentStrategy,
+    };
+
+    let session = create_stage1_browser_task_session(
+        state,
+        prep_run_id,
+        "D20",
+        "Stage 1 seeded event replay task.",
+        MainChatAgentStrategy::DirectAnswer,
+        Some("Reconnect should replay the recorded task events.".into()),
+        vec!["stage1-browser-replay-context".into()],
+    )
+    .await?;
+    append_stage1_browser_transcript(
+        state,
+        &session.id,
+        ExecutionTranscriptEntryKind::Observation,
+        "replaying_events: Stage 1 event stream replay has an observation ready.",
+        serde_json::json!({
+            "replayingEvents": true,
+            "streamRecovered": true,
+            "directWritesExecuted": false,
+        }),
+    )
+    .await?;
+    append_stage1_browser_transcript(
+        state,
+        &session.id,
+        ExecutionTranscriptEntryKind::FinalResult,
+        "Completed event replay with Recommended next action.",
+        serde_json::json!({
+            "completedActions": ["replayed task event stream"],
+            "nextSteps": ["continue from replayed state"],
+            "directWritesExecuted": false,
+        }),
+    )
+    .await?;
+    {
+        let store_arc = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .ok_or_else(|| "session store missing".to_string())?;
+        let store = store_arc.lock().await;
+        store
+            .complete_session(&session.id, "Stage 1 event replay completed.")
+            .map_err(|err| err.to_string())?;
+    }
+    Ok(session.id)
+}
+
+async fn seed_stage1_browser_stale_task(
+    state: &Arc<AppState>,
+    prep_run_id: &str,
+) -> Result<String, String> {
+    use openlife_core::agent::main_chat_agent_v1::{
+        ExecutionTranscriptEntryKind, MainChatAgentStrategy,
+    };
+
+    let session = create_stage1_browser_task_session(
+        state,
+        prep_run_id,
+        "D27",
+        "Stage 1 seeded stale resume context.",
+        MainChatAgentStrategy::DirectAnswer,
+        None,
+        vec!["stage1-browser-current-context".into()],
+    )
+    .await?;
+    append_stage1_browser_transcript(
+        state,
+        &session.id,
+        ExecutionTranscriptEntryKind::Observation,
+        "Stored context digest no longer matches current context.",
+        serde_json::json!({
+            "continuityContextDigest": "bytes:12 hash:sha256:old-context",
+            "contextSnapshotRef": "stage1-browser-previous-context",
+            "directWritesExecuted": false,
+        }),
+    )
+    .await?;
+    {
+        let store_arc = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .ok_or_else(|| "session store missing".to_string())?;
+        let store = store_arc.lock().await;
+        store
+            .block_session(&session.id, "stale_context")
+            .map_err(|err| err.to_string())?;
+    }
+    Ok(session.id)
+}
+
+async fn create_stage1_browser_task_session(
+    state: &Arc<AppState>,
+    prep_run_id: &str,
+    scenario_id: &str,
+    user_goal: &str,
+    strategy: openlife_core::agent::main_chat_agent_v1::MainChatAgentStrategy,
+    current_plan_summary: Option<String>,
+    context_snapshot_refs: Vec<String>,
+) -> Result<openlife_core::agent::main_chat_agent_v1::AgentTaskSession, String> {
+    let store_arc = state
+        .main_chat_agent_session_store
+        .as_ref()
+        .ok_or_else(|| "session store missing".to_string())?;
+    let store = store_arc.lock().await;
+    store
+        .create_session(
+            openlife_core::agent::main_chat_agent_v1::AgentTaskSessionDraft {
+                chat_session_id: format!("{prep_run_id}:{scenario_id}"),
+                user_goal: user_goal.into(),
+                selected_strategy: strategy,
+                current_plan_summary,
+                context_snapshot_refs,
+            },
+        )
+        .map_err(|err| err.to_string())
+}
+
+async fn enqueue_stage1_browser_action(
+    state: &Arc<AppState>,
+    session_id: &str,
+    action: openlife_core::agent::main_chat_agent_v1::ExecutionAction,
+) -> Result<openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction, String> {
+    let queue_arc = state
+        .main_chat_action_queue_store
+        .as_ref()
+        .ok_or_else(|| "action queue missing".to_string())?;
+    let queue = queue_arc.lock().await;
+    let policy =
+        openlife_core::agent::main_chat_agent_v1::ExecutionPolicy::default().classify(&action);
+    queue
+        .enqueue(session_id, action, policy)
+        .map_err(|err| err.to_string())
+}
+
+async fn transition_stage1_browser_action(
+    state: &Arc<AppState>,
+    action_id: &str,
+    status: openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus,
+    observation_metadata: Option<serde_json::Value>,
+) -> Result<openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction, String> {
+    let queue_arc = state
+        .main_chat_action_queue_store
+        .as_ref()
+        .ok_or_else(|| "action queue missing".to_string())?;
+    let queue = queue_arc.lock().await;
+    queue
+        .transition(action_id, status, observation_metadata)
+        .map_err(|err| err.to_string())
+}
+
+async fn record_stage1_browser_action(
+    state: &Arc<AppState>,
+    session_id: &str,
+    action_id: &str,
+) -> Result<(), String> {
+    let store_arc = state
+        .main_chat_agent_session_store
+        .as_ref()
+        .ok_or_else(|| "session store missing".to_string())?;
+    let store = store_arc.lock().await;
+    store
+        .record_action_queue_id(session_id, action_id)
+        .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+async fn append_stage1_browser_transcript(
+    state: &Arc<AppState>,
+    session_id: &str,
+    kind: openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind,
+    summary: &str,
+    metadata: serde_json::Value,
+) -> Result<(), String> {
+    let store_arc = state
+        .main_chat_agent_session_store
+        .as_ref()
+        .ok_or_else(|| "session store missing".to_string())?;
+    let store = store_arc.lock().await;
+    store
+        .append_transcript_entry(
+            openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryDraft {
+                session_id: session_id.into(),
+                kind,
+                summary: summary.into(),
+                metadata,
+            },
+        )
+        .map_err(|err| err.to_string())?;
+    Ok(())
 }
 
 async fn run_stage1_runtime_evidence_bundle(
@@ -624,8 +1137,7 @@ fn read_browser_e2e_report_from_default_path() -> Option<MainChatStage1BrowserE2
         report_digest: value
             .get("reportDigest")
             .and_then(serde_json::Value::as_str)
-            .map(str::to_string)
-            .or_else(|| Some(digest_label(content.as_bytes()))),
+            .map(str::to_string),
         required_journeys,
         passed_journeys,
         failed_journeys,
@@ -757,8 +1269,15 @@ fn audit_browser_e2e_evidence(
     if !browser_e2e_trace_is_fresh_and_bounded(evidence) {
         push_unique(&mut blockers, "browser_e2e_report_stale_or_untraceable");
     }
+    if !browser_e2e_report_digest_matches(evidence) {
+        push_unique(&mut blockers, "browser_e2e_report_digest_mismatch");
+    }
     for blocker in &evidence.blockers {
-        push_unique(&mut blockers, blocker);
+        if metadata_safe_browser_report_blocker(blocker) {
+            push_unique(&mut blockers, blocker);
+        } else {
+            push_unique(&mut blockers, "browser_e2e_report_blocker_unsafe");
+        }
     }
     for blocker in observed_blockers.drain(..) {
         push_unique(&mut blockers, &blocker);
@@ -810,6 +1329,30 @@ fn audit_browser_observed_scenarios(evidence: &MainChatStage1BrowserE2eEvidence)
         push_unique(
             &mut blockers,
             &format!("browser_e2e_observed_scenario_duplicate:{id}"),
+        );
+    }
+    let distinct_task_session_count = evidence
+        .observed_scenarios
+        .iter()
+        .map(|scenario| scenario.task_session_id.clone())
+        .collect::<BTreeSet<_>>()
+        .len();
+    if distinct_task_session_count < 20 {
+        push_unique(
+            &mut blockers,
+            "browser_e2e_observed_task_session_distinct_count_below_20",
+        );
+    }
+    let distinct_run_count = evidence
+        .observed_scenarios
+        .iter()
+        .map(|scenario| scenario.run_id.clone())
+        .collect::<BTreeSet<_>>()
+        .len();
+    if distinct_run_count < 20 {
+        push_unique(
+            &mut blockers,
+            "browser_e2e_observed_run_distinct_count_below_20",
         );
     }
 
@@ -868,10 +1411,78 @@ fn audit_browser_observed_scenarios(evidence: &MainChatStage1BrowserE2eEvidence)
                 &format!("browser_e2e_route_unsafe:{}", scenario.scenario_id),
             );
         }
+        if scenario.route_strategy != expected.route {
+            push_unique(
+                &mut blockers,
+                &format!("browser_e2e_route_mismatch:{}", scenario.scenario_id),
+            );
+        }
+        if expected.scenario_type == "seeded_task_control_e2e"
+            && scenario.route_strategy == "task_control"
+        {
+            push_unique(
+                &mut blockers,
+                &format!(
+                    "browser_e2e_generic_route_not_observed:{}",
+                    scenario.scenario_id
+                ),
+            );
+        }
         if scenario.runtime_events.is_empty() || !scenario.runtime_evidence_observed {
             push_unique(
                 &mut blockers,
                 &format!("browser_e2e_runtime_state_missing:{}", scenario.scenario_id),
+            );
+        }
+        if has_unsafe_label(&scenario.runtime_events) {
+            push_unique(
+                &mut blockers,
+                &format!(
+                    "browser_e2e_runtime_event_unsafe:{}",
+                    scenario.scenario_id
+                ),
+            );
+        }
+        if expected.scenario_type == "chat_e2e"
+            && !scenario
+                .runtime_events
+                .iter()
+                .any(|event| event == "visible_control.chat_send")
+        {
+            push_unique(
+                &mut blockers,
+                &format!(
+                    "browser_e2e_chat_send_control_not_observed:{}",
+                    scenario.scenario_id
+                ),
+            );
+        }
+        if expected.scenario_type == "seeded_task_control_e2e"
+            && !scenario
+                .runtime_events
+                .iter()
+                .any(|event| event.starts_with("visible_control."))
+        {
+            push_unique(
+                &mut blockers,
+                &format!(
+                    "browser_e2e_seeded_visible_control_not_observed:{}",
+                    scenario.scenario_id
+                ),
+            );
+        }
+        if expected.scenario_type == "seeded_task_control_e2e"
+            && !seeded_visible_control_event_observed(
+                &scenario.scenario_id,
+                &scenario.runtime_events,
+            )
+        {
+            push_unique(
+                &mut blockers,
+                &format!(
+                    "browser_e2e_seeded_expected_control_not_observed:{}",
+                    scenario.scenario_id
+                ),
             );
         }
         if scenario.visible_ui_states.is_empty() || !scenario.ui_state_observed {
@@ -880,11 +1491,29 @@ fn audit_browser_observed_scenarios(evidence: &MainChatStage1BrowserE2eEvidence)
                 &format!("browser_e2e_ui_state_missing:{}", scenario.scenario_id),
             );
         }
+        if has_unsafe_label(&scenario.visible_ui_states) {
+            push_unique(
+                &mut blockers,
+                &format!(
+                    "browser_e2e_visible_ui_state_unsafe:{}",
+                    scenario.scenario_id
+                ),
+            );
+        }
         if scenario.final_delivery_sections.is_empty() || !scenario.final_delivery_observed {
             push_unique(
                 &mut blockers,
                 &format!(
                     "browser_e2e_final_delivery_missing:{}",
+                    scenario.scenario_id
+                ),
+            );
+        }
+        if has_unsafe_label(&scenario.final_delivery_sections) {
+            push_unique(
+                &mut blockers,
+                &format!(
+                    "browser_e2e_final_delivery_section_unsafe:{}",
                     scenario.scenario_id
                 ),
             );
@@ -918,6 +1547,15 @@ fn audit_browser_observed_scenarios(evidence: &MainChatStage1BrowserE2eEvidence)
                     ),
                 );
             }
+        }
+        if has_unsafe_label(&scenario.visible_blockers) {
+            push_unique(
+                &mut blockers,
+                &format!(
+                    "browser_e2e_visible_blocker_unsafe:{}",
+                    scenario.scenario_id
+                ),
+            );
         }
         if expected.blocker.is_some_and(|blocker| {
             !scenario
@@ -965,6 +1603,54 @@ fn audit_browser_observed_scenarios(evidence: &MainChatStage1BrowserE2eEvidence)
     blockers
 }
 
+fn seeded_visible_control_event_observed(scenario_id: &str, events: &[String]) -> bool {
+    seeded_visible_control_event_prefixes(scenario_id)
+        .iter()
+        .any(|prefix| {
+            events
+                .iter()
+                .any(|event| visible_control_event_matches_prefix(event, prefix))
+        })
+}
+
+fn visible_control_event_matches_prefix(event: &str, prefix: &str) -> bool {
+    event == prefix || event.as_bytes().get(prefix.len()).is_some_and(|value| {
+        event.starts_with(prefix) && *value == b'_'
+    })
+}
+
+fn seeded_visible_control_event_prefixes(scenario_id: &str) -> &'static [&'static str] {
+    match scenario_id {
+        "D09" => &["visible_control.skip_step"],
+        "D11" => &["visible_control.accept_proposal"],
+        "D12" => &["visible_control.rollback_memory"],
+        "D13" => &["visible_control.resume_task_from_continuity_detail"],
+        "D14" => &["visible_control.retry_task_action"],
+        "D15" => &["visible_control.cancel_task_from_continuity_detail"],
+        "D19" | "D20" | "D28" => &["visible_control.task_continuity_detail_opened"],
+        "D27" => &["visible_control.refresh_task_context"],
+        "D35" => &["visible_control.deny", "visible_control.reject_proposal"],
+        "D36" => &["visible_control.defer"],
+        _ => &[],
+    }
+}
+
+fn seeded_visible_control_event_for_test(scenario_id: &str) -> &'static str {
+    match scenario_id {
+        "D09" => "visible_control.skip_step_seeded_plan_step",
+        "D11" => "visible_control.accept_proposal",
+        "D12" => "visible_control.rollback_memory",
+        "D13" => "visible_control.resume_task_from_continuity_detail",
+        "D14" => "visible_control.retry_task_action",
+        "D15" => "visible_control.cancel_task_from_continuity_detail",
+        "D19" | "D20" | "D28" => "visible_control.task_continuity_detail_opened",
+        "D27" => "visible_control.refresh_task_context",
+        "D35" => "visible_control.deny",
+        "D36" => "visible_control.defer",
+        _ => "visible_control.unmapped_seeded_control",
+    }
+}
+
 fn browser_evidence_source_is_frontend_only(source: &str) -> bool {
     let lowered = source.to_ascii_lowercase();
     lowered.contains("frontend")
@@ -975,10 +1661,7 @@ fn browser_evidence_source_is_frontend_only(source: &str) -> bool {
 }
 
 fn browser_evidence_source_is_safe_real_command_surface(source: &str) -> bool {
-    metadata_safe_label(source)
-        && source.contains("tauri")
-        && source.contains("command_surface")
-        && !browser_evidence_source_is_frontend_only(source)
+    source == "tauri_command_surface_browser_observed"
 }
 
 fn browser_e2e_trace_is_fresh_and_bounded(evidence: &MainChatStage1BrowserE2eEvidence) -> bool {
@@ -1013,6 +1696,101 @@ fn browser_e2e_trace_is_fresh_and_bounded(evidence: &MainChatStage1BrowserE2eEvi
             .is_some_and(metadata_safe_digest_label)
 }
 
+fn browser_e2e_report_digest_matches(evidence: &MainChatStage1BrowserE2eEvidence) -> bool {
+    let Some(expected) = stage1_browser_report_digest(evidence) else {
+        return false;
+    };
+    evidence.report_digest.as_deref() == Some(expected.as_str())
+}
+
+pub(crate) fn stage1_browser_report_digest(
+    evidence: &MainChatStage1BrowserE2eEvidence,
+) -> Option<String> {
+    let run_id = evidence.run_id.as_deref()?;
+    let generated_at = evidence.generated_at.as_deref()?;
+    Some(digest_label(
+        stage1_browser_report_digest_input(
+            &evidence.evidence_source,
+            run_id,
+            generated_at,
+            &evidence.required_journeys,
+            &evidence.passed_journeys,
+            &evidence.failed_journeys,
+            &evidence.observed_scenarios,
+            &evidence.blockers,
+        )
+        .as_bytes(),
+    ))
+}
+
+fn stage1_browser_report_digest_input(
+    evidence_source: &str,
+    run_id: &str,
+    generated_at: &str,
+    required_journeys: &[String],
+    passed_journeys: &[String],
+    failed_journeys: &[String],
+    observed_scenarios: &[MainChatStage1BrowserScenarioEvidence],
+    blockers: &[String],
+) -> String {
+    let rows = observed_scenarios
+        .iter()
+        .map(|scenario| {
+            [
+                digest_part(&scenario.scenario_id),
+                digest_part(&scenario.observed_via),
+                digest_part(&scenario.entry_point),
+                digest_part(&scenario.task_session_id),
+                digest_part(&scenario.run_id),
+                digest_part(&scenario.route_strategy),
+                digest_part(&digest_array(&scenario.runtime_events)),
+                digest_part(&digest_array(&scenario.visible_ui_states)),
+                digest_part(&digest_array(&scenario.final_delivery_sections)),
+                digest_part(&digest_array(&scenario.visible_blockers)),
+                digest_part(bool_label(scenario.runtime_evidence_observed)),
+                digest_part(bool_label(scenario.ui_state_observed)),
+                digest_part(bool_label(scenario.final_delivery_observed)),
+                digest_part(bool_label(scenario.non_fake_evidence_observed)),
+                digest_part(bool_label(scenario.legacy_fallback_used)),
+                digest_part(bool_label(scenario.silent_durable_write_detected)),
+                digest_part(bool_label(scenario.fake_execution_detected)),
+            ]
+            .join("|")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    [
+        "stage1-browser-e2e-report-v1".into(),
+        format!("source={}", digest_part(evidence_source)),
+        format!("runId={}", digest_part(run_id)),
+        format!("generatedAt={}", digest_part(generated_at)),
+        format!("required={}", digest_array(required_journeys)),
+        format!("passed={}", digest_array(passed_journeys)),
+        format!("failed={}", digest_array(failed_journeys)),
+        format!("blockers={}", digest_array(blockers)),
+        "observed:".into(),
+        rows,
+    ]
+    .join("\n")
+}
+
+fn digest_array(values: &[String]) -> String {
+    values
+        .iter()
+        .map(|value| digest_part(value))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn digest_part(value: &str) -> String {
+    format!("{}:{value}", value.len())
+}
+
+fn bool_label(value: bool) -> &'static str {
+    if value { "true" } else { "false" }
+}
+
 fn metadata_safe_label(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 96
@@ -1020,6 +1798,19 @@ fn metadata_safe_label(value: &str) -> bool {
         && value
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':' | '/'))
+}
+
+fn metadata_safe_browser_report_blocker(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 160
+        && value.trim() == value
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':' | '/'))
+}
+
+fn has_unsafe_label(values: &[String]) -> bool {
+    values.iter().any(|value| !metadata_safe_label(value))
 }
 
 fn metadata_safe_commit_label(value: &str) -> bool {

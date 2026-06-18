@@ -214,6 +214,31 @@ function companionRunSummary(run: AgentRun | null): string[] {
   ];
 }
 
+function recordArrayLength(value: Record<string, unknown> | null | undefined, key: string): number {
+  const item = value?.[key];
+  return Array.isArray(item) ? item.length : 0;
+}
+
+function taskContinuityFinalDeliverySections(
+  value: Record<string, unknown> | null | undefined
+): string[] {
+  if (!value) return [];
+  const metadata = value.metadata;
+  const metrics =
+    metadata && typeof metadata === "object" && !Array.isArray(metadata)
+      ? { ...value, ...(metadata as Record<string, unknown>) }
+      : value;
+  return [
+    recordArrayLength(metrics, "completedActions") > 0 ? "Completed actions" : null,
+    recordArrayLength(metrics, "observationsUsed") > 0 ? "Sources used" : null,
+    recordArrayLength(metrics, "proposalsCreated") > 0 ? "Proposals created" : null,
+    recordArrayLength(metrics, "blockers") > 0 ? "Blocked items" : null,
+    recordArrayLength(metrics, "skippedWork") > 0 ? "Skipped work" : null,
+    recordArrayLength(metrics, "pendingUserActions") > 0 ? "Pending user actions" : null,
+    recordArrayLength(metrics, "durableChanges") > 0 ? "Durable changes" : null,
+  ].filter((section): section is string => Boolean(section));
+}
+
 function isStreamDonePayload(value: unknown): value is StreamMessageDonePayload {
   return (
     !!value &&
@@ -564,8 +589,9 @@ export default function ChatPage({
   const [input, setInput] = useState("");
   const [selectedSkillId, setSelectedSkillId] = useState("");
   const [skillSummaries, setSkillSummaries] = useState<MainChatSkillSummary[]>([]);
-  const [selectedSkillEvidence, setSelectedSkillEvidence] =
-    useState<MainChatSelectedSkill | null>(null);
+  const [selectedSkillEvidence, setSelectedSkillEvidence] = useState<MainChatSelectedSkill | null>(
+    null
+  );
   const [inspectedSkillDetail, setInspectedSkillDetail] = useState<MainChatSkillDetail | null>(
     null
   );
@@ -600,12 +626,8 @@ export default function ChatPage({
   const [currentAgentTaskState, setCurrentAgentTaskState] = useState<MainChatAgentTaskState | null>(
     null
   );
-  const [taskContinuitySummaries, setTaskContinuitySummaries] = useState<MainChatTaskSummary[]>(
-    []
-  );
-  const [taskContinuityDetail, setTaskContinuityDetail] = useState<MainChatTaskDetail | null>(
-    null
-  );
+  const [taskContinuitySummaries, setTaskContinuitySummaries] = useState<MainChatTaskSummary[]>([]);
+  const [taskContinuityDetail, setTaskContinuityDetail] = useState<MainChatTaskDetail | null>(null);
   const [taskContinuityBusy, setTaskContinuityBusy] = useState(false);
   const [taskContinuityError, setTaskContinuityError] = useState<string | null>(null);
   const [currentAgentState, setCurrentAgentState] = useState<MainChatAgentStateSnapshot | null>(
@@ -1726,13 +1748,16 @@ export default function ChatPage({
     }
   }, [currentMainChatTaskSessionId, loadSkillToolSurface]);
 
-  const refreshMainChatControlState = useCallback(async (taskSessionId?: string) => {
-    await refreshPendingProposals();
-    if (taskSessionId) {
-      await loadMainChatTaskState(taskSessionId, currentSessionIdRef.current);
-    }
-    await loadTaskContinuityList();
-  }, [loadTaskContinuityList]);
+  const refreshMainChatControlState = useCallback(
+    async (taskSessionId?: string) => {
+      await refreshPendingProposals();
+      if (taskSessionId) {
+        await loadMainChatTaskState(taskSessionId, currentSessionIdRef.current);
+      }
+      await loadTaskContinuityList();
+    },
+    [loadTaskContinuityList]
+  );
 
   const handleResumeMainChatTask = useCallback(async () => {
     const taskSessionId = currentMainChatTaskSessionId();
@@ -3434,6 +3459,7 @@ export default function ChatPage({
                 </div>
               )}
               <div
+                data-testid={m.role === "assistant" ? "assistant-message" : "user-message"}
                 className={classNames(
                   "max-w-2xl rounded-xl px-4 py-3 text-sm",
                   companionMode
@@ -4072,9 +4098,7 @@ export default function ChatPage({
                     {toolCandidateSurface.candidates.length > 0 && (
                       <div className="min-w-0 border-l border-sky-300 bg-sky-50/70 px-2 py-1">
                         <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-semibold text-stone-950">
-                            Safe read candidates
-                          </span>
+                          <span className="font-semibold text-stone-950">Safe read candidates</span>
                           <span className="text-stone-500">
                             {toolCandidateSurface.evidenceDigest}
                           </span>
@@ -4086,12 +4110,8 @@ export default function ChatPage({
                                 <span className="font-semibold text-stone-800">
                                   {candidate.toolName}
                                 </span>
-                                <span className="text-stone-500">
-                                  {candidate.policyDecision}
-                                </span>
-                                <span className="text-stone-500">
-                                  {candidate.selectionReason}
-                                </span>
+                                <span className="text-stone-500">{candidate.policyDecision}</span>
+                                <span className="text-stone-500">{candidate.selectionReason}</span>
                               </div>
                               <div className="truncate text-stone-500">
                                 {candidate.candidateDigest}
@@ -4108,9 +4128,7 @@ export default function ChatPage({
                         {toolCandidateSurface.blockedTools.slice(0, 5).map(tool => (
                           <div key={`${tool.toolName}-${tool.reasonCode}`} className="mt-1">
                             <div className="flex flex-wrap items-center gap-2">
-                              <span className="font-semibold text-amber-950">
-                                {tool.toolName}
-                              </span>
+                              <span className="font-semibold text-amber-950">{tool.toolName}</span>
                               <span className="text-amber-900">{tool.reasonCode}</span>
                             </div>
                           </div>
@@ -4146,15 +4164,13 @@ export default function ChatPage({
             </section>
           )}
           {!companionMode && (taskContinuitySummaries.length > 0 || taskContinuityError) && (
-            <div className="px-4 py-2">
+            <div data-testid="task-continuity" className="px-4 py-2">
               <div className="border-y border-stone-200 bg-white px-3 py-3 text-xs text-stone-700">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="inline-flex h-6 items-center rounded-md bg-stone-900 px-2 font-semibold text-white">
                     Task continuity
                   </span>
-                  <span className="text-stone-500">
-                    {taskContinuitySummaries.length} tracked
-                  </span>
+                  <span className="text-stone-500">{taskContinuitySummaries.length} tracked</span>
                   {taskContinuityBusy && (
                     <span className="inline-flex items-center gap-1 text-stone-500">
                       <Loader2 size={12} className="animate-spin" />
@@ -4173,6 +4189,12 @@ export default function ChatPage({
                       <button
                         key={summary.taskSessionId}
                         type="button"
+                        data-testid="task-continuity-summary"
+                        data-task-session-id={summary.taskSessionId}
+                        data-run-id={summary.runId}
+                        data-task-status={summary.status}
+                        data-task-strategy={summary.strategy}
+                        data-next-control={summary.nextRecommendedControl}
                         aria-label={`Open task ${summary.title}`}
                         onClick={() => loadTaskContinuityDetail(summary.taskSessionId)}
                         className={classNames(
@@ -4214,7 +4236,19 @@ export default function ChatPage({
                     ))}
                   </div>
                   {taskContinuityDetail && (
-                    <div className="min-w-0 border-y border-stone-200 bg-stone-50/80 px-2 py-2">
+                    <div
+                      data-testid="task-continuity-detail"
+                      data-task-session-id={taskContinuityDetail.taskSession.id}
+                      data-run-id={
+                        taskContinuitySummaries.find(
+                          summary => summary.taskSessionId === taskContinuityDetail.taskSession.id
+                        )?.runId ?? taskContinuityDetail.taskSession.id
+                      }
+                      data-task-strategy={taskContinuityDetail.taskSession.selectedStrategy}
+                      data-task-status={taskContinuityDetail.taskSession.status}
+                      data-next-control={taskContinuityDetail.nextRecommendedControl}
+                      className="min-w-0 border-y border-stone-200 bg-stone-50/80 px-2 py-2"
+                    >
                       <div className="flex flex-wrap items-start gap-2">
                         <div className="min-w-0 flex-1">
                           <div className="truncate font-semibold text-stone-950">
@@ -4238,9 +4272,7 @@ export default function ChatPage({
                             </span>
                             <span className="inline-flex h-5 items-center rounded-md bg-white px-1.5 text-stone-600">
                               next{" "}
-                              {formatContinuityControl(
-                                taskContinuityDetail.nextRecommendedControl
-                              )}
+                              {formatContinuityControl(taskContinuityDetail.nextRecommendedControl)}
                             </span>
                           </div>
                         </div>
@@ -4355,6 +4387,34 @@ export default function ChatPage({
                               </div>
                             </div>
                           ))}
+                        </div>
+                      )}
+                      {taskContinuityDetail.finalDelivery && (
+                        <div
+                          data-testid="task-continuity-final-delivery"
+                          data-final-delivery-section-titles={taskContinuityFinalDeliverySections(
+                            taskContinuityDetail.finalDelivery
+                          ).join("|")}
+                          className="mt-2 border-l border-emerald-300 bg-white/80 px-2 py-1"
+                        >
+                          <div className="font-semibold text-stone-950">Final delivery</div>
+                          <div className="mt-1 flex flex-wrap gap-1 text-stone-600">
+                            {taskContinuityFinalDeliverySections(taskContinuityDetail.finalDelivery)
+                              .length > 0 ? (
+                              taskContinuityFinalDeliverySections(
+                                taskContinuityDetail.finalDelivery
+                              ).map(section => (
+                                <span
+                                  key={section}
+                                  className="inline-flex h-5 items-center rounded-md border border-emerald-200 bg-emerald-50 px-1.5 text-emerald-900"
+                                >
+                                  {section}
+                                </span>
+                              ))
+                            ) : (
+                              <span>Recorded</span>
+                            )}
+                          </div>
                         </div>
                       )}
                     </div>

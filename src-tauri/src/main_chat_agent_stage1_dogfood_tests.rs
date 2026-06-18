@@ -1,8 +1,10 @@
 use crate::main_chat_agent_stage1_dogfood::{
     passing_stage1_browser_e2e_evidence_for_tests,
+    prepare_main_chat_agent_stage1_browser_dogfood_state_with_state,
     run_main_chat_agent_stage1_dogfood_report_with_browser_evidence,
     run_main_chat_agent_stage1_dogfood_report_with_inputs_for_tests,
-    run_stage1_runtime_evidence_bundle_for_tests, MainChatStage1BrowserE2eEvidence,
+    run_stage1_runtime_evidence_bundle_for_tests, stage1_browser_report_digest,
+    MainChatStage1BrowserE2eEvidence,
 };
 
 fn is_digest_label(value: &str) -> bool {
@@ -199,6 +201,27 @@ async fn main_chat_agent_stage1_dogfood_gate_rejects_frontend_only_fixture_brows
 }
 
 #[tokio::test]
+async fn main_chat_agent_stage1_dogfood_gate_rejects_non_exact_browser_evidence_source() {
+    let mut evidence = passing_stage1_browser_e2e_evidence_for_tests();
+    evidence.evidence_source = "tauri_command_surface_shadow_observed".into();
+    evidence.report_digest = stage1_browser_report_digest(&evidence);
+
+    let report = run_main_chat_agent_stage1_dogfood_report_with_inputs_for_tests(
+        Some(evidence),
+        None,
+        false,
+    )
+    .await
+    .expect("stage 1 dogfood report");
+
+    assert!(!report.default_ready);
+    assert!(report
+        .blockers
+        .iter()
+        .any(|blocker| blocker == "browser_e2e_source_missing_or_unsafe"));
+}
+
+#[tokio::test]
 async fn main_chat_agent_stage1_dogfood_gate_rejects_incomplete_browser_journeys() {
     let mut evidence = passing_stage1_browser_e2e_evidence_for_tests();
     evidence.passed_journeys.pop();
@@ -218,6 +241,29 @@ async fn main_chat_agent_stage1_dogfood_gate_rejects_incomplete_browser_journeys
 }
 
 #[tokio::test]
+async fn main_chat_agent_stage1_dogfood_gate_rejects_mismatched_browser_report_digest() {
+    let mut evidence = passing_stage1_browser_e2e_evidence_for_tests();
+    evidence.report_digest = Some(
+        "bytes:1 hash:sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            .into(),
+    );
+
+    let report = run_main_chat_agent_stage1_dogfood_report_with_inputs_for_tests(
+        Some(evidence),
+        None,
+        false,
+    )
+    .await
+    .expect("stage 1 dogfood report");
+
+    assert!(!report.default_ready);
+    assert!(report
+        .blockers
+        .iter()
+        .any(|blocker| blocker == "browser_e2e_report_digest_mismatch"));
+}
+
+#[tokio::test]
 async fn main_chat_agent_stage1_dogfood_gate_rejects_journey_only_browser_report() {
     let mut evidence = passing_stage1_browser_e2e_evidence_for_tests();
     evidence.observed_scenarios.clear();
@@ -234,6 +280,335 @@ async fn main_chat_agent_stage1_dogfood_gate_rejects_journey_only_browser_report
         .blockers
         .iter()
         .any(|blocker| blocker == "browser_e2e_observed_scenarios_missing"));
+}
+
+#[tokio::test]
+async fn main_chat_agent_stage1_dogfood_gate_rejects_reused_browser_runtime_identities() {
+    let mut evidence = passing_stage1_browser_e2e_evidence_for_tests();
+    for scenario in &mut evidence.observed_scenarios {
+        scenario.task_session_id = "reused-browser-task".into();
+        scenario.run_id = "reused-browser-run".into();
+    }
+    evidence.report_digest = stage1_browser_report_digest(&evidence);
+
+    let report = run_main_chat_agent_stage1_dogfood_report_with_inputs_for_tests(
+        Some(evidence),
+        None,
+        false,
+    )
+    .await
+    .expect("stage 1 dogfood report");
+
+    assert!(!report.default_ready);
+    assert!(report
+        .blockers
+        .iter()
+        .any(|blocker| blocker == "browser_e2e_observed_task_session_distinct_count_below_20"));
+    assert!(report
+        .blockers
+        .iter()
+        .any(|blocker| blocker == "browser_e2e_observed_run_distinct_count_below_20"));
+}
+
+#[tokio::test]
+async fn main_chat_agent_stage1_dogfood_gate_rejects_seeded_control_without_visible_control_event()
+{
+    let mut evidence = passing_stage1_browser_e2e_evidence_for_tests();
+    let d09 = evidence
+        .observed_scenarios
+        .iter_mut()
+        .find(|scenario| scenario.scenario_id == "D09")
+        .expect("D09 browser scenario");
+    d09.runtime_events
+        .retain(|event| !event.starts_with("visible_control."));
+
+    let report = run_main_chat_agent_stage1_dogfood_report_with_inputs_for_tests(
+        Some(evidence),
+        None,
+        false,
+    )
+    .await
+    .expect("stage 1 dogfood report");
+
+    assert!(!report.default_ready);
+    assert!(report
+        .blockers
+        .iter()
+        .any(|blocker| { blocker == "browser_e2e_seeded_visible_control_not_observed:D09" }));
+}
+
+#[tokio::test]
+async fn main_chat_agent_stage1_dogfood_gate_rejects_seeded_control_without_expected_control_event()
+{
+    let mut evidence = passing_stage1_browser_e2e_evidence_for_tests();
+    let d13 = evidence
+        .observed_scenarios
+        .iter_mut()
+        .find(|scenario| scenario.scenario_id == "D13")
+        .expect("D13 browser scenario");
+    d13.runtime_events = vec![
+        "task_session.created".into(),
+        "visible_control.applied".into(),
+        "final_delivery.created".into(),
+    ];
+    evidence.report_digest = stage1_browser_report_digest(&evidence);
+
+    let report = run_main_chat_agent_stage1_dogfood_report_with_inputs_for_tests(
+        Some(evidence),
+        None,
+        false,
+    )
+    .await
+    .expect("stage 1 dogfood report");
+
+    assert!(!report.default_ready);
+    assert!(report
+        .blockers
+        .iter()
+        .any(|blocker| { blocker == "browser_e2e_seeded_expected_control_not_observed:D13" }));
+}
+
+#[tokio::test]
+async fn main_chat_agent_stage1_dogfood_gate_rejects_chat_without_visible_send_event() {
+    let mut evidence = passing_stage1_browser_e2e_evidence_for_tests();
+    let d01 = evidence
+        .observed_scenarios
+        .iter_mut()
+        .find(|scenario| scenario.scenario_id == "D01")
+        .expect("D01 browser scenario");
+    d01.runtime_events
+        .retain(|event| event != "visible_control.chat_send");
+    evidence.report_digest = stage1_browser_report_digest(&evidence);
+
+    let report = run_main_chat_agent_stage1_dogfood_report_with_inputs_for_tests(
+        Some(evidence),
+        None,
+        false,
+    )
+    .await
+    .expect("stage 1 dogfood report");
+
+    assert!(!report.default_ready);
+    assert!(report
+        .blockers
+        .iter()
+        .any(|blocker| blocker == "browser_e2e_chat_send_control_not_observed:D01"));
+}
+
+#[tokio::test]
+async fn main_chat_agent_stage1_dogfood_gate_rejects_unsafe_observed_browser_labels() {
+    let mut evidence = passing_stage1_browser_e2e_evidence_for_tests();
+    let d01 = evidence
+        .observed_scenarios
+        .iter_mut()
+        .find(|scenario| scenario.scenario_id == "D01")
+        .expect("D01 browser scenario");
+    d01.runtime_events
+        .push("assistant text says Actions and observations are complete".into());
+    d01.visible_ui_states
+        .push("completed\nfrom assistant text".into());
+    d01.final_delivery_sections
+        .push("Final delivery: complete".into());
+    d01.visible_blockers
+        .push("permission required by assistant text".into());
+    evidence.report_digest = stage1_browser_report_digest(&evidence);
+
+    let report = run_main_chat_agent_stage1_dogfood_report_with_inputs_for_tests(
+        Some(evidence),
+        None,
+        false,
+    )
+    .await
+    .expect("stage 1 dogfood report");
+
+    assert!(!report.default_ready);
+    assert!(report
+        .blockers
+        .iter()
+        .any(|blocker| blocker == "browser_e2e_runtime_event_unsafe:D01"));
+    assert!(report
+        .blockers
+        .iter()
+        .any(|blocker| blocker == "browser_e2e_visible_ui_state_unsafe:D01"));
+    assert!(report
+        .blockers
+        .iter()
+        .any(|blocker| blocker == "browser_e2e_final_delivery_section_unsafe:D01"));
+    assert!(report
+        .blockers
+        .iter()
+        .any(|blocker| blocker == "browser_e2e_visible_blocker_unsafe:D01"));
+}
+
+#[tokio::test]
+async fn main_chat_agent_stage1_dogfood_gate_rejects_unsafe_browser_report_blockers() {
+    let mut evidence = passing_stage1_browser_e2e_evidence_for_tests();
+    evidence
+        .blockers
+        .push("raw browser blocker\nwith assistant text".into());
+    evidence.report_digest = stage1_browser_report_digest(&evidence);
+
+    let report = run_main_chat_agent_stage1_dogfood_report_with_inputs_for_tests(
+        Some(evidence),
+        None,
+        false,
+    )
+    .await
+    .expect("stage 1 dogfood report");
+
+    assert!(!report.default_ready);
+    assert!(report
+        .blockers
+        .iter()
+        .any(|blocker| blocker == "browser_e2e_report_blocker_unsafe"));
+    assert!(!report
+        .blockers
+        .iter()
+        .any(|blocker| blocker.contains("assistant text")));
+}
+
+#[tokio::test]
+async fn main_chat_agent_stage1_dogfood_gate_rejects_seeded_control_with_generic_route() {
+    let mut evidence = passing_stage1_browser_e2e_evidence_for_tests();
+    let d13 = evidence
+        .observed_scenarios
+        .iter_mut()
+        .find(|scenario| scenario.scenario_id == "D13")
+        .expect("D13 browser scenario");
+    d13.route_strategy = "task_control".into();
+
+    let report = run_main_chat_agent_stage1_dogfood_report_with_inputs_for_tests(
+        Some(evidence),
+        None,
+        false,
+    )
+    .await
+    .expect("stage 1 dogfood report");
+
+    assert!(!report.default_ready);
+    assert!(report
+        .blockers
+        .iter()
+        .any(|blocker| blocker == "browser_e2e_generic_route_not_observed:D13"));
+}
+
+#[tokio::test]
+async fn main_chat_agent_stage1_dogfood_gate_rejects_browser_route_mismatch() {
+    let mut evidence = passing_stage1_browser_e2e_evidence_for_tests();
+    let d02 = evidence
+        .observed_scenarios
+        .iter_mut()
+        .find(|scenario| scenario.scenario_id == "D02")
+        .expect("D02 browser scenario");
+    d02.route_strategy = "DirectAnswer".into();
+    evidence.report_digest = stage1_browser_report_digest(&evidence);
+
+    let report = run_main_chat_agent_stage1_dogfood_report_with_inputs_for_tests(
+        Some(evidence),
+        None,
+        false,
+    )
+    .await
+    .expect("stage 1 dogfood report");
+
+    assert!(!report.default_ready);
+    assert!(report
+        .blockers
+        .iter()
+        .any(|blocker| blocker == "browser_e2e_route_mismatch:D02"));
+}
+
+#[tokio::test]
+async fn main_chat_agent_stage1_browser_prep_seeds_real_task_control_state_only() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let prep = prepare_main_chat_agent_stage1_browser_dogfood_state_with_state(&state)
+        .await
+        .expect("stage 1 browser prep");
+
+    assert!(prep.prepared);
+    assert_eq!(prep.evidence_source, "real_app_state_task_continuity_seed");
+    assert!(!prep.direct_writes_executed);
+    assert_eq!(prep.task_session_ids.len(), 7);
+    for id in ["D13", "D14", "D15", "D19", "D20", "D27", "D28"] {
+        assert!(
+            prep.task_session_ids.contains_key(id),
+            "missing seeded task id for {id}"
+        );
+    }
+
+    let d13 = crate::main_chat_task_controls::get_main_chat_agent_task_detail_with_state(
+        prep.task_session_ids.get("D13").unwrap(),
+        &state,
+    )
+    .await
+    .expect("D13 detail");
+    assert!(d13
+        .allowed_controls
+        .iter()
+        .any(|control| control == "resume"));
+
+    let d14 = crate::main_chat_task_controls::get_main_chat_agent_task_detail_with_state(
+        prep.task_session_ids.get("D14").unwrap(),
+        &state,
+    )
+    .await
+    .expect("D14 detail");
+    assert!(d14
+        .allowed_controls
+        .iter()
+        .any(|control| control == "retry"));
+
+    let d15 = crate::main_chat_task_controls::get_main_chat_agent_task_detail_with_state(
+        prep.task_session_ids.get("D15").unwrap(),
+        &state,
+    )
+    .await
+    .expect("D15 detail");
+    assert!(d15
+        .allowed_controls
+        .iter()
+        .any(|control| control == "cancel"));
+    assert!(d15
+        .blockers
+        .iter()
+        .any(|blocker| blocker == "stage1_cancel_blocked_work"));
+
+    let d27 = crate::main_chat_task_controls::get_main_chat_agent_task_detail_with_state(
+        prep.task_session_ids.get("D27").unwrap(),
+        &state,
+    )
+    .await
+    .expect("D27 detail");
+    assert!(d27
+        .continuity_diagnostics
+        .reason_codes
+        .iter()
+        .any(|code| code == "stale_context"));
+    assert!(d27
+        .allowed_controls
+        .iter()
+        .any(|control| control == "refresh_context"));
+
+    let d28 = crate::main_chat_task_controls::get_main_chat_agent_task_detail_with_state(
+        prep.task_session_ids.get("D28").unwrap(),
+        &state,
+    )
+    .await
+    .expect("D28 detail");
+    let d28_final_delivery = d28.final_delivery.expect("D28 final delivery");
+    let d28_metadata = d28_final_delivery
+        .get("metadata")
+        .expect("D28 final delivery metadata");
+    assert!(d28_metadata
+        .get("sections")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|sections| sections
+            .iter()
+            .any(|section| section.as_str() == Some("skipped"))));
+    assert!(d28_metadata
+        .get("skippedActions")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| !items.is_empty()));
 }
 
 #[tokio::test]

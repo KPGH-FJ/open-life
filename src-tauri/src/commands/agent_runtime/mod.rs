@@ -1978,6 +1978,19 @@ pub async fn run_main_chat_agent_stage1_dogfood_gate(
 }
 
 #[tauri::command]
+pub async fn prepare_main_chat_agent_stage1_browser_dogfood_state(
+    state: State<'_, Arc<AppState>>,
+) -> Result<
+    crate::main_chat_agent_stage1_dogfood::MainChatAgentStage1BrowserDogfoodPrepReport,
+    String,
+> {
+    crate::main_chat_agent_stage1_dogfood::prepare_main_chat_agent_stage1_browser_dogfood_state_with_state(
+        &state.inner().clone(),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn run_main_chat_agent_execution_v1_final_acceptance_gate(
     state: State<'_, Arc<AppState>>,
 ) -> Result<MainChatAgentExecutionV1FinalAcceptanceGateCommandReport, String> {

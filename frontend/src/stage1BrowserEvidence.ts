@@ -1,9 +1,19 @@
 import type { MainChatAgentStage1DogfoodReport } from "./tauri";
+import { STAGE1_DOGFOOD_SCENARIOS } from "./stage1DogfoodScenarios";
 
 export const STAGE1_REQUIRED_BROWSER_JOURNEYS = Array.from(
   { length: 36 },
   (_, index) => `D${String(index + 1).padStart(2, "0")}`
 );
+
+export const STAGE1_NON_TAURI_BROWSER_BLOCKERS = [
+  "real_tauri_browser_command_surface_unavailable",
+  "playwright_default_runner_is_vite_only",
+  "tauri_webdriver_environment_not_ready",
+] as const;
+
+const STAGE1_MACOS_TAURI_WEBDRIVER_BLOCKER =
+  "tauri_webdriver_macos_not_supported_by_tauri_driver";
 
 const REPORT_PATH = "frontend/test-results/main-chat-stage1-dogfood-report.json";
 const PASSING_SOURCE = "tauri_command_surface_browser_observed";
@@ -51,13 +61,26 @@ interface BuildOptions {
   runId?: string;
 }
 
+interface Stage1TauriWebdriverPreflightInput {
+  platform: string;
+  tauriDriverAvailable: boolean;
+  nativeWebdriverAvailable: boolean;
+  appBinaryAvailable: boolean;
+}
+
+interface Stage1TauriWebdriverPreflightReport {
+  ready: boolean;
+  supportedPlatform: boolean;
+  blockers: string[];
+}
+
 export function buildStage1BlockedBrowserEvidenceReport(
   blockers: string[],
   options: BuildOptions = {}
 ): Stage1BrowserEvidenceReport {
   const runId = options.runId ?? `stage1-browser-e2e-blocked-${Date.now()}`;
   const generatedAt = (options.now ?? new Date()).toISOString();
-  const normalizedBlockers = uniqueValues(["not_ready_browser_e2e_blocked", ...blockers]);
+  const normalizedBlockers = normalizeBlockers(["not_ready_browser_e2e_blocked", ...blockers]);
   return {
     browserE2eEnvironmentReady: false,
     selfContainedRunner: true,
@@ -67,10 +90,12 @@ export function buildStage1BlockedBrowserEvidenceReport(
     runId,
     generatedAt,
     reportDigest: digestLabel(
-      JSON.stringify({
+      stage1BrowserReportDigestInput({
+        evidenceSource: BLOCKED_SOURCE,
         runId,
         generatedAt,
         requiredJourneys: STAGE1_REQUIRED_BROWSER_JOURNEYS,
+        passedJourneys: [],
         failedJourneys: STAGE1_REQUIRED_BROWSER_JOURNEYS,
         observedScenarios: [],
         blockers: normalizedBlockers,
@@ -81,6 +106,37 @@ export function buildStage1BlockedBrowserEvidenceReport(
     failedJourneys: [...STAGE1_REQUIRED_BROWSER_JOURNEYS],
     observedScenarios: [],
     blockers: normalizedBlockers,
+  };
+}
+
+export function stage1NonTauriBrowserBlockersForPlatform(platform: string): string[] {
+  return platform === "darwin"
+    ? [...STAGE1_NON_TAURI_BROWSER_BLOCKERS, STAGE1_MACOS_TAURI_WEBDRIVER_BLOCKER]
+    : [...STAGE1_NON_TAURI_BROWSER_BLOCKERS];
+}
+
+export function buildStage1TauriWebdriverPreflight(
+  input: Stage1TauriWebdriverPreflightInput
+): Stage1TauriWebdriverPreflightReport {
+  if (input.platform === "darwin") {
+    return {
+      ready: false,
+      supportedPlatform: false,
+      blockers: [STAGE1_MACOS_TAURI_WEBDRIVER_BLOCKER],
+    };
+  }
+
+  const supportedPlatform = input.platform === "linux" || input.platform === "win32";
+  const blockers: string[] = [];
+  if (!supportedPlatform) blockers.push("tauri_webdriver_platform_not_supported");
+  if (!input.tauriDriverAvailable) blockers.push("tauri_driver_binary_missing");
+  if (!input.nativeWebdriverAvailable) blockers.push("native_webdriver_binary_missing");
+  if (!input.appBinaryAvailable) blockers.push("tauri_debug_app_binary_missing");
+
+  return {
+    ready: supportedPlatform && blockers.length === 0,
+    supportedPlatform,
+    blockers,
   };
 }
 
@@ -99,20 +155,8 @@ export function buildStage1PassingBrowserEvidenceReportFromObservedScenarios(
       ["stage1_browser_observed_scenarios_incomplete", ...observedBlockers].join(":")
     );
   }
-  const report = gateReport as MainChatAgentStage1DogfoodReport;
   const runId = options.runId ?? `stage1-browser-e2e-real-${Date.now()}`;
   const generatedAt = (options.now ?? new Date()).toISOString();
-  const evidenceSummary = {
-    runId,
-    generatedAt,
-    defaultScenarioCount: report.defaultScenarioCount,
-    taskSessionCreatedCount: report.taskSessionCreatedCount,
-    ordinaryChatScenarioCount: report.ordinaryChatScenarioCount,
-    seededTaskControlScenarioCount: report.seededTaskControlScenarioCount,
-    finalDeliveryVerifiedScenarioCount: report.finalDeliveryVerifiedScenarioCount,
-    scenarioIds: STAGE1_REQUIRED_BROWSER_JOURNEYS,
-    observedScenarios,
-  };
 
   return {
     browserE2eEnvironmentReady: true,
@@ -122,7 +166,18 @@ export function buildStage1PassingBrowserEvidenceReportFromObservedScenarios(
     evidenceSource: PASSING_SOURCE,
     runId,
     generatedAt,
-    reportDigest: digestLabel(JSON.stringify(evidenceSummary)),
+    reportDigest: digestLabel(
+      stage1BrowserReportDigestInput({
+        evidenceSource: PASSING_SOURCE,
+        runId,
+        generatedAt,
+        requiredJourneys: STAGE1_REQUIRED_BROWSER_JOURNEYS,
+        passedJourneys: STAGE1_REQUIRED_BROWSER_JOURNEYS,
+        failedJourneys: [],
+        observedScenarios,
+        blockers: [],
+      })
+    ),
     requiredJourneys: [...STAGE1_REQUIRED_BROWSER_JOURNEYS],
     passedJourneys: [...STAGE1_REQUIRED_BROWSER_JOURNEYS],
     failedJourneys: [],
@@ -204,6 +259,7 @@ function stage1ObservedScenarioBlockers(
   const defaultRows =
     report?.scenarios?.filter(row => row.liveProviderEvidence === "default_deterministic") ?? [];
   const gateRowsById = new Map(defaultRows.map(row => [row.scenarioId, row]));
+  const scenarioMatrixById = new Map(STAGE1_DOGFOOD_SCENARIOS.map(row => [row.id, row]));
 
   if (observedScenarios.length !== STAGE1_REQUIRED_BROWSER_JOURNEYS.length) {
     blockers.push("observed_scenario_count_not_36");
@@ -221,11 +277,23 @@ function stage1ObservedScenarioBlockers(
     if (!observedIds.includes(id)) blockers.push(`missing_observed_scenario:${id}`);
   }
 
+  if (uniqueValues(observedScenarios.map(row => row.taskSessionId)).length < 20) {
+    blockers.push("observed_task_session_distinct_count_below_20");
+  }
+  if (uniqueValues(observedScenarios.map(row => row.runId)).length < 20) {
+    blockers.push("observed_run_distinct_count_below_20");
+  }
+
   for (const row of observedScenarios) {
     const gateRow = gateRowsById.get(row.scenarioId);
+    const expectedScenario = scenarioMatrixById.get(row.scenarioId);
     if (!gateRow) blockers.push(`missing_gate_cross_check:${row.scenarioId}`);
+    if (!expectedScenario) blockers.push(`missing_scenario_matrix_cross_check:${row.scenarioId}`);
     if (row.observedVia !== OBSERVED_VIA) {
       blockers.push(`scenario_not_real_tauri_observed:${row.scenarioId}`);
+    }
+    if (gateRow?.entryPoint && row.entryPoint !== gateRow.entryPoint) {
+      blockers.push(`entry_point_mismatch:${row.scenarioId}`);
     }
     if (!metadataSafeLabel(row.entryPoint)) blockers.push(`entry_point_unsafe:${row.scenarioId}`);
     if (!metadataSafeLabel(row.taskSessionId) || row.taskSessionId.startsWith("stage1_task_")) {
@@ -235,10 +303,54 @@ function stage1ObservedScenarioBlockers(
       blockers.push(`run_not_observed:${row.scenarioId}`);
     }
     if (!metadataSafeLabel(row.routeStrategy)) blockers.push(`route_unsafe:${row.scenarioId}`);
+    if (gateRow?.routeStrategy && row.routeStrategy !== gateRow.routeStrategy) {
+      blockers.push(`route_mismatch:${row.scenarioId}`);
+    }
+    if (
+      gateRow?.entryPoint === "seeded_visible_control_surface" &&
+      row.routeStrategy === "task_control"
+    ) {
+      blockers.push(`generic_route_not_observed:${row.scenarioId}`);
+    }
     if (row.runtimeEvents.length === 0) blockers.push(`runtime_events_missing:${row.scenarioId}`);
+    if (hasUnsafeLabel(row.runtimeEvents)) blockers.push(`runtime_event_unsafe:${row.scenarioId}`);
+    if (
+      gateRow?.entryPoint === "ordinary_main_chat_input" &&
+      !row.runtimeEvents.includes("visible_control.chat_send")
+    ) {
+      blockers.push(`chat_send_control_not_observed:${row.scenarioId}`);
+    }
+    if (
+      gateRow?.entryPoint === "seeded_visible_control_surface" &&
+      !row.runtimeEvents.some(event => event.startsWith("visible_control."))
+    ) {
+      blockers.push(`visible_control_not_observed:${row.scenarioId}`);
+    }
+    if (
+      gateRow?.entryPoint === "seeded_visible_control_surface" &&
+      !seededVisibleControlEventObserved(row.scenarioId, row.runtimeEvents)
+    ) {
+      blockers.push(`seeded_control_event_not_observed:${row.scenarioId}`);
+    }
     if (row.visibleUiStates.length === 0) blockers.push(`ui_state_missing:${row.scenarioId}`);
+    if (hasUnsafeLabel(row.visibleUiStates)) {
+      blockers.push(`visible_ui_state_unsafe:${row.scenarioId}`);
+    }
+    for (const requiredState of expectedScenario?.expectedUiStates ?? []) {
+      if (!row.visibleUiStates.includes(requiredState)) {
+        blockers.push(`required_ui_state_not_observed:${row.scenarioId}:${requiredState}`);
+      }
+    }
     if (row.finalDeliverySections.length === 0) {
       blockers.push(`final_delivery_missing:${row.scenarioId}`);
+    }
+    if (hasUnsafeLabel(row.finalDeliverySections)) {
+      blockers.push(`final_delivery_section_unsafe:${row.scenarioId}`);
+    }
+    for (const requiredSection of expectedScenario?.expectedFinalSections ?? []) {
+      if (!row.finalDeliverySections.includes(requiredSection)) {
+        blockers.push(`required_final_section_not_observed:${row.scenarioId}:${requiredSection}`);
+      }
     }
     if (!row.runtimeEvidenceObserved) blockers.push(`runtime_not_observed:${row.scenarioId}`);
     if (!row.uiStateObserved) blockers.push(`ui_not_observed:${row.scenarioId}`);
@@ -247,12 +359,38 @@ function stage1ObservedScenarioBlockers(
     if (row.legacyFallbackUsed) blockers.push(`legacy_fallback:${row.scenarioId}`);
     if (row.silentDurableWriteDetected) blockers.push(`silent_write:${row.scenarioId}`);
     if (row.fakeExecutionDetected) blockers.push(`fake_execution:${row.scenarioId}`);
+    if (hasUnsafeLabel(row.visibleBlockers)) {
+      blockers.push(`visible_blocker_unsafe:${row.scenarioId}`);
+    }
     if (gateRow?.expectedOutcome === "expected_blocker" && row.visibleBlockers.length === 0) {
       blockers.push(`expected_blocker_not_visible:${row.scenarioId}`);
     }
   }
 
   return uniqueValues(blockers);
+}
+
+function seededVisibleControlEventObserved(scenarioId: string, events: string[]): boolean {
+  const expectedPrefixes = seededVisibleControlEventPrefixes(scenarioId);
+  return expectedPrefixes.some(prefix =>
+    events.some(event => event === prefix || event.startsWith(`${prefix}_`))
+  );
+}
+
+function seededVisibleControlEventPrefixes(scenarioId: string): string[] {
+  if (scenarioId === "D09") return ["visible_control.skip_step"];
+  if (scenarioId === "D11") return ["visible_control.accept_proposal"];
+  if (scenarioId === "D12") return ["visible_control.rollback_memory"];
+  if (scenarioId === "D13") return ["visible_control.resume_task_from_continuity_detail"];
+  if (scenarioId === "D14") return ["visible_control.retry_task_action"];
+  if (scenarioId === "D15") return ["visible_control.cancel_task_from_continuity_detail"];
+  if (scenarioId === "D19") return ["visible_control.task_continuity_detail_opened"];
+  if (scenarioId === "D20") return ["visible_control.task_continuity_detail_opened"];
+  if (scenarioId === "D27") return ["visible_control.refresh_task_context"];
+  if (scenarioId === "D28") return ["visible_control.task_continuity_detail_opened"];
+  if (scenarioId === "D35") return ["visible_control.deny", "visible_control.reject_proposal"];
+  if (scenarioId === "D36") return ["visible_control.defer"];
+  return [];
 }
 
 function metadataSafeLabel(value: string): boolean {
@@ -264,8 +402,84 @@ function metadataSafeLabel(value: string): boolean {
   );
 }
 
+function normalizeBlockers(values: string[]): string[] {
+  return uniqueValues(values.map(metadataSafeBlocker));
+}
+
+function metadataSafeBlocker(value: string): string {
+  return (
+    String(value)
+      .replace(/[^A-Za-z0-9_.:/-]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 160) || "unknown"
+  );
+}
+
+function hasUnsafeLabel(values: string[]): boolean {
+  return values.some(value => !metadataSafeLabel(value));
+}
+
 function arraysEqual(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function stage1BrowserReportDigestInput(input: {
+  evidenceSource: string;
+  runId: string;
+  generatedAt: string;
+  requiredJourneys: string[];
+  passedJourneys: string[];
+  failedJourneys: string[];
+  observedScenarios: Stage1ObservedBrowserScenario[];
+  blockers: string[];
+}): string {
+  const rows = input.observedScenarios
+    .map(row =>
+      [
+        row.scenarioId,
+        row.observedVia,
+        row.entryPoint,
+        row.taskSessionId,
+        row.runId,
+        row.routeStrategy,
+        digestArray(row.runtimeEvents),
+        digestArray(row.visibleUiStates),
+        digestArray(row.finalDeliverySections),
+        digestArray(row.visibleBlockers),
+        String(row.runtimeEvidenceObserved),
+        String(row.uiStateObserved),
+        String(row.finalDeliveryObserved),
+        String(row.nonFakeEvidenceObserved),
+        String(row.legacyFallbackUsed),
+        String(row.silentDurableWriteDetected),
+        String(row.fakeExecutionDetected),
+      ]
+        .map(digestPart)
+        .join("|")
+    )
+    .join("\n");
+
+  return [
+    "stage1-browser-e2e-report-v1",
+    `source=${digestPart(input.evidenceSource)}`,
+    `runId=${digestPart(input.runId)}`,
+    `generatedAt=${digestPart(input.generatedAt)}`,
+    `required=${digestArray(input.requiredJourneys)}`,
+    `passed=${digestArray(input.passedJourneys)}`,
+    `failed=${digestArray(input.failedJourneys)}`,
+    `blockers=${digestArray(input.blockers)}`,
+    "observed:",
+    rows,
+  ].join("\n");
+}
+
+function digestArray(values: string[]): string {
+  return values.map(digestPart).join(",");
+}
+
+function digestPart(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  return `${bytes.byteLength}:${value}`;
 }
 
 function digestLabel(input: string): string {

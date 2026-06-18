@@ -43,8 +43,12 @@ type ControlHandlers = {
   onEditProposal?: (proposalId: string) => void;
   onRollbackMemory?: (memoryId: string) => void;
   onConfirmPlan?: (target: PlanControlTarget) => void;
-  onEditPlanStep?: (target: Required<Pick<PlanControlTarget, "planSessionId" | "baseRevision" | "stepId" | "title">>) => void;
-  onExecutePlanStep?: (target: Required<Pick<PlanControlTarget, "planSessionId" | "baseRevision" | "stepId">>) => void;
+  onEditPlanStep?: (
+    target: Required<Pick<PlanControlTarget, "planSessionId" | "baseRevision" | "stepId" | "title">>
+  ) => void;
+  onExecutePlanStep?: (
+    target: Required<Pick<PlanControlTarget, "planSessionId" | "baseRevision" | "stepId">>
+  ) => void;
   onSkipPlanStep?: (
     target: Required<Pick<PlanControlTarget, "planSessionId" | "baseRevision" | "stepId">>
   ) => void;
@@ -235,7 +239,11 @@ function finalDeliverySection(
 ) {
   if (items.length === 0) return null;
   return (
-    <div className="min-w-0 border-l border-stone-300 bg-white/80 px-2 py-1">
+    <div
+      data-testid="agent-final-delivery-section"
+      data-section-title={title}
+      className="min-w-0 border-l border-stone-300 bg-white/80 px-2 py-1"
+    >
       <div className="font-semibold text-stone-950">{title}</div>
       <div className="mt-1 space-y-1">
         {items.map((item, index) => {
@@ -325,9 +333,30 @@ export default function AgentControlPlane({
   const planControls = plan?.controls ?? [];
   const planCommandReady = Boolean(plan && planSessionId && planRevision !== null);
   const reviewSummary = plan?.reviewSummary ?? null;
+  const finalDelivery = state.finalDelivery;
+  const finalDeliverySectionTitles = [
+    finalDelivery?.completedActions.length ? "Completed actions" : null,
+    finalDelivery?.observationsUsed.length ? "Sources used" : null,
+    finalDelivery?.proposalsCreated.length ? "Proposals created" : null,
+    finalDelivery?.blockers.length ? "Blocked items" : null,
+    finalDelivery?.pendingUserActions.length ? "Pending user actions" : null,
+    finalDelivery?.durableChanges.length ? "Durable changes" : null,
+  ].filter((title): title is string => Boolean(title));
 
   return (
     <section
+      data-testid="agent-control-plane"
+      data-task-session-id={state.task.taskId}
+      data-run-id={state.task.runId}
+      data-route-strategy={state.route.strategy}
+      data-task-status={state.task.status}
+      data-action-count={state.actions.length}
+      data-observation-count={state.observations.length}
+      data-blocker-count={state.blockers.length}
+      data-proposal-count={state.proposals.length}
+      data-final-delivery={state.finalDelivery ? "true" : "false"}
+      data-final-delivery-status={state.finalDelivery?.status ?? ""}
+      data-final-delivery-section-titles={finalDeliverySectionTitles.join("|")}
       aria-label="Agent Control Plane"
       className="border-y border-stone-200 bg-white px-4 py-3 text-xs text-stone-700"
     >
@@ -404,7 +433,12 @@ export default function AgentControlPlane({
       </div>
 
       {eventStream && (
-        <div className="mt-3 border-l border-indigo-300 bg-indigo-50/70 px-2 py-1">
+        <div
+          data-testid="agent-event-stream"
+          data-event-stream-status={eventStream.status}
+          data-event-count={eventStream.events.length}
+          className="mt-3 border-l border-indigo-300 bg-indigo-50/70 px-2 py-1"
+        >
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-semibold text-stone-950">Event stream</span>
             <span className="inline-flex h-5 items-center rounded-md border border-indigo-200 bg-white px-1.5 font-medium text-indigo-800">
@@ -467,7 +501,10 @@ export default function AgentControlPlane({
       )}
 
       {plan && (plan.steps?.length || planCommandReady) ? (
-        <div className="mt-3 border-l border-emerald-300 bg-emerald-50/70 px-3 py-2">
+        <div
+          data-testid="agent-plan-interaction"
+          className="mt-3 border-l border-emerald-300 bg-emerald-50/70 px-3 py-2"
+        >
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="min-w-0">
               <div className="font-semibold text-stone-950">Plan interaction</div>
@@ -620,9 +657,7 @@ export default function AgentControlPlane({
                 >
                   {reviewSummary.planStatus.replace(/_/g, " ")}
                 </span>
-                <span className="text-stone-500">
-                  revision {reviewSummary.basePlanRevision}
-                </span>
+                <span className="text-stone-500">revision {reviewSummary.basePlanRevision}</span>
               </div>
               <div className="mt-2 grid gap-2 md:grid-cols-3">
                 {reviewSummarySection("Completed", reviewSummary.completedSteps)}
@@ -648,7 +683,7 @@ export default function AgentControlPlane({
       ) : null}
 
       {state.actions.length > 0 && (
-        <div className="mt-3">
+        <div data-testid="agent-actions" className="mt-3">
           <div className="mb-1 flex items-center gap-1 font-semibold text-stone-950">
             <Wrench size={13} />
             Actions
@@ -679,7 +714,7 @@ export default function AgentControlPlane({
       )}
 
       {state.observations.length > 0 && (
-        <div className="mt-3">
+        <div data-testid="agent-observations" className="mt-3">
           <div className="mb-1 flex items-center gap-1 font-semibold text-stone-950">
             <FileText size={13} />
             Observations
@@ -713,7 +748,7 @@ export default function AgentControlPlane({
       )}
 
       {state.blockers.length > 0 && (
-        <div className="mt-3">
+        <div data-testid="agent-blockers" className="mt-3">
           <div className="mb-1 flex items-center gap-1 font-semibold text-amber-950">
             <ShieldAlert size={13} />
             Blockers
@@ -805,7 +840,7 @@ export default function AgentControlPlane({
       )}
 
       {state.proposals.length > 0 && (
-        <div className="mt-3">
+        <div data-testid="agent-proposals" className="mt-3">
           <div className="mb-1 flex items-center gap-1 font-semibold text-stone-950">
             <CheckCircle2 size={13} />
             Proposals
@@ -881,7 +916,10 @@ export default function AgentControlPlane({
       )}
 
       {state.finalDelivery && (
-        <div className="mt-3 border-l border-emerald-300 bg-emerald-50/70 px-3 py-2">
+        <div
+          data-testid="agent-final-delivery"
+          className="mt-3 border-l border-emerald-300 bg-emerald-50/70 px-3 py-2"
+        >
           <div className="flex flex-wrap items-center gap-2">
             <CheckCircle2 size={14} className="text-emerald-700" />
             <span className="font-semibold text-stone-950">{state.finalDelivery.headline}</span>
