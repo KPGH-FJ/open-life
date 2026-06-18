@@ -256,9 +256,7 @@ export default function ProposalReviewPage() {
         record.memoryId,
         "User requested rollback from Review Center."
       );
-      setNotice(
-        `Memory rollback recorded: ${report.rollbackEvent.rollbackEventId.slice(-12)}`
-      );
+      setNotice(`Memory rollback recorded: ${report.rollbackEvent.rollbackEventId.slice(-12)}`);
       await load();
     } catch (e) {
       setError(`回滚记忆失败：${String(e)}`);

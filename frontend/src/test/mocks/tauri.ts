@@ -930,8 +930,7 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
     case "run_main_chat_agent_beta_v1_readiness_gate":
       return Promise.resolve({
         reportKind: "main_chat_agent_beta_v1_readiness_gate",
-        readinessSemantics:
-          "beta_v1_execution_first_default_deterministic_live_opt_in_separate",
+        readinessSemantics: "beta_v1_execution_first_default_deterministic_live_opt_in_separate",
         defaultReadinessScope: "beta_v1_default_deterministic_local_only",
         optInLiveReadinessScope: "beta_v1_external_live_opt_in_only",
         foundationInventoryExists: true,
@@ -1094,9 +1093,7 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           },
         ],
         blockers: ["not_ready_browser_e2e_blocked"],
-        acceptedResidualRisks: [
-          "manual_dogfood_not_attempted_ready_for_engineering_dogfood_only",
-        ],
+        acceptedResidualRisks: ["manual_dogfood_not_attempted_ready_for_engineering_dogfood_only"],
       } as T);
     case "list_mcp_servers":
       return Promise.resolve([

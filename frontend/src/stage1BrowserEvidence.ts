@@ -12,8 +12,7 @@ export const STAGE1_NON_TAURI_BROWSER_BLOCKERS = [
   "tauri_webdriver_environment_not_ready",
 ] as const;
 
-const STAGE1_MACOS_TAURI_WEBDRIVER_BLOCKER =
-  "tauri_webdriver_macos_not_supported_by_tauri_driver";
+const STAGE1_MACOS_TAURI_WEBDRIVER_BLOCKER = "tauri_webdriver_macos_not_supported_by_tauri_driver";
 
 const REPORT_PATH = "frontend/test-results/main-chat-stage1-dogfood-report.json";
 const PASSING_SOURCE = "tauri_command_surface_browser_observed";

@@ -460,6 +460,8 @@ describe("AgentControlPlane", () => {
     expect(screen.getByText("real read")).toBeInTheDocument();
     expect(screen.getByText("no writes")).toBeInTheDocument();
     expect(screen.queryByText("fixture")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /approve|reject|rollback/i })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /approve|reject|rollback/i })
+    ).not.toBeInTheDocument();
   });
 });

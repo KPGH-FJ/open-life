@@ -179,7 +179,8 @@ describe("ChatPage", () => {
       pendingProposalCount: 0,
       nextRecommendedControl: "retry",
       staleState: "fresh",
-      resumeSafetyDigest: "bytes:48 hash:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      resumeSafetyDigest:
+        "bytes:48 hash:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     };
     const staleSummary = {
       taskSessionId: "task-continuity-stale",
@@ -194,7 +195,8 @@ describe("ChatPage", () => {
       pendingProposalCount: 0,
       nextRecommendedControl: "refresh_context",
       staleState: "stale",
-      resumeSafetyDigest: "bytes:47 hash:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      resumeSafetyDigest:
+        "bytes:47 hash:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     };
     const blockedDetail = {
       taskSession: {
@@ -324,7 +326,9 @@ describe("ChatPage", () => {
     expect(await screen.findByText("Task continuity")).toBeInTheDocument();
     expect(screen.getByText("Blocked safe read")).toBeInTheDocument();
     expect(screen.getByText("Stale context task")).toBeInTheDocument();
-    expect(screen.getByText("Last observation came from queued action evidence.")).toBeInTheDocument();
+    expect(
+      screen.getByText("Last observation came from queued action evidence.")
+    ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Open task Blocked safe read" }));
     expect(await screen.findByText("safe_read_failed")).toBeInTheDocument();
@@ -490,7 +494,9 @@ describe("ChatPage", () => {
     expect(screen.getByText(/bytes:142 hash:sha256/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Inspect skill Phase E Review" }));
-    expect(await screen.findByText("Use Phase E skill evidence as bounded context only.")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Use Phase E skill evidence as bounded context only.")
+    ).toBeInTheDocument();
     expect(screen.getByText(/bounded context, not authority/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Select skill Phase E Review" }));
@@ -1538,7 +1544,9 @@ describe("ChatPage", () => {
       await Promise.resolve();
     });
 
-    fireEvent.click(await screen.findByRole("button", { name: "Execute step Continue next read step" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Execute step Continue next read step" })
+    );
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith(
         "execute_plan_execute_step",
@@ -1726,7 +1734,9 @@ describe("ChatPage", () => {
     expect(screen.getByText("Completed")).toBeInTheDocument();
     expect(screen.getByText("Observations used")).toBeInTheDocument();
     expect(screen.getByText("Unresolved")).toBeInTheDocument();
-    expect(screen.getByText("Review cancelled steps before starting a new plan.")).toBeInTheDocument();
+    expect(
+      screen.getByText("Review cancelled steps before starting a new plan.")
+    ).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Execute step Prepare weekly proposal" })
     ).not.toBeInTheDocument();

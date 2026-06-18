@@ -195,14 +195,10 @@ describe("stage1 browser evidence report builder", () => {
     };
 
     expect(() =>
-      buildStage1PassingBrowserEvidenceReportFromObservedScenarios(
-        observed,
-        baseGateReport(),
-        {
-          now: new Date("2026-06-18T07:20:00.000Z"),
-          runId: "stage1-browser-e2e-missing-chat-send-test",
-        }
-      )
+      buildStage1PassingBrowserEvidenceReportFromObservedScenarios(observed, baseGateReport(), {
+        now: new Date("2026-06-18T07:20:00.000Z"),
+        runId: "stage1-browser-e2e-missing-chat-send-test",
+      })
     ).toThrow(/chat_send_control_not_observed:D01/);
   });
 
@@ -243,7 +239,9 @@ describe("stage1 browser evidence report builder", () => {
     const scenarioIndex = observed.findIndex(row => row.scenarioId === "D08");
     observed[scenarioIndex] = {
       ...observed[scenarioIndex],
-      visibleUiStates: observed[scenarioIndex].visibleUiStates.filter(state => state !== "planning"),
+      visibleUiStates: observed[scenarioIndex].visibleUiStates.filter(
+        state => state !== "planning"
+      ),
     };
 
     expect(() =>
@@ -267,8 +265,8 @@ describe("stage1 browser evidence report builder", () => {
     expect(() =>
       buildStage1PassingBrowserEvidenceReportFromObservedScenarios(observed, baseGateReport(), {
         now: new Date("2026-06-18T07:20:00.000Z"),
-      runId: "stage1-browser-e2e-missing-final-section-test",
-    })
+        runId: "stage1-browser-e2e-missing-final-section-test",
+      })
     ).toThrow(/required_final_section_not_observed:D08:next_action/);
   });
 
@@ -294,13 +292,10 @@ describe("stage1 browser evidence report builder", () => {
   });
 
   it("keeps unavailable Tauri browser command surface honestly blocked", () => {
-    const report = buildStage1BlockedBrowserEvidenceReport(
-      [...STAGE1_NON_TAURI_BROWSER_BLOCKERS],
-      {
-        now: new Date("2026-06-18T07:20:00.000Z"),
-        runId: "stage1-browser-e2e-blocked-test",
-      }
-    );
+    const report = buildStage1BlockedBrowserEvidenceReport([...STAGE1_NON_TAURI_BROWSER_BLOCKERS], {
+      now: new Date("2026-06-18T07:20:00.000Z"),
+      runId: "stage1-browser-e2e-blocked-test",
+    });
 
     expect(report.browserE2eEnvironmentReady).toBe(false);
     expect(report.smokePassed).toBe(false);
@@ -327,9 +322,7 @@ describe("stage1 browser evidence report builder", () => {
     );
 
     expect(report.blockers).toContain("raw_blocker_with_spaces_and_symbols");
-    expect(report.blockers.every(blocker => /^[A-Za-z0-9_.:/-]{1,160}$/.test(blocker))).toBe(
-      true
-    );
+    expect(report.blockers.every(blocker => /^[A-Za-z0-9_.:/-]{1,160}$/.test(blocker))).toBe(true);
   });
 
   it("adds the official macOS Tauri WebDriver limitation only on Darwin", () => {
@@ -394,8 +387,9 @@ describe("stage1 browser evidence report builder", () => {
     expect(STAGE1_DOGFOOD_SCENARIOS.map(scenario => scenario.id)).toEqual(
       STAGE1_REQUIRED_BROWSER_JOURNEYS
     );
-    expect(STAGE1_DOGFOOD_SCENARIOS.filter(scenario => scenario.scenarioType === "chat_e2e"))
-      .toHaveLength(24);
+    expect(
+      STAGE1_DOGFOOD_SCENARIOS.filter(scenario => scenario.scenarioType === "chat_e2e")
+    ).toHaveLength(24);
     expect(
       STAGE1_DOGFOOD_SCENARIOS.filter(
         scenario => scenario.scenarioType === "seeded_task_control_e2e"
@@ -431,9 +425,7 @@ describe("stage1 browser evidence report builder", () => {
       "utf8"
     );
 
-    expect(packageJson.scripts["test:e2e:tauri"]).toBe(
-      "node scripts/stage1-tauri-webdriver.mjs"
-    );
+    expect(packageJson.scripts["test:e2e:tauri"]).toBe("node scripts/stage1-tauri-webdriver.mjs");
     expect(fs.existsSync(path.resolve(process.cwd(), "scripts/stage1-tauri-webdriver.mjs"))).toBe(
       true
     );
@@ -459,8 +451,12 @@ describe("stage1 browser evidence report builder", () => {
     expect(script).toContain("send-button");
     expect(script).toContain("webdriver_selected_skill_not_applied");
     expect(script).toContain("requestedSkillId.trim()");
-    expect(script).toContain('Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")');
-    expect(script).toContain('Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")');
+    expect(script).toContain(
+      'Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")'
+    );
+    expect(script).toContain(
+      'Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")'
+    );
     expect(script).toContain("visible_control.task_continuity_detail_opened");
     expect(script).toContain("getAttribute('aria-label')");
     expect(script).toContain("getAttribute('title')");
@@ -507,7 +503,7 @@ describe("stage1 browser evidence report builder", () => {
     expect(script).toContain('"corepack"');
     expect(script).toContain('"pnpm", "dev", "--", "--host", "127.0.0.1", "--port", "5173"');
     expect(script).toContain("frontendDevServer.kill()");
-    expect(script).toContain('fileURLToPath(import.meta.url)');
+    expect(script).toContain("fileURLToPath(import.meta.url)");
     expect(script).toContain('const repoRoot = path.resolve(frontendRoot, "..")');
     expect(script).toContain("cwd: frontendRoot");
     expect(script).toContain('path.resolve(repoRoot, "frontend", "test-results"');
@@ -532,7 +528,9 @@ describe("stage1 browser evidence report builder", () => {
     expect(workflow).toContain("cargo install tauri-driver --locked");
     expect(workflow).toContain("cargo build -p openlife-tauri");
     expect(workflow).toContain("pnpm --dir frontend test:e2e:tauri");
-    expect(workflow).toContain("cargo test -p openlife-tauri main_chat_agent_stage1_dogfood -- --nocapture");
+    expect(workflow).toContain(
+      "cargo test -p openlife-tauri main_chat_agent_stage1_dogfood -- --nocapture"
+    );
     expect(workflow).toContain(
       "cargo test -p openlife-tauri run_main_chat_agent_stage1_dogfood_command_returns_isolated_report -- --nocapture"
     );
@@ -552,14 +550,14 @@ describe("stage1 browser evidence report builder", () => {
       expect(source).not.toContain('text.includes("Actions")');
       expect(source).not.toContain('text.includes("Observations")');
       expect(source).not.toContain('text.includes("Sources used")');
-      expect(source).not.toContain('/Final delivery|completed/i.test(text)');
-      expect(source).not.toContain('/permission|pending user/i.test(text)');
-      expect(source).not.toContain('/blocked|stale/.test');
-      expect(source).not.toContain('/memory|proposal/i.test(text)');
-      expect(source).not.toContain('/Retry/i.test(text)');
-      expect(source).not.toContain('/replay|refresh/.test(text)');
-      expect(source).not.toContain('/Proposals/i.test(text)');
-      expect(source).not.toContain('/Blockers|blocked/i.test(text)');
+      expect(source).not.toContain("/Final delivery|completed/i.test(text)");
+      expect(source).not.toContain("/permission|pending user/i.test(text)");
+      expect(source).not.toContain("/blocked|stale/.test");
+      expect(source).not.toContain("/memory|proposal/i.test(text)");
+      expect(source).not.toContain("/Retry/i.test(text)");
+      expect(source).not.toContain("/replay|refresh/.test(text)");
+      expect(source).not.toContain("/Proposals/i.test(text)");
+      expect(source).not.toContain("/Blockers|blocked/i.test(text)");
     }
   });
 });

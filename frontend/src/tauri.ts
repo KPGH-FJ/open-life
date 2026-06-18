@@ -1626,9 +1626,7 @@ export async function runMainChatAgentBetaV1ReadinessGate(): Promise<MainChatAge
 }
 
 export async function runMainChatAgentStage1DogfoodGate(): Promise<MainChatAgentStage1DogfoodReport> {
-  return safeInvoke<MainChatAgentStage1DogfoodReport>(
-    "run_main_chat_agent_stage1_dogfood_gate"
-  );
+  return safeInvoke<MainChatAgentStage1DogfoodReport>("run_main_chat_agent_stage1_dogfood_gate");
 }
 
 export async function createPlanExecuteSession(

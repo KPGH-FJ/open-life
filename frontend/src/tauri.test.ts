@@ -605,8 +605,7 @@ describe("tauri command argument aliases", () => {
       reportKind: "main_chat_external_live_productization_gate",
       scenarioCount: 6,
       defaultGateScenarioCount: 0,
-      readinessSemantics:
-        "opt_in_external_live_product_evidence_only_default_readiness_unchanged",
+      readinessSemantics: "opt_in_external_live_product_evidence_only_default_readiness_unchanged",
       runMode: "external_live_opt_in",
       liveProviderAttempted: false,
       passedScenarioCount: 0,
@@ -1036,8 +1035,7 @@ describe("tauri command argument aliases", () => {
   it("invokes Main Chat Agent Beta v1 readiness gate with deterministic and live sections", async () => {
     vi.mocked(invoke).mockResolvedValue({
       reportKind: "main_chat_agent_beta_v1_readiness_gate",
-      readinessSemantics:
-        "beta_v1_execution_first_default_deterministic_live_opt_in_separate",
+      readinessSemantics: "beta_v1_execution_first_default_deterministic_live_opt_in_separate",
       defaultReadinessScope: "beta_v1_default_deterministic_local_only",
       optInLiveReadinessScope: "beta_v1_external_live_opt_in_only",
       foundationInventoryExists: true,
@@ -1109,10 +1107,7 @@ describe("tauri command argument aliases", () => {
 
     const result = await runMainChatAgentBetaV1ReadinessGate();
 
-    expect(invoke).toHaveBeenCalledWith(
-      "run_main_chat_agent_beta_v1_readiness_gate",
-      undefined
-    );
+    expect(invoke).toHaveBeenCalledWith("run_main_chat_agent_beta_v1_readiness_gate", undefined);
     expect(result.defaultReady).toBe(true);
     expect(result.defaultReadinessScope).toBe("beta_v1_default_deterministic_local_only");
     expect(result.optInLiveReady).toBe(false);
@@ -1121,7 +1116,7 @@ describe("tauri command argument aliases", () => {
     expect(result.productMaturityPhaseCounts[0]?.scenarioCount).toBe(9);
     expect(result.defaultRealTaskPassedCount).toBe(28);
     expect(result.productMaturityDefaultScenarioCount).toBe(43);
-    expect(result.readinessDimensions.some((dimension) => dimension.dimension === "Routing")).toBe(
+    expect(result.readinessDimensions.some(dimension => dimension.dimension === "Routing")).toBe(
       true
     );
   });
@@ -1219,17 +1214,12 @@ describe("tauri command argument aliases", () => {
         },
       ],
       blockers: ["not_ready_browser_e2e_blocked"],
-      acceptedResidualRisks: [
-        "manual_dogfood_not_attempted_ready_for_engineering_dogfood_only",
-      ],
+      acceptedResidualRisks: ["manual_dogfood_not_attempted_ready_for_engineering_dogfood_only"],
     });
 
     const result = await runMainChatAgentStage1DogfoodGate();
 
-    expect(invoke).toHaveBeenCalledWith(
-      "run_main_chat_agent_stage1_dogfood_gate",
-      undefined
-    );
+    expect(invoke).toHaveBeenCalledWith("run_main_chat_agent_stage1_dogfood_gate", undefined);
     expect(result.defaultReady).toBe(false);
     expect(result.readinessRecommendation).toBe("not_ready");
     expect(result.defaultScenarioCount).toBe(36);
