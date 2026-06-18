@@ -62,6 +62,28 @@ pub(crate) struct MainChatAgentStage1DogfoodScenarioEvidence {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct MainChatStage1BrowserScenarioEvidence {
+    pub scenario_id: String,
+    pub observed_via: String,
+    pub entry_point: String,
+    pub task_session_id: String,
+    pub run_id: String,
+    pub route_strategy: String,
+    pub runtime_events: Vec<String>,
+    pub visible_ui_states: Vec<String>,
+    pub final_delivery_sections: Vec<String>,
+    pub visible_blockers: Vec<String>,
+    pub runtime_evidence_observed: bool,
+    pub ui_state_observed: bool,
+    pub final_delivery_observed: bool,
+    pub non_fake_evidence_observed: bool,
+    pub legacy_fallback_used: bool,
+    pub silent_durable_write_detected: bool,
+    pub fake_execution_detected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct MainChatStage1BrowserE2eEvidence {
     pub environment_ready: bool,
     pub self_contained_runner: bool,
@@ -75,6 +97,7 @@ pub(crate) struct MainChatStage1BrowserE2eEvidence {
     pub required_journeys: Vec<String>,
     pub passed_journeys: Vec<String>,
     pub failed_journeys: Vec<String>,
+    pub observed_scenarios: Vec<MainChatStage1BrowserScenarioEvidence>,
     pub blockers: Vec<String>,
 }
 
@@ -427,17 +450,48 @@ pub(crate) fn passing_stage1_browser_e2e_evidence_for_tests() -> MainChatStage1B
         serde_json::json!({
             "runId": run_id,
             "requiredJourneys": journeys,
-            "source": "tauri_command_surface_browser_e2e"
+            "source": "tauri_command_surface_browser_observed"
         })
         .to_string()
         .as_bytes(),
     );
+    let observed_scenarios = stage1_scenarios()
+        .into_iter()
+        .filter(|scenario| !scenario.live)
+        .map(|scenario| MainChatStage1BrowserScenarioEvidence {
+            scenario_id: scenario.id.into(),
+            observed_via: "real_tauri_chat_or_control_path".into(),
+            entry_point: scenario_entry_point(&scenario).into(),
+            task_session_id: format!("browser-task-{}", scenario.id),
+            run_id: format!("browser-run-{}", scenario.id),
+            route_strategy: scenario.route.into(),
+            runtime_events: runtime_events_for_scenario(&scenario),
+            visible_ui_states: scenario
+                .ui_states
+                .iter()
+                .map(|value| (*value).into())
+                .collect(),
+            final_delivery_sections: scenario
+                .final_delivery
+                .iter()
+                .map(|value| (*value).into())
+                .collect(),
+            visible_blockers: scenario.blocker.into_iter().map(str::to_string).collect(),
+            runtime_evidence_observed: true,
+            ui_state_observed: true,
+            final_delivery_observed: true,
+            non_fake_evidence_observed: true,
+            legacy_fallback_used: false,
+            silent_durable_write_detected: false,
+            fake_execution_detected: false,
+        })
+        .collect::<Vec<_>>();
     MainChatStage1BrowserE2eEvidence {
         environment_ready: true,
         self_contained_runner: true,
         smoke_passed: true,
         report_path: Some(BROWSER_E2E_REPORT_PATH.into()),
-        evidence_source: "tauri_command_surface_browser_e2e".into(),
+        evidence_source: "tauri_command_surface_browser_observed".into(),
         run_id: Some(run_id),
         generated_at: Some(generated_at),
         commit: None,
@@ -445,6 +499,7 @@ pub(crate) fn passing_stage1_browser_e2e_evidence_for_tests() -> MainChatStage1B
         required_journeys: journeys.clone(),
         passed_journeys: journeys,
         failed_journeys: Vec::new(),
+        observed_scenarios,
         blockers: Vec::new(),
     }
 }
@@ -521,6 +576,16 @@ fn read_browser_e2e_report_from_default_path() -> Option<MainChatStage1BrowserE2
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let observed_scenarios = value
+        .get("observedScenarios")
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(parse_browser_observed_scenario)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
 
     Some(MainChatStage1BrowserE2eEvidence {
         environment_ready: value
@@ -564,8 +629,68 @@ fn read_browser_e2e_report_from_default_path() -> Option<MainChatStage1BrowserE2
         required_journeys,
         passed_journeys,
         failed_journeys,
+        observed_scenarios,
         blockers,
     })
+}
+
+fn parse_browser_observed_scenario(
+    value: &serde_json::Value,
+) -> Option<MainChatStage1BrowserScenarioEvidence> {
+    Some(MainChatStage1BrowserScenarioEvidence {
+        scenario_id: value.get("scenarioId")?.as_str()?.to_string(),
+        observed_via: value.get("observedVia")?.as_str()?.to_string(),
+        entry_point: value.get("entryPoint")?.as_str()?.to_string(),
+        task_session_id: value.get("taskSessionId")?.as_str()?.to_string(),
+        run_id: value.get("runId")?.as_str()?.to_string(),
+        route_strategy: value.get("routeStrategy")?.as_str()?.to_string(),
+        runtime_events: string_array_field(value, "runtimeEvents"),
+        visible_ui_states: string_array_field(value, "visibleUiStates"),
+        final_delivery_sections: string_array_field(value, "finalDeliverySections"),
+        visible_blockers: string_array_field(value, "visibleBlockers"),
+        runtime_evidence_observed: value
+            .get("runtimeEvidenceObserved")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        ui_state_observed: value
+            .get("uiStateObserved")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        final_delivery_observed: value
+            .get("finalDeliveryObserved")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        non_fake_evidence_observed: value
+            .get("nonFakeEvidenceObserved")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        legacy_fallback_used: value
+            .get("legacyFallbackUsed")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        silent_durable_write_detected: value
+            .get("silentDurableWriteDetected")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        fake_execution_detected: value
+            .get("fakeExecutionDetected")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+fn string_array_field(value: &serde_json::Value, field: &str) -> Vec<String> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
 }
 
 fn audit_browser_e2e_evidence(
@@ -616,9 +741,14 @@ fn audit_browser_e2e_evidence(
     if evidence.passed_journeys != required {
         push_unique(&mut blockers, "browser_e2e_passed_journeys_mismatch");
     }
-    let fake_execution_detected =
-        browser_evidence_source_is_frontend_only(&evidence.evidence_source);
-    if fake_execution_detected {
+    let mut observed_blockers = audit_browser_observed_scenarios(evidence);
+    let source_frontend_only = browser_evidence_source_is_frontend_only(&evidence.evidence_source);
+    let fake_execution_detected = source_frontend_only
+        || evidence
+            .observed_scenarios
+            .iter()
+            .any(|scenario| scenario.fake_execution_detected);
+    if source_frontend_only {
         push_unique(&mut blockers, "browser_e2e_frontend_only_fixture_report");
     }
     if !browser_evidence_source_is_safe_real_command_surface(&evidence.evidence_source) {
@@ -629,6 +759,9 @@ fn audit_browser_e2e_evidence(
     }
     for blocker in &evidence.blockers {
         push_unique(&mut blockers, blocker);
+    }
+    for blocker in observed_blockers.drain(..) {
+        push_unique(&mut blockers, &blocker);
     }
 
     Stage1BrowserAudit {
@@ -641,6 +774,195 @@ fn audit_browser_e2e_evidence(
         fake_execution_detected,
         blockers,
     }
+}
+
+fn audit_browser_observed_scenarios(evidence: &MainChatStage1BrowserE2eEvidence) -> Vec<String> {
+    let mut blockers = Vec::new();
+    let required = required_browser_journeys();
+    let observed_ids = evidence
+        .observed_scenarios
+        .iter()
+        .map(|scenario| scenario.scenario_id.clone())
+        .collect::<Vec<_>>();
+    let observed_set = observed_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let required_set = required.iter().cloned().collect::<BTreeSet<_>>();
+
+    if evidence.observed_scenarios.is_empty() {
+        push_unique(&mut blockers, "browser_e2e_observed_scenarios_missing");
+        return blockers;
+    }
+    if evidence.observed_scenarios.len() != required.len() || observed_set != required_set {
+        push_unique(&mut blockers, "browser_e2e_observed_scenarios_incomplete");
+    }
+    if observed_ids != required {
+        push_unique(
+            &mut blockers,
+            "browser_e2e_observed_scenario_order_mismatch",
+        );
+    }
+    for id in observed_ids.iter().filter(|id| {
+        observed_ids
+            .iter()
+            .filter(|candidate| *candidate == *id)
+            .count()
+            > 1
+    }) {
+        push_unique(
+            &mut blockers,
+            &format!("browser_e2e_observed_scenario_duplicate:{id}"),
+        );
+    }
+
+    let scenario_defs = stage1_scenarios()
+        .into_iter()
+        .filter(|scenario| !scenario.live)
+        .map(|scenario| (scenario.id, scenario))
+        .collect::<BTreeMap<_, _>>();
+
+    for scenario in &evidence.observed_scenarios {
+        let Some(expected) = scenario_defs.get(scenario.scenario_id.as_str()) else {
+            push_unique(
+                &mut blockers,
+                &format!(
+                    "browser_e2e_unknown_observed_scenario:{}",
+                    scenario.scenario_id
+                ),
+            );
+            continue;
+        };
+        if scenario.observed_via != "real_tauri_chat_or_control_path" {
+            push_unique(
+                &mut blockers,
+                &format!(
+                    "browser_e2e_not_real_tauri_observed:{}",
+                    scenario.scenario_id
+                ),
+            );
+        }
+        if scenario.entry_point != scenario_entry_point(expected) {
+            push_unique(
+                &mut blockers,
+                &format!("browser_e2e_entry_point_mismatch:{}", scenario.scenario_id),
+            );
+        }
+        if !metadata_safe_label(&scenario.task_session_id)
+            || scenario.task_session_id.starts_with("stage1_task_")
+        {
+            push_unique(
+                &mut blockers,
+                &format!(
+                    "browser_e2e_task_session_unobserved:{}",
+                    scenario.scenario_id
+                ),
+            );
+        }
+        if !metadata_safe_label(&scenario.run_id) || scenario.run_id.starts_with("stage1_run_") {
+            push_unique(
+                &mut blockers,
+                &format!("browser_e2e_run_unobserved:{}", scenario.scenario_id),
+            );
+        }
+        if !metadata_safe_label(&scenario.route_strategy) {
+            push_unique(
+                &mut blockers,
+                &format!("browser_e2e_route_unsafe:{}", scenario.scenario_id),
+            );
+        }
+        if scenario.runtime_events.is_empty() || !scenario.runtime_evidence_observed {
+            push_unique(
+                &mut blockers,
+                &format!("browser_e2e_runtime_state_missing:{}", scenario.scenario_id),
+            );
+        }
+        if scenario.visible_ui_states.is_empty() || !scenario.ui_state_observed {
+            push_unique(
+                &mut blockers,
+                &format!("browser_e2e_ui_state_missing:{}", scenario.scenario_id),
+            );
+        }
+        if scenario.final_delivery_sections.is_empty() || !scenario.final_delivery_observed {
+            push_unique(
+                &mut blockers,
+                &format!(
+                    "browser_e2e_final_delivery_missing:{}",
+                    scenario.scenario_id
+                ),
+            );
+        }
+        for required_state in expected.ui_states {
+            if !scenario
+                .visible_ui_states
+                .iter()
+                .any(|state| state == required_state)
+            {
+                push_unique(
+                    &mut blockers,
+                    &format!(
+                        "browser_e2e_required_ui_state_missing:{}",
+                        scenario.scenario_id
+                    ),
+                );
+            }
+        }
+        for required_section in expected.final_delivery {
+            if !scenario
+                .final_delivery_sections
+                .iter()
+                .any(|section| section == required_section)
+            {
+                push_unique(
+                    &mut blockers,
+                    &format!(
+                        "browser_e2e_required_final_section_missing:{}",
+                        scenario.scenario_id
+                    ),
+                );
+            }
+        }
+        if expected.blocker.is_some_and(|blocker| {
+            !scenario
+                .visible_blockers
+                .iter()
+                .any(|value| value == blocker)
+        }) {
+            push_unique(
+                &mut blockers,
+                &format!(
+                    "browser_e2e_expected_blocker_not_visible:{}",
+                    scenario.scenario_id
+                ),
+            );
+        }
+        if !scenario.non_fake_evidence_observed {
+            push_unique(
+                &mut blockers,
+                &format!(
+                    "browser_e2e_non_fake_evidence_missing:{}",
+                    scenario.scenario_id
+                ),
+            );
+        }
+        if scenario.legacy_fallback_used {
+            push_unique(
+                &mut blockers,
+                &format!("browser_e2e_legacy_fallback:{}", scenario.scenario_id),
+            );
+        }
+        if scenario.silent_durable_write_detected {
+            push_unique(
+                &mut blockers,
+                &format!("browser_e2e_silent_write:{}", scenario.scenario_id),
+            );
+        }
+        if scenario.fake_execution_detected {
+            push_unique(
+                &mut blockers,
+                &format!("browser_e2e_fake_execution:{}", scenario.scenario_id),
+            );
+        }
+    }
+
+    blockers
 }
 
 fn browser_evidence_source_is_frontend_only(source: &str) -> bool {
@@ -1000,14 +1322,7 @@ fn scenario_evidence(
     MainChatAgentStage1DogfoodScenarioEvidence {
         scenario_id: scenario.id.into(),
         scenario_type: scenario.scenario_type.into(),
-        entry_point: if scenario.scenario_type == "chat_e2e" {
-            "ordinary_main_chat_input"
-        } else if scenario.live {
-            "opt_in_live_main_chat_input"
-        } else {
-            "seeded_visible_control_surface"
-        }
-        .into(),
+        entry_point: scenario_entry_point(scenario).into(),
         scenario_prompt_id: format!("stage1:{}:{}", scenario.priority, scenario.id),
         bounded_prompt_preview: bounded_preview(scenario.prompt),
         user_prompt_digest: digest_label(scenario.prompt.as_bytes()),
@@ -1072,6 +1387,16 @@ fn scenario_evidence(
         } else {
             Some("stage1_evidence_incomplete".into())
         },
+    }
+}
+
+fn scenario_entry_point(scenario: &Stage1ScenarioDef) -> &'static str {
+    if scenario.scenario_type == "chat_e2e" {
+        "ordinary_main_chat_input"
+    } else if scenario.live {
+        "opt_in_live_main_chat_input"
+    } else {
+        "seeded_visible_control_surface"
     }
 }
 

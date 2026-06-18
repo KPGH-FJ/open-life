@@ -218,6 +218,25 @@ async fn main_chat_agent_stage1_dogfood_gate_rejects_incomplete_browser_journeys
 }
 
 #[tokio::test]
+async fn main_chat_agent_stage1_dogfood_gate_rejects_journey_only_browser_report() {
+    let mut evidence = passing_stage1_browser_e2e_evidence_for_tests();
+    evidence.observed_scenarios.clear();
+    let report = run_main_chat_agent_stage1_dogfood_report_with_inputs_for_tests(
+        Some(evidence),
+        None,
+        false,
+    )
+    .await
+    .expect("stage 1 dogfood report");
+
+    assert!(!report.default_ready);
+    assert!(report
+        .blockers
+        .iter()
+        .any(|blocker| blocker == "browser_e2e_observed_scenarios_missing"));
+}
+
+#[tokio::test]
 async fn main_chat_agent_stage1_dogfood_default_readiness_is_unaffected_by_live_opt_in_status() {
     let no_live = run_main_chat_agent_stage1_dogfood_report_with_inputs_for_tests(
         Some(passing_stage1_browser_e2e_evidence_for_tests()),
