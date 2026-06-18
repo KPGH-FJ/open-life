@@ -309,7 +309,19 @@ async function createTauriWebDriverSession(application) {
   const value = response.value ?? response;
   const sessionId = value.sessionId ?? response.sessionId;
   if (!sessionId) throw new Error("webdriver_session_id_missing");
+  await configureWebDriverTimeouts(sessionId);
   return { sessionId };
+}
+
+async function configureWebDriverTimeouts(sessionId) {
+  await webdriverRequest(`/session/${encodeURIComponent(sessionId)}/timeouts`, {
+    method: "POST",
+    body: {
+      implicit: 0,
+      pageLoad: 60_000,
+      script: 180_000,
+    },
+  });
 }
 
 async function executeChatScenarioWithWebDriver(sessionId, scenario, gateRow) {
@@ -389,25 +401,35 @@ async function executeSeededControlScenarioWithWebDriver(sessionId, scenario, ga
 }
 
 async function tauriInvoke(sessionId, command, commandArgs = {}) {
-  const result = await executeAsyncScript(
-    sessionId,
-    `
-      const done = arguments[arguments.length - 1];
-      const command = arguments[0];
-      const commandArgs = arguments[1];
-      const internals = window.__TAURI_INTERNALS__;
-      if (!internals?.invoke) {
-        done({ ok: false, error: "tauri_invoke_unavailable" });
-        return;
-      }
-      internals.invoke(command, commandArgs)
-        .then(value => done({ ok: true, value }))
-        .catch(error => done({ ok: false, error: String(error?.message ?? error) }));
-    `,
-    [command, commandArgs]
-  );
-  if (!result?.ok) throw new Error(result?.error ?? "tauri_invoke_failed");
-  return result.value;
+  const safeCommand = metadataSafeBlocker(command);
+  console.error(`[tauri_invoke:start] ${safeCommand}`);
+  try {
+    const result = await executeAsyncScript(
+      sessionId,
+      `
+        const done = arguments[arguments.length - 1];
+        const command = arguments[0];
+        const commandArgs = arguments[1];
+        const internals = window.__TAURI_INTERNALS__;
+        if (!internals?.invoke) {
+          done({ ok: false, error: "tauri_invoke_unavailable" });
+          return;
+        }
+        internals.invoke(command, commandArgs)
+          .then(value => done({ ok: true, value }))
+          .catch(error => done({ ok: false, error: String(error?.message ?? error) }));
+      `,
+      [command, commandArgs]
+    );
+    if (!result?.ok) throw new Error(result?.error ?? "tauri_invoke_failed");
+    console.error(`[tauri_invoke:ok] ${safeCommand}`);
+    return result.value;
+  } catch (error) {
+    console.error(
+      `[tauri_invoke:error] ${safeCommand}:${metadataSafeBlocker(error?.message ?? error)}`
+    );
+    throw error;
+  }
 }
 
 async function navigateToChat(sessionId) {

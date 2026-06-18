@@ -506,6 +506,11 @@ describe("stage1 browser evidence report builder", () => {
     expect(script).toContain("assertFinalStage1GateReadyWithBrowserEvidence");
     expect(script).toContain("readinessRecommendation");
     expect(script).toContain("ready_for_engineering_dogfood");
+    expect(script).toContain("configureWebDriverTimeouts(sessionId)");
+    expect(script).toContain("`/session/${encodeURIComponent(sessionId)}/timeouts`");
+    expect(script).toContain("script: 180_000");
+    expect(script).toContain("[tauri_invoke:start]");
+    expect(script).toContain("[tauri_invoke:ok]");
     expect(script).toContain('pipeChildOutput(child, "frontend_dev_server")');
     expect(script).not.toContain('"--", "--host"');
     expect(script).toContain("browserE2ePassedJourneyCount");
