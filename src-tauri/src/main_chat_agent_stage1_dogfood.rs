@@ -1437,10 +1437,7 @@ fn audit_browser_observed_scenarios(evidence: &MainChatStage1BrowserE2eEvidence)
         if has_unsafe_label(&scenario.runtime_events) {
             push_unique(
                 &mut blockers,
-                &format!(
-                    "browser_e2e_runtime_event_unsafe:{}",
-                    scenario.scenario_id
-                ),
+                &format!("browser_e2e_runtime_event_unsafe:{}", scenario.scenario_id),
             );
         }
         if expected.scenario_type == "chat_e2e"
@@ -1614,9 +1611,11 @@ fn seeded_visible_control_event_observed(scenario_id: &str, events: &[String]) -
 }
 
 fn visible_control_event_matches_prefix(event: &str, prefix: &str) -> bool {
-    event == prefix || event.as_bytes().get(prefix.len()).is_some_and(|value| {
-        event.starts_with(prefix) && *value == b'_'
-    })
+    event == prefix
+        || event
+            .as_bytes()
+            .get(prefix.len())
+            .is_some_and(|value| event.starts_with(prefix) && *value == b'_')
 }
 
 fn seeded_visible_control_event_prefixes(scenario_id: &str) -> &'static [&'static str] {
@@ -1788,7 +1787,11 @@ fn digest_part(value: &str) -> String {
 }
 
 fn bool_label(value: bool) -> &'static str {
-    if value { "true" } else { "false" }
+    if value {
+        "true"
+    } else {
+        "false"
+    }
 }
 
 fn metadata_safe_label(value: &str) -> bool {
