@@ -23,6 +23,11 @@ const reportPath = "frontend/test-results/main-chat-stage1-dogfood-report.json";
 const webdriverUrl = "http://127.0.0.1:4444";
 const frontendDevUrl = "http://127.0.0.1:5173";
 
+if (process.argv.includes("--validate-scenarios-only")) {
+  console.log(`validated_stage1_dogfood_scenarios=${STAGE1_DOGFOOD_SCENARIOS.length}`);
+  process.exit(0);
+}
+
 main().catch(error => {
   const blocker = metadataSafeBlocker(`tauri_webdriver_runner_error:${error?.message ?? error}`);
   writeBlockedReport([blocker]);
@@ -98,10 +103,12 @@ function buildPreflight() {
 function commandAvailable(command) {
   const lookup = process.platform === "win32" ? "where" : "command";
   const args = process.platform === "win32" ? [command] : ["-v", command];
-  return spawnSync(lookup, args, {
-    stdio: "ignore",
-    shell: process.platform !== "win32",
-  }).status === 0;
+  return (
+    spawnSync(lookup, args, {
+      stdio: "ignore",
+      shell: process.platform !== "win32",
+    }).status === 0
+  );
 }
 
 function nativeWebdriverAvailable() {
@@ -145,9 +152,7 @@ async function runStage1TauriDogfood() {
     }
 
     const gateReport = await tauriInvoke(sessionId, "run_main_chat_agent_stage1_dogfood_gate");
-    const gateRows = new Map(
-      (gateReport?.scenarios ?? []).map(row => [row.scenarioId, row])
-    );
+    const gateRows = new Map((gateReport?.scenarios ?? []).map(row => [row.scenarioId, row]));
     const observedScenarios = [];
     for (const scenario of STAGE1_DOGFOOD_SCENARIOS) {
       const gateRow = gateRows.get(scenario.id);
@@ -188,10 +193,7 @@ async function runStage1TauriDogfood() {
           ready: false,
           sessionCreated: true,
           observedCount: observedScenarios.length,
-          blockers: [
-            "tauri_webdriver_final_gate_rejected",
-            finalGateBlockerFromError(error),
-          ],
+          blockers: ["tauri_webdriver_final_gate_rejected", finalGateBlockerFromError(error)],
         };
       }
       return {
@@ -208,10 +210,7 @@ async function runStage1TauriDogfood() {
       ready: false,
       sessionCreated: true,
       observedCount: observedScenarios.length,
-      blockers: [
-        "tauri_webdriver_d01_d36_observation_not_completed",
-        ...observedBlockers,
-      ],
+      blockers: ["tauri_webdriver_d01_d36_observation_not_completed", ...observedBlockers],
     };
   } catch (error) {
     return {
@@ -244,15 +243,11 @@ function startTauriDriver() {
 
 async function startFrontendDevServer() {
   if (await frontendDevServerReady()) return null;
-  const child = spawn(
-    "corepack",
-    ["pnpm", "dev", "--", "--host", "127.0.0.1", "--port", "5173"],
-    {
-      cwd: frontendRoot,
-      stdio: ["ignore", "ignore", "pipe"],
-      shell: process.platform === "win32",
-    }
-  );
+  const child = spawn("corepack", ["pnpm", "dev", "--", "--host", "127.0.0.1", "--port", "5173"], {
+    cwd: frontendRoot,
+    stdio: ["ignore", "ignore", "pipe"],
+    shell: process.platform === "win32",
+  });
   child.stderr?.on("data", chunk => {
     process.stderr.write(chunk);
   });
@@ -298,8 +293,8 @@ async function createTauriWebDriverSession(application) {
       body: {
         capabilities: {
           alwaysMatch: {
-            browserName: 'wry',
-            'tauri:options': { application },
+            browserName: "wry",
+            "tauri:options": { application },
           },
         },
       },
@@ -333,14 +328,18 @@ async function executeSeededControlScenarioWithWebDriver(sessionId, scenario, ga
   const preObserved = emptyPreObservedEvidence();
   const preparedTaskId = prepReport?.taskSessionIds?.[scenario.id] ?? "";
   if (preparedTaskId) {
-    visibleControlEvents.push(await openTaskContinuityDetailWithWebDriver(sessionId, preparedTaskId));
+    visibleControlEvents.push(
+      await openTaskContinuityDetailWithWebDriver(sessionId, preparedTaskId)
+    );
     const preEvidence = await readTaskContinuityEvidenceWithWebDriver(sessionId, scenario);
     preObserved.visibleUiStates.push(...preEvidence.visibleUiStates);
     preObserved.finalDeliverySections.push(...preEvidence.finalDeliverySections);
     preObserved.visibleBlockers.push(...preEvidence.visibleBlockers);
     if (scenario.id === "D13") {
       visibleControlEvents.push(
-        await clickFirstVisibleControlWithWebDriver(sessionId, ["Resume task from continuity detail"])
+        await clickFirstVisibleControlWithWebDriver(sessionId, [
+          "Resume task from continuity detail",
+        ])
       );
     } else if (scenario.id === "D14") {
       visibleControlEvents.push(
@@ -348,7 +347,9 @@ async function executeSeededControlScenarioWithWebDriver(sessionId, scenario, ga
       );
     } else if (scenario.id === "D15") {
       visibleControlEvents.push(
-        await clickFirstVisibleControlWithWebDriver(sessionId, ["Cancel task from continuity detail"])
+        await clickFirstVisibleControlWithWebDriver(sessionId, [
+          "Cancel task from continuity detail",
+        ])
       );
     } else if (scenario.id === "D27") {
       visibleControlEvents.push(
@@ -356,7 +357,13 @@ async function executeSeededControlScenarioWithWebDriver(sessionId, scenario, ga
       );
     }
     const evidence = await readTaskContinuityEvidenceWithWebDriver(sessionId, scenario);
-    return seededObservationFromEvidence(scenario, gateRow, evidence, visibleControlEvents, preObserved);
+    return seededObservationFromEvidence(
+      scenario,
+      gateRow,
+      evidence,
+      visibleControlEvents,
+      preObserved
+    );
   }
 
   if (["D19", "D20", "D28"].includes(scenario.id)) {
@@ -423,7 +430,7 @@ async function setSelectedSkillWithWebDriver(sessionId, selectedSkillId) {
   const requestedSkillId = String(selectedSkillId ?? "");
   const selected = await executeScript(
     sessionId,
-     `
+    `
       const input = document.querySelector('[data-testid="skill-context-input"]');
       if (!input) return false;
       const inputValueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
@@ -437,7 +444,9 @@ async function setSelectedSkillWithWebDriver(sessionId, selectedSkillId) {
     [requestedSkillId]
   );
   if (requestedSkillId.trim() && !selected) {
-    throw new Error(`webdriver_selected_skill_not_applied:${metadataSafeBlocker(requestedSkillId)}`);
+    throw new Error(
+      `webdriver_selected_skill_not_applied:${metadataSafeBlocker(requestedSkillId)}`
+    );
   }
 }
 
@@ -586,9 +595,12 @@ async function clickScenarioControlWithWebDriver(sessionId, id) {
     await installPromptResponseWithWebDriver(sessionId, "Stage 1 browser dogfood skip.");
     return await clickFirstVisibleControlWithWebDriver(sessionId, ["Skip step"]);
   }
-  if (id === "D11") return await clickFirstVisibleControlWithWebDriver(sessionId, ["Accept proposal"]);
-  if (id === "D12") return await clickFirstVisibleControlWithWebDriver(sessionId, ["Rollback memory"]);
-  if (id === "D35") return await clickFirstVisibleControlWithWebDriver(sessionId, ["Deny", "Reject proposal"]);
+  if (id === "D11")
+    return await clickFirstVisibleControlWithWebDriver(sessionId, ["Accept proposal"]);
+  if (id === "D12")
+    return await clickFirstVisibleControlWithWebDriver(sessionId, ["Rollback memory"]);
+  if (id === "D35")
+    return await clickFirstVisibleControlWithWebDriver(sessionId, ["Deny", "Reject proposal"]);
   if (id === "D36") return await clickFirstVisibleControlWithWebDriver(sessionId, ["Defer"]);
   throw new Error(`webdriver_visible_control_not_mapped:${id}`);
 }
@@ -986,10 +998,7 @@ function finalSectionObserved(section, visibleTitles, snapshot, controlEvents = 
     );
   }
   if (section === "blocked_work") {
-    return (
-      visibleTitles.includes("Blocked items") ||
-      arrayLength(deliveryMetrics, "blockers") > 0
-    );
+    return visibleTitles.includes("Blocked items") || arrayLength(deliveryMetrics, "blockers") > 0;
   }
   if (section === "skipped_work") {
     return (
@@ -1035,11 +1044,13 @@ function arrayIncludes(value, key, expected) {
 }
 
 function snapshotControls(snapshot) {
-  return uniqueValues([
-    ...(snapshot?.task?.controls ?? []),
-    ...(snapshot?.blockers ?? []).flatMap(blocker => blocker?.controls ?? []),
-    ...(snapshot?.proposals ?? []).flatMap(proposal => proposal?.controls ?? []),
-  ].filter(value => typeof value === "string"));
+  return uniqueValues(
+    [
+      ...(snapshot?.task?.controls ?? []),
+      ...(snapshot?.blockers ?? []).flatMap(blocker => blocker?.controls ?? []),
+      ...(snapshot?.proposals ?? []).flatMap(proposal => proposal?.controls ?? []),
+    ].filter(value => typeof value === "string")
+  );
 }
 
 function transcriptMetadataFlag(detail, keys) {
@@ -1050,7 +1061,9 @@ function transcriptMetadataFlag(detail, keys) {
 
 function snapshotEvents(snapshot) {
   return uniqueValues(
-    (snapshot?.events ?? []).map(event => event?.eventType).filter(event => typeof event === "string")
+    (snapshot?.events ?? [])
+      .map(event => event?.eventType)
+      .filter(event => typeof event === "string")
   );
 }
 
@@ -1071,18 +1084,24 @@ async function waitForScript(sessionId, script, args, timeoutMs, timeoutError) {
 }
 
 async function executeScript(sessionId, script, args = []) {
-  const response = await webdriverRequest(`/session/${encodeURIComponent(sessionId)}/execute/sync`, {
-    method: "POST",
-    body: { script, args },
-  });
+  const response = await webdriverRequest(
+    `/session/${encodeURIComponent(sessionId)}/execute/sync`,
+    {
+      method: "POST",
+      body: { script, args },
+    }
+  );
   return response.value;
 }
 
 async function executeAsyncScript(sessionId, script, args = []) {
-  const response = await webdriverRequest(`/session/${encodeURIComponent(sessionId)}/execute/async`, {
-    method: "POST",
-    body: { script, args },
-  });
+  const response = await webdriverRequest(
+    `/session/${encodeURIComponent(sessionId)}/execute/async`,
+    {
+      method: "POST",
+      body: { script, args },
+    }
+  );
   return response.value;
 }
 
@@ -1115,16 +1134,20 @@ async function webdriverRequest(endpoint, options) {
   const text = await response.text();
   const data = text ? JSON.parse(text) : {};
   if (!response.ok) {
-    throw new Error(metadataSafeBlocker(data?.value?.message ?? data?.message ?? response.statusText));
+    throw new Error(
+      metadataSafeBlocker(data?.value?.message ?? data?.message ?? response.statusText)
+    );
   }
   return data;
 }
 
 function metadataSafeBlocker(value) {
-  return String(value)
-    .replace(/[^A-Za-z0-9_.:/-]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 160) || "unknown";
+  return (
+    String(value)
+      .replace(/[^A-Za-z0-9_.:/-]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 160) || "unknown"
+  );
 }
 
 function normalizeBlockers(values) {
@@ -1230,7 +1253,9 @@ async function assertFinalStage1GateReadyWithBrowserEvidence(sessionId) {
     blockers.push("tauri_webdriver_final_gate_browser_failed_count_nonzero");
   }
   if (Array.isArray(report?.blockers) && report.blockers.length > 0) {
-    blockers.push(...report.blockers.map(blocker => `tauri_webdriver_final_gate_blocker:${blocker}`));
+    blockers.push(
+      ...report.blockers.map(blocker => `tauri_webdriver_final_gate_blocker:${blocker}`)
+    );
   }
   if (blockers.length > 0) {
     throw new Error(uniqueValues(blockers).map(metadataSafeBlocker).join(","));
@@ -1315,7 +1340,9 @@ function validateObservedScenariosForPassingReport(observedScenarios, gateRows =
     }
     for (const requiredState of scenario.expectedUiStates) {
       if (!row.visibleUiStates?.includes(requiredState)) {
-        blockers.push(`tauri_webdriver_required_ui_state_missing:${row.scenarioId}:${requiredState}`);
+        blockers.push(
+          `tauri_webdriver_required_ui_state_missing:${row.scenarioId}:${requiredState}`
+        );
       }
     }
     for (const requiredSection of scenario.expectedFinalSections) {
@@ -1417,20 +1444,22 @@ function copyObservedScenario(row) {
 function loadStage1DogfoodScenarios() {
   const sourcePath = path.resolve(frontendRoot, "src/stage1DogfoodScenarios.ts");
   const source = fs.readFileSync(sourcePath, "utf8");
-  const ids = [...source.matchAll(/s\("(?<id>D\d{2})",\s*"(?<scenarioType>[^"]+)",\s*"(?<prompt>(?:[^"\\]|\\.)*)".*?\)/g)].map(
-    match => {
-      const stringArrays = stringArraysFromScenarioCall(match[0]);
-      return {
-        id: match.groups.id,
-        scenarioType: match.groups.scenarioType,
-        prompt: match.groups.prompt,
-        expectedUiStates: stringArrays[0] ?? [],
-        expectedFinalSections: stringArrays[1] ?? [],
-        expectedBlocker: expectedBlockerFromScenarioCall(match[0]),
-        selectedSkillId: selectedSkillIdFromScenarioCall(match[0]),
-      };
-    }
-  );
+  const ids = [
+    ...source.matchAll(
+      /s\(\s*"(?<id>D\d{2})",\s*"(?<scenarioType>[^"]+)",\s*"(?<prompt>(?:[^"\\]|\\.)*)".*?\)/gs
+    ),
+  ].map(match => {
+    const stringArrays = stringArraysFromScenarioCall(match[0]);
+    return {
+      id: match.groups.id,
+      scenarioType: match.groups.scenarioType,
+      prompt: match.groups.prompt,
+      expectedUiStates: stringArrays[0] ?? [],
+      expectedFinalSections: stringArrays[1] ?? [],
+      expectedBlocker: expectedBlockerFromScenarioCall(match[0]),
+      selectedSkillId: selectedSkillIdFromScenarioCall(match[0]),
+    };
+  });
   const expectedIds = Array.from(
     { length: 36 },
     (_, index) => `D${String(index + 1).padStart(2, "0")}`
@@ -1438,7 +1467,9 @@ function loadStage1DogfoodScenarios() {
   if (ids.map(item => item.id).join(",") !== expectedIds.join(",")) {
     throw new Error("stage1_dogfood_scenario_matrix_not_exact_d01_d36");
   }
-  if (ids.some(item => item.expectedUiStates.length === 0 || item.expectedFinalSections.length === 0)) {
+  if (
+    ids.some(item => item.expectedUiStates.length === 0 || item.expectedFinalSections.length === 0)
+  ) {
     throw new Error("stage1_dogfood_scenario_matrix_missing_expected_observations");
   }
   return ids;
@@ -1454,12 +1485,16 @@ function expectedBlockerFromScenarioCall(callSource) {
   const arrays = [...callSource.matchAll(/\[[^\]]*\]/g)];
   if (arrays.length < 2) return "";
   const afterFinalSections = callSource.slice(arrays[1].index + arrays[1][0].length);
-  return afterFinalSections.match(/^\s*,\s*"(?<expectedBlocker>[^"]+)"/)?.groups?.expectedBlocker ?? "";
+  return (
+    afterFinalSections.match(/^\s*,\s*"(?<expectedBlocker>[^"]+)"/)?.groups?.expectedBlocker ?? ""
+  );
 }
 
 function selectedSkillIdFromScenarioCall(callSource) {
-  return callSource.match(/,\s*undefined,\s*"(?<selectedSkillId>[^"]+)"\s*\)$/)?.groups
-    ?.selectedSkillId ?? "";
+  return (
+    callSource.match(/,\s*undefined,\s*"(?<selectedSkillId>[^"]+)"\s*\)$/)?.groups
+      ?.selectedSkillId ?? ""
+  );
 }
 
 function stage1BrowserReportDigestInput(input) {

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -399,6 +400,20 @@ describe("stage1 browser evidence report builder", () => {
     expect(STAGE1_DOGFOOD_SCENARIOS.some(scenario => scenario.expectedBlocker)).toBe(true);
   });
 
+  it("validates the formatted D01-D36 scenario matrix without starting Tauri", () => {
+    const result = spawnSync(
+      "node",
+      ["scripts/stage1-tauri-webdriver.mjs", "--validate-scenarios-only"],
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+      }
+    );
+
+    expect(`${result.stdout}${result.stderr}`).toContain("validated_stage1_dogfood_scenarios=36");
+    expect(result.status).toBe(0);
+  });
+
   it("keeps Playwright dogfood on the shared Stage 1 scenario matrix", () => {
     const spec = fs.readFileSync(
       path.resolve(process.cwd(), "e2e/main-chat-stage1-dogfood.spec.ts"),
@@ -430,8 +445,8 @@ describe("stage1 browser evidence report builder", () => {
       true
     );
     expect(script).not.toContain("tauri_webdriver_d01_d36_executor_not_implemented");
-    expect(script).toContain("'tauri:options'");
-    expect(script).toContain("browserName: 'wry'");
+    expect(script).toContain('"tauri:options"');
+    expect(script).toContain('browserName: "wry"');
     expect(script).toContain('const webdriverUrl = "http://127.0.0.1:4444"');
     expect(script).toContain('"/session"');
     expect(script).toContain("stage1DogfoodScenarios.ts");
