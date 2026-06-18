@@ -525,6 +525,7 @@ describe("stage1 browser evidence report builder", () => {
     expect(workflow).toContain("runs-on: ubuntu-22.04");
     expect(workflow).toContain("webkit2gtk-driver");
     expect(workflow).toContain("xvfb");
+    expect(workflow).toContain("corepack prepare pnpm@9.1.0 --activate");
     expect(workflow).toContain("cargo install tauri-driver --locked");
     expect(workflow).toContain("cargo build -p openlife-tauri");
     expect(workflow).toContain("pnpm --dir frontend test:e2e:tauri");
