@@ -506,6 +506,8 @@ describe("stage1 browser evidence report builder", () => {
     expect(script).toContain("assertFinalStage1GateReadyWithBrowserEvidence");
     expect(script).toContain("readinessRecommendation");
     expect(script).toContain("ready_for_engineering_dogfood");
+    expect(script).toContain('pipeChildOutput(child, "frontend_dev_server")');
+    expect(script).not.toContain('"--", "--host"');
     expect(script).toContain("browserE2ePassedJourneyCount");
     expect(script).toContain("tauri_webdriver_final_gate_rejected");
     expect(script).toContain("finalGateBlockerFromError");
@@ -516,7 +518,7 @@ describe("stage1 browser evidence report builder", () => {
     expect(script).toContain("waitForFrontendDevServer");
     expect(script).toContain('const frontendDevUrl = "http://127.0.0.1:5173"');
     expect(script).toContain('"corepack"');
-    expect(script).toContain('"pnpm", "dev", "--", "--host", "127.0.0.1", "--port", "5173"');
+    expect(script).toContain('"pnpm", "dev", "--host", "127.0.0.1", "--port", "5173"');
     expect(script).toContain("frontendDevServer.kill()");
     expect(script).toContain("fileURLToPath(import.meta.url)");
     expect(script).toContain('const repoRoot = path.resolve(frontendRoot, "..")');

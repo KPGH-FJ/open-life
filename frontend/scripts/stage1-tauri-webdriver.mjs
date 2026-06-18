@@ -229,12 +229,10 @@ async function runStage1TauriDogfood() {
 function startTauriDriver() {
   const command = process.platform === "win32" ? "tauri-driver.exe" : "tauri-driver";
   const child = spawn(command, [], {
-    stdio: ["ignore", "ignore", "pipe"],
+    stdio: ["ignore", "pipe", "pipe"],
     shell: process.platform === "win32",
   });
-  child.stderr?.on("data", chunk => {
-    process.stderr.write(chunk);
-  });
+  pipeChildOutput(child, "tauri_driver");
   child.on("error", error => {
     throw error;
   });
@@ -243,16 +241,23 @@ function startTauriDriver() {
 
 async function startFrontendDevServer() {
   if (await frontendDevServerReady()) return null;
-  const child = spawn("corepack", ["pnpm", "dev", "--", "--host", "127.0.0.1", "--port", "5173"], {
+  const child = spawn("corepack", ["pnpm", "dev", "--host", "127.0.0.1", "--port", "5173"], {
     cwd: frontendRoot,
-    stdio: ["ignore", "ignore", "pipe"],
+    stdio: ["ignore", "pipe", "pipe"],
     shell: process.platform === "win32",
   });
-  child.stderr?.on("data", chunk => {
-    process.stderr.write(chunk);
-  });
+  pipeChildOutput(child, "frontend_dev_server");
   await waitForFrontendDevServer(child, 120_000);
   return child;
+}
+
+function pipeChildOutput(child, label) {
+  child.stdout?.on("data", chunk => {
+    process.stderr.write(`[${label}:stdout] ${chunk}`);
+  });
+  child.stderr?.on("data", chunk => {
+    process.stderr.write(`[${label}:stderr] ${chunk}`);
+  });
 }
 
 async function waitForFrontendDevServer(child, timeoutMs) {
