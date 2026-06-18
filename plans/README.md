@@ -1,7 +1,7 @@
 # OpenLife Plans Document Governance
 
-> Last updated: 2026-06-11
-> Status: authoritative document index for Agents, W150-W158 Skill Runtime Beta Maturity complete; Main Chat Agent Execution v1 stabilization is the current Goal-mode entry; v1 is not complete
+> Last updated: 2026-06-18
+> Status: authoritative document index for Agents; Main Chat Agent Beta v1 deterministic readiness is the completed foundation; Stage 1 Real End-to-End Dogfood is the current Goal-mode entry
 
 This file prevents old planning documents from steering new Agent work. If two
 documents disagree, use the precedence below and treat lower-priority stale text
@@ -13,8 +13,17 @@ as reference only.
    - Project-wide Agent instructions, current constraints, and Tool Taxonomy.
 2. `plans/README.md`
    - This authority map and current entry point.
-3. `plans/main_chat_agent_v1_stabilization_goal_spec.md`
-   - Current Goal-mode entry for the stabilization / acceptance-blocker
+3. `plans/main_chat_stage1_preparation_index.md` and
+   `plans/main_chat_agent_stage1_dogfood_goal_spec.md`
+   - Current Goal-mode entry for Stage 1 Real End-to-End Dogfood. This Goal
+     must build on the existing Beta v1 task/event/memory/plan/proposal/
+     skill/tool foundations, not create parallel runtime systems. It focuses
+     on deterministic seed data, product dogfood scenarios, self-contained
+     browser E2E evidence, final-delivery proof, visible blockers, and a
+     fail-closed Stage 1 readiness report. External live-provider proof remains
+     opt-in and separate from default readiness.
+4. `plans/main_chat_agent_v1_stabilization_goal_spec.md`
+   - Previous Goal-mode entry for the stabilization / acceptance-blocker
      remediation pass after checkpoint `d8e415f`. This Goal does not restart
      the previous broad migration Goal and does not expand the product roadmap.
      It exists to fix known blockers: real auditable final gate, external
@@ -23,7 +32,7 @@ as reference only.
      knowledge-format context surfaces, and `src-tauri/src/lib.rs` module
      cleanup. It must fail closed and must not claim completion without real
      evidence.
-4. `plans/main_chat_agent_migration_v1_goal_spec.md`
+5. `plans/main_chat_agent_migration_v1_goal_spec.md`
    - Main Chat Agent Execution v1 remediation spec / audit trail and capability
      target.
      Ordinary Main Chat now enters AgentIngress and a governed task session,
@@ -307,10 +316,14 @@ as reference only.
 
 ## 2. Current Position
 
-Current latest status is **Main Chat Agent Execution v1 stabilization is the
-current Goal-mode entry, and v1 remains not complete**. The next Goal should use
-`plans/main_chat_agent_v1_stabilization_goal_spec.md` to fix acceptance
-blockers before any broader capability expansion.
+Current latest status is **Main Chat Agent Beta v1 deterministic readiness is
+the completed foundation, and Stage 1 Real End-to-End Dogfood is the current
+Goal-mode entry**. The next Goal should use
+`plans/main_chat_stage1_preparation_index.md` and
+`plans/main_chat_agent_stage1_dogfood_goal_spec.md` to implement deterministic
+product dogfood, UI-visible evidence, final-delivery proof, self-contained
+browser E2E, and a fail-closed Stage 1 readiness gate before broader capability
+expansion.
 
 Main Chat Agent Execution v1 remediation remains in progress after W150-W158
 Skill Runtime Beta Maturity. Ordinary `send_message` and
@@ -1139,6 +1152,8 @@ metadata-safe safety, default Chat impact, and next dependency.
 | Document | Use for |
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, and current hard constraints. |
+| `plans/main_chat_stage1_preparation_index.md` | Current Stage 1 preparation index, required reading, phase map, readiness boundaries, and short CLI Goal prompt. |
+| `plans/main_chat_agent_stage1_dogfood_goal_spec.md` | Current CLI Goal-mode entry for Main Chat Agent Stage 1 Real End-to-End Dogfood. Build on Beta v1 foundations; do not create parallel runtime systems. |
 | `plans/main_chat_agent_productization_v1_goal_spec.md` | Next development goal spec for Main Chat Agent Control Plane, product eval, runtime-backed UI state, L0-L2 product completion, and narrow L3/L4/L5 continuity. |
 | `plans/openlife_agent_product_capability_matrix_v1.md` | Product capability matrix for the next Agent phase: capability levels, current/target state, UI/backend dependencies, acceptance gates, and Codex/Hermes/OpenClaw gaps. |
 | `plans/main_chat_agent_product_eval_scenarios_v1.md` | Product-level Main Chat Agent scenario set covering DirectAnswer, read tools, ReAct, PlanExecute, memory, permission, skill, recovery, and final delivery. |
@@ -1146,7 +1161,7 @@ metadata-safe safety, default Chat impact, and next dependency.
 | `plans/main_chat_runtime_to_ui_evidence_mapping_v1.md` | Contract mapping runtime evidence to UI task, action, observation, blocker, proposal, and final delivery objects. |
 | `plans/main_chat_permission_proposal_memory_ux_contract_v1.md` | Permission, ToolPermission proposal, memory proposal, conflict, rollback, and Review Center UX contract. |
 | `plans/main_chat_final_delivery_contract_v1.md` | Final delivery object, completion statuses, section requirements, and negative assertions for task completion. |
-| `plans/main_chat_agent_v1_stabilization_goal_spec.md` | Current Goal-mode entry for stabilization / acceptance-blocker remediation. Use before restarting broader Main Chat capability expansion. |
+| `plans/main_chat_agent_v1_stabilization_goal_spec.md` | Previous stabilization / acceptance-blocker remediation entry. Keep as audit trail, not the current Goal-mode entry. |
 | `plans/main_chat_agent_migration_v1_goal_spec.md` | Main Chat Agent Execution v1 capability target and audit trail. Do not directly restart it as the next broad Goal unless explicitly requested. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Current LifeModel-Governed Runtime program and post-W149 implementation options. |
 | `plans/lifemodel_governed_backend_completion_goal_spec.md` | Completed Backend Completion master spec through Goal 8 / W147-W149. |
