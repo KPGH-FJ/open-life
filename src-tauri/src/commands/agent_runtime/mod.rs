@@ -1959,6 +1959,25 @@ pub async fn run_main_chat_agent_beta_v1_readiness_gate(
 }
 
 #[tauri::command]
+pub async fn run_main_chat_agent_stage1_dogfood_gate(
+    _state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
+    let runtime_handle = tokio::runtime::Handle::current();
+    let report = std::thread::Builder::new()
+        .name("stage1-dogfood-gate".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            runtime_handle.block_on(
+                crate::main_chat_agent_stage1_dogfood::run_main_chat_agent_stage1_dogfood_report(),
+            )
+        })
+        .map_err(|err| format!("spawn stage1 dogfood gate worker: {err}"))?
+        .join()
+        .map_err(|_| "stage1 dogfood gate worker panicked".to_string())??;
+    serde_json::to_value(report).map_err(|err| format!("serialize stage1 dogfood report: {err}"))
+}
+
+#[tauri::command]
 pub async fn run_main_chat_agent_execution_v1_final_acceptance_gate(
     state: State<'_, Arc<AppState>>,
 ) -> Result<MainChatAgentExecutionV1FinalAcceptanceGateCommandReport, String> {

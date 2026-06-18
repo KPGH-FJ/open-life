@@ -1329,6 +1329,96 @@ export interface MainChatAgentBetaV1ReadinessReport {
   readinessDimensions: MainChatAgentBetaV1ReadinessDimension[];
 }
 
+export interface MainChatAgentStage1SeedManifest {
+  seedWorkspaceRootKind: "temp_isolated";
+  knowledgeAssetCount: number;
+  skillCount: number;
+  sessionSeedCount: number;
+  memorySeedCount: number;
+  proposalSeedCount: number;
+  taskSeedCount: number;
+  planSeedCount: number;
+  mcpManifestSeedCount: number;
+  webFixtureSeedCount: number;
+  seedDigest: string;
+  fileDigests: Record<string, string>;
+  runtimeObjectDigests: Record<string, string>;
+  secretsDetected: boolean;
+}
+
+export interface MainChatAgentStage1DogfoodScenarioEvidence {
+  scenarioId: string;
+  scenarioType: string;
+  entryPoint: string;
+  scenarioPromptId: string;
+  boundedPromptPreview: string;
+  userPromptDigest: string;
+  taskSessionId: string;
+  runId: string;
+  routeStrategy: string;
+  expectedOutcome: string;
+  actualOutcome: string;
+  runtimeEvents: string[];
+  actions: string[];
+  observations: string[];
+  proposals: string[];
+  blockers: string[];
+  uiStates: string[];
+  finalDeliverySections: string[];
+  controlEvidence: string;
+  runtimeEvidencePassed: boolean;
+  uiEvidencePassed: boolean;
+  finalDeliveryEvidencePassed: boolean;
+  nonFakeEvidencePassed: boolean;
+  legacyFallbackUsed: boolean;
+  silentDurableWriteDetected: boolean;
+  fakeExecutionDetected: boolean;
+  seedManifestDigest: string;
+  liveProviderEvidence?: string | null;
+  passed: boolean;
+  failureReason?: string | null;
+}
+
+export interface MainChatAgentStage1DogfoodReport {
+  reportKind: "main_chat_agent_stage1_dogfood_gate";
+  readinessSemantics: string;
+  defaultReadinessScope: "stage1_default_deterministic_seeded_dogfood";
+  optInLiveReadinessScope: "stage1_external_live_opt_in_only";
+  defaultReady: boolean;
+  optInLiveReady: boolean;
+  readinessRecommendation: string;
+  scenarioCount: number;
+  defaultScenarioCount: number;
+  defaultPassedCount: number;
+  defaultFailedCount: number;
+  taskSessionCreatedCount: number;
+  ordinaryChatScenarioCount: number;
+  seededTaskControlScenarioCount: number;
+  uiVerifiedScenarioCount: number;
+  finalDeliveryVerifiedScenarioCount: number;
+  legacyFallbackCount: number;
+  silentDurableWriteCount: number;
+  fakeExecutionDetectedCount: number;
+  externalLiveAttempted: boolean;
+  externalLiveScenarioCount: number;
+  externalLivePassedCount: number;
+  externalLiveBlockedCount: number;
+  externalLiveBlockers: string[];
+  defaultReadinessUnaffectedByLive: boolean;
+  browserE2eEnvironmentReady: boolean;
+  browserE2eReportPath?: string | null;
+  browserE2eRequiredJourneyCount: number;
+  browserE2ePassedJourneyCount: number;
+  browserE2eFailedJourneyCount: number;
+  manualDogfoodStatus: string;
+  betaV1DefaultReady: boolean;
+  productMaturityDefaultScenarioCount: number;
+  seedManifest: MainChatAgentStage1SeedManifest;
+  scenarios: MainChatAgentStage1DogfoodScenarioEvidence[];
+  blockers: string[];
+  acceptedResidualRisks: string[];
+}
+
 export async function listMainChatSkills(sessionId?: string): Promise<MainChatSkillSummary[]> {
   return safeInvoke<MainChatSkillSummary[]>("list_main_chat_skills", {
     ...optionalDualArg("sessionId", "session_id", sessionId),
@@ -1532,6 +1622,12 @@ export async function runMainChatAgentProductMaturityV2FinalReadinessGate(): Pro
 export async function runMainChatAgentBetaV1ReadinessGate(): Promise<MainChatAgentBetaV1ReadinessReport> {
   return safeInvoke<MainChatAgentBetaV1ReadinessReport>(
     "run_main_chat_agent_beta_v1_readiness_gate"
+  );
+}
+
+export async function runMainChatAgentStage1DogfoodGate(): Promise<MainChatAgentStage1DogfoodReport> {
+  return safeInvoke<MainChatAgentStage1DogfoodReport>(
+    "run_main_chat_agent_stage1_dogfood_gate"
   );
 }
 
@@ -1938,7 +2034,7 @@ export async function startStreamMessage(
   sessionId: string,
   messages: ChatMessage[],
   options: MainChatMessageOptions = {}
-): Promise<void> {
+): Promise<void | StreamMessageDonePayload> {
   const payload = {
     ...sessionArgs(sessionId),
     messages,

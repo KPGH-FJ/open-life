@@ -23,6 +23,8 @@ pub(crate) mod main_chat_agent_beta_v1_readiness;
 pub(crate) mod main_chat_agent_beta_v1_real_tasks;
 #[allow(dead_code)]
 pub(crate) mod main_chat_agent_productization_eval;
+#[allow(dead_code)]
+pub(crate) mod main_chat_agent_stage1_dogfood;
 pub(crate) mod main_chat_agent_state_payload;
 #[allow(dead_code)]
 pub(crate) mod main_chat_command_surface_eval;
@@ -94,6 +96,9 @@ mod main_chat_runtime_module_tests;
 mod main_chat_agent_productization_tests;
 
 #[cfg(test)]
+mod main_chat_agent_stage1_dogfood_tests;
+
+#[cfg(test)]
 mod main_chat_event_stream_tests;
 
 #[cfg(test)]
@@ -156,9 +161,9 @@ use commands::agent_runtime::{
     run_main_chat_agent_product_maturity_v2_final_readiness_gate,
     run_main_chat_agent_product_maturity_v2_plan_gate,
     run_main_chat_agent_product_maturity_v2_skills_gate,
-    run_main_chat_agent_productization_v1_gate, run_main_chat_external_live_productization_gate,
-    run_multi_strategy_agent_preview, select_main_chat_skill, skip_plan_execute_step,
-    update_plan_execute_session_draft,
+    run_main_chat_agent_productization_v1_gate, run_main_chat_agent_stage1_dogfood_gate,
+    run_main_chat_external_live_productization_gate, run_multi_strategy_agent_preview,
+    select_main_chat_skill, skip_plan_execute_step, update_plan_execute_session_draft,
 };
 
 use commands::builder::{
@@ -643,6 +648,7 @@ pub fn run() {
             run_main_chat_agent_product_maturity_v2_skills_gate,
             run_main_chat_agent_product_maturity_v2_final_readiness_gate,
             run_main_chat_agent_beta_v1_readiness_gate,
+            run_main_chat_agent_stage1_dogfood_gate,
             run_main_chat_agent_execution_v1_final_acceptance_gate,
             get_runtime_strategy_registry_status,
             get_react_beta_execution_status,

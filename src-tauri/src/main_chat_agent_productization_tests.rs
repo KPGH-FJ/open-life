@@ -40,6 +40,10 @@ fn productization_command_test_context() -> tauri::Context<tauri::test::MockRunt
     );
     context.runtime_authority_mut().__allow_command(
         "run_main_chat_agent_beta_v1_readiness_gate".into(),
+        mock_ipc_origin.clone(),
+    );
+    context.runtime_authority_mut().__allow_command(
+        "run_main_chat_agent_stage1_dogfood_gate".into(),
         mock_ipc_origin,
     );
     context
@@ -1554,6 +1558,72 @@ async fn run_main_chat_agent_beta_v1_readiness_command_returns_isolated_report()
     );
     assert_eq!(response["legacyFallbackCount"].as_u64().unwrap(), 0);
     assert_eq!(response["silentDurableWriteCount"].as_u64().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn run_main_chat_agent_stage1_dogfood_command_returns_isolated_report() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let app = tauri::test::mock_builder()
+        .manage(state.clone())
+        .invoke_handler(tauri::generate_handler![
+            crate::commands::agent_runtime::run_main_chat_agent_stage1_dogfood_gate
+        ])
+        .build(productization_command_test_context())
+        .expect("build mock tauri app");
+    let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+        .build()
+        .expect("build mock webview");
+
+    let response = tauri::test::get_ipc_response(
+        &webview,
+        productization_invoke_request(
+            "run_main_chat_agent_stage1_dogfood_gate",
+            serde_json::json!({}),
+        ),
+    )
+    .expect("stage1 dogfood response")
+    .deserialize::<serde_json::Value>()
+    .expect("deserialize stage1 dogfood response");
+
+    assert_eq!(
+        response["reportKind"].as_str().unwrap(),
+        "main_chat_agent_stage1_dogfood_gate"
+    );
+    assert_eq!(response["defaultScenarioCount"].as_u64().unwrap(), 36);
+    assert_eq!(response["scenarioCount"].as_u64().unwrap(), 40);
+    assert_eq!(response["ordinaryChatScenarioCount"].as_u64().unwrap(), 24);
+    assert_eq!(
+        response["seededTaskControlScenarioCount"].as_u64().unwrap(),
+        12
+    );
+    if response["defaultReady"].as_bool().unwrap() {
+        assert!(response["defaultReady"].as_bool().unwrap());
+        assert_eq!(
+            response["readinessRecommendation"].as_str().unwrap(),
+            "ready_for_engineering_dogfood"
+        );
+        assert_eq!(
+            response["browserE2eReportPath"].as_str().unwrap(),
+            "frontend/test-results/main-chat-stage1-dogfood-report.json"
+        );
+    } else {
+        assert!(!response["defaultReady"].as_bool().unwrap());
+        assert_eq!(
+            response["readinessRecommendation"].as_str().unwrap(),
+            "not_ready"
+        );
+        assert!(response["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| { blocker.as_str() == Some("not_ready_browser_e2e_blocked") }));
+    }
+    assert_eq!(
+        response["seedManifest"]["seedWorkspaceRootKind"]
+            .as_str()
+            .unwrap(),
+        "temp_isolated"
+    );
 }
 
 #[tokio::test]

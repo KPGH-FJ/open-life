@@ -123,6 +123,8 @@ Thumbs.db
 .eslintcache
 .stylelintcache
 .parcel-cache
+frontend/playwright-report/
+frontend/test-results/
 
 # 忽略本地数据目录
 openlife-data/

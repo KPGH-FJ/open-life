@@ -214,6 +214,16 @@ function companionRunSummary(run: AgentRun | null): string[] {
   ];
 }
 
+function isStreamDonePayload(value: unknown): value is StreamMessageDonePayload {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    typeof (value as StreamMessageDonePayload).session_id === "string" &&
+    typeof (value as StreamMessageDonePayload).run_id === "string" &&
+    typeof (value as StreamMessageDonePayload).reply === "string"
+  );
+}
+
 function getFixSuggestion(
   diagnostics: SystemDiagnostics | null
 ): { text: string; action: string; link: string } | null {
@@ -1492,9 +1502,56 @@ export default function ChatPage({
       const selectedSkillOption = selectedSkillId.trim() || undefined;
       // The streaming backend persists the user message before model execution.
       // Saving it here as well creates duplicate user rows in history and memory retrieval.
-      await startStreamMessage(currentSessionId, nextMessages, {
+      const browserE2eDone = await startStreamMessage(currentSessionId, nextMessages, {
         selectedSkillId: selectedSkillOption,
       });
+      if (isStreamDonePayload(browserE2eDone) && browserE2eDone.session_id === currentSessionId) {
+        const nextStage =
+          inferStageFromToolCalls(browserE2eDone.tool_calls ?? []) ??
+          inferStageFromText(browserE2eDone.reply) ??
+          "idle";
+        flushStreaming();
+        setMessages(prev => {
+          if (
+            prev.some(
+              message => message.role === "assistant" && message.run_id === browserE2eDone.run_id
+            )
+          ) {
+            return prev;
+          }
+          return [
+            ...prev,
+            {
+              role: "assistant",
+              content: browserE2eDone.reply,
+              run_id: browserE2eDone.run_id,
+            },
+          ];
+        });
+        setStreamingReply("");
+        setSending(false);
+        setReasoningTrace(browserE2eDone.reasoning_trace ?? null);
+        setCurrentRunId(browserE2eDone.run_id);
+        setToolCalls(
+          (browserE2eDone.tool_calls ?? []).map(call => ({
+            ...call,
+            run_id: browserE2eDone.run_id,
+          }))
+        );
+        setCurrentAgentIngress(browserE2eDone.agent_ingress ?? null);
+        applyMainChatAgentStateSnapshot(browserE2eDone.agent_state ?? null);
+        setCurrentExecutionTranscript(browserE2eDone.execution_transcript ?? []);
+        setLegacyFallbackUsed(Boolean(browserE2eDone.legacy_fallback_used));
+        setStreamInterrupted(false);
+        emitCompanionStage(nextStage);
+        await loadMainChatTaskState(
+          browserE2eDone.agent_ingress?.agentTaskSessionId,
+          browserE2eDone.session_id
+        );
+        await loadAgentRunForSession(browserE2eDone.run_id, browserE2eDone.session_id);
+        refreshAgentRuns(browserE2eDone.session_id);
+        logAnalyticsEvent("send_message", currentSessionId, undefined).catch(() => {});
+      }
       await loadSessions();
     } catch (e) {
       flushStreaming();
