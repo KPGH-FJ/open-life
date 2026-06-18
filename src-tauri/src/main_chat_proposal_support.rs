@@ -19,37 +19,64 @@ pub(crate) async fn create_main_chat_agent_proposal(
     };
     use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 
-    let (proposal_type, affected_path, reason, risk_level, after) = match strategy {
-        MainChatAgentStrategy::MemoryProposal => (
-            ProposalType::MemoryWrite,
-            "memory.pending.chat_conversation",
-            "User explicitly requested a memory update from Main Chat.",
+    let knowledge_asset_edit = strategy == MainChatAgentStrategy::LifeModelProposal
+        && main_chat_knowledge_asset_edit_target(user_text).is_some();
+    let (proposal_type, affected_path, reason, risk_level, after) = if knowledge_asset_edit {
+        let target = main_chat_knowledge_asset_edit_target(user_text).unwrap_or("AGENTS.md");
+        (
+            ProposalType::LifeModelUpdate,
+            format!("knowledge_asset.{target}"),
+            "User requested a proposal-first knowledge asset edit from Main Chat.".to_string(),
             RiskLevel::Medium,
             serde_json::json!({
-                "content": user_text,
+                "assetId": target,
+                "assetKind": "knowledge_markdown",
                 "source": "main_chat_agent_v1",
                 "originatingTaskSessionId": task_session_id,
-                "directMemoryWrite": false,
+                "proposedDiff": {
+                    "operation": "append_note",
+                    "target": target,
+                    "summary": "Add bounded Beta evidence note to the knowledge asset.",
+                    "unifiedDiff": format!("--- {target}\n+++ {target}\n@@\n+Bounded Beta evidence note: keep knowledge assets as context, not policy override."),
+                },
+                "directKnowledgeFileWrite": false,
+                "requiresReviewCenterApproval": true,
             }),
-        ),
-        _ => (
-            ProposalType::LifeModelUpdate,
-            "lifemodel.pending.chat_conversation",
-            "User explicitly requested a LifeModel-affecting update from Main Chat.",
-            RiskLevel::High,
-            serde_json::json!({
-                "requestedChange": user_text,
-                "source": "main_chat_agent_v1",
-                "originatingTaskSessionId": task_session_id,
-                "directLifeModelWrite": false,
-            }),
-        ),
+        )
+    } else {
+        match strategy {
+            MainChatAgentStrategy::MemoryProposal => (
+                ProposalType::MemoryWrite,
+                "memory.pending.chat_conversation".to_string(),
+                "User explicitly requested a memory update from Main Chat.".to_string(),
+                RiskLevel::Medium,
+                serde_json::json!({
+                    "content": user_text,
+                    "source": "main_chat_agent_v1",
+                    "originatingTaskSessionId": task_session_id,
+                    "directMemoryWrite": false,
+                }),
+            ),
+            _ => (
+                ProposalType::LifeModelUpdate,
+                "lifemodel.pending.chat_conversation".to_string(),
+                "User explicitly requested a LifeModel-affecting update from Main Chat."
+                    .to_string(),
+                RiskLevel::High,
+                serde_json::json!({
+                    "requestedChange": user_text,
+                    "source": "main_chat_agent_v1",
+                    "originatingTaskSessionId": task_session_id,
+                    "directLifeModelWrite": false,
+                }),
+            ),
+        }
     };
     let mut proposal = AgentProposal::new(
         proposal_type,
-        affected_path,
+        &affected_path,
         after,
-        reason,
+        &reason,
         0.86,
         risk_level,
         ProposalSource::ChatConversation,
@@ -57,11 +84,21 @@ pub(crate) async fn create_main_chat_agent_proposal(
     proposal.source_detail = Some(format!("main_chat_agent_task_session:{task_session_id}"));
 
     let mut internal_transcript = Vec::new();
+    let queue_action_type = if knowledge_asset_edit {
+        "knowledge.propose_edit"
+    } else {
+        "proposal.create"
+    };
+    let queue_description = if knowledge_asset_edit {
+        "Create a Review Center proposal for a knowledge asset edit."
+    } else {
+        "Create a Review Center proposal from Main Chat."
+    };
     let queued = enqueue_main_chat_agent_action(
         state,
         task_session_id,
-        "proposal.create",
-        "Create a Review Center proposal from Main Chat.",
+        queue_action_type,
+        queue_description,
         &mut internal_transcript,
     )
     .await?;
@@ -82,6 +119,13 @@ pub(crate) async fn create_main_chat_agent_proposal(
         Some(serde_json::json!({
             "proposalId": proposal.id,
             "proposalType": proposal.proposal_type,
+            "knowledgeAssetId": if knowledge_asset_edit {
+                proposal.after.get("assetId").and_then(serde_json::Value::as_str)
+            } else {
+                None
+            },
+            "proposedDiffPresent": proposal.after.get("proposedDiff").is_some(),
+            "directKnowledgeFileWrite": proposal.after.get("directKnowledgeFileWrite").and_then(serde_json::Value::as_bool).unwrap_or(false),
             "directWritesExecuted": false,
         })),
     )
@@ -95,11 +139,37 @@ pub(crate) async fn create_main_chat_agent_proposal(
         serde_json::json!({
             "actionId": queued.id,
             "proposalId": proposal.id,
+            "actionType": queue_action_type,
+            "knowledgeAssetId": if knowledge_asset_edit {
+                proposal.after.get("assetId").and_then(serde_json::Value::as_str)
+            } else {
+                None
+            },
+            "proposedDiffPresent": proposal.after.get("proposedDiff").is_some(),
+            "directKnowledgeFileWrite": proposal.after.get("directKnowledgeFileWrite").and_then(serde_json::Value::as_bool).unwrap_or(false),
             "directWritesExecuted": false,
         }),
     )
     .await;
     Ok(proposal)
+}
+
+fn main_chat_knowledge_asset_edit_target(user_text: &str) -> Option<&'static str> {
+    let lower = user_text.to_ascii_lowercase();
+    if !lower.contains("knowledge asset") && !lower.contains(".md") {
+        return None;
+    }
+    if lower.contains("agents.md") {
+        Some("AGENTS.md")
+    } else if lower.contains("soul.md") {
+        Some("SOUL.md")
+    } else if lower.contains("user.md") {
+        Some("USER.md")
+    } else if lower.contains("memory.md") {
+        Some("MEMORY.md")
+    } else {
+        Some("AGENTS.md")
+    }
 }
 
 pub(crate) async fn attach_main_chat_tool_permission_proposal_metadata(

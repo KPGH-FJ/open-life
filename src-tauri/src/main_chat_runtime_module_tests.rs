@@ -867,7 +867,7 @@ fn main_chat_command_surface_eval_report_normalization_is_not_hidden_in_test_mod
     );
     assert!(
         module_source.contains("MAIN_CHAT_COMMAND_SURFACE_EVAL_CASES"),
-        "the 24-case send/stream command-surface matrix must not be hidden in tests"
+        "the 38-case send/stream command-surface matrix must not be hidden in tests"
     );
     assert!(
         module_source.contains("acceptance_evidence("),
@@ -879,7 +879,7 @@ fn main_chat_command_surface_eval_report_normalization_is_not_hidden_in_test_mod
     );
     assert!(
         module_source.contains("MainChatCommandSurfaceEvalReport::from_case_evidence("),
-        "the 24-case command-surface runner must call the reusable report aggregation"
+        "the 38-case command-surface runner must call the reusable report aggregation"
     );
 }
 

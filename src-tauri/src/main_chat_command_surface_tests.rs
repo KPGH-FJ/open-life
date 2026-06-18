@@ -65,7 +65,7 @@ async fn main_chat_command_surface_eval_gate_covers_send_stream_runtime_matrix()
     let report = run_main_chat_command_surface_eval_gate().await;
 
     assert_eq!(report.failed_cases, 0, "{:?}", report.failures);
-    assert!(report.total_cases >= 24);
+    assert!(report.total_cases >= 38);
     let two_case_coverage = 2.0 / report.total_cases as f32;
     assert!(report.send_coverage >= 0.45);
     assert!(report.stream_coverage >= 0.45);

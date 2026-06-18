@@ -802,6 +802,16 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                 "liveProviderInvoked": live_provider_invoked,
                 "externalLiveProviderEvalPreflighted": false,
             });
+            if let Some(object) = metadata.as_object_mut() {
+                object.insert(
+                    "agentLoopActionCount".into(),
+                    serde_json::json!(result.run.actions.len()),
+                );
+                object.insert(
+                    "agentLoopObservationCount".into(),
+                    serde_json::json!(result.run.observations.len()),
+                );
+            }
             attach_tool_selection_ranking_metadata(&mut metadata, &tool_selection_ranking);
             if plan.target == "mcp.call_tool" {
                 if let Some(object) = metadata.as_object_mut() {

@@ -2272,8 +2272,8 @@ pub fn evaluate_main_chat_agent_execution_v1_acceptance_gate(
         push_unique_blocker(&mut blockers, blocker);
     }
 
-    if command.total_cases < 24 {
-        push_unique_blocker(&mut blockers, "command_surface_cases_below_24");
+    if command.total_cases < 38 {
+        push_unique_blocker(&mut blockers, "command_surface_cases_below_38");
     }
     if command.legacy_fallback_count > 0 {
         push_unique_blocker(&mut blockers, "command_surface_legacy_fallback_detected");
@@ -2323,7 +2323,7 @@ pub fn evaluate_main_chat_agent_execution_v1_acceptance_gate(
         && runtime.silent_write_count == 0
         && runtime.final_completion_ready
         && runtime_coverage_blockers.is_empty();
-    let command_surface_gate_ready = command.total_cases >= 24
+    let command_surface_gate_ready = command.total_cases >= 38
         && command.legacy_fallback_count == 0
         && command.silent_write_count == 0
         && command.send_stream_matrix_coverage >= 1.0
@@ -5695,6 +5695,16 @@ fn is_lifemodel_proposal_intent(lower: &str) -> bool {
     contains_any(
         lower,
         &[
+            "knowledge asset edit",
+            "edit a knowledge asset",
+            "edit agents.md",
+            "edit soul.md",
+            "edit user.md",
+            "edit memory.md",
+            "propose an edit to agents.md",
+            "propose an edit to soul.md",
+            "propose an edit to user.md",
+            "propose an edit to memory.md",
             "lifemodel",
             "life model",
             "switching careers",
@@ -5742,6 +5752,9 @@ fn is_tool_observation_intent(lower: &str) -> bool {
             "search",
             "fetch",
             "past sessions",
+            "what we discussed",
+            "multiple reads",
+            "multiple read",
             "yesterday",
             "what did i ask",
             "notes about",

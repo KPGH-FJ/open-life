@@ -51,6 +51,7 @@ import {
   runControlledChatMigrationShadowRun,
   runMultiStrategyAgentPreview,
   runMainChatAgentExecutionV1EvalGate,
+  runMainChatAgentBetaV1ReadinessGate,
   clearMainChatSkill,
   getMainChatSkillDetail,
   listMainChatSkills,
@@ -937,10 +938,10 @@ describe("tauri command argument aliases", () => {
       finalReadinessStatus: "blocked_live_productization_not_ready",
       deterministicReadinessStatus: "ready",
       optInLiveReadinessStatus: "blocked",
-      defaultDeterministicScenarioCount: 42,
+      defaultDeterministicScenarioCount: 43,
       defaultLiveProdExcludedCount: 6,
       externalLiveScenarioCount: 6,
-      defaultScenarioPassedCount: 32,
+      defaultScenarioPassedCount: 33,
       defaultScenarioExpectedBlockerCount: 10,
       defaultScenarioFailedCount: 0,
       defaultScenarioBlockedCount: 0,
@@ -1029,6 +1030,99 @@ describe("tauri command argument aliases", () => {
     expect(result.phaseCounts[0]?.passed).toBe(6);
     expect(result.phaseCounts[0]?.expectedBlocker).toBe(2);
     expect(result.phaseCounts[1]?.blocked).toBe(6);
+  });
+
+  it("invokes Main Chat Agent Beta v1 readiness gate with deterministic and live sections", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      reportKind: "main_chat_agent_beta_v1_readiness_gate",
+      readinessSemantics:
+        "beta_v1_execution_first_default_deterministic_live_opt_in_separate",
+      defaultReadinessScope: "beta_v1_default_deterministic_local_only",
+      optInLiveReadinessScope: "beta_v1_external_live_opt_in_only",
+      foundationInventoryExists: true,
+      foundationInventoryItems: [
+        {
+          component: "Knowledge assets and context inventory",
+          status: "partial",
+          evidence: ["B27 inspection and B28 proposal-first edit evidence"],
+          developmentDecision: "reuse minimum beta slice; broader manager deferred",
+        },
+      ],
+      workstreams: [
+        {
+          workstreamId: "phase_5",
+          label: "Beta Hardening",
+          status: "ready",
+          ready: true,
+          evidence: ["structured readiness report and release notes"],
+          blockers: [],
+        },
+      ],
+      productMaturityPhaseCounts: [
+        {
+          phaseId: "phase_a",
+          capabilityGroup: "memory_lifecycle",
+          scenarioCount: 9,
+          passed: 7,
+          expectedBlocker: 2,
+          failed: 0,
+          blocked: 0,
+          ready: true,
+          optInOnly: false,
+        },
+      ],
+      defaultReadinessStatus: "ready",
+      defaultReady: true,
+      optInLiveReady: false,
+      externalLiveAttempted: false,
+      defaultRealTaskScenarioCount: 28,
+      defaultRealTaskPassedCount: 28,
+      optInLiveRealTaskScenarioCount: 2,
+      defaultExperienceRequiredStateCount: 11,
+      defaultExperienceVerifiedStateCount: 11,
+      productMaturityDefaultScenarioCount: 43,
+      commandSurfaceTotalCases: 38,
+      commandSurfaceFailedCases: 0,
+      legacyFallbackCount: 0,
+      silentDurableWriteCount: 0,
+      noSilentDurableWrites: true,
+      defaultBlockers: [],
+      optInLiveBlockers: ["explicit_live_eval_required"],
+      readinessDimensions: [
+        {
+          dimension: "Routing",
+          status: "ready",
+          optInOnly: false,
+          evidence: ["governed task sessions and strategy routing"],
+          blockers: [],
+        },
+        {
+          dimension: "Live provider",
+          status: "blocked_opt_in_not_attempted",
+          optInOnly: true,
+          evidence: ["external live evidence is opt-in and not run by default"],
+          blockers: ["explicit_live_eval_required"],
+        },
+      ],
+    });
+
+    const result = await runMainChatAgentBetaV1ReadinessGate();
+
+    expect(invoke).toHaveBeenCalledWith(
+      "run_main_chat_agent_beta_v1_readiness_gate",
+      undefined
+    );
+    expect(result.defaultReady).toBe(true);
+    expect(result.defaultReadinessScope).toBe("beta_v1_default_deterministic_local_only");
+    expect(result.optInLiveReady).toBe(false);
+    expect(result.foundationInventoryItems[0]?.status).toBe("partial");
+    expect(result.workstreams[0]?.workstreamId).toBe("phase_5");
+    expect(result.productMaturityPhaseCounts[0]?.scenarioCount).toBe(9);
+    expect(result.defaultRealTaskPassedCount).toBe(28);
+    expect(result.productMaturityDefaultScenarioCount).toBe(43);
+    expect(result.readinessDimensions.some((dimension) => dimension.dimension === "Routing")).toBe(
+      true
+    );
   });
 
   it("invokes runtime strategy registry status as explicit read-only diagnostic", async () => {

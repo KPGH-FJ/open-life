@@ -72,6 +72,14 @@ pub(crate) async fn compile_main_chat_context(
     candidates.extend(load_current_workspace_knowledge_context_candidates(
         selected_skill_id.as_deref(),
     ));
+    let configured_knowledge_roots = {
+        let config = state.config.lock().await;
+        config.system.knowledge_roots.clone()
+    };
+    candidates.extend(load_configured_knowledge_context_candidates(
+        &configured_knowledge_roots,
+        selected_skill_id.as_deref(),
+    ));
     if let Some(lifecycle_store) = state.memory_lifecycle_store.as_ref() {
         let store = lifecycle_store.lock().await;
         if let Ok(records) = store.list_active_records(None, 8) {
@@ -154,6 +162,37 @@ pub(crate) fn load_current_workspace_knowledge_context_candidates(
     if let Some(configured) = configured_knowledge_root() {
         roots.push(KnowledgeContextRoot::new("configured", configured));
     }
+
+    load_knowledge_context_candidates_from_roots(&roots, selected_skill_id)
+}
+
+pub(crate) fn load_configured_knowledge_context_candidates(
+    configured_roots: &[String],
+    selected_skill_id: Option<&str>,
+) -> Vec<ContextSourceCandidate> {
+    let roots = configured_roots
+        .iter()
+        .enumerate()
+        .filter_map(|(index, raw)| {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let path = PathBuf::from(trimmed);
+            if !path.is_dir() {
+                return None;
+            }
+            let label = if index == 0 {
+                "app_configured".to_string()
+            } else {
+                format!("app_configured_{}", index + 1)
+            };
+            Some(KnowledgeContextRoot::new(
+                label,
+                path.canonicalize().ok().unwrap_or(path),
+            ))
+        })
+        .collect::<Vec<_>>();
 
     load_knowledge_context_candidates_from_roots(&roots, selected_skill_id)
 }

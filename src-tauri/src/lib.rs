@@ -16,6 +16,12 @@ pub(crate) mod default_chat_adapter;
 pub mod errors;
 pub(crate) mod legacy_write_convergence;
 #[allow(dead_code)]
+pub(crate) mod main_chat_agent_beta_v1_default_experience;
+#[allow(dead_code)]
+pub(crate) mod main_chat_agent_beta_v1_readiness;
+#[allow(dead_code)]
+pub(crate) mod main_chat_agent_beta_v1_real_tasks;
+#[allow(dead_code)]
 pub(crate) mod main_chat_agent_productization_eval;
 pub(crate) mod main_chat_agent_state_payload;
 #[allow(dead_code)]
@@ -143,7 +149,8 @@ use commands::agent_runtime::{
     record_default_chat_adapter_narrow_implementation_plan_review_decision,
     review_plan_execute_session, run_controlled_chat_cutover_candidate,
     run_controlled_chat_migration_shadow_run, run_default_chat_adapter_controlled_preview,
-    run_default_chat_adapter_dry_run, run_main_chat_agent_execution_v1_eval_gate,
+    run_default_chat_adapter_dry_run, run_main_chat_agent_beta_v1_readiness_gate,
+    run_main_chat_agent_execution_v1_eval_gate,
     run_main_chat_agent_execution_v1_final_acceptance_gate,
     run_main_chat_agent_product_maturity_v2_event_gate,
     run_main_chat_agent_product_maturity_v2_final_readiness_gate,
@@ -635,6 +642,7 @@ pub fn run() {
             run_main_chat_agent_product_maturity_v2_plan_gate,
             run_main_chat_agent_product_maturity_v2_skills_gate,
             run_main_chat_agent_product_maturity_v2_final_readiness_gate,
+            run_main_chat_agent_beta_v1_readiness_gate,
             run_main_chat_agent_execution_v1_final_acceptance_gate,
             get_runtime_strategy_registry_status,
             get_react_beta_execution_status,

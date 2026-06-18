@@ -7,17 +7,34 @@ use openlife_core::llm::ChatMessage;
 use serde::Serialize;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum MainChatCommandSurfaceEvalEntryPoint {
     Send,
     Stream,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl MainChatCommandSurfaceEvalEntryPoint {
+    pub(crate) fn as_label(self) -> &'static str {
+        match self {
+            Self::Send => "send",
+            Self::Stream => "stream",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum MainChatCommandSurfaceEvalScenario {
     DirectProviderTrace,
+    MemoryContextDirectAnswerSuccess,
+    MemoryConflictCompareSuccess,
     FileReadSuccess,
+    SessionSearchSuccess,
     PlanExecuteDraft,
+    SelectedSkillContextSuccess,
+    KnowledgeAssetContextSuccess,
+    KnowledgeAssetEditProposal,
     ProposalPath,
     WebPolicyBlocker,
     WebPolicyAgentLoopBlocker,
@@ -25,14 +42,43 @@ pub(crate) enum MainChatCommandSurfaceEvalScenario {
     MissingMcpBlocker,
     RegisteredMcpReadSuccess,
     RegisteredMcpAgentLoopSuccess,
+    MultiReadAgentLoopSuccess,
     RegisteredMcpPermissionProposal,
     RegisteredMcpAgentLoopPermissionProposal,
+}
+
+impl MainChatCommandSurfaceEvalScenario {
+    pub(crate) fn as_label(self) -> &'static str {
+        match self {
+            Self::DirectProviderTrace => "direct_provider_trace",
+            Self::MemoryContextDirectAnswerSuccess => "memory_context_direct_answer_success",
+            Self::MemoryConflictCompareSuccess => "memory_conflict_compare_success",
+            Self::FileReadSuccess => "file_read_success",
+            Self::SessionSearchSuccess => "session_search_success",
+            Self::PlanExecuteDraft => "plan_execute_draft",
+            Self::SelectedSkillContextSuccess => "selected_skill_context_success",
+            Self::KnowledgeAssetContextSuccess => "knowledge_asset_context_success",
+            Self::KnowledgeAssetEditProposal => "knowledge_asset_edit_proposal",
+            Self::ProposalPath => "proposal_path",
+            Self::WebPolicyBlocker => "web_policy_blocker",
+            Self::WebPolicyAgentLoopBlocker => "web_policy_agent_loop_blocker",
+            Self::WebAgentLoopSuccess => "web_agent_loop_success",
+            Self::MissingMcpBlocker => "missing_mcp_blocker",
+            Self::RegisteredMcpReadSuccess => "registered_mcp_read_success",
+            Self::RegisteredMcpAgentLoopSuccess => "registered_mcp_agent_loop_success",
+            Self::MultiReadAgentLoopSuccess => "multi_read_agent_loop_success",
+            Self::RegisteredMcpPermissionProposal => "registered_mcp_permission_proposal",
+            Self::RegisteredMcpAgentLoopPermissionProposal => {
+                "registered_mcp_agent_loop_permission_proposal"
+            }
+        }
+    }
 }
 
 pub(crate) const MAIN_CHAT_COMMAND_SURFACE_EVAL_CASES: [(
     MainChatCommandSurfaceEvalEntryPoint,
     MainChatCommandSurfaceEvalScenario,
-); 24] = [
+); 38] = [
     (
         MainChatCommandSurfaceEvalEntryPoint::Send,
         MainChatCommandSurfaceEvalScenario::DirectProviderTrace,
@@ -40,6 +86,22 @@ pub(crate) const MAIN_CHAT_COMMAND_SURFACE_EVAL_CASES: [(
     (
         MainChatCommandSurfaceEvalEntryPoint::Stream,
         MainChatCommandSurfaceEvalScenario::DirectProviderTrace,
+    ),
+    (
+        MainChatCommandSurfaceEvalEntryPoint::Send,
+        MainChatCommandSurfaceEvalScenario::MemoryContextDirectAnswerSuccess,
+    ),
+    (
+        MainChatCommandSurfaceEvalEntryPoint::Stream,
+        MainChatCommandSurfaceEvalScenario::MemoryContextDirectAnswerSuccess,
+    ),
+    (
+        MainChatCommandSurfaceEvalEntryPoint::Send,
+        MainChatCommandSurfaceEvalScenario::MemoryConflictCompareSuccess,
+    ),
+    (
+        MainChatCommandSurfaceEvalEntryPoint::Stream,
+        MainChatCommandSurfaceEvalScenario::MemoryConflictCompareSuccess,
     ),
     (
         MainChatCommandSurfaceEvalEntryPoint::Send,
@@ -51,11 +113,43 @@ pub(crate) const MAIN_CHAT_COMMAND_SURFACE_EVAL_CASES: [(
     ),
     (
         MainChatCommandSurfaceEvalEntryPoint::Send,
+        MainChatCommandSurfaceEvalScenario::SessionSearchSuccess,
+    ),
+    (
+        MainChatCommandSurfaceEvalEntryPoint::Stream,
+        MainChatCommandSurfaceEvalScenario::SessionSearchSuccess,
+    ),
+    (
+        MainChatCommandSurfaceEvalEntryPoint::Send,
         MainChatCommandSurfaceEvalScenario::PlanExecuteDraft,
     ),
     (
         MainChatCommandSurfaceEvalEntryPoint::Stream,
         MainChatCommandSurfaceEvalScenario::PlanExecuteDraft,
+    ),
+    (
+        MainChatCommandSurfaceEvalEntryPoint::Send,
+        MainChatCommandSurfaceEvalScenario::SelectedSkillContextSuccess,
+    ),
+    (
+        MainChatCommandSurfaceEvalEntryPoint::Stream,
+        MainChatCommandSurfaceEvalScenario::SelectedSkillContextSuccess,
+    ),
+    (
+        MainChatCommandSurfaceEvalEntryPoint::Send,
+        MainChatCommandSurfaceEvalScenario::KnowledgeAssetContextSuccess,
+    ),
+    (
+        MainChatCommandSurfaceEvalEntryPoint::Stream,
+        MainChatCommandSurfaceEvalScenario::KnowledgeAssetContextSuccess,
+    ),
+    (
+        MainChatCommandSurfaceEvalEntryPoint::Send,
+        MainChatCommandSurfaceEvalScenario::KnowledgeAssetEditProposal,
+    ),
+    (
+        MainChatCommandSurfaceEvalEntryPoint::Stream,
+        MainChatCommandSurfaceEvalScenario::KnowledgeAssetEditProposal,
     ),
     (
         MainChatCommandSurfaceEvalEntryPoint::Send,
@@ -112,6 +206,14 @@ pub(crate) const MAIN_CHAT_COMMAND_SURFACE_EVAL_CASES: [(
     (
         MainChatCommandSurfaceEvalEntryPoint::Stream,
         MainChatCommandSurfaceEvalScenario::RegisteredMcpAgentLoopSuccess,
+    ),
+    (
+        MainChatCommandSurfaceEvalEntryPoint::Send,
+        MainChatCommandSurfaceEvalScenario::MultiReadAgentLoopSuccess,
+    ),
+    (
+        MainChatCommandSurfaceEvalEntryPoint::Stream,
+        MainChatCommandSurfaceEvalScenario::MultiReadAgentLoopSuccess,
     ),
     (
         MainChatCommandSurfaceEvalEntryPoint::Send,
@@ -161,12 +263,13 @@ async fn run_main_chat_command_surface_state_eval_case(
         role: "user".into(),
         content: user_text.into(),
     }];
+    let selected_skill_id = main_chat_command_surface_eval_selected_skill_id(scenario);
     let (response_value, task_session_id, legacy_fallback_used) = match entry_point {
         MainChatCommandSurfaceEvalEntryPoint::Send => {
             let result = crate::main_chat_send::send_message_with_state(
                 session_id.clone(),
                 messages,
-                None,
+                selected_skill_id.map(str::to_string),
                 &state,
             )
             .await?;
@@ -186,7 +289,7 @@ async fn run_main_chat_command_surface_state_eval_case(
             crate::main_chat_streaming::start_stream_message_with_state(
                 session_id.clone(),
                 messages,
-                None,
+                selected_skill_id.map(str::to_string),
                 &state,
                 |event, payload| {
                     emitted_events.push((event.to_string(), payload));
@@ -266,10 +369,19 @@ async fn run_main_chat_command_surface_state_eval_case(
         Some(&response_value),
     )
     .await?;
+    let memory_conflict_evidence =
+        main_chat_command_surface_eval_memory_conflict_evidence(&state).await?;
+    let knowledge_asset_edit_evidence =
+        main_chat_command_surface_eval_knowledge_asset_edit_evidence(&proposals);
 
     Ok(MainChatCommandSurfaceEvalEvidence::for_case(
         entry_point,
         scenario,
+        task_session_id,
+        transcript.len(),
+        actions.len(),
+        proposals.len(),
+        runs.len(),
         legacy_fallback_used,
         main_chat_command_surface_eval_has_silent_write(
             Some(&response_value),
@@ -277,6 +389,26 @@ async fn run_main_chat_command_surface_state_eval_case(
             &actions,
             &runs,
         ),
+        selected_skill_id.map(str::to_string),
+        main_chat_command_surface_eval_selected_skill_loaded(
+            &transcript,
+            "skills/phase_e_review/SKILL.md",
+        ),
+        main_chat_command_surface_eval_selected_skill_loaded(
+            &transcript,
+            "skills/unselected_context/SKILL.md",
+        ),
+        main_chat_command_surface_eval_memory_context_source_count(&transcript),
+        main_chat_command_surface_eval_knowledge_asset_source_count(&transcript),
+        main_chat_command_surface_eval_knowledge_asset_scope_digest_loaded(&transcript),
+        main_chat_command_surface_eval_agent_loop_count(&transcript, "toolCallCount"),
+        main_chat_command_surface_eval_agent_loop_count(&transcript, "agentLoopObservationCount"),
+        memory_conflict_evidence.graph_conflict_count,
+        memory_conflict_evidence.lifecycle_record_count,
+        memory_conflict_evidence.distinct_conflict_id_count,
+        knowledge_asset_edit_evidence.proposal_created,
+        knowledge_asset_edit_evidence.proposed_diff_present,
+        knowledge_asset_edit_evidence.direct_write_detected,
     ))
 }
 
@@ -290,6 +422,22 @@ pub(crate) async fn configure_main_chat_command_surface_eval_state(
             *scheduler = scripted_eval_scheduler(
                 "gpt-command-surface-eval-direct",
                 "command-surface eval direct provider reply",
+            );
+        }
+        MainChatCommandSurfaceEvalScenario::MemoryContextDirectAnswerSuccess => {
+            seed_command_surface_memory_context(state).await?;
+            let mut scheduler = state.scheduler.lock().await;
+            *scheduler = scripted_eval_scheduler(
+                "gpt-command-surface-eval-memory-context",
+                "command-surface eval direct reply grounded in accepted memory context",
+            );
+        }
+        MainChatCommandSurfaceEvalScenario::MemoryConflictCompareSuccess => {
+            seed_command_surface_memory_conflict_context(state).await?;
+            let mut scheduler = state.scheduler.lock().await;
+            *scheduler = scripted_eval_scheduler(
+                "gpt-command-surface-eval-memory-conflict",
+                "command-surface eval direct reply comparing visible conflicting memory facts",
             );
         }
         MainChatCommandSurfaceEvalScenario::FileReadSuccess => {
@@ -331,7 +479,59 @@ pub(crate) async fn configure_main_chat_command_surface_eval_state(
                 .to_string(),
             );
         }
+        MainChatCommandSurfaceEvalScenario::SessionSearchSuccess => {
+            {
+                let memory_store = state.memory_store.lock().await;
+                memory_store
+                    .save_message(
+                        "prior-agent-memory-session",
+                        &ChatMessage {
+                            role: "user".into(),
+                            content: "We discussed Agent memory needing source citations, bounded session search, and no silent promotion to durable truth.".into(),
+                        },
+                    )
+                    .map_err(|error| {
+                        format!("seed command-surface session search memory failed: {error}")
+                    })?;
+            }
+            let mut scheduler = state.scheduler.lock().await;
+            *scheduler = scripted_eval_scheduler(
+                "gpt-command-surface-eval-session-search",
+                serde_json::json!({
+                    "final": "I will search prior session memory first.",
+                    "actions": [{
+                        "name": "session.search",
+                        "action_type": "session_search",
+                        "arguments": {
+                            "query": "Agent memory",
+                            "limit": 5
+                        }
+                    }],
+                    "thought_summary": "Need a governed prior-session search observation.",
+                    "warnings": []
+                })
+                .to_string(),
+            );
+        }
         MainChatCommandSurfaceEvalScenario::PlanExecuteDraft => {}
+        MainChatCommandSurfaceEvalScenario::SelectedSkillContextSuccess => {}
+        MainChatCommandSurfaceEvalScenario::KnowledgeAssetContextSuccess => {
+            let root = create_command_surface_knowledge_asset_root()?;
+            {
+                let mut config = state.config.lock().await;
+                config.system.knowledge_roots.push(root);
+            }
+            let mut scheduler = state.scheduler.lock().await;
+            *scheduler = scripted_eval_scheduler(
+                "gpt-command-surface-eval-knowledge-assets",
+                "command-surface eval direct reply grounded in bounded knowledge assets",
+            );
+        }
+        MainChatCommandSurfaceEvalScenario::KnowledgeAssetEditProposal => {
+            let root = create_command_surface_knowledge_asset_root()?;
+            let mut config = state.config.lock().await;
+            config.system.knowledge_roots.push(root);
+        }
         MainChatCommandSurfaceEvalScenario::WebPolicyBlocker => {
             let mut config = state.config.lock().await;
             config.system.network_policy.enabled = false;
@@ -423,6 +623,66 @@ pub(crate) async fn configure_main_chat_command_surface_eval_state(
                 .to_string(),
             );
         }
+        MainChatCommandSurfaceEvalScenario::MultiReadAgentLoopSuccess => {
+            {
+                let mut config = state.config.lock().await;
+                config.system.agent_loop_max_steps = 1;
+                config.system.agent_loop_max_tool_calls = 3;
+            }
+            {
+                let memory_store = state.memory_store.lock().await;
+                memory_store
+                    .save_message(
+                        "multi-read-fixture-source-a",
+                        &ChatMessage {
+                            role: "user".into(),
+                            content: "Ask a task that needs multiple reads. Multi-read fixture alpha covers workspace notes and source evidence.".into(),
+                        },
+                    )
+                    .map_err(|error| {
+                        format!("seed command-surface multi-read memory A failed: {error}")
+                    })?;
+                memory_store
+                    .save_message(
+                        "multi-read-fixture-source-b",
+                        &ChatMessage {
+                            role: "assistant".into(),
+                            content: "Ask a task that needs multiple reads. Multi-read fixture beta covers delivery evidence and follow-up synthesis.".into(),
+                        },
+                    )
+                    .map_err(|error| {
+                        format!("seed command-surface multi-read memory B failed: {error}")
+                    })?;
+            }
+            let mut scheduler = state.scheduler.lock().await;
+            *scheduler = scripted_eval_scheduler(
+                "gpt-command-surface-eval-multi-read-loop",
+                serde_json::json!({
+                    "final": "I will run two governed reads before answering.",
+                    "actions": [
+                        {
+                            "name": "memory.search",
+                            "action_type": "memory_search",
+                            "arguments": {
+                                "query": "multi-read fixture alpha",
+                                "limit": 5
+                            }
+                        },
+                        {
+                            "name": "memory.search",
+                            "action_type": "memory_search",
+                            "arguments": {
+                                "query": "multi-read fixture beta",
+                                "limit": 5
+                            }
+                        }
+                    ],
+                    "thought_summary": "Need two bounded memory observations.",
+                    "warnings": []
+                })
+                .to_string(),
+            );
+        }
         MainChatCommandSurfaceEvalScenario::RegisteredMcpPermissionProposal => {
             let mut scheduler = state.scheduler.lock().await;
             *scheduler = scripted_eval_scheduler(
@@ -466,11 +726,29 @@ pub(crate) fn main_chat_command_surface_eval_user_text(
         MainChatCommandSurfaceEvalScenario::DirectProviderTrace => {
             "Explain focused work in one concise paragraph for a teammate."
         }
+        MainChatCommandSurfaceEvalScenario::MemoryContextDirectAnswerSuccess => {
+            "Use my current memory/preferences when answering."
+        }
+        MainChatCommandSurfaceEvalScenario::MemoryConflictCompareSuccess => {
+            "Compare two memory facts that conflict."
+        }
         MainChatCommandSurfaceEvalScenario::FileReadSuccess => {
             "Read Cargo.toml as a governed workspace file observation."
         }
+        MainChatCommandSurfaceEvalScenario::SessionSearchSuccess => {
+            "Find what we discussed about Agent memory."
+        }
         MainChatCommandSurfaceEvalScenario::PlanExecuteDraft => {
             "Draft a weekly plan and break this goal into steps."
+        }
+        MainChatCommandSurfaceEvalScenario::SelectedSkillContextSuccess => {
+            "Use the selected skill to review this plan."
+        }
+        MainChatCommandSurfaceEvalScenario::KnowledgeAssetContextSuccess => {
+            "Inspect loaded knowledge assets."
+        }
+        MainChatCommandSurfaceEvalScenario::KnowledgeAssetEditProposal => {
+            "Propose an edit to AGENTS.md knowledge asset: add a bounded Beta evidence note."
         }
         MainChatCommandSurfaceEvalScenario::ProposalPath => {
             "Please remember that I prefer morning writing blocks."
@@ -487,6 +765,9 @@ pub(crate) fn main_chat_command_surface_eval_user_text(
         MainChatCommandSurfaceEvalScenario::MissingMcpBlocker => {
             "Use mcp missing.status read-only now."
         }
+        MainChatCommandSurfaceEvalScenario::MultiReadAgentLoopSuccess => {
+            "Ask a task that needs multiple reads."
+        }
         MainChatCommandSurfaceEvalScenario::RegisteredMcpReadSuccess
         | MainChatCommandSurfaceEvalScenario::RegisteredMcpAgentLoopSuccess => {
             "Use mcp builtin_echo read-only now."
@@ -495,6 +776,15 @@ pub(crate) fn main_chat_command_surface_eval_user_text(
         | MainChatCommandSurfaceEvalScenario::RegisteredMcpAgentLoopPermissionProposal => {
             "Use mcp memory.search now."
         }
+    }
+}
+
+pub(crate) fn main_chat_command_surface_eval_selected_skill_id(
+    scenario: MainChatCommandSurfaceEvalScenario,
+) -> Option<&'static str> {
+    match scenario {
+        MainChatCommandSurfaceEvalScenario::SelectedSkillContextSuccess => Some("phase_e_review"),
+        _ => None,
     }
 }
 
@@ -510,8 +800,24 @@ pub(crate) fn main_chat_command_surface_eval_session_id(
         },
         match scenario {
             MainChatCommandSurfaceEvalScenario::DirectProviderTrace => "direct-provider",
+            MainChatCommandSurfaceEvalScenario::MemoryContextDirectAnswerSuccess => {
+                "memory-context-direct"
+            }
+            MainChatCommandSurfaceEvalScenario::MemoryConflictCompareSuccess => {
+                "memory-conflict-compare"
+            }
             MainChatCommandSurfaceEvalScenario::FileReadSuccess => "file-read-success",
+            MainChatCommandSurfaceEvalScenario::SessionSearchSuccess => "session-search-success",
             MainChatCommandSurfaceEvalScenario::PlanExecuteDraft => "plan-execute-draft",
+            MainChatCommandSurfaceEvalScenario::SelectedSkillContextSuccess => {
+                "selected-skill-context"
+            }
+            MainChatCommandSurfaceEvalScenario::KnowledgeAssetContextSuccess => {
+                "knowledge-assets-context"
+            }
+            MainChatCommandSurfaceEvalScenario::KnowledgeAssetEditProposal => {
+                "knowledge-assets-edit-proposal"
+            }
             MainChatCommandSurfaceEvalScenario::ProposalPath => "proposal",
             MainChatCommandSurfaceEvalScenario::WebPolicyBlocker => "web-blocker",
             MainChatCommandSurfaceEvalScenario::WebPolicyAgentLoopBlocker => {
@@ -521,6 +827,9 @@ pub(crate) fn main_chat_command_surface_eval_session_id(
             MainChatCommandSurfaceEvalScenario::MissingMcpBlocker => "missing-mcp",
             MainChatCommandSurfaceEvalScenario::RegisteredMcpReadSuccess => "mcp-success",
             MainChatCommandSurfaceEvalScenario::RegisteredMcpAgentLoopSuccess => "mcp-agent-loop",
+            MainChatCommandSurfaceEvalScenario::MultiReadAgentLoopSuccess => {
+                "multi-read-agent-loop"
+            }
             MainChatCommandSurfaceEvalScenario::RegisteredMcpPermissionProposal => {
                 "mcp-permission-proposal"
             }
@@ -561,6 +870,190 @@ pub(crate) async fn grant_builtin_echo_read_once(state: &Arc<AppState>) -> Resul
         )
         .map_err(|error| format!("grant builtin_echo read permission failed: {error}"))?;
     Ok(())
+}
+
+async fn seed_command_surface_memory_context(state: &Arc<AppState>) -> Result<(), String> {
+    let mut proposal = openlife_core::agent::AgentProposal::new(
+        openlife_core::agent::ProposalType::MemoryWrite,
+        "memory.preferences.beta_b4",
+        serde_json::json!({
+            "content": "User prefers concise execution-first answers with source-backed caveats.",
+            "scope": "global",
+            "category": "preference"
+        }),
+        "Command-surface eval seeds one accepted memory preference for bounded context.",
+        0.91,
+        openlife_core::agent::RiskLevel::Low,
+        openlife_core::agent::ProposalSource::ChatConversation,
+    );
+    proposal.id = "proposal-command-surface-memory-context".into();
+    proposal.source_detail = Some("task-session-command-surface-memory-context".into());
+    let input = openlife_core::agent::MemoryLifecycleAcceptanceInput::from_memory_proposal(
+        &proposal,
+        "User prefers concise execution-first answers with source-backed caveats.".into(),
+    );
+    let store_arc = state
+        .memory_lifecycle_store
+        .as_ref()
+        .ok_or_else(|| "command-surface eval missing memory lifecycle store".to_string())?;
+    let store = store_arc.lock().await;
+    store
+        .accept_memory_proposal(input)
+        .map(|_| ())
+        .map_err(|error| format!("seed command-surface memory context failed: {error}"))
+}
+
+async fn seed_command_surface_memory_conflict_context(state: &Arc<AppState>) -> Result<(), String> {
+    let conflict_ids = {
+        let evidence_store = state.evidence_store.lock().await;
+        let support = evidence_store
+            .create_evidence(command_surface_memory_conflict_evidence_draft(
+                "run-command-surface-memory-conflict-support",
+                openlife_core::agent::EvidenceType::Preference,
+                0.82,
+                Vec::new(),
+            ))
+            .map_err(|error| format!("seed memory conflict support evidence failed: {error}"))?;
+        let contradiction = evidence_store
+            .create_evidence(command_surface_memory_conflict_evidence_draft(
+                "run-command-surface-memory-conflict-opposition",
+                openlife_core::agent::EvidenceType::Contradiction,
+                0.79,
+                vec![support.id.clone()],
+            ))
+            .map_err(|error| {
+                format!("seed memory conflict contradiction evidence failed: {error}")
+            })?;
+        let records = evidence_store
+            .query(openlife_core::agent::EvidenceQuery::default())
+            .map_err(|error| format!("query memory conflict evidence failed: {error}"))?;
+        let graph = openlife_core::agent::evaluate_evidence_graph(
+            openlife_core::agent::EvidenceGraphInput::new(records, chrono::Utc::now()),
+        );
+        if !graph.graph_ready
+            || !graph.metadata_safe
+            || graph.contains_raw_content
+            || graph.conflict_count < 2
+            || graph.opposition_link_count == 0
+        {
+            return Err(format!(
+                "seeded memory conflict graph not ready: conflict_count={} opposition_link_count={}",
+                graph.conflict_count, graph.opposition_link_count
+            ));
+        }
+        vec![support.id, contradiction.id]
+    };
+
+    let store_arc = state
+        .memory_lifecycle_store
+        .as_ref()
+        .ok_or_else(|| "command-surface eval missing memory lifecycle store".to_string())?;
+    let store = store_arc.lock().await;
+    for (suffix, content) in [
+        ("a", "User prefers morning deep work."),
+        ("b", "User prefers late-night deep work."),
+    ] {
+        let proposal = command_surface_memory_conflict_proposal(suffix, content, &conflict_ids);
+        store
+            .accept_memory_proposal(
+                openlife_core::agent::MemoryLifecycleAcceptanceInput::from_memory_proposal(
+                    &proposal,
+                    content.into(),
+                ),
+            )
+            .map_err(|error| format!("seed memory conflict lifecycle record failed: {error}"))?;
+    }
+    Ok(())
+}
+
+fn command_surface_memory_conflict_proposal(
+    suffix: &str,
+    content: &str,
+    conflict_ids: &[String],
+) -> openlife_core::agent::AgentProposal {
+    let mut proposal = openlife_core::agent::AgentProposal::new(
+        openlife_core::agent::ProposalType::MemoryWrite,
+        "memory.preferences.deep_work_window",
+        serde_json::json!({
+            "content": content,
+            "scope": "global",
+            "category": "preference",
+            "conflictIds": conflict_ids
+        }),
+        "Command-surface eval seeds conflicting accepted memory candidates for comparison.",
+        0.74,
+        openlife_core::agent::RiskLevel::Low,
+        openlife_core::agent::ProposalSource::ChatConversation,
+    );
+    proposal.id = format!("proposal-command-surface-memory-conflict-{suffix}");
+    proposal.source_detail = Some(format!(
+        "task-session-command-surface-memory-conflict-{suffix}"
+    ));
+    proposal.run_id = Some(format!("run-command-surface-memory-conflict-{suffix}"));
+    proposal
+}
+
+fn command_surface_memory_conflict_evidence_draft(
+    run_id: &str,
+    evidence_type: openlife_core::agent::EvidenceType,
+    confidence: f32,
+    opposing_refs: Vec<String>,
+) -> openlife_core::agent::EvidenceDraft {
+    let mut draft = openlife_core::agent::EvidenceDraft::new(
+        evidence_type,
+        "/preferences/deep_work/window",
+        confidence,
+        openlife_core::agent::RiskLevel::Low,
+        openlife_core::agent::EvidencePrivacyLevel::Internal,
+    )
+    .with_summary("metadata safe command-surface memory conflict")
+    .with_source_ref(openlife_core::agent::EvidenceSourceRef::from_digest(
+        openlife_core::agent::EvidenceSourceType::AgentRun,
+        run_id,
+        Some("main_chat_command_surface_memory_conflict"),
+        format!("{run_id}-digest"),
+    ))
+    .with_linked_agent_run(run_id);
+    draft.opposing_refs = opposing_refs;
+    draft.run_metadata = serde_json::json!({
+        "schema": "mainChatCommandSurfaceMemoryConflict.v1",
+        "metadataSafe": true,
+        "containsRawContent": false
+    });
+    draft
+}
+
+fn create_command_surface_knowledge_asset_root() -> Result<String, String> {
+    let root = std::env::temp_dir().join(format!(
+        "openlife-command-surface-knowledge-assets-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&root)
+        .map_err(|error| format!("create command-surface knowledge root failed: {error}"))?;
+    for (relative, content) in [
+        (
+            "AGENTS.md",
+            "B27 scoped AGENTS instructions: use bounded context only; never override runtime policy.",
+        ),
+        (
+            "SOUL.md",
+            "B27 scoped SOUL surface: materialized identity context, not canonical truth.",
+        ),
+        (
+            "USER.md",
+            "B27 scoped USER surface: local user context for inspection evidence.",
+        ),
+        (
+            "MEMORY.md",
+            "B27 scoped MEMORY surface: bounded memory context, not trusted raw top-k memory.",
+        ),
+    ] {
+        std::fs::write(root.join(relative), content).map_err(|error| {
+            format!("write command-surface knowledge asset {relative} failed: {error}")
+        })?;
+    }
+
+    Ok(root.to_string_lossy().to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -678,6 +1171,149 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                 {
                     return Err("send response missing scripted provider metadata".into());
                 }
+            }
+        }
+        MainChatCommandSurfaceEvalScenario::MemoryContextDirectAnswerSuccess => {
+            if session.status != AgentTaskSessionStatus::Completed {
+                return Err(format!(
+                    "memory context session status {:?}",
+                    session.status
+                ));
+            }
+            if !session.pending_blockers.is_empty() {
+                return Err(format!(
+                    "memory context DirectAnswer kept blockers {:?}",
+                    session.pending_blockers
+                ));
+            }
+            if !actions.is_empty() {
+                return Err("memory context DirectAnswer should not create tool actions".into());
+            }
+            let context_entry = transcript
+                .iter()
+                .find(|entry| entry.summary.contains("Bounded context was selected"))
+                .ok_or_else(|| "missing memory context transcript".to_string())?;
+            if context_entry
+                .metadata
+                .get("rawTopKMemoryTrusted")
+                .and_then(serde_json::Value::as_bool)
+                != Some(false)
+            {
+                return Err("memory context must not trust raw top-k memory snippets".into());
+            }
+            let memory_source_count = context_entry_source_prefix_count(
+                &context_entry.metadata,
+                "selected_personal_context",
+                "memory:",
+            );
+            if memory_source_count == 0
+                || !context_entry_sources_contain_prefix(
+                    &context_entry.metadata,
+                    "selected_personal_context",
+                    "memory:",
+                )
+            {
+                return Err(
+                    "accepted memory lifecycle source was not loaded as bounded context".into(),
+                );
+            }
+            let generation_entry = transcript
+                .iter()
+                .find(|entry| {
+                    entry
+                        .summary
+                        .contains("DirectAnswer generated a model response")
+                })
+                .ok_or_else(|| {
+                    "missing memory-context DirectAnswer generation transcript".to_string()
+                })?;
+            if generation_entry
+                .metadata
+                .get("providerGenerationPath")
+                .and_then(serde_json::Value::as_str)
+                != Some("main_chat_direct_answer_scheduler")
+                || generation_entry
+                    .metadata
+                    .get("directWritesExecuted")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(false)
+            {
+                return Err("memory-context DirectAnswer generation metadata incomplete".into());
+            }
+        }
+        MainChatCommandSurfaceEvalScenario::MemoryConflictCompareSuccess => {
+            if session.status != AgentTaskSessionStatus::Completed {
+                return Err(format!(
+                    "memory conflict compare session status {:?}",
+                    session.status
+                ));
+            }
+            if !session.pending_blockers.is_empty() {
+                return Err(format!(
+                    "memory conflict compare kept blockers {:?}",
+                    session.pending_blockers
+                ));
+            }
+            if !actions.is_empty() {
+                return Err("memory conflict compare should not create tool actions".into());
+            }
+            let context_entry = transcript
+                .iter()
+                .find(|entry| entry.summary.contains("Bounded context was selected"))
+                .ok_or_else(|| "missing memory conflict context transcript".to_string())?;
+            if context_entry
+                .metadata
+                .get("rawTopKMemoryTrusted")
+                .and_then(serde_json::Value::as_bool)
+                != Some(false)
+            {
+                return Err("memory conflict must not trust raw top-k memory snippets".into());
+            }
+            let memory_source_count = context_entry_source_prefix_count(
+                &context_entry.metadata,
+                "selected_personal_context",
+                "memory:",
+            );
+            if memory_source_count != 2 {
+                return Err(format!(
+                    "memory conflict should load exactly two accepted memory records, got {memory_source_count}"
+                ));
+            }
+            let conflict_evidence =
+                main_chat_command_surface_eval_memory_conflict_evidence(state).await?;
+            if conflict_evidence.graph_conflict_count != 2
+                || conflict_evidence.lifecycle_record_count != 2
+                || conflict_evidence.distinct_conflict_id_count != 2
+            {
+                return Err(format!(
+                    "memory conflict evidence incomplete: graph={} lifecycle={} conflict_ids={}",
+                    conflict_evidence.graph_conflict_count,
+                    conflict_evidence.lifecycle_record_count,
+                    conflict_evidence.distinct_conflict_id_count
+                ));
+            }
+            let generation_entry = transcript
+                .iter()
+                .find(|entry| {
+                    entry
+                        .summary
+                        .contains("DirectAnswer generated a model response")
+                })
+                .ok_or_else(|| {
+                    "missing memory-conflict DirectAnswer generation transcript".to_string()
+                })?;
+            if generation_entry
+                .metadata
+                .get("providerGenerationPath")
+                .and_then(serde_json::Value::as_str)
+                != Some("main_chat_direct_answer_scheduler")
+                || generation_entry
+                    .metadata
+                    .get("directWritesExecuted")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(false)
+            {
+                return Err("memory-conflict DirectAnswer generation metadata incomplete".into());
             }
         }
         MainChatCommandSurfaceEvalScenario::FileReadSuccess => {
@@ -806,6 +1442,143 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                 return Err("file.read action metadata incomplete".into());
             }
         }
+        MainChatCommandSurfaceEvalScenario::SessionSearchSuccess => {
+            if session.status != AgentTaskSessionStatus::Completed {
+                return Err(format!(
+                    "session search session status {:?}",
+                    session.status
+                ));
+            }
+            if !session.pending_blockers.is_empty() {
+                return Err(format!(
+                    "session search kept blockers {:?}",
+                    session.pending_blockers
+                ));
+            }
+            let completed_entry = transcript
+                .iter()
+                .find(|entry| entry.summary.contains("Governed ReAct AgentLoop completed"))
+                .ok_or_else(|| {
+                    "missing session search AgentLoop completion transcript".to_string()
+                })?;
+            if completed_entry
+                .metadata
+                .get("agentLoopSucceeded")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+                || completed_entry
+                    .metadata
+                    .get("singleStepFallbackUsed")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(false)
+                || completed_entry
+                    .metadata
+                    .get("agentLoopActionStatus")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("succeeded")
+                || completed_entry
+                    .metadata
+                    .get("directWritesExecuted")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(false)
+            {
+                return Err("session search AgentLoop metadata incomplete".into());
+            }
+            let session_action = actions
+                .iter()
+                .find(|action| action.action.action_type == "session.search")
+                .ok_or_else(|| "missing session.search action".to_string())?;
+            if session_action.status != ExecutionQueueStatus::Completed {
+                return Err(format!(
+                    "session.search action status {:?}",
+                    session_action.status
+                ));
+            }
+            let metadata = session_action
+                .observation_metadata
+                .as_ref()
+                .ok_or_else(|| "missing session.search observation metadata".to_string())?;
+            if metadata
+                .get("sourceKind")
+                .and_then(serde_json::Value::as_str)
+                != Some("session")
+                || metadata
+                    .get("sourceLabel")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("session.search")
+                || metadata
+                    .get("preview")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(str::is_empty)
+            {
+                return Err(
+                    "session search observation must expose source metadata for the control plane"
+                        .into(),
+                );
+            }
+            let structured = metadata
+                .get("structuredResult")
+                .ok_or_else(|| "session search missing structured result".to_string())?;
+            if structured
+                .get("hitCount")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_default()
+                == 0
+                || structured
+                    .get("directWritesExecuted")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(false)
+                || structured
+                    .get("promotedToMemory")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(false)
+            {
+                return Err(
+                    "session search must return hits without silent memory promotion".into(),
+                );
+            }
+            let read_evidence = structured.get("readExecutionEvidence").ok_or_else(|| {
+                "session search observation missing read execution evidence".to_string()
+            })?;
+            if read_evidence
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                != Some("session_read")
+                || read_evidence
+                    .get("realReadOnlyExecution")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
+                || read_evidence
+                    .get("fixtureBacked")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(false)
+            {
+                return Err(
+                    "session search observation did not prove real read-only session execution"
+                        .into(),
+                );
+            }
+            assert_response_agent_state_read_execution(response, "session_read", true, false)?;
+            if metadata
+                .get("agentLoopSucceeded")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+                || metadata
+                    .get("singleStepFallbackUsed")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(false)
+                || metadata
+                    .get("agentLoopActionStatus")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("succeeded")
+                || metadata
+                    .get("directWritesExecuted")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(false)
+            {
+                return Err("session.search action metadata incomplete".into());
+            }
+        }
         MainChatCommandSurfaceEvalScenario::PlanExecuteDraft => {
             if session.status != AgentTaskSessionStatus::Completed {
                 return Err(format!("PlanExecute session status {:?}", session.status));
@@ -868,6 +1641,234 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                         == Some(false)
             }) {
                 return Err("missing PlanExecute transcript metadata".into());
+            }
+        }
+        MainChatCommandSurfaceEvalScenario::SelectedSkillContextSuccess => {
+            if session.status != AgentTaskSessionStatus::Completed {
+                return Err(format!(
+                    "selected skill session status {:?}",
+                    session.status
+                ));
+            }
+            if !session.pending_blockers.is_empty() {
+                return Err(format!(
+                    "selected skill context kept blockers {:?}",
+                    session.pending_blockers
+                ));
+            }
+            let context_entry = transcript
+                .iter()
+                .find(|entry| entry.summary.contains("Bounded context was selected"))
+                .ok_or_else(|| "missing selected skill context transcript".to_string())?;
+            if context_entry
+                .metadata
+                .get("selectedSkillInstructionLoaded")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+            {
+                return Err("selected skill instruction was not marked loaded".into());
+            }
+            if !context_entry_sources_contain(
+                &context_entry.metadata,
+                "skill_instruction",
+                "skills/phase_e_review/SKILL.md",
+            ) {
+                return Err("selected phase_e_review SKILL.md source missing".into());
+            }
+            if context_entry_sources_contain(
+                &context_entry.metadata,
+                "skill_instruction",
+                "skills/unselected_context/SKILL.md",
+            ) {
+                return Err("unselected skill instruction was injected".into());
+            }
+            if !actions.iter().any(|action| {
+                action.action.action_type == "plan_execute.create_session"
+                    && action.status == ExecutionQueueStatus::Completed
+            }) {
+                return Err("selected skill plan review did not complete a governed action".into());
+            }
+            if !transcript.iter().any(|entry| {
+                entry
+                    .summary
+                    .contains("Governed PlanExecute draft session was created")
+                    && entry
+                        .metadata
+                        .get("directWritesExecuted")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(false)
+            }) {
+                return Err("selected skill plan review missing final governed delivery".into());
+            }
+        }
+        MainChatCommandSurfaceEvalScenario::KnowledgeAssetContextSuccess => {
+            if session.status != AgentTaskSessionStatus::Completed {
+                return Err(format!(
+                    "knowledge asset context session status {:?}",
+                    session.status
+                ));
+            }
+            if !session.pending_blockers.is_empty() {
+                return Err(format!(
+                    "knowledge asset context kept blockers {:?}",
+                    session.pending_blockers
+                ));
+            }
+            if !actions.is_empty() {
+                return Err(
+                    "knowledge asset context inspection should not create tool actions".into(),
+                );
+            }
+            let context_entry = transcript
+                .iter()
+                .find(|entry| entry.summary.contains("Bounded context was selected"))
+                .ok_or_else(|| "missing knowledge asset context transcript".to_string())?;
+            if context_entry
+                .metadata
+                .get("workspacePolicyOverrideBlocked")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+                || context_entry
+                    .metadata
+                    .get("rawLifeModelYamlIncluded")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(false)
+                || context_entry
+                    .metadata
+                    .get("rawTopKMemoryTrusted")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(false)
+                || context_entry
+                    .metadata
+                    .get("contextSnapshotRef")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(str::is_empty)
+            {
+                return Err(
+                    "knowledge asset context metadata did not preserve runtime policy boundaries"
+                        .into(),
+                );
+            }
+            let required_sources = [
+                ("workspace_instruction", "app_configured:AGENTS.md"),
+                ("materialized_file", "app_configured:SOUL.md"),
+                ("selected_personal_context", "app_configured:USER.md"),
+                ("selected_personal_context", "app_configured:MEMORY.md"),
+            ];
+            for (source_kind, source_id) in required_sources {
+                if !context_entry_sources_contain(&context_entry.metadata, source_kind, source_id) {
+                    return Err(format!(
+                        "knowledge asset source missing from bounded context: {source_kind}:{source_id}"
+                    ));
+                }
+            }
+            let loaded_count = context_entry_source_prefix_count(
+                &context_entry.metadata,
+                "workspace_instruction",
+                "app_configured:",
+            ) + context_entry_source_prefix_count(
+                &context_entry.metadata,
+                "materialized_file",
+                "app_configured:",
+            ) + context_entry_source_prefix_count(
+                &context_entry.metadata,
+                "selected_personal_context",
+                "app_configured:",
+            );
+            if loaded_count != 4 {
+                return Err(format!(
+                    "knowledge asset context should load exactly four scoped configured assets, got {loaded_count}"
+                ));
+            }
+            let generation_entry = transcript
+                .iter()
+                .find(|entry| {
+                    entry
+                        .summary
+                        .contains("DirectAnswer generated a model response")
+                })
+                .ok_or_else(|| {
+                    "missing knowledge-asset DirectAnswer generation transcript".to_string()
+                })?;
+            if generation_entry
+                .metadata
+                .get("providerGenerationPath")
+                .and_then(serde_json::Value::as_str)
+                != Some("main_chat_direct_answer_scheduler")
+                || generation_entry
+                    .metadata
+                    .get("directWritesExecuted")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(false)
+            {
+                return Err("knowledge-asset DirectAnswer generation metadata incomplete".into());
+            }
+        }
+        MainChatCommandSurfaceEvalScenario::KnowledgeAssetEditProposal => {
+            if session.status != AgentTaskSessionStatus::WaitingPermission {
+                return Err(format!(
+                    "knowledge asset edit proposal session status {:?}",
+                    session.status
+                ));
+            }
+            if !session
+                .pending_blockers
+                .iter()
+                .any(|blocker| blocker.starts_with("proposal:"))
+            {
+                return Err("knowledge asset edit proposal blocker not preserved".into());
+            }
+            let edit_action = actions
+                .iter()
+                .find(|action| action.action.action_type == "knowledge.propose_edit")
+                .ok_or_else(|| "missing knowledge.propose_edit action".to_string())?;
+            if edit_action.status != ExecutionQueueStatus::Completed {
+                return Err(format!(
+                    "knowledge.propose_edit action status {:?}",
+                    edit_action.status
+                ));
+            }
+            let proposal = proposals
+                .iter()
+                .find(|proposal| {
+                    proposal.source == openlife_core::agent::ProposalSource::ChatConversation
+                        && proposal.source_detail.as_deref()
+                            == Some(
+                                format!("main_chat_agent_task_session:{task_session_id}").as_str(),
+                            )
+                        && proposal.affected_path == "knowledge_asset.AGENTS.md"
+                })
+                .ok_or_else(|| "knowledge asset edit proposal not linked to task".to_string())?;
+            if proposal.proposal_type != openlife_core::agent::ProposalType::LifeModelUpdate
+                || proposal
+                    .after
+                    .get("assetId")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("AGENTS.md")
+                || proposal.after.get("proposedDiff").is_none()
+                || proposal
+                    .after
+                    .get("directKnowledgeFileWrite")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(false)
+                || proposal
+                    .after
+                    .get("requiresReviewCenterApproval")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
+            {
+                return Err(format!(
+                    "knowledge asset edit proposal payload incomplete: {:?}",
+                    proposal.after
+                ));
+            }
+            if actions.iter().any(|action| {
+                matches!(
+                    action.action.action_type.as_str(),
+                    "file.write" | "file.update" | "knowledge.write"
+                )
+            }) {
+                return Err("knowledge asset edit must not execute a direct file write".into());
             }
         }
         MainChatCommandSurfaceEvalScenario::ProposalPath => {
@@ -1176,6 +2177,53 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                     != Some("builtin_echo")
             {
                 return Err("AgentLoop MCP completion metadata incomplete".into());
+            }
+        }
+        MainChatCommandSurfaceEvalScenario::MultiReadAgentLoopSuccess => {
+            if session.status != AgentTaskSessionStatus::Completed {
+                return Err(format!("multi-read session status {:?}", session.status));
+            }
+            if !session.pending_blockers.is_empty() {
+                return Err(format!(
+                    "multi-read kept blockers {:?}",
+                    session.pending_blockers
+                ));
+            }
+            let completed_entry = transcript
+                .iter()
+                .find(|entry| entry.summary.contains("Governed ReAct AgentLoop completed"))
+                .ok_or_else(|| "missing multi-read AgentLoop completion transcript".to_string())?;
+            let tool_call_count = metadata_usize(&completed_entry.metadata, "toolCallCount");
+            let action_count = metadata_usize(&completed_entry.metadata, "agentLoopActionCount");
+            let observation_count =
+                metadata_usize(&completed_entry.metadata, "agentLoopObservationCount");
+            if completed_entry
+                .metadata
+                .get("agentLoopSucceeded")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+                || completed_entry
+                    .metadata
+                    .get("singleStepFallbackUsed")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(false)
+                || completed_entry
+                    .metadata
+                    .get("agentLoopActionStatus")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("succeeded")
+                || completed_entry
+                    .metadata
+                    .get("directWritesExecuted")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(false)
+                || tool_call_count < 2
+                || action_count < 2
+                || observation_count < 2
+            {
+                return Err(format!(
+                    "multi-read AgentLoop metadata incomplete: tool_calls={tool_call_count}, actions={action_count}, observations={observation_count}"
+                ));
             }
         }
         MainChatCommandSurfaceEvalScenario::RegisteredMcpPermissionProposal => {
@@ -1520,6 +2568,248 @@ pub(crate) fn json_contains_direct_write_true(value: &serde_json::Value) -> bool
     }
 }
 
+fn context_entry_sources_contain(
+    metadata: &serde_json::Value,
+    source_kind: &str,
+    source_id: &str,
+) -> bool {
+    metadata
+        .get("sources")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|sources| {
+            sources.iter().any(|source| {
+                source.get("sourceKind").and_then(serde_json::Value::as_str) == Some(source_kind)
+                    && source.get("sourceId").and_then(serde_json::Value::as_str) == Some(source_id)
+            })
+        })
+}
+
+fn context_entry_sources_contain_prefix(
+    metadata: &serde_json::Value,
+    source_kind: &str,
+    source_id_prefix: &str,
+) -> bool {
+    metadata
+        .get("sources")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|sources| {
+            sources.iter().any(|source| {
+                source.get("sourceKind").and_then(serde_json::Value::as_str) == Some(source_kind)
+                    && source
+                        .get("sourceId")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|source_id| source_id.starts_with(source_id_prefix))
+            })
+        })
+}
+
+fn context_entry_source_count(metadata: &serde_json::Value, source_kind: &str) -> usize {
+    metadata
+        .get("sources")
+        .and_then(serde_json::Value::as_array)
+        .map(|sources| {
+            sources
+                .iter()
+                .filter(|source| {
+                    source.get("sourceKind").and_then(serde_json::Value::as_str)
+                        == Some(source_kind)
+                })
+                .count()
+        })
+        .unwrap_or_default()
+}
+
+fn context_entry_source_prefix_count(
+    metadata: &serde_json::Value,
+    source_kind: &str,
+    source_id_prefix: &str,
+) -> usize {
+    metadata
+        .get("sources")
+        .and_then(serde_json::Value::as_array)
+        .map(|sources| {
+            sources
+                .iter()
+                .filter(|source| {
+                    source.get("sourceKind").and_then(serde_json::Value::as_str)
+                        == Some(source_kind)
+                        && source
+                            .get("sourceId")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|source_id| source_id.starts_with(source_id_prefix))
+                })
+                .count()
+        })
+        .unwrap_or_default()
+}
+
+fn main_chat_command_surface_eval_selected_skill_loaded(
+    transcript: &[openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry],
+    source_id: &str,
+) -> bool {
+    transcript
+        .iter()
+        .find(|entry| entry.summary.contains("Bounded context was selected"))
+        .is_some_and(|entry| {
+            context_entry_sources_contain(&entry.metadata, "skill_instruction", source_id)
+        })
+}
+
+fn main_chat_command_surface_eval_memory_context_source_count(
+    transcript: &[openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry],
+) -> usize {
+    transcript
+        .iter()
+        .find(|entry| entry.summary.contains("Bounded context was selected"))
+        .map(|entry| {
+            context_entry_source_prefix_count(
+                &entry.metadata,
+                "selected_personal_context",
+                "memory:",
+            )
+        })
+        .unwrap_or_default()
+}
+
+fn main_chat_command_surface_eval_knowledge_asset_source_count(
+    transcript: &[openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry],
+) -> usize {
+    transcript
+        .iter()
+        .find(|entry| entry.summary.contains("Bounded context was selected"))
+        .map(|entry| {
+            context_entry_source_prefix_count(
+                &entry.metadata,
+                "workspace_instruction",
+                "app_configured:",
+            ) + context_entry_source_prefix_count(
+                &entry.metadata,
+                "materialized_file",
+                "app_configured:",
+            ) + context_entry_source_prefix_count(
+                &entry.metadata,
+                "selected_personal_context",
+                "app_configured:",
+            )
+        })
+        .unwrap_or_default()
+}
+
+fn main_chat_command_surface_eval_knowledge_asset_scope_digest_loaded(
+    transcript: &[openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry],
+) -> bool {
+    transcript
+        .iter()
+        .find(|entry| entry.summary.contains("Bounded context was selected"))
+        .is_some_and(|entry| {
+            entry
+                .metadata
+                .get("workspacePolicyOverrideBlocked")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+                && entry
+                    .metadata
+                    .get("contextSnapshotRef")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty())
+        })
+}
+
+fn main_chat_command_surface_eval_agent_loop_count(
+    transcript: &[openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry],
+    key: &str,
+) -> usize {
+    transcript
+        .iter()
+        .find(|entry| entry.summary.contains("Governed ReAct AgentLoop completed"))
+        .map(|entry| metadata_usize(&entry.metadata, key))
+        .unwrap_or_default()
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct MainChatCommandSurfaceMemoryConflictEvidence {
+    graph_conflict_count: usize,
+    lifecycle_record_count: usize,
+    distinct_conflict_id_count: usize,
+}
+
+async fn main_chat_command_surface_eval_memory_conflict_evidence(
+    state: &Arc<AppState>,
+) -> Result<MainChatCommandSurfaceMemoryConflictEvidence, String> {
+    let records = {
+        let evidence_store = state.evidence_store.lock().await;
+        evidence_store
+            .query(openlife_core::agent::EvidenceQuery::default())
+            .map_err(|error| {
+                format!("query command-surface memory conflict evidence failed: {error}")
+            })?
+    };
+    let graph = openlife_core::agent::evaluate_evidence_graph(
+        openlife_core::agent::EvidenceGraphInput::new(records, chrono::Utc::now()),
+    );
+    let (lifecycle_record_count, distinct_conflict_id_count) =
+        if let Some(lifecycle_store) = state.memory_lifecycle_store.as_ref() {
+            let store = lifecycle_store.lock().await;
+            let records = store.list_active_records(None, 20).map_err(|error| {
+                format!("list memory conflict lifecycle records failed: {error}")
+            })?;
+            let distinct_conflict_ids = records
+                .iter()
+                .flat_map(|record| record.conflict_ids.iter().cloned())
+                .collect::<std::collections::BTreeSet<_>>();
+            (
+                records
+                    .iter()
+                    .filter(|record| !record.conflict_ids.is_empty())
+                    .count(),
+                distinct_conflict_ids.len(),
+            )
+        } else {
+            (0, 0)
+        };
+
+    Ok(MainChatCommandSurfaceMemoryConflictEvidence {
+        graph_conflict_count: graph.conflict_count,
+        lifecycle_record_count,
+        distinct_conflict_id_count,
+    })
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct MainChatCommandSurfaceKnowledgeAssetEditEvidence {
+    proposal_created: bool,
+    proposed_diff_present: bool,
+    direct_write_detected: bool,
+}
+
+fn main_chat_command_surface_eval_knowledge_asset_edit_evidence(
+    proposals: &[openlife_core::agent::AgentProposal],
+) -> MainChatCommandSurfaceKnowledgeAssetEditEvidence {
+    let Some(proposal) = proposals
+        .iter()
+        .find(|proposal| proposal.affected_path == "knowledge_asset.AGENTS.md")
+    else {
+        return MainChatCommandSurfaceKnowledgeAssetEditEvidence::default();
+    };
+    MainChatCommandSurfaceKnowledgeAssetEditEvidence {
+        proposal_created: true,
+        proposed_diff_present: proposal.after.get("proposedDiff").is_some(),
+        direct_write_detected: proposal
+            .after
+            .get("directKnowledgeFileWrite")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    }
+}
+
+fn metadata_usize(metadata: &serde_json::Value, key: &str) -> usize {
+    metadata
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .map(|value| value.min(usize::MAX as u64) as usize)
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MainChatCommandSurfaceEvalReport {
@@ -1548,6 +2838,7 @@ pub(crate) struct MainChatCommandSurfaceEvalReport {
     pub(crate) final_completion_blockers: Vec<String>,
     pub(crate) legacy_fallback_count: usize,
     pub(crate) silent_write_count: usize,
+    pub(crate) case_evidence: Vec<MainChatCommandSurfaceEvalEvidence>,
     pub(crate) failures: Vec<String>,
 }
 
@@ -1658,6 +2949,7 @@ impl MainChatCommandSurfaceEvalReport {
                 .iter()
                 .filter(|case| case.silent_write_detected)
                 .count(),
+            case_evidence: evidence,
             failures,
         }
     }
@@ -1708,9 +3000,16 @@ impl MainChatCommandSurfaceEvalReport {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct MainChatCommandSurfaceEvalEvidence {
     pub(crate) entry_point: MainChatCommandSurfaceEvalEntryPoint,
+    pub(crate) scenario: MainChatCommandSurfaceEvalScenario,
+    pub(crate) task_session_id: String,
+    pub(crate) transcript_entry_count: usize,
+    pub(crate) action_count: usize,
+    pub(crate) proposal_count: usize,
+    pub(crate) run_count: usize,
     pub(crate) provider_generation: bool,
     pub(crate) file_read: bool,
     pub(crate) plan_execute: bool,
@@ -1725,17 +3024,56 @@ pub(crate) struct MainChatCommandSurfaceEvalEvidence {
     pub(crate) mcp_agent_loop_tool_permission_proposal: bool,
     pub(crate) legacy_fallback_used: bool,
     pub(crate) silent_write_detected: bool,
+    pub(crate) selected_skill_id: Option<String>,
+    pub(crate) selected_skill_instruction_loaded: bool,
+    pub(crate) unselected_skill_instruction_loaded: bool,
+    pub(crate) memory_context_active_record_count: usize,
+    pub(crate) knowledge_asset_context_source_count: usize,
+    pub(crate) knowledge_asset_scope_digest_loaded: bool,
+    pub(crate) agent_loop_tool_call_count: usize,
+    pub(crate) agent_loop_observation_count: usize,
+    pub(crate) memory_conflict_graph_conflict_count: usize,
+    pub(crate) memory_conflict_lifecycle_record_count: usize,
+    pub(crate) memory_conflict_distinct_conflict_id_count: usize,
+    pub(crate) knowledge_asset_edit_proposal_created: bool,
+    pub(crate) knowledge_asset_edit_proposed_diff_present: bool,
+    pub(crate) knowledge_asset_edit_direct_write_detected: bool,
 }
 
 impl MainChatCommandSurfaceEvalEvidence {
     pub(crate) fn for_case(
         entry_point: MainChatCommandSurfaceEvalEntryPoint,
         scenario: MainChatCommandSurfaceEvalScenario,
+        task_session_id: String,
+        transcript_entry_count: usize,
+        action_count: usize,
+        proposal_count: usize,
+        run_count: usize,
         legacy_fallback_used: bool,
         silent_write_detected: bool,
+        selected_skill_id: Option<String>,
+        selected_skill_instruction_loaded: bool,
+        unselected_skill_instruction_loaded: bool,
+        memory_context_active_record_count: usize,
+        knowledge_asset_context_source_count: usize,
+        knowledge_asset_scope_digest_loaded: bool,
+        agent_loop_tool_call_count: usize,
+        agent_loop_observation_count: usize,
+        memory_conflict_graph_conflict_count: usize,
+        memory_conflict_lifecycle_record_count: usize,
+        memory_conflict_distinct_conflict_id_count: usize,
+        knowledge_asset_edit_proposal_created: bool,
+        knowledge_asset_edit_proposed_diff_present: bool,
+        knowledge_asset_edit_direct_write_detected: bool,
     ) -> Self {
         Self {
             entry_point,
+            scenario,
+            task_session_id,
+            transcript_entry_count,
+            action_count,
+            proposal_count,
+            run_count,
             provider_generation: scenario
                 == MainChatCommandSurfaceEvalScenario::DirectProviderTrace,
             file_read: scenario == MainChatCommandSurfaceEvalScenario::FileReadSuccess,
@@ -1764,6 +3102,20 @@ impl MainChatCommandSurfaceEvalEvidence {
                 == MainChatCommandSurfaceEvalScenario::RegisteredMcpAgentLoopPermissionProposal,
             legacy_fallback_used,
             silent_write_detected,
+            selected_skill_id,
+            selected_skill_instruction_loaded,
+            unselected_skill_instruction_loaded,
+            memory_context_active_record_count,
+            knowledge_asset_context_source_count,
+            knowledge_asset_scope_digest_loaded,
+            agent_loop_tool_call_count,
+            agent_loop_observation_count,
+            memory_conflict_graph_conflict_count,
+            memory_conflict_lifecycle_record_count,
+            memory_conflict_distinct_conflict_id_count,
+            knowledge_asset_edit_proposal_created,
+            knowledge_asset_edit_proposed_diff_present,
+            knowledge_asset_edit_direct_write_detected,
         }
     }
 }

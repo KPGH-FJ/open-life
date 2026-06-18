@@ -1952,6 +1952,13 @@ pub async fn run_main_chat_agent_product_maturity_v2_final_readiness_gate(
 }
 
 #[tauri::command]
+pub async fn run_main_chat_agent_beta_v1_readiness_gate(
+    _state: State<'_, Arc<AppState>>,
+) -> Result<crate::main_chat_agent_beta_v1_readiness::MainChatAgentBetaV1ReadinessReport, String> {
+    crate::main_chat_agent_beta_v1_readiness::run_main_chat_agent_beta_v1_readiness_report().await
+}
+
+#[tauri::command]
 pub async fn run_main_chat_agent_execution_v1_final_acceptance_gate(
     state: State<'_, Arc<AppState>>,
 ) -> Result<MainChatAgentExecutionV1FinalAcceptanceGateCommandReport, String> {
@@ -3380,7 +3387,7 @@ mod tests {
         assert!(report
             .acceptance
             .blockers
-            .contains(&"command_surface_cases_below_24".to_string()));
+            .contains(&"command_surface_cases_below_38".to_string()));
         assert!(report
             .acceptance
             .blockers
@@ -3492,7 +3499,7 @@ mod tests {
             .final_gate
             .acceptance
             .blockers
-            .contains(&"command_surface_cases_below_24".to_string()));
+            .contains(&"command_surface_cases_below_38".to_string()));
         assert!(!report
             .final_gate
             .acceptance

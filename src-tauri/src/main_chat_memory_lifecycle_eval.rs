@@ -2,6 +2,8 @@ use openlife_core::agent::types::{
     AgentProposal, ProposalSource, ProposalStatus, ProposalType, RiskLevel,
 };
 use openlife_core::agent::{
+    evaluate_evidence_graph, EvidenceDraft, EvidenceGraphInput, EvidencePrivacyLevel,
+    EvidenceQuery, EvidenceSourceRef, EvidenceSourceType, EvidenceStore, EvidenceType,
     MemoryLifecycleAcceptanceInput, MemoryLifecycleScope, MemoryLifecycleStatus,
     MemoryLifecycleStore,
 };
@@ -66,11 +68,11 @@ pub(crate) fn run_main_chat_memory_lifecycle_eval_gate() -> MainChatMemoryLifecy
     if passed_scenario_count != proofs.len() {
         blockers.push("memory_lifecycle_eval_scenarios_failed".into());
     }
-    if proofs.len() != 8 {
+    if proofs.len() != 9 {
         blockers.push("memory_lifecycle_mr_matrix_incomplete".into());
     }
     for id in [
-        "MR-01", "MR-02", "MR-03", "MR-04", "MR-05", "MR-06", "MR-07", "MR-08",
+        "MR-01", "MR-02", "MR-03", "MR-04", "MR-05", "MR-06", "MR-07", "MR-08", "MR-09",
     ] {
         if !proofs.iter().any(|proof| proof.scenario_id == id) {
             blockers.push(format!("missing_memory_lifecycle_eval:{id}"));
@@ -192,6 +194,21 @@ fn memory_lifecycle_eval_scenarios() -> Vec<MemoryLifecycleEvalScenario> {
             ["no_unsupported_confidence_claim"],
             "pass",
         ),
+        scenario(
+            "MR-09",
+            "Compare two memory facts that conflict.",
+            "memory_proposal",
+            [
+                "evidence_conflict",
+                "memory_id",
+                "conflict_ids",
+                "provenance",
+            ],
+            ["conflict_state", "memory_candidate"],
+            ["compare_memory_conflict"],
+            ["no_silent_memory_write", "no_silent_overwrite"],
+            "pass",
+        ),
     ]
 }
 
@@ -237,6 +254,7 @@ fn execute_memory_lifecycle_scenario(
         "MR-06" => mr_06_reject_memory(scenario),
         "MR-07" => mr_07_scoped_memory(scenario),
         "MR-08" => mr_08_provenance_visible(scenario),
+        "MR-09" => mr_09_conflict_state_visible(scenario),
         _ => failed_proof(scenario, "unknown memory lifecycle scenario"),
     }
 }
@@ -566,6 +584,84 @@ fn mr_08_provenance_visible(scenario: &MemoryLifecycleEvalScenario) -> MemoryLif
     )
 }
 
+fn mr_09_conflict_state_visible(
+    scenario: &MemoryLifecycleEvalScenario,
+) -> MemoryLifecycleEvalProof {
+    let lifecycle_store = match MemoryLifecycleStore::new_in_memory() {
+        Ok(store) => store,
+        Err(err) => return failed_proof(scenario, &err.to_string()),
+    };
+    let evidence_store = match EvidenceStore::new_in_memory() {
+        Ok(store) => store,
+        Err(err) => return failed_proof(scenario, &err.to_string()),
+    };
+    let (support, contradiction, graph) = match create_memory_conflict_evidence(&evidence_store) {
+        Ok(values) => values,
+        Err(err) => return failed_proof(scenario, &err.to_string()),
+    };
+    let conflict_ids = vec![support.id.clone(), contradiction.id.clone()];
+    let first = match lifecycle_store.accept_memory_proposal(acceptance_input(
+        &memory_conflict_proposal("MR-09-a", "User prefers morning deep work.", &conflict_ids),
+    )) {
+        Ok(accepted) => accepted,
+        Err(err) => return failed_proof(scenario, &err.to_string()),
+    };
+    let second =
+        match lifecycle_store.accept_memory_proposal(acceptance_input(&memory_conflict_proposal(
+            "MR-09-b",
+            "User prefers late-night deep work.",
+            &conflict_ids,
+        ))) {
+            Ok(accepted) => accepted,
+            Err(err) => return failed_proof(scenario, &err.to_string()),
+        };
+    let active_records = lifecycle_store
+        .list_active_records(None, 10)
+        .unwrap_or_default();
+    let distinct_conflict_ids = active_records
+        .iter()
+        .flat_map(|record| record.conflict_ids.iter().cloned())
+        .collect::<std::collections::BTreeSet<_>>();
+    let conflict_visible =
+        graph.graph_ready
+            && graph.metadata_safe
+            && !graph.contains_raw_content
+            && graph.conflict_count >= 2
+            && graph.opposition_link_count > 0
+            && graph.timeline.items.iter().all(|item| {
+                item.conflict_state.conflicted && !item.conflict_state.reasons.is_empty()
+            });
+    proof(
+        scenario,
+        "pass",
+        [
+            "evidence_conflict",
+            "memory_id",
+            "conflict_ids",
+            "provenance",
+        ],
+        ["conflict_state", "memory_candidate"],
+        ["compare_memory_conflict"],
+        vec![first.record.memory_id, second.record.memory_id],
+        vec![],
+        vec![
+            first.materialized_view.version,
+            second.materialized_view.version,
+        ],
+        vec![],
+        vec![],
+        diagnostics(
+            conflict_visible
+                && active_records.len() == 2
+                && distinct_conflict_ids.len() == 2
+                && active_records
+                    .iter()
+                    .all(|record| record.conflict_ids.len() == 2),
+            "memory conflict evidence graph or lifecycle conflict ids were not visible",
+        ),
+    )
+}
+
 fn memory_proposal(id_suffix: &str, scope: MemoryLifecycleScope) -> AgentProposal {
     let mut proposal = AgentProposal::new(
         ProposalType::MemoryWrite,
@@ -585,11 +681,90 @@ fn memory_proposal(id_suffix: &str, scope: MemoryLifecycleScope) -> AgentProposa
     proposal
 }
 
+fn memory_conflict_proposal(
+    id_suffix: &str,
+    content: &str,
+    conflict_ids: &[String],
+) -> AgentProposal {
+    let mut proposal = AgentProposal::new(
+        ProposalType::MemoryWrite,
+        "memory.preferences.deep_work_window",
+        serde_json::json!({
+            "content": content,
+            "scope": "global",
+            "category": "preference",
+            "conflictIds": conflict_ids
+        }),
+        "Memory conflict eval compares two accepted preference candidates with visible evidence opposition.",
+        0.74,
+        RiskLevel::Low,
+        ProposalSource::ChatConversation,
+    );
+    proposal.id = format!("proposal-{id_suffix}");
+    proposal.source_detail = Some(format!("task-session-{id_suffix}"));
+    proposal.run_id = Some(format!("run-{id_suffix}"));
+    proposal
+}
+
 fn acceptance_input(proposal: &AgentProposal) -> MemoryLifecycleAcceptanceInput {
     MemoryLifecycleAcceptanceInput::from_memory_proposal(
         proposal,
         "User prefers execution-first agents.".into(),
     )
+}
+
+fn create_memory_conflict_evidence(
+    store: &EvidenceStore,
+) -> anyhow::Result<(
+    openlife_core::agent::EvidenceRecord,
+    openlife_core::agent::EvidenceRecord,
+    openlife_core::agent::EvidenceGraphReport,
+)> {
+    let support = store.create_evidence(memory_conflict_evidence_draft(
+        "run-memory-conflict-support",
+        EvidenceType::Preference,
+        0.82,
+        Vec::new(),
+    ))?;
+    let contradiction = store.create_evidence(memory_conflict_evidence_draft(
+        "run-memory-conflict-opposition",
+        EvidenceType::Contradiction,
+        0.79,
+        vec![support.id.clone()],
+    ))?;
+    let records = store.query(EvidenceQuery::default())?;
+    let graph = evaluate_evidence_graph(EvidenceGraphInput::new(records, chrono::Utc::now()));
+    Ok((support, contradiction, graph))
+}
+
+fn memory_conflict_evidence_draft(
+    run_id: &str,
+    evidence_type: EvidenceType,
+    confidence: f32,
+    opposing_refs: Vec<String>,
+) -> EvidenceDraft {
+    let mut draft = EvidenceDraft::new(
+        evidence_type,
+        "/preferences/deep_work/window",
+        confidence,
+        RiskLevel::Low,
+        EvidencePrivacyLevel::Internal,
+    )
+    .with_summary("metadata safe deep work preference conflict")
+    .with_source_ref(EvidenceSourceRef::from_digest(
+        EvidenceSourceType::AgentRun,
+        run_id,
+        Some("main_chat_memory_conflict_eval"),
+        format!("{run_id}-digest"),
+    ))
+    .with_linked_agent_run(run_id);
+    draft.opposing_refs = opposing_refs;
+    draft.run_metadata = serde_json::json!({
+        "schema": "mainChatMemoryConflictEval.v1",
+        "metadataSafe": true,
+        "containsRawContent": false
+    });
+    draft
 }
 
 fn diagnostics(condition: bool, message: &str) -> Vec<String> {

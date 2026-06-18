@@ -1264,6 +1264,71 @@ export interface MainChatProductMaturityV2FinalReadinessReport {
   defaultLiveProdExcluded: boolean;
 }
 
+export interface MainChatAgentBetaV1ReadinessDimension {
+  dimension: string;
+  status: string;
+  optInOnly: boolean;
+  evidence: string[];
+  blockers: string[];
+}
+
+export interface MainChatAgentBetaV1FoundationInventoryItem {
+  component: string;
+  status: string;
+  evidence: string[];
+  developmentDecision: string;
+}
+
+export interface MainChatAgentBetaV1WorkstreamStatus {
+  workstreamId: string;
+  label: string;
+  status: string;
+  ready: boolean;
+  evidence: string[];
+  blockers: string[];
+}
+
+export interface MainChatAgentBetaV1ProductMaturityPhaseCount {
+  phaseId: string;
+  capabilityGroup: string;
+  scenarioCount: number;
+  passed: number;
+  expectedBlocker: number;
+  failed: number;
+  blocked: number;
+  ready: boolean;
+  optInOnly: boolean;
+}
+
+export interface MainChatAgentBetaV1ReadinessReport {
+  reportKind: "main_chat_agent_beta_v1_readiness_gate";
+  readinessSemantics: "beta_v1_execution_first_default_deterministic_live_opt_in_separate";
+  defaultReadinessScope: "beta_v1_default_deterministic_local_only";
+  optInLiveReadinessScope: "beta_v1_external_live_opt_in_only";
+  foundationInventoryExists: boolean;
+  foundationInventoryItems: MainChatAgentBetaV1FoundationInventoryItem[];
+  workstreams: MainChatAgentBetaV1WorkstreamStatus[];
+  productMaturityPhaseCounts: MainChatAgentBetaV1ProductMaturityPhaseCount[];
+  defaultReadinessStatus: string;
+  defaultReady: boolean;
+  optInLiveReady: boolean;
+  externalLiveAttempted: boolean;
+  defaultRealTaskScenarioCount: number;
+  defaultRealTaskPassedCount: number;
+  optInLiveRealTaskScenarioCount: number;
+  defaultExperienceRequiredStateCount: number;
+  defaultExperienceVerifiedStateCount: number;
+  productMaturityDefaultScenarioCount: number;
+  commandSurfaceTotalCases: number;
+  commandSurfaceFailedCases: number;
+  legacyFallbackCount: number;
+  silentDurableWriteCount: number;
+  noSilentDurableWrites: boolean;
+  defaultBlockers: string[];
+  optInLiveBlockers: string[];
+  readinessDimensions: MainChatAgentBetaV1ReadinessDimension[];
+}
+
 export async function listMainChatSkills(sessionId?: string): Promise<MainChatSkillSummary[]> {
   return safeInvoke<MainChatSkillSummary[]>("list_main_chat_skills", {
     ...optionalDualArg("sessionId", "session_id", sessionId),
@@ -1461,6 +1526,12 @@ export async function runMainChatAgentProductMaturityV2SkillsGate(): Promise<Mai
 export async function runMainChatAgentProductMaturityV2FinalReadinessGate(): Promise<MainChatProductMaturityV2FinalReadinessReport> {
   return safeInvoke<MainChatProductMaturityV2FinalReadinessReport>(
     "run_main_chat_agent_product_maturity_v2_final_readiness_gate"
+  );
+}
+
+export async function runMainChatAgentBetaV1ReadinessGate(): Promise<MainChatAgentBetaV1ReadinessReport> {
+  return safeInvoke<MainChatAgentBetaV1ReadinessReport>(
+    "run_main_chat_agent_beta_v1_readiness_gate"
   );
 }
 

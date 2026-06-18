@@ -36,6 +36,10 @@ fn productization_command_test_context() -> tauri::Context<tauri::test::MockRunt
     );
     context.runtime_authority_mut().__allow_command(
         "run_main_chat_agent_product_maturity_v2_final_readiness_gate".into(),
+        mock_ipc_origin.clone(),
+    );
+    context.runtime_authority_mut().__allow_command(
+        "run_main_chat_agent_beta_v1_readiness_gate".into(),
         mock_ipc_origin,
     );
     context
@@ -224,14 +228,14 @@ fn main_chat_agent_productization_v1_gate_fails_schema_only_runtime_executor() {
 fn main_chat_product_maturity_v2_memory_lifecycle_eval_covers_mr_matrix() {
     let report = crate::main_chat_memory_lifecycle_eval::run_main_chat_memory_lifecycle_eval_gate();
 
-    assert_eq!(report.scenario_count, 8);
-    assert_eq!(report.default_gate_scenario_count, 8);
-    assert_eq!(report.executed_scenario_count, 8);
-    assert_eq!(report.passed_scenario_count, 8, "{:?}", report.proofs);
+    assert_eq!(report.scenario_count, 9);
+    assert_eq!(report.default_gate_scenario_count, 9);
+    assert_eq!(report.executed_scenario_count, 9);
+    assert_eq!(report.passed_scenario_count, 9, "{:?}", report.proofs);
     assert_eq!(report.expected_blocker_count, 2);
     assert!(report.ready, "{:?}", report.blockers);
     for id in [
-        "MR-01", "MR-02", "MR-03", "MR-04", "MR-05", "MR-06", "MR-07", "MR-08",
+        "MR-01", "MR-02", "MR-03", "MR-04", "MR-05", "MR-06", "MR-07", "MR-08", "MR-09",
     ] {
         assert!(
             report.proofs.iter().any(|proof| proof.scenario_id == id),
@@ -788,7 +792,7 @@ async fn main_chat_product_maturity_v2_final_readiness_aggregates_all_phase_gate
         report.report_kind,
         "main_chat_agent_product_maturity_v2_final_readiness_gate"
     );
-    assert_eq!(report.default_deterministic_scenario_count, 42);
+    assert_eq!(report.default_deterministic_scenario_count, 43);
     assert_eq!(report.external_live_scenario_count, 6);
     assert_eq!(
         report.default_readiness_scope,
@@ -829,8 +833,8 @@ async fn main_chat_product_maturity_v2_final_readiness_aggregates_all_phase_gate
         .iter()
         .find(|phase| phase.capability_group == "memory_lifecycle")
         .expect("memory lifecycle phase");
-    assert_eq!(memory.scenario_count, 8);
-    assert_eq!(memory.passed, 6);
+    assert_eq!(memory.scenario_count, 9);
+    assert_eq!(memory.passed, 7);
     assert_eq!(memory.expected_blocker, 2);
     assert_eq!(memory.failed, 0);
     assert_eq!(memory.blocked, 0);
@@ -953,7 +957,7 @@ async fn run_main_chat_product_maturity_v2_final_readiness_command_returns_read_
         response["defaultDeterministicScenarioCount"]
             .as_u64()
             .unwrap(),
-        42
+        43
     );
     assert_eq!(response["externalLiveScenarioCount"].as_u64().unwrap(), 6);
     assert!(response["unsupportedScenarios"]
@@ -1313,5 +1317,863 @@ async fn main_chat_agent_productization_v1_send_result_includes_runtime_backed_a
     assert!(
         agent_state.observations.is_empty(),
         "DirectAnswer context/model transcript must not become fake action observations"
+    );
+}
+
+#[tokio::test]
+async fn main_chat_agent_beta_v1_default_experience_maps_required_states_to_runtime_ui_evidence() {
+    let report =
+        crate::main_chat_agent_beta_v1_default_experience::run_main_chat_agent_beta_v1_default_experience_report()
+            .await;
+
+    assert_eq!(
+        report.report_kind,
+        "main_chat_agent_beta_v1_default_experience"
+    );
+    assert!(
+        report.ready,
+        "default experience blockers: {:?}",
+        report.blockers
+    );
+    assert_eq!(report.phase, "phase_1_default_agent_experience");
+    assert!(report.productization_v1_complete);
+    assert_eq!(report.command_surface_failed_cases, 0);
+    assert_eq!(report.command_surface_legacy_fallback_count, 0);
+    assert_eq!(report.command_surface_silent_write_count, 0);
+    assert!(report.command_surface_total_cases >= 38);
+
+    let required_states = [
+        "classifying",
+        "answering",
+        "planning",
+        "action_queued",
+        "action_running",
+        "observation_ready",
+        "permission_needed",
+        "memory_candidate",
+        "blocked",
+        "retry_available",
+        "completed",
+    ];
+    let covered_states = report
+        .state_mappings
+        .iter()
+        .map(|mapping| mapping.state.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        covered_states,
+        required_states
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+    );
+
+    for mapping in &report.state_mappings {
+        assert!(
+            mapping.verified,
+            "{} mapping should be verified: {:?}",
+            mapping.state, mapping.blockers
+        );
+        assert!(
+            !mapping.runtime_evidence.is_empty(),
+            "{} needs runtime evidence",
+            mapping.state
+        );
+        assert!(
+            !mapping.command_surface_evidence.is_empty(),
+            "{} needs command-surface evidence",
+            mapping.state
+        );
+        assert!(
+            !mapping.ui_evidence.is_empty(),
+            "{} needs UI evidence",
+            mapping.state
+        );
+        let combined = format!(
+            "{} {} {}",
+            mapping.runtime_evidence.join(" "),
+            mapping.command_surface_evidence.join(" "),
+            mapping.ui_evidence.join(" ")
+        );
+        assert!(
+            !combined.contains("assistant_text"),
+            "{} must not use assistant text as state proof",
+            mapping.state
+        );
+    }
+}
+
+#[tokio::test]
+async fn main_chat_agent_beta_v1_readiness_gate_aggregates_default_evidence_with_live_separate() {
+    let report =
+        crate::main_chat_agent_beta_v1_readiness::run_main_chat_agent_beta_v1_readiness_report()
+            .await
+            .expect("beta readiness report");
+
+    assert_eq!(report.report_kind, "main_chat_agent_beta_v1_readiness_gate");
+    assert_eq!(
+        report.readiness_semantics,
+        "beta_v1_execution_first_default_deterministic_live_opt_in_separate"
+    );
+    assert_eq!(
+        report.default_readiness_scope,
+        "beta_v1_default_deterministic_local_only"
+    );
+    assert_eq!(
+        report.opt_in_live_readiness_scope,
+        "beta_v1_external_live_opt_in_only"
+    );
+    assert!(report.foundation_inventory_exists);
+    assert!(report
+        .foundation_inventory_items
+        .iter()
+        .any(
+            |item| item.component == "Knowledge assets and context inventory"
+                && item.status == "partial"
+        ));
+    assert_eq!(report.workstreams.len(), 5);
+    assert!(report
+        .workstreams
+        .iter()
+        .any(|workstream| workstream.workstream_id == "phase_5"
+            && workstream.ready
+            && workstream.status == "ready"));
+    assert!(report
+        .product_maturity_phase_counts
+        .iter()
+        .any(|phase| phase.capability_group == "memory_lifecycle"
+            && phase.scenario_count == 9
+            && phase.ready));
+    assert_eq!(report.default_readiness_status, "ready");
+    assert!(report.default_ready);
+    assert!(!report.opt_in_live_ready);
+    assert!(!report.external_live_attempted);
+    assert_eq!(report.default_real_task_scenario_count, 28);
+    assert_eq!(report.default_real_task_passed_count, 28);
+    assert_eq!(report.opt_in_live_real_task_scenario_count, 2);
+    assert_eq!(report.default_experience_required_state_count, 11);
+    assert_eq!(report.default_experience_verified_state_count, 11);
+    assert_eq!(report.product_maturity_default_scenario_count, 43);
+    assert_eq!(report.command_surface_failed_cases, 0);
+    assert!(report.command_surface_total_cases >= 38);
+    assert_eq!(report.legacy_fallback_count, 0);
+    assert_eq!(report.silent_durable_write_count, 0);
+    assert!(report.no_silent_durable_writes);
+    assert!(
+        report.default_blockers.is_empty(),
+        "{:?}",
+        report.default_blockers
+    );
+    assert!(report
+        .opt_in_live_blockers
+        .contains(&"explicit_live_eval_required".to_string()));
+
+    let dimensions = report
+        .readiness_dimensions
+        .iter()
+        .map(|dimension| dimension.dimension.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        dimensions,
+        [
+            "Routing",
+            "UI",
+            "Events",
+            "Memory",
+            "Plan",
+            "Tools",
+            "Permissions",
+            "Recovery",
+            "Final delivery",
+            "Live provider",
+            "No silent writes",
+            "No legacy bypass",
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>()
+    );
+    for dimension in &report.readiness_dimensions {
+        if dimension.opt_in_only {
+            assert_eq!(dimension.status, "blocked_opt_in_not_attempted");
+        } else {
+            assert_eq!(
+                dimension.status, "ready",
+                "{} should be ready: {:?}",
+                dimension.dimension, dimension.blockers
+            );
+            assert!(
+                !dimension.evidence.is_empty(),
+                "{} needs structured evidence",
+                dimension.dimension
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn run_main_chat_agent_beta_v1_readiness_command_returns_isolated_report() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let app = tauri::test::mock_builder()
+        .manage(state.clone())
+        .invoke_handler(tauri::generate_handler![
+            crate::commands::agent_runtime::run_main_chat_agent_beta_v1_readiness_gate
+        ])
+        .build(productization_command_test_context())
+        .expect("build mock tauri app");
+    let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+        .build()
+        .expect("build mock webview");
+
+    let response = tauri::test::get_ipc_response(
+        &webview,
+        productization_invoke_request(
+            "run_main_chat_agent_beta_v1_readiness_gate",
+            serde_json::json!({}),
+        ),
+    )
+    .expect("beta readiness response")
+    .deserialize::<serde_json::Value>()
+    .expect("deserialize beta readiness response");
+
+    assert_eq!(
+        response["reportKind"].as_str().unwrap(),
+        "main_chat_agent_beta_v1_readiness_gate"
+    );
+    assert_eq!(
+        response["defaultReadinessStatus"].as_str().unwrap(),
+        "ready"
+    );
+    assert!(response["defaultReady"].as_bool().unwrap());
+    assert!(!response["optInLiveReady"].as_bool().unwrap());
+    assert!(!response["externalLiveAttempted"].as_bool().unwrap());
+    assert_eq!(response["defaultRealTaskPassedCount"].as_u64().unwrap(), 28);
+    assert_eq!(
+        response["productMaturityDefaultScenarioCount"]
+            .as_u64()
+            .unwrap(),
+        43
+    );
+    assert_eq!(response["legacyFallbackCount"].as_u64().unwrap(), 0);
+    assert_eq!(response["silentDurableWriteCount"].as_u64().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn main_chat_agent_beta_v1_readiness_live_opt_in_is_audited_but_separate() {
+    let report =
+        crate::main_chat_agent_beta_v1_readiness::run_main_chat_agent_beta_v1_readiness_report_with_live_opt_in(true)
+            .await
+            .expect("beta readiness report");
+
+    assert!(report.default_ready);
+    assert_eq!(report.default_readiness_status, "ready");
+    assert!(report.external_live_attempted);
+    assert!(!report.opt_in_live_ready);
+    assert!(report
+        .opt_in_live_blockers
+        .contains(&"beta_real_task_external_live_not_attempted".to_string()));
+    assert!(
+        report.default_blockers.is_empty(),
+        "live opt-in blockers must not pollute deterministic default readiness: {:?}",
+        report.default_blockers
+    );
+}
+
+#[tokio::test]
+async fn main_chat_agent_beta_v1_real_task_harness_defines_b1_b30_and_marks_phase2_ready() {
+    let report =
+        crate::main_chat_agent_beta_v1_real_tasks::run_main_chat_agent_beta_v1_real_task_report()
+            .await;
+
+    assert_eq!(
+        report.report_kind,
+        "main_chat_agent_beta_v1_real_task_verticals"
+    );
+    assert_eq!(report.phase, "phase_2_real_task_verticals");
+    assert_eq!(report.fixture_count, 30);
+    assert_eq!(report.default_readiness_scenario_count, 28);
+    assert_eq!(report.opt_in_live_scenario_count, 2);
+    assert_eq!(report.executed_default_scenario_count, 28);
+    assert!(!report.external_live_attempted);
+    assert!(
+        report.ready,
+        "Phase 2 should be ready once every required default real task has runtime/product evidence: {:?}",
+        report.blockers
+    );
+    assert_eq!(report.failed_default_scenario_count, 0);
+    assert!(
+        report.blockers.is_empty(),
+        "Phase 2 readiness should not carry stale blockers: {:?}",
+        report.blockers
+    );
+
+    let expected_ids = (1..=30).map(|n| format!("B{n}")).collect::<Vec<_>>();
+    let actual_ids = report
+        .fixtures
+        .iter()
+        .map(|fixture| fixture.id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(actual_ids, expected_ids);
+
+    for fixture in &report.fixtures {
+        assert!(
+            !fixture.expected_outcome.is_empty(),
+            "{} missing expected_outcome",
+            fixture.id
+        );
+        assert!(
+            matches!(
+                fixture.expected_outcome.as_str(),
+                "success" | "proposal" | "expected_blocker" | "opt_in_live"
+            ),
+            "{} has invalid expected_outcome {}",
+            fixture.id,
+            fixture.expected_outcome
+        );
+        assert!(
+            !fixture.command_surface.is_empty(),
+            "{} missing command_surface",
+            fixture.id
+        );
+        if fixture.command_surface == "not_applicable_with_reason" {
+            assert!(
+                fixture
+                    .not_applicable_with_reason
+                    .as_deref()
+                    .is_some_and(|reason| !reason.trim().is_empty()),
+                "{} must explain not_applicable command_surface",
+                fixture.id
+            );
+        }
+        assert!(
+            !fixture.required_ui_states.is_empty(),
+            "{} must declare UI states",
+            fixture.id
+        );
+        assert!(
+            fixture
+                .forbidden_evidence
+                .iter()
+                .any(|item| item == "silent_durable_write"),
+            "{} must forbid silent durable writes",
+            fixture.id
+        );
+    }
+
+    for live_id in ["B25", "B26"] {
+        let fixture = report
+            .fixtures
+            .iter()
+            .find(|fixture| fixture.id == live_id)
+            .expect("live fixture");
+        assert!(!fixture.default_readiness);
+        assert!(fixture.requires_live_provider);
+        assert_eq!(fixture.expected_outcome, "opt_in_live");
+    }
+
+    for proof in &report.proofs {
+        if proof.default_readiness {
+            assert_eq!(proof.legacy_fallback_count, 0, "{}", proof.scenario_id);
+            assert_eq!(proof.silent_durable_write_count, 0, "{}", proof.scenario_id);
+            assert!(
+                proof.fixture_contract_valid,
+                "{} fixture contract should be valid: {:?}",
+                proof.scenario_id, proof.blockers
+            );
+            assert!(
+                proof.runtime_evidence_count > 0 || !proof.blockers.is_empty(),
+                "{} must carry evidence or fail closed",
+                proof.scenario_id
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn main_chat_agent_beta_v1_real_task_command_surface_proofs_use_runtime_task_sessions() {
+    let report =
+        crate::main_chat_agent_beta_v1_real_tasks::run_main_chat_agent_beta_v1_real_task_report()
+            .await;
+
+    let command_surface_proofs = report
+        .proofs
+        .iter()
+        .filter(|proof| {
+            proof.default_readiness
+                && proof
+                    .evidence_sources
+                    .iter()
+                    .any(|source| source == "command_surface")
+                && proof.runtime_evidence_count > 0
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !command_surface_proofs.is_empty(),
+        "Beta real-task report should map command-surface scenarios to concrete runtime evidence"
+    );
+
+    for proof in command_surface_proofs {
+        let task_session_id = proof.task_session_id.as_deref().unwrap_or_else(|| {
+            panic!("{} missing command-surface task session", proof.scenario_id)
+        });
+        assert!(
+            !task_session_id.starts_with("covered_by_existing_runtime_gate:"),
+            "{} must not use placeholder task-session evidence: {}",
+            proof.scenario_id,
+            task_session_id
+        );
+        assert!(
+            !task_session_id.trim().is_empty() && task_session_id == task_session_id.trim(),
+            "{} task-session evidence must be a raw bounded runtime id: {:?}",
+            proof.scenario_id,
+            task_session_id
+        );
+        assert!(
+            proof
+                .evidence_sources
+                .iter()
+                .any(|source| source.starts_with("command_surface_case:")),
+            "{} should retain the specific command-surface eval case used as proof: {:?}",
+            proof.scenario_id,
+            proof.evidence_sources
+        );
+    }
+}
+
+#[tokio::test]
+async fn main_chat_agent_beta_v1_real_task_command_surface_proofs_include_runtime_record_counts() {
+    let report =
+        crate::main_chat_agent_beta_v1_real_tasks::run_main_chat_agent_beta_v1_real_task_report()
+            .await;
+
+    for scenario_id in ["B1", "B2", "B5", "B7", "B10", "B16", "B23", "B24"] {
+        let proof = report
+            .proofs
+            .iter()
+            .find(|proof| proof.scenario_id == scenario_id)
+            .unwrap_or_else(|| panic!("missing proof for {scenario_id}"));
+        assert!(
+            proof
+                .evidence_sources
+                .iter()
+                .any(|source| source.starts_with("command_surface_records:transcript=")),
+            "{scenario_id} should expose runtime record counts from its command-surface case: {:?}",
+            proof.evidence_sources
+        );
+    }
+}
+
+#[tokio::test]
+async fn main_chat_agent_beta_v1_b3_session_search_runs_through_command_surface() {
+    let report =
+        crate::main_chat_agent_beta_v1_real_tasks::run_main_chat_agent_beta_v1_real_task_report()
+            .await;
+
+    let proof = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "B3")
+        .expect("B3 proof");
+
+    assert!(
+        proof.passed,
+        "B3 session search should pass with ordinary command-surface runtime evidence: {:?}",
+        proof.blockers
+    );
+    assert_eq!(proof.actual_outcome, "success");
+    assert_eq!(proof.command_surface, "both");
+    assert!(
+        proof.task_session_id.is_some(),
+        "B3 should expose the runtime task session used for session.search"
+    );
+    assert!(
+        proof.actions_attempted >= 1 && proof.actions_executed >= 1,
+        "B3 should execute a governed session.search action: {:?}",
+        proof
+    );
+    assert!(
+        proof.observations_recorded >= 1,
+        "B3 should record a session search observation"
+    );
+    assert!(
+        proof
+            .evidence_sources
+            .iter()
+            .any(|source| source == "command_surface"),
+        "B3 should use ordinary send/stream command-surface evidence: {:?}",
+        proof.evidence_sources
+    );
+    assert!(
+        proof
+            .evidence_sources
+            .iter()
+            .any(|source| source.ends_with(":session_search_success")),
+        "B3 should retain the concrete session_search_success eval case: {:?}",
+        proof.evidence_sources
+    );
+}
+
+#[tokio::test]
+async fn main_chat_agent_beta_v1_b4_memory_context_runs_through_command_surface() {
+    let report =
+        crate::main_chat_agent_beta_v1_real_tasks::run_main_chat_agent_beta_v1_real_task_report()
+            .await;
+
+    let proof = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "B4")
+        .expect("B4 proof");
+
+    assert!(
+        proof.passed,
+        "B4 memory context should pass with ordinary command-surface runtime evidence: {:?}",
+        proof.blockers
+    );
+    assert_eq!(proof.actual_outcome, "success");
+    assert_eq!(proof.command_surface, "both");
+    assert!(
+        proof.task_session_id.is_some(),
+        "B4 should expose the runtime task session used for bounded memory context"
+    );
+    assert!(
+        proof.actions_attempted == 0 && proof.actions_executed == 0,
+        "B4 should remain a traceable DirectAnswer, not invent a tool action: {:?}",
+        proof
+    );
+    assert!(
+        proof
+            .evidence_sources
+            .iter()
+            .any(|source| source == "command_surface"),
+        "B4 should use ordinary send/stream command-surface evidence: {:?}",
+        proof.evidence_sources
+    );
+    assert!(
+        proof
+            .evidence_sources
+            .iter()
+            .any(|source| source.ends_with(":memory_context_direct_answer_success")),
+        "B4 should retain the concrete memory_context_direct_answer_success eval case: {:?}",
+        proof.evidence_sources
+    );
+    assert!(
+        proof
+            .evidence_sources
+            .iter()
+            .any(|source| source == "memory_context:active_records=1:loaded=true"),
+        "B4 should prove one active accepted memory record was loaded as bounded context: {:?}",
+        proof.evidence_sources
+    );
+}
+
+#[tokio::test]
+async fn main_chat_agent_beta_v1_b6_selected_skill_runs_through_command_surface() {
+    let report =
+        crate::main_chat_agent_beta_v1_real_tasks::run_main_chat_agent_beta_v1_real_task_report()
+            .await;
+
+    let proof = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "B6")
+        .expect("B6 proof");
+
+    assert!(
+        proof.passed,
+        "B6 selected skill should pass with ordinary command-surface runtime evidence: {:?}",
+        proof.blockers
+    );
+    assert_eq!(proof.actual_outcome, "success");
+    assert_eq!(proof.command_surface, "both");
+    assert!(
+        proof.task_session_id.is_some(),
+        "B6 should expose the runtime task session used for selected-skill context"
+    );
+    assert!(
+        proof
+            .evidence_sources
+            .iter()
+            .any(|source| source == "command_surface"),
+        "B6 should use ordinary send/stream command-surface evidence: {:?}",
+        proof.evidence_sources
+    );
+    assert!(
+        proof
+            .evidence_sources
+            .iter()
+            .any(|source| source.ends_with(":selected_skill_context_success")),
+        "B6 should retain the concrete selected_skill_context_success eval case: {:?}",
+        proof.evidence_sources
+    );
+    assert!(
+        proof
+            .evidence_sources
+            .iter()
+            .any(|source| source
+                == "selected_skill_context:phase_e_review:loaded=true:unselected=false"),
+        "B6 should prove only the selected skill instruction was loaded: {:?}",
+        proof.evidence_sources
+    );
+}
+
+#[tokio::test]
+async fn main_chat_agent_beta_v1_b8_plan_execute_runs_through_command_surface() {
+    let report =
+        crate::main_chat_agent_beta_v1_real_tasks::run_main_chat_agent_beta_v1_real_task_report()
+            .await;
+
+    let proof = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "B8")
+        .expect("B8 proof");
+
+    assert!(
+        proof.passed,
+        "B8 plan execute should pass with PlanInteraction and ordinary command-surface evidence: {:?}",
+        proof.blockers
+    );
+    assert_eq!(proof.actual_outcome, "success");
+    assert_eq!(proof.command_surface, "both");
+    assert!(
+        proof.task_session_id.is_some(),
+        "B8 should expose the runtime task session used for PlanExecute draft"
+    );
+    assert!(
+        proof
+            .evidence_sources
+            .iter()
+            .any(|source| source == "command_surface"),
+        "B8 should use ordinary send/stream command-surface evidence: {:?}",
+        proof.evidence_sources
+    );
+    assert!(
+        proof
+            .evidence_sources
+            .iter()
+            .any(|source| source == "plan_interaction"),
+        "B8 should keep PlanInteraction gate evidence for execute/step coverage: {:?}",
+        proof.evidence_sources
+    );
+    assert!(
+        proof
+            .evidence_sources
+            .iter()
+            .any(|source| source.ends_with(":plan_execute_draft")),
+        "B8 should retain the concrete plan_execute_draft eval case: {:?}",
+        proof.evidence_sources
+    );
+}
+
+#[tokio::test]
+async fn main_chat_agent_beta_v1_b22_multi_read_runs_through_command_surface() {
+    let report =
+        crate::main_chat_agent_beta_v1_real_tasks::run_main_chat_agent_beta_v1_real_task_report()
+            .await;
+
+    let proof = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "B22")
+        .expect("B22 proof");
+
+    assert!(
+        proof.passed,
+        "B22 multi-read should pass with ordinary command-surface AgentLoop evidence: {:?}",
+        proof.blockers
+    );
+    assert_eq!(proof.actual_outcome, "success");
+    assert_eq!(proof.command_surface, "both");
+    assert!(
+        proof.task_session_id.is_some(),
+        "B22 should expose the runtime task session used for multi-read AgentLoop"
+    );
+    assert!(
+        proof.actions_attempted >= 2 && proof.actions_executed >= 2,
+        "B22 should represent at least two read actions: {:?}",
+        proof
+    );
+    assert!(
+        proof.observations_recorded >= 2,
+        "B22 should record at least two observations"
+    );
+    assert!(
+        proof
+            .evidence_sources
+            .iter()
+            .any(|source| source == "command_surface"),
+        "B22 should use ordinary send/stream command-surface evidence: {:?}",
+        proof.evidence_sources
+    );
+    assert!(
+        proof
+            .evidence_sources
+            .iter()
+            .any(|source| source.ends_with(":multi_read_agent_loop_success")),
+        "B22 should retain the concrete multi_read_agent_loop_success eval case: {:?}",
+        proof.evidence_sources
+    );
+    assert!(
+        proof
+            .evidence_sources
+            .iter()
+            .any(|source| source == "multi_read_agent_loop:tool_calls=2:observations=2"),
+        "B22 should prove two tool calls and two observations from AgentLoop: {:?}",
+        proof.evidence_sources
+    );
+}
+
+#[tokio::test]
+async fn main_chat_agent_beta_v1_b21_memory_conflict_uses_evidence_graph_runtime() {
+    let report =
+        crate::main_chat_agent_beta_v1_real_tasks::run_main_chat_agent_beta_v1_real_task_report()
+            .await;
+
+    let proof = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "B21")
+        .expect("B21 proof");
+
+    assert!(
+        proof.passed,
+        "B21 memory conflict should pass with memory lifecycle and evidence graph evidence: {:?}",
+        proof.blockers
+    );
+    assert_eq!(proof.actual_outcome, "success");
+    assert_eq!(proof.command_surface, "both");
+    assert!(
+        proof.actions_attempted >= 1 && proof.actions_executed >= 1,
+        "B21 should represent a governed memory.compare action: {:?}",
+        proof
+    );
+    assert!(
+        proof.observations_recorded >= 1,
+        "B21 should record a conflict_state observation"
+    );
+    assert!(
+        proof
+            .evidence_sources
+            .iter()
+            .any(|source| source == "memory_lifecycle"),
+        "B21 should use memory lifecycle gate evidence: {:?}",
+        proof.evidence_sources
+    );
+    assert!(
+        proof
+            .evidence_sources
+            .iter()
+            .any(|source| source == "memory_conflict:evidence_graph_conflict_count=2"),
+        "B21 should prove visible conflict state from Evidence Graph: {:?}",
+        proof.evidence_sources
+    );
+    assert!(
+        proof
+            .evidence_sources
+            .iter()
+            .any(|source| source == "memory_conflict:lifecycle_records=2:conflict_ids=2"),
+        "B21 should prove conflict ids are attached to accepted memory lifecycle records: {:?}",
+        proof.evidence_sources
+    );
+}
+
+#[tokio::test]
+async fn main_chat_agent_beta_v1_b27_knowledge_assets_run_through_command_surface() {
+    let report =
+        crate::main_chat_agent_beta_v1_real_tasks::run_main_chat_agent_beta_v1_real_task_report()
+            .await;
+
+    let proof = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "B27")
+        .expect("B27 proof");
+
+    assert!(
+        proof.passed,
+        "B27 knowledge asset inspection should pass with ordinary command-surface context evidence: {:?}",
+        proof.blockers
+    );
+    assert_eq!(proof.actual_outcome, "success");
+    assert_eq!(proof.command_surface, "both");
+    assert!(
+        proof.task_session_id.is_some(),
+        "B27 should expose the runtime task session used for knowledge asset inspection"
+    );
+    assert!(
+        proof
+            .evidence_sources
+            .iter()
+            .any(|source| source == "command_surface"),
+        "B27 should use ordinary send/stream command-surface evidence: {:?}",
+        proof.evidence_sources
+    );
+    assert!(
+        proof
+            .evidence_sources
+            .iter()
+            .any(|source| source.ends_with(":knowledge_asset_context_success")),
+        "B27 should retain the concrete knowledge_asset_context_success eval case: {:?}",
+        proof.evidence_sources
+    );
+    assert!(
+        proof
+            .evidence_sources
+            .iter()
+            .any(|source| source == "knowledge_assets:loaded=4:scope_digest_loaded=true"),
+        "B27 should prove scoped AGENTS/SOUL/USER/MEMORY knowledge assets loaded without policy override: {:?}",
+        proof.evidence_sources
+    );
+}
+
+#[tokio::test]
+async fn main_chat_agent_beta_v1_b28_knowledge_asset_edit_creates_review_proposal() {
+    let report =
+        crate::main_chat_agent_beta_v1_real_tasks::run_main_chat_agent_beta_v1_real_task_report()
+            .await;
+
+    let proof = report
+        .proofs
+        .iter()
+        .find(|proof| proof.scenario_id == "B28")
+        .expect("B28 proof");
+
+    assert!(
+        proof.passed,
+        "B28 knowledge asset edit should pass with proposal-first command-surface evidence: {:?}",
+        proof.blockers
+    );
+    assert_eq!(proof.actual_outcome, "proposal");
+    assert_eq!(proof.command_surface, "both");
+    assert!(
+        proof.task_session_id.is_some(),
+        "B28 should expose the runtime task session used for the edit proposal"
+    );
+    assert!(
+        proof.proposals_created >= 1,
+        "B28 should create a Review Center proposal: {:?}",
+        proof
+    );
+    assert!(
+        proof
+            .evidence_sources
+            .iter()
+            .any(|source| source == "command_surface"),
+        "B28 should use ordinary send/stream command-surface evidence: {:?}",
+        proof.evidence_sources
+    );
+    assert!(
+        proof
+            .evidence_sources
+            .iter()
+            .any(|source| source.ends_with(":knowledge_asset_edit_proposal")),
+        "B28 should retain the concrete knowledge_asset_edit_proposal eval case: {:?}",
+        proof.evidence_sources
+    );
+    assert!(
+        proof.evidence_sources.iter().any(|source| {
+            source == "knowledge_asset_edit:proposal_created=true:proposed_diff=true:direct_write=false"
+        }),
+        "B28 should prove a proposed diff and no direct knowledge-file write: {:?}",
+        proof.evidence_sources
     );
 }

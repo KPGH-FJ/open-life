@@ -536,7 +536,7 @@ pub(crate) fn command_surface_evidence_with_live_provider(
         && live_provider.proposal_permission_eval_executed
         && live_provider.no_silent_writes;
 
-    evidence.final_completion_ready = evidence.total_cases >= 24
+    evidence.final_completion_ready = evidence.total_cases >= 38
         && evidence.legacy_fallback_count == 0
         && evidence.silent_write_count == 0
         && evidence.send_stream_matrix_coverage >= 1.0

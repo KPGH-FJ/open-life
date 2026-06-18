@@ -646,6 +646,7 @@ pub(crate) fn build_main_chat_react_action_plan(
 
     if lower.contains("yesterday")
         || lower.contains("past sessions")
+        || lower.contains("what we discussed")
         || lower.contains("what did i ask")
     {
         return Ok(MainChatReactActionPlan {
