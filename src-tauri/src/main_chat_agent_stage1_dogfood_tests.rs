@@ -529,6 +529,31 @@ async fn main_chat_agent_stage1_browser_prep_seeds_real_task_control_state_only(
     assert_eq!(prep.evidence_source, "real_app_state_task_continuity_seed");
     assert!(!prep.direct_writes_executed);
     assert_eq!(prep.task_session_ids.len(), 7);
+
+    let config = state.config.lock().await.clone();
+    assert_eq!(config.llm.provider, "openai");
+    assert_eq!(
+        config.llm.openai_base,
+        "https://stage1-browser-dogfood.invalid/v1"
+    );
+    assert_eq!(config.llm.openai_key, "stage1-browser-dogfood-scripted-key");
+    assert_eq!(config.llm.chat_model, "stage1-browser-dogfood-scripted");
+    assert!(!config.llm.embedding_enabled);
+
+    let scheduler = state.scheduler.lock().await.clone();
+    assert_eq!(scheduler.provider, "openai");
+    assert_eq!(
+        scheduler.openai_base,
+        "https://stage1-browser-dogfood.invalid/v1"
+    );
+    assert_eq!(scheduler.openai_key, "stage1-browser-dogfood-scripted-key");
+    assert_eq!(scheduler.chat_model, "stage1-browser-dogfood-scripted");
+    assert!(!scheduler.embedding_enabled);
+    assert_eq!(
+        scheduler.scripted_generation_response.as_deref(),
+        Some("Stage 1 browser dogfood deterministic model response.")
+    );
+
     for id in ["D13", "D14", "D15", "D19", "D20", "D27", "D28"] {
         assert!(
             prep.task_session_ids.contains_key(id),

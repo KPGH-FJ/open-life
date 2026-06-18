@@ -135,7 +135,6 @@ async function runStage1TauriDogfood() {
     driverProcess = startTauriDriver();
     const session = await createTauriWebDriverSession(stage1TauriDebugAppBinaryPath());
     sessionId = session.sessionId;
-    await navigateToChat(sessionId);
 
     const prepReport = await tauriInvoke(
       sessionId,
@@ -150,6 +149,8 @@ async function runStage1TauriDogfood() {
         blockers: ["tauri_webdriver_stage1_prep_not_ready", ...prepBlockers],
       };
     }
+
+    await navigateToChat(sessionId);
 
     const gateReport = await tauriInvoke(sessionId, "run_main_chat_agent_stage1_dogfood_gate");
     const gateRows = new Map((gateReport?.scenarios ?? []).map(row => [row.scenarioId, row]));

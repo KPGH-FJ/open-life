@@ -452,6 +452,9 @@ describe("stage1 browser evidence report builder", () => {
     expect(script).toContain("stage1DogfoodScenarios.ts");
     expect(script).toContain("STAGE1_DOGFOOD_SCENARIOS");
     expect(script).toContain("prepare_main_chat_agent_stage1_browser_dogfood_state");
+    expect(script.indexOf("prepare_main_chat_agent_stage1_browser_dogfood_state")).toBeLessThan(
+      script.indexOf("await navigateToChat(sessionId);")
+    );
     expect(script).toContain("validateStage1BrowserPrepReport");
     expect(script).toContain("directWritesExecuted");
     expect(script).toContain("durableLifemodelWritesExecuted");

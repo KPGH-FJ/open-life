@@ -5,9 +5,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::AppState;
+use openlife_core::scheduler::InferenceScheduler;
 
 const BROWSER_E2E_REPORT_PATH: &str = "frontend/test-results/main-chat-stage1-dogfood-report.json";
 const BROWSER_E2E_MAX_AGE_HOURS: i64 = 24;
+const STAGE1_BROWSER_DOGFOOD_PROVIDER: &str = "openai";
+const STAGE1_BROWSER_DOGFOOD_BASE: &str = "https://stage1-browser-dogfood.invalid/v1";
+const STAGE1_BROWSER_DOGFOOD_KEY: &str = "stage1-browser-dogfood-scripted-key";
+const STAGE1_BROWSER_DOGFOOD_MODEL: &str = "stage1-browser-dogfood-scripted";
+const STAGE1_BROWSER_DOGFOOD_RESPONSE: &str =
+    "Stage 1 browser dogfood deterministic model response.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -527,6 +534,8 @@ pub(crate) async fn prepare_main_chat_agent_stage1_browser_dogfood_state_with_st
     let prep_run_id = format!("stage1-browser-prep-{}", uuid::Uuid::new_v4());
     let mut task_session_ids = BTreeMap::new();
 
+    prepare_stage1_browser_dogfood_scheduler(state).await;
+
     task_session_ids.insert(
         "D13".into(),
         seed_stage1_browser_permission_resume_task(state, &prep_run_id).await?,
@@ -566,6 +575,35 @@ pub(crate) async fn prepare_main_chat_agent_stage1_browser_dogfood_state_with_st
         file_or_external_writes_executed: false,
         blockers: Vec::new(),
     })
+}
+
+async fn prepare_stage1_browser_dogfood_scheduler(state: &Arc<AppState>) {
+    let (local_model, embedding_model) = {
+        let mut config = state.config.lock().await;
+        config.prefer_local_model = false;
+        config.llm.provider = STAGE1_BROWSER_DOGFOOD_PROVIDER.into();
+        config.llm.openai_base = STAGE1_BROWSER_DOGFOOD_BASE.into();
+        config.llm.openai_key = STAGE1_BROWSER_DOGFOOD_KEY.into();
+        config.llm.chat_model = STAGE1_BROWSER_DOGFOOD_MODEL.into();
+        config.llm.embedding_enabled = false;
+        (
+            config.local_model.clone(),
+            config.llm.embedding_model.clone(),
+        )
+    };
+
+    let mut scheduler = state.scheduler.lock().await;
+    *scheduler = InferenceScheduler::new(
+        local_model,
+        false,
+        STAGE1_BROWSER_DOGFOOD_PROVIDER.into(),
+        STAGE1_BROWSER_DOGFOOD_BASE.into(),
+        STAGE1_BROWSER_DOGFOOD_KEY.into(),
+        STAGE1_BROWSER_DOGFOOD_MODEL.into(),
+        embedding_model,
+        false,
+    )
+    .with_scripted_generation_response(STAGE1_BROWSER_DOGFOOD_RESPONSE);
 }
 
 async fn seed_stage1_browser_permission_resume_task(
