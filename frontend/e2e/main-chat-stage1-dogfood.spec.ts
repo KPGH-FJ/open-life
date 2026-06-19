@@ -127,6 +127,10 @@ async function setSelectedSkill(page: Page, selectedSkillId: string) {
     return;
   }
   await skillInput.fill(selectedSkillId);
+  await expect(page.getByTestId("skill-context-control")).toHaveAttribute(
+    "data-selected-skill-id",
+    normalizedSkillId
+  );
   if (normalizedSkillId) {
     await expect(skillInput, `stage1_selected_skill_not_applied:${normalizedSkillId}`).toHaveValue(
       selectedSkillId

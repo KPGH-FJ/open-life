@@ -477,7 +477,15 @@ async function setSelectedSkillWithWebDriver(sessionId, selectedSkillId) {
       if (!inputValueSetter) return false;
       input.focus();
       inputValueSetter.call(input, arguments[0]);
-      input.dispatchEvent(new Event('input', { bubbles: true }));
+      try {
+        input.dispatchEvent(new InputEvent('input', {
+          bubbles: true,
+          data: arguments[0],
+          inputType: arguments[0] ? 'insertText' : 'deleteContentBackward',
+        }));
+      } catch {
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      }
       input.dispatchEvent(new Event('change', { bubbles: true }));
       return input.value === arguments[0];
     `,
@@ -488,6 +496,20 @@ async function setSelectedSkillWithWebDriver(sessionId, selectedSkillId) {
       `webdriver_selected_skill_not_applied:${metadataSafeBlocker(requestedSkillId)}`
     );
   }
+  await waitForScript(
+    sessionId,
+    `
+      const expected = arguments[0];
+      const input = document.querySelector('[data-testid="skill-context-input"]');
+      const stateBackedControl = document.querySelector('[data-testid="skill-context-control"]');
+      if (!input || !stateBackedControl) return false;
+      return input.value === expected &&
+        stateBackedControl.getAttribute('data-selected-skill-id') === expected;
+    `,
+    [requestedSkillId],
+    10_000,
+    `webdriver_selected_skill_state_not_committed:${metadataSafeBlocker(requestedSkillId)}`
+  );
 }
 
 async function fillByTestId(sessionId, testId, value) {

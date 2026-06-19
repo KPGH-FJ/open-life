@@ -25,8 +25,27 @@ fn browser_evidence_with_source(source: &str) -> MainChatStage1BrowserE2eEvidenc
     evidence
 }
 
-#[tokio::test]
-async fn main_chat_agent_stage1_dogfood_gate_builds_full_default_matrix_and_seed_manifest() {
+#[test]
+fn main_chat_agent_stage1_dogfood_gate_builds_full_default_matrix_and_seed_manifest() {
+    std::thread::Builder::new()
+        .name("stage1-full-default-matrix".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("stage 1 dogfood test runtime");
+            runtime.block_on(async {
+                main_chat_agent_stage1_dogfood_gate_builds_full_default_matrix_and_seed_manifest_inner()
+                    .await
+            });
+        })
+        .expect("spawn stage 1 dogfood test thread")
+        .join()
+        .expect("stage 1 dogfood test thread");
+}
+
+async fn main_chat_agent_stage1_dogfood_gate_builds_full_default_matrix_and_seed_manifest_inner() {
     let report = run_main_chat_agent_stage1_dogfood_report_with_browser_evidence(Some(
         passing_stage1_browser_e2e_evidence_for_tests(),
     ))

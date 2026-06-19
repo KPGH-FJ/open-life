@@ -468,10 +468,14 @@ describe("stage1 browser evidence report builder", () => {
     expect(script).toContain("chat-input");
     expect(script).toContain("send-button");
     expect(script).toContain("webdriver_selected_skill_not_applied");
+    expect(script).toContain("webdriver_selected_skill_state_not_committed");
+    expect(script).toContain("skill-context-control");
+    expect(script).toContain("data-selected-skill-id");
     expect(script).toContain("requestedSkillId.trim()");
     expect(script).toContain(
       'Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")'
     );
+    expect(script).toContain("new InputEvent('input'");
     expect(script).toContain(
       'Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")'
     );

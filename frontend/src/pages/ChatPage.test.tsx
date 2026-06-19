@@ -2848,6 +2848,12 @@ describe("ChatPage", () => {
     fireEvent.change(screen.getByLabelText("Skill context"), {
       target: { value: "weekly-planning" },
     });
+    await waitFor(() => {
+      expect(screen.getByTestId("skill-context-control")).toHaveAttribute(
+        "data-selected-skill-id",
+        "weekly-planning"
+      );
+    });
     fireEvent.change(textarea, { target: { value: "按这个技能整理本周计划" } });
     fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
 

@@ -175,7 +175,11 @@ export default function ChatInputArea({
                 重试上一条
               </button>
             </div>
-            <label className="ml-auto flex min-w-[180px] max-w-[260px] flex-1 items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2 py-1 text-gray-600">
+            <label
+              data-testid="skill-context-control"
+              data-selected-skill-id={selectedSkillId.trim()}
+              className="ml-auto flex min-w-[180px] max-w-[260px] flex-1 items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2 py-1 text-gray-600"
+            >
               <FileText size={12} className="shrink-0 text-gray-400" />
               <span className="shrink-0 font-medium text-gray-500">SKILL.md</span>
               <input
