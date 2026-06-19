@@ -645,7 +645,7 @@ async function installPromptResponseWithWebDriver(sessionId, response) {
 }
 
 async function clickFirstVisibleControlWithWebDriver(sessionId, labels) {
-  const label = await executeScript(
+  const label = await waitForScript(
     sessionId,
     `
       const labels = arguments[0].map(label => label.toLowerCase());
@@ -665,9 +665,10 @@ async function clickFirstVisibleControlWithWebDriver(sessionId, labels) {
       button.click();
       return text;
     `,
-    [labels]
+    [labels],
+    30_000,
+    `webdriver_visible_control_missing:${labels.join("|")}`
   );
-  if (!label) throw new Error(`webdriver_visible_control_missing:${labels.join("|")}`);
   await new Promise(resolve => setTimeout(resolve, 500));
   return visibleControlEventForLabel(label);
 }

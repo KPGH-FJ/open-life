@@ -478,6 +478,8 @@ describe("stage1 browser evidence report builder", () => {
     expect(script).toContain("visible_control.task_continuity_detail_opened");
     expect(script).toContain("getAttribute('aria-label')");
     expect(script).toContain("getAttribute('title')");
+    expect(script).toContain("const label = await waitForScript(");
+    expect(script).toContain('webdriver_visible_control_missing:${labels.join("|")}');
     expect(script).not.toContain("tauri_webdriver_seeded_control_observation_not_completed");
     expect(script).toContain("expectedUiStates");
     expect(script).toContain("expectedFinalSections");
