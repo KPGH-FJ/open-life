@@ -400,6 +400,17 @@ describe("stage1 browser evidence report builder", () => {
     expect(STAGE1_DOGFOOD_SCENARIOS.some(scenario => scenario.expectedBlocker)).toBe(true);
   });
 
+  it("keeps D32 on real bounded dogfood fixtures instead of the large workspace AGENTS file", () => {
+    const d32 = STAGE1_DOGFOOD_SCENARIOS.find(scenario => scenario.id === "D32");
+
+    expect(d32?.prompt).toContain("dogfood/planning_notes.md");
+    expect(d32?.selectedSkillId).toBe("planning_review");
+    expect(fs.existsSync(path.resolve(process.cwd(), "../dogfood/planning_notes.md"))).toBe(true);
+    expect(fs.existsSync(path.resolve(process.cwd(), "../skills/planning_review/SKILL.md"))).toBe(
+      true
+    );
+  });
+
   it("validates the formatted D01-D36 scenario matrix without starting Tauri", () => {
     const result = spawnSync(
       "node",
@@ -487,6 +498,9 @@ describe("stage1 browser evidence report builder", () => {
     expect(script).toContain("[stage1_scenario:start]");
     expect(script).toContain("scenario_${scenario.id}:");
     expect(script).toContain("waitForControlPlaneDelivery(sessionId, previousTaskId, scenario)");
+    expect(script).toContain("readControlPlaneTimeoutSnapshotWithWebDriver");
+    expect(script).toContain("lastTaskChanged");
+    expect(script).toContain("selectedSkillId");
     expect(script).toContain("readyWithoutFinalDelivery");
     expect(script).toContain("snapshot?.proposals?.length");
     expect(script).not.toContain("tauri_webdriver_seeded_control_observation_not_completed");

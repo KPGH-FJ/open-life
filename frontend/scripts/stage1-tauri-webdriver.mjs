@@ -563,52 +563,63 @@ async function waitForElementEnabled(sessionId, testId, timeoutMs) {
 }
 
 async function waitForControlPlaneDelivery(sessionId, previousTaskId, scenario) {
-  return await waitForScript(
-    sessionId,
-    `
-      const controls = [...document.querySelectorAll('[data-testid="agent-control-plane"]')];
-      const control = controls.at(-1);
-      if (!control) return null;
-      const expectedUiStates = arguments[1] ?? [];
-      const taskSessionId = control.getAttribute('data-task-session-id') ?? '';
-      const finalDelivery = control.getAttribute('data-final-delivery') === 'true';
-      const routeStrategy = control.getAttribute('data-route-strategy') ?? '';
-      const taskStatus = control.getAttribute('data-task-status') ?? '';
-      const actionCount = Number(control.getAttribute('data-action-count') ?? '0');
-      const observationCount = Number(control.getAttribute('data-observation-count') ?? '0');
-      const blockerCount = Number(control.getAttribute('data-blocker-count') ?? '0');
-      const proposalCount = Number(control.getAttribute('data-proposal-count') ?? '0');
-      const readyWithoutFinalDelivery =
-        expectedUiStates.some(state =>
-          ["blocked", "permission_needed", "memory_candidate"].includes(state)
-        ) &&
-        (blockerCount > 0 || proposalCount > 0 || /blocked|waiting_permission/.test(taskStatus));
-      if (
-        !taskSessionId ||
-        taskSessionId === arguments[0] ||
-        (!finalDelivery && !readyWithoutFinalDelivery)
-      ) {
-        return null;
-      }
-      return {
-        taskSessionId,
-        runId: control.getAttribute('data-run-id') ?? '',
-        routeStrategy,
-        taskStatus,
-        actionCount,
-        observationCount,
-        blockerCount,
-        proposalCount,
-        finalDeliverySectionTitles: (
-          control.getAttribute('data-final-delivery-section-titles') ?? ''
-        ).split('|').filter(Boolean),
-        text: control.textContent ?? '',
-      };
-    `,
-    [previousTaskId, scenario?.expectedUiStates ?? []],
-    120_000,
-    `webdriver_control_plane_delivery_timeout:${scenario?.id ?? "unknown"}`
-  );
+  try {
+    return await waitForScript(
+      sessionId,
+      `
+        const controls = [...document.querySelectorAll('[data-testid="agent-control-plane"]')];
+        const control = controls.at(-1);
+        if (!control) return null;
+        const expectedUiStates = arguments[1] ?? [];
+        const taskSessionId = control.getAttribute('data-task-session-id') ?? '';
+        const finalDelivery = control.getAttribute('data-final-delivery') === 'true';
+        const routeStrategy = control.getAttribute('data-route-strategy') ?? '';
+        const taskStatus = control.getAttribute('data-task-status') ?? '';
+        const actionCount = Number(control.getAttribute('data-action-count') ?? '0');
+        const observationCount = Number(control.getAttribute('data-observation-count') ?? '0');
+        const blockerCount = Number(control.getAttribute('data-blocker-count') ?? '0');
+        const proposalCount = Number(control.getAttribute('data-proposal-count') ?? '0');
+        const readyWithoutFinalDelivery =
+          expectedUiStates.some(state =>
+            ["blocked", "permission_needed", "memory_candidate"].includes(state)
+          ) &&
+          (blockerCount > 0 || proposalCount > 0 || /blocked|waiting_permission/.test(taskStatus));
+        if (
+          !taskSessionId ||
+          taskSessionId === arguments[0] ||
+          (!finalDelivery && !readyWithoutFinalDelivery)
+        ) {
+          return null;
+        }
+        return {
+          taskSessionId,
+          runId: control.getAttribute('data-run-id') ?? '',
+          routeStrategy,
+          taskStatus,
+          actionCount,
+          observationCount,
+          blockerCount,
+          proposalCount,
+          finalDeliverySectionTitles: (
+            control.getAttribute('data-final-delivery-section-titles') ?? ''
+          ).split('|').filter(Boolean),
+          text: control.textContent ?? '',
+        };
+      `,
+      [previousTaskId, scenario?.expectedUiStates ?? []],
+      120_000,
+      `webdriver_control_plane_delivery_timeout:${scenario?.id ?? "unknown"}`
+    );
+  } catch (error) {
+    const snapshot = await readControlPlaneTimeoutSnapshotWithWebDriver(
+      sessionId,
+      previousTaskId
+    ).catch(
+      snapshotError =>
+        `snapshot_error=${metadataSafeBlocker(snapshotError?.message ?? snapshotError)}`
+    );
+    throw new Error(`${error?.message ?? error}:${snapshot}`);
+  }
 }
 
 async function readLastControlPlaneWithWebDriver(sessionId) {
@@ -637,6 +648,42 @@ async function readLastControlPlaneWithWebDriver(sessionId) {
     30_000,
     "webdriver_control_plane_missing"
   );
+}
+
+async function readControlPlaneTimeoutSnapshotWithWebDriver(sessionId, previousTaskId) {
+  const snapshot = await executeScript(
+    sessionId,
+    `
+      const safe = value => String(value ?? '')
+        .replace(/[^A-Za-z0-9_.:-]/g, '_')
+        .slice(0, 96);
+      const controls = [...document.querySelectorAll('[data-testid="agent-control-plane"]')];
+      const control = controls.at(-1);
+      const selectedSkillControl = document.querySelector('[data-testid="skill-context-control"]');
+      const sendButton = document.querySelector('[data-testid="send-button"]');
+      const assistantMessages = [...document.querySelectorAll('[data-testid="chat-message-assistant"]')];
+      const lastTaskSessionId = control?.getAttribute('data-task-session-id') ?? '';
+      return {
+        controlCount: controls.length,
+        lastTaskChanged: Boolean(lastTaskSessionId && lastTaskSessionId !== arguments[0]),
+        lastTaskStatus: safe(control?.getAttribute('data-task-status') ?? ''),
+        lastFinalDelivery: control?.getAttribute('data-final-delivery') === 'true',
+        lastRouteStrategy: safe(control?.getAttribute('data-route-strategy') ?? ''),
+        actionCount: Number(control?.getAttribute('data-action-count') ?? '0'),
+        observationCount: Number(control?.getAttribute('data-observation-count') ?? '0'),
+        blockerCount: Number(control?.getAttribute('data-blocker-count') ?? '0'),
+        proposalCount: Number(control?.getAttribute('data-proposal-count') ?? '0'),
+        selectedSkillId: safe(selectedSkillControl?.getAttribute('data-selected-skill-id') ?? ''),
+        sendDisabled: Boolean(sendButton?.disabled),
+        assistantMessageCount: assistantMessages.length,
+      };
+    `,
+    [previousTaskId]
+  );
+  if (!snapshot || typeof snapshot !== "object") return "snapshot=missing";
+  return Object.entries(snapshot)
+    .map(([key, value]) => `${metadataSafeBlocker(key)}=${metadataSafeBlocker(value)}`)
+    .join(",");
 }
 
 async function openTaskContinuityDetailWithWebDriver(sessionId, taskSessionId = "") {

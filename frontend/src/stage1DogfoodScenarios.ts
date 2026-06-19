@@ -119,7 +119,7 @@ export const STAGE1_DOGFOOD_SCENARIOS: Stage1DogfoodScenario[] = [
   s(
     "D16",
     "chat_e2e",
-    "Publish the seeded `policy_note.md` to the external destination named in the write-like action seed.",
+    "Publish the seeded `dogfood/policy_note.md` to the external destination named in the write-like action seed.",
     ["permission_needed", "blocked"],
     ["blocked_work", "pending_user_action"],
     "permission_required"
@@ -244,7 +244,7 @@ export const STAGE1_DOGFOOD_SCENARIOS: Stage1DogfoodScenario[] = [
   s(
     "D32",
     "chat_e2e",
-    "Use selected skill plus file read to review the seed plan.",
+    "Use the selected skill plus a file read of `dogfood/planning_notes.md` to review the seed plan.",
     ["planning", "action_running", "observation_ready", "completed"],
     ["completed_work", "observations_used"],
     undefined,
