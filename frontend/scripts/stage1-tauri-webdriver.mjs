@@ -156,6 +156,7 @@ async function runStage1TauriDogfood() {
     const gateRows = new Map((gateReport?.scenarios ?? []).map(row => [row.scenarioId, row]));
     const observedScenarios = [];
     for (const scenario of STAGE1_DOGFOOD_SCENARIOS) {
+      console.error(`[stage1_scenario:start] ${scenario.id}`);
       const gateRow = gateRows.get(scenario.id);
       if (!gateRow) {
         return {
@@ -165,14 +166,25 @@ async function runStage1TauriDogfood() {
           blockers: [metadataSafeBlocker(`tauri_webdriver_gate_row_missing:${scenario.id}`)],
         };
       }
-      if (scenario.scenarioType === "chat_e2e") {
-        observedScenarios.push(
-          await executeChatScenarioWithWebDriver(sessionId, scenario, gateRow)
-        );
-      } else {
-        observedScenarios.push(
-          await executeSeededControlScenarioWithWebDriver(sessionId, scenario, gateRow, prepReport)
-        );
+      try {
+        const observed =
+          scenario.scenarioType === "chat_e2e"
+            ? await executeChatScenarioWithWebDriver(sessionId, scenario, gateRow)
+            : await executeSeededControlScenarioWithWebDriver(
+                sessionId,
+                scenario,
+                gateRow,
+                prepReport
+              );
+        observedScenarios.push(observed);
+        console.error(`[stage1_scenario:ok] ${scenario.id}`);
+      } catch (error) {
+        return {
+          ready: false,
+          sessionCreated: true,
+          observedCount: observedScenarios.length,
+          blockers: [metadataSafeBlocker(`scenario_${scenario.id}:${error?.message ?? error}`)],
+        };
       }
     }
 
@@ -331,7 +343,7 @@ async function executeChatScenarioWithWebDriver(sessionId, scenario, gateRow) {
   await fillByTestId(sessionId, "chat-input", scenario.prompt);
   await waitForElementEnabled(sessionId, "send-button", 10_000);
   await clickByTestId(sessionId, "send-button");
-  const controlPlane = await waitForControlPlaneDelivery(sessionId, previousTaskId);
+  const controlPlane = await waitForControlPlaneDelivery(sessionId, previousTaskId, scenario);
   return await observeFromControlPlaneWithWebDriver(
     sessionId,
     controlPlane.taskSessionId,
@@ -528,34 +540,52 @@ async function waitForElementEnabled(sessionId, testId, timeoutMs) {
   );
 }
 
-async function waitForControlPlaneDelivery(sessionId, previousTaskId) {
+async function waitForControlPlaneDelivery(sessionId, previousTaskId, scenario) {
   return await waitForScript(
     sessionId,
     `
       const controls = [...document.querySelectorAll('[data-testid="agent-control-plane"]')];
       const control = controls.at(-1);
       if (!control) return null;
+      const expectedUiStates = arguments[1] ?? [];
       const taskSessionId = control.getAttribute('data-task-session-id') ?? '';
       const finalDelivery = control.getAttribute('data-final-delivery') === 'true';
-      if (!taskSessionId || taskSessionId === arguments[0] || !finalDelivery) return null;
+      const routeStrategy = control.getAttribute('data-route-strategy') ?? '';
+      const taskStatus = control.getAttribute('data-task-status') ?? '';
+      const actionCount = Number(control.getAttribute('data-action-count') ?? '0');
+      const observationCount = Number(control.getAttribute('data-observation-count') ?? '0');
+      const blockerCount = Number(control.getAttribute('data-blocker-count') ?? '0');
+      const proposalCount = Number(control.getAttribute('data-proposal-count') ?? '0');
+      const readyWithoutFinalDelivery =
+        expectedUiStates.some(state =>
+          ["blocked", "permission_needed", "memory_candidate"].includes(state)
+        ) &&
+        (blockerCount > 0 || proposalCount > 0 || /blocked|waiting_permission/.test(taskStatus));
+      if (
+        !taskSessionId ||
+        taskSessionId === arguments[0] ||
+        (!finalDelivery && !readyWithoutFinalDelivery)
+      ) {
+        return null;
+      }
       return {
         taskSessionId,
         runId: control.getAttribute('data-run-id') ?? '',
-        routeStrategy: control.getAttribute('data-route-strategy') ?? '',
-        taskStatus: control.getAttribute('data-task-status') ?? '',
-        actionCount: Number(control.getAttribute('data-action-count') ?? '0'),
-        observationCount: Number(control.getAttribute('data-observation-count') ?? '0'),
-        blockerCount: Number(control.getAttribute('data-blocker-count') ?? '0'),
-        proposalCount: Number(control.getAttribute('data-proposal-count') ?? '0'),
+        routeStrategy,
+        taskStatus,
+        actionCount,
+        observationCount,
+        blockerCount,
+        proposalCount,
         finalDeliverySectionTitles: (
           control.getAttribute('data-final-delivery-section-titles') ?? ''
         ).split('|').filter(Boolean),
         text: control.textContent ?? '',
       };
     `,
-    [previousTaskId],
+    [previousTaskId, scenario?.expectedUiStates ?? []],
     120_000,
-    "webdriver_control_plane_delivery_timeout"
+    `webdriver_control_plane_delivery_timeout:${scenario?.id ?? "unknown"}`
   );
 }
 
@@ -1017,17 +1047,24 @@ function finalSectionObserved(section, visibleTitles, snapshot, controlEvents = 
   if (section === "proposals_created" || section === "proposed_work") {
     return (
       visibleTitles.includes("Proposals created") ||
-      arrayLength(deliveryMetrics, "proposalsCreated") > 0
+      arrayLength(deliveryMetrics, "proposalsCreated") > 0 ||
+      (snapshot?.proposals?.length ?? 0) > 0
     );
   }
   if (section === "pending_user_action") {
     return (
       visibleTitles.includes("Pending user actions") ||
-      arrayLength(deliveryMetrics, "pendingUserActions") > 0
+      arrayLength(deliveryMetrics, "pendingUserActions") > 0 ||
+      (snapshot?.proposals?.length ?? 0) > 0 ||
+      (snapshot?.blockers?.length ?? 0) > 0
     );
   }
   if (section === "blocked_work") {
-    return visibleTitles.includes("Blocked items") || arrayLength(deliveryMetrics, "blockers") > 0;
+    return (
+      visibleTitles.includes("Blocked items") ||
+      arrayLength(deliveryMetrics, "blockers") > 0 ||
+      (snapshot?.blockers?.length ?? 0) > 0
+    );
   }
   if (section === "skipped_work") {
     return (

@@ -480,6 +480,11 @@ describe("stage1 browser evidence report builder", () => {
     expect(script).toContain("getAttribute('title')");
     expect(script).toContain("const label = await waitForScript(");
     expect(script).toContain('webdriver_visible_control_missing:${labels.join("|")}');
+    expect(script).toContain("[stage1_scenario:start]");
+    expect(script).toContain("scenario_${scenario.id}:");
+    expect(script).toContain("waitForControlPlaneDelivery(sessionId, previousTaskId, scenario)");
+    expect(script).toContain("readyWithoutFinalDelivery");
+    expect(script).toContain("snapshot?.proposals?.length");
     expect(script).not.toContain("tauri_webdriver_seeded_control_observation_not_completed");
     expect(script).toContain("expectedUiStates");
     expect(script).toContain("expectedFinalSections");
