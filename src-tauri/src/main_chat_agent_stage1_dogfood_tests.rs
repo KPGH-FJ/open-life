@@ -547,7 +547,7 @@ async fn main_chat_agent_stage1_browser_prep_seeds_real_task_control_state_only(
     assert!(prep.prepared);
     assert_eq!(prep.evidence_source, "real_app_state_task_continuity_seed");
     assert!(!prep.direct_writes_executed);
-    assert_eq!(prep.task_session_ids.len(), 7);
+    assert_eq!(prep.task_session_ids.len(), 9);
 
     let config = state.config.lock().await.clone();
     assert_eq!(config.llm.provider, "openai");
@@ -573,7 +573,9 @@ async fn main_chat_agent_stage1_browser_prep_seeds_real_task_control_state_only(
         Some("Stage 1 browser dogfood deterministic model response.")
     );
 
-    for id in ["D13", "D14", "D15", "D19", "D20", "D27", "D28"] {
+    for id in [
+        "D13", "D14", "D15", "D19", "D20", "D27", "D28", "D35", "D36",
+    ] {
         assert!(
             prep.task_session_ids.contains_key(id),
             "missing seeded task id for {id}"
@@ -653,6 +655,92 @@ async fn main_chat_agent_stage1_browser_prep_seeds_real_task_control_state_only(
         .get("skippedActions")
         .and_then(serde_json::Value::as_array)
         .is_some_and(|items| !items.is_empty()));
+
+    let d35 = crate::main_chat_task_controls::get_main_chat_agent_task_detail_with_state(
+        prep.task_session_ids.get("D35").unwrap(),
+        &state,
+    )
+    .await
+    .expect("D35 detail");
+    assert!(d35
+        .blockers
+        .iter()
+        .any(|blocker| blocker == "tool_permission_required"));
+    assert!(d35.actions.iter().any(|action| {
+        action.status
+            == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::PendingPermission
+            && action
+                .observation_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("proposalId"))
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+    }));
+    let d35_proposal = d35
+        .proposals
+        .iter()
+        .find(|proposal| {
+            proposal.proposal_type == openlife_core::agent::ProposalType::ToolPermission
+        })
+        .expect("D35 ToolPermission proposal");
+    assert_eq!(
+        d35_proposal.status,
+        openlife_core::agent::ProposalStatus::Pending
+    );
+    crate::commands::proposal::reject_proposal_with_state(d35_proposal.id.clone(), &state)
+        .await
+        .expect("reject D35 proposal");
+    let d35_after = crate::main_chat_task_controls::get_main_chat_agent_task_detail_with_state(
+        prep.task_session_ids.get("D35").unwrap(),
+        &state,
+    )
+    .await
+    .expect("D35 detail after reject");
+    assert!(d35_after.proposals.iter().any(|proposal| {
+        proposal.proposal_type == openlife_core::agent::ProposalType::ToolPermission
+            && proposal.status == openlife_core::agent::ProposalStatus::Rejected
+    }));
+
+    let d36 = crate::main_chat_task_controls::get_main_chat_agent_task_detail_with_state(
+        prep.task_session_ids.get("D36").unwrap(),
+        &state,
+    )
+    .await
+    .expect("D36 detail");
+    let d36_proposal = d36
+        .proposals
+        .iter()
+        .find(|proposal| proposal.proposal_type == openlife_core::agent::ProposalType::MemoryWrite)
+        .expect("D36 MemoryWrite proposal");
+    assert_eq!(
+        d36_proposal.status,
+        openlife_core::agent::ProposalStatus::Pending
+    );
+    let d36_final_delivery = d36.final_delivery.expect("D36 final delivery");
+    let d36_metadata = d36_final_delivery
+        .get("metadata")
+        .expect("D36 final delivery metadata");
+    assert!(d36_metadata
+        .get("proposalsCreated")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| !items.is_empty()));
+    assert!(d36_metadata
+        .get("nextSteps")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| !items.is_empty()));
+    crate::commands::proposal::postpone_proposal_with_state(d36_proposal.id.clone(), &state)
+        .await
+        .expect("postpone D36 proposal");
+    let d36_after = crate::main_chat_task_controls::get_main_chat_agent_task_detail_with_state(
+        prep.task_session_ids.get("D36").unwrap(),
+        &state,
+    )
+    .await
+    .expect("D36 detail after postpone");
+    assert!(d36_after.proposals.iter().any(|proposal| {
+        proposal.proposal_type == openlife_core::agent::ProposalType::MemoryWrite
+            && proposal.status == openlife_core::agent::ProposalStatus::Postponed
+    }));
 }
 
 #[tokio::test]

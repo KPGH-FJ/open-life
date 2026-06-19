@@ -473,6 +473,8 @@ describe("stage1 browser evidence report builder", () => {
     expect(script).toContain("tauri_webdriver_stage1_prep_missing_seeded_task");
     expect(script).toContain("tauri_webdriver_stage1_prep_task_id_unsafe");
     expect(script).toContain("metadataSafeLabel(taskSessionId)");
+    expect(script).toContain('"D35"');
+    expect(script).toContain('"D36"');
     expect(script).toContain("run_main_chat_agent_stage1_dogfood_gate");
     expect(script).toContain("executeChatScenarioWithWebDriver");
     expect(script).toContain("executeSeededControlScenarioWithWebDriver");
@@ -491,6 +493,10 @@ describe("stage1 browser evidence report builder", () => {
       'Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")'
     );
     expect(script).toContain("visible_control.task_continuity_detail_opened");
+    expect(script).toContain("clickTaskContinuityVisibleControlWithWebDriver");
+    expect(script).toContain("waitForTaskContinuityProposalStatusWithWebDriver");
+    expect(script).toContain('"rejected"');
+    expect(script).toContain('"postponed"');
     expect(script).toContain("getAttribute('aria-label')");
     expect(script).toContain("getAttribute('title')");
     expect(script).toContain("const label = await waitForScript(");

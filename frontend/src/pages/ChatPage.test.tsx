@@ -351,6 +351,150 @@ describe("ChatPage", () => {
     });
   });
 
+  it("routes task continuity proposal reject and defer controls through Tauri commands", async () => {
+    const summary = {
+      taskSessionId: "task-continuity-proposals",
+      conversationId: "session-1",
+      runId: "run-continuity-proposals",
+      title: "Pending proposal controls",
+      strategy: "react_tool_execution",
+      status: "waiting_permission",
+      lastUpdatedAt: "2026-06-17T02:00:00.000Z",
+      lastObservationPreview: "Two linked proposals are waiting for review.",
+      pendingBlockerCount: 1,
+      pendingProposalCount: 2,
+      nextRecommendedControl: "review_permission",
+      staleState: "fresh",
+      resumeSafetyDigest:
+        "bytes:52 hash:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    };
+    const proposalStatuses = {
+      "proposal-detail-tool": "pending",
+      "proposal-detail-memory": "pending",
+    };
+    const proposal = (
+      id: keyof typeof proposalStatuses,
+      proposalType: "tool_permission" | "memory_write",
+      reason: string
+    ) => ({
+      id,
+      runId: summary.runId,
+      proposalType,
+      source: "chat_conversation",
+      sourceDetail: summary.taskSessionId,
+      affectedPath:
+        proposalType === "tool_permission"
+          ? "tool_permission.builtin.builtin_echo"
+          : "memory.stage1.deferred_preference",
+      after: {},
+      reason,
+      confidence: 0.7,
+      riskLevel: proposalType === "tool_permission" ? "medium" : "low",
+      status: proposalStatuses[id],
+      createdAt: "2026-06-17T02:00:00.000Z",
+    });
+    const detail = () => ({
+      taskSession: {
+        id: summary.taskSessionId,
+        chatSessionId: "session-1",
+        userGoal: summary.title,
+        selectedStrategy: "react_tool_execution",
+        status: "waiting_permission",
+        currentPlanSummary: "Review linked proposal controls.",
+        actionQueueIds: ["action-proposal-control"],
+        pendingBlockers: ["tool_permission_required"],
+        contextSnapshotRefs: [],
+        createdAt: "2026-06-17T01:59:00.000Z",
+        updatedAt: summary.lastUpdatedAt,
+        finalSummary: null,
+      },
+      actions: [],
+      transcript: [],
+      proposals: [
+        proposal("proposal-detail-tool", "tool_permission", "Allow a read-only tool once."),
+        proposal("proposal-detail-memory", "memory_write", "Remember a planning preference."),
+      ],
+      blockers: ["tool_permission_required"],
+      finalDelivery: {
+        summary: "Proposal controls are pending.",
+        metadata: {
+          proposalsCreated: ["tool permission proposal", "memory proposal"],
+          blockers: ["tool_permission_required"],
+          nextSteps: ["Reject or defer a linked proposal."],
+        },
+      },
+      continuityDiagnostics: {
+        staleContext: false,
+        missingActionEvidence: false,
+        permissionScopeMismatch: false,
+        terminalNoResume: false,
+        providerUnavailable: false,
+        toolUnavailable: false,
+        requiresUserDecision: true,
+        selectedSkillContextDigestMismatch: false,
+        planRevisionMismatch: false,
+        reasonCodes: ["requires_user_decision"],
+        automaticReplayAllowed: false,
+      },
+      allowedControls: ["open_trace"],
+      nextRecommendedControl: "review_permission",
+      lastSafeResumePoint: null,
+      contextDigest: "bytes:12 hash:sha256:context",
+      selectedSkillDigest: null,
+      toolManifestDigest: "bytes:12 hash:sha256:tools",
+    });
+
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: any) => {
+      if (cmd === "list_main_chat_agent_tasks") {
+        return Promise.resolve([summary]);
+      }
+      if (cmd === "get_main_chat_agent_task_detail") {
+        return Promise.resolve(detail());
+      }
+      if (cmd === "reject_proposal") {
+        proposalStatuses["proposal-detail-tool"] = "rejected";
+        return Promise.resolve(undefined);
+      }
+      if (cmd === "postpone_proposal") {
+        proposalStatuses["proposal-detail-memory"] = "postponed";
+        return Promise.resolve(undefined);
+      }
+      return mockInvoke(cmd, args as Record<string, any>);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Open task Pending proposal controls" })
+    );
+    expect(await screen.findByTestId("task-continuity-proposals")).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Reject proposal" })[0]);
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "reject_proposal",
+        expect.objectContaining({ proposalId: "proposal-detail-tool" })
+      );
+    });
+    await screen.findByText("rejected");
+
+    fireEvent.click(await screen.findByRole("button", { name: "Defer" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "postpone_proposal",
+        expect.objectContaining({ proposalId: "proposal-detail-memory" })
+      );
+    });
+    expect(invoke).toHaveBeenCalledWith(
+      "get_main_chat_agent_task_detail",
+      expect.objectContaining({ taskSessionId: summary.taskSessionId })
+    );
+  });
+
   it("renders command-backed skills and tool candidates with select and clear controls", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: any) => {
       if (cmd === "list_main_chat_skills") {

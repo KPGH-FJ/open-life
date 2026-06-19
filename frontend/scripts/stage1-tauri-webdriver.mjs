@@ -11,7 +11,17 @@ const frontendRoot = path.resolve(scriptDir, "..");
 const repoRoot = path.resolve(frontendRoot, "..");
 const STAGE1_DOGFOOD_SCENARIOS = loadStage1DogfoodScenarios();
 const requiredJourneys = STAGE1_DOGFOOD_SCENARIOS.map(scenario => scenario.id);
-const REQUIRED_STAGE1_PREP_TASK_IDS = ["D13", "D14", "D15", "D19", "D20", "D27", "D28"];
+const REQUIRED_STAGE1_PREP_TASK_IDS = [
+  "D13",
+  "D14",
+  "D15",
+  "D19",
+  "D20",
+  "D27",
+  "D28",
+  "D35",
+  "D36",
+];
 
 const unavailableBlockers = [
   "real_tauri_browser_command_surface_unavailable",
@@ -385,6 +395,20 @@ async function executeSeededControlScenarioWithWebDriver(sessionId, scenario, ga
       visibleControlEvents.push(
         await clickFirstVisibleControlWithWebDriver(sessionId, ["Refresh task context"])
       );
+    } else if (scenario.id === "D35") {
+      visibleControlEvents.push(
+        await clickTaskContinuityVisibleControlWithWebDriver(sessionId, ["Reject proposal"])
+      );
+      await waitForTaskContinuityProposalStatusWithWebDriver(sessionId, preparedTaskId, [
+        "rejected",
+      ]);
+    } else if (scenario.id === "D36") {
+      visibleControlEvents.push(
+        await clickTaskContinuityVisibleControlWithWebDriver(sessionId, ["Defer"])
+      );
+      await waitForTaskContinuityProposalStatusWithWebDriver(sessionId, preparedTaskId, [
+        "postponed",
+      ]);
     }
     const evidence = await readTaskContinuityEvidenceWithWebDriver(sessionId, scenario);
     return seededObservationFromEvidence(
@@ -770,6 +794,60 @@ async function clickFirstVisibleControlWithWebDriver(sessionId, labels) {
   );
   await new Promise(resolve => setTimeout(resolve, 500));
   return visibleControlEventForLabel(label);
+}
+
+async function clickTaskContinuityVisibleControlWithWebDriver(sessionId, labels) {
+  const label = await waitForScript(
+    sessionId,
+    `
+      const detail = document.querySelector('[data-testid="task-continuity-detail"]');
+      if (!detail) return '';
+      const labels = arguments[0].map(label => label.toLowerCase());
+      const buttons = [...detail.querySelectorAll('button')];
+      const labelText = item => [
+        item.innerText,
+        item.textContent,
+        item.getAttribute('aria-label'),
+        item.getAttribute('title'),
+      ].filter(Boolean).join(' ').trim();
+      const button = buttons.find(item => {
+        const text = labelText(item).toLowerCase();
+        return !item.disabled && labels.some(label => text === label || text.includes(label));
+      });
+      if (!button) return '';
+      const text = labelText(button);
+      button.click();
+      return text;
+    `,
+    [labels],
+    30_000,
+    `webdriver_task_continuity_control_missing:${labels.join("|")}`
+  );
+  await new Promise(resolve => setTimeout(resolve, 500));
+  return visibleControlEventForLabel(label);
+}
+
+async function waitForTaskContinuityProposalStatusWithWebDriver(
+  sessionId,
+  taskSessionId,
+  expectedStatuses
+) {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const detail = await tauriInvoke(sessionId, "get_main_chat_agent_task_detail", {
+      taskSessionId,
+      task_session_id: taskSessionId,
+    });
+    if (
+      (detail?.proposals ?? []).some(proposal => expectedStatuses.includes(proposal?.status ?? ""))
+    ) {
+      return true;
+    }
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  throw new Error(
+    `webdriver_task_continuity_proposal_status_timeout:${expectedStatuses.join("|")}`
+  );
 }
 
 async function observeFromControlPlaneWithWebDriver(

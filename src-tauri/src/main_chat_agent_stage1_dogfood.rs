@@ -564,6 +564,14 @@ pub(crate) async fn prepare_main_chat_agent_stage1_browser_dogfood_state_with_st
         "D28".into(),
         seed_stage1_browser_terminal_mixed_task(state, &prep_run_id, "D28").await?,
     );
+    task_session_ids.insert(
+        "D35".into(),
+        seed_stage1_browser_pending_tool_permission_task(state, &prep_run_id).await?,
+    );
+    task_session_ids.insert(
+        "D36".into(),
+        seed_stage1_browser_pending_memory_proposal_task(state, &prep_run_id).await?,
+    );
 
     Ok(MainChatAgentStage1BrowserDogfoodPrepReport {
         prepared: true,
@@ -698,6 +706,192 @@ async fn seed_stage1_browser_permission_resume_task(
             .map_err(|err| err.to_string())?;
         store
             .mark_waiting_permission(&session.id)
+            .map_err(|err| err.to_string())?;
+    }
+    Ok(session.id)
+}
+
+async fn seed_stage1_browser_pending_tool_permission_task(
+    state: &Arc<AppState>,
+    prep_run_id: &str,
+) -> Result<String, String> {
+    use openlife_core::agent::main_chat_agent_v1::{
+        ExecutionAction, ExecutionQueueStatus, ExecutionTranscriptEntryKind, MainChatAgentStrategy,
+    };
+    use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
+
+    let session = create_stage1_browser_task_session(
+        state,
+        prep_run_id,
+        "D35",
+        "Stage 1 seeded tool permission denial.",
+        MainChatAgentStrategy::ReActToolExecution,
+        Some("Waiting for the user to deny a seeded ToolPermission proposal.".into()),
+        vec!["stage1-browser-deny-permission-context".into()],
+    )
+    .await?;
+    let action = ExecutionAction::new(
+        "mcp.read_only",
+        "Pending registered MCP read awaiting ToolPermission denial.",
+    );
+    let queued = enqueue_stage1_browser_action(state, &session.id, action).await?;
+
+    let mut proposal = AgentProposal::new(
+        ProposalType::ToolPermission,
+        "tool_permission.builtin.builtin_echo",
+        serde_json::json!({
+            "tool_name": "builtin_echo",
+            "source": "builtin",
+            "risk_level": "medium",
+            "action_type": "read",
+            "permission": "allow_once"
+        }),
+        "Stage 1 browser dogfood seed asks the user to deny this ToolPermission.",
+        0.72,
+        RiskLevel::Medium,
+        ProposalSource::ChatConversation,
+    );
+    proposal.source_detail = Some(session.id.clone());
+    proposal.run_id = Some(format!("{prep_run_id}:D35"));
+    let proposal_id = proposal.id.clone();
+    {
+        let proposal_store = state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(|| "proposal store missing".to_string())?;
+        proposal_store
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .map_err(|err| err.to_string())?;
+    }
+
+    transition_stage1_browser_action(state, &queued.id, ExecutionQueueStatus::Executing, None)
+        .await?;
+    transition_stage1_browser_action(
+        state,
+        &queued.id,
+        ExecutionQueueStatus::PendingPermission,
+        Some(serde_json::json!({
+            "proposalId": proposal_id,
+            "toolName": "builtin_echo",
+            "resumeReplayable": false,
+            "directWritesExecuted": false,
+        })),
+    )
+    .await?;
+    record_stage1_browser_action(state, &session.id, &queued.id).await?;
+    append_stage1_browser_transcript(
+        state,
+        &session.id,
+        ExecutionTranscriptEntryKind::PermissionRequest,
+        "Stage 1 seeded ToolPermission proposal is pending denial.",
+        serde_json::json!({
+            "proposalId": proposal_id,
+            "actionId": queued.id,
+            "runId": format!("{prep_run_id}:D35"),
+            "directWritesExecuted": false,
+        }),
+    )
+    .await?;
+    append_stage1_browser_transcript(
+        state,
+        &session.id,
+        ExecutionTranscriptEntryKind::FinalResult,
+        "Tool permission remains blocked until the user denies or reviews the proposal.",
+        serde_json::json!({
+            "blockers": ["tool_permission_required"],
+            "nextSteps": ["Deny the pending ToolPermission proposal or review it later."],
+            "directWritesExecuted": false,
+        }),
+    )
+    .await?;
+    {
+        let store_arc = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .ok_or_else(|| "session store missing".to_string())?;
+        let store = store_arc.lock().await;
+        store
+            .set_pending_blockers(&session.id, vec!["tool_permission_required".into()])
+            .map_err(|err| err.to_string())?;
+        store
+            .mark_waiting_permission(&session.id)
+            .map_err(|err| err.to_string())?;
+    }
+    Ok(session.id)
+}
+
+async fn seed_stage1_browser_pending_memory_proposal_task(
+    state: &Arc<AppState>,
+    prep_run_id: &str,
+) -> Result<String, String> {
+    use openlife_core::agent::main_chat_agent_v1::{
+        ExecutionTranscriptEntryKind, MainChatAgentStrategy,
+    };
+    use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
+
+    let session = create_stage1_browser_task_session(
+        state,
+        prep_run_id,
+        "D36",
+        "Stage 1 seeded memory proposal defer.",
+        MainChatAgentStrategy::MemoryProposal,
+        Some("A seeded memory proposal is waiting for a defer decision.".into()),
+        vec!["stage1-browser-defer-memory-context".into()],
+    )
+    .await?;
+    let mut proposal = AgentProposal::new(
+        ProposalType::MemoryWrite,
+        "memory.stage1.deferred_preference",
+        serde_json::json!({
+            "content": "User may prefer planning reviews before execution.",
+            "scope": "workspace",
+            "source": "stage1_browser_dogfood_seed"
+        }),
+        "Stage 1 browser dogfood seed asks the user to defer this memory proposal.",
+        0.69,
+        RiskLevel::Low,
+        ProposalSource::ChatConversation,
+    );
+    proposal.source_detail = Some(session.id.clone());
+    proposal.run_id = Some(format!("{prep_run_id}:D36"));
+    let proposal_id = proposal.id.clone();
+    {
+        let proposal_store = state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(|| "proposal store missing".to_string())?;
+        proposal_store
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .map_err(|err| err.to_string())?;
+    }
+    append_stage1_browser_transcript(
+        state,
+        &session.id,
+        ExecutionTranscriptEntryKind::FinalResult,
+        "Created a seeded memory proposal for a visible defer control.",
+        serde_json::json!({
+            "proposalId": proposal_id,
+            "proposalsCreated": ["seeded memory proposal"],
+            "nextSteps": ["Defer the pending memory proposal from task continuity."],
+            "directWritesExecuted": false,
+        }),
+    )
+    .await?;
+    {
+        let store_arc = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .ok_or_else(|| "session store missing".to_string())?;
+        let store = store_arc.lock().await;
+        store
+            .complete_session(
+                &session.id,
+                "Stage 1 seeded memory proposal is pending review.",
+            )
             .map_err(|err| err.to_string())?;
     }
     Ok(session.id)

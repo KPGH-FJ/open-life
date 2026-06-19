@@ -31,7 +31,17 @@ type Stage1BrowserPrepReport = {
 };
 
 const REPORT_FILE = "test-results/main-chat-stage1-dogfood-report.json";
-const REQUIRED_STAGE1_PREP_TASK_IDS = ["D13", "D14", "D15", "D19", "D20", "D27", "D28"];
+const REQUIRED_STAGE1_PREP_TASK_IDS = [
+  "D13",
+  "D14",
+  "D15",
+  "D19",
+  "D20",
+  "D27",
+  "D28",
+  "D35",
+  "D36",
+];
 
 function writeReport(report: Stage1BrowserEvidenceReport) {
   const reportPath = path.resolve(process.cwd(), REPORT_FILE);
@@ -56,7 +66,9 @@ function stage1NonTauriBrowserBlockers(): string[] {
 function commandAvailable(command: string): boolean {
   const lookup = process.platform === "win32" ? "where" : "command";
   const args = process.platform === "win32" ? [command] : ["-v", command];
-  return spawnSync(lookup, args, { stdio: "ignore", shell: process.platform !== "win32" }).status === 0;
+  return (
+    spawnSync(lookup, args, { stdio: "ignore", shell: process.platform !== "win32" }).status === 0
+  );
 }
 
 function nativeWebdriverAvailable(): boolean {
@@ -181,7 +193,9 @@ async function executeSeededControlScenario(
         await clickFirstVisibleControl(page, [/Resume task from continuity detail/i], detail)
       );
     } else if (scenario.id === "D14") {
-      visibleControlEvents.push(await clickFirstVisibleControl(page, [/Retry task action/i], detail));
+      visibleControlEvents.push(
+        await clickFirstVisibleControl(page, [/Retry task action/i], detail)
+      );
     } else if (scenario.id === "D15") {
       visibleControlEvents.push(
         await clickFirstVisibleControl(page, [/Cancel task from continuity detail/i], detail)
@@ -190,6 +204,12 @@ async function executeSeededControlScenario(
       visibleControlEvents.push(
         await clickFirstVisibleControl(page, [/Refresh task context/i], detail)
       );
+    } else if (scenario.id === "D35") {
+      visibleControlEvents.push(await clickFirstVisibleControl(page, [/Reject proposal/i], detail));
+      await waitForTaskContinuityProposalStatus(page, preparedTaskId, ["rejected"]);
+    } else if (scenario.id === "D36") {
+      visibleControlEvents.push(await clickFirstVisibleControl(page, [/^Defer$/i], detail));
+      await waitForTaskContinuityProposalStatus(page, preparedTaskId, ["postponed"]);
     }
   } else if (["D19", "D20", "D28"].includes(scenario.id)) {
     visibleControlEvents.push(await openTaskContinuityDetail(page));
@@ -272,12 +292,7 @@ async function hasEnabledMatchingButton(scope: Locator, labels: RegExp[]): Promi
 
 async function clickScenarioControl(page: Page, id: string, scope?: Locator): Promise<string> {
   if (id === "D09") {
-    return clickWithOptionalPrompt(
-      page,
-      [/Skip step/i],
-      "Stage 1 browser dogfood skip.",
-      scope
-    );
+    return clickWithOptionalPrompt(page, [/Skip step/i], "Stage 1 browser dogfood skip.", scope);
   }
   if (id === "D11") {
     return clickFirstVisibleControl(page, [/Accept proposal/i], scope);
@@ -286,20 +301,25 @@ async function clickScenarioControl(page: Page, id: string, scope?: Locator): Pr
     return clickFirstVisibleControl(page, [/Rollback memory/i], scope);
   }
   if (id === "D13") {
-    return clickFirstVisibleControl(page, [
-      /Resume task from continuity detail/i,
-      /Resume task/i,
-    ], scope);
+    return clickFirstVisibleControl(
+      page,
+      [/Resume task from continuity detail/i, /Resume task/i],
+      scope
+    );
   }
   if (id === "D14") {
-    return clickFirstVisibleControl(page, [
-      /Retry task action/i,
-      /Retry failed action/i,
-      /^Retry$/i,
-    ], scope);
+    return clickFirstVisibleControl(
+      page,
+      [/Retry task action/i, /Retry failed action/i, /^Retry$/i],
+      scope
+    );
   }
   if (id === "D15") {
-    return clickFirstVisibleControl(page, [/Cancel task from continuity detail/i, /Cancel task/i], scope);
+    return clickFirstVisibleControl(
+      page,
+      [/Cancel task from continuity detail/i, /Cancel task/i],
+      scope
+    );
   }
   if (id === "D35") {
     return clickFirstVisibleControl(page, [/^Deny$/i, /Reject proposal/i], scope);
@@ -360,6 +380,27 @@ async function clickFirstEnabledMatchingButton(
     }
   }
   return null;
+}
+
+async function waitForTaskContinuityProposalStatus(
+  page: Page,
+  taskSessionId: string,
+  expectedStatuses: string[]
+) {
+  await expect
+    .poll(
+      async () => {
+        const detail = await tauriInvoke<any>(page, "get_main_chat_agent_task_detail", {
+          taskSessionId,
+          task_session_id: taskSessionId,
+        });
+        return (detail?.proposals ?? []).some((proposal: any) =>
+          expectedStatuses.includes(proposal?.status ?? "")
+        );
+      },
+      { timeout: 10_000 }
+    )
+    .toBe(true);
 }
 
 async function accessibleButtonLabel(button: Locator, fallback: string): Promise<string> {
@@ -486,17 +527,17 @@ async function observeFromTaskContinuity(
       ...evidence.visibleBlockers,
     ]),
     runtimeEvidenceObserved: evidence.runtimeEvidenceObserved,
-    uiStateObserved:
-      scenario.expectedUiStates.every(state =>
-        uniqueValues([...(preObserved.visibleUiStates ?? []), ...evidence.visibleUiStates]).includes(state)
-      ),
-    finalDeliveryObserved:
-      scenario.expectedFinalSections.every(section =>
-        uniqueValues([
-          ...(preObserved.finalDeliverySections ?? []),
-          ...evidence.finalDeliverySections,
-        ]).includes(section)
-      ),
+    uiStateObserved: scenario.expectedUiStates.every(state =>
+      uniqueValues([...(preObserved.visibleUiStates ?? []), ...evidence.visibleUiStates]).includes(
+        state
+      )
+    ),
+    finalDeliveryObserved: scenario.expectedFinalSections.every(section =>
+      uniqueValues([
+        ...(preObserved.finalDeliverySections ?? []),
+        ...evidence.finalDeliverySections,
+      ]).includes(section)
+    ),
     nonFakeEvidenceObserved: evidence.nonFakeEvidenceObserved,
     legacyFallbackUsed: false,
     silentDurableWriteDetected: false,
@@ -626,7 +667,9 @@ function uiStateObserved(
       finalDeliveryArrayLength(snapshot, "pendingUserActions") > 0
     );
   if (state === "blocked")
-    return attrs.blockerCount > 0 || statusHasAny(attrs.taskStatus, ["blocked", "waiting_permission"]);
+    return (
+      attrs.blockerCount > 0 || statusHasAny(attrs.taskStatus, ["blocked", "waiting_permission"])
+    );
   if (state === "retry_available")
     return (
       (snapshot?.actions ?? []).some((action: any) => action?.retryable) ||
@@ -647,7 +690,9 @@ function continuityUiStateObserved(
   detail: any
 ): boolean {
   if (state === "completed")
-    return statusHasAny(status, ["completed", "cancelled", "blocked"]) || Boolean(detail?.finalDelivery);
+    return (
+      statusHasAny(status, ["completed", "cancelled", "blocked"]) || Boolean(detail?.finalDelivery)
+    );
   if (state === "blocked")
     return (
       detail?.blockers?.length > 0 ||
@@ -667,8 +712,7 @@ function continuityUiStateObserved(
     );
   if (state === "memory_candidate")
     return (
-      detail?.proposals?.length > 0 ||
-      finalDeliveryArrayLength(detail, "proposalsCreated") > 0
+      detail?.proposals?.length > 0 || finalDeliveryArrayLength(detail, "proposalsCreated") > 0
     );
   if (state === "planning")
     return (
@@ -696,8 +740,7 @@ function finalSectionObserved(
     delivery?.metadata && typeof delivery.metadata === "object"
       ? { ...delivery, ...delivery.metadata }
       : delivery;
-  if (section === "completed_work")
-    return Boolean(delivery);
+  if (section === "completed_work") return Boolean(delivery);
   if (section === "observations_used")
     return (
       visibleTitles.includes("Sources used") ||
@@ -720,10 +763,7 @@ function finalSectionObserved(
       arrayLength(deliveryMetrics, "pendingUserActions") > 0
     );
   if (section === "blocked_work")
-    return (
-      visibleTitles.includes("Blocked items") ||
-      arrayLength(deliveryMetrics, "blockers") > 0
-    );
+    return visibleTitles.includes("Blocked items") || arrayLength(deliveryMetrics, "blockers") > 0;
   if (section === "skipped_work")
     return (
       visibleTitles.includes("Skipped work") ||
@@ -745,10 +785,7 @@ function finalSectionObserved(
   return false;
 }
 
-function visibleBlockersForScenario(
-  scenario: Stage1DogfoodScenario,
-  evidence: any
-): string[] {
+function visibleBlockersForScenario(scenario: Stage1DogfoodScenario, evidence: any): string[] {
   if (!scenario.expectedBlocker) return [];
   const blockerEvidence =
     evidence?.blockers?.length > 0 ||
@@ -877,9 +914,9 @@ test.describe("main-chat-stage1-dogfood", () => {
     const tauriAvailable = await page.evaluate(() => Boolean((window as any).__TAURI_INTERNALS__));
 
     if (!tauriAvailable) {
-      const report = writeReport(buildStage1BlockedBrowserEvidenceReport([
-        ...stage1NonTauriBrowserBlockers(),
-      ]));
+      const report = writeReport(
+        buildStage1BlockedBrowserEvidenceReport([...stage1NonTauriBrowserBlockers()])
+      );
 
       expect(report.selfContainedRunner).toBe(true);
       expect(report.smokePassed).toBe(false);

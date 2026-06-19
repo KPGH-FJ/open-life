@@ -1916,6 +1916,56 @@ export default function ChatPage({
     taskContinuityDetail?.taskSession.id,
   ]);
 
+  const handleRejectTaskContinuityProposal = useCallback(
+    async (proposalId: string) => {
+      const taskSessionId = taskContinuityDetail?.taskSession.id;
+      if (!taskSessionId || taskContinuityBusy) return;
+      setTaskContinuityBusy(true);
+      setTaskContinuityError(null);
+      try {
+        await rejectProposal(proposalId);
+        await loadTaskContinuityDetail(taskSessionId);
+        await loadTaskContinuityList();
+        await refreshPendingProposals();
+      } catch (e) {
+        setTaskContinuityError(`Reject proposal failed: ${readablePreviewError(e)}`);
+      } finally {
+        setTaskContinuityBusy(false);
+      }
+    },
+    [
+      loadTaskContinuityDetail,
+      loadTaskContinuityList,
+      taskContinuityBusy,
+      taskContinuityDetail?.taskSession.id,
+    ]
+  );
+
+  const handleDeferTaskContinuityProposal = useCallback(
+    async (proposalId: string) => {
+      const taskSessionId = taskContinuityDetail?.taskSession.id;
+      if (!taskSessionId || taskContinuityBusy) return;
+      setTaskContinuityBusy(true);
+      setTaskContinuityError(null);
+      try {
+        await postponeProposal(proposalId);
+        await loadTaskContinuityDetail(taskSessionId);
+        await loadTaskContinuityList();
+        await refreshPendingProposals();
+      } catch (e) {
+        setTaskContinuityError(`Defer proposal failed: ${readablePreviewError(e)}`);
+      } finally {
+        setTaskContinuityBusy(false);
+      }
+    },
+    [
+      loadTaskContinuityDetail,
+      loadTaskContinuityList,
+      taskContinuityBusy,
+      taskContinuityDetail?.taskSession.id,
+    ]
+  );
+
   const handleApproveOnceMainChatPermission = useCallback(
     async (target: { proposalId: string; actionId: string; blockerId: string }) => {
       const taskSessionId = currentMainChatTaskSessionId();
@@ -4385,6 +4435,46 @@ export default function ChatPage({
                               <div className="truncate text-stone-600">
                                 {action.action.description}
                               </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {taskContinuityDetail.proposals.length > 0 && (
+                        <div
+                          data-testid="task-continuity-proposals"
+                          className="mt-2 divide-y divide-stone-200 border-y border-stone-200 bg-white/70"
+                        >
+                          {taskContinuityDetail.proposals.map(proposal => (
+                            <div key={proposal.id} className="grid gap-1 px-2 py-1">
+                              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                                <span className="truncate font-semibold text-stone-900">
+                                  {proposal.proposalType.replace(/_/g, " ")} proposal
+                                </span>
+                                <span className="inline-flex h-5 items-center rounded-md border border-stone-200 bg-stone-50 px-1.5 font-medium text-stone-700">
+                                  {proposal.status.replace(/_/g, " ")}
+                                </span>
+                              </div>
+                              <div className="truncate text-stone-600">{proposal.reason}</div>
+                              {proposal.status === "pending" && (
+                                <div className="flex flex-wrap gap-1">
+                                  <button
+                                    type="button"
+                                    disabled={taskContinuityBusy}
+                                    onClick={() => handleRejectTaskContinuityProposal(proposal.id)}
+                                    className="inline-flex min-h-6 items-center rounded-md border border-stone-200 bg-white px-2 font-medium text-stone-800 hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-40"
+                                  >
+                                    Reject proposal
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={taskContinuityBusy}
+                                    onClick={() => handleDeferTaskContinuityProposal(proposal.id)}
+                                    className="inline-flex min-h-6 items-center rounded-md border border-stone-200 bg-white px-2 font-medium text-stone-800 hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-40"
+                                  >
+                                    Defer
+                                  </button>
+                                </div>
+                              )}
                             </div>
                           ))}
                         </div>
