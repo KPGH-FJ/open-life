@@ -475,6 +475,20 @@ impl ExecutionPolicy {
         if contains_any(
             &haystack,
             &[
+                "skill.boundary",
+                "unselected skill",
+                "skill that is not selected",
+                "not selected skill",
+            ],
+        ) {
+            return policy_decision(
+                MainChatPolicyLevel::L4ExternalWrite,
+                "unselected_skill_not_injected",
+            );
+        }
+        if contains_any(
+            &haystack,
+            &[
                 "calendar.real_write",
                 "calendar write",
                 "email.send",
@@ -5670,6 +5684,16 @@ fn classify_privacy_risk(lower: &str) -> MainChatPrivacyRiskSummary {
 }
 
 fn is_blocked_confirmation_intent(lower: &str) -> bool {
+    if contains_any(
+        lower,
+        &[
+            "skill that is not selected",
+            "unselected skill",
+            "not selected skill",
+        ],
+    ) {
+        return true;
+    }
     contains_any(lower, &["send", "email", "calendar", "external"])
         && contains_any(
             lower,

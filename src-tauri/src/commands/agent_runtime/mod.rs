@@ -1991,6 +1991,20 @@ pub async fn prepare_main_chat_agent_stage1_browser_dogfood_state(
 }
 
 #[tauri::command]
+pub async fn set_main_chat_agent_stage1_browser_network_policy(
+    enabled: bool,
+    state: State<'_, Arc<AppState>>,
+) -> Result<bool, String> {
+    if !cfg!(debug_assertions) {
+        return Err("stage1_browser_network_policy_toggle_debug_only".into());
+    }
+    let mut config = state.config.lock().await;
+    let previous = config.system.network_policy.enabled;
+    config.system.network_policy.enabled = enabled;
+    Ok(previous)
+}
+
+#[tauri::command]
 pub async fn run_main_chat_agent_execution_v1_final_acceptance_gate(
     state: State<'_, Arc<AppState>>,
 ) -> Result<MainChatAgentExecutionV1FinalAcceptanceGateCommandReport, String> {

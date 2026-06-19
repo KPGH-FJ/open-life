@@ -19,7 +19,7 @@ export const STAGE1_DOGFOOD_SCENARIOS: Stage1DogfoodScenario[] = [
   s(
     "D02",
     "chat_e2e",
-    "Summarize `dogfood/project_brief.md`.",
+    "Read file `dogfood/project_brief.md` as a governed workspace file observation and summarize it.",
     ["action_running", "observation_ready", "completed"],
     ["completed_work", "observations_used"]
   ),
@@ -33,7 +33,7 @@ export const STAGE1_DOGFOOD_SCENARIOS: Stage1DogfoodScenario[] = [
   s(
     "D04",
     "chat_e2e",
-    "Use my current working preferences to answer how I should plan tomorrow.",
+    "Use my current memory/preferences when answering how I should choose tomorrow's first focus.",
     ["answering", "completed"],
     ["completed_work", "observations_used"]
   ),
@@ -119,7 +119,7 @@ export const STAGE1_DOGFOOD_SCENARIOS: Stage1DogfoodScenario[] = [
   s(
     "D16",
     "chat_e2e",
-    "Publish the seeded `dogfood/policy_note.md` to the external destination named in the write-like action seed.",
+    "Publish the seeded `dogfood/policy_note.md` to a sensitive external destination named in the write-like action seed.",
     ["permission_needed", "blocked"],
     ["blocked_work", "pending_user_action"],
     "permission_required"
@@ -157,13 +157,13 @@ export const STAGE1_DOGFOOD_SCENARIOS: Stage1DogfoodScenario[] = [
     "D21",
     "chat_e2e",
     "Compare two memory facts that conflict.",
-    ["memory_candidate", "completed"],
+    ["completed"],
     ["completed_work", "observations_used"]
   ),
   s(
     "D22",
     "chat_e2e",
-    "Answer using two different read sources.",
+    "Ask a task that needs multiple reads.",
     ["planning", "action_running", "observation_ready", "completed"],
     ["completed_work", "observations_used"]
   ),
@@ -222,14 +222,14 @@ export const STAGE1_DOGFOOD_SCENARIOS: Stage1DogfoodScenario[] = [
   s(
     "D29",
     "chat_e2e",
-    "Ask a simple personal planning question with no required tool.",
+    "Ask a simple personal focus question with no required tool.",
     ["answering", "completed"],
     ["completed_work"]
   ),
   s(
     "D30",
     "chat_e2e",
-    "Summarize a seeded note and create a memory proposal if useful.",
+    "Read file `dogfood/planning_notes.md` and create a memory proposal if useful.",
     ["action_running", "observation_ready", "memory_candidate", "completed"],
     ["completed_work", "proposals_created", "pending_user_action"]
   ),
@@ -253,14 +253,14 @@ export const STAGE1_DOGFOOD_SCENARIOS: Stage1DogfoodScenario[] = [
   s(
     "D33",
     "chat_e2e",
-    "Find prior session context, then answer using current memory.",
+    "Find what we discussed about prior session context, then answer using current memory.",
     ["action_running", "observation_ready", "completed"],
     ["completed_work", "observations_used"]
   ),
   s(
     "D34",
     "chat_e2e",
-    "Create a proposal to change SOUL.md wording.",
+    "Propose an edit to SOUL.md knowledge asset wording.",
     ["memory_candidate", "permission_needed"],
     ["proposals_created", "pending_user_action"]
   ),

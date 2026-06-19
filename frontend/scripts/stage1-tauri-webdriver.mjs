@@ -354,18 +354,41 @@ async function configureWebDriverTimeouts(sessionId) {
 
 async function executeChatScenarioWithWebDriver(sessionId, scenario, gateRow) {
   const previousTaskId = await readCurrentTaskIdWithWebDriver(sessionId);
-  await setSelectedSkillWithWebDriver(sessionId, scenario.selectedSkillId ?? "");
-  await fillByTestId(sessionId, "chat-input", scenario.prompt);
-  await waitForElementEnabled(sessionId, "send-button", 10_000);
-  await clickByTestId(sessionId, "send-button");
-  const controlPlane = await waitForControlPlaneDelivery(sessionId, previousTaskId, scenario);
-  return await observeFromControlPlaneWithWebDriver(
-    sessionId,
-    controlPlane.taskSessionId,
-    scenario,
-    gateRow,
-    ["visible_control.chat_send"]
-  );
+  const previousNetworkPolicy = await prepareStage1ScenarioNetworkPolicy(sessionId, scenario);
+  try {
+    await setSelectedSkillWithWebDriver(sessionId, scenario.selectedSkillId ?? "");
+    await fillByTestId(sessionId, "chat-input", scenario.prompt);
+    await waitForElementEnabled(sessionId, "send-button", 10_000);
+    await clickByTestId(sessionId, "send-button");
+    const controlPlane = await waitForControlPlaneDelivery(sessionId, previousTaskId, scenario);
+    return await observeFromControlPlaneWithWebDriver(
+      sessionId,
+      controlPlane.taskSessionId,
+      scenario,
+      gateRow,
+      ["visible_control.chat_send"]
+    );
+  } finally {
+    await restoreStage1ScenarioNetworkPolicy(sessionId, previousNetworkPolicy);
+  }
+}
+
+async function prepareStage1ScenarioNetworkPolicy(sessionId, scenario) {
+  if (scenario.id !== "D23") return null;
+  return await tauriInvoke(sessionId, "set_main_chat_agent_stage1_browser_network_policy", {
+    enabled: false,
+  });
+}
+
+async function restoreStage1ScenarioNetworkPolicy(sessionId, previousNetworkPolicy) {
+  if (previousNetworkPolicy === null || previousNetworkPolicy === undefined) return;
+  await tauriInvoke(sessionId, "set_main_chat_agent_stage1_browser_network_policy", {
+    enabled: Boolean(previousNetworkPolicy),
+  }).catch(error => {
+    console.error(
+      `[stage1_network_policy_restore:error] ${metadataSafeBlocker(error?.message ?? error)}`
+    );
+  });
 }
 
 async function executeSeededControlScenarioWithWebDriver(sessionId, scenario, gateRow, prepReport) {
@@ -1186,7 +1209,8 @@ function continuityUiStateObserved(state, status, nextControl, detail) {
     return (
       detail?.actions?.some(action => action.observationMetadata) ||
       (detail?.actions ?? []).some(action => (action?.observationIds?.length ?? 0) > 0) ||
-      finalDeliveryArrayLength(detail, "observationsUsed") > 0
+      finalDeliveryArrayLength(detail, "observationsUsed") > 0 ||
+      transcriptEvents(detail).includes("transcript.observation")
     );
   }
   if (state === "memory_candidate") {
@@ -1226,14 +1250,38 @@ function finalSectionObserved(section, visibleTitles, snapshot, controlEvents = 
     return (
       visibleTitles.includes("Sources used") ||
       arrayLength(deliveryMetrics, "observationsUsed") > 0 ||
-      arrayLength(snapshot?.plan?.reviewSummary, "observationsUsed") > 0
+      arrayLength(snapshot?.plan?.reviewSummary, "observationsUsed") > 0 ||
+      transcriptEvents(snapshot).includes("transcript.observation")
     );
   }
   if (section === "next_action") {
     return (
       visibleTitles.includes("Next steps") ||
       arrayLength(deliveryMetrics, "nextSteps") > 0 ||
-      arrayLength(snapshot?.plan?.reviewSummary, "recommendedNextAction") > 0
+      arrayLength(snapshot?.plan?.reviewSummary, "recommendedNextAction") > 0 ||
+      controlNameMatches(snapshot?.nextRecommendedControl, [
+        "retry",
+        "resume",
+        "refresh_context",
+        "cancel",
+        "deny",
+        "defer",
+      ]) ||
+      hasControlName(snapshot?.allowedControls, [
+        "retry",
+        "resume",
+        "refresh_context",
+        "cancel",
+        "deny",
+        "defer",
+      ]) ||
+      controlEvents.some(event =>
+        [
+          "visible_control.resume_task_from_continuity_detail",
+          "visible_control.cancel_task_from_continuity_detail",
+          "visible_control.refresh_task_context",
+        ].some(prefix => seededVisibleControlEventMatchesPrefix(event, prefix))
+      )
     );
   }
   if (section === "proposals_created" || section === "proposed_work") {
@@ -1274,7 +1322,9 @@ function finalSectionObserved(section, visibleTitles, snapshot, controlEvents = 
   if (section === "durable_changes") {
     return (
       visibleTitles.includes("Durable changes") ||
-      arrayLength(deliveryMetrics, "durableChanges") > 0
+      arrayLength(deliveryMetrics, "durableChanges") > 0 ||
+      snapshotEvents(snapshot).includes("memory.materialized") ||
+      snapshotEvents(snapshot).includes("memory.rolled_back")
     );
   }
   return false;

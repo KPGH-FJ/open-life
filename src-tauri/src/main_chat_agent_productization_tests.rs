@@ -1325,6 +1325,45 @@ async fn main_chat_agent_productization_v1_send_result_includes_runtime_backed_a
 }
 
 #[tokio::test]
+async fn main_chat_direct_answer_final_delivery_cites_bounded_context_sources_without_fake_actions()
+{
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let result = crate::main_chat_send::send_message_with_state(
+        "stage1-d25-context-inspection".into(),
+        vec![openlife_core::llm::ChatMessage {
+            role: "user".into(),
+            content: "Inspect loaded knowledge assets.".into(),
+        }],
+        None,
+        &state,
+    )
+    .await
+    .expect("send context inspection message");
+
+    let agent_state = result.agent_state.expect("context inspection agent state");
+    assert_eq!(agent_state.route.strategy.as_str(), "direct_answer");
+    assert!(
+        agent_state.actions.is_empty(),
+        "context source citation must not create fake action evidence"
+    );
+    assert!(
+        agent_state.observations.is_empty(),
+        "context source citation must not create fake action observation rows"
+    );
+    assert!(
+        agent_state.final_delivery.as_ref().is_some_and(|delivery| {
+            delivery.observations_used.iter().any(|observation| {
+                observation.source_kind == "workspace_instruction"
+                    || observation.source_kind == "materialized_file"
+                    || observation.source_kind == "selected_personal_context"
+            })
+        }),
+        "DirectAnswer final delivery should cite bounded context sources: {:?}",
+        agent_state.final_delivery
+    );
+}
+
+#[tokio::test]
 async fn main_chat_agent_state_payload_exposes_plan_execute_controls_from_later_plan_transcript() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let result = crate::main_chat_send::send_message_with_state(
@@ -1385,6 +1424,100 @@ async fn main_chat_agent_state_payload_exposes_plan_execute_controls_from_later_
             .as_ref()
             .is_some_and(|delivery| !delivery.observations_used.is_empty()),
         "PlanExecute final delivery should cite observation evidence: {:?}",
+        agent_state.final_delivery
+    );
+}
+
+#[tokio::test]
+async fn main_chat_stage1_d30_read_plus_memory_proposal_uses_real_read_and_review_proposal() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let result = crate::main_chat_send::send_message_with_state(
+        "stage1-d30-read-plus-proposal".into(),
+        vec![openlife_core::llm::ChatMessage {
+            role: "user".into(),
+            content:
+                "Read file `dogfood/planning_notes.md` and create a memory proposal if useful."
+                    .into(),
+        }],
+        None,
+        &state,
+    )
+    .await
+    .expect("send D30 message");
+
+    let agent_state = result.agent_state.expect("D30 agent state");
+    assert_eq!(agent_state.route.strategy.as_str(), "react_tool_execution");
+    assert!(
+        agent_state
+            .actions
+            .iter()
+            .any(|action| action.action_type == "file.read" && action.status == "succeeded"),
+        "D30 should perform a real governed file read: {:?}",
+        agent_state.actions
+    );
+    assert!(
+        agent_state
+            .proposals
+            .iter()
+            .any(|proposal| proposal.proposal_type == "memory"),
+        "D30 should create a Review Center memory proposal after the read: {:?}",
+        agent_state.proposals
+    );
+    assert!(
+        agent_state.final_delivery.as_ref().is_some_and(|delivery| {
+            !delivery.observations_used.is_empty()
+                && !delivery.proposals_created.is_empty()
+                && !delivery.pending_user_actions.is_empty()
+        }),
+        "D30 final delivery should cite read evidence and pending proposal: {:?}",
+        agent_state.final_delivery
+    );
+}
+
+#[tokio::test]
+async fn main_chat_stage1_d31_plan_execute_blocks_risky_external_publish_step() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let result = crate::main_chat_send::send_message_with_state(
+        "stage1-d31-plan-publish-blocker".into(),
+        vec![openlife_core::llm::ChatMessage {
+            role: "user".into(),
+            content:
+                "Plan the seeded policy-note publication task, but ask me before any risky external publish step."
+                    .into(),
+        }],
+        None,
+        &state,
+    )
+    .await
+    .expect("send D31 message");
+
+    let agent_state = result.agent_state.expect("D31 agent state");
+    assert_eq!(agent_state.route.strategy.as_str(), "plan_execute");
+    assert!(
+        agent_state.plan.is_some(),
+        "D31 should expose PlanExecute evidence"
+    );
+    assert!(
+        agent_state
+            .actions
+            .iter()
+            .any(|action| action.action_type == "external.write" && action.status == "blocked"),
+        "D31 should block the risky external publish action: {:?}",
+        agent_state.actions
+    );
+    assert!(
+        agent_state
+            .blockers
+            .iter()
+            .any(|blocker| blocker.reason_code == "external_write_requires_confirmation"),
+        "D31 should expose the external write blocker: {:?}",
+        agent_state.blockers
+    );
+    assert!(
+        agent_state.final_delivery.as_ref().is_some_and(|delivery| {
+            !delivery.blockers.is_empty() && !delivery.pending_user_actions.is_empty()
+        }),
+        "D31 final delivery should show blocked work and pending user action: {:?}",
         agent_state.final_delivery
     );
 }

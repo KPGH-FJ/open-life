@@ -124,6 +124,72 @@ fn seed_router_cases_match_main_chat_v1_strategy_contract() {
 }
 
 #[test]
+fn stage1_browser_prompts_select_expected_main_chat_strategies() {
+    let ingress = AgentIngress::default();
+    let cases = [
+        (
+            "D02",
+            "Read file `dogfood/project_brief.md` as a governed workspace file observation and summarize it.",
+            MainChatAgentStrategy::ReActToolExecution,
+        ),
+        (
+            "D04",
+            "Use my current memory/preferences when answering how I should choose tomorrow's first focus.",
+            MainChatAgentStrategy::DirectAnswer,
+        ),
+        (
+            "D16",
+            "Publish the seeded `dogfood/policy_note.md` to a sensitive external destination named in the write-like action seed.",
+            MainChatAgentStrategy::BlockedConfirmation,
+        ),
+        (
+            "D18",
+            "Use a skill that is not selected.",
+            MainChatAgentStrategy::BlockedConfirmation,
+        ),
+        (
+            "D22",
+            "Ask a task that needs multiple reads.",
+            MainChatAgentStrategy::ReActToolExecution,
+        ),
+        (
+            "D29",
+            "Ask a simple personal focus question with no required tool.",
+            MainChatAgentStrategy::DirectAnswer,
+        ),
+        (
+            "D31",
+            "Plan the seeded policy-note publication task, but ask me before any risky external publish step.",
+            MainChatAgentStrategy::PlanExecute,
+        ),
+        (
+            "D33",
+            "Find what we discussed about prior session context, then answer using current memory.",
+            MainChatAgentStrategy::ReActToolExecution,
+        ),
+        (
+            "D34",
+            "Propose an edit to SOUL.md knowledge asset wording.",
+            MainChatAgentStrategy::LifeModelProposal,
+        ),
+    ];
+
+    for (id, prompt, expected) in cases {
+        let decision = ingress.decide(
+            "stage1-browser-router",
+            prompt,
+            None,
+            AgentTaskKind::Conversation,
+        );
+        assert_eq!(
+            decision.selected_strategy, expected,
+            "{id} should route to {:?}, got {:?} for prompt {prompt:?}",
+            expected, decision.selected_strategy
+        );
+    }
+}
+
+#[test]
 fn seed_policy_cases_enforce_no_silent_high_risk_writes() {
     let policy = ExecutionPolicy::default();
     let report = run_main_chat_agent_v1_eval_suite(MainChatEvalSuiteInput {
@@ -147,6 +213,18 @@ fn seed_policy_cases_enforce_no_silent_high_risk_writes() {
     assert_eq!(destructive.level, MainChatPolicyLevel::L5DangerousHardBlock);
     assert!(!destructive.execution_allowed);
     assert!(destructive.requires_blocker);
+
+    let unselected_skill = policy.classify(&ExecutionAction::new(
+        "skill.boundary",
+        "Unselected skill instruction requested from Main Chat.",
+    ));
+    assert_eq!(unselected_skill.level, MainChatPolicyLevel::L4ExternalWrite);
+    assert_eq!(
+        unselected_skill.reason_code,
+        "unselected_skill_not_injected"
+    );
+    assert!(!unselected_skill.execution_allowed);
+    assert!(unselected_skill.requires_blocker);
 }
 
 #[test]

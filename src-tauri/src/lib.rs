@@ -164,7 +164,8 @@ use commands::agent_runtime::{
     run_main_chat_agent_product_maturity_v2_skills_gate,
     run_main_chat_agent_productization_v1_gate, run_main_chat_agent_stage1_dogfood_gate,
     run_main_chat_external_live_productization_gate, run_multi_strategy_agent_preview,
-    select_main_chat_skill, skip_plan_execute_step, update_plan_execute_session_draft,
+    select_main_chat_skill, set_main_chat_agent_stage1_browser_network_policy,
+    skip_plan_execute_step, update_plan_execute_session_draft,
 };
 
 use commands::builder::{
@@ -651,6 +652,7 @@ pub fn run() {
             run_main_chat_agent_beta_v1_readiness_gate,
             run_main_chat_agent_stage1_dogfood_gate,
             prepare_main_chat_agent_stage1_browser_dogfood_state,
+            set_main_chat_agent_stage1_browser_network_policy,
             run_main_chat_agent_execution_v1_final_acceptance_gate,
             get_runtime_strategy_registry_status,
             get_react_beta_execution_status,

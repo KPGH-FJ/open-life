@@ -411,6 +411,32 @@ describe("stage1 browser evidence report builder", () => {
     );
   });
 
+  it("keeps Stage1 browser prompts aligned with AgentIngress routing triggers", () => {
+    const prompt = (id: string) =>
+      STAGE1_DOGFOOD_SCENARIOS.find(scenario => scenario.id === id)?.prompt.toLowerCase() ?? "";
+
+    expect(prompt("D02")).toContain("file");
+    expect(prompt("D04")).not.toContain("plan");
+    expect(prompt("D16")).toContain("sensitive");
+    expect(prompt("D16")).toContain("external");
+    expect(prompt("D18")).toContain("not selected");
+    expect(prompt("D22")).toContain("multiple reads");
+    expect(prompt("D29")).not.toContain("plan");
+    expect(prompt("D30")).toContain("file");
+    expect(prompt("D31")).toContain("risky external publish");
+    expect(prompt("D33")).toContain("what we discussed");
+    expect(prompt("D34")).toContain("propose an edit to soul.md");
+  });
+
+  it("does not require proposal UI for D21 memory-conflict compare", () => {
+    const d21 = STAGE1_DOGFOOD_SCENARIOS.find(scenario => scenario.id === "D21");
+
+    expect(routeStrategyForTest("D21")).toBe("memory_conflict");
+    expect(d21?.expectedUiStates).toEqual(["completed"]);
+    expect(d21?.expectedFinalSections).toContain("observations_used");
+    expect(d21?.expectedFinalSections).not.toContain("proposals_created");
+  });
+
   it("validates the formatted D01-D36 scenario matrix without starting Tauri", () => {
     const result = spawnSync(
       "node",
@@ -463,6 +489,8 @@ describe("stage1 browser evidence report builder", () => {
     expect(script).toContain("stage1DogfoodScenarios.ts");
     expect(script).toContain("STAGE1_DOGFOOD_SCENARIOS");
     expect(script).toContain("prepare_main_chat_agent_stage1_browser_dogfood_state");
+    expect(script).toContain("set_main_chat_agent_stage1_browser_network_policy");
+    expect(script).toContain("restoreStage1ScenarioNetworkPolicy");
     expect(script.indexOf("prepare_main_chat_agent_stage1_browser_dogfood_state")).toBeLessThan(
       script.indexOf("await navigateToChat(sessionId);")
     );
@@ -569,6 +597,21 @@ describe("stage1 browser evidence report builder", () => {
     expect(script).not.toContain(
       'path.resolve(process.cwd(), "test-results/main-chat-stage1-dogfood-report.json")'
     );
+  });
+
+  it("maps seeded continuity transcript events to Stage1 browser final evidence", () => {
+    const files = [
+      path.resolve(process.cwd(), "scripts/stage1-tauri-webdriver.mjs"),
+      path.resolve(process.cwd(), "e2e/main-chat-stage1-dogfood.spec.ts"),
+    ];
+
+    for (const file of files) {
+      const source = fs.readFileSync(file, "utf8");
+      expect(source).toContain('transcriptEvents(snapshot).includes("transcript.observation")');
+      expect(source).toContain('snapshotEvents(snapshot).includes("memory.materialized")');
+      expect(source).toContain('snapshotEvents(snapshot).includes("memory.rolled_back")');
+      expect(source).toContain("controlNameMatches(snapshot?.nextRecommendedControl");
+    }
   });
 
   it("exposes a Linux CI path for real Tauri WebDriver D01-D36 dogfood", () => {

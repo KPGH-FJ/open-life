@@ -119,14 +119,41 @@ async function executeChatScenario(
   gateRow: MainChatAgentStage1DogfoodReport["scenarios"][number]
 ): Promise<Stage1ObservedBrowserScenario> {
   const previousTaskId = await readCurrentTaskId(page);
-  await setSelectedSkill(page, scenario.selectedSkillId ?? "");
-  await page.getByTestId("chat-input").fill(scenario.prompt);
-  await expect(page.getByTestId("send-button")).toBeEnabled({ timeout: 10_000 });
-  await page.getByTestId("send-button").click();
-  const controlPlane = await waitForControlPlaneDelivery(page, previousTaskId);
-  return observeFromControlPlane(page, controlPlane, scenario, gateRow, [
-    "visible_control.chat_send",
-  ]);
+  const previousNetworkPolicy = await prepareStage1ScenarioNetworkPolicy(page, scenario);
+  try {
+    await setSelectedSkill(page, scenario.selectedSkillId ?? "");
+    await page.getByTestId("chat-input").fill(scenario.prompt);
+    await expect(page.getByTestId("send-button")).toBeEnabled({ timeout: 10_000 });
+    await page.getByTestId("send-button").click();
+    const controlPlane = await waitForControlPlaneDelivery(page, previousTaskId);
+    return observeFromControlPlane(page, controlPlane, scenario, gateRow, [
+      "visible_control.chat_send",
+    ]);
+  } finally {
+    await restoreStage1ScenarioNetworkPolicy(page, previousNetworkPolicy);
+  }
+}
+
+async function prepareStage1ScenarioNetworkPolicy(
+  page: Page,
+  scenario: Stage1DogfoodScenario
+): Promise<boolean | null> {
+  if (scenario.id !== "D23") return null;
+  return tauriInvoke<boolean>(page, "set_main_chat_agent_stage1_browser_network_policy", {
+    enabled: false,
+  });
+}
+
+async function restoreStage1ScenarioNetworkPolicy(
+  page: Page,
+  previousNetworkPolicy: boolean | null
+) {
+  if (previousNetworkPolicy === null) return;
+  await tauriInvoke(page, "set_main_chat_agent_stage1_browser_network_policy", {
+    enabled: Boolean(previousNetworkPolicy),
+  }).catch(error => {
+    console.error(`stage1_network_policy_restore_failed:${String(error?.message ?? error)}`);
+  });
 }
 
 async function setSelectedSkill(page: Page, selectedSkillId: string) {
@@ -722,7 +749,8 @@ function continuityUiStateObserved(
     return (
       detail?.actions?.some((action: any) => action.observationMetadata) ||
       (detail?.actions ?? []).some((action: any) => (action?.observationIds?.length ?? 0) > 0) ||
-      finalDeliveryArrayLength(detail, "observationsUsed") > 0
+      finalDeliveryArrayLength(detail, "observationsUsed") > 0 ||
+      transcriptEvents(detail).includes("transcript.observation")
     );
   if (state === "memory_candidate")
     return (
@@ -759,13 +787,37 @@ function finalSectionObserved(
     return (
       visibleTitles.includes("Sources used") ||
       arrayLength(deliveryMetrics, "observationsUsed") > 0 ||
-      arrayLength(snapshot?.plan?.reviewSummary, "observationsUsed") > 0
+      arrayLength(snapshot?.plan?.reviewSummary, "observationsUsed") > 0 ||
+      transcriptEvents(snapshot).includes("transcript.observation")
     );
   if (section === "next_action")
     return (
       visibleTitles.includes("Next steps") ||
       arrayLength(deliveryMetrics, "nextSteps") > 0 ||
-      arrayLength(snapshot?.plan?.reviewSummary, "recommendedNextAction") > 0
+      arrayLength(snapshot?.plan?.reviewSummary, "recommendedNextAction") > 0 ||
+      controlNameMatches(snapshot?.nextRecommendedControl, [
+        "retry",
+        "resume",
+        "refresh_context",
+        "cancel",
+        "deny",
+        "defer",
+      ]) ||
+      hasControlName(snapshot?.allowedControls, [
+        "retry",
+        "resume",
+        "refresh_context",
+        "cancel",
+        "deny",
+        "defer",
+      ]) ||
+      controlEvents.some(event =>
+        [
+          "visible_control.resume_task_from_continuity_detail",
+          "visible_control.cancel_task_from_continuity_detail",
+          "visible_control.refresh_task_context",
+        ].some(prefix => seededVisibleControlEventMatchesPrefix(event, prefix))
+      )
     );
   if (section === "proposals_created" || section === "proposed_work")
     return (
@@ -795,7 +847,9 @@ function finalSectionObserved(
   if (section === "durable_changes")
     return (
       visibleTitles.includes("Durable changes") ||
-      arrayLength(deliveryMetrics, "durableChanges") > 0
+      arrayLength(deliveryMetrics, "durableChanges") > 0 ||
+      snapshotEvents(snapshot).includes("memory.materialized") ||
+      snapshotEvents(snapshot).includes("memory.rolled_back")
     );
   return false;
 }

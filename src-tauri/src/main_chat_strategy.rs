@@ -330,6 +330,21 @@ pub(crate) async fn try_run_main_chat_agent_strategy(
                     reply = agent_loop_attempt.reply.unwrap_or_else(|| {
                         "The governed ReAct AgentLoop completed without a final response.".into()
                     });
+                    if agent_loop_attempt.queue_status == Some(ExecutionQueueStatus::Completed)
+                        && user_text_requests_memory_proposal_after_read(user_text)
+                    {
+                        let proposal = create_main_chat_agent_proposal(
+                            state,
+                            task_session_id,
+                            MainChatAgentStrategy::MemoryProposal,
+                            user_text,
+                        )
+                        .await?;
+                        pending_blockers.push(format!("proposal:{}", proposal.id));
+                        reply = format!(
+                            "{reply}\n\nI also created a Memory proposal for review after the read. I did not write it into long-term memory."
+                        );
+                    }
                 } else {
                     match execute_main_chat_react_action_with_executor(
                         state,
@@ -482,6 +497,19 @@ pub(crate) async fn try_run_main_chat_agent_strategy(
                                 }
                                 execution_transcript.extend(follow_up.transcript_entries);
                                 reply = follow_up.reply;
+                                if user_text_requests_memory_proposal_after_read(user_text) {
+                                    let proposal = create_main_chat_agent_proposal(
+                                        state,
+                                        task_session_id,
+                                        MainChatAgentStrategy::MemoryProposal,
+                                        user_text,
+                                    )
+                                    .await?;
+                                    pending_blockers.push(format!("proposal:{}", proposal.id));
+                                    reply = format!(
+                                        "{reply}\n\nI also created a Memory proposal for review after the read. I did not write it into long-term memory."
+                                    );
+                                }
                             } else {
                                 reply = observation.final_answer.clone();
                             }
@@ -638,6 +666,45 @@ pub(crate) async fn try_run_main_chat_agent_strategy(
                 plan_session.steps.len()
             );
             completed = true;
+            if user_text_requests_risky_external_publish_confirmation(user_text) {
+                let blocked_publish = enqueue_main_chat_agent_action(
+                    state,
+                    task_session_id,
+                    "external.write",
+                    "Risky external publish step from a PlanExecute draft requires explicit confirmation.",
+                    &mut execution_transcript,
+                )
+                .await?;
+                pending_blockers.push(blocked_publish.policy.reason_code.clone());
+                execution_transcript.extend(
+                    append_main_chat_agent_transcript(
+                        state,
+                        Some(task_session_id),
+                        ExecutionTranscriptEntryKind::PermissionRequest,
+                        "Risky external publish step is blocked pending explicit confirmation.",
+                        serde_json::json!({
+                            "actionId": blocked_publish.id,
+                            "policyLevel": blocked_publish.policy.level.as_str(),
+                            "reasonCode": blocked_publish.policy.reason_code.clone(),
+                            "requiresConfirmation": blocked_publish.policy.requires_confirmation,
+                            "externalWritesExecuted": false,
+                        }),
+                    )
+                    .await,
+                );
+                tool_calls.push(tool_call_from_action(
+                    "external.write",
+                    &blocked_publish.id,
+                    false,
+                    None,
+                    Some("Risky external publish requires explicit confirmation and was not executed.".into()),
+                    ToolCallStatus::Blocked,
+                    true,
+                ));
+                reply = format!(
+                    "{reply}\n\nThe risky external publish step is blocked until you explicitly confirm it. No external write was executed."
+                );
+            }
         }
         MainChatAgentStrategy::MemoryProposal | MainChatAgentStrategy::LifeModelProposal => {
             let proposal =
@@ -708,11 +775,22 @@ pub(crate) async fn try_run_main_chat_agent_strategy(
             completed = true;
         }
         MainChatAgentStrategy::BlockedConfirmation => {
+            let unselected_skill_boundary = user_text_requests_unselected_skill(user_text);
+            let action_type = if unselected_skill_boundary {
+                "skill.boundary"
+            } else {
+                "external.write"
+            };
+            let action_description = if unselected_skill_boundary {
+                "Unselected skill instruction requested from Main Chat."
+            } else {
+                "External or sensitive write requested from Main Chat."
+            };
             let queued = enqueue_main_chat_agent_action(
                 state,
                 task_session_id,
-                "external.write",
-                "External or sensitive write requested from Main Chat.",
+                action_type,
+                action_description,
                 &mut execution_transcript,
             )
             .await?;
@@ -722,26 +800,40 @@ pub(crate) async fn try_run_main_chat_agent_strategy(
                     state,
                     Some(task_session_id),
                     ExecutionTranscriptEntryKind::PermissionRequest,
-                    "External or sensitive write is blocked pending explicit confirmation and provider support.",
+                    if unselected_skill_boundary {
+                        "Unselected skill instruction is blocked because it was not explicitly selected for this turn."
+                    } else {
+                        "External or sensitive write is blocked pending explicit confirmation and provider support."
+                    },
                     serde_json::json!({
                         "actionId": queued.id,
                         "policyLevel": queued.policy.level.as_str(),
+                        "reasonCode": queued.policy.reason_code.clone(),
                         "requiresConfirmation": queued.policy.requires_confirmation,
                         "externalWritesExecuted": false,
+                        "unselectedSkillInjected": false,
                     }),
                 )
                 .await,
             );
             tool_calls.push(tool_call_from_action(
-                "external.write",
+                action_type,
                 &queued.id,
                 false,
                 None,
-                Some("External or sensitive write requires explicit confirmation and is not executed in Main Chat v1.".into()),
+                Some(if unselected_skill_boundary {
+                    "Unselected skill instructions are not injected unless explicitly selected for the turn.".into()
+                } else {
+                    "External or sensitive write requires explicit confirmation and is not executed in Main Chat v1.".into()
+                }),
                 ToolCallStatus::Blocked,
                 true,
             ));
-            reply = "I cannot send or write that directly. It requires explicit confirmation and a governed provider path; no external write was executed.".into();
+            reply = if unselected_skill_boundary {
+                "I cannot use a skill that was not explicitly selected for this turn. No unselected skill instruction was injected.".into()
+            } else {
+                "I cannot send or write that directly. It requires explicit confirmation and a governed provider path; no external write was executed.".into()
+            };
         }
     }
 
@@ -892,4 +984,25 @@ pub(crate) async fn try_run_main_chat_agent_strategy(
         execution_transcript,
         legacy_fallback_used: false,
     }))
+}
+
+fn user_text_requests_unselected_skill(user_text: &str) -> bool {
+    let lower = user_text.to_ascii_lowercase();
+    lower.contains("skill that is not selected")
+        || lower.contains("unselected skill")
+        || lower.contains("not selected skill")
+}
+
+fn user_text_requests_memory_proposal_after_read(user_text: &str) -> bool {
+    let lower = user_text.to_ascii_lowercase();
+    (lower.contains("memory proposal") || lower.contains("create a memory proposal"))
+        && (lower.contains("read") || lower.contains("file"))
+}
+
+fn user_text_requests_risky_external_publish_confirmation(user_text: &str) -> bool {
+    let lower = user_text.to_ascii_lowercase();
+    lower.contains("risky external publish")
+        || (lower.contains("ask me before")
+            && lower.contains("external")
+            && lower.contains("publish"))
 }

@@ -2211,7 +2211,7 @@ fn final_delivery_from_evidence(
             observation_ids: action.observation_ids.clone(),
         })
         .collect::<Vec<_>>();
-    let observations_used = observations
+    let mut observations_used = observations
         .iter()
         .map(|observation| ObservationSummary {
             observation_id: observation.observation_id.clone(),
@@ -2220,6 +2220,15 @@ fn final_delivery_from_evidence(
             preview: observation.preview.clone(),
         })
         .collect::<Vec<_>>();
+    let mut cited_source_labels = observations_used
+        .iter()
+        .map(|observation| observation.source_label.clone())
+        .collect::<BTreeSet<_>>();
+    for source in context_observation_summaries_from_transcript(transcript) {
+        if cited_source_labels.insert(source.source_label.clone()) {
+            observations_used.push(source);
+        }
+    }
     let proposals_created = proposals
         .iter()
         .map(|proposal| ProposalSummary {
@@ -2257,6 +2266,52 @@ fn final_delivery_from_evidence(
         next_steps: next_steps_for_status(status),
         trace_available: !transcript.is_empty(),
     })
+}
+
+fn context_observation_summaries_from_transcript(
+    transcript: &[ExecutionTranscriptEntry],
+) -> Vec<ObservationSummary> {
+    let mut summaries = Vec::new();
+    for entry in transcript.iter().filter(|entry| {
+        entry.kind == ExecutionTranscriptEntryKind::Observation
+            && entry.metadata.get("contextSnapshotRef").is_some()
+    }) {
+        let Some(sources) = entry.metadata.get("sources").and_then(Value::as_array) else {
+            continue;
+        };
+        for (index, source) in sources.iter().enumerate() {
+            let source_kind = source
+                .get("sourceKind")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !matches!(
+                source_kind,
+                "selected_personal_context"
+                    | "workspace_instruction"
+                    | "materialized_file"
+                    | "skill_instruction"
+                    | "observation"
+            ) {
+                continue;
+            }
+            let source_label = source
+                .get("sourceId")
+                .and_then(Value::as_str)
+                .unwrap_or(source_kind);
+            let preview = source
+                .get("inclusionReason")
+                .and_then(Value::as_str)
+                .or_else(|| source.get("content").and_then(Value::as_str))
+                .unwrap_or("bounded context source selected for this turn");
+            summaries.push(ObservationSummary {
+                observation_id: format!("{}:context:{index}", entry.id),
+                source_kind: source_kind.into(),
+                source_label: bounded(source_label, 180),
+                preview: bounded(preview, 240),
+            });
+        }
+    }
+    summaries
 }
 
 fn has_pending_items(proposals: &[ProposalEvidence], blockers: &[BlockerEvidence]) -> bool {
