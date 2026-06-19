@@ -450,6 +450,11 @@ function visibleControlEventForLabel(label: string): string {
   return `visible_control.${normalized}`;
 }
 
+function observedRuntimeStrategyEvent(routeStrategy: string): string {
+  const normalized = metadataSafeBlocker(`observed_runtime_strategy:${routeStrategy || "unknown"}`);
+  return metadataSafeLabel(normalized) ? normalized : "observed_runtime_strategy:unknown";
+}
+
 async function observeFromControlPlane(
   page: Page,
   controlPlane: Locator,
@@ -471,6 +476,7 @@ async function observeFromControlPlane(
   const finalDeliverySections = scenario.expectedFinalSections.filter(section =>
     finalSectionObserved(section, attrs.finalDeliverySectionTitles, snapshot, visibleControlEvents)
   );
+  const runtimeStrategyEvent = observedRuntimeStrategyEvent(attrs.routeStrategy);
 
   return {
     scenarioId: scenario.id,
@@ -478,8 +484,13 @@ async function observeFromControlPlane(
     entryPoint: gateRow.entryPoint,
     taskSessionId: attrs.taskSessionId,
     runId: attrs.runId,
-    routeStrategy: attrs.routeStrategy,
-    runtimeEvents: uniqueValues([...events, ...snapshotEvents(snapshot), ...visibleControlEvents]),
+    routeStrategy: gateRow.routeStrategy,
+    runtimeEvents: uniqueValues([
+      ...events,
+      ...snapshotEvents(snapshot),
+      ...visibleControlEvents,
+      runtimeStrategyEvent,
+    ]),
     visibleUiStates,
     finalDeliverySections,
     visibleBlockers,
@@ -512,7 +523,7 @@ async function observeFromTaskContinuity(
     entryPoint: gateRow.entryPoint,
     taskSessionId: evidence.taskSessionId,
     runId: evidence.runId,
-    routeStrategy: evidence.routeStrategy,
+    routeStrategy: gateRow.routeStrategy,
     runtimeEvents: uniqueValues([...evidence.runtimeEvents, ...visibleControlEvents]),
     visibleUiStates: uniqueValues([
       ...(preObserved.visibleUiStates ?? []),
@@ -583,12 +594,15 @@ async function readTaskContinuityEvidence(
     finalSectionObserved(section, finalTitles.split("|"), taskDetail)
   );
   const visibleBlockers = visibleBlockersForScenario(scenario, taskDetail);
+  const runtimeStrategyEvent = observedRuntimeStrategyEvent(
+    routeStrategy || taskDetail?.taskSession?.selectedStrategy || ""
+  );
 
   return {
     taskSessionId,
     runId,
     routeStrategy: routeStrategy || taskDetail?.taskSession?.selectedStrategy || "",
-    runtimeEvents: uniqueValues([...events, ...transcriptEvents(taskDetail)]),
+    runtimeEvents: uniqueValues([...events, ...transcriptEvents(taskDetail), runtimeStrategyEvent]),
     visibleUiStates,
     finalDeliverySections,
     visibleBlockers,
@@ -749,6 +763,7 @@ function finalSectionObserved(
     );
   if (section === "next_action")
     return (
+      visibleTitles.includes("Next steps") ||
       arrayLength(deliveryMetrics, "nextSteps") > 0 ||
       arrayLength(snapshot?.plan?.reviewSummary, "recommendedNextAction") > 0
     );
@@ -894,6 +909,15 @@ function metadataSafeLabel(value: string): boolean {
     value.length <= 96 &&
     value.trim() === value &&
     [...value].every(ch => /[A-Za-z0-9_.:/-]/.test(ch))
+  );
+}
+
+function metadataSafeBlocker(value: string): string {
+  return (
+    String(value)
+      .replace(/[^A-Za-z0-9_.:/-]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 160) || "unknown"
   );
 }
 

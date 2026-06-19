@@ -236,6 +236,7 @@ function taskContinuityFinalDeliverySections(
     recordArrayLength(metrics, "skippedWork") > 0 ? "Skipped work" : null,
     recordArrayLength(metrics, "pendingUserActions") > 0 ? "Pending user actions" : null,
     recordArrayLength(metrics, "durableChanges") > 0 ? "Durable changes" : null,
+    recordArrayLength(metrics, "nextSteps") > 0 ? "Next steps" : null,
   ].filter((section): section is string => Boolean(section));
 }
 

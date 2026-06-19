@@ -509,6 +509,9 @@ describe("stage1 browser evidence report builder", () => {
     expect(script).toContain("selectedSkillId");
     expect(script).toContain("readyWithoutFinalDelivery");
     expect(script).toContain("snapshot?.proposals?.length");
+    expect(script).toContain("writeBlockedReport(result.blockers, result.observedScenarios ?? [])");
+    expect(script).toContain("observed_runtime_strategy");
+    expect(script).toContain('visibleTitles.includes("Next steps")');
     expect(script).not.toContain("tauri_webdriver_seeded_control_observation_not_completed");
     expect(script).toContain("expectedUiStates");
     expect(script).toContain("expectedFinalSections");

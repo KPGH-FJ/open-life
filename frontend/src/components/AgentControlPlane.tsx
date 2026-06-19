@@ -341,6 +341,7 @@ export default function AgentControlPlane({
     finalDelivery?.blockers.length ? "Blocked items" : null,
     finalDelivery?.pendingUserActions.length ? "Pending user actions" : null,
     finalDelivery?.durableChanges.length ? "Durable changes" : null,
+    finalDelivery?.nextSteps.length ? "Next steps" : null,
   ].filter((title): title is string => Boolean(title));
 
   return (

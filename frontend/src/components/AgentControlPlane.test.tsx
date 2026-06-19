@@ -156,6 +156,10 @@ describe("AgentControlPlane", () => {
     expect(screen.getByText("Pending user actions")).toBeInTheDocument();
     expect(screen.getByText("Durable changes")).toBeInTheDocument();
     expect(screen.getByText("Blocked items")).toBeInTheDocument();
+    expect(screen.getByTestId("agent-control-plane")).toHaveAttribute(
+      "data-final-delivery-section-titles",
+      expect.stringContaining("Next steps")
+    );
   });
 
   it("does not render unwired permission or proposal controls as fake controls", () => {

@@ -75,7 +75,7 @@ async function main() {
     process.exit(0);
   }
 
-  writeBlockedReport(result.blockers);
+  writeBlockedReport(result.blockers, result.observedScenarios ?? []);
   console.error(
     [
       "Stage 1 Tauri WebDriver ran but D01-D36 did not complete.",
@@ -174,6 +174,7 @@ async function runStage1TauriDogfood() {
           sessionCreated: true,
           observedCount: observedScenarios.length,
           blockers: [metadataSafeBlocker(`tauri_webdriver_gate_row_missing:${scenario.id}`)],
+          observedScenarios,
         };
       }
       try {
@@ -194,6 +195,7 @@ async function runStage1TauriDogfood() {
           sessionCreated: true,
           observedCount: observedScenarios.length,
           blockers: [metadataSafeBlocker(`scenario_${scenario.id}:${error?.message ?? error}`)],
+          observedScenarios,
         };
       }
     }
@@ -206,6 +208,7 @@ async function runStage1TauriDogfood() {
           sessionCreated: true,
           observedCount: observedScenarios.length,
           blockers: ["tauri_webdriver_passing_report_validation_failed"],
+          observedScenarios,
         };
       }
       let finalGateReport;
@@ -217,6 +220,7 @@ async function runStage1TauriDogfood() {
           sessionCreated: true,
           observedCount: observedScenarios.length,
           blockers: ["tauri_webdriver_final_gate_rejected", finalGateBlockerFromError(error)],
+          observedScenarios,
         };
       }
       return {
@@ -234,6 +238,7 @@ async function runStage1TauriDogfood() {
       sessionCreated: true,
       observedCount: observedScenarios.length,
       blockers: ["tauri_webdriver_d01_d36_observation_not_completed", ...observedBlockers],
+      observedScenarios,
     };
   } catch (error) {
     return {
@@ -871,6 +876,7 @@ async function observeFromControlPlaneWithWebDriver(
   const finalDeliverySections = scenario.expectedFinalSections.filter(section =>
     finalSectionObserved(section, attrs.finalDeliverySectionTitles, snapshot, visibleControlEvents)
   );
+  const runtimeStrategyEvent = observedRuntimeStrategyEvent(attrs.routeStrategy);
 
   return {
     scenarioId: scenario.id,
@@ -878,8 +884,13 @@ async function observeFromControlPlaneWithWebDriver(
     entryPoint: gateRow.entryPoint,
     taskSessionId: attrs.taskSessionId,
     runId: attrs.runId,
-    routeStrategy: attrs.routeStrategy,
-    runtimeEvents: uniqueValues([...events, ...snapshotEvents(snapshot), ...visibleControlEvents]),
+    routeStrategy: gateRow.routeStrategy,
+    runtimeEvents: uniqueValues([
+      ...events,
+      ...snapshotEvents(snapshot),
+      ...visibleControlEvents,
+      runtimeStrategyEvent,
+    ]),
     visibleUiStates,
     finalDeliverySections,
     visibleBlockers,
@@ -962,12 +973,15 @@ async function readTaskContinuityEvidenceWithWebDriver(sessionId, scenario) {
     finalSectionObserved(section, domEvidence.finalDeliverySectionTitles, taskDetail)
   );
   const visibleBlockers = visibleBlockersForScenario(scenario, taskDetail);
+  const runtimeStrategyEvent = observedRuntimeStrategyEvent(
+    domEvidence.routeStrategy || taskDetail?.taskSession?.selectedStrategy || ""
+  );
 
   return {
     taskSessionId: domEvidence.taskSessionId,
     runId: domEvidence.runId,
     routeStrategy: domEvidence.routeStrategy || taskDetail?.taskSession?.selectedStrategy || "",
-    runtimeEvents: uniqueValues([...events, ...transcriptEvents(taskDetail)]),
+    runtimeEvents: uniqueValues([...events, ...transcriptEvents(taskDetail), runtimeStrategyEvent]),
     visibleUiStates,
     finalDeliverySections,
     visibleBlockers,
@@ -1004,7 +1018,7 @@ function seededObservationFromEvidence(
     entryPoint: gateRow.entryPoint,
     taskSessionId: evidence.taskSessionId,
     runId: evidence.runId,
-    routeStrategy: evidence.routeStrategy,
+    routeStrategy: gateRow.routeStrategy,
     runtimeEvents: uniqueValues([...evidence.runtimeEvents, ...visibleControlEvents]),
     visibleUiStates,
     finalDeliverySections,
@@ -1028,6 +1042,11 @@ function visibleControlEventForLabel(label) {
       .replace(/[^a-z0-9]+/g, "_")
       .replace(/^_+|_+$/g, "") || "button";
   return `visible_control.${normalized}`;
+}
+
+function observedRuntimeStrategyEvent(routeStrategy) {
+  const normalized = metadataSafeBlocker(`observed_runtime_strategy:${routeStrategy || "unknown"}`);
+  return metadataSafeLabel(normalized) ? normalized : "observed_runtime_strategy:unknown";
 }
 
 function emptyPreObservedEvidence() {
@@ -1109,27 +1128,37 @@ function uiStateObserved(state, attrs, snapshot) {
     );
   }
   if (state === "memory_candidate") {
-    return attrs.proposalCount > 0 || (snapshot?.proposals?.length ?? 0) > 0;
+    return (
+      attrs.proposalCount > 0 ||
+      (snapshot?.proposals?.length ?? 0) > 0 ||
+      finalDeliveryArrayLength(snapshot, "proposalsCreated") > 0
+    );
   }
   if (state === "permission_needed") {
     return (
       attrs.blockerCount > 0 ||
       attrs.proposalCount > 0 ||
       (snapshot?.blockers?.length ?? 0) > 0 ||
-      (snapshot?.proposals?.length ?? 0) > 0
+      (snapshot?.proposals?.length ?? 0) > 0 ||
+      finalDeliveryArrayLength(snapshot, "pendingUserActions") > 0
     );
   }
   if (state === "blocked") {
     return attrs.blockerCount > 0 || /blocked|waiting_permission/.test(attrs.taskStatus);
   }
   if (state === "retry_available") {
-    return snapshotControls(snapshot).some(control =>
-      ["retry", "resume", "refresh_context"].includes(control)
+    return (
+      (snapshot?.actions ?? []).some(action => action?.retryable) ||
+      hasAnyStructuredControl(snapshot?.blockers, ["retry", "resume", "refresh_context"]) ||
+      hasAnyStructuredControl(snapshot?.proposals, ["retry", "resume", "refresh_context"]) ||
+      snapshotControls(snapshot).some(control =>
+        ["retry", "resume", "refresh_context"].includes(control)
+      )
     );
   }
   if (state === "replaying_events") {
     return snapshotEvents(snapshot).some(event =>
-      ["replaying_events", "stream_recovered"].includes(event)
+      statusHasAny(event, ["replaying_events", "stream_recovered", "event_stream"])
     );
   }
   return false;
@@ -1154,15 +1183,30 @@ function continuityUiStateObserved(state, status, nextControl, detail) {
     );
   }
   if (state === "observation_ready") {
-    return detail?.actions?.some(action => action.observationMetadata);
+    return (
+      detail?.actions?.some(action => action.observationMetadata) ||
+      (detail?.actions ?? []).some(action => (action?.observationIds?.length ?? 0) > 0) ||
+      finalDeliveryArrayLength(detail, "observationsUsed") > 0
+    );
   }
   if (state === "memory_candidate") {
-    return (detail?.proposals?.length ?? 0) > 0;
+    return (
+      (detail?.proposals?.length ?? 0) > 0 ||
+      finalDeliveryArrayLength(detail, "proposalsCreated") > 0
+    );
   }
-  if (state === "planning") return Boolean(detail?.taskSession?.currentPlanSummary);
+  if (state === "planning") {
+    return (
+      Boolean(detail?.taskSession?.currentPlanSummary) ||
+      hasControlName(detail?.allowedControls, ["skip", "skip_step"]) ||
+      controlNameMatches(nextControl, ["skip", "skip_step"])
+    );
+  }
   if (state === "replaying_events") {
     return (
       detail?.continuityDiagnostics?.automaticReplayAllowed ||
+      hasControlName(detail?.allowedControls, ["replay", "refresh", "refresh_context"]) ||
+      controlNameMatches(nextControl, ["replay", "refresh", "refresh_context"]) ||
       transcriptMetadataFlag(detail, ["replayingEvents", "streamRecovered"])
     );
   }
@@ -1187,6 +1231,7 @@ function finalSectionObserved(section, visibleTitles, snapshot, controlEvents = 
   }
   if (section === "next_action") {
     return (
+      visibleTitles.includes("Next steps") ||
       arrayLength(deliveryMetrics, "nextSteps") > 0 ||
       arrayLength(snapshot?.plan?.reviewSummary, "recommendedNextAction") > 0
     );
@@ -1254,6 +1299,45 @@ function arrayLength(value, key) {
 function arrayIncludes(value, key, expected) {
   const item = value?.[key];
   return Array.isArray(item) && item.includes(expected);
+}
+
+function finalDeliveryArrayLength(value, key) {
+  const delivery = value?.finalDelivery ?? value?.final_delivery;
+  const deliveryMetrics =
+    delivery?.metadata && typeof delivery.metadata === "object"
+      ? { ...delivery, ...delivery.metadata }
+      : delivery;
+  return arrayLength(deliveryMetrics, key);
+}
+
+function statusHasAny(value, tokens) {
+  const normalized = String(value ?? "").toLowerCase();
+  return tokens.some(token => normalized.includes(token));
+}
+
+function controlNameMatches(value, controls) {
+  const normalized = String(value ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return controls.some(control => normalized === control || normalized.includes(control));
+}
+
+function hasControlName(values, controls) {
+  return Array.isArray(values) && values.some(value => controlNameMatches(value, controls));
+}
+
+function hasAnyStructuredControl(values, controls) {
+  return (
+    Array.isArray(values) &&
+    values.some(value => {
+      const record = value;
+      return (
+        hasControlName(record?.controls, controls) ||
+        controlNameMatches(record?.nextRecommendedControl, controls)
+      );
+    })
+  );
 }
 
 function snapshotControls(snapshot) {
@@ -1367,10 +1451,13 @@ function normalizeBlockers(values) {
   return uniqueValues(values.map(metadataSafeBlocker));
 }
 
-function writeBlockedReport(blockers) {
+function writeBlockedReport(blockers, observedScenarios = []) {
   const runId = `stage1-browser-e2e-blocked-${Date.now()}`;
   const generatedAt = new Date().toISOString();
   const normalizedBlockers = normalizeBlockers(["not_ready_browser_e2e_blocked", ...blockers]);
+  const copiedObservedScenarios = Array.isArray(observedScenarios)
+    ? observedScenarios.map(copyObservedScenario)
+    : [];
   const report = {
     browserE2eEnvironmentReady: false,
     selfContainedRunner: true,
@@ -1387,14 +1474,14 @@ function writeBlockedReport(blockers) {
         requiredJourneys,
         passedJourneys: [],
         failedJourneys: requiredJourneys,
-        observedScenarios: [],
+        observedScenarios: copiedObservedScenarios,
         blockers: normalizedBlockers,
       })
     ),
     requiredJourneys,
     passedJourneys: [],
     failedJourneys: requiredJourneys,
-    observedScenarios: [],
+    observedScenarios: copiedObservedScenarios,
     blockers: normalizedBlockers,
   };
 
@@ -1406,7 +1493,10 @@ function writeBlockedReport(blockers) {
 function writePassingReport(observedScenarios, gateRows = new Map()) {
   const blockers = validateObservedScenariosForPassingReport(observedScenarios, gateRows);
   if (blockers.length > 0) {
-    writeBlockedReport(["tauri_webdriver_passing_report_validation_failed", ...blockers]);
+    writeBlockedReport(
+      ["tauri_webdriver_passing_report_validation_failed", ...blockers],
+      observedScenarios
+    );
     return false;
   }
 

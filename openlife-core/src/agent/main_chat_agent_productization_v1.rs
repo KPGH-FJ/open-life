@@ -2310,7 +2310,9 @@ fn delivery_headline(status: MainChatAgentProductDeliveryStatus) -> &'static str
 
 fn next_steps_for_status(status: MainChatAgentProductDeliveryStatus) -> Vec<String> {
     match status {
-        MainChatAgentProductDeliveryStatus::Completed => Vec::new(),
+        MainChatAgentProductDeliveryStatus::Completed => {
+            vec!["No pending user action is required.".into()]
+        }
         MainChatAgentProductDeliveryStatus::CompletedWithPendingItems => {
             vec!["Review pending proposal or permission items.".into()]
         }
