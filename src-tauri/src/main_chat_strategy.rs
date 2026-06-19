@@ -600,6 +600,27 @@ pub(crate) async fn try_run_main_chat_agent_strategy(
                 )
                 .await,
             );
+            execution_transcript.extend(
+                append_main_chat_agent_transcript(
+                    state,
+                    Some(task_session_id),
+                    ExecutionTranscriptEntryKind::Observation,
+                    "Governed PlanExecute draft observation recorded for the queued action.",
+                    serde_json::json!({
+                        "actionId": queued.id,
+                        "sourceKind": "plan_execute",
+                        "sourceLabel": "plan_execute.create_session",
+                        "preview": format!(
+                            "PlanExecute draft with {} steps",
+                            plan_session.steps.len()
+                        ),
+                        "planExecuteSessionId": plan_session.session_id,
+                        "stepCount": plan_session.steps.len(),
+                        "directWritesExecuted": false,
+                    }),
+                )
+                .await,
+            );
             tool_calls.push(tool_call_from_action(
                 "plan_execute.create_session",
                 &queued.id,

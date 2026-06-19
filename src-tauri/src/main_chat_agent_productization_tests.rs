@@ -1371,6 +1371,22 @@ async fn main_chat_agent_state_payload_exposes_plan_execute_controls_from_later_
         "PlanExecute draft step controls should expose skip_step for Stage 1 D09: {:?}",
         plan.steps
     );
+    assert!(
+        agent_state.observations.iter().any(|observation| {
+            observation.source_kind == "plan_execute"
+                && observation.source_label == "plan_execute.create_session"
+        }),
+        "PlanExecute should expose governed observation evidence for Stage 1 D08: {:?}",
+        agent_state.observations
+    );
+    assert!(
+        agent_state
+            .final_delivery
+            .as_ref()
+            .is_some_and(|delivery| !delivery.observations_used.is_empty()),
+        "PlanExecute final delivery should cite observation evidence: {:?}",
+        agent_state.final_delivery
+    );
 }
 
 #[tokio::test]

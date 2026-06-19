@@ -63,7 +63,7 @@ export const STAGE1_DOGFOOD_SCENARIOS: Stage1DogfoodScenario[] = [
   s(
     "D08",
     "chat_e2e",
-    "Plan my week and execute the first safe read-only step.",
+    "Draft a weekly plan and break this goal into steps.",
     ["planning", "action_running", "observation_ready", "completed"],
     ["completed_work", "observations_used", "next_action"]
   ),
