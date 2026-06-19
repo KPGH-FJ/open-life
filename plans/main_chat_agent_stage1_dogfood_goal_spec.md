@@ -1,12 +1,18 @@
 # Main Chat Agent Stage 1 Dogfood Goal Spec
 
-> Date: 2026-06-18
-> Status: implementation entrypoint for future CLI goal work
+> Date: 2026-06-19
+> Status: completed automated Stage 1 engineering dogfood goal; retained as acceptance audit trail
 > Depends on: Beta v1 readiness and Stage 1 preparation documents
 
 ## 1. Objective
 
 Implement **Main Chat Agent Stage 1: Real End-to-End Dogfood**.
+
+Status update: this automated engineering dogfood goal passed in Linux CI run
+`27807633105` with real `tauri_command_surface_browser_observed` evidence, 36
+observed scenarios, 36 passed journeys, 0 failed journeys, and no blockers.
+Manual dogfood / internal-trial approval and external live-provider proof remain
+separate follow-up scopes.
 
 The goal is to prove that real users can start from Main Chat, issue realistic
 work-like requests, see the agent execute or block correctly, and receive a
@@ -44,6 +50,9 @@ Read before editing code:
   path actually ran.
 
 ## 4. Implementation Phases
+
+All phases below are complete for automated deterministic Stage 1 engineering
+dogfood.
 
 ### Phase 0: Stage 1 inventory and seed foundation
 
@@ -117,7 +126,7 @@ mark manual dogfood as not attempted and recommend engineering dogfood only.
 
 ## 5. Acceptance
 
-Stage 1 is complete only when:
+Stage 1 automated engineering dogfood is complete only when:
 
 - default deterministic dogfood runs all P0/P1 required scenarios from
   `plans/main_chat_stage1_dogfood_scenarios.md`;

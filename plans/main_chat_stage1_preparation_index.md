@@ -1,8 +1,8 @@
 # Main Chat Stage 1 Preparation Index
 
-> Date: 2026-06-18
+> Date: 2026-06-19
 > Stage: Main Chat Agent Stage 1 - Real End-to-End Dogfood
-> Status: preparation complete for implementation planning
+> Status: implementation complete for automated engineering dogfood; manual/internal-trial review remains separate
 
 ## 1. Why Stage 1 Exists
 
@@ -16,6 +16,25 @@ real dogfood experience:
 - failures are recoverable or clearly blocked;
 - memory/knowledge changes are proposal-first;
 - final delivery is accurate.
+
+## 1.1 Current Evidence
+
+Stage 1 automated engineering dogfood passed on the supported Linux Tauri
+WebDriver path in GitHub Actions:
+
+- Workflow: `Stage 1 Tauri Dogfood`
+- Run id: `27807633105`
+- Evidence source: `tauri_command_surface_browser_observed`
+- Observed scenarios: `36`
+- Passed journeys: `36`
+- Failed journeys: `0`
+- Blockers: `[]`
+- Browser report digest:
+  `bytes:25422 hash:sha256:b53415fe64b623298be32b93fe55d3c45b7941c65d94e1ce6f3c716db8ade678`
+
+This is a `ready_for_engineering_dogfood` result for default deterministic
+Stage 1 readiness. It is not a `ready_for_internal_trial` result; manual dogfood
+and external live-provider evidence remain separate scopes.
 
 ## 2. Preparation Documents
 
@@ -32,9 +51,10 @@ real dogfood experience:
 | `plans/main_chat_stage1_readiness_gate_contract.md` | Defines final Stage 1 readiness command/report shape. |
 | `plans/main_chat_agent_stage1_dogfood_goal_spec.md` | CLI goal-mode entrypoint for implementation. |
 
-## 3. Implementation Entry Point
+## 3. Historical Implementation Entry Point
 
-Use this concise instruction for CLI goal mode:
+The Stage 1 implementation goal is complete. This was the concise instruction
+used for CLI goal mode and is retained as audit trail:
 
 ```text
 Implement Main Chat Agent Stage 1 Real End-to-End Dogfood.
@@ -52,7 +72,7 @@ browser-level smoke slice before Stage 1 can be marked complete.
 
 ## 4. Readiness To Start Development
 
-Stage 1 implementation work can start when:
+Stage 1 implementation work started only after:
 
 - Stage 1 preparation documents are tracked or intentionally staged, and the
   remaining working tree is clean;
