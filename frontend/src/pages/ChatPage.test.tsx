@@ -1077,6 +1077,152 @@ describe("ChatPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("refreshes agent snapshot after accepting a memory proposal so rollback is visible", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+
+    const pendingMemoryState = buildMainChatAgentStateSnapshot({
+      task: {
+        ...buildMainChatAgentStateSnapshot().task,
+        taskId: "mainchat-task-memory-accept-ui-1",
+        runId: "run-memory-accept-ui-1",
+        title: "Memory proposal",
+        strategy: "memory_proposal",
+        status: "waiting_permission",
+        proposalIds: ["proposal-memory-accept-ui-1"],
+        finalDeliveryId: undefined,
+      },
+      route: {
+        strategy: "memory_proposal",
+        reason: "memory proposal requires review",
+        confidence: 0.93,
+      },
+      actions: [],
+      observations: [],
+      proposals: [
+        {
+          proposalId: "proposal-memory-accept-ui-1",
+          proposalType: "memory",
+          status: "pending_review",
+          title: "memory proposal",
+          summary: "Remember morning deep work preference.",
+          evidenceIds: ["memory-proposal-evidence-ui-1"],
+          actionIds: [],
+          controls: [
+            "accept_proposal",
+            "reject_proposal",
+            "edit_proposal",
+            "defer",
+            "open_review_center",
+          ],
+        },
+      ],
+      finalDelivery: undefined,
+    });
+    const acceptedMemoryState = buildMainChatAgentStateSnapshot({
+      ...pendingMemoryState,
+      task: {
+        ...pendingMemoryState.task,
+        status: "completed",
+        finalDeliveryId: "delivery-memory-accept-ui-1",
+      },
+      proposals: [
+        {
+          ...pendingMemoryState.proposals[0],
+          status: "accepted",
+          controls: ["rollback", "open_review_center"],
+          memoryLifecycle: {
+            memoryId: "memory-accept-ui-1",
+            proposalId: "proposal-memory-accept-ui-1",
+            sourceTaskSessionId: "mainchat-task-memory-accept-ui-1",
+            sourceRunId: "run-memory-accept-ui-1",
+            content: "User prefers morning deep work.",
+            scope: "preference",
+            category: "work_style",
+            riskLevel: "low",
+            status: "materialized",
+            materializationStatus: "materialized",
+            createdBy: "main_chat",
+            acceptedBy: "user",
+            acceptedAt: "2026-06-16T00:00:01.000Z",
+            materializedViewId: "materialized-view-memory-accept-ui-1",
+            materializedViewVersion: 1,
+            evidenceIds: ["memory-proposal-evidence-ui-1"],
+            confidence: 0.84,
+            conflictIds: [],
+          },
+        },
+      ],
+      finalDelivery: {
+        ...buildMainChatAgentStateSnapshot().finalDelivery!,
+        deliveryId: "delivery-memory-accept-ui-1",
+        taskId: "mainchat-task-memory-accept-ui-1",
+        runId: "run-memory-accept-ui-1",
+        headline: "Memory proposal accepted",
+        answer: "The accepted memory is materialized and can be rolled back from this task.",
+        durableChanges: [
+          {
+            changeType: "memory",
+            target: "memory-accept-ui-1",
+            provenanceId: "proposal-memory-accept-ui-1",
+            rollbackAvailable: true,
+          },
+        ],
+      },
+    });
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "accept_proposal") {
+        return Promise.resolve({ id: "proposal-memory-accept-ui-1", status: "accepted" } as any);
+      }
+      if (cmd === "get_main_chat_agent_state_snapshot") {
+        return Promise.resolve(acceptedMemoryState as any);
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Remember my deep work preference" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+    await waitFor(() => {
+      expect(listeners.get("stream-message-done")).toBeDefined();
+    });
+
+    await act(async () => {
+      await listeners.get("stream-message-done")?.({
+        payload: {
+          session_id: "session-1",
+          run_id: "run-memory-accept-ui-1",
+          reply: "I created a memory proposal.",
+          reasoning_trace: null,
+          tool_calls: [],
+          agent_state: pendingMemoryState,
+          execution_transcript: [],
+          legacy_fallback_used: false,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Accept proposal" }));
+
+    expect(await screen.findByRole("button", { name: "Rollback memory" })).toBeInTheDocument();
+    expect(invoke).toHaveBeenCalledWith(
+      "get_main_chat_agent_state_snapshot",
+      expect.objectContaining({ taskSessionId: "mainchat-task-memory-accept-ui-1" })
+    );
+  });
+
   it("renders durable event stream status from backend events and ignores duplicates", async () => {
     type StreamListener = (event: { payload: any }) => void | Promise<void>;
     const listeners = new Map<string, StreamListener>();

@@ -1752,11 +1752,17 @@ export default function ChatPage({
     async (taskSessionId?: string) => {
       await refreshPendingProposals();
       if (taskSessionId) {
+        try {
+          const snapshot = await getMainChatAgentStateSnapshot(taskSessionId);
+          applyMainChatAgentStateSnapshot(snapshot, "snapshot_refresh_required");
+        } catch {
+          // Task-state refresh still runs below; snapshot reload is best-effort after controls.
+        }
         await loadMainChatTaskState(taskSessionId, currentSessionIdRef.current);
       }
       await loadTaskContinuityList();
     },
-    [loadTaskContinuityList]
+    [applyMainChatAgentStateSnapshot, loadTaskContinuityList]
   );
 
   const handleResumeMainChatTask = useCallback(async () => {
@@ -2066,15 +2072,9 @@ export default function ChatPage({
   const refreshMainChatSnapshot = useCallback(
     async (taskSessionId?: string) => {
       if (!taskSessionId) return;
-      try {
-        const snapshot = await getMainChatAgentStateSnapshot(taskSessionId);
-        applyMainChatAgentStateSnapshot(snapshot, "snapshot_refresh_required");
-      } catch {
-        // Task-state refresh still runs below; snapshot reload is best-effort after controls.
-      }
       await refreshMainChatControlState(taskSessionId);
     },
-    [applyMainChatAgentStateSnapshot, refreshMainChatControlState]
+    [refreshMainChatControlState]
   );
 
   const handleConfirmPlan = useCallback(
