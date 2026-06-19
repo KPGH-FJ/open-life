@@ -501,7 +501,13 @@ async function observeFromControlPlane(
     uiStateObserved(state, attrs, snapshot)
   );
   const finalDeliverySections = scenario.expectedFinalSections.filter(section =>
-    finalSectionObserved(section, attrs.finalDeliverySectionTitles, snapshot, visibleControlEvents)
+    finalSectionObserved(
+      section,
+      attrs.finalDeliverySectionTitles,
+      snapshot,
+      visibleControlEvents,
+      events
+    )
   );
   const runtimeStrategyEvent = observedRuntimeStrategyEvent(attrs.routeStrategy);
 
@@ -618,7 +624,7 @@ async function readTaskContinuityEvidence(
     continuityUiStateObserved(state, status, nextControl, taskDetail)
   );
   const finalDeliverySections = scenario.expectedFinalSections.filter(section =>
-    finalSectionObserved(section, finalTitles.split("|"), taskDetail)
+    finalSectionObserved(section, finalTitles.split("|"), taskDetail, [], events)
   );
   const visibleBlockers = visibleBlockersForScenario(scenario, taskDetail);
   const runtimeStrategyEvent = observedRuntimeStrategyEvent(
@@ -775,9 +781,11 @@ function finalSectionObserved(
   section: string,
   visibleTitles: string[],
   snapshot: any,
-  controlEvents: string[] = []
+  controlEvents: string[] = [],
+  runtimeEvents: string[] = []
 ): boolean {
   const delivery = snapshot?.finalDelivery ?? snapshot?.final_delivery;
+  const eventEvidence = [...snapshotEvents(snapshot), ...runtimeEvents];
   const deliveryMetrics =
     delivery?.metadata && typeof delivery.metadata === "object"
       ? { ...delivery, ...delivery.metadata }
@@ -848,8 +856,8 @@ function finalSectionObserved(
     return (
       visibleTitles.includes("Durable changes") ||
       arrayLength(deliveryMetrics, "durableChanges") > 0 ||
-      snapshotEvents(snapshot).includes("memory.materialized") ||
-      snapshotEvents(snapshot).includes("memory.rolled_back")
+      eventEvidence.includes("memory.materialized") ||
+      eventEvidence.includes("memory.rolled_back")
     );
   return false;
 }

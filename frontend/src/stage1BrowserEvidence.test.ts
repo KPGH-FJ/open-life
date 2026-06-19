@@ -608,8 +608,11 @@ describe("stage1 browser evidence report builder", () => {
     for (const file of files) {
       const source = fs.readFileSync(file, "utf8");
       expect(source).toContain('transcriptEvents(snapshot).includes("transcript.observation")');
-      expect(source).toContain('snapshotEvents(snapshot).includes("memory.materialized")');
-      expect(source).toContain('snapshotEvents(snapshot).includes("memory.rolled_back")');
+      expect(source).toContain(
+        "const eventEvidence = [...snapshotEvents(snapshot), ...runtimeEvents]"
+      );
+      expect(source).toContain('eventEvidence.includes("memory.materialized")');
+      expect(source).toContain('eventEvidence.includes("memory.rolled_back")');
       expect(source).toContain("controlNameMatches(snapshot?.nextRecommendedControl");
     }
   });
