@@ -107,14 +107,12 @@ async fn main_chat_task_continuity_list_detail_and_refresh_are_evidence_backed()
             .expect("main chat action queue")
             .lock()
             .await;
+        let execution_action = ExecutionAction::new("file.read", "Read a safe workspace file.");
         let queued = queue
             .enqueue(
                 &blocked.id,
-                ExecutionAction::new("file.read", "Read a safe workspace file."),
-                ExecutionPolicy::default().classify(&ExecutionAction::new(
-                    "file.read",
-                    "Read a safe workspace file.",
-                )),
+                execution_action.clone(),
+                ExecutionPolicy.classify(&execution_action),
             )
             .expect("enqueue read action");
         queue
@@ -407,7 +405,7 @@ async fn main_chat_task_continuity_blocks_stale_terminal_and_changed_target_resu
             .enqueue(
                 &changed_target.id,
                 action.clone(),
-                ExecutionPolicy::default().classify(&action),
+                ExecutionPolicy.classify(&action),
             )
             .expect("enqueue pending action");
         queue
@@ -611,7 +609,7 @@ async fn resume_main_chat_task_replays_pending_action_after_tool_permission_acce
             .enqueue(
                 &session.id,
                 action.clone(),
-                ExecutionPolicy::default().classify(&action),
+                ExecutionPolicy.classify(&action),
             )
             .expect("enqueue pending mcp action");
         queue
@@ -777,7 +775,7 @@ async fn resume_main_chat_task_does_not_replay_tool_permission_when_scope_target
             .enqueue(
                 &session.id,
                 action.clone(),
-                ExecutionPolicy::default().classify(&action),
+                ExecutionPolicy.classify(&action),
             )
             .expect("enqueue pending mcp action");
         queue
@@ -903,14 +901,14 @@ async fn cancel_main_chat_task_cancels_nonterminal_queued_actions() {
             .enqueue(
                 &session.id,
                 planned_action.clone(),
-                ExecutionPolicy::default().classify(&planned_action),
+                ExecutionPolicy.classify(&planned_action),
             )
             .expect("enqueue planned action");
         let pending = queue
             .enqueue(
                 &session.id,
                 permission_action.clone(),
-                ExecutionPolicy::default().classify(&permission_action),
+                ExecutionPolicy.classify(&permission_action),
             )
             .expect("enqueue pending action");
         (planned.id, pending.id)

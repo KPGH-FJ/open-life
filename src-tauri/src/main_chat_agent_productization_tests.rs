@@ -1325,6 +1325,55 @@ async fn main_chat_agent_productization_v1_send_result_includes_runtime_backed_a
 }
 
 #[tokio::test]
+async fn main_chat_agent_state_payload_exposes_plan_execute_controls_from_later_plan_transcript() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let result = crate::main_chat_send::send_message_with_state(
+        "productization-plan-agent-state".into(),
+        vec![openlife_core::llm::ChatMessage {
+            role: "user".into(),
+            content: "Draft a weekly plan and break this goal into steps.".into(),
+        }],
+        None,
+        &state,
+    )
+    .await
+    .expect("send PlanExecute message");
+
+    assert_eq!(
+        result
+            .agent_ingress
+            .as_ref()
+            .expect("agent ingress")
+            .selected_strategy,
+        MainChatAgentStrategy::PlanExecute
+    );
+    let agent_state = result
+        .agent_state
+        .expect("PlanExecute send result must include agent_state");
+    let plan = agent_state
+        .plan
+        .expect("PlanExecute agent_state must expose plan evidence");
+    assert!(
+        plan.plan_session_id.is_some(),
+        "plan evidence should be enriched from the Plan transcript entry that carries planExecuteSessionId: {plan:?}"
+    );
+    assert!(
+        plan.controls
+            .iter()
+            .any(|control| control == "confirm_plan"),
+        "PlanExecute draft controls should be visible in agent_state: {:?}",
+        plan.controls
+    );
+    assert!(
+        plan.steps
+            .iter()
+            .any(|step| step.controls.iter().any(|control| control == "skip_step")),
+        "PlanExecute draft step controls should expose skip_step for Stage 1 D09: {:?}",
+        plan.steps
+    );
+}
+
+#[tokio::test]
 async fn main_chat_agent_beta_v1_default_experience_maps_required_states_to_runtime_ui_evidence() {
     let report =
         crate::main_chat_agent_beta_v1_default_experience::run_main_chat_agent_beta_v1_default_experience_report()

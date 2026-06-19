@@ -170,6 +170,7 @@ pub(crate) async fn run_main_chat_agent_product_maturity_v2_task_continuity_gate
     }
 }
 
+#[allow(clippy::vec_init_then_push)]
 async fn run_task_continuity_runtime_proofs(
 ) -> Result<Vec<MainChatProductMaturityV2TaskContinuityProof>, String> {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
@@ -383,7 +384,7 @@ async fn seed_failed_safe_read_task(state: &Arc<crate::AppState>) -> Result<Seed
             .enqueue(
                 &session.id,
                 action.clone(),
-                ExecutionPolicy::default().classify(&action),
+                ExecutionPolicy.classify(&action),
             )
             .map_err(|err| err.to_string())?;
         queue
@@ -580,7 +581,7 @@ async fn seed_waiting_permission_task(
             .enqueue(
                 &session.id,
                 action.clone(),
-                ExecutionPolicy::default().classify(&action),
+                ExecutionPolicy.classify(&action),
             )
             .map_err(|err| err.to_string())?;
         queue
@@ -621,6 +622,7 @@ async fn seed_waiting_permission_task(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scenario<const P: usize, const R: usize, const U: usize, const C: usize, const N: usize>(
     id: &str,
     prompt: &str,
@@ -724,6 +726,7 @@ fn proof_for_detail<const R: usize, const U: usize, const N: usize>(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn proof(
     scenario_id: &str,
     passed: bool,

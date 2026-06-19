@@ -9743,10 +9743,10 @@ mod tests {
         assert!(draft
             .blocking_reasons
             .contains(&"controlled_preview_approval_readiness_not_ready".to_string()));
-        assert_eq!(draft.manual_review_required, true);
-        assert_eq!(draft.not_automatic_migration, true);
-        assert_eq!(draft.requires_separate_implementation, true);
-        assert_eq!(draft.requires_separate_cutover_review, true);
+        assert!(draft.manual_review_required);
+        assert!(draft.not_automatic_migration);
+        assert!(draft.requires_separate_implementation);
+        assert!(draft.requires_separate_cutover_review);
     }
 
     #[tokio::test]
@@ -9791,10 +9791,10 @@ mod tests {
 
         assert!(draft.draft_ready);
         assert!(draft.controlled_preview_approval_readiness.ready);
-        assert_eq!(draft.manual_review_required, true);
-        assert_eq!(draft.not_automatic_migration, true);
-        assert_eq!(draft.requires_separate_implementation, true);
-        assert_eq!(draft.requires_separate_cutover_review, true);
+        assert!(draft.manual_review_required);
+        assert!(draft.not_automatic_migration);
+        assert!(draft.requires_separate_implementation);
+        assert!(draft.requires_separate_cutover_review);
         assert_eq!(draft.source_session_id, "session-cutover-plan-ready");
         assert_eq!(draft.input_message_length, message.chars().count());
         assert!(draft.input_message_hash.starts_with("sha256:"));
@@ -10624,9 +10624,9 @@ mod tests {
         assert!(!draft.discussion_gate.eligible);
         assert!(draft.plan_sections.is_empty());
         assert!(draft.stable_plan_digest.is_none());
-        assert_eq!(draft.manual_review_required, true);
-        assert_eq!(draft.not_automatic_migration, true);
-        assert_eq!(draft.requires_separate_implementation, true);
+        assert!(draft.manual_review_required);
+        assert!(draft.not_automatic_migration);
+        assert!(draft.requires_separate_implementation);
         assert!(draft
             .blocking_reasons
             .contains(&"narrow_implementation_discussion_gate_not_ready".to_string()));
@@ -10674,10 +10674,10 @@ mod tests {
 
         assert!(draft.draft_ready);
         assert!(draft.discussion_gate.eligible);
-        assert_eq!(draft.manual_review_required, true);
-        assert_eq!(draft.not_automatic_migration, true);
-        assert_eq!(draft.requires_separate_implementation, true);
-        assert_eq!(draft.requires_separate_cutover_review, true);
+        assert!(draft.manual_review_required);
+        assert!(draft.not_automatic_migration);
+        assert!(draft.requires_separate_implementation);
+        assert!(draft.requires_separate_cutover_review);
         assert_eq!(draft.source_session_id, "session-narrow-plan-ready");
         assert_eq!(draft.input_message_length, message.chars().count());
         assert!(draft.input_message_hash.starts_with("sha256:"));

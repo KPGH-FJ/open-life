@@ -678,6 +678,7 @@ fn events_prove_no_direct_writes(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn plan_scenario(
     id: &str,
     prompt: &str,

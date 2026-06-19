@@ -24,12 +24,11 @@ fn main_chat_hs_runtime_behavior_tests_are_not_concentrated_in_lib_rs() {
         );
     }
 
-    for forbidden in ["main_chat_hs_runtime_helpers_are_extracted_from_lib_rs"] {
-        assert!(
-            !source.contains(&format!("\n    fn {forbidden}(")),
-            "HS runtime extraction guard {forbidden} should live outside src/lib.rs"
-        );
-    }
+    let forbidden = "main_chat_hs_runtime_helpers_are_extracted_from_lib_rs";
+    assert!(
+        !source.contains(&format!("\n    fn {forbidden}(")),
+        "HS runtime extraction guard {forbidden} should live outside src/lib.rs"
+    );
 }
 
 #[test]

@@ -334,7 +334,7 @@ fn proof_for_fixture(
     let success_satisfied = matches!(fixture.expected_outcome.as_str(), "success" | "proposal")
         && runtime_evidence_count > 0
         && blockers.is_empty();
-    let live_satisfied = fixture.expected_outcome == "opt_in_live" && false;
+    let live_satisfied = false;
     let passed = fixture_contract_valid
         && (success_satisfied || expected_blocker_satisfied || live_satisfied)
         && !fixture.requires_live_provider;
@@ -550,6 +550,7 @@ fn beta_real_task_fixtures() -> Vec<MainChatAgentBetaV1RealTaskFixture> {
     ]
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fixture(
     id: &str,
     vertical: &str,

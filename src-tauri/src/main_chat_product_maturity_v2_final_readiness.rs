@@ -555,6 +555,7 @@ fn phase_count_from_live(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn deterministic_phase_count(
     phase_id: &str,
     phase_label: &str,

@@ -1623,7 +1623,7 @@ pub(crate) async fn accept_proposal_with_state(
             let store = lifecycle_store.lock().await;
             if let Ok(Some(record)) = store.get_record_by_proposal_id(&proposal.id) {
                 response["memoryLifecycle"] =
-                    serde_json::to_value(&record).unwrap_or_else(|_| serde_json::Value::Null);
+                    serde_json::to_value(&record).unwrap_or(serde_json::Value::Null);
             }
         }
     }

@@ -991,8 +991,7 @@ async fn enqueue_stage1_browser_action(
         .as_ref()
         .ok_or_else(|| "action queue missing".to_string())?;
     let queue = queue_arc.lock().await;
-    let policy =
-        openlife_core::agent::main_chat_agent_v1::ExecutionPolicy::default().classify(&action);
+    let policy = openlife_core::agent::main_chat_agent_v1::ExecutionPolicy.classify(&action);
     queue
         .enqueue(session_id, action, policy)
         .map_err(|err| err.to_string())
@@ -1333,6 +1332,7 @@ fn audit_browser_e2e_evidence(
     }
 }
 
+#[allow(clippy::needless_borrows_for_generic_args)]
 fn audit_browser_observed_scenarios(evidence: &MainChatStage1BrowserE2eEvidence) -> Vec<String> {
     let mut blockers = Vec::new();
     let required = required_browser_journeys();
@@ -1760,6 +1760,7 @@ pub(crate) fn stage1_browser_report_digest(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn stage1_browser_report_digest_input(
     evidence_source: &str,
     run_id: &str,
@@ -2717,6 +2718,7 @@ fn stage1_scenarios() -> Vec<Stage1ScenarioDef> {
     ]
 }
 
+#[allow(clippy::too_many_arguments)]
 fn d(
     id: &'static str,
     priority: &'static str,

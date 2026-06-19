@@ -1920,6 +1920,7 @@ fn set_session_status_for_product_control(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_product_control_transition(
     control: openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentProductControl,
     to_status: &str,

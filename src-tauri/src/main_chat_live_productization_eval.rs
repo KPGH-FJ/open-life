@@ -183,6 +183,7 @@ pub(crate) fn main_chat_live_product_scenarios() -> Vec<MainChatLiveProductScena
     ]
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scenario(
     id: &str,
     capability_group: &str,

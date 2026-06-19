@@ -45,6 +45,7 @@ pub(crate) struct MainChatReactAgentLoopAttempt {
     pub(crate) blocker_reason: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn attach_main_chat_read_observation_metadata(
     metadata: &mut serde_json::Value,
     queue_action_type: &str,

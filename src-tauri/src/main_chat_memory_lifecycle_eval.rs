@@ -212,6 +212,7 @@ fn memory_lifecycle_eval_scenarios() -> Vec<MemoryLifecycleEvalScenario> {
     ]
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scenario<const R: usize, const U: usize, const C: usize, const N: usize>(
     id: &str,
     prompt: &str,
@@ -792,6 +793,7 @@ fn failed_proof(scenario: &MemoryLifecycleEvalScenario, reason: &str) -> MemoryL
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn proof<const R: usize, const U: usize, const C: usize>(
     scenario: &MemoryLifecycleEvalScenario,
     outcome: &str,

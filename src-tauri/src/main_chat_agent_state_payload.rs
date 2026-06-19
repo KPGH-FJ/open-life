@@ -186,9 +186,15 @@ pub(crate) async fn assemble_main_chat_agent_state_for_turn(
 
     let plan_execute_session_id = transcript
         .iter()
-        .find(|entry| entry.kind == ExecutionTranscriptEntryKind::Plan)
-        .and_then(|entry| entry.metadata.get("planExecuteSessionId"))
-        .and_then(serde_json::Value::as_str)
+        .find_map(|entry| {
+            if entry.kind != ExecutionTranscriptEntryKind::Plan {
+                return None;
+            }
+            entry
+                .metadata
+                .get("planExecuteSessionId")
+                .and_then(serde_json::Value::as_str)
+        })
         .map(str::to_string);
 
     let mut snapshot = match assemble_main_chat_agent_state(MainChatAgentStateAssemblerInput {

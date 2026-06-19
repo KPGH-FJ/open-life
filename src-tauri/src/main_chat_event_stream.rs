@@ -371,6 +371,7 @@ pub(crate) async fn materialize_optional_main_chat_agent_events(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn append_main_chat_agent_runtime_event(
     state: &Arc<AppState>,
     task_session_id: impl Into<String>,
@@ -1001,11 +1002,7 @@ fn draft(
 fn metadata_safe_digest(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
-    format!(
-        "bytes:{} hash:sha256:{:x}",
-        value.as_bytes().len(),
-        hasher.finalize()
-    )
+    format!("bytes:{} hash:sha256:{:x}", value.len(), hasher.finalize())
 }
 
 fn stable_event_id(

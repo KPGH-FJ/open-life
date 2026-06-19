@@ -844,7 +844,7 @@ async fn main_chat_tool_manifest_digest(state: &Arc<AppState>) -> String {
             })
         })
         .collect::<Vec<_>>();
-    manifests.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+    manifests.sort_by_key(|a| a.to_string());
     digest_label(&serde_json::Value::Array(manifests))
 }
 

@@ -1208,6 +1208,7 @@ fn stable_blocker_id(tool_name: &str, reason: &str) -> String {
     format!("blocker_{}", short_hash(&format!("{tool_name}:{reason}")))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scenario<const P: usize, const R: usize, const U: usize, const C: usize, const N: usize>(
     id: &str,
     prompt: &str,
@@ -1377,8 +1378,7 @@ fn skill_description_from_content(content: &str) -> String {
     content
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .next()
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
         .unwrap_or("Local Main Chat skill instructions.")
         .to_string()
 }
