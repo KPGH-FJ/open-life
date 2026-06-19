@@ -1,7 +1,7 @@
 # OpenLife Plans Document Governance
 
 > Last updated: 2026-06-19
-> Status: authoritative document index for Agents; Stage 1 automated engineering dogfood passed in Linux CI; manual/internal-trial and external live-provider proof remain separate
+> Status: authoritative document index for Agents; Stage 2 Internal Trial Readiness preparation is the current entry point
 
 This file prevents old planning documents from steering new Agent work. If two
 documents disagree, use the precedence below and treat lower-priority stale text
@@ -13,7 +13,16 @@ as reference only.
    - Project-wide Agent instructions, current constraints, and Tool Taxonomy.
 2. `plans/README.md`
    - This authority map and current entry point.
-3. `plans/main_chat_stage1_preparation_index.md` and
+3. `plans/main_chat_stage2_preparation_index.md` and
+   `plans/main_chat_agent_stage2_internal_trial_goal_spec.md`
+   - Current Stage 2 planning and Goal-mode entry point. Stage 2 targets
+     limited internal trial readiness, not public beta and not another
+     engineering-only dogfood pass. It must build on Stage 1 automated
+     engineering dogfood evidence and add manual dogfood, live-provider P0
+     evidence, AgentControlPlane product states, memory
+     proposal trial flow, failure recovery coverage, and a fail-closed
+     `ready_for_limited_internal_trial` readiness report.
+4. `plans/main_chat_stage1_preparation_index.md` and
    `plans/main_chat_agent_stage1_dogfood_goal_spec.md`
    - Completed Stage 1 Real End-to-End Dogfood implementation and acceptance
      audit trail. Linux CI run `27807633105` produced real
@@ -21,7 +30,7 @@ as reference only.
      scenarios, 36 passed journeys, 0 failed journeys, and no blockers. Manual
      dogfood / internal-trial approval and external live-provider proof remain
      opt-in and separate from default deterministic readiness.
-4. `plans/main_chat_agent_v1_stabilization_goal_spec.md`
+5. `plans/main_chat_agent_v1_stabilization_goal_spec.md`
    - Previous Goal-mode entry for the stabilization / acceptance-blocker
      remediation pass after checkpoint `d8e415f`. This Goal does not restart
      the previous broad migration Goal and does not expand the product roadmap.
@@ -31,7 +40,7 @@ as reference only.
      knowledge-format context surfaces, and `src-tauri/src/lib.rs` module
      cleanup. It must fail closed and must not claim completion without real
      evidence.
-5. `plans/main_chat_agent_migration_v1_goal_spec.md`
+6. `plans/main_chat_agent_migration_v1_goal_spec.md`
    - Main Chat Agent Execution v1 remediation spec / audit trail and capability
      target.
      Ordinary Main Chat now enters AgentIngress and a governed task session,
@@ -315,16 +324,17 @@ as reference only.
 
 ## 2. Current Position
 
-Current latest status is **Stage 1 automated engineering dogfood is complete for
-default deterministic readiness**. Linux CI run `27807633105` passed the real
+Current latest status is **Stage 2 Internal Trial Readiness preparation is the
+active planning entry point**. Stage 1 automated engineering dogfood is complete
+for default deterministic readiness: Linux CI run `27807633105` passed the real
 Tauri Chat UI D01-D36 dogfood gate with
 `evidenceSource=tauri_command_surface_browser_observed`, 36 observed scenarios,
 36 passed journeys, 0 failed journeys, and `blockers=[]`.
 
 Do not use stale local macOS fail-closed browser reports as Stage 1 pass
 evidence; macOS remains unsupported for the official Tauri WebDriver desktop
-path. Manual dogfood / internal-trial approval and external live-provider proof
-remain separate follow-up scopes.
+path. Manual dogfood and external live-provider P0 proof are explicit Stage 2
+requirements before `ready_for_limited_internal_trial` can be claimed.
 
 Main Chat Agent Execution v1 remediation remains in progress after W150-W158
 Skill Runtime Beta Maturity. Ordinary `send_message` and
