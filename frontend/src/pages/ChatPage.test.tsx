@@ -1209,13 +1209,13 @@ describe("ChatPage", () => {
     expect(screen.getByText("Workspace planning read")).toBeInTheDocument();
     expect(screen.getByText("react_tool_execution")).toBeInTheDocument();
     expect(screen.getByText("AGENTS.md bounded context")).toBeInTheDocument();
-    expect(screen.getByText("Read workspace guidance")).toBeInTheDocument();
-    expect(screen.getByText("file.read")).toBeInTheDocument();
-    expect(screen.getByText("AGENTS.md")).toBeInTheDocument();
+    expect(screen.getAllByText("Read workspace guidance").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("file.read").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("AGENTS.md").length).toBeGreaterThanOrEqual(1);
     expect(
-      screen.getByText("Main Chat Agent v1 stays proposal-first and evidence-backed.")
-    ).toBeInTheDocument();
-    expect(screen.getByText("Workspace guidance summarized")).toBeInTheDocument();
+      screen.getAllByText("Main Chat Agent v1 stays proposal-first and evidence-backed.").length
+    ).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("Workspace guidance summarized").length).toBeGreaterThanOrEqual(1);
     expect(
       screen.getByText("Use the bounded workspace guidance without creating durable writes.")
     ).toBeInTheDocument();
@@ -1458,7 +1458,7 @@ describe("ChatPage", () => {
 
     expect(await screen.findByText("Event stream")).toBeInTheDocument();
     expect(screen.getByText("receiving_event")).toBeInTheDocument();
-    expect(screen.getByText("final_delivery.created")).toBeInTheDocument();
+    expect(screen.getAllByText(/final_delivery\.created/).length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("1 event")).toBeInTheDocument();
     expect(
       vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "list_main_chat_agent_events")
@@ -2222,7 +2222,7 @@ describe("ChatPage", () => {
       );
     });
     expect(await screen.findByText("snapshot_refresh_required")).toBeInTheDocument();
-    expect(screen.getByText("sequence 5")).toBeInTheDocument();
+    expect(screen.getAllByText("sequence 5").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Recovered from snapshot")).toBeInTheDocument();
   });
 
@@ -2560,14 +2560,14 @@ describe("ChatPage", () => {
 
     expect(await screen.findByText("Agent Control Plane")).toBeInTheDocument();
     expect(screen.getByText("Direct response with no tool evidence")).toBeInTheDocument();
-    expect(screen.getByText("Direct answer delivered")).toBeInTheDocument();
+    expect(screen.getAllByText("Direct answer delivered").length).toBeGreaterThanOrEqual(1);
     expect(screen.queryByText("fake.file.read")).not.toBeInTheDocument();
     expect(screen.queryByText("Ghost observation")).not.toBeInTheDocument();
     expect(screen.queryByText("Actions")).not.toBeInTheDocument();
     expect(screen.queryByText("Observations")).not.toBeInTheDocument();
   });
 
-  it("renders main chat agent execution state as a task panel", async () => {
+  it("renders ingress/task-state fallback as a diagnostic shell when typed agent state is missing", async () => {
     type StreamListener = (event: { payload: any }) => void | Promise<void>;
     const listeners = new Map<string, StreamListener>();
     vi.mocked(listen).mockImplementation((event, handler) => {
@@ -2721,14 +2721,23 @@ describe("ChatPage", () => {
       await Promise.resolve();
     });
 
-    expect(await screen.findByText("Execution task")).toBeInTheDocument();
+    expect(await screen.findByText("Diagnostic task shell")).toBeInTheDocument();
+    expect(screen.getByTestId("agent-diagnostic-task-shell")).toHaveAttribute(
+      "data-agent-state-source",
+      "ingress-task-state-diagnostic"
+    );
+    expect(
+      screen.getByText(
+        "Typed AgentControlPlane snapshot is not available yet; this shell is derived from AgentIngress and task detail only."
+      )
+    ).toBeInTheDocument();
     expect(screen.getByText("Goal")).toBeInTheDocument();
     expect(screen.getByText("Prepare a low energy weekly plan")).toBeInTheDocument();
     expect(screen.getByText("Current plan")).toBeInTheDocument();
     expect(
       screen.getByText("Search planning memory, then ask before creating tasks.")
     ).toBeInTheDocument();
-    expect(screen.getByText("Execution queue")).toBeInTheDocument();
+    expect(screen.getByText("Diagnostic queue preview")).toBeInTheDocument();
     expect(screen.getByText("memory.search")).toBeInTheDocument();
     expect(screen.getByText("Search accepted planning memory")).toBeInTheDocument();
     expect(screen.getByText("matchedCount: 2")).toBeInTheDocument();

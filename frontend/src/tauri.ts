@@ -658,6 +658,7 @@ export interface MainChatAgentStateSnapshot {
     observationsUsed: unknown[];
     proposalsCreated: unknown[];
     blockers: unknown[];
+    skippedWork?: unknown[];
     pendingUserActions: unknown[];
     durableChanges: unknown[];
     nextSteps: string[];
@@ -1448,6 +1449,33 @@ export interface MainChatAgentStage2ReadinessReport {
   artifacts: MainChatAgentStage2ArtifactRef[];
 }
 
+export interface MainChatStage3ExecutionUxCoverageRow {
+  scenarioId: string;
+  scenario: string;
+  status: "passed" | "failed" | "blocked";
+  evidence: string[];
+  blockers: string[];
+}
+
+export interface MainChatStage3ExecutionUxReport {
+  reportKind: "main_chat_stage3_execution_ux";
+  schemaVersion: "stage3-execution-ux-v1";
+  dataPath: string;
+  totalScenarioCount: number;
+  passedScenarioCount: number;
+  failedScenarioCount: number;
+  blockedScenarioCount: number;
+  executionFirstRequiredIds: string[];
+  executionFirstPassedIds: string[];
+  executionFirstClaimValid: boolean;
+  readyForLimitedInternalTrial: false;
+  readinessRecommendation: "not_ready_for_limited_internal_trial";
+  stage2ReadinessPreserved: string;
+  nonGoals: string[];
+  coverage: MainChatStage3ExecutionUxCoverageRow[];
+  blockers: string[];
+}
+
 export interface MainChatAgentStage1SeedManifest {
   seedWorkspaceRootKind: "temp_isolated";
   knowledgeAssetCount: number;
@@ -1706,6 +1734,10 @@ export async function runMainChatAgentProductizationV1Gate(): Promise<MainChatAg
   return safeInvoke<MainChatAgentProductizationV1GateReport>(
     "run_main_chat_agent_productization_v1_gate"
   );
+}
+
+export async function runMainChatStage3ExecutionUxReport(): Promise<MainChatStage3ExecutionUxReport> {
+  return safeInvoke<MainChatStage3ExecutionUxReport>("run_main_chat_stage3_execution_ux_report");
 }
 
 export async function runMainChatExternalLiveProductizationGate(): Promise<MainChatExternalLiveProductizationGateReport> {

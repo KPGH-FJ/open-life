@@ -262,6 +262,61 @@ function finalDeliverySection(
   );
 }
 
+function boundedTraceString(value: string | undefined | null, fallback: string | null = null) {
+  if (!value) return fallback;
+  return value
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 160);
+}
+
+function reviewerTraceJson(state: MainChatAgentStateSnapshot, blockerCodes: string[]) {
+  return JSON.stringify({
+    schemaVersion: "main-chat-stage3-reviewer-trace-v1",
+    taskId: boundedTraceString(state.task.taskId, "unknown"),
+    runId: boundedTraceString(state.task.runId, "unknown"),
+    status: boundedTraceString(state.task.status, "unknown"),
+    route: boundedTraceString(state.route.strategy, "unknown"),
+    blockers: blockerCodes.slice(0, 12).map(code => boundedTraceString(code, "unknown")),
+    provider: boundedTraceString(state.provider?.provider),
+    model: boundedTraceString(state.provider?.model),
+    finalDeliveryStatus: boundedTraceString(state.finalDelivery?.status),
+    timestamp: new Date().toISOString(),
+  });
+}
+
+function idsForAction(
+  items: Array<{
+    actionId?: string;
+    affectedActionId?: string;
+    observationId?: string;
+    blockerId?: string;
+  }>,
+  actionId: string,
+  idKey: "observationId" | "blockerId"
+) {
+  return items
+    .filter(item => item.actionId === actionId || item.affectedActionId === actionId)
+    .map(item => item[idKey])
+    .filter((id): id is string => Boolean(id));
+}
+
+function isCurrentAction(
+  action: MainChatAgentStateSnapshot["actions"][number],
+  state: MainChatAgentStateSnapshot
+) {
+  if (["running", "executing", "pending_permission", "queued"].includes(action.status)) {
+    return true;
+  }
+  if (!["executing", "queued", "observing", "planning"].includes(state.task.status)) return false;
+  return (
+    state.actions.find(
+      item => !["succeeded", "completed", "failed", "blocked", "cancelled"].includes(item.status)
+    )?.actionId === action.actionId
+  );
+}
+
 function reviewSummarySection(title: string, items: PlanExecuteReviewItem[]) {
   return (
     <div className="min-w-0 border-l border-emerald-300 bg-white/80 px-2 py-1">
@@ -340,18 +395,20 @@ export default function AgentControlPlane({
     finalDelivery?.observationsUsed.length ? "Sources used" : null,
     finalDelivery?.proposalsCreated.length ? "Proposals created" : null,
     finalDelivery?.blockers.length ? "Blocked items" : null,
+    finalDelivery?.skippedWork?.length ? "Skipped work" : null,
     finalDelivery?.pendingUserActions.length ? "Pending user actions" : null,
     finalDelivery?.durableChanges.length ? "Durable changes" : null,
     finalDelivery?.nextSteps.length ? "Next steps" : null,
   ].filter((title): title is string => Boolean(title));
   const blockerCodes = state.blockers.map(blocker => blocker.reasonCode || blocker.blockerId);
-  const reviewerTraceLine = [
-    `taskId=${state.task.taskId}`,
-    `runId=${state.task.runId}`,
-    `status=${state.task.status}`,
-    `route=${state.route.strategy}`,
-    `blockers=${blockerCodes.length ? blockerCodes.join(",") : "none"}`,
-  ].join(" ");
+  const reviewerTraceLine = reviewerTraceJson(state, blockerCodes);
+  const timelineVisible =
+    Boolean(plan?.steps?.length) ||
+    state.actions.length > 0 ||
+    state.observations.length > 0 ||
+    state.blockers.length > 0 ||
+    state.proposals.length > 0 ||
+    Boolean(state.finalDelivery);
 
   return (
     <section
@@ -499,7 +556,9 @@ export default function AgentControlPlane({
                   key={event.eventId}
                   className="inline-flex h-5 max-w-full items-center rounded-md border border-indigo-100 bg-white px-1.5"
                 >
-                  <span className="truncate">{event.eventType}</span>
+                  <span className="truncate">
+                    #{event.sequence} {event.eventType} · {event.source}
+                  </span>
                 </span>
               ))}
             </div>
@@ -540,6 +599,173 @@ export default function AgentControlPlane({
               )}
             </div>
           )}
+        </div>
+      )}
+
+      {timelineVisible && (
+        <div
+          data-testid="agent-execution-timeline"
+          className="mt-3 border-l border-stone-900 bg-stone-50/70 px-3 py-2"
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-semibold text-stone-950">Execution timeline</span>
+            <span className="text-stone-500">sequence {state.sequence}</span>
+          </div>
+          <div className="mt-2 space-y-2">
+            {plan?.steps?.map(step => (
+              <div
+                key={`timeline-plan-${step.stepId}`}
+                data-testid={`agent-timeline-plan-${step.stepId}`}
+                className="min-w-0 border-l border-emerald-300 bg-white px-2 py-1"
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-semibold text-stone-950">plan {step.index}</span>
+                  <span
+                    className={`inline-flex h-5 items-center rounded-md border px-1.5 ${statusClass(step.status)}`}
+                  >
+                    {step.status.replace(/_/g, " ")}
+                  </span>
+                  <span className="truncate text-stone-700">{step.title}</span>
+                </div>
+                {[
+                  ...step.linkedActionIds.map(id => `action ${id}`),
+                  ...step.linkedObservationIds.map(id => `observation ${id}`),
+                  ...step.linkedProposalIds.map(id => `proposal ${id}`),
+                  ...step.blockerIds.map(id => `blocker ${id}`),
+                ].length > 0 && (
+                  <div className="mt-1 flex flex-wrap gap-1 text-stone-500">
+                    {[
+                      ...step.linkedActionIds.map(id => `action ${id}`),
+                      ...step.linkedObservationIds.map(id => `observation ${id}`),
+                      ...step.linkedProposalIds.map(id => `proposal ${id}`),
+                      ...step.blockerIds.map(id => `blocker ${id}`),
+                    ].map(label => (
+                      <span key={`${step.stepId}-${label}`}>{label}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+            {state.actions.map(action => {
+              const observationIds = idsForAction(
+                state.observations,
+                action.actionId,
+                "observationId"
+              );
+              const blockerIds = idsForAction(state.blockers, action.actionId, "blockerId");
+              const proposalIds = state.proposals
+                .filter(proposal => proposal.actionIds.includes(action.actionId))
+                .map(proposal => proposal.proposalId);
+              const current = isCurrentAction(action, state);
+              return (
+                <div
+                  key={`timeline-action-${action.actionId}`}
+                  data-testid={`agent-timeline-action-${action.actionId}`}
+                  data-current-action={current ? "true" : "false"}
+                  className={`min-w-0 border-l px-2 py-1 ${
+                    current
+                      ? "border-sky-500 bg-sky-50 ring-1 ring-sky-100"
+                      : "border-stone-300 bg-white"
+                  }`}
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-semibold text-stone-950">{action.label}</span>
+                    <span className="text-stone-500">{action.actionType}</span>
+                    <span
+                      className={`inline-flex h-5 items-center rounded-md border px-1.5 ${statusClass(action.status)}`}
+                    >
+                      {action.status.replace(/_/g, " ")}
+                    </span>
+                    {current && (
+                      <span className="inline-flex h-5 items-center rounded-md border border-sky-200 bg-white px-1.5 font-medium text-sky-800">
+                        current
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-1 truncate text-stone-600">{action.target}</div>
+                  {[...observationIds, ...blockerIds, ...proposalIds].length > 0 && (
+                    <div className="mt-1 flex flex-wrap gap-1 text-stone-500">
+                      {observationIds.map(id => (
+                        <span key={`${action.actionId}-observation-${id}`}>observation {id}</span>
+                      ))}
+                      {blockerIds.map(id => (
+                        <span key={`${action.actionId}-blocker-${id}`}>blocker {id}</span>
+                      ))}
+                      {proposalIds.map(id => (
+                        <span key={`${action.actionId}-proposal-${id}`}>proposal {id}</span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            {state.observations.map(observation => (
+              <div
+                key={`timeline-observation-${observation.observationId}`}
+                data-testid={`agent-timeline-observation-${observation.observationId}`}
+                className="min-w-0 border-l border-emerald-300 bg-white px-2 py-1"
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-semibold text-stone-950">observation</span>
+                  <span className="text-stone-500">{observation.sourceKind}</span>
+                  <span className="truncate text-stone-700">{observation.sourceLabel}</span>
+                  <span className="text-stone-500">action {observation.actionId}</span>
+                </div>
+                <div className="mt-1 line-clamp-2 text-stone-600">{observation.preview}</div>
+              </div>
+            ))}
+            {state.blockers.map(blocker => (
+              <div
+                key={`timeline-blocker-${blocker.blockerId}`}
+                data-testid={`agent-timeline-blocker-${blocker.blockerId}`}
+                className="min-w-0 border-l border-amber-400 bg-amber-50 px-2 py-1"
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-semibold text-amber-950">blocker</span>
+                  <span className="text-amber-900">{blocker.reasonCode}</span>
+                  {blocker.affectedActionId && (
+                    <span className="text-amber-900">action {blocker.affectedActionId}</span>
+                  )}
+                </div>
+                <div className="mt-1 line-clamp-2 text-amber-900">{blocker.detail}</div>
+              </div>
+            ))}
+            {state.proposals.map(proposal => (
+              <div
+                key={`timeline-proposal-${proposal.proposalId}`}
+                data-testid={`agent-timeline-proposal-${proposal.proposalId}`}
+                className="min-w-0 border-l border-indigo-300 bg-white px-2 py-1"
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-semibold text-stone-950">proposal</span>
+                  <span className="text-stone-500">{proposal.proposalType}</span>
+                  <span
+                    className={`inline-flex h-5 items-center rounded-md border px-1.5 ${statusClass(proposal.status)}`}
+                  >
+                    {proposal.status.replace(/_/g, " ")}
+                  </span>
+                  <span className="text-stone-500">{proposal.proposalId}</span>
+                </div>
+                <div className="mt-1 line-clamp-2 text-stone-600">{proposal.summary}</div>
+              </div>
+            ))}
+            {state.finalDelivery && (
+              <div className="min-w-0 border-l border-emerald-500 bg-emerald-50 px-2 py-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-semibold text-emerald-950">final delivery</span>
+                  <span
+                    className={`inline-flex h-5 items-center rounded-md border px-1.5 ${statusClass(state.finalDelivery.status)}`}
+                  >
+                    {state.finalDelivery.status.replace(/_/g, " ")}
+                  </span>
+                  <span className="text-emerald-900">{state.finalDelivery.deliveryId}</span>
+                </div>
+                <div className="mt-1 line-clamp-2 text-emerald-900">
+                  {state.finalDelivery.headline}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -746,6 +972,23 @@ export default function AgentControlPlane({
                     <span className="text-stone-500">{action.riskLevel} risk</span>
                   </div>
                   <div className="mt-1 truncate text-stone-600">{action.target}</div>
+                  {[
+                    ...action.observationIds.map(id => `observation ${id}`),
+                    ...state.blockers
+                      .filter(blocker => blocker.affectedActionId === action.actionId)
+                      .map(blocker => `blocker ${blocker.blockerId}`),
+                  ].length > 0 && (
+                    <div className="mt-1 flex flex-wrap gap-1 text-stone-500">
+                      {[
+                        ...action.observationIds.map(id => `observation ${id}`),
+                        ...state.blockers
+                          .filter(blocker => blocker.affectedActionId === action.actionId)
+                          .map(blocker => `blocker ${blocker.blockerId}`),
+                      ].map(label => (
+                        <span key={`${action.actionId}-${label}`}>{label}</span>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <div className="text-right text-stone-500">
                   {action.retryable ? "retryable" : shortId(action.policyDecisionId)}
@@ -782,6 +1025,9 @@ export default function AgentControlPlane({
                       citation
                     </span>
                   )}
+                  <span className="inline-flex h-5 items-center rounded-md border border-stone-200 bg-stone-50 px-1.5 text-stone-600">
+                    action {observation.actionId}
+                  </span>
                 </div>
                 <div className="mt-1 text-stone-600">{observation.preview}</div>
               </div>
@@ -801,6 +1047,11 @@ export default function AgentControlPlane({
               <div key={blocker.blockerId} className="py-2">
                 <div className="font-semibold text-amber-950">{blocker.title}</div>
                 <div className="mt-1 text-amber-900">{blocker.detail}</div>
+                <div className="mt-1 flex flex-wrap gap-1 text-amber-900">
+                  <span>blocker {blocker.blockerId}</span>
+                  {blocker.affectedActionId && <span>action {blocker.affectedActionId}</span>}
+                  <span>{blocker.recoverable ? "recoverable" : "terminal explanation"}</span>
+                </div>
                 <div className="mt-2 flex flex-wrap gap-1">
                   {(() => {
                     const permissionProposal = matchingPermissionProposal(state, blocker);
@@ -894,6 +1145,12 @@ export default function AgentControlPlane({
                 <div className="min-w-0">
                   <div className="font-semibold text-stone-950">{proposal.title}</div>
                   <div className="mt-1 text-stone-600">{proposal.summary}</div>
+                  <div className="mt-1 flex flex-wrap gap-1 text-stone-500">
+                    <span>proposal {proposal.proposalId}</span>
+                    {proposal.actionIds.map(actionId => (
+                      <span key={`${proposal.proposalId}-${actionId}`}>action {actionId}</span>
+                    ))}
+                  </div>
                   <div className="mt-2 flex flex-wrap gap-1">
                     {proposal.status === "pending_review" &&
                       proposal.controls.includes("accept_proposal") &&
@@ -990,6 +1247,7 @@ export default function AgentControlPlane({
             state.finalDelivery.observationsUsed,
             state.finalDelivery.proposalsCreated,
             state.finalDelivery.blockers,
+            state.finalDelivery.skippedWork ?? [],
             state.finalDelivery.pendingUserActions,
             state.finalDelivery.durableChanges,
           ].some(items => items.length > 0) && (
@@ -1017,6 +1275,12 @@ export default function AgentControlPlane({
                 state.finalDelivery.blockers,
                 ["reasonCode", "reason_code", "blockerId", "blocker_id"],
                 ["affectedActionId", "affected_action_id"]
+              )}
+              {finalDeliverySection(
+                "Skipped work",
+                state.finalDelivery.skippedWork ?? [],
+                ["title", "stepId", "step_id", "kind"],
+                ["reason", "skipReason", "skip_reason", "status"]
               )}
               {finalDeliverySection(
                 "Pending user actions",

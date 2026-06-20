@@ -3759,12 +3759,16 @@ export default function ChatPage({
           )}
           {!companionMode && !currentAgentState && currentAgentIngress && (
             <div className="px-4 py-2">
-              <div className="border-y border-stone-200 bg-stone-50/75 px-3 py-3 text-xs text-stone-700">
+              <div
+                data-testid="agent-diagnostic-task-shell"
+                data-agent-state-source="ingress-task-state-diagnostic"
+                className="border-y border-stone-200 bg-stone-50/75 px-3 py-3 text-xs text-stone-700"
+              >
                 <div className="flex flex-wrap items-start gap-2">
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="inline-flex h-6 items-center rounded-md bg-stone-900 px-2 font-semibold text-white">
-                        Execution task
+                        Diagnostic task shell
                       </span>
                       <span className="inline-flex h-6 items-center rounded-md border border-stone-300 bg-white px-2 font-semibold text-stone-800">
                         {formatMainChatStrategy(currentAgentIngress.selectedStrategy)}
@@ -3795,6 +3799,10 @@ export default function ChatPage({
                           </span>
                         </>
                       )}
+                    </div>
+                    <div className="mt-2 border-l-2 border-stone-300 bg-white/70 px-2 py-1 text-stone-700">
+                      Typed AgentControlPlane snapshot is not available yet; this shell is derived
+                      from AgentIngress and task detail only.
                     </div>
                     <div className="mt-2 grid gap-2 md:grid-cols-2">
                       {currentAgentTaskState?.session?.userGoal && (
@@ -3868,7 +3876,7 @@ export default function ChatPage({
                 {currentAgentTaskState?.actions?.length ? (
                   <div className="mt-3">
                     <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-stone-500">
-                      Execution queue
+                      Diagnostic queue preview
                     </div>
                     <div className="divide-y divide-stone-200 border-y border-stone-200 bg-white/75">
                       {currentAgentTaskState.actions.map(action => {
@@ -3965,7 +3973,7 @@ export default function ChatPage({
                 {currentExecutionTranscript.length > 0 && (
                   <div className="mt-3">
                     <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-stone-500">
-                      Transcript
+                      Diagnostic transcript
                     </div>
                     <div className="grid gap-1 sm:grid-cols-2">
                       {currentExecutionTranscript.slice(-4).map(entry => (

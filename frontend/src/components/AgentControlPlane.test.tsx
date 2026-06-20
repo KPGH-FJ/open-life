@@ -174,7 +174,7 @@ describe("AgentControlPlane", () => {
     expect(trace).toHaveTextContent("tool_permission_required");
   });
 
-  it("copies reviewer trace evidence as a single runtime-backed line", () => {
+  it("copies reviewer trace evidence as a bounded one-line JSON object", () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
@@ -203,9 +203,35 @@ describe("AgentControlPlane", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Copy reviewer trace" }));
 
-    expect(writeText).toHaveBeenCalledWith(
-      "taskId=task-agent-control-plane-1 runId=run-agent-control-plane-1 status=blocked route=react_tool_execution blockers=tool_permission_required"
-    );
+    expect(writeText).toHaveBeenCalledTimes(1);
+    const copied = writeText.mock.calls[0][0] as string;
+    expect(copied).not.toMatch(/\s{2,}|\n|\t/);
+    expect(copied.length).toBeLessThanOrEqual(900);
+    const parsed = JSON.parse(copied) as Record<string, unknown>;
+    expect(Object.keys(parsed)).toEqual([
+      "schemaVersion",
+      "taskId",
+      "runId",
+      "status",
+      "route",
+      "blockers",
+      "provider",
+      "model",
+      "finalDeliveryStatus",
+      "timestamp",
+    ]);
+    expect(parsed).toMatchObject({
+      schemaVersion: "main-chat-stage3-reviewer-trace-v1",
+      taskId: "task-agent-control-plane-1",
+      runId: "run-agent-control-plane-1",
+      status: "blocked",
+      route: "react_tool_execution",
+      blockers: ["tool_permission_required"],
+      provider: null,
+      model: null,
+      finalDeliveryStatus: "completed_with_pending_items",
+    });
+    expect(parsed.timestamp).toEqual(expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/));
   });
 
   it("renders canonical final delivery sections separately", () => {
@@ -224,6 +250,92 @@ describe("AgentControlPlane", () => {
     expect(screen.getByTestId("agent-control-plane")).toHaveAttribute(
       "data-final-delivery-section-titles",
       expect.stringContaining("Next steps")
+    );
+  });
+
+  it("renders skipped final delivery work as its own terminal section", () => {
+    renderPanel(
+      agentState({
+        finalDelivery: {
+          ...agentState().finalDelivery!,
+          status: "completed_with_pending_items",
+          skippedWork: [
+            {
+              stepId: "plan-step-skipped-1",
+              title: "Publish external note",
+              reason: "external write is out of scope",
+            },
+          ],
+        } as any,
+      })
+    );
+
+    expect(screen.getByText("Skipped work")).toBeInTheDocument();
+    expect(screen.getByText("Publish external note")).toBeInTheDocument();
+    expect(screen.getByTestId("agent-control-plane")).toHaveAttribute(
+      "data-final-delivery-section-titles",
+      expect.stringContaining("Skipped work")
+    );
+  });
+
+  it("renders a linked execution timeline with the current action emphasized", () => {
+    renderPanel(
+      agentState({
+        task: {
+          ...agentState().task,
+          status: "executing",
+          finalDeliveryId: undefined,
+        },
+        actions: [
+          {
+            ...agentState().actions[0],
+            actionId: "action-running-1",
+            label: "Read workspace file",
+            status: "running",
+            observationIds: ["observation-linked-1"],
+          },
+          {
+            ...agentState().actions[0],
+            actionId: "action-blocked-1",
+            label: "Fetch governed web source",
+            status: "blocked",
+            observationIds: [],
+          },
+        ],
+        observations: [
+          {
+            ...agentState().observations[0],
+            observationId: "observation-linked-1",
+            actionId: "action-running-1",
+            sourceKind: "file",
+            sourceLabel: "AGENTS.md",
+          },
+        ],
+        blockers: [
+          {
+            blockerId: "blocker-web-policy-1",
+            reasonCode: "web_network_policy_blocked",
+            title: "Web blocked",
+            detail: "Network access is disabled for this task.",
+            affectedActionId: "action-blocked-1",
+            recoverable: false,
+            controls: ["cancel", "open_trace"],
+          },
+        ],
+        finalDelivery: undefined,
+      })
+    );
+
+    expect(screen.getByTestId("agent-execution-timeline")).toBeInTheDocument();
+    expect(screen.getByTestId("agent-timeline-action-action-running-1")).toHaveAttribute(
+      "data-current-action",
+      "true"
+    );
+    expect(screen.getByTestId("agent-timeline-action-action-running-1")).toHaveTextContent(
+      "observation observation-linked-1"
+    );
+    expect(screen.getByTestId("agent-timeline-action-action-blocked-1")).toHaveTextContent(
+      "blocker blocker-web-policy-1"
     );
   });
 

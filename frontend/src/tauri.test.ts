@@ -65,6 +65,7 @@ import {
   runMainChatAgentProductMaturityV2PlanGate,
   runMainChatAgentProductMaturityV2SkillsGate,
   runMainChatAgentProductizationV1Gate,
+  runMainChatStage3ExecutionUxReport,
   selectMainChatSkill,
   listMainChatAgentEvents,
   getMainChatAgentStateSnapshot,
@@ -600,6 +601,60 @@ describe("tauri command argument aliases", () => {
     expect(result.runtimeExecutionScope).toBe(
       "default_deterministic_scenarios_runtime_backed_external_live_excluded"
     );
+  });
+
+  it("invokes Main Chat Stage 3 execution UX report without readiness semantics", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      reportKind: "main_chat_stage3_execution_ux",
+      schemaVersion: "stage3-execution-ux-v1",
+      dataPath:
+        "Main Chat send/stream -> AgentIngress / strategy route -> AgentTaskSession / ActionQueue / ExecutionTranscript / Main Chat event stream -> MainChatAgentStateSnapshot -> AgentControlPlane",
+      totalScenarioCount: 13,
+      passedScenarioCount: 13,
+      failedScenarioCount: 0,
+      blockedScenarioCount: 0,
+      executionFirstRequiredIds: [
+        "UX3-02",
+        "UX3-03",
+        "UX3-04",
+        "UX3-06",
+        "UX3-09",
+        "UX3-11",
+        "UX3-12",
+      ],
+      executionFirstPassedIds: [
+        "UX3-02",
+        "UX3-03",
+        "UX3-04",
+        "UX3-06",
+        "UX3-09",
+        "UX3-11",
+        "UX3-12",
+      ],
+      executionFirstClaimValid: true,
+      readyForLimitedInternalTrial: false,
+      readinessRecommendation: "not_ready_for_limited_internal_trial",
+      stage2ReadinessPreserved:
+        "stage2_readiness_remains_fail_closed_without_manual_dogfood_and_current_commit_live_evidence",
+      nonGoals: ["manual_dogfood_rows_not_run_or_fabricated"],
+      coverage: Array.from({ length: 13 }, (_, index) => ({
+        scenarioId: `UX3-${String(index + 1).padStart(2, "0")}`,
+        scenario: "covered Stage 3 scenario",
+        status: "passed",
+        evidence: ["runtime-backed evidence"],
+        blockers: [],
+      })),
+      blockers: [],
+    });
+
+    const result = await runMainChatStage3ExecutionUxReport();
+
+    expect(invoke).toHaveBeenCalledWith("run_main_chat_stage3_execution_ux_report", undefined);
+    expect(result.totalScenarioCount).toBe(13);
+    expect(result.coverage.map(row => row.scenarioId)).toContain("UX3-13");
+    expect(result.readyForLimitedInternalTrial).toBe(false);
+    expect(result.readinessRecommendation).toBe("not_ready_for_limited_internal_trial");
+    expect(result.nonGoals).toContain("manual_dogfood_rows_not_run_or_fabricated");
   });
 
   it("invokes external live productization gate as opt-in non-default evidence", async () => {

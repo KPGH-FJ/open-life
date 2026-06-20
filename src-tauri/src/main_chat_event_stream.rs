@@ -1190,6 +1190,7 @@ fn base_direct_snapshot(task_id: String) -> MainChatAgentStateSnapshot {
             observations_used: vec![],
             proposals_created: vec![],
             blockers: vec![],
+            skipped_work: vec![],
             pending_user_actions: vec![],
             durable_changes: vec![],
             next_steps: vec![],

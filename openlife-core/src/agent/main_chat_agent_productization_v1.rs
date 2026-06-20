@@ -1243,6 +1243,15 @@ pub struct PendingUserActionSummary {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SkippedWorkSummary {
+    pub step_id: String,
+    pub title: String,
+    pub reason: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DurableChangeSummary {
     pub change_type: String,
     pub target: String,
@@ -1263,6 +1272,8 @@ pub struct FinalDeliveryEvidence {
     pub observations_used: Vec<ObservationSummary>,
     pub proposals_created: Vec<ProposalSummary>,
     pub blockers: Vec<BlockerSummary>,
+    #[serde(default)]
+    pub skipped_work: Vec<SkippedWorkSummary>,
     pub pending_user_actions: Vec<PendingUserActionSummary>,
     pub durable_changes: Vec<DurableChangeSummary>,
     pub next_steps: Vec<String>,
@@ -1444,6 +1455,7 @@ pub fn assemble_main_chat_agent_state(
             session: &input.session,
             run_id: &run_id,
             transcript: &input.transcript,
+            plan: plan.as_ref(),
             actions: &actions,
             observations: &observations,
             blockers: &blockers,
@@ -2136,6 +2148,7 @@ struct FinalDeliveryEvidenceInput<'a> {
     session: &'a AgentTaskSession,
     run_id: &'a str,
     transcript: &'a [ExecutionTranscriptEntry],
+    plan: Option<&'a PlanEvidence>,
     actions: &'a [ActionEvidence],
     observations: &'a [ObservationEvidence],
     blockers: &'a [BlockerEvidence],
@@ -2149,6 +2162,7 @@ fn final_delivery_from_evidence(
     let session = input.session;
     let run_id = input.run_id;
     let transcript = input.transcript;
+    let plan = input.plan;
     let actions = input.actions;
     let observations = input.observations;
     let blockers = input.blockers;
@@ -2248,6 +2262,7 @@ fn final_delivery_from_evidence(
         })
         .collect::<Vec<_>>();
     let pending_user_actions = pending_user_actions_from(proposals, blockers);
+    let skipped_work = skipped_work_from_plan(plan);
     Some(FinalDeliveryEvidence {
         delivery_id: final_entry
             .map(|entry| entry.id.clone())
@@ -2261,11 +2276,32 @@ fn final_delivery_from_evidence(
         observations_used,
         proposals_created,
         blockers: blocker_summaries,
+        skipped_work,
         pending_user_actions,
         durable_changes: Vec::new(),
         next_steps: next_steps_for_status(status),
         trace_available: !transcript.is_empty(),
     })
+}
+
+fn skipped_work_from_plan(plan: Option<&PlanEvidence>) -> Vec<SkippedWorkSummary> {
+    plan.map(|plan| {
+        plan.steps
+            .iter()
+            .filter(|step| step.status == "skipped")
+            .map(|step| SkippedWorkSummary {
+                step_id: step.step_id.clone(),
+                title: step.title.clone(),
+                reason: step
+                    .skip_reason
+                    .clone()
+                    .or_else(|| step.reason.clone())
+                    .unwrap_or_else(|| "skipped_by_plan_control".into()),
+                status: step.status.clone(),
+            })
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 fn context_observation_summaries_from_transcript(
