@@ -447,7 +447,7 @@ impl VectorStore {
         );
         let restored = tx.execute(&sql, rusqlite::params_from_iter(chunk_ids.iter()))?;
         tx.commit()?;
-        Ok(restored as usize)
+        Ok(restored)
     }
 
     /// Archive specific memories by id. Used by user-reviewed MemoryArchive proposals.
@@ -470,7 +470,7 @@ impl VectorStore {
             .chain(chunk_ids.iter().map(|id| id as &dyn rusqlite::ToSql));
         let archived = tx.execute(&sql, rusqlite::params_from_iter(params))?;
         tx.commit()?;
-        Ok(archived as usize)
+        Ok(archived)
     }
 
     pub fn archive_chunks_by_source(&self, source: &str) -> Result<usize> {
@@ -491,7 +491,7 @@ impl VectorStore {
             params![now, source],
         )?;
         tx.commit()?;
-        Ok(archived as usize)
+        Ok(archived)
     }
 
     /// List archived chunks with summary (no embedding to save memory).

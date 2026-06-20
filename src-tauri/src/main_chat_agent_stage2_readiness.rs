@@ -564,7 +564,7 @@ fn read_stage2_manual_dogfood_artifact_from_path_with_expected_commit(
     path: &Path,
     expected_commit: Option<&str>,
 ) -> Stage2ManualDogfoodSummary {
-    let Ok(bytes) = std::fs::read(&path) else {
+    let Ok(bytes) = std::fs::read(path) else {
         return missing_manual_summary();
     };
     let artifact_digest = Some(digest_bytes(&bytes));
@@ -826,9 +826,8 @@ fn evaluate_stage2_manual_dogfood_records(
     }
 
     for scenario_id in REQUIRED_MANUAL_SCENARIOS {
-        if !attempted_ids.contains(scenario_id) {
-            failed_ids.insert(scenario_id.into());
-        } else if !passed_ids.contains(scenario_id)
+        if !attempted_ids.contains(scenario_id)
+            || !passed_ids.contains(scenario_id)
             || scenario_has_non_pass
                 .get(scenario_id)
                 .copied()
@@ -1243,13 +1242,12 @@ fn evaluate_stage2_live_provider_evidence(
             });
             continue;
         };
-        if row.status == "completed" || row.status == "passed" {
-            if !external_provider_label(&row.provider)
+        if (row.status == "completed" || row.status == "passed")
+            && (!external_provider_label(&row.provider)
                 || row.provider_endpoint_kind != "external_provider"
-                || !external_model_label(&row.model)
-            {
-                local_or_mock_credit_rejected += 1;
-            }
+                || !external_model_label(&row.model))
+        {
+            local_or_mock_credit_rejected += 1;
         }
         if stage2_live_provider_identity_inconsistent(row, expected_provider, expected_model) {
             provider_identity_inconsistent = true;
@@ -1531,9 +1529,7 @@ fn stage2_live_provider_scenario_report(
 ) -> Stage2LiveProviderScenarioReport {
     Stage2LiveProviderScenarioReport {
         scenario_id: row.scenario_id.clone(),
-        status: if credited {
-            row.status.clone()
-        } else if matches!(row.status.as_str(), "blocked" | "missing") {
+        status: if credited || matches!(row.status.as_str(), "blocked" | "missing") {
             row.status.clone()
         } else {
             "failed".into()
@@ -1696,7 +1692,7 @@ fn stage2_live_provider_evidence_from_harness_reports(
 ) -> Vec<Stage2LiveProviderScenarioEvidence> {
     reports
         .into_iter()
-        .filter_map(|report| {
+        .map(|report| {
             let scenario_id = match report.scenario {
                 crate::main_chat_final_gate::MainChatLiveProviderEvalHarnessScenario::DirectAnswer => {
                     "L2-L01"
@@ -1724,7 +1720,7 @@ fn stage2_live_provider_evidence_from_harness_reports(
                     "stage2_live_harness_required_evidence_manifest_invalid",
                 );
             }
-            Some(Stage2LiveProviderScenarioEvidence {
+            Stage2LiveProviderScenarioEvidence {
                 scenario_id: scenario_id.into(),
                 status: report.status,
                 provider: report.provider,
@@ -1742,7 +1738,7 @@ fn stage2_live_provider_evidence_from_harness_reports(
                 direct_writes_executed: report.direct_writes_executed,
                 legacy_fallback_used: report.legacy_fallback_used,
                 blockers,
-            })
+            }
         })
         .collect()
 }
@@ -2799,9 +2795,9 @@ async fn stage2_live_provider_permission_denial_evidence_from_report(
     let proposal_id =
         stage2_live_tool_permission_proposal_id_for_session(state, &task_session_id).await;
     if let Some(proposal_id) = proposal_id.as_deref() {
-        if let Err(_) =
-            crate::commands::proposal::reject_proposal_with_state(proposal_id.to_string(), state)
-                .await
+        if crate::commands::proposal::reject_proposal_with_state(proposal_id.to_string(), state)
+            .await
+            .is_err()
         {
             push_unique(&mut blockers, "stage2_live_permission_denial_reject_failed");
         }
@@ -2815,11 +2811,12 @@ async fn stage2_live_provider_permission_denial_evidence_from_report(
     let mut resume_attempted = false;
     if !task_session_id.is_empty() {
         resume_attempted = true;
-        if let Err(_) = crate::main_chat_task_controls::resume_main_chat_agent_task_with_state(
+        if crate::main_chat_task_controls::resume_main_chat_agent_task_with_state(
             &task_session_id,
             state,
         )
         .await
+        .is_err()
         {
             push_unique(&mut blockers, "stage2_live_permission_denial_resume_failed");
         }

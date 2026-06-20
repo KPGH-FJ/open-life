@@ -1411,14 +1411,17 @@ fn stage5_bundle_blockers(
     transcript: &[ExecutionTranscriptEntry],
 ) -> Vec<String> {
     let mut output = blockers.to_vec();
-    output.extend(actions.iter().filter_map(|action| {
-        (action.status == ExecutionQueueStatus::Failed).then(|| {
-            action
-                .error
-                .clone()
-                .unwrap_or_else(|| "action_failed".into())
-        })
-    }));
+    output.extend(
+        actions
+            .iter()
+            .filter(|action| action.status == ExecutionQueueStatus::Failed)
+            .map(|action| {
+                action
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "action_failed".into())
+            }),
+    );
     output.extend(
         transcript
             .iter()

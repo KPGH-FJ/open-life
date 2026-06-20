@@ -158,17 +158,11 @@ pub struct Stage4MemoryKnowledgeRow {
     pub blockers: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ManagedKnowledgeHistory {
     #[serde(default)]
     records: Vec<ManagedKnowledgeRecord>,
-}
-
-impl Default for ManagedKnowledgeHistory {
-    fn default() -> Self {
-        Self { records: vec![] }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
