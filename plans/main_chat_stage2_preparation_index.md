@@ -2,7 +2,7 @@
 
 > Date: 2026-06-19
 > Stage: Main Chat Agent Stage 2 - Internal Trial Readiness
-> Status: preparation complete for review
+> Status: implementation mechanism report available; readiness blocked on manual evidence
 
 ## 1. Stage 2 Direction
 
@@ -28,12 +28,15 @@ Stage 2 must prove:
 | `plans/main_chat_stage2_objective_and_scope.md` | Defines Stage 2 target, non-goals, workstreams, and exit criteria. |
 | `plans/main_chat_stage2_internal_trial_acceptance_matrix.md` | Product acceptance matrix for limited internal trial. |
 | `plans/main_chat_stage2_manual_dogfood_task_set.md` | Real user task set for manual dogfood and reviewer reporting. |
+| `plans/main_chat_stage2_manual_dogfood_reviewer_worksheet.md` | Non-evidence worksheet for reviewers to collect S2-D01 through S2-D24 trace-backed rows before writing the machine-readable artifact. |
+| `plans/main_chat_stage2_manual_dogfood_artifact_template.json` | Non-evidence JSON template for all S2-D01 through S2-D24 rows; it intentionally fails validation until real reviewer/runtime evidence replaces placeholders. |
 | `plans/main_chat_stage2_live_provider_eval_plan.md` | External live-provider scenarios, environment contract, and fail-closed rules. |
 | `plans/main_chat_stage2_agent_control_plane_product_requirements.md` | Product requirements for the execution-first task panel. |
 | `plans/main_chat_stage2_memory_proposal_trial_flow.md` | Memory/proposal/knowledge flow for internal trial. |
 | `plans/main_chat_stage2_failure_recovery_requirements.md` | Failure taxonomy, runtime/UI requirements, and recovery scenarios. |
 | `plans/main_chat_stage2_readiness_gate_contract.md` | Typed readiness command/report contract and fail-closed rules. |
 | `plans/main_chat_agent_stage2_internal_trial_goal_spec.md` | CLI goal-mode implementation entrypoint. |
+| `plans/main_chat_stage2_implementation_report.md` | Current Stage 2 implementation evidence, verification run, blockers, and residual risks. |
 
 ## 3. Recommended Development Order
 
@@ -63,8 +66,9 @@ blockers. Do not claim internal trial readiness without manual dogfood and
 real live-provider P0 evidence. If live-provider evidence is unavailable, return
 not_ready with named blockers instead of deferring it inside this stage.
 It is acceptable to finish implementation_complete_for_stage2_mechanism while
-the readiness gate still returns not_ready because real manual reviewer or live
-provider evidence is missing.
+the readiness gate still returns not_ready because real manual reviewer
+evidence is missing, or because the final gate is run without known build
+provenance.
 ```
 
 ## 5. Readiness To Start Stage 2 Development

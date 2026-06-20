@@ -23,6 +23,7 @@ fn main_chat_command_surface_ipc_tests_are_not_concentrated_in_lib_rs() {
         "send_message_web_policy_blocker_completes_through_agent_loop_not_fallback",
         "start_stream_message_web_policy_blocker_completes_through_agent_loop_not_fallback",
         "send_message_registered_mcp_multi_candidate_agent_loop_selects_allowed_manifest",
+        "send_message_missing_workspace_file_source_blocks_before_queue_execution",
         "main_chat_command_surface_eval_gate_covers_send_stream_runtime_matrix",
     ] {
         assert!(
@@ -104,6 +105,121 @@ async fn main_chat_command_surface_eval_gate_covers_send_stream_runtime_matrix()
         .contains(&"provider_live_proposal_permission_not_executed".to_string()));
     assert_eq!(report.legacy_fallback_count, 0);
     assert_eq!(report.silent_write_count, 0);
+}
+
+#[tokio::test]
+async fn send_message_missing_workspace_file_source_blocks_before_queue_execution() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let app = tauri::test::mock_builder()
+        .manage(state.clone())
+        .invoke_handler(tauri::generate_handler![crate::send_message])
+        .build(main_chat_command_surface_test_context())
+        .expect("build mock tauri app");
+    let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+        .build()
+        .expect("build mock webview");
+    let session_id = "command-surface-missing-workspace-file-source";
+
+    let response = tauri::test::get_ipc_response(
+        &webview,
+        main_chat_invoke_request(
+            "send_message",
+            serde_json::json!({
+                "sessionId": session_id,
+                "session_id": session_id,
+                "messages": [{
+                    "role": "user",
+                    "content": "Read frontend/definitely-missing-stage2-file.md before answering."
+                }]
+            }),
+        ),
+    )
+    .expect("send_message missing file response")
+    .deserialize::<serde_json::Value>()
+    .expect("deserialize missing file response");
+
+    assert_eq!(response["legacy_fallback_used"], false);
+    assert_eq!(
+        response["agent_ingress"]["selectedStrategy"],
+        "re_act_tool_execution"
+    );
+    assert!(response["reply"]
+        .as_str()
+        .is_some_and(|reply| reply.contains("missing or unreadable")));
+    let task_session_id = response["agent_ingress"]["agentTaskSessionId"]
+        .as_str()
+        .expect("missing file task session id");
+
+    let session = {
+        let store_arc = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("main chat session store");
+        let store = store_arc.lock().await;
+        store
+            .load_session(task_session_id)
+            .expect("load missing file task session")
+            .expect("missing file task session exists")
+    };
+    assert_eq!(
+        session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
+    );
+    assert_eq!(
+        session.pending_blockers,
+        vec!["workspace_file_read_source_missing".to_string()]
+    );
+
+    let actions = {
+        let queue_arc = state
+            .main_chat_action_queue_store
+            .as_ref()
+            .expect("main chat action queue store");
+        let queue = queue_arc.lock().await;
+        queue
+            .list_for_session(task_session_id)
+            .expect("list missing file actions")
+    };
+    assert!(
+        actions.is_empty(),
+        "missing file plan preparation should block before queue execution: {actions:?}"
+    );
+
+    let transcript = {
+        let store_arc = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("main chat session store");
+        let store = store_arc.lock().await;
+        store
+            .list_transcript_entries(task_session_id)
+            .expect("list missing file transcript")
+    };
+    let error_entry = transcript
+        .iter()
+        .find(|entry| entry.summary == "ReAct tool action was blocked before execution.")
+        .expect("missing file blocker transcript entry");
+    assert_eq!(
+        error_entry
+            .metadata
+            .get("blockerReason")
+            .and_then(serde_json::Value::as_str),
+        Some("workspace_file_read_source_missing")
+    );
+    assert_eq!(
+        error_entry
+            .metadata
+            .get("sourceMissing")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        error_entry
+            .metadata
+            .get("legacyFallbackUsed")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
 }
 
 #[tokio::test]

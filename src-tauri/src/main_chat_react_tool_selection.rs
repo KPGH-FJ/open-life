@@ -592,6 +592,44 @@ pub(crate) fn build_main_chat_react_action_plan(
         });
     }
 
+    if main_chat_explicit_multi_source_read_request(&lower) {
+        let (path_label, path) = main_chat_workspace_file_target(user_text)?;
+        return Ok(MainChatReactActionPlan {
+            queue_action_type: "file.read".into(),
+            executor_action_type: "mcp_tool".into(),
+            target: "file.read".into(),
+            arguments: serde_json::json!({ "path": path }),
+            description: format!(
+                "Read workspace file {path_label} and a registered MCP source through AgentLoop."
+            ),
+            requires_network: false,
+            uses_ephemeral_file_permission: true,
+            uses_ephemeral_mcp_wrapper_permission: true,
+            tool_candidates: vec![
+                MainChatReactToolCandidate {
+                    candidate_id: "file.read".into(),
+                    executor_action_type: "mcp_tool".into(),
+                    target: "file.read".into(),
+                    arguments: serde_json::json!({ "path": path }),
+                    manifest_source: "planned_action".into(),
+                    capabilities: vec!["read".into()],
+                    selection_rank: 1,
+                    match_reason: "multi_source_file_read".into(),
+                },
+                MainChatReactToolCandidate {
+                    candidate_id: "builtin_echo".into(),
+                    executor_action_type: "mcp_tool".into(),
+                    target: "builtin_echo".into(),
+                    arguments: serde_json::json!({}),
+                    manifest_source: "registered_manifest".into(),
+                    capabilities: vec!["read".into()],
+                    selection_rank: 2,
+                    match_reason: "multi_source_mcp_read".into(),
+                },
+            ],
+        });
+    }
+
     if lower.contains("agents.md") || lower.contains("read ") || lower.contains("file") {
         let (path_label, path) = main_chat_workspace_file_target(user_text)?;
         return Ok(MainChatReactActionPlan {
@@ -694,6 +732,14 @@ fn main_chat_explicit_mcp_read_request(lower: &str) -> bool {
         || lower.contains("governed mcp")
 }
 
+fn main_chat_explicit_multi_source_read_request(lower: &str) -> bool {
+    (lower.contains("two safe read sources")
+        || lower.contains("two read sources")
+        || lower.contains("multiple read sources")
+        || lower.contains("multi-step eval"))
+        && (lower.contains("read") || lower.contains("file"))
+}
+
 pub(crate) fn build_main_chat_react_agent_loop_messages(
     messages_for_generation: &[ChatMessage],
     plan: &MainChatReactActionPlan,
@@ -708,7 +754,7 @@ pub(crate) fn build_main_chat_react_agent_loop_messages(
         content: format!(
             concat!(
                 "Main Chat Agent v1 selected a governed read-only ReAct action for this turn.\n",
-                "Use at most one allowed tool candidate. If the user explicitly asks to use, call, read, search, or fetch, the action is necessary and you must not answer directly.\n",
+                "Use at most one allowed tool candidate unless the user explicitly asks for multiple read sources. If the user explicitly asks to use, call, read, search, or fetch, the action is necessary and you must not answer directly.\n",
                 "Only answer directly when no explicit tool action is requested.\n",
                 "When using the action, return only a JSON envelope shaped as ",
                 "{{\"final\":\"...\",\"actions\":[{{\"name\":\"<allowedTarget>\",",

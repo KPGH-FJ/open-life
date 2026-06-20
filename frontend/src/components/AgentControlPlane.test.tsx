@@ -143,6 +143,71 @@ function renderPanel(state: MainChatAgentStateSnapshot) {
 }
 
 describe("AgentControlPlane", () => {
+  it("renders reviewer trace identifiers from runtime state", () => {
+    renderPanel(
+      agentState({
+        task: {
+          ...agentState().task,
+          status: "blocked",
+          blockerIds: ["blocker-permission-1"],
+        },
+        blockers: [
+          {
+            blockerId: "blocker-permission-1",
+            reasonCode: "tool_permission_required",
+            title: "Permission required",
+            detail: "Safe read needs scoped approval for action-1.",
+            affectedActionId: "action-1",
+            recoverable: true,
+            controls: ["deny", "cancel", "open_trace"],
+          },
+        ],
+      })
+    );
+
+    const trace = screen.getByTestId("agent-reviewer-trace");
+
+    expect(trace).toHaveAttribute("data-task-session-id", "task-agent-control-plane-1");
+    expect(trace).toHaveAttribute("data-run-id", "run-agent-control-plane-1");
+    expect(trace).toHaveTextContent("task-agent-control-plane-1");
+    expect(trace).toHaveTextContent("run-agent-control-plane-1");
+    expect(trace).toHaveTextContent("tool_permission_required");
+  });
+
+  it("copies reviewer trace evidence as a single runtime-backed line", () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    renderPanel(
+      agentState({
+        task: {
+          ...agentState().task,
+          status: "blocked",
+          blockerIds: ["blocker-permission-1"],
+        },
+        blockers: [
+          {
+            blockerId: "blocker-permission-1",
+            reasonCode: "tool_permission_required",
+            title: "Permission required",
+            detail: "Safe read needs scoped approval for action-1.",
+            affectedActionId: "action-1",
+            recoverable: true,
+            controls: ["deny", "cancel", "open_trace"],
+          },
+        ],
+      })
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy reviewer trace" }));
+
+    expect(writeText).toHaveBeenCalledWith(
+      "taskId=task-agent-control-plane-1 runId=run-agent-control-plane-1 status=blocked route=react_tool_execution blockers=tool_permission_required"
+    );
+  });
+
   it("renders canonical final delivery sections separately", () => {
     renderPanel(agentState());
 

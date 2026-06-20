@@ -213,6 +213,40 @@ impl ModelRouter {
         self
     }
 
+    pub fn seed_configured_cloud_provider(
+        &mut self,
+        provider: &str,
+        model: &str,
+        has_configured_key: bool,
+    ) {
+        let provider = provider.trim();
+        if provider.is_empty() || provider == "ollama" || self.providers.contains_key(provider) {
+            return;
+        }
+
+        let model = model.trim();
+        self.providers.insert(
+            provider.to_string(),
+            ProviderAvailability {
+                provider: provider.to_string(),
+                available: has_configured_key,
+                latency_ms: None,
+                models: if model.is_empty() {
+                    vec![]
+                } else {
+                    vec![model.to_string()]
+                },
+                last_checked: chrono::Utc::now(),
+                last_error: if has_configured_key {
+                    None
+                } else {
+                    Some(format!("{}_api_key_missing", provider))
+                },
+                health_is_estimated: true,
+            },
+        );
+    }
+
     fn provider_env_key(provider: &str) -> Option<String> {
         let candidates: &[&str] = match provider {
             "deepseek" => &["DEEPSEEK_API_KEY"],

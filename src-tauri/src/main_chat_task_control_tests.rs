@@ -519,8 +519,10 @@ fn resume_main_chat_task_preserves_pending_permission_blocker_instead_of_state_o
         env!("CARGO_MANIFEST_DIR")
     );
     let source = std::fs::read_to_string(module_path).expect("read task-control module");
-    let resume_body =
-        extract_rust_function_body(&source, "pub(crate) async fn resume_main_chat_agent_task(");
+    let resume_body = extract_rust_function_body(
+        &source,
+        "pub(crate) async fn resume_main_chat_agent_task_with_state(",
+    );
 
     assert!(
         resume_body.contains("evaluate_main_chat_task_resume("),

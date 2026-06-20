@@ -227,6 +227,41 @@ fn main_chat_react_action_plan_does_not_treat_action_type_schema_key_as_mcp_tool
 }
 
 #[test]
+fn main_chat_react_action_plan_allows_explicit_multi_source_reads() {
+    let plan = build_main_chat_react_action_plan(
+        "session-stage2-multi-source",
+        "For this Stage 2 live multi-step eval, use two safe read sources for `Cargo.toml` and builtin echo.",
+    )
+    .expect("build multi-source read plan");
+
+    assert_eq!(plan.queue_action_type, "file.read");
+    assert!(plan.uses_ephemeral_file_permission);
+    assert!(plan.uses_ephemeral_mcp_wrapper_permission);
+    assert_eq!(plan.tool_candidate_count(), 2);
+    assert_eq!(
+        plan.tool_candidate_ids(),
+        vec!["file.read".to_string(), "builtin_echo".to_string()]
+    );
+    assert_eq!(plan.allowed_tool_actions().len(), 2);
+
+    let guided_messages = build_main_chat_react_agent_loop_messages(
+        &[ChatMessage {
+            role: "user".into(),
+            content: "use two safe read sources".into(),
+        }],
+        &plan,
+    );
+    let guidance = guided_messages
+        .first()
+        .expect("multi-source guidance should be prepended");
+
+    assert!(guidance.content.contains("multiple read sources"));
+    assert!(guidance.content.contains("candidateCount=2"));
+    assert!(guidance.content.contains("candidateId=file.read"));
+    assert!(guidance.content.contains("candidateId=builtin_echo"));
+}
+
+#[test]
 fn main_chat_react_agent_loop_guidance_declares_governed_tool_candidate_set() {
     let plan = build_main_chat_react_action_plan(
         "session-candidate-guidance",

@@ -43,6 +43,14 @@ fn productization_command_test_context() -> tauri::Context<tauri::test::MockRunt
         mock_ipc_origin.clone(),
     );
     context.runtime_authority_mut().__allow_command(
+        "run_main_chat_agent_stage2_readiness_gate".into(),
+        mock_ipc_origin.clone(),
+    );
+    context.runtime_authority_mut().__allow_command(
+        "validate_main_chat_agent_stage2_manual_dogfood_artifact".into(),
+        mock_ipc_origin.clone(),
+    );
+    context.runtime_authority_mut().__allow_command(
         "run_main_chat_agent_stage1_dogfood_gate".into(),
         mock_ipc_origin,
     );
@@ -1821,6 +1829,149 @@ async fn run_main_chat_agent_stage1_dogfood_command_returns_isolated_report() {
             .as_str()
             .unwrap(),
         "temp_isolated"
+    );
+}
+
+#[tokio::test]
+async fn run_stage2_readiness_gate_command_returns_auditable_report() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let app = tauri::test::mock_builder()
+        .manage(state.clone())
+        .invoke_handler(tauri::generate_handler![
+            crate::commands::agent_runtime::run_main_chat_agent_stage2_readiness_gate
+        ])
+        .build(productization_command_test_context())
+        .expect("build mock tauri app");
+    let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+        .build()
+        .expect("build mock webview");
+
+    let response = tauri::test::get_ipc_response(
+        &webview,
+        productization_invoke_request(
+            "run_main_chat_agent_stage2_readiness_gate",
+            serde_json::json!({}),
+        ),
+    )
+    .expect("stage 2 readiness response")
+    .deserialize::<serde_json::Value>()
+    .expect("deserialize stage 2 readiness response");
+
+    assert_eq!(
+        response["reportKind"].as_str().unwrap(),
+        "main_chat_agent_stage2_readiness_gate"
+    );
+    assert_eq!(
+        response["schemaVersion"].as_str().unwrap(),
+        "stage2-readiness-v1"
+    );
+    let recommendation = response["recommendation"].as_str().unwrap();
+    assert!(
+        matches!(
+            recommendation,
+            "ready_for_limited_internal_trial" | "not_ready_for_limited_internal_trial"
+        ),
+        "unexpected Stage 2 recommendation: {recommendation}"
+    );
+    assert_eq!(
+        response["manualDogfood"]["requiredScenarioCount"]
+            .as_u64()
+            .unwrap(),
+        24
+    );
+    assert_eq!(
+        response["liveProvider"]["requiredScenarioCount"]
+            .as_u64()
+            .unwrap(),
+        10
+    );
+    let blockers = response["blockers"].as_array().unwrap();
+    if recommendation == "ready_for_limited_internal_trial" {
+        assert!(
+            blockers.is_empty(),
+            "ready report has blockers: {blockers:?}"
+        );
+        assert!(response["manualDogfood"]["ready"].as_bool().unwrap());
+        assert!(response["liveProvider"]["ready"].as_bool().unwrap());
+    } else {
+        assert!(
+            !blockers.is_empty(),
+            "not-ready report must expose named blockers"
+        );
+    }
+    let live_ready = response["liveProvider"]["ready"].as_bool().unwrap();
+    if live_ready {
+        assert_eq!(
+            response["liveProvider"]["passedScenarioCount"]
+                .as_u64()
+                .unwrap(),
+            10
+        );
+        assert_eq!(
+            response["liveProvider"]["modelInvokedCount"]
+                .as_u64()
+                .unwrap(),
+            10
+        );
+        assert_eq!(
+            response["liveProvider"]["mainChatInvokedCount"]
+                .as_u64()
+                .unwrap(),
+            10
+        );
+        assert!(
+            !blockers.iter().any(|blocker| blocker
+                .as_str()
+                .is_some_and(|label| label.starts_with("stage2_live_"))),
+            "credited live artifact should not leave live blockers: {blockers:?}"
+        );
+    } else {
+        assert!(
+            blockers.iter().any(|blocker| blocker
+                .as_str()
+                .is_some_and(|label| label.starts_with("stage2_live_"))),
+            "missing or blocked live evidence must remain visible: {blockers:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn validate_stage2_manual_dogfood_artifact_command_returns_focused_summary() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let app = tauri::test::mock_builder()
+        .manage(state.clone())
+        .invoke_handler(tauri::generate_handler![
+            crate::commands::agent_runtime::validate_main_chat_agent_stage2_manual_dogfood_artifact
+        ])
+        .build(productization_command_test_context())
+        .expect("build mock tauri app");
+    let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+        .build()
+        .expect("build mock webview");
+
+    let response = tauri::test::get_ipc_response(
+        &webview,
+        productization_invoke_request(
+            "validate_main_chat_agent_stage2_manual_dogfood_artifact",
+            serde_json::json!({}),
+        ),
+    )
+    .expect("manual dogfood artifact validation response")
+    .deserialize::<serde_json::Value>()
+    .expect("deserialize manual dogfood artifact validation response");
+
+    assert_eq!(
+        response["requiredScenarioCount"].as_u64().unwrap(),
+        24,
+        "validator should return the focused manual dogfood summary"
+    );
+    assert!(
+        response["missingScenarioIds"].as_array().is_some(),
+        "validator should expose missing P0 manual scenario ids for operators"
+    );
+    assert!(
+        response["blockers"].as_array().is_some(),
+        "validator must expose named blockers without running full readiness"
     );
 }
 

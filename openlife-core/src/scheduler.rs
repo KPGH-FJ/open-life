@@ -100,7 +100,12 @@ impl InferenceScheduler {
         }
     }
 
-    pub fn with_model_router(mut self, router: ModelRouter) -> Self {
+    pub fn with_model_router(mut self, mut router: ModelRouter) -> Self {
+        router.seed_configured_cloud_provider(
+            &self.provider,
+            &self.chat_model,
+            !self.effective_api_key().trim().is_empty(),
+        );
         self.model_router = Some(router);
         self
     }
@@ -556,6 +561,48 @@ mod tests {
             true,
         );
         assert!(scheduler.should_use_local_for_chat(None, true));
+    }
+
+    #[tokio::test]
+    async fn model_router_uses_configured_cloud_key_without_prior_availability_probe() {
+        let scheduler = InferenceScheduler::new(
+            "qwen2.5".into(),
+            false,
+            "deepseek".into(),
+            "https://api.deepseek.com".into(),
+            "sk-test".into(),
+            "deepseek-chat".into(),
+            "text-embedding-3-small".into(),
+            false,
+        )
+        .with_model_router(ModelRouter::new());
+
+        let trace = scheduler.preview_chat_route(None).await;
+
+        assert_eq!(trace.provider, "deepseek");
+        assert_eq!(trace.model, "deepseek-chat");
+        assert_eq!(trace.route_type, "cloud");
+        assert_eq!(trace.provider_health_is_estimated, None);
+    }
+
+    #[tokio::test]
+    async fn model_router_keeps_configured_cloud_provider_unavailable_without_key() {
+        let scheduler = InferenceScheduler::new(
+            "qwen2.5".into(),
+            false,
+            "deepseek".into(),
+            "https://api.deepseek.com".into(),
+            "".into(),
+            "deepseek-chat".into(),
+            "text-embedding-3-small".into(),
+            false,
+        )
+        .with_model_router(ModelRouter::new());
+
+        let trace = scheduler.preview_chat_route(None).await;
+
+        assert_eq!(trace.provider, "none");
+        assert!(trace.reason.contains("No available providers"));
     }
 
     #[tokio::test]

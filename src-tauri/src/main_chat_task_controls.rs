@@ -880,6 +880,13 @@ pub(crate) async fn resume_main_chat_agent_task(
     task_session_id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<MainChatAgentTaskState, String> {
+    resume_main_chat_agent_task_with_state(&task_session_id, &state).await
+}
+
+pub(crate) async fn resume_main_chat_agent_task_with_state(
+    task_session_id: &str,
+    state: &Arc<AppState>,
+) -> Result<MainChatAgentTaskState, String> {
     let store_arc = state
         .main_chat_agent_session_store
         .as_ref()
@@ -887,23 +894,23 @@ pub(crate) async fn resume_main_chat_agent_task(
     let session = {
         let store = store_arc.lock().await;
         store
-            .load_session(&task_session_id)
+            .load_session(task_session_id)
             .map_err(|err| format!("load Main Chat task before resume failed: {err}"))?
     };
     let actions = if let Some(ref queue_arc) = state.main_chat_action_queue_store {
         let queue = queue_arc.lock().await;
         queue
-            .list_for_session(&task_session_id)
+            .list_for_session(task_session_id)
             .map_err(|err| format!("load Main Chat actions before resume failed: {err}"))?
     } else {
         Vec::new()
     };
     if session.is_some() {
-        let detail = get_main_chat_agent_task_detail_with_state(&task_session_id, &state).await?;
+        let detail = get_main_chat_agent_task_detail_with_state(task_session_id, state).await?;
         if let Some(reason_code) = continuity_hard_resume_blocker(&detail.continuity_diagnostics) {
             append_main_chat_agent_transcript(
-                &state,
-                Some(&task_session_id),
+                state,
+                Some(task_session_id),
                 openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Error,
                 "Task resume was blocked by continuity diagnostics before any replay.",
                 serde_json::json!({
@@ -918,8 +925,8 @@ pub(crate) async fn resume_main_chat_agent_task(
             .await;
             if reason_code == "permission_scope_mismatch" {
                 append_main_chat_agent_transcript(
-                    &state,
-                    Some(&task_session_id),
+                    state,
+                    Some(task_session_id),
                     openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::PermissionRequest,
                     "Task resume was requested but pending permission blockers remain.",
                     serde_json::json!({
@@ -933,7 +940,7 @@ pub(crate) async fn resume_main_chat_agent_task(
                     }),
                 )
                 .await;
-                return load_main_chat_agent_task_state(&task_session_id, &state).await;
+                return load_main_chat_agent_task_state(task_session_id, state).await;
             }
             return Err(format!("resume Main Chat task rejected: {reason_code}"));
         }
@@ -956,15 +963,15 @@ pub(crate) async fn resume_main_chat_agent_task(
                     == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::PendingPermission
             }) {
                 if main_chat_pending_action_permission_ready_for_resume(
-                    &state,
+                    state,
                     session_ref,
                     action_ref,
                 )
                 .await?
                 {
                     append_main_chat_agent_transcript(
-                        &state,
-                        Some(&task_session_id),
+                        state,
+                        Some(task_session_id),
                         openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Retry,
                         "Task resume is replaying a pending action after accepted ToolPermission.",
                         serde_json::json!({
@@ -976,17 +983,17 @@ pub(crate) async fn resume_main_chat_agent_task(
                     )
                     .await;
                     replay_main_chat_agent_action(
-                        &state,
-                        &task_session_id,
+                        state,
+                        task_session_id,
                         &action_ref.id,
                         session_ref,
                         action_ref,
                     )
                     .await?;
-                    mark_main_chat_action_resume_replay_metadata(&state, &action_ref.id).await?;
+                    mark_main_chat_action_resume_replay_metadata(state, &action_ref.id).await?;
                     append_main_chat_agent_transcript(
-                        &state,
-                        Some(&task_session_id),
+                        state,
+                        Some(task_session_id),
                         openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Observation,
                         "Task resume replay completed through the governed executor.",
                         serde_json::json!({
@@ -997,18 +1004,18 @@ pub(crate) async fn resume_main_chat_agent_task(
                         }),
                     )
                     .await;
-                    return load_main_chat_agent_task_state(&task_session_id, &state).await;
+                    return load_main_chat_agent_task_state(task_session_id, state).await;
                 }
             }
         }
         let store = store_arc.lock().await;
         store
-            .mark_waiting_permission(&task_session_id)
+            .mark_waiting_permission(task_session_id)
             .map_err(|err| format!("preserve Main Chat permission blocker failed: {err}"))?;
         drop(store);
         append_main_chat_agent_transcript(
-            &state,
-            Some(&task_session_id),
+            state,
+            Some(task_session_id),
             openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::PermissionRequest,
             "Task resume was requested but pending permission blockers remain.",
             serde_json::json!({
@@ -1021,17 +1028,17 @@ pub(crate) async fn resume_main_chat_agent_task(
             }),
         )
         .await;
-        return load_main_chat_agent_task_state(&task_session_id, &state).await;
+        return load_main_chat_agent_task_state(task_session_id, state).await;
     }
 
     let store = store_arc.lock().await;
     store
-        .resume_session(&task_session_id)
+        .resume_session(task_session_id)
         .map_err(|err| format!("resume Main Chat task failed: {err}"))?;
     drop(store);
     append_main_chat_agent_transcript(
-        &state,
-        Some(&task_session_id),
+        state,
+        Some(task_session_id),
         openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Retry,
         "Task was resumed from Main Chat.",
         serde_json::json!({
@@ -1042,7 +1049,7 @@ pub(crate) async fn resume_main_chat_agent_task(
         }),
     )
     .await;
-    load_main_chat_agent_task_state(&task_session_id, &state).await
+    load_main_chat_agent_task_state(task_session_id, state).await
 }
 
 async fn main_chat_pending_action_permission_ready_for_resume(

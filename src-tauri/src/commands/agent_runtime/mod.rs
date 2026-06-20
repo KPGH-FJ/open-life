@@ -1959,6 +1959,33 @@ pub async fn run_main_chat_agent_beta_v1_readiness_gate(
 }
 
 #[tauri::command]
+pub async fn run_main_chat_agent_stage2_readiness_gate(
+    state: State<'_, Arc<AppState>>,
+) -> Result<crate::main_chat_agent_stage2_readiness::MainChatAgentStage2ReadinessReport, String> {
+    let state = state.inner().clone();
+    let runtime_handle = tokio::runtime::Handle::current();
+    std::thread::Builder::new()
+        .name("stage2-readiness-gate".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            runtime_handle.block_on(
+                crate::main_chat_agent_stage2_readiness::run_main_chat_agent_stage2_readiness_report(
+                    &state,
+                ),
+            )
+        })
+        .map_err(|err| format!("spawn stage2 readiness gate worker: {err}"))?
+        .join()
+        .map_err(|_| "stage2 readiness gate worker panicked".to_string())?
+}
+
+#[tauri::command]
+pub async fn validate_main_chat_agent_stage2_manual_dogfood_artifact(
+) -> Result<crate::main_chat_agent_stage2_readiness::Stage2ManualDogfoodSummary, String> {
+    Ok(crate::main_chat_agent_stage2_readiness::validate_stage2_manual_dogfood_artifact())
+}
+
+#[tauri::command]
 pub async fn run_main_chat_agent_stage1_dogfood_gate(
     _state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {

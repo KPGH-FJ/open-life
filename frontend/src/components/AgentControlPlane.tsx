@@ -2,6 +2,7 @@ import {
   Ban,
   CheckCircle2,
   Clock,
+  Copy,
   FileText,
   Pencil,
   Play,
@@ -343,6 +344,14 @@ export default function AgentControlPlane({
     finalDelivery?.durableChanges.length ? "Durable changes" : null,
     finalDelivery?.nextSteps.length ? "Next steps" : null,
   ].filter((title): title is string => Boolean(title));
+  const blockerCodes = state.blockers.map(blocker => blocker.reasonCode || blocker.blockerId);
+  const reviewerTraceLine = [
+    `taskId=${state.task.taskId}`,
+    `runId=${state.task.runId}`,
+    `status=${state.task.status}`,
+    `route=${state.route.strategy}`,
+    `blockers=${blockerCodes.length ? blockerCodes.join(",") : "none"}`,
+  ].join(" ");
 
   return (
     <section
@@ -431,6 +440,39 @@ export default function AgentControlPlane({
             )}
           </div>
         )}
+      </div>
+
+      <div
+        data-testid="agent-reviewer-trace"
+        data-task-session-id={state.task.taskId}
+        data-run-id={state.task.runId}
+        data-blocker-codes={blockerCodes.join("|")}
+        className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 border-l border-stone-300 bg-stone-50/80 px-2 py-1 text-stone-600"
+      >
+        <span className="font-semibold text-stone-950">Reviewer trace</span>
+        <span className="min-w-0 break-all">
+          task <span className="font-mono text-stone-800">{state.task.taskId}</span>
+        </span>
+        <span className="min-w-0 break-all">
+          run <span className="font-mono text-stone-800">{state.task.runId}</span>
+        </span>
+        {blockerCodes.length > 0 && (
+          <span className="min-w-0 break-all">
+            blockers <span className="font-mono text-stone-800">{blockerCodes.join(",")}</span>
+          </span>
+        )}
+        <button
+          type="button"
+          aria-label="Copy reviewer trace"
+          title="Copy reviewer trace"
+          onClick={() => {
+            void navigator.clipboard?.writeText(reviewerTraceLine).catch(() => undefined);
+          }}
+          className="inline-flex min-h-6 items-center gap-1 rounded-md border border-stone-200 bg-white px-2 font-medium text-stone-800 hover:bg-stone-100"
+        >
+          <Copy size={12} />
+          <span>Copy</span>
+        </button>
       </div>
 
       {eventStream && (

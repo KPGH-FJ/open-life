@@ -53,6 +53,8 @@ import {
   runMainChatAgentExecutionV1EvalGate,
   runMainChatAgentBetaV1ReadinessGate,
   runMainChatAgentStage1DogfoodGate,
+  runMainChatAgentStage2ReadinessGate,
+  validateMainChatAgentStage2ManualDogfoodArtifact,
   clearMainChatSkill,
   getMainChatSkillDetail,
   listMainChatSkills,
@@ -1119,6 +1121,429 @@ describe("tauri command argument aliases", () => {
     expect(result.readinessDimensions.some(dimension => dimension.dimension === "Routing")).toBe(
       true
     );
+  });
+
+  it("invokes Main Chat Agent Stage 2 readiness gate with manual and live blockers", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      reportKind: "main_chat_agent_stage2_readiness_gate",
+      schemaVersion: "stage2-readiness-v1",
+      runId: "stage2-readiness-test",
+      commit: "abc123",
+      recommendation: "not_ready_for_limited_internal_trial",
+      implementationStatus: "implementation_complete_for_stage2_mechanism",
+      blockers: [
+        "stage2_manual_dogfood_evidence_missing",
+        "stage2_live_provider_p0_evidence_missing",
+      ],
+      deterministicStage1Ready: true,
+      betaFoundationReady: true,
+      manualDogfood: {
+        attempted: false,
+        ready: false,
+        reviewerCount: 0,
+        requiredScenarioCount: 24,
+        attemptedScenarioCount: 0,
+        passedScenarioCount: 0,
+        missingScenarioIds: ["S2-D01"],
+        failedScenarioIds: ["S2-D01"],
+        traceIdsPresent: false,
+        artifactDigest: null,
+        blockers: ["stage2_manual_dogfood_evidence_missing"],
+      },
+      liveProvider: {
+        attempted: false,
+        ready: false,
+        provider: null,
+        model: null,
+        requiredScenarioCount: 10,
+        passedScenarioCount: 0,
+        failedScenarioIds: ["L2-L01"],
+        modelInvokedCount: 0,
+        mainChatInvokedCount: 0,
+        localOrMockCreditRejected: 0,
+        artifactDigest: null,
+        blockers: ["stage2_live_provider_p0_evidence_missing"],
+        scenarioPlans: [
+          {
+            scenarioId: "L2-L01",
+            scenario: "direct_answer",
+            scenarioSetup: "live_provider_enabled",
+            requiredRuntimeEvidence: [
+              "provider_model_identity",
+              "model_invoked",
+              "response_preview",
+              "no_agent_loop_metadata",
+            ],
+            failClosedBlocker: "live_provider_generation_not_completed",
+            executionSource: "existing_v1_live_harness",
+            runnerStatus: "implemented",
+          },
+          {
+            scenarioId: "L2-L02",
+            scenario: "file_read_request",
+            scenarioSetup: "seeded_workspace_file_or_missing_file_fixture",
+            requiredRuntimeEvidence: ["file_action_or_blocker", "no_fake_observation"],
+            failClosedBlocker: "live_provider_read_action_missing",
+            executionSource: "stage2_live_file_read_runner",
+            runnerStatus: "implemented",
+          },
+          {
+            scenarioId: "L2-L03",
+            scenario: "web_policy_blocker",
+            scenarioSetup: "web_network_policy_disabled",
+            requiredRuntimeEvidence: ["web_policy_blocker", "no_provider_backed_web_credit"],
+            failClosedBlocker: "live_provider_web_policy_bypass",
+            executionSource: "stage2_live_web_policy_runner",
+            runnerStatus: "implemented",
+          },
+          {
+            scenarioId: "L2-L04",
+            scenario: "provider_backed_web_read",
+            scenarioSetup: "governed_web_read_enabled",
+            requiredRuntimeEvidence: [
+              "selected_web_candidate",
+              "action_status",
+              "observation",
+              "final_synthesis",
+            ],
+            failClosedBlocker: "provider_backed_web_agent_loop_not_executed",
+            executionSource: "existing_v1_live_harness",
+            runnerStatus: "implemented",
+          },
+          {
+            scenarioId: "L2-L05",
+            scenario: "registered_mcp_read",
+            scenarioSetup: "two_bounded_read_only_mcp_candidates",
+            requiredRuntimeEvidence: [
+              "candidate_ids",
+              "target_allowlist",
+              "selected_rank",
+              "observation",
+            ],
+            failClosedBlocker: "provider_backed_mcp_agent_loop_not_executed",
+            executionSource: "existing_v1_live_harness",
+            runnerStatus: "implemented",
+          },
+          {
+            scenarioId: "L2-L06",
+            scenario: "mcp_tool_permission_proposal",
+            scenarioSetup: "permission_required_read_target",
+            requiredRuntimeEvidence: [
+              "tool_permission_proposal",
+              "proposal_target",
+              "selected_candidate",
+              "no_read_success_overlap",
+            ],
+            failClosedBlocker: "provider_live_proposal_permission_not_executed",
+            executionSource: "existing_v1_live_harness",
+            runnerStatus: "implemented",
+          },
+          {
+            scenarioId: "L2-L07",
+            scenario: "multi_step_react",
+            scenarioSetup: "two_safe_read_sources_available",
+            requiredRuntimeEvidence: ["two_actions", "two_observations", "final_synthesis"],
+            failClosedBlocker: "live_provider_multistep_observation_missing",
+            executionSource: "stage2_live_multistep_react_runner",
+            runnerStatus: "implemented",
+          },
+          {
+            scenarioId: "L2-L08",
+            scenario: "memory_proposal",
+            scenarioSetup: "memory_proposal_enabled_no_auto_materialization",
+            requiredRuntimeEvidence: [
+              "proposal_id",
+              "source_evidence",
+              "no_memory_materialization",
+            ],
+            failClosedBlocker: "live_provider_memory_proposal_missing",
+            executionSource: "stage2_live_memory_proposal_runner",
+            runnerStatus: "implemented",
+          },
+          {
+            scenarioId: "L2-L09",
+            scenario: "permission_denial",
+            scenarioSetup: "pending_safe_read_permission_denial",
+            requiredRuntimeEvidence: ["denied_permission_state", "no_resumed_action"],
+            failClosedBlocker: "live_provider_permission_denial_bypassed",
+            executionSource: "stage2_live_permission_denial_runner",
+            runnerStatus: "implemented",
+          },
+          {
+            scenarioId: "L2-L10",
+            scenario: "failure_recovery",
+            scenarioSetup: "induced_bad_tool_or_safe_tool_failure",
+            requiredRuntimeEvidence: [
+              "blocker_reason",
+              "retry_or_cancel_state",
+              "no_fake_final_done",
+            ],
+            failClosedBlocker: "live_provider_failure_hidden",
+            executionSource: "stage2_live_failure_recovery_runner",
+            runnerStatus: "implemented",
+          },
+        ],
+        scenarioReports: [
+          {
+            scenarioId: "L2-L01",
+            status: "blocked",
+            credited: false,
+            providerEndpointKind: null,
+            blockers: ["stage2_live_provider_p0_evidence_missing"],
+            mainChatInvoked: false,
+            modelInvoked: false,
+            runIdPresent: false,
+            taskSessionIdPresent: false,
+            responsePreviewPresent: false,
+          },
+          {
+            scenarioId: "L2-L05",
+            status: "failed",
+            credited: false,
+            providerEndpointKind: "external_provider",
+            blockers: ["live_provider_model_ranked_selection_trace_missing"],
+            mainChatInvoked: true,
+            modelInvoked: true,
+            runIdPresent: true,
+            taskSessionIdPresent: true,
+            responsePreviewPresent: true,
+          },
+        ],
+      },
+      controlPlane: {
+        ready: true,
+        requiredCount: 10,
+        attemptedCount: 10,
+        passedCount: 10,
+        failedIds: [],
+        coverage: [{ id: "direct_answer", passed: true, evidence: ["trace"], blockers: [] }],
+        blockers: [],
+      },
+      memoryProposal: {
+        ready: true,
+        requiredCount: 8,
+        attemptedCount: 8,
+        passedCount: 8,
+        failedIds: [],
+        coverage: [{ id: "M2-01", passed: true, evidence: ["proposal"], blockers: [] }],
+        blockers: [],
+      },
+      failureRecovery: {
+        ready: true,
+        requiredCount: 10,
+        attemptedCount: 10,
+        passedCount: 10,
+        failedIds: [],
+        coverage: [
+          {
+            id: "R2-01",
+            passed: true,
+            evidence: [
+              "missing_workspace_file_blocker",
+              "blocked_missing_source_state",
+              "user_next_action_or_terminal_explanation",
+              "no_fake_file_read_completion",
+            ],
+            blockers: [],
+          },
+        ],
+        blockers: [],
+      },
+      finalDelivery: {
+        ready: true,
+        p0ScenarioCount: 24,
+        finalDeliveryEvidenceCount: 24,
+        finalDoneOverclaimCount: 0,
+        blockers: [],
+      },
+      safety: {
+        silentDurableWriteCount: 0,
+        hiddenLegacyFallbackCount: 0,
+        fakeBrowserEvidenceCount: 0,
+        fakeLiveEvidenceCount: 0,
+        localProviderCreditedAsLiveCount: 0,
+        unscopedPermissionReplayCount: 0,
+        finalDoneOverclaimCount: 0,
+      },
+      artifacts: [
+        {
+          kind: "stage1_browser_dogfood",
+          path: "frontend/test-results/main-chat-stage1-dogfood-report.json",
+          digest:
+            "bytes:25422 hash:sha256:b53415fe64b623298be32b93fe55d3c45b7941c65d94e1ce6f3c716db8ade678",
+          status: "loaded",
+        },
+        {
+          kind: "manual_dogfood",
+          path: "frontend/test-results/main-chat-stage2-manual-dogfood-report.json",
+          digest: null,
+          status: "missing",
+        },
+        {
+          kind: "live_provider",
+          path: "frontend/test-results/main-chat-stage2-live-provider-report.json",
+          digest: null,
+          status: "not_loaded",
+        },
+      ],
+    });
+
+    const result = await runMainChatAgentStage2ReadinessGate();
+
+    expect(invoke).toHaveBeenCalledWith("run_main_chat_agent_stage2_readiness_gate", undefined);
+    expect(result.recommendation).toBe("not_ready_for_limited_internal_trial");
+    expect(result.implementationStatus).toBe("implementation_complete_for_stage2_mechanism");
+    expect(result.blockers).not.toContain("stage2_live_provider_p0_runner_incomplete");
+    expect(result.manualDogfood.requiredScenarioCount).toBe(24);
+    expect(result.liveProvider.requiredScenarioCount).toBe(10);
+    expect(result.liveProvider.scenarioPlans).toHaveLength(10);
+    const l205 = result.liveProvider.scenarioReports.find(row => row.scenarioId === "L2-L05");
+    expect(l205?.credited).toBe(false);
+    expect(l205?.blockers).toContain("live_provider_model_ranked_selection_trace_missing");
+    const r201 = result.failureRecovery.coverage.find(row => row.id === "R2-01");
+    expect(r201?.evidence).toContain("missing_workspace_file_blocker");
+    expect(r201?.evidence.some(evidence => evidence.includes("success"))).toBe(false);
+    const requiredEvidenceByScenario = Object.fromEntries(
+      result.liveProvider.scenarioPlans.map(plan => [plan.scenarioId, plan.requiredRuntimeEvidence])
+    );
+    expect(requiredEvidenceByScenario["L2-L01"]).toEqual([
+      "provider_model_identity",
+      "model_invoked",
+      "response_preview",
+      "no_agent_loop_metadata",
+    ]);
+    expect(requiredEvidenceByScenario["L2-L02"]).toEqual([
+      "file_action_or_blocker",
+      "no_fake_observation",
+    ]);
+    expect(requiredEvidenceByScenario["L2-L03"]).toEqual([
+      "web_policy_blocker",
+      "no_provider_backed_web_credit",
+    ]);
+    expect(requiredEvidenceByScenario["L2-L04"]).toEqual([
+      "selected_web_candidate",
+      "action_status",
+      "observation",
+      "final_synthesis",
+    ]);
+    expect(requiredEvidenceByScenario["L2-L05"]).toEqual([
+      "candidate_ids",
+      "target_allowlist",
+      "selected_rank",
+      "observation",
+    ]);
+    expect(requiredEvidenceByScenario["L2-L06"]).toEqual([
+      "tool_permission_proposal",
+      "proposal_target",
+      "selected_candidate",
+      "no_read_success_overlap",
+    ]);
+    expect(requiredEvidenceByScenario["L2-L07"]).toEqual([
+      "two_actions",
+      "two_observations",
+      "final_synthesis",
+    ]);
+    expect(requiredEvidenceByScenario["L2-L08"]).toEqual([
+      "proposal_id",
+      "source_evidence",
+      "no_memory_materialization",
+    ]);
+    expect(requiredEvidenceByScenario["L2-L09"]).toEqual([
+      "denied_permission_state",
+      "no_resumed_action",
+    ]);
+    expect(requiredEvidenceByScenario["L2-L10"]).toEqual([
+      "blocker_reason",
+      "retry_or_cancel_state",
+      "no_fake_final_done",
+    ]);
+    expect(
+      result.liveProvider.scenarioPlans.find(plan => plan.scenarioId === "L2-L03")
+    ).toMatchObject({
+      scenarioSetup: "web_network_policy_disabled",
+      executionSource: "stage2_live_web_policy_runner",
+      runnerStatus: "implemented",
+      failClosedBlocker: "live_provider_web_policy_bypass",
+    });
+    expect(
+      result.liveProvider.scenarioPlans.find(plan => plan.scenarioId === "L2-L02")
+    ).toMatchObject({
+      scenarioSetup: "seeded_workspace_file_or_missing_file_fixture",
+      executionSource: "stage2_live_file_read_runner",
+      runnerStatus: "implemented",
+      failClosedBlocker: "live_provider_read_action_missing",
+    });
+    expect(
+      result.liveProvider.scenarioPlans.find(plan => plan.scenarioId === "L2-L10")
+    ).toMatchObject({
+      scenarioSetup: "induced_bad_tool_or_safe_tool_failure",
+      executionSource: "stage2_live_failure_recovery_runner",
+      runnerStatus: "implemented",
+      failClosedBlocker: "live_provider_failure_hidden",
+    });
+    expect(
+      result.liveProvider.scenarioPlans.find(plan => plan.scenarioId === "L2-L09")
+    ).toMatchObject({
+      scenarioSetup: "pending_safe_read_permission_denial",
+      executionSource: "stage2_live_permission_denial_runner",
+      runnerStatus: "implemented",
+      failClosedBlocker: "live_provider_permission_denial_bypassed",
+    });
+    expect(
+      result.liveProvider.scenarioPlans.find(plan => plan.scenarioId === "L2-L08")
+    ).toMatchObject({
+      scenarioSetup: "memory_proposal_enabled_no_auto_materialization",
+      executionSource: "stage2_live_memory_proposal_runner",
+      runnerStatus: "implemented",
+      failClosedBlocker: "live_provider_memory_proposal_missing",
+    });
+    expect(
+      result.liveProvider.scenarioPlans.find(plan => plan.scenarioId === "L2-L07")
+    ).toMatchObject({
+      scenarioSetup: "two_safe_read_sources_available",
+      executionSource: "stage2_live_multistep_react_runner",
+      runnerStatus: "implemented",
+      failClosedBlocker: "live_provider_multistep_observation_missing",
+    });
+    expect(result.controlPlane.ready).toBe(true);
+    expect(result.safety.silentDurableWriteCount).toBe(0);
+    expect(result.artifacts.map(artifact => artifact.kind)).toEqual([
+      "stage1_browser_dogfood",
+      "manual_dogfood",
+      "live_provider",
+    ]);
+    expect(
+      result.artifacts.find(artifact => artifact.kind === "stage1_browser_dogfood")
+    ).toMatchObject({
+      path: "frontend/test-results/main-chat-stage1-dogfood-report.json",
+      status: "loaded",
+    });
+  });
+
+  it("invokes Main Chat Agent Stage 2 manual dogfood artifact validator", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      attempted: false,
+      ready: false,
+      reviewerCount: 0,
+      requiredScenarioCount: 24,
+      attemptedScenarioCount: 0,
+      passedScenarioCount: 0,
+      missingScenarioIds: ["S2-D01"],
+      failedScenarioIds: ["S2-D01"],
+      traceIdsPresent: false,
+      artifactDigest: null,
+      blockers: ["stage2_manual_dogfood_evidence_missing"],
+    });
+
+    const result = await validateMainChatAgentStage2ManualDogfoodArtifact();
+
+    expect(invoke).toHaveBeenCalledWith(
+      "validate_main_chat_agent_stage2_manual_dogfood_artifact",
+      undefined
+    );
+    expect(result.requiredScenarioCount).toBe(24);
+    expect(result.missingScenarioIds).toContain("S2-D01");
+    expect(result.blockers).toContain("stage2_manual_dogfood_evidence_missing");
   });
 
   it("invokes Main Chat Agent Stage 1 dogfood gate with browser and live sections", async () => {

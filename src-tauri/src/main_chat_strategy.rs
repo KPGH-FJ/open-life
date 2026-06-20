@@ -105,7 +105,7 @@ pub(crate) async fn try_run_main_chat_agent_strategy(
     );
 
     let mut tool_calls = Vec::new();
-    let mut reply: String;
+    let mut reply = "I could not complete the requested Main Chat task.".to_string();
     let mut pending_blockers = Vec::new();
     let mut completed = false;
     let mut hard_blocked = false;
@@ -192,127 +192,154 @@ pub(crate) async fn try_run_main_chat_agent_strategy(
             completed = true;
         }
         MainChatAgentStrategy::ReActToolExecution => {
-            let action_plan = build_main_chat_react_action_plan(session_id, user_text)?;
-            let queued = enqueue_main_chat_agent_action(
-                state,
-                task_session_id,
-                &action_plan.queue_action_type,
-                &action_plan.description,
-                &mut execution_transcript,
-            )
-            .await?;
-            if queued.policy.execution_allowed {
-                transition_main_chat_action(
-                    state,
-                    &queued.id,
-                    ExecutionQueueStatus::Executing,
-                    None,
-                )
-                .await?;
-                let agent_loop_attempt = try_run_main_chat_react_agent_loop(
+            let action_plan = match build_main_chat_react_action_plan(session_id, user_text) {
+                Ok(action_plan) => Some(action_plan),
+                Err(error) => {
+                    let blocker_reason = main_chat_react_action_plan_error_blocker_reason(&error);
+                    hard_blocked = true;
+                    pending_blockers.push(blocker_reason.clone());
+                    execution_transcript.extend(
+                        append_main_chat_agent_transcript(
+                            state,
+                            Some(task_session_id),
+                            ExecutionTranscriptEntryKind::Error,
+                            "ReAct tool action was blocked before execution.",
+                            serde_json::json!({
+                                "blockerReason": blocker_reason,
+                                "sourceMissing": blocker_reason == "workspace_file_read_source_missing",
+                                "directWritesExecuted": false,
+                                "legacyFallbackUsed": false,
+                            }),
+                        )
+                        .await,
+                    );
+                    reply = main_chat_react_action_plan_blocked_reply(&blocker_reason);
+                    None
+                }
+            };
+            if let Some(action_plan) = action_plan {
+                let queued = enqueue_main_chat_agent_action(
                     state,
                     task_session_id,
-                    session_id,
-                    user_text,
-                    messages_for_generation,
-                    life_model,
-                    privacy_engine,
-                    privacy_map,
-                    &action_plan,
-                    main_chat_agent_turn
-                        .decision
-                        .privacy_risk
-                        .local_only_required,
+                    &action_plan.queue_action_type,
+                    &action_plan.description,
+                    &mut execution_transcript,
                 )
                 .await?;
-                execution_transcript.extend(agent_loop_attempt.transcript_entries);
-                let mut agent_loop_metadata = agent_loop_attempt.metadata.clone();
-                bind_main_chat_observation_metadata_to_queue_action(
-                    &mut agent_loop_metadata,
-                    &queued.id,
-                );
-                if let Some(queue_status) = agent_loop_attempt.queue_status {
-                    match queue_status {
-                        ExecutionQueueStatus::Completed => {
-                            transition_main_chat_action(
-                                state,
-                                &queued.id,
-                                ExecutionQueueStatus::Observed,
-                                Some(agent_loop_metadata.clone()),
-                            )
-                            .await?;
-                            transition_main_chat_action(
-                                state,
-                                &queued.id,
-                                ExecutionQueueStatus::Completed,
-                                None,
-                            )
-                            .await?;
-                            completed = true;
-                        }
-                        ExecutionQueueStatus::PendingPermission => {
-                            let blocker_reason = agent_loop_attempt
-                                .blocker_reason
-                                .clone()
-                                .unwrap_or_else(|| "tool_permission_required".into());
-                            let permission_blocker =
-                                main_chat_permission_blocker_reason(&action_plan, &blocker_reason);
-                            let (metadata, permission_transcript) =
-                                attach_main_chat_tool_permission_proposal_metadata(
+                if queued.policy.execution_allowed {
+                    transition_main_chat_action(
+                        state,
+                        &queued.id,
+                        ExecutionQueueStatus::Executing,
+                        None,
+                    )
+                    .await?;
+                    let agent_loop_attempt = try_run_main_chat_react_agent_loop(
+                        state,
+                        task_session_id,
+                        session_id,
+                        user_text,
+                        messages_for_generation,
+                        life_model,
+                        privacy_engine,
+                        privacy_map,
+                        &action_plan,
+                        main_chat_agent_turn
+                            .decision
+                            .privacy_risk
+                            .local_only_required,
+                    )
+                    .await?;
+                    execution_transcript.extend(agent_loop_attempt.transcript_entries);
+                    let mut agent_loop_metadata = agent_loop_attempt.metadata.clone();
+                    bind_main_chat_observation_metadata_to_queue_action(
+                        &mut agent_loop_metadata,
+                        &queued.id,
+                    );
+                    if let Some(queue_status) = agent_loop_attempt.queue_status {
+                        match queue_status {
+                            ExecutionQueueStatus::Completed => {
+                                transition_main_chat_action(
                                     state,
-                                    task_session_id,
+                                    &queued.id,
+                                    ExecutionQueueStatus::Observed,
+                                    Some(agent_loop_metadata.clone()),
+                                )
+                                .await?;
+                                transition_main_chat_action(
+                                    state,
+                                    &queued.id,
+                                    ExecutionQueueStatus::Completed,
+                                    None,
+                                )
+                                .await?;
+                                completed = true;
+                            }
+                            ExecutionQueueStatus::PendingPermission => {
+                                let blocker_reason = agent_loop_attempt
+                                    .blocker_reason
+                                    .clone()
+                                    .unwrap_or_else(|| "tool_permission_required".into());
+                                let permission_blocker = main_chat_permission_blocker_reason(
                                     &action_plan,
-                                    Some(&permission_blocker),
+                                    &blocker_reason,
+                                );
+                                let (metadata, permission_transcript) =
+                                    attach_main_chat_tool_permission_proposal_metadata(
+                                        state,
+                                        task_session_id,
+                                        &action_plan,
+                                        Some(&permission_blocker),
+                                        agent_loop_metadata.clone(),
+                                    )
+                                    .await?;
+                                execution_transcript.extend(permission_transcript);
+                                transition_main_chat_action(
+                                    state,
+                                    &queued.id,
+                                    ExecutionQueueStatus::PendingPermission,
+                                    Some(metadata),
+                                )
+                                .await?;
+                                pending_blockers.push(permission_blocker);
+                            }
+                            ExecutionQueueStatus::Failed => {
+                                if agent_loop_metadata
+                                    .get("agentLoopActionStatus")
+                                    .and_then(serde_json::Value::as_str)
+                                    == Some("blocked")
+                                {
+                                    hard_blocked = true;
+                                }
+                                let blocker_reason = agent_loop_attempt
+                                    .blocker_reason
+                                    .clone()
+                                    .unwrap_or_else(|| "agent_loop_action_failed".into());
+                                pending_blockers.push(blocker_reason.clone());
+                                fail_main_chat_action(
+                                    state,
+                                    &queued.id,
+                                    &blocker_reason,
                                     agent_loop_metadata.clone(),
                                 )
                                 .await?;
-                            execution_transcript.extend(permission_transcript);
-                            transition_main_chat_action(
-                                state,
-                                &queued.id,
-                                ExecutionQueueStatus::PendingPermission,
-                                Some(metadata),
-                            )
-                            .await?;
-                            pending_blockers.push(permission_blocker);
-                        }
-                        ExecutionQueueStatus::Failed => {
-                            if agent_loop_metadata
-                                .get("agentLoopActionStatus")
-                                .and_then(serde_json::Value::as_str)
-                                == Some("blocked")
-                            {
-                                hard_blocked = true;
                             }
-                            let blocker_reason = agent_loop_attempt
-                                .blocker_reason
-                                .clone()
-                                .unwrap_or_else(|| "agent_loop_action_failed".into());
-                            pending_blockers.push(blocker_reason.clone());
-                            fail_main_chat_action(
-                                state,
-                                &queued.id,
-                                &blocker_reason,
-                                agent_loop_metadata.clone(),
-                            )
-                            .await?;
+                            ExecutionQueueStatus::Planned
+                            | ExecutionQueueStatus::Executing
+                            | ExecutionQueueStatus::Observed
+                            | ExecutionQueueStatus::Retrying
+                            | ExecutionQueueStatus::Cancelled => {
+                                fail_main_chat_action(
+                                    state,
+                                    &queued.id,
+                                    "agent_loop_action_incomplete",
+                                    agent_loop_metadata.clone(),
+                                )
+                                .await?;
+                            }
                         }
-                        ExecutionQueueStatus::Planned
-                        | ExecutionQueueStatus::Executing
-                        | ExecutionQueueStatus::Observed
-                        | ExecutionQueueStatus::Retrying
-                        | ExecutionQueueStatus::Cancelled => {
-                            fail_main_chat_action(
-                                state,
-                                &queued.id,
-                                "agent_loop_action_incomplete",
-                                agent_loop_metadata.clone(),
-                            )
-                            .await?;
-                        }
-                    }
-                    if agent_loop_metadata.get("sourceKind").is_some() {
-                        execution_transcript.extend(
+                        if agent_loop_metadata.get("sourceKind").is_some() {
+                            execution_transcript.extend(
                             append_main_chat_agent_transcript(
                                 state,
                                 Some(task_session_id),
@@ -322,47 +349,48 @@ pub(crate) async fn try_run_main_chat_agent_strategy(
                             )
                             .await,
                         );
-                    }
-                    if let Some(model_route) = agent_loop_attempt.model_route {
-                        model_route_override = Some(model_route);
-                    }
-                    tool_calls.extend(agent_loop_attempt.tool_calls);
-                    reply = agent_loop_attempt.reply.unwrap_or_else(|| {
-                        "The governed ReAct AgentLoop completed without a final response.".into()
-                    });
-                    if agent_loop_attempt.queue_status == Some(ExecutionQueueStatus::Completed)
-                        && user_text_requests_memory_proposal_after_read(user_text)
-                    {
-                        let proposal = create_main_chat_agent_proposal(
-                            state,
-                            task_session_id,
-                            MainChatAgentStrategy::MemoryProposal,
-                            user_text,
-                        )
-                        .await?;
-                        pending_blockers.push(format!("proposal:{}", proposal.id));
-                        reply = format!(
+                        }
+                        if let Some(model_route) = agent_loop_attempt.model_route {
+                            model_route_override = Some(model_route);
+                        }
+                        tool_calls.extend(agent_loop_attempt.tool_calls);
+                        reply = agent_loop_attempt.reply.unwrap_or_else(|| {
+                            "The governed ReAct AgentLoop completed without a final response."
+                                .into()
+                        });
+                        if agent_loop_attempt.queue_status == Some(ExecutionQueueStatus::Completed)
+                            && user_text_requests_memory_proposal_after_read(user_text)
+                        {
+                            let proposal = create_main_chat_agent_proposal(
+                                state,
+                                task_session_id,
+                                MainChatAgentStrategy::MemoryProposal,
+                                user_text,
+                            )
+                            .await?;
+                            pending_blockers.push(format!("proposal:{}", proposal.id));
+                            reply = format!(
                             "{reply}\n\nI also created a Memory proposal for review after the read. I did not write it into long-term memory."
                         );
-                    }
-                } else {
-                    match execute_main_chat_react_action_with_executor(
-                        state,
-                        &action_plan,
-                        main_chat_agent_turn
-                            .decision
-                            .privacy_risk
-                            .local_only_required,
-                    )
-                    .await
-                    {
-                        Ok(observation) => {
-                            let mut observation_metadata = observation.metadata.clone();
-                            bind_main_chat_observation_metadata_to_queue_action(
-                                &mut observation_metadata,
-                                &queued.id,
-                            );
-                            if observation.executor_status
+                        }
+                    } else {
+                        match execute_main_chat_react_action_with_executor(
+                            state,
+                            &action_plan,
+                            main_chat_agent_turn
+                                .decision
+                                .privacy_risk
+                                .local_only_required,
+                        )
+                        .await
+                        {
+                            Ok(observation) => {
+                                let mut observation_metadata = observation.metadata.clone();
+                                bind_main_chat_observation_metadata_to_queue_action(
+                                    &mut observation_metadata,
+                                    &queued.id,
+                                );
+                                if observation.executor_status
                                 == openlife_core::agent::ActionExecutionStatus::Succeeded
                             {
                                 transition_main_chat_action(
@@ -433,17 +461,17 @@ pub(crate) async fn try_run_main_chat_agent_strategy(
                                 )
                                 .await?;
                             }
-                            execution_transcript.extend(
-                                append_main_chat_agent_transcript(
-                                    state,
-                                    Some(task_session_id),
-                                    ExecutionTranscriptEntryKind::Observation,
-                                    observation.summary.clone(),
-                                    observation_metadata.clone(),
-                                )
-                                .await,
-                            );
-                            tool_calls.push(tool_call_from_action(
+                                execution_transcript.extend(
+                                    append_main_chat_agent_transcript(
+                                        state,
+                                        Some(task_session_id),
+                                        ExecutionTranscriptEntryKind::Observation,
+                                        observation.summary.clone(),
+                                        observation_metadata.clone(),
+                                    )
+                                    .await,
+                                );
+                                tool_calls.push(tool_call_from_action(
                                 &action_plan.target,
                                 &queued.id,
                                 observation.executor_status
@@ -477,87 +505,88 @@ pub(crate) async fn try_run_main_chat_agent_strategy(
                                 observation.executor_status
                                     == openlife_core::agent::ActionExecutionStatus::NeedsConfirmation,
                             ));
-                            if observation.executor_status
-                                == openlife_core::agent::ActionExecutionStatus::Succeeded
-                            {
-                                let follow_up = synthesize_main_chat_react_follow_up(
-                                    state,
-                                    task_session_id,
-                                    session_id,
-                                    user_text,
-                                    messages_for_generation,
-                                    life_model,
-                                    privacy_engine,
-                                    privacy_map,
-                                    &observation,
-                                )
-                                .await?;
-                                if let Some(model_route) = follow_up.model_route {
-                                    model_route_override = Some(model_route);
-                                }
-                                execution_transcript.extend(follow_up.transcript_entries);
-                                reply = follow_up.reply;
-                                if user_text_requests_memory_proposal_after_read(user_text) {
-                                    let proposal = create_main_chat_agent_proposal(
+                                if observation.executor_status
+                                    == openlife_core::agent::ActionExecutionStatus::Succeeded
+                                {
+                                    let follow_up = synthesize_main_chat_react_follow_up(
                                         state,
                                         task_session_id,
-                                        MainChatAgentStrategy::MemoryProposal,
+                                        session_id,
                                         user_text,
+                                        messages_for_generation,
+                                        life_model,
+                                        privacy_engine,
+                                        privacy_map,
+                                        &observation,
                                     )
                                     .await?;
-                                    pending_blockers.push(format!("proposal:{}", proposal.id));
-                                    reply = format!(
+                                    if let Some(model_route) = follow_up.model_route {
+                                        model_route_override = Some(model_route);
+                                    }
+                                    execution_transcript.extend(follow_up.transcript_entries);
+                                    reply = follow_up.reply;
+                                    if user_text_requests_memory_proposal_after_read(user_text) {
+                                        let proposal = create_main_chat_agent_proposal(
+                                            state,
+                                            task_session_id,
+                                            MainChatAgentStrategy::MemoryProposal,
+                                            user_text,
+                                        )
+                                        .await?;
+                                        pending_blockers.push(format!("proposal:{}", proposal.id));
+                                        reply = format!(
                                         "{reply}\n\nI also created a Memory proposal for review after the read. I did not write it into long-term memory."
                                     );
+                                    }
+                                } else {
+                                    reply = observation.final_answer.clone();
                                 }
-                            } else {
-                                reply = observation.final_answer.clone();
                             }
-                        }
-                        Err(error) => {
-                            fail_main_chat_action(
-                                state,
-                                &queued.id,
-                                &error,
-                                serde_json::json!({
-                                    "error": error,
-                                    "actionExecutorBacked": true,
-                                    "failSoft": true,
-                                }),
-                            )
-                            .await?;
-                            execution_transcript.extend(
-                                append_main_chat_agent_transcript(
+                            Err(error) => {
+                                fail_main_chat_action(
                                     state,
-                                    Some(task_session_id),
-                                    ExecutionTranscriptEntryKind::Error,
-                                    "Read-only tool action could not complete.",
+                                    &queued.id,
+                                    &error,
                                     serde_json::json!({
-                                        "actionId": queued.id,
                                         "error": error,
-                                        "retryAvailable": true,
+                                        "actionExecutorBacked": true,
+                                        "failSoft": true,
                                     }),
                                 )
-                                .await,
-                            );
-                            tool_calls.push(tool_call_from_action(
-                                &action_plan.target,
-                                &queued.id,
-                                false,
-                                None,
-                                Some(error.clone()),
-                                ToolCallStatus::Error,
-                                false,
-                            ));
-                            reply = format!(
+                                .await?;
+                                execution_transcript.extend(
+                                    append_main_chat_agent_transcript(
+                                        state,
+                                        Some(task_session_id),
+                                        ExecutionTranscriptEntryKind::Error,
+                                        "Read-only tool action could not complete.",
+                                        serde_json::json!({
+                                            "actionId": queued.id,
+                                            "error": error,
+                                            "retryAvailable": true,
+                                        }),
+                                    )
+                                    .await,
+                                );
+                                tool_calls.push(tool_call_from_action(
+                                    &action_plan.target,
+                                    &queued.id,
+                                    false,
+                                    None,
+                                    Some(error.clone()),
+                                    ToolCallStatus::Error,
+                                    false,
+                                ));
+                                reply = format!(
                                 "I could not complete that read-only action yet. Blocker: {error}\n\nYou can retry or narrow the request."
                             );
+                            }
                         }
                     }
+                } else {
+                    pending_blockers.push(queued.policy.reason_code.clone());
+                    reply = "This action needs review before it can run.".into();
                 }
-            } else {
-                pending_blockers.push(queued.policy.reason_code.clone());
-                reply = "This action needs review before it can run.".into();
             }
         }
         MainChatAgentStrategy::PlanExecute => {
@@ -997,6 +1026,37 @@ fn user_text_requests_memory_proposal_after_read(user_text: &str) -> bool {
     let lower = user_text.to_ascii_lowercase();
     (lower.contains("memory proposal") || lower.contains("create a memory proposal"))
         && (lower.contains("read") || lower.contains("file"))
+}
+
+fn main_chat_react_action_plan_error_blocker_reason(error: &str) -> String {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("file is not readable in workspace")
+        || lower.contains("no such file")
+        || lower.contains("not found")
+    {
+        "workspace_file_read_source_missing".into()
+    } else if lower.contains("absolute file read paths are blocked")
+        || lower.contains("path traversal")
+        || lower.contains("outside workspace")
+    {
+        "workspace_file_read_policy_blocked".into()
+    } else {
+        "react_action_plan_unavailable".into()
+    }
+}
+
+fn main_chat_react_action_plan_blocked_reply(blocker_reason: &str) -> String {
+    match blocker_reason {
+        "workspace_file_read_source_missing" => {
+            "I could not read that workspace file because it is missing or unreadable. Check the path, choose another source, or cancel this task. I did not infer file contents.".into()
+        }
+        "workspace_file_read_policy_blocked" => {
+            "I could not read that workspace file because the requested path is outside the allowed workspace boundary. Use a workspace-relative path or choose another source.".into()
+        }
+        _ => {
+            "I could not prepare the requested tool action. You can revise the request, retry with a narrower source, or cancel this task.".into()
+        }
+    }
 }
 
 fn user_text_requests_risky_external_publish_confirmation(user_text: &str) -> bool {

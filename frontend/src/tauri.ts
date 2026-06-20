@@ -1329,6 +1329,125 @@ export interface MainChatAgentBetaV1ReadinessReport {
   readinessDimensions: MainChatAgentBetaV1ReadinessDimension[];
 }
 
+export interface MainChatAgentStage2ManualDogfoodSummary {
+  attempted: boolean;
+  ready: boolean;
+  reviewerCount: number;
+  requiredScenarioCount: number;
+  attemptedScenarioCount: number;
+  passedScenarioCount: number;
+  missingScenarioIds: string[];
+  failedScenarioIds: string[];
+  traceIdsPresent: boolean;
+  artifactDigest?: string | null;
+  blockers: string[];
+}
+
+export interface MainChatAgentStage2LiveProviderSummary {
+  attempted: boolean;
+  ready: boolean;
+  provider?: string | null;
+  model?: string | null;
+  requiredScenarioCount: number;
+  passedScenarioCount: number;
+  failedScenarioIds: string[];
+  modelInvokedCount: number;
+  mainChatInvokedCount: number;
+  localOrMockCreditRejected: number;
+  artifactDigest?: string | null;
+  blockers: string[];
+  scenarioPlans: MainChatAgentStage2LiveProviderScenarioPlan[];
+  scenarioReports: MainChatAgentStage2LiveProviderScenarioReport[];
+}
+
+export interface MainChatAgentStage2LiveProviderScenarioPlan {
+  scenarioId: string;
+  scenario: string;
+  scenarioSetup: string;
+  requiredRuntimeEvidence: string[];
+  failClosedBlocker: string;
+  executionSource: string;
+  runnerStatus: string;
+}
+
+export interface MainChatAgentStage2LiveProviderScenarioReport {
+  scenarioId: string;
+  status: string;
+  credited: boolean;
+  providerEndpointKind?: string | null;
+  blockers: string[];
+  mainChatInvoked: boolean;
+  modelInvoked: boolean;
+  runIdPresent: boolean;
+  taskSessionIdPresent: boolean;
+  responsePreviewPresent: boolean;
+}
+
+export interface MainChatAgentStage2CoverageItem {
+  id: string;
+  passed: boolean;
+  evidence: string[];
+  blockers: string[];
+}
+
+export interface MainChatAgentStage2CoverageSummary {
+  ready: boolean;
+  requiredCount: number;
+  attemptedCount: number;
+  passedCount: number;
+  failedIds: string[];
+  coverage: MainChatAgentStage2CoverageItem[];
+  blockers: string[];
+}
+
+export interface MainChatAgentStage2FinalDeliverySummary {
+  ready: boolean;
+  p0ScenarioCount: number;
+  finalDeliveryEvidenceCount: number;
+  finalDoneOverclaimCount: number;
+  blockers: string[];
+}
+
+export interface MainChatAgentStage2SafetySummary {
+  silentDurableWriteCount: number;
+  hiddenLegacyFallbackCount: number;
+  fakeBrowserEvidenceCount: number;
+  fakeLiveEvidenceCount: number;
+  localProviderCreditedAsLiveCount: number;
+  unscopedPermissionReplayCount: number;
+  finalDoneOverclaimCount: number;
+}
+
+export interface MainChatAgentStage2ArtifactRef {
+  kind: string;
+  path: string;
+  digest?: string | null;
+  status: string;
+}
+
+export interface MainChatAgentStage2ReadinessReport {
+  reportKind: "main_chat_agent_stage2_readiness_gate";
+  schemaVersion: "stage2-readiness-v1";
+  runId: string;
+  commit: string;
+  recommendation: "ready_for_limited_internal_trial" | "not_ready_for_limited_internal_trial";
+  implementationStatus:
+    | "implementation_complete_for_stage2_mechanism"
+    | "implementation_incomplete_for_stage2_mechanism"
+    | "ready_for_limited_internal_trial";
+  blockers: string[];
+  deterministicStage1Ready: boolean;
+  betaFoundationReady: boolean;
+  manualDogfood: MainChatAgentStage2ManualDogfoodSummary;
+  liveProvider: MainChatAgentStage2LiveProviderSummary;
+  controlPlane: MainChatAgentStage2CoverageSummary;
+  memoryProposal: MainChatAgentStage2CoverageSummary;
+  failureRecovery: MainChatAgentStage2CoverageSummary;
+  finalDelivery: MainChatAgentStage2FinalDeliverySummary;
+  safety: MainChatAgentStage2SafetySummary;
+  artifacts: MainChatAgentStage2ArtifactRef[];
+}
+
 export interface MainChatAgentStage1SeedManifest {
   seedWorkspaceRootKind: "temp_isolated";
   knowledgeAssetCount: number;
@@ -1622,6 +1741,18 @@ export async function runMainChatAgentProductMaturityV2FinalReadinessGate(): Pro
 export async function runMainChatAgentBetaV1ReadinessGate(): Promise<MainChatAgentBetaV1ReadinessReport> {
   return safeInvoke<MainChatAgentBetaV1ReadinessReport>(
     "run_main_chat_agent_beta_v1_readiness_gate"
+  );
+}
+
+export async function runMainChatAgentStage2ReadinessGate(): Promise<MainChatAgentStage2ReadinessReport> {
+  return safeInvoke<MainChatAgentStage2ReadinessReport>(
+    "run_main_chat_agent_stage2_readiness_gate"
+  );
+}
+
+export async function validateMainChatAgentStage2ManualDogfoodArtifact(): Promise<MainChatAgentStage2ManualDogfoodSummary> {
+  return safeInvoke<MainChatAgentStage2ManualDogfoodSummary>(
+    "validate_main_chat_agent_stage2_manual_dogfood_artifact"
   );
 }
 
