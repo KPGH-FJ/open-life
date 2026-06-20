@@ -2,6 +2,12 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { listAgentRuns, deleteAgentRun, type AgentRun } from "../tauri";
 import {
+  getPlanExecuteProductTrace,
+  planExecuteProductSearchText,
+  planExecuteProductSubtitle,
+} from "../utils/planExecuteProduct";
+import { getMultiStrategyPreviewAudit, previewWarningLabel } from "../utils/previewAudit";
+import {
   Activity,
   Clock,
   AlertTriangle,
@@ -45,6 +51,41 @@ function kindLabel(kind: string): string {
     memory_governance: "Memory",
   };
   return labels[kind] || kind;
+}
+
+function runKindLabel(run: AgentRun): string {
+  if (getPlanExecuteProductTrace(run)) return "Plan-Execute Weekly Plan";
+  return getMultiStrategyPreviewAudit(run) ? "Multi-Strategy Preview" : kindLabel(run.kind);
+}
+
+function runSubtitle(run: AgentRun): string {
+  const productTrace = getPlanExecuteProductTrace(run);
+  if (productTrace) {
+    return planExecuteProductSubtitle(productTrace);
+  }
+  const audit = getMultiStrategyPreviewAudit(run);
+  if (audit) {
+    return [audit.strategyKind, audit.payloadKind, audit.reasonCode].filter(Boolean).join(" · ");
+  }
+  return run.userInput ? `${run.userInput.length} chars redacted` : "No user input";
+}
+
+function reactTraceSearchText(run: AgentRun): string {
+  const actionText = run.actions
+    .map(action => {
+      const trace = action.reactTrace;
+      if (!trace) return `${action.actionType} ${action.target ?? ""} ${action.status}`;
+      return `${trace.toolName} ${trace.toolSource} ${trace.status} ${trace.riskLevel} ${trace.actionCategory} ${trace.permissionDecision ?? ""} ${trace.proposalId ?? ""}`;
+    })
+    .join(" ");
+  const observationText = run.observations
+    .map(observation => {
+      const trace = observation.reactTrace;
+      if (!trace) return observation.source;
+      return `${trace.toolName} ${trace.toolSource} ${trace.observationStatus ?? ""} ${trace.outputHash ?? ""}`;
+    })
+    .join(" ");
+  return `${actionText} ${observationText}`;
 }
 
 const PAGE_SIZE = 20;
@@ -95,7 +136,16 @@ export default function RunsPage() {
     // Search
     if (searchQuery) {
       const query = searchQuery.toLowerCase();
-      const text = `${run.userInput ?? ""} ${run.outputPreview ?? ""} ${run.kind}`.toLowerCase();
+      const audit = getMultiStrategyPreviewAudit(run);
+      const productTrace = getPlanExecuteProductTrace(run);
+      const auditText = audit
+        ? `${audit.runtimeStrategyTraceKind ?? ""} ${audit.selectedStrategyKind ?? ""} ${audit.strategyKind ?? ""} ${audit.payloadKind ?? ""} ${audit.strategyDescriptorId ?? ""} ${audit.governanceDecisionKind ?? ""} ${audit.selectionReasonCode ?? ""} ${audit.reasonCode ?? ""} ${(audit.strategyCapabilityIds ?? []).join(" ")}`
+        : "";
+      const productText = productTrace ? planExecuteProductSearchText(productTrace) : "";
+      const outputText = productTrace ? "" : "";
+      const traceText = reactTraceSearchText(run);
+      const text =
+        `${outputText} ${run.kind} ${auditText} ${productText} ${traceText}`.toLowerCase();
       if (!text.includes(query)) return false;
     }
 
@@ -149,6 +199,7 @@ export default function RunsPage() {
     { value: "conversation", label: "Chat" },
     { value: "builder", label: "Builder" },
     { value: "calibration", label: "Calibration" },
+    { value: "planning", label: "Planning" },
   ];
 
   if (loading) {
@@ -217,7 +268,7 @@ export default function RunsPage() {
                 />
                 <input
                   type="text"
-                  placeholder="搜索输入内容或输出..."
+                  placeholder="搜索工具、来源或状态..."
                   value={searchQuery}
                   onChange={e => {
                     setSearchQuery(e.target.value);
@@ -316,62 +367,127 @@ export default function RunsPage() {
                 <span className="text-xs text-stone-500">全选本页</span>
               </div>
 
-              {paginatedRuns.map(run => (
-                <div
-                  key={run.id}
-                  className={`bg-white rounded-xl border p-4 cursor-pointer hover:shadow-md transition-shadow ${
-                    selectedRuns.has(run.id)
-                      ? "border-stone-900 ring-1 ring-stone-900"
-                      : "border-stone-200"
-                  }`}
-                >
-                  <div className="flex items-start gap-3">
-                    <input
-                      type="checkbox"
-                      checked={selectedRuns.has(run.id)}
-                      onChange={e => {
-                        e.stopPropagation();
-                        toggleSelect(run.id);
-                      }}
-                      className="mt-1 rounded border-stone-300"
-                    />
-                    <div className="flex-1" onClick={() => navigate(`/runs/${run.id}`)}>
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-3">
-                          {statusIcon(run.status)}
-                          <div>
-                            <div className="font-medium text-stone-900">{kindLabel(run.kind)}</div>
-                            <div className="text-xs text-stone-500 mt-0.5">
-                              {run.userInput ? run.userInput.slice(0, 60) + "..." : "No user input"}
+              {paginatedRuns.map(run => {
+                const previewAudit = getMultiStrategyPreviewAudit(run);
+                const productTrace = getPlanExecuteProductTrace(run);
+                const warningCount = previewAudit?.warnings?.length ?? 0;
+                return (
+                  <div
+                    key={run.id}
+                    className={`bg-white rounded-xl border p-4 cursor-pointer hover:shadow-md transition-shadow ${
+                      selectedRuns.has(run.id)
+                        ? "border-stone-900 ring-1 ring-stone-900"
+                        : "border-stone-200"
+                    }`}
+                  >
+                    <div className="flex items-start gap-3">
+                      <input
+                        type="checkbox"
+                        checked={selectedRuns.has(run.id)}
+                        onChange={e => {
+                          e.stopPropagation();
+                          toggleSelect(run.id);
+                        }}
+                        className="mt-1 rounded border-stone-300"
+                      />
+                      <div className="flex-1" onClick={() => navigate(`/runs/${run.id}`)}>
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-3">
+                            {statusIcon(run.status)}
+                            <div>
+                              <div className="font-medium text-stone-900">{runKindLabel(run)}</div>
+                              <div className="text-xs text-stone-500 mt-0.5">
+                                {runSubtitle(run)}
+                              </div>
                             </div>
                           </div>
-                        </div>
-                        <div className="text-right">
-                          <div className="text-xs text-stone-400 flex items-center gap-1">
-                            <Clock size={12} />
-                            {new Date(run.startedAt).toLocaleString()}
-                          </div>
-                          {run.outputPreview && (
-                            <div className="text-xs text-stone-500 mt-1 max-w-xs truncate">
-                              {run.outputPreview}
+                          <div className="text-right">
+                            <div className="text-xs text-stone-400 flex items-center gap-1">
+                              <Clock size={12} />
+                              {new Date(run.startedAt).toLocaleString()}
                             </div>
-                          )}
+                            {!productTrace && run.outputPreview && (
+                              <div className="text-xs text-stone-500 mt-1 max-w-xs truncate">
+                                {run.outputPreview.length} chars redacted
+                              </div>
+                            )}
+                          </div>
                         </div>
+                        {previewAudit && (
+                          <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                            <span className="rounded bg-stone-100 px-2 py-1 text-stone-700">
+                              Preview
+                            </span>
+                            {previewAudit.strategyKind && (
+                              <span className="rounded bg-blue-50 px-2 py-1 text-blue-700">
+                                Strategy: {previewAudit.strategyKind}
+                              </span>
+                            )}
+                            {previewAudit.payloadKind && (
+                              <span className="rounded bg-teal-50 px-2 py-1 text-teal-700">
+                                Payload: {previewAudit.payloadKind}
+                              </span>
+                            )}
+                            {previewAudit.governanceDecisionKind && (
+                              <span className="rounded bg-amber-50 px-2 py-1 text-amber-700">
+                                Governance: {previewAudit.governanceDecisionKind}
+                              </span>
+                            )}
+                            {warningCount > 0 && (
+                              <span className="rounded bg-red-50 px-2 py-1 text-red-700">
+                                {previewWarningLabel(warningCount)}
+                              </span>
+                            )}
+                          </div>
+                        )}
+                        {productTrace && (
+                          <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                            <span className="rounded bg-stone-100 px-2 py-1 text-stone-700">
+                              Plan-Execute
+                            </span>
+                            {productTrace.status && (
+                              <span className="rounded bg-teal-50 px-2 py-1 text-teal-700">
+                                Status: {productTrace.status}
+                              </span>
+                            )}
+                            {productTrace.stepCount !== undefined && (
+                              <span className="rounded bg-blue-50 px-2 py-1 text-blue-700">
+                                Steps: {productTrace.stepCount}
+                              </span>
+                            )}
+                            {productTrace.generatedProposalCount !== undefined && (
+                              <span className="rounded bg-amber-50 px-2 py-1 text-amber-700">
+                                Proposals: {productTrace.generatedProposalCount}
+                              </span>
+                            )}
+                            {productTrace.metadataSafe && (
+                              <span className="rounded bg-emerald-50 px-2 py-1 text-emerald-700">
+                                metadata-safe
+                              </span>
+                            )}
+                            {productTrace.warningCount !== undefined &&
+                              productTrace.warningCount > 0 && (
+                                <span className="rounded bg-red-50 px-2 py-1 text-red-700">
+                                  {previewWarningLabel(productTrace.warningCount)}
+                                </span>
+                              )}
+                          </div>
+                        )}
+                        {run.error && (
+                          <div className="mt-2 text-xs text-red-500 bg-red-50 rounded px-2 py-1">
+                            {run.error.message}
+                          </div>
+                        )}
+                        {!productTrace && run.generatedProposals.length > 0 && (
+                          <div className="mt-2 text-xs text-blue-600 bg-blue-50 rounded px-2 py-1">
+                            {run.generatedProposals.length} 个提案
+                          </div>
+                        )}
                       </div>
-                      {run.error && (
-                        <div className="mt-2 text-xs text-red-500 bg-red-50 rounded px-2 py-1">
-                          {run.error.message}
-                        </div>
-                      )}
-                      {run.generatedProposals.length > 0 && (
-                        <div className="mt-2 text-xs text-blue-600 bg-blue-50 rounded px-2 py-1">
-                          {run.generatedProposals.length} 个提案
-                        </div>
-                      )}
                     </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
 
             {/* Pagination */}

@@ -8,5 +8,3 @@
 # LifeModel-HS governance artifacts
 /plans/lifemodel_hs_* @KPGH-FJ
 /plans/adr/0013-lifemodel-hs-source-of-truth-governance.md @KPGH-FJ
-/.github/ISSUE_TEMPLATE/00_lifemodel_hs_epic.yml @KPGH-FJ
-/.github/ISSUE_TEMPLATE/01_lifemodel_hs_task.yml @KPGH-FJ

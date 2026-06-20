@@ -1,5 +1,6 @@
 pub mod a2a;
 pub mod agent;
+pub mod agent_runtime;
 pub mod builder;
 pub mod calibration;
 pub mod chat;

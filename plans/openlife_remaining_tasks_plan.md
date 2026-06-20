@@ -1,12 +1,17 @@
 # OpenLife 剩余任务规划
 
-> 基于 Sprint 1-4 完成后的代码审查，制定下一阶段详细执行计划
+> Historical sprint/debt plan. Do not use as current Agent development
+> authority without re-checking code and `plans/README.md`.
+> Current order is defined by
+> `plans/openlife_lifemodel_governed_agent_runtime.md`.
+
+> 历史背景：基于早期代码审查，制定旧阶段详细执行计划
 > 文档版本：2026-05-05
 > 目标：完成 Beta 发布前的所有技术债务清理
 
 ---
 
-## 一、当前状态快照
+## 一、历史状态快照
 
 ### 1.1 已完成（Sprint 1-4）
 

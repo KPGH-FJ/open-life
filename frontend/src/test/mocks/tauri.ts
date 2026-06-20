@@ -232,6 +232,136 @@ export const mockChatMessages: ChatMessage[] = [
   { role: "assistant", content: "你好！我是 OpenLife。" },
 ];
 
+export const mockPreviewAgentRun = {
+  id: "run-preview-1",
+  taskId: "task-preview-1",
+  sessionId: "session-preview",
+  status: "completed",
+  kind: "conversation",
+  generatedProposals: [],
+  actions: [],
+  observations: [],
+  reasoningStrategy: "multi_strategy_preview",
+  reasoningTrace: {
+    strategy_result: {
+      previewRuntime: "multi_strategy",
+      strategyKind: "react",
+      payloadKind: "react",
+      governanceDecisionKind: "allow",
+      riskLevel: "low",
+      reasonCode: "default_react",
+      hasHsPacket: false,
+      warnings: [],
+      proposalIds: [],
+      planStepCount: 0,
+      planStepStatuses: [],
+      blocked: false,
+      metadataSafe: true,
+    },
+  },
+  outputPreview: "Multi-strategy preview: react / allow",
+  startedAt: new Date().toISOString(),
+};
+
+const mockPlanExecuteSession = {
+  sessionId: "plan-session-1",
+  planId: "plan:plan-session-1",
+  sourceAgentRunId: "run-plan-1",
+  sourceChatSessionId: "workspace_weekly_planning",
+  scenario: "weekly_planning",
+  status: "draft",
+  revision: 1,
+  revisionId: "rev-1",
+  createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
+  finalizedAt: null,
+  confirmedAt: null,
+  reviewId: null,
+  sourceEvidenceIds: [],
+  supersededByPlanId: null,
+  metadataSafeObjective: "scenario=weekly_planning",
+  stepCount: 3,
+  completedStepCount: 0,
+  proposalRequiredStepCount: 1,
+  linkedProposalIds: [],
+  warnings: [],
+  steps: [
+    {
+      planId: "plan:plan-session-1",
+      stepId: "step-1",
+      index: 1,
+      order: 1,
+      title: "Review current priorities",
+      intent: "read_only_reasoning",
+      toolName: null,
+      actionKind: "reason",
+      riskLevel: "low",
+      declaredWrite: false,
+      status: "planned",
+      revision: 1,
+      basePlanRevision: 1,
+      linkedProposalId: null,
+      linkedActionIds: [],
+      linkedObservationIds: [],
+      linkedProposalIds: [],
+      blockerIds: [],
+      linkedFinalDeliveryIds: [],
+      observationSummary: null,
+      policyReasonCode: null,
+      metadataSafeSummary: {},
+    },
+    {
+      planId: "plan:plan-session-1",
+      stepId: "step-2",
+      index: 2,
+      order: 2,
+      title: "Shape this week's focus",
+      intent: "read_only_planning",
+      toolName: null,
+      actionKind: "plan",
+      riskLevel: "low",
+      declaredWrite: false,
+      status: "planned",
+      revision: 1,
+      basePlanRevision: 1,
+      linkedProposalId: null,
+      linkedActionIds: [],
+      linkedObservationIds: [],
+      linkedProposalIds: [],
+      blockerIds: [],
+      linkedFinalDeliveryIds: [],
+      observationSummary: null,
+      policyReasonCode: null,
+      metadataSafeSummary: {},
+    },
+    {
+      planId: "plan:plan-session-1",
+      stepId: "step-3",
+      index: 3,
+      order: 3,
+      title: "Prepare weekly check-in proposal",
+      intent: "write_like_schedule_task",
+      toolName: "review_center.propose_scheduled_task",
+      actionKind: "schedule",
+      riskLevel: "medium",
+      declaredWrite: true,
+      status: "planned",
+      revision: 1,
+      basePlanRevision: 1,
+      linkedProposalId: null,
+      linkedActionIds: [],
+      linkedObservationIds: [],
+      linkedProposalIds: [],
+      blockerIds: [],
+      linkedFinalDeliveryIds: [],
+      observationSummary: null,
+      policyReasonCode: null,
+      metadataSafeSummary: {},
+    },
+  ],
+  metadataSafeSummary: {},
+};
+
 export const mockLifeModelVersions: LifeModelVersion[] = [
   {
     version: "0.1.0",
@@ -249,7 +379,83 @@ export const mockLifeModelVersions: LifeModelVersion[] = [
   },
 ];
 
-export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): Promise<T> => {
+function mockStage5PreflightFixture() {
+  return {
+    reportKind: "main_chat_stage5_release_debug_preflight",
+    schemaVersion: "stage5-preflight-v1",
+    createdAt: "2026-06-20T00:00:00Z",
+    build: {
+      commit: null,
+      branch: null,
+      appVersion: "0.1.0",
+      buildTimestamp: null,
+      dirtyState: null,
+      blockers: ["build_commit_unavailable"],
+    },
+    provider: {
+      provider: "openai",
+      model: "gpt-4.1-mini",
+      routeType: "default_preflight_no_invocation",
+      keyPresent: false,
+      networkOptIn: false,
+      liveProviderInvocationAllowed: false,
+      liveProviderPreflightStatus: "blocked",
+      blockers: ["provider_api_key_missing"],
+    },
+    scheduler: {
+      schedulerType: "scripted_eval",
+      scriptedProviderResponsePresent: true,
+      preferLocal: false,
+      localModelConfigured: false,
+    },
+    workspace: {
+      rootDigest: "sha256:workspace",
+      safePathCount: 1,
+      safePathsDigest: "sha256:safe-paths",
+      safePathsConfigured: true,
+      blockers: [],
+    },
+    mcp: {
+      registryAvailable: true,
+      manifestCount: 1,
+      readCandidateCount: 1,
+      blockers: [],
+    },
+    database: {
+      memoryStoreAvailable: true,
+      agentRunStoreAvailable: true,
+      taskSessionStoreAvailable: true,
+      actionQueueStoreAvailable: true,
+      proposalStoreAvailable: true,
+      memoryLifecycleStoreAvailable: true,
+      blockers: [],
+    },
+    stage2Readiness: {
+      recommendation: "not_ready_for_limited_internal_trial",
+      blockers: ["stage2_manual_dogfood_evidence_missing"],
+    },
+    finalAcceptance: {
+      recommendation: "not_final_completion_ready",
+      blockers: ["live_provider_generation_not_executed"],
+    },
+    failure: {
+      class: "environment_preflight_failure",
+      severity: "p1",
+      scope: "environment",
+      recoverability: "needs_environment_fix",
+      recoveryRecommendation: "Fix local provider, workspace, MCP, or store configuration.",
+      evidence: ["provider_api_key_missing"],
+    },
+    externalProviderInvokedByDefault: false,
+    modelInvoked: false,
+    directWritesExecuted: false,
+    metadataSafe: true,
+    blockers: ["provider_api_key_missing"],
+  };
+}
+
+export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Promise<T> => {
+  const _args = args;
   switch (cmd) {
     case "get_config":
       return Promise.resolve({
@@ -274,6 +480,1315 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
       return Promise.resolve(mockStateHistory as T);
     case "list_chat_sessions":
       return Promise.resolve(mockChatSessions as T);
+    case "get_main_chat_agent_task_state":
+      return Promise.resolve({
+        session: {
+          id: _args?.taskSessionId ?? _args?.task_session_id ?? "mainchat_task_mock",
+          chatSessionId: "session-1",
+          userGoal: "mock goal",
+          selectedStrategy: "direct_answer",
+          status: "completed",
+          currentPlanSummary: undefined,
+          actionQueueIds: [],
+          pendingBlockers: [],
+          contextSnapshotRefs: [],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          finalSummary: "mock complete",
+        },
+        actions: [],
+        transcript: [],
+        pendingApprovalCount: 0,
+        activeToolCount: 0,
+        canResume: false,
+        canCancel: false,
+        canRetry: false,
+      } as T);
+    case "list_main_chat_agent_tasks":
+      return Promise.resolve([] as T);
+    case "get_main_chat_agent_task_detail":
+    case "refresh_main_chat_agent_task_context":
+      return Promise.resolve({
+        taskSession: {
+          id: _args?.taskSessionId ?? _args?.task_session_id ?? "mainchat_task_mock",
+          chatSessionId: "session-1",
+          userGoal: "mock goal",
+          selectedStrategy: "direct_answer",
+          status: "completed",
+          currentPlanSummary: undefined,
+          actionQueueIds: [],
+          pendingBlockers: [],
+          contextSnapshotRefs: [],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          finalSummary: "mock complete",
+        },
+        actions: [],
+        transcript: [],
+        proposals: [],
+        blockers: [],
+        finalDelivery: null,
+        continuityDiagnostics: {
+          staleContext: false,
+          missingActionEvidence: false,
+          permissionScopeMismatch: false,
+          terminalNoResume: true,
+          providerUnavailable: false,
+          toolUnavailable: false,
+          requiresUserDecision: false,
+          selectedSkillContextDigestMismatch: false,
+          planRevisionMismatch: false,
+          reasonCodes: ["terminal_no_resume"],
+          automaticReplayAllowed: false,
+        },
+        allowedControls: ["open_trace"],
+        nextRecommendedControl: "open_trace",
+        lastSafeResumePoint: null,
+        contextDigest: "bytes:2 hash:sha256:mock",
+        selectedSkillDigest: null,
+        toolManifestDigest: "bytes:2 hash:sha256:mock",
+      } as T);
+    case "list_main_chat_agent_events":
+      return Promise.resolve([] as T);
+    case "list_main_chat_skills":
+      return Promise.resolve([
+        {
+          skillId: "phase_e_review",
+          name: "Phase E Review",
+          source: "workspace:skills/phase_e_review/SKILL.md",
+          scope: "session",
+          description: "Review Main Chat Skill/Tool evidence.",
+          riskLevel: "low",
+          available: true,
+          selected: false,
+          instructionDigest:
+            "bytes:80 hash:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          sourceKind: "workspace",
+          lastUsedAt: null,
+        },
+      ] as T);
+    case "get_main_chat_skill_detail":
+      return Promise.resolve({
+        skillId: _args?.skillId ?? _args?.skill_id ?? "phase_e_review",
+        manifest: {
+          name: "Phase E Review",
+          source: "workspace:skills/phase_e_review/SKILL.md",
+          sourceKind: "workspace",
+          available: true,
+        },
+        boundedInstructionsPreview: "Use Phase E skill evidence as bounded context only.",
+        allowedTools: ["builtin_echo"],
+        disallowedTools: ["email.send"],
+        policyNotes: ["Selected SKILL.md is bounded context, not authority."],
+        requiredPermissions: [],
+        evidenceDigest:
+          "bytes:120 hash:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        redactionSummary: "bounded_preview_no_secrets",
+        lastModifiedAt: "2026-06-17T00:00:00.000Z",
+      } as T);
+    case "select_main_chat_skill":
+      return Promise.resolve({
+        sessionId: _args?.sessionId ?? _args?.session_id ?? "session-1",
+        selectedSkillId: _args?.skillId ?? _args?.skill_id ?? "phase_e_review",
+        selectedSkillDigest:
+          "bytes:80 hash:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        selectionReason: "user_selected_local_skill",
+        boundedInstructionsPreview: "Use Phase E skill evidence as bounded context only.",
+        evidenceDigest:
+          "bytes:120 hash:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        policyNotes: ["Selected SKILL.md is bounded context, not authority."],
+        includedAsBoundedContextOnly: true,
+        unselectedSkillsInjected: false,
+        controls: ["clear_skill"],
+      } as T);
+    case "clear_main_chat_skill":
+      return Promise.resolve({
+        sessionId: _args?.sessionId ?? _args?.session_id ?? "session-1",
+        selectedSkillId: null,
+        selectedSkillDigest: null,
+        selectionReason: "user_cleared_local_skill",
+        boundedInstructionsPreview: "",
+        evidenceDigest:
+          "bytes:34 hash:sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        policyNotes: ["Next task context has no selected skill."],
+        includedAsBoundedContextOnly: false,
+        unselectedSkillsInjected: false,
+        controls: ["select_skill"],
+      } as T);
+    case "list_main_chat_tool_candidates":
+      return Promise.resolve({
+        taskSessionId: _args?.taskSessionId ?? _args?.task_session_id ?? null,
+        candidates: [
+          {
+            candidateId: "builtin_echo",
+            toolName: "builtin_echo",
+            source: "builtin",
+            capabilityLabels: ["read"],
+            riskLevel: "low",
+            selectionReason: "manifest_default_order",
+            policyDecision: "allow",
+            requiresPermission: false,
+            candidateDigest:
+              "bytes:88 hash:sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            linkedActionId: null,
+          },
+        ],
+        blockedTools: [
+          {
+            toolName: "email.send",
+            reasonCode: "write_like_tool_blocked",
+            policyDecision: "permission_required",
+            requiresPermission: true,
+            blockerId: "blocker-email-send",
+          },
+        ],
+        failureRecovery: null,
+        evidenceDigest:
+          "bytes:142 hash:sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        controls: [],
+      } as T);
+    case "get_main_chat_agent_state_snapshot":
+      return Promise.resolve({
+        task: {
+          taskId: _args?.taskSessionId ?? _args?.task_session_id ?? "mainchat_task_mock",
+          runId: "run_mainchat_mock",
+          title: "mock goal",
+          strategy: "direct_answer",
+          status: "completed",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          actionIds: [],
+          observationIds: [],
+          proposalIds: [],
+          blockerIds: [],
+          pendingControlIds: [],
+        },
+        route: {
+          strategy: "direct_answer",
+          reason: "mock route",
+          confidence: 1,
+        },
+        context: [],
+        provider: undefined,
+        plan: undefined,
+        actions: [],
+        observations: [],
+        blockers: [],
+        proposals: [],
+        finalDelivery: undefined,
+        diagnostics: [],
+        sequence: 1,
+        emittedAt: new Date().toISOString(),
+        events: [],
+      } as T);
+    case "resume_main_chat_agent_task":
+    case "cancel_main_chat_agent_task":
+    case "retry_main_chat_agent_action":
+      return Promise.resolve({
+        session: null,
+        actions: [],
+        transcript: [],
+        pendingApprovalCount: 0,
+        activeToolCount: 0,
+        canResume: false,
+        canCancel: false,
+        canRetry: false,
+      } as T);
+    case "run_main_chat_agent_execution_v1_eval_gate":
+      return Promise.resolve({
+        reportKind: "main_chat_agent_execution_v1_eval_gate",
+        runtimeEval: {
+          totalCases: 100,
+          runtimeExecutedCaseCount: 100,
+          deterministicStubCaseCount: 0,
+          passedCases: 100,
+          failedCases: 0,
+          silentWriteCount: 0,
+          finalCompletionReady: false,
+          finalCompletionBlockers: [
+            "live_provider_generation_not_executed",
+            "provider_backed_web_mcp_agent_loop_not_executed",
+            "provider_live_proposal_permission_not_executed",
+          ],
+          failures: [],
+        },
+        acceptance: {
+          ready: false,
+          status: "blocked",
+          blockers: ["command_surface_cases_below_24", "live_provider_generation_not_executed"],
+          requiredEvidence: [
+            "core_100_case_runtime_eval",
+            "send_stream_command_surface_eval",
+            "live_provider_generation",
+            "provider_backed_web_mcp_agent_loop",
+            "provider_backed_web_agent_loop",
+            "provider_backed_mcp_agent_loop",
+            "provider_live_proposal_permission",
+          ],
+          runtimeGateReady: false,
+          commandSurfaceGateReady: false,
+          liveProviderGateReady: false,
+          directWritesExecuted: false,
+        },
+        liveProviderPreflight: {
+          ready: false,
+          status: "blocked",
+          provider: "openai",
+          blockers: ["explicit_live_eval_required", "provider_api_key_missing"],
+          requiredEvidence: [
+            "live_provider_generation",
+            "provider_backed_web_mcp_agent_loop",
+            "provider_backed_web_agent_loop",
+            "provider_backed_mcp_agent_loop",
+            "provider_live_proposal_permission",
+          ],
+          liveProviderInvocationAllowed: false,
+          modelInvoked: false,
+          directWritesExecuted: false,
+        },
+        commandSurfaceGateExecuted: false,
+        liveProviderAttempted: false,
+        migrationPermission: false,
+        metadataSafe: true,
+        noExternalProviderInvocation: true,
+        noAppStoreWrites: true,
+        metadataSafeSummary: {
+          reportKind: "main_chat_agent_execution_v1_eval_gate",
+          runtimeTotalCases: 100,
+          acceptanceReady: false,
+          liveProviderPreflightReady: false,
+          liveProviderPreflightStatus: "blocked",
+          liveProviderPreflightProvider: "openai",
+          liveProviderPreflightBlockers: [
+            "explicit_live_eval_required",
+            "provider_api_key_missing",
+          ],
+          liveProviderPreflightRequiredEvidence: [
+            "live_provider_generation",
+            "provider_backed_web_mcp_agent_loop",
+            "provider_backed_web_agent_loop",
+            "provider_backed_mcp_agent_loop",
+            "provider_live_proposal_permission",
+          ],
+          liveProviderPreflightInvocationAllowed: false,
+          liveProviderPreflightModelInvoked: false,
+          liveProviderPreflightDirectWritesExecuted: false,
+          metadataSafe: true,
+        },
+      } as T);
+    case "run_main_chat_agent_productization_v1_gate":
+      return Promise.resolve({
+        totalScenarioCount: 93,
+        defaultDeterministicScenarioCount: 92,
+        readinessSemantics: "full_deterministic_productization_v1_runtime_ready",
+        runtimeExecutionScope:
+          "default_deterministic_scenarios_runtime_backed_external_live_excluded",
+        executedScenarioCount: 92,
+        passedScenarioCount: 81,
+        expectedBlockerScenarioCount: 11,
+        failedScenarioCount: 0,
+        externalLiveExcludedCount: 1,
+        runtimePayloadSnapshotEventGatePassed: true,
+        runtimeRequiredGroupCount: 92,
+        runtimeRequiredGroupPassedCount: 92,
+        representativeRuntimeGroupCount: 0,
+        representativeRuntimeGroupPassedCount: 0,
+        fullDeterministicRuntimeScenarioCount: 92,
+        fullDeterministicRuntimeScenarioExecutedCount: 92,
+        runtimeRequiredGroupEvidence: [],
+        eventSemantics:
+          "durable_replayable_delta_events_available_snapshot_backfill_excluded_from_live_credit",
+        finalReadinessReady: true,
+        fullProductizationV1Complete: true,
+        futureWork: [],
+        routeCounts: {},
+        unsupportedScenarios: [],
+        failedScenarios: [],
+        blockers: [],
+      } as T);
+    case "run_main_chat_stage3_execution_ux_report":
+      return Promise.resolve({
+        reportKind: "main_chat_stage3_execution_ux",
+        schemaVersion: "stage3-execution-ux-v1",
+        dataPath:
+          "Main Chat send/stream -> AgentIngress / strategy route -> AgentTaskSession / ActionQueue / ExecutionTranscript / Main Chat event stream -> MainChatAgentStateSnapshot -> AgentControlPlane",
+        totalScenarioCount: 13,
+        passedScenarioCount: 13,
+        failedScenarioCount: 0,
+        blockedScenarioCount: 0,
+        executionFirstRequiredIds: [
+          "UX3-02",
+          "UX3-03",
+          "UX3-04",
+          "UX3-06",
+          "UX3-09",
+          "UX3-11",
+          "UX3-12",
+        ],
+        executionFirstPassedIds: [
+          "UX3-02",
+          "UX3-03",
+          "UX3-04",
+          "UX3-06",
+          "UX3-09",
+          "UX3-11",
+          "UX3-12",
+        ],
+        executionFirstClaimValid: true,
+        readyForLimitedInternalTrial: false,
+        readinessRecommendation: "not_ready_for_limited_internal_trial",
+        stage2ReadinessPreserved:
+          "stage2_readiness_remains_fail_closed_without_manual_dogfood_and_current_commit_live_evidence",
+        nonGoals: [
+          "manual_dogfood_rows_not_run_or_fabricated",
+          "ready_for_limited_internal_trial_not_claimed",
+        ],
+        coverage: Array.from({ length: 13 }, (_, index) => ({
+          scenarioId: `UX3-${String(index + 1).padStart(2, "0")}`,
+          scenario: "covered Stage 3 scenario",
+          status: "passed",
+          evidence: ["runtime-backed evidence"],
+          blockers: [],
+        })),
+        blockers: [],
+      } as T);
+    case "run_main_chat_stage4_memory_knowledge_report":
+      return Promise.resolve({
+        reportKind: "main_chat_stage4_memory_knowledge",
+        schemaVersion: "stage4.v1",
+        scenarioCount: 18,
+        passedScenarioCount: 17,
+        blockedScenarioCount: 1,
+        notAReadinessGate: true,
+        readinessClaim: false,
+        stage2ReadinessPreserved: true,
+        rows: Array.from({ length: 18 }, (_, index) => ({
+          id: `MK4-${String(index + 1).padStart(2, "0")}`,
+          scenario: "mock stage4 scenario",
+          status: index === 17 ? "blocked" : "passed",
+          evidenceIds: ["mock-stage4"],
+          blockers: index === 17 ? ["managed_user_memory_write_lifecycle_not_yet_exercised"] : [],
+        })),
+        evidenceIds: ["mock-stage4"],
+        blockers: ["managed_user_memory_write_lifecycle_not_yet_exercised"],
+        activeMemoryIds: ["memory:active-1"],
+        excludedMemoryIds: ["memory:rolled-back-1"],
+        loadedKnowledgeAssetIds: ["knowledge:USER.md", "knowledge:MEMORY.md"],
+        skippedKnowledgeAssetIds: ["knowledge:SOUL.md"],
+        managedKnowledgeWriteAssetIds: [],
+        managedKnowledgeWriteVersionIds: [],
+        managedKnowledgeWriteAuditIds: [],
+        managedKnowledgeRollbackSnapshotIds: [],
+        directWriteCount: 0,
+        confirmedKnowledgeWriteCount: 0,
+        rollbackEventCount: 1,
+      } as T);
+    case "evaluate_main_chat_stage5_release_debug_preflight":
+      return Promise.resolve(mockStage5PreflightFixture() as T);
+    case "export_main_chat_agent_debug_bundle":
+      return Promise.resolve({
+        bundleId: "stage5-bundle-mock",
+        schemaVersion: "stage5-debug-bundle-v1",
+        createdAt: "2026-06-20T00:00:01Z",
+        build: {
+          commit: null,
+          branch: null,
+          appVersion: "0.1.0",
+          buildTimestamp: null,
+          dirtyState: null,
+          blockers: ["build_commit_unavailable"],
+        },
+        environment: mockStage5PreflightFixture(),
+        scenario: {
+          scenarioId: args?.scenarioId ?? args?.scenario_id ?? "DBG5-04",
+          reviewerId: args?.reviewerId ?? args?.reviewer_id ?? "internal-tester",
+          status: null,
+          notesDigest: null,
+        },
+        task: {
+          chatSessionId: "chat-stage5-mock",
+          taskSessionId: args?.taskSessionId ?? args?.task_session_id ?? "task-stage5-mock",
+          runId: "run-stage5-mock",
+          strategy: "direct_answer",
+          status: "completed",
+          userGoalDigest: "sha256:user-goal",
+          transcriptEntryCount: 3,
+          actionCount: 0,
+          proposalCount: 0,
+          blockerCount: 0,
+          finalDeliveryId: "delivery-stage5-mock",
+        },
+        route: {
+          routeType: "governed_direct_answer",
+          provider: "scripted_eval",
+          model: "mock-model",
+          localOnly: false,
+          liveProviderAttempted: false,
+          providerEndpointKind: "local_synthetic",
+        },
+        timeline: [
+          {
+            itemId: "transcript-stage5-1",
+            kind: "final_result",
+            summaryPreview: "metadata-safe final result summary",
+            metadataDigest: "sha256:transcript",
+          },
+        ],
+        tools: {
+          candidateCount: 0,
+          selectedTool: null,
+          actionType: null,
+          targetDigest: null,
+          policyDecision: null,
+          observationCount: 0,
+          actionStatuses: [],
+        },
+        context: {
+          activeMemoryIds: [],
+          excludedMemoryIds: [],
+          knowledgeAssetIds: [],
+          selectedSkillId: null,
+          contextSourceDigests: [],
+        },
+        memory: {
+          proposalIds: [],
+          acceptedMemoryIds: [],
+          rolledBackMemoryIds: [],
+          managedKnowledgeVersionIds: [],
+        },
+        finalDelivery: {
+          completedWorkCount: 1,
+          durableChangeCount: 0,
+          pendingUserActionCount: 0,
+          skippedWorkCount: 0,
+          blockerCount: 0,
+          finalDeliveryDigest: "sha256:final-delivery",
+        },
+        failure: {
+          class: "unknown_failure",
+          severity: "p2",
+          scope: "unknown",
+          recoverability: "needs_developer_fix",
+          recoveryRecommendation: "Triage with trace-backed evidence.",
+          evidence: ["final_delivery_present"],
+        },
+        redaction: {
+          mode: "metadata_safe",
+          rawContentIncluded: false,
+          secretsDetected: false,
+          unsafeFieldCount: 0,
+          unsafeFieldsDropped: [],
+          previewLimit: 160,
+          promptDigest: "sha256:prompt",
+          responseDigest: "sha256:response",
+          contextDigest: "sha256:context",
+        },
+        uiEvidence: args?.uiEvidence ?? args?.ui_evidence ?? null,
+        artifact: {
+          artifactId: "stage5-bundle-mock",
+          artifactKind: "debug_bundle",
+          schemaVersion: "stage5-debug-bundle-v1",
+          createdAt: "2026-06-20T00:00:01Z",
+          storageAlias: "stage5/debug_bundles/stage5-bundle-mock.json",
+          digest: "sha256:bundle",
+          byteSize: 4096,
+        },
+      } as T);
+    case "create_main_chat_internal_issue_report":
+      return Promise.resolve({
+        reportId: "stage5-issue-mock",
+        schemaVersion: "stage5-issue-report-v1",
+        createdAt: "2026-06-20T00:00:02Z",
+        scenarioId: args?.input?.scenarioId ?? "DBG5-19",
+        reviewerId: args?.input?.reviewerId ?? "internal-tester",
+        status: args?.input?.status ?? "fail",
+        taskSessionId: args?.input?.taskSessionId ?? "task-stage5-mock",
+        runId: args?.input?.runId ?? "run-stage5-mock",
+        bundleId: args?.input?.bundleId ?? "stage5-bundle-mock",
+        buildCommit: null,
+        appVersion: "0.1.0",
+        redactionMode: "metadata_safe",
+        failureClass: args?.input?.failureClass ?? "unknown_failure",
+        notesDigest: "sha256:notes",
+        notesPreview: null,
+        missingTaskRunReason: null,
+        blockers: ["stage5_issue_notes_preview_redacted"],
+        artifact: {
+          artifactId: "stage5-issue-mock",
+          artifactKind: "issue_report",
+          schemaVersion: "stage5-issue-report-v1",
+          createdAt: "2026-06-20T00:00:02Z",
+          storageAlias: "stage5/issue_reports/stage5-issue-mock.json",
+          digest: "sha256:issue",
+          byteSize: 1024,
+        },
+      } as T);
+    case "list_main_chat_debug_bundles":
+      return Promise.resolve([
+        {
+          artifactId: "stage5-bundle-mock",
+          artifactKind: "debug_bundle",
+          schemaVersion: "stage5-debug-bundle-v1",
+          createdAt: "2026-06-20T00:00:01Z",
+          storageAlias: "stage5/debug_bundles/stage5-bundle-mock.json",
+          digest: "sha256:bundle",
+          byteSize: 4096,
+        },
+      ] as T);
+    case "get_main_chat_debug_bundle":
+      return mockInvoke("export_main_chat_agent_debug_bundle", args) as Promise<T>;
+    case "delete_main_chat_debug_bundle":
+      return Promise.resolve(true as T);
+    case "list_main_chat_internal_issue_reports":
+      return Promise.resolve([
+        {
+          artifactId: "stage5-issue-mock",
+          artifactKind: "issue_report",
+          schemaVersion: "stage5-issue-report-v1",
+          createdAt: "2026-06-20T00:00:02Z",
+          storageAlias: "stage5/issue_reports/stage5-issue-mock.json",
+          digest: "sha256:issue",
+          byteSize: 1024,
+        },
+      ] as T);
+    case "get_main_chat_internal_issue_report":
+      return mockInvoke("create_main_chat_internal_issue_report", {
+        input: {
+          scenarioId: "DBG5-19",
+          reviewerId: "internal-tester",
+          status: "fail",
+          taskSessionId: "task-stage5-mock",
+          runId: "run-stage5-mock",
+          bundleId: args?.reportId ?? args?.report_id ?? "stage5-bundle-mock",
+          failureClass: "unknown_failure",
+        },
+      }) as Promise<T>;
+    case "delete_main_chat_internal_issue_report":
+      return Promise.resolve(true as T);
+    case "run_main_chat_stage5_release_debug_report":
+      return Promise.resolve({
+        reportKind: "main_chat_stage5_release_debug",
+        schemaVersion: "stage5-release-debug-v1",
+        scenarioCount: 24,
+        passedScenarioCount: 20,
+        blockedScenarioCount: 4,
+        notAReadinessGate: true,
+        readinessClaim: false,
+        rows: Array.from({ length: 24 }, (_, index) => ({
+          id: `DBG5-${String(index + 1).padStart(2, "0")}`,
+          scenario: "mock stage5 scenario",
+          status: index < 20 ? "passed" : "blocked",
+          evidenceIds: ["stage5_release_debug_report"],
+          bundleIds: ["stage5-bundle-mock"],
+          issueArtifactIds: index === 18 ? ["stage5-issue-mock"] : [],
+          blockers: index < 20 ? [] : ["stage5_scenario_evidence_missing"],
+        })),
+        evidenceIds: ["stage5_release_debug_report"],
+        blockers: ["DBG5-24:stage5_scenario_evidence_missing"],
+        build: {
+          commit: null,
+          branch: null,
+          appVersion: "0.1.0",
+          buildTimestamp: null,
+          dirtyState: null,
+          blockers: ["build_commit_unavailable"],
+        },
+        preflightSummary: mockStage5PreflightFixture(),
+        bundleIds: ["stage5-bundle-mock"],
+        issueArtifactIds: ["stage5-issue-mock"],
+        artifactStorageSummary: [
+          {
+            artifactId: "stage5-bundle-mock",
+            artifactKind: "debug_bundle",
+            schemaVersion: "stage5-debug-bundle-v1",
+            createdAt: "2026-06-20T00:00:01Z",
+            storageAlias: "stage5/debug_bundles/stage5-bundle-mock.json",
+            digest: "sha256:bundle",
+            byteSize: 4096,
+          },
+        ],
+        redactionSummary: {
+          mode: "metadata_safe",
+          rawContentIncluded: false,
+          secretsDetected: false,
+          unsafeFieldCount: 0,
+          unsafeFieldsDropped: [],
+          previewLimit: 160,
+          promptDigest: null,
+          responseDigest: null,
+          contextDigest: "sha256:stage5-report",
+        },
+        managedKnowledgeEval: {
+          isolatedEvalAppState: true,
+          tempWorkspace: true,
+          realWorkspaceWriteExecuted: false,
+          userWriteCompleted: true,
+          memoryRollbackCompleted: true,
+          managedKnowledgeWriteVersionIds: ["knowledge_version:stage5-mock"],
+          managedKnowledgeAuditIds: ["knowledge_audit:stage5-mock"],
+          rollbackSnapshotIds: ["snapshot:stage5-mock"],
+          evidenceIds: ["stage5_isolated_managed_knowledge_eval"],
+          blockers: [],
+        },
+        stage2ReadinessPreserved: true,
+      } as T);
+    case "run_main_chat_agent_product_maturity_v2_event_gate":
+      return Promise.resolve({
+        scenarioCount: 8,
+        defaultGateScenarioCount: 8,
+        passedScenarioCount: 8,
+        expectedBlockerCount: 0,
+        ready: true,
+        blockers: [],
+        proofs: [
+          {
+            scenarioId: "EV-01",
+            capabilityGroup: "event_delta_stream",
+            passed: true,
+            runtimeObjectCount: 2,
+            emittedEventIds: ["mainchat_event:mock:1:route.selected:direct_answer:d1"],
+            replayedEventIds: ["mainchat_event:mock:1:route.selected:direct_answer:d1"],
+            emittedSequences: [1],
+            replayedSequences: [1],
+            uiState: ["subscribed", "receiving_event"],
+            diagnostics: [],
+          },
+        ],
+      } as T);
+    case "run_main_chat_agent_product_maturity_v2_plan_gate":
+      return Promise.resolve({
+        scenarioCount: 10,
+        defaultGateScenarioCount: 10,
+        passedScenarioCount: 10,
+        expectedBlockerCount: 3,
+        ready: true,
+        blockers: [],
+        scenarios: [
+          {
+            id: "PI-01",
+            capabilityGroup: "plan_interaction",
+            prompt: "Plan this work before executing.",
+            preconditions: ["none"],
+            expectedRoute: "plan_execute",
+            requiredRuntimeEvidence: ["plan.created", "step.created"],
+            requiredUiState: ["plan_draft_visible"],
+            requiredControls: ["confirm_plan", "edit_plan", "skip_step"],
+            negativeAssertions: ["no_frontend_only_plan"],
+            expectedOutcome: "pass",
+            defaultGate: true,
+          },
+        ],
+        proofs: [
+          {
+            scenarioId: "PI-01",
+            passed: true,
+            expectedBlocker: false,
+            planId: "plan:mock-phase-c",
+            revision: 1,
+            stepIds: ["step-1"],
+            eventTypes: ["plan.created", "step.created"],
+            linkedActionIds: [],
+            linkedObservationIds: [],
+            linkedProposalIds: [],
+            blockerIds: [],
+            controls: ["confirm_plan", "edit_plan", "skip_step"],
+            diagnostics: [],
+          },
+        ],
+      } as T);
+    case "run_main_chat_agent_product_maturity_v2_skills_gate":
+      return Promise.resolve({
+        scenarioCount: 8,
+        defaultGateScenarioCount: 8,
+        passedScenarioCount: 8,
+        expectedBlockerCount: 2,
+        ready: true,
+        blockers: [],
+        scenarios: [
+          {
+            id: "SK2-01",
+            capabilityGroup: "skills_tools_surface",
+            prompt: "Select a bounded local skill.",
+            preconditions: ["local_skill_available"],
+            expectedRoute: "direct_answer",
+            requiredRuntimeEvidence: ["selected_skill.bounded_context"],
+            requiredUiState: ["selected_skill_visible"],
+            requiredControls: ["clear_skill"],
+            negativeAssertions: ["skill_does_not_override_policy"],
+            expectedOutcome: "pass",
+            defaultGate: true,
+          },
+        ],
+        proofs: [
+          {
+            scenarioId: "SK2-01",
+            passed: true,
+            expectedBlocker: false,
+            runtimeObjectCount: 3,
+            selectedSkillIds: ["phase_e_review"],
+            candidateIds: ["project_status.read"],
+            blockerIds: [],
+            actionIds: [],
+            observationIds: [],
+            controls: ["clear_skill"],
+            runtimeEvidence: ["selected_skill.bounded_context"],
+            uiState: ["selected_skill_visible"],
+            negativeAssertions: ["skill_does_not_override_policy"],
+            diagnostics: [],
+          },
+        ],
+      } as T);
+    case "run_main_chat_agent_product_maturity_v2_final_readiness_gate":
+      return Promise.resolve({
+        reportKind: "main_chat_agent_product_maturity_v2_final_readiness_gate",
+        readinessSemantics:
+          "phase_g_final_readiness_default_deterministic_live_product_opt_in_separate",
+        defaultReadinessScope: "MR_EV_PI_LT2_SK2_deterministic_only",
+        optInLiveReadinessScope: "LIVE_PROD_external_live_opt_in_only",
+        finalReady: false,
+        deterministicReady: true,
+        optInLiveReady: false,
+        finalReadinessStatus: "blocked_live_productization_not_ready",
+        deterministicReadinessStatus: "ready",
+        optInLiveReadinessStatus: "blocked",
+        defaultDeterministicScenarioCount: 43,
+        defaultLiveProdExcludedCount: 6,
+        externalLiveScenarioCount: 6,
+        defaultScenarioPassedCount: 33,
+        defaultScenarioExpectedBlockerCount: 10,
+        defaultScenarioFailedCount: 0,
+        defaultScenarioBlockedCount: 0,
+        externalLivePassedCount: 0,
+        externalLiveBlockedCount: 6,
+        externalLiveFailedCount: 0,
+        phaseCounts: [
+          {
+            phaseId: "phase_a",
+            phaseLabel: "Phase A Memory lifecycle",
+            capabilityGroup: "memory_lifecycle",
+            scenarioCount: 9,
+            passed: 7,
+            expectedBlocker: 2,
+            failed: 0,
+            blocked: 0,
+            status: "ready",
+            ready: true,
+            defaultGate: true,
+            optInOnly: false,
+            blockers: [],
+            supportedScenarios: ["MR-01", "MR-02", "MR-03", "MR-06", "MR-07", "MR-08"],
+            blockedScenarios: ["MR-04", "MR-05"],
+            unsupportedScenarios: [],
+            futureScenarios: [],
+          },
+          {
+            phaseId: "phase_f",
+            phaseLabel: "Phase F External live product evidence",
+            capabilityGroup: "external_live_productization",
+            scenarioCount: 6,
+            passed: 0,
+            expectedBlocker: 0,
+            failed: 0,
+            blocked: 6,
+            status: "blocked",
+            ready: false,
+            defaultGate: false,
+            optInOnly: true,
+            blockers: ["explicit_live_eval_required"],
+            supportedScenarios: [],
+            blockedScenarios: ["LIVE-PROD-01"],
+            unsupportedScenarios: [],
+            futureScenarios: [],
+          },
+        ],
+        supportedScenarios: [
+          {
+            scenarioId: "MR-03",
+            phaseId: "phase_a",
+            capabilityGroup: "memory_lifecycle",
+            status: "supported",
+            reason: "passed",
+          },
+        ],
+        blockedScenarios: [
+          {
+            scenarioId: "LIVE-PROD-01",
+            phaseId: "phase_f",
+            capabilityGroup: "external_live_productization",
+            status: "blocked",
+            reason: "explicit_live_eval_required",
+          },
+        ],
+        unsupportedScenarios: [],
+        futureScenarios: [],
+        blockers: ["explicit_live_eval_required"],
+        deterministicBlockers: [],
+        optInLiveBlockers: ["explicit_live_eval_required"],
+        directWritesExecuted: false,
+        noSilentDurableWrites: true,
+        defaultLiveProdExcluded: true,
+      } as T);
+    case "run_main_chat_agent_beta_v1_readiness_gate":
+      return Promise.resolve({
+        reportKind: "main_chat_agent_beta_v1_readiness_gate",
+        readinessSemantics: "beta_v1_execution_first_default_deterministic_live_opt_in_separate",
+        defaultReadinessScope: "beta_v1_default_deterministic_local_only",
+        optInLiveReadinessScope: "beta_v1_external_live_opt_in_only",
+        foundationInventoryExists: true,
+        foundationInventoryItems: [
+          {
+            component: "Knowledge assets and context inventory",
+            status: "partial",
+            evidence: ["B27 inspection and B28 proposal-first edit evidence"],
+            developmentDecision: "reuse minimum beta slice; broader manager deferred",
+          },
+        ],
+        workstreams: [
+          {
+            workstreamId: "phase_5",
+            label: "Beta Hardening",
+            status: "ready",
+            ready: true,
+            evidence: ["structured readiness report and release notes"],
+            blockers: [],
+          },
+        ],
+        productMaturityPhaseCounts: [
+          {
+            phaseId: "phase_a",
+            capabilityGroup: "memory_lifecycle",
+            scenarioCount: 9,
+            passed: 7,
+            expectedBlocker: 2,
+            failed: 0,
+            blocked: 0,
+            ready: true,
+            optInOnly: false,
+          },
+        ],
+        defaultReadinessStatus: "ready",
+        defaultReady: true,
+        optInLiveReady: false,
+        externalLiveAttempted: false,
+        defaultRealTaskScenarioCount: 28,
+        defaultRealTaskPassedCount: 28,
+        optInLiveRealTaskScenarioCount: 2,
+        defaultExperienceRequiredStateCount: 11,
+        defaultExperienceVerifiedStateCount: 11,
+        productMaturityDefaultScenarioCount: 43,
+        commandSurfaceTotalCases: 38,
+        commandSurfaceFailedCases: 0,
+        legacyFallbackCount: 0,
+        silentDurableWriteCount: 0,
+        noSilentDurableWrites: true,
+        defaultBlockers: [],
+        optInLiveBlockers: ["explicit_live_eval_required"],
+        readinessDimensions: [
+          {
+            dimension: "Routing",
+            status: "ready",
+            optInOnly: false,
+            evidence: ["governed task sessions and strategy routing"],
+            blockers: [],
+          },
+          {
+            dimension: "Live provider",
+            status: "blocked_opt_in_not_attempted",
+            optInOnly: true,
+            evidence: ["external live evidence is opt-in and not run by default"],
+            blockers: ["explicit_live_eval_required"],
+          },
+        ],
+      } as T);
+    case "run_main_chat_agent_stage2_readiness_gate":
+      return Promise.resolve({
+        reportKind: "main_chat_agent_stage2_readiness_gate",
+        schemaVersion: "stage2-readiness-v1",
+        runId: "stage2-readiness-mock",
+        commit: "unknown",
+        recommendation: "not_ready_for_limited_internal_trial",
+        implementationStatus: "implementation_complete_for_stage2_mechanism",
+        blockers: [
+          "stage2_readiness_commit_missing",
+          "stage2_manual_dogfood_evidence_missing",
+          "stage2_live_provider_p0_evidence_missing",
+        ],
+        deterministicStage1Ready: true,
+        betaFoundationReady: true,
+        manualDogfood: {
+          attempted: false,
+          ready: false,
+          reviewerCount: 0,
+          requiredScenarioCount: 24,
+          attemptedScenarioCount: 0,
+          passedScenarioCount: 0,
+          missingScenarioIds: ["S2-D01"],
+          failedScenarioIds: ["S2-D01"],
+          traceIdsPresent: false,
+          artifactDigest: null,
+          blockers: ["stage2_manual_dogfood_evidence_missing"],
+        },
+        liveProvider: {
+          attempted: false,
+          ready: false,
+          provider: null,
+          model: null,
+          requiredScenarioCount: 10,
+          passedScenarioCount: 0,
+          failedScenarioIds: ["L2-L01"],
+          modelInvokedCount: 0,
+          mainChatInvokedCount: 0,
+          localOrMockCreditRejected: 0,
+          artifactDigest: null,
+          blockers: ["stage2_live_provider_p0_evidence_missing"],
+          scenarioPlans: [
+            {
+              scenarioId: "L2-L01",
+              scenario: "direct_answer",
+              scenarioSetup: "live_provider_enabled",
+              requiredRuntimeEvidence: [
+                "provider_model_identity",
+                "model_invoked",
+                "response_preview",
+                "no_agent_loop_metadata",
+              ],
+              failClosedBlocker: "live_provider_generation_not_completed",
+              executionSource: "existing_v1_live_harness",
+              runnerStatus: "implemented",
+            },
+            {
+              scenarioId: "L2-L02",
+              scenario: "file_read_request",
+              scenarioSetup: "seeded_workspace_file_or_missing_file_fixture",
+              requiredRuntimeEvidence: ["file_action_or_blocker", "no_fake_observation"],
+              failClosedBlocker: "live_provider_read_action_missing",
+              executionSource: "stage2_live_file_read_runner",
+              runnerStatus: "implemented",
+            },
+            {
+              scenarioId: "L2-L03",
+              scenario: "web_policy_blocker",
+              scenarioSetup: "web_network_policy_disabled",
+              requiredRuntimeEvidence: ["web_policy_blocker", "no_provider_backed_web_credit"],
+              failClosedBlocker: "live_provider_web_policy_bypass",
+              executionSource: "stage2_live_web_policy_runner",
+              runnerStatus: "implemented",
+            },
+            {
+              scenarioId: "L2-L04",
+              scenario: "provider_backed_web_read",
+              scenarioSetup: "governed_web_read_enabled",
+              requiredRuntimeEvidence: [
+                "selected_web_candidate",
+                "action_status",
+                "observation",
+                "final_synthesis",
+              ],
+              failClosedBlocker: "provider_backed_web_agent_loop_not_executed",
+              executionSource: "existing_v1_live_harness",
+              runnerStatus: "implemented",
+            },
+            {
+              scenarioId: "L2-L05",
+              scenario: "registered_mcp_read",
+              scenarioSetup: "two_bounded_read_only_mcp_candidates",
+              requiredRuntimeEvidence: [
+                "candidate_ids",
+                "target_allowlist",
+                "selected_rank",
+                "observation",
+              ],
+              failClosedBlocker: "provider_backed_mcp_agent_loop_not_executed",
+              executionSource: "existing_v1_live_harness",
+              runnerStatus: "implemented",
+            },
+            {
+              scenarioId: "L2-L06",
+              scenario: "mcp_tool_permission_proposal",
+              scenarioSetup: "permission_required_read_target",
+              requiredRuntimeEvidence: [
+                "tool_permission_proposal",
+                "proposal_target",
+                "selected_candidate",
+                "no_read_success_overlap",
+              ],
+              failClosedBlocker: "provider_live_proposal_permission_not_executed",
+              executionSource: "existing_v1_live_harness",
+              runnerStatus: "implemented",
+            },
+            {
+              scenarioId: "L2-L07",
+              scenario: "multi_step_react",
+              scenarioSetup: "two_safe_read_sources_available",
+              requiredRuntimeEvidence: ["two_actions", "two_observations", "final_synthesis"],
+              failClosedBlocker: "live_provider_multistep_observation_missing",
+              executionSource: "stage2_live_multistep_react_runner",
+              runnerStatus: "implemented",
+            },
+            {
+              scenarioId: "L2-L08",
+              scenario: "memory_proposal",
+              scenarioSetup: "memory_proposal_enabled_no_auto_materialization",
+              requiredRuntimeEvidence: [
+                "proposal_id",
+                "source_evidence",
+                "no_memory_materialization",
+              ],
+              failClosedBlocker: "live_provider_memory_proposal_missing",
+              executionSource: "stage2_live_memory_proposal_runner",
+              runnerStatus: "implemented",
+            },
+            {
+              scenarioId: "L2-L09",
+              scenario: "permission_denial",
+              scenarioSetup: "pending_safe_read_permission_denial",
+              requiredRuntimeEvidence: ["denied_permission_state", "no_resumed_action"],
+              failClosedBlocker: "live_provider_permission_denial_bypassed",
+              executionSource: "stage2_live_permission_denial_runner",
+              runnerStatus: "implemented",
+            },
+            {
+              scenarioId: "L2-L10",
+              scenario: "failure_recovery",
+              scenarioSetup: "induced_bad_tool_or_safe_tool_failure",
+              requiredRuntimeEvidence: [
+                "blocker_reason",
+                "retry_or_cancel_state",
+                "no_fake_final_done",
+              ],
+              failClosedBlocker: "live_provider_failure_hidden",
+              executionSource: "stage2_live_failure_recovery_runner",
+              runnerStatus: "implemented",
+            },
+          ],
+          scenarioReports: [
+            {
+              scenarioId: "L2-L01",
+              status: "blocked",
+              credited: false,
+              providerEndpointKind: null,
+              blockers: ["stage2_live_provider_p0_evidence_missing"],
+              mainChatInvoked: false,
+              modelInvoked: false,
+              runIdPresent: false,
+              taskSessionIdPresent: false,
+              responsePreviewPresent: false,
+            },
+            {
+              scenarioId: "L2-L05",
+              status: "failed",
+              credited: false,
+              providerEndpointKind: "external_provider",
+              blockers: ["live_provider_model_ranked_selection_trace_missing"],
+              mainChatInvoked: true,
+              modelInvoked: true,
+              runIdPresent: true,
+              taskSessionIdPresent: true,
+              responsePreviewPresent: true,
+            },
+          ],
+        },
+        controlPlane: {
+          ready: true,
+          requiredCount: 10,
+          attemptedCount: 10,
+          passedCount: 10,
+          failedIds: [],
+          coverage: [
+            {
+              id: "direct_answer",
+              passed: true,
+              evidence: ["AgentRun DirectAnswer trace"],
+              blockers: [],
+            },
+          ],
+          blockers: [],
+        },
+        memoryProposal: {
+          ready: true,
+          requiredCount: 8,
+          attemptedCount: 8,
+          passedCount: 8,
+          failedIds: [],
+          coverage: [
+            {
+              id: "M2-01",
+              passed: true,
+              evidence: ["MR-01 pending memory proposal"],
+              blockers: [],
+            },
+          ],
+          blockers: [],
+        },
+        failureRecovery: {
+          ready: true,
+          requiredCount: 10,
+          attemptedCount: 10,
+          passedCount: 10,
+          failedIds: [],
+          coverage: [
+            {
+              id: "R2-01",
+              passed: true,
+              evidence: [
+                "missing_workspace_file_blocker",
+                "blocked_missing_source_state",
+                "user_next_action_or_terminal_explanation",
+                "no_fake_file_read_completion",
+              ],
+              blockers: [],
+            },
+          ],
+          blockers: [],
+        },
+        finalDelivery: {
+          ready: true,
+          p0ScenarioCount: 24,
+          finalDeliveryEvidenceCount: 24,
+          finalDoneOverclaimCount: 0,
+          blockers: [],
+        },
+        safety: {
+          silentDurableWriteCount: 0,
+          hiddenLegacyFallbackCount: 0,
+          fakeBrowserEvidenceCount: 0,
+          fakeLiveEvidenceCount: 0,
+          localProviderCreditedAsLiveCount: 0,
+          unscopedPermissionReplayCount: 0,
+          finalDoneOverclaimCount: 0,
+        },
+        artifacts: [
+          {
+            kind: "stage1_browser_dogfood",
+            path: "frontend/test-results/main-chat-stage1-dogfood-report.json",
+            digest:
+              "bytes:25422 hash:sha256:b53415fe64b623298be32b93fe55d3c45b7941c65d94e1ce6f3c716db8ade678",
+            status: "loaded",
+          },
+          {
+            kind: "manual_dogfood",
+            path: "frontend/test-results/main-chat-stage2-manual-dogfood-report.json",
+            digest: null,
+            status: "missing",
+          },
+          {
+            kind: "live_provider",
+            path: "frontend/test-results/main-chat-stage2-live-provider-report.json",
+            digest: null,
+            status: "not_loaded",
+          },
+        ],
+      } as T);
+    case "validate_main_chat_agent_stage2_manual_dogfood_artifact":
+      return Promise.resolve({
+        attempted: false,
+        ready: false,
+        reviewerCount: 0,
+        requiredScenarioCount: 24,
+        attemptedScenarioCount: 0,
+        passedScenarioCount: 0,
+        missingScenarioIds: ["S2-D01"],
+        failedScenarioIds: ["S2-D01"],
+        traceIdsPresent: false,
+        artifactDigest: null,
+        blockers: ["stage2_manual_dogfood_evidence_missing"],
+      } as T);
+    case "run_main_chat_agent_stage1_dogfood_gate":
+      return Promise.resolve({
+        reportKind: "main_chat_agent_stage1_dogfood_gate",
+        readinessSemantics:
+          "stage1_real_e2e_dogfood_default_deterministic_browser_required_live_opt_in_separate",
+        defaultReadinessScope: "stage1_default_deterministic_seeded_dogfood",
+        optInLiveReadinessScope: "stage1_external_live_opt_in_only",
+        defaultReady: false,
+        optInLiveReady: false,
+        readinessRecommendation: "not_ready",
+        scenarioCount: 40,
+        defaultScenarioCount: 36,
+        defaultPassedCount: 0,
+        defaultFailedCount: 36,
+        taskSessionCreatedCount: 36,
+        ordinaryChatScenarioCount: 24,
+        seededTaskControlScenarioCount: 12,
+        uiVerifiedScenarioCount: 0,
+        finalDeliveryVerifiedScenarioCount: 36,
+        legacyFallbackCount: 0,
+        silentDurableWriteCount: 0,
+        fakeExecutionDetectedCount: 0,
+        externalLiveAttempted: false,
+        externalLiveScenarioCount: 4,
+        externalLivePassedCount: 0,
+        externalLiveBlockedCount: 4,
+        externalLiveBlockers: ["explicit_live_eval_required"],
+        defaultReadinessUnaffectedByLive: true,
+        browserE2eEnvironmentReady: false,
+        browserE2eReportPath: "frontend/test-results/main-chat-stage1-dogfood-report.json",
+        browserE2eRequiredJourneyCount: 36,
+        browserE2ePassedJourneyCount: 0,
+        browserE2eFailedJourneyCount: 36,
+        manualDogfoodStatus: "not_attempted_engineering_dogfood_only",
+        betaV1DefaultReady: true,
+        productMaturityDefaultScenarioCount: 43,
+        seedManifest: {
+          seedWorkspaceRootKind: "temp_isolated",
+          knowledgeAssetCount: 9,
+          skillCount: 3,
+          sessionSeedCount: 1,
+          memorySeedCount: 5,
+          proposalSeedCount: 2,
+          taskSeedCount: 5,
+          planSeedCount: 1,
+          mcpManifestSeedCount: 2,
+          webFixtureSeedCount: 1,
+          seedDigest:
+            "bytes:12 hash:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          fileDigests: {
+            "project_brief.md":
+              "bytes:12 hash:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          },
+          runtimeObjectDigests: {},
+          secretsDetected: false,
+        },
+        scenarios: [
+          {
+            scenarioId: "D01",
+            scenarioType: "chat_e2e",
+            entryPoint: "ordinary_main_chat_input",
+            scenarioPromptId: "stage1:P0:D01",
+            boundedPromptPreview:
+              "What is the difference between a task and a proposal in OpenLife?",
+            userPromptDigest:
+              "bytes:12 hash:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            taskSessionId: "stage1_task_d01",
+            runId: "stage1_run_d01",
+            routeStrategy: "DirectAnswer",
+            expectedOutcome: "success",
+            actualOutcome: "success",
+            runtimeEvents: ["route.selected", "final_delivery.created"],
+            actions: [],
+            observations: [],
+            proposals: [],
+            blockers: [],
+            uiStates: [],
+            finalDeliverySections: ["completed_work", "next_action"],
+            controlEvidence: "not_applicable",
+            runtimeEvidencePassed: true,
+            uiEvidencePassed: false,
+            finalDeliveryEvidencePassed: true,
+            nonFakeEvidencePassed: true,
+            legacyFallbackUsed: false,
+            silentDurableWriteDetected: false,
+            fakeExecutionDetected: false,
+            seedManifestDigest:
+              "bytes:12 hash:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            liveProviderEvidence: "default_deterministic",
+            passed: false,
+            failureReason: "stage1_browser_ui_evidence_missing",
+          },
+        ],
+        blockers: ["not_ready_browser_e2e_blocked"],
+        acceptedResidualRisks: ["manual_dogfood_not_attempted_ready_for_engineering_dogfood_only"],
+      } as T);
     case "list_mcp_servers":
       return Promise.resolve([
         {
@@ -364,9 +1879,1081 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
       ] as T);
     case "get_chat_history":
       return Promise.resolve(mockChatMessages as T);
+    case "run_multi_strategy_agent_preview":
+      return Promise.resolve({
+        runId: "run-preview-1",
+        strategyKind: "react",
+        payloadKind: "react",
+        userOutput: "Preview response",
+        proposalIds: [],
+        warnings: [],
+        metadataSafeSummary: {
+          selectedStrategyKind: "react",
+          taskKind: "conversation",
+          riskLevel: "low",
+          hasHsPacket: false,
+          governanceDecisionKind: "allow",
+          reasonCode: "default_react",
+        },
+        governanceDecisionKind: "allow",
+      } as T);
+    case "list_plan_execute_sessions":
+      return Promise.resolve([] as T);
+    case "create_plan_execute_session":
+      return Promise.resolve(mockPlanExecuteSession as T);
+    case "get_plan_execute_session":
+      return Promise.resolve(mockPlanExecuteSession as T);
+    case "update_plan_execute_session_draft":
+      return Promise.resolve(mockPlanExecuteSession as T);
+    case "finalize_plan_execute_session":
+      return Promise.resolve({ ...mockPlanExecuteSession, status: "finalized" } as T);
+    case "cancel_plan_execute_session":
+      return Promise.resolve({ ...mockPlanExecuteSession, status: "cancelled" } as T);
+    case "review_plan_execute_session":
+      return Promise.resolve({
+        session: {
+          ...mockPlanExecuteSession,
+          reviewId: "plan-review-mock-1",
+          reviewSummary: {
+            reviewId: "plan-review-mock-1",
+            planId: mockPlanExecuteSession.planId,
+            planSessionId: mockPlanExecuteSession.sessionId,
+            planStatus: mockPlanExecuteSession.status,
+            basePlanRevision: _args?.input?.baseRevision ?? mockPlanExecuteSession.revision,
+            completedSteps: [],
+            skippedSteps: [],
+            blockedSteps: [],
+            proposalsCreated: [],
+            observationsUsed: [],
+            unresolved: [],
+            recommendedNextAction: ["No remaining plan action is required."],
+            completionClaimed: false,
+          },
+        },
+        summary: {
+          reviewId: "plan-review-mock-1",
+          planId: mockPlanExecuteSession.planId,
+          planSessionId: mockPlanExecuteSession.sessionId,
+          planStatus: mockPlanExecuteSession.status,
+          basePlanRevision: _args?.input?.baseRevision ?? mockPlanExecuteSession.revision,
+          completedSteps: [],
+          skippedSteps: [],
+          blockedSteps: [],
+          proposalsCreated: [],
+          observationsUsed: [],
+          unresolved: [],
+          recommendedNextAction: ["No remaining plan action is required."],
+          completionClaimed: false,
+        },
+        metadataSafeSummary: {},
+      } as T);
+    case "execute_plan_execute_step":
+      return Promise.resolve({
+        session: {
+          ...mockPlanExecuteSession,
+          status: "in_progress",
+          completedStepCount: 1,
+          steps: mockPlanExecuteSession.steps.map(step =>
+            step.stepId === _args?.input?.stepId
+              ? {
+                  ...step,
+                  status: step.declaredWrite ? "requires_proposal" : "executed",
+                  linkedProposalId: step.declaredWrite ? "proposal-plan-1" : null,
+                  observationSummary: step.declaredWrite
+                    ? null
+                    : "read-only internal reasoning completed; raw prompt omitted",
+                }
+              : step
+          ),
+        },
+        executedStep: {
+          sessionId: "plan-session-1",
+          stepId: _args?.input?.stepId ?? "step-1",
+          stepStatus: "executed",
+          linkedProposalId: null,
+          observationSummary: "read-only internal reasoning completed; raw prompt omitted",
+          metadataSafeSummary: {},
+        },
+        metadataSafeSummary: {},
+      } as T);
+    case "skip_plan_execute_step":
+      return Promise.resolve({
+        session: {
+          ...mockPlanExecuteSession,
+          status: "in_progress",
+          steps: mockPlanExecuteSession.steps.map(step =>
+            step.stepId === _args?.input?.stepId
+              ? {
+                  ...step,
+                  status: "skipped",
+                  skipReason: _args?.input?.reason ?? "skipped",
+                }
+              : step
+          ),
+        },
+        skippedStep: {
+          sessionId: "plan-session-1",
+          planId: "plan:plan-session-1",
+          stepId: _args?.input?.stepId ?? "step-1",
+          stepStatus: "skipped",
+          revision: 2,
+          basePlanRevision: _args?.input?.baseRevision ?? 1,
+          stepKind: "read",
+          linkedProposalId: null,
+          linkedActionIds: [],
+          linkedObservationIds: [],
+          linkedProposalIds: [],
+          blockerIds: [],
+          linkedFinalDeliveryIds: [],
+          skipReason: _args?.input?.reason ?? "skipped",
+          observationSummary: null,
+          metadataSafeSummary: {},
+        },
+        metadataSafeSummary: {},
+      } as T);
+    case "check_runtime_migration_gate":
+      return Promise.resolve({
+        defaultChatUnchanged: true,
+        previewPathHealthy: true,
+        metadataSafeTraceReady: true,
+        fallbackAvailable: true,
+        noExternalWrites: true,
+        proposalFirstPreserved: true,
+        blockingReasons: [],
+      } as T);
+    case "get_default_chat_runtime_boundary_status":
+      return Promise.resolve({
+        currentMode: "legacy_stream",
+        controlledCandidateAvailable: false,
+        defaultChatUnchanged: true,
+        candidatePromotionReadinessRequired: true,
+        automaticMigrationEnabled: false,
+        blockingReasons: [],
+        metadataSafeSummary: {
+          runtimeBoundary: "default_chat",
+          metadataSafe: true,
+          readOnly: true,
+          currentMode: "legacy_stream",
+          controlledCandidateAvailable: false,
+          defaultChatUnchanged: true,
+          candidatePromotionReadinessRequired: true,
+          automaticMigrationEnabled: false,
+        },
+      } as T);
+    case "draft_default_chat_adapter_activation_plan":
+      return Promise.resolve({
+        draftReady: true,
+        candidatePromotionReadinessReport: {
+          ready: true,
+          cutoverReadinessEligible: true,
+          requiredApprovedCandidates: _args?.input?.requiredApprovedCandidates ?? 1,
+          approvedCandidateCount: 1,
+          latestDecision: {
+            evidenceId: "ev_candidate_review_1",
+            candidateRunId: "run-candidate-1",
+            decisionKind: "approve",
+            contractShape: "send_message_compatible",
+            candidateSummaryDigest: "sha256:mock-candidate-summary",
+            reviewerNoteChecksum: null,
+            reviewerNoteLength: 0,
+            reviewerNoteCategory: "none",
+            createdAt: "2026-05-31T06:07:08Z",
+          },
+          approvedCandidates: [],
+          defaultChatUnchanged: true,
+          blockingReasons: [],
+          metadataSafeSummary: {
+            promotionReadinessGate: "controlled_chat_cutover_candidate",
+            metadataSafe: true,
+            readOnly: true,
+          },
+          checkedAt: "2026-05-31T06:08:00Z",
+        },
+        runtimeBoundaryStatus: {
+          currentMode: "legacy_stream",
+          controlledCandidateAvailable: false,
+          defaultChatUnchanged: true,
+          candidatePromotionReadinessRequired: true,
+          automaticMigrationEnabled: false,
+          blockingReasons: [],
+          metadataSafeSummary: {
+            runtimeBoundary: "default_chat",
+            metadataSafe: true,
+            readOnly: true,
+          },
+        },
+        activationScope: ["Human-review-only adapter activation draft."],
+        requiredPreconditions: ["W33 candidate promotion readiness remains ready."],
+        adapterContractChecks: ["send_message-compatible contract shape remains stable."],
+        fallbackPlan: ["Keep default Chat on the legacy stream fallback."],
+        rollbackPlan: ["Revert only a separate adapter implementation."],
+        observabilityPlan: ["Use metadata-safe activation counters only."],
+        testPlan: ["Verify send_message and start_stream_message do not call this command."],
+        manualReviewRequired: true,
+        notAutomaticMigration: true,
+        requiresSeparateImplementation: true,
+        blockingReasons: [],
+        metadataSafeSummary: {
+          activationPlan: "default_chat_adapter_activation",
+          metadataSafe: true,
+          readOnly: true,
+          manualReviewRequired: true,
+          notAutomaticMigration: true,
+          requiresSeparateImplementation: true,
+        },
+      } as T);
+    case "record_default_chat_adapter_activation_review_decision":
+      return Promise.resolve({
+        recorded: true,
+        evidenceId: "ev_activation_review_1",
+        decisionKind: _args?.input?.decisionKind ?? "approve",
+        draftReady: true,
+        activationPlanDigest: "sha256:mock-activation-plan",
+        createdAt: "2026-05-31T10:11:12Z",
+        blockingReasons: [],
+      } as T);
+    case "get_default_chat_adapter_activation_review_summary":
+      return Promise.resolve({
+        latestDecision: {
+          evidenceId: "ev_activation_review_1",
+          decisionKind: "approve",
+          draftReady: true,
+          activationPlanDigest: "sha256:mock-activation-plan",
+          candidatePromotionReady: true,
+          currentMode: "legacy_stream",
+          automaticMigrationEnabled: false,
+          reviewerNoteChecksum: null,
+          reviewerNoteLength: 0,
+          reviewerNoteCategory: "none",
+          createdAt: "2026-05-31T10:11:12Z",
+        },
+        approvedCount: 1,
+        rejectOrReworkCount: 0,
+        latestTimestamp: "2026-05-31T10:11:12Z",
+        blockingReasons: [],
+        metadataSafeSummary: {
+          activationReview: "default_chat_adapter_activation",
+          metadataSafe: true,
+          readOnly: true,
+          approvedCount: 1,
+          rejectOrReworkCount: 0,
+          latestDecisionPresent: true,
+        },
+      } as T);
+    case "check_default_chat_adapter_activation_implementation_gate":
+      return Promise.resolve({
+        implementationGateEligible: true,
+        draftReady: true,
+        latestDecision: {
+          evidenceId: "ev_activation_review_1",
+          decisionKind: "approve",
+          draftReady: true,
+          activationPlanDigest: "sha256:mock-activation-plan",
+          candidatePromotionReady: true,
+          currentMode: "legacy_stream",
+          automaticMigrationEnabled: false,
+          reviewerNoteChecksum: null,
+          reviewerNoteLength: 0,
+          reviewerNoteCategory: "none",
+          createdAt: "2026-05-31T10:11:12Z",
+        },
+        currentActivationPlanDigest: "sha256:mock-activation-plan",
+        activationPlanDigestMatched: true,
+        defaultChatUnchanged: true,
+        automaticMigrationEnabled: false,
+        currentMode: "legacy_stream",
+        blockingReasons: [],
+        metadataSafeSummary: {
+          activationImplementationGate: "default_chat_adapter_activation",
+          metadataSafe: true,
+          readOnly: true,
+          notAutomaticMigration: true,
+          requiresSeparateImplementation: true,
+          implementationGateEligible: true,
+          activationPlanDigestMatched: true,
+        },
+      } as T);
+    case "get_default_chat_adapter_routing_status":
+      return Promise.resolve({
+        currentMode: "legacy_stream",
+        adapterScaffoldPresent: true,
+        controlledAdapterEnabled: false,
+        defaultSendPath: "legacy_stream",
+        startStreamPath: "legacy_stream",
+        activationImplementationGateEligible: true,
+        requiresSeparateCutoverImplementation: true,
+        blockingReasons: [],
+        metadataSafeSummary: {
+          defaultChatAdapterRouting: "disabled_scaffold",
+          metadataSafe: true,
+          readOnly: true,
+          routingMode: "legacy_stream",
+          adapterScaffoldPresent: true,
+          controlledAdapterEnabled: false,
+          defaultSendPath: "legacy_stream",
+          startStreamPath: "legacy_stream",
+          activationImplementationGateEligible: true,
+          notAutomaticMigration: true,
+          requiresSeparateCutoverImplementation: true,
+        },
+      } as T);
+    case "check_default_chat_adapter_contract_harness":
+      return Promise.resolve({
+        contractHarnessReady: true,
+        contractShape: "disabled_adapter_legacy_stream_contract",
+        adapterDisabled: true,
+        activationImplementationGateEligible: true,
+        routingStatus: {
+          currentMode: "legacy_stream",
+          adapterScaffoldPresent: true,
+          controlledAdapterEnabled: false,
+          defaultSendPath: "legacy_stream",
+          startStreamPath: "legacy_stream",
+          activationImplementationGateEligible: true,
+          requiresSeparateCutoverImplementation: true,
+          blockingReasons: [],
+          metadataSafeSummary: {
+            defaultChatAdapterRouting: "disabled_scaffold",
+            metadataSafe: true,
+            readOnly: true,
+          },
+        },
+        sendMessageContract: {
+          name: "send_message",
+          ready: true,
+          expectedPath: "legacy_stream",
+          actualPath: "legacy_stream",
+          blockingReasons: [],
+        },
+        streamMessageContract: {
+          name: "start_stream_message",
+          ready: true,
+          expectedPath: "legacy_stream",
+          actualPath: "legacy_stream",
+          blockingReasons: [],
+        },
+        blockingReasons: [],
+        metadataSafeSummary: {
+          contractHarness: "default_chat_adapter",
+          metadataSafe: true,
+          readOnly: true,
+          contractHarnessReady: true,
+          contractShape: "disabled_adapter_legacy_stream_contract",
+          adapterDisabled: true,
+          activationImplementationGateEligible: true,
+          defaultSendPath: "legacy_stream",
+          startStreamPath: "legacy_stream",
+          controlledAdapterEnabled: false,
+        },
+      } as T);
+    case "run_default_chat_adapter_dry_run":
+      return Promise.resolve({
+        dryRunReady: true,
+        blocked: false,
+        contractShape: "default_chat_adapter_dry_run_contract",
+        sourceSessionId: _args?.input?.sessionId ?? "settings-dry-run",
+        adapterPath: "controlled_adapter_dry_run",
+        allowWrites: false,
+        maxToolCalls: 0,
+        defaultChatPathUnchanged: true,
+        chatMessageSaved: false,
+        agentRunRecorded: false,
+        contractHarnessReady: true,
+        inputMessageLength: 31,
+        inputMessageHash: "abc123",
+        blockingReasons: [],
+        metadataSafeSummary: {
+          adapterDryRun: "default_chat_adapter",
+          metadataSafe: true,
+          readOnly: true,
+          dryRunReady: true,
+          contractShape: "default_chat_adapter_dry_run_contract",
+          adapterPath: "controlled_adapter_dry_run",
+          allowWrites: false,
+          maxToolCalls: 0,
+          defaultChatPathUnchanged: true,
+          chatMessageSaved: false,
+          agentRunRecorded: false,
+        },
+      } as T);
+    case "record_default_chat_adapter_dry_run_review_decision":
+      return Promise.resolve({
+        recorded: true,
+        evidenceId: "ev_dry_run_review_1",
+        decisionKind: _args?.input?.decisionKind ?? "approve",
+        sourceSessionId: _args?.input?.sourceSessionId ?? "settings-dry-run",
+        contractShape: "default_chat_adapter_dry_run_contract",
+        dryRunReady: true,
+        dryRunSummaryDigest: "sha256:dryrunreview",
+        createdAt: new Date().toISOString(),
+        blockingReasons: [],
+      } as T);
+    case "get_default_chat_adapter_dry_run_review_summary":
+      return Promise.resolve({
+        latestDecision: {
+          evidenceId: "ev_dry_run_review_1",
+          decisionKind: "approve",
+          sourceSessionId: "settings-dry-run",
+          contractShape: "default_chat_adapter_dry_run_contract",
+          dryRunReady: true,
+          dryRunSummaryDigest: "sha256:dryrunreview",
+          reviewerNoteChecksum: null,
+          reviewerNoteLength: 0,
+          reviewerNoteCategory: "none",
+          createdAt: new Date().toISOString(),
+        },
+        approvedCount: 1,
+        rejectOrReworkCount: 0,
+        latestTimestamp: new Date().toISOString(),
+        blockingReasons: [],
+        metadataSafeSummary: {
+          dryRunReview: "default_chat_adapter",
+          metadataSafe: true,
+          readOnly: true,
+          approvedCount: 1,
+        },
+      } as T);
+    case "check_default_chat_adapter_implementation_readiness":
+      return Promise.resolve({
+        implementationReady: true,
+        latestDryRunReviewDecision: {
+          evidenceId: "ev_dry_run_review_1",
+          decisionKind: "approve",
+          sourceSessionId: _args?.input?.sourceSessionId ?? "settings-dry-run",
+          contractShape: "default_chat_adapter_dry_run_contract",
+          dryRunReady: true,
+          dryRunSummaryDigest: "sha256:dryrunreview",
+          reviewerNoteChecksum: null,
+          reviewerNoteLength: 0,
+          reviewerNoteCategory: "none",
+          createdAt: new Date().toISOString(),
+        },
+        activationImplementationGateEligible: true,
+        contractHarnessReady: true,
+        dryRunReady: true,
+        dryRunReviewApproved: true,
+        dryRunDigestMatched: true,
+        defaultChatUnchanged: true,
+        controlledAdapterEnabled: false,
+        automaticMigrationEnabled: false,
+        defaultSendPath: "legacy_stream",
+        startStreamPath: "legacy_stream",
+        blockingReasons: [],
+        metadataSafeSummary: {
+          implementationReadiness: "default_chat_adapter",
+          metadataSafe: true,
+          readOnly: true,
+          implementationReady: true,
+          activationImplementationGateEligible: true,
+          contractHarnessReady: true,
+          dryRunReady: true,
+          dryRunReviewApproved: true,
+          dryRunDigestMatched: true,
+          defaultChatUnchanged: true,
+          controlledAdapterEnabled: false,
+          automaticMigrationEnabled: false,
+          defaultSendPath: "legacy_stream",
+          startStreamPath: "legacy_stream",
+        },
+      } as T);
+    case "run_default_chat_adapter_controlled_preview":
+      return Promise.resolve({
+        previewReady: true,
+        blocked: false,
+        contractShape: "send_message_compatible",
+        sourceSessionId: _args?.input?.sourceSessionId ?? "settings-dry-run",
+        adapterPath: "controlled_adapter_preview",
+        reply: "Controlled adapter preview reply",
+        reasoningTrace: {
+          strategyResult: {
+            adapterPreview: "default_chat_adapter_controlled_preview",
+            metadataSafe: true,
+          },
+        },
+        toolCalls: [],
+        runId: "run-adapter-preview-1",
+        allowWrites: false,
+        maxToolCalls: 0,
+        defaultChatPathUnchanged: true,
+        chatMessageSaved: false,
+        agentRunRecorded: true,
+        implementationReady: true,
+        warnings: [],
+        blockingReasons: [],
+        metadataSafeSummary: {
+          adapterPreview: "default_chat_adapter_controlled_preview",
+          metadataSafe: true,
+          allowWrites: false,
+          maxToolCalls: 0,
+          chatHistoryStorage: "none",
+          defaultSendPath: "legacy_stream",
+          startStreamPath: "legacy_stream",
+        },
+      } as T);
+    case "record_default_chat_adapter_controlled_preview_review_decision":
+      return Promise.resolve({
+        recorded: true,
+        evidenceId: "ev_adapter_preview_review_1",
+        previewRunId: _args?.input?.previewRunId ?? "run-adapter-preview-1",
+        decisionKind: _args?.input?.decisionKind ?? "approve",
+        contractShape: "send_message_compatible",
+        previewSummaryDigest: "sha256:adapterpreviewreview",
+        createdAt: new Date().toISOString(),
+        blockingReasons: [],
+      } as T);
+    case "get_default_chat_adapter_controlled_preview_review_summary":
+      return Promise.resolve({
+        latestDecision: {
+          evidenceId: "ev_adapter_preview_review_1",
+          previewRunId: "run-adapter-preview-1",
+          decisionKind: "approve",
+          contractShape: "send_message_compatible",
+          previewSummaryDigest: "sha256:adapterpreviewreview",
+          reviewerNoteChecksum: null,
+          reviewerNoteLength: 0,
+          reviewerNoteCategory: "none",
+          createdAt: new Date().toISOString(),
+        },
+        approvedCount: 1,
+        rejectOrReworkCount: 0,
+        latestTimestamp: new Date().toISOString(),
+        blockingReasons: [],
+        metadataSafeSummary: {
+          controlledPreviewReview: "default_chat_adapter",
+          metadataSafe: true,
+          readOnly: true,
+          approvedCount: 1,
+        },
+      } as T);
+    case "check_default_chat_adapter_controlled_preview_approval_readiness":
+      return Promise.resolve({
+        ready: true,
+        requiredApprovedPreviews: _args?.input?.requiredApprovedPreviews ?? 1,
+        approvedPreviewCount: 1,
+        latestDecision: {
+          evidenceId: "ev_adapter_preview_review_1",
+          previewRunId: "run-adapter-preview-1",
+          decisionKind: "approve",
+          contractShape: "send_message_compatible",
+          previewSummaryDigest: "sha256:adapterpreviewreview",
+          reviewerNoteChecksum: null,
+          reviewerNoteLength: 0,
+          reviewerNoteCategory: "none",
+          createdAt: new Date().toISOString(),
+        },
+        verifiedPreviewRunIds: ["run-adapter-preview-1"],
+        implementationReadinessReady: true,
+        previewReviewApproved: true,
+        previewDigestMatched: true,
+        defaultChatUnchanged: true,
+        controlledAdapterEnabled: false,
+        automaticMigrationEnabled: false,
+        defaultSendPath: "legacy_stream",
+        startStreamPath: "legacy_stream",
+        blockingReasons: [],
+        metadataSafeSummary: {
+          controlledPreviewApprovalReadiness: "default_chat_adapter",
+          metadataSafe: true,
+          readOnly: true,
+          ready: true,
+          notAutomaticMigration: true,
+        },
+      } as T);
+    case "draft_default_chat_adapter_cutover_implementation_plan":
+      return Promise.resolve({
+        draftReady: true,
+        controlledPreviewApprovalReadiness: {
+          ready: true,
+          requiredApprovedPreviews: _args?.input?.requiredApprovedPreviews ?? 1,
+          approvedPreviewCount: 1,
+          latestDecision: {
+            evidenceId: "ev_adapter_preview_review_1",
+            previewRunId: "run-adapter-preview-1",
+            decisionKind: "approve",
+            contractShape: "send_message_compatible",
+            previewSummaryDigest: "sha256:adapterpreviewreview",
+            reviewerNoteChecksum: null,
+            reviewerNoteLength: 0,
+            reviewerNoteCategory: "none",
+            createdAt: new Date().toISOString(),
+          },
+          verifiedPreviewRunIds: ["run-adapter-preview-1"],
+          implementationReadinessReady: true,
+          previewReviewApproved: true,
+          previewDigestMatched: true,
+          defaultChatUnchanged: true,
+          controlledAdapterEnabled: false,
+          automaticMigrationEnabled: false,
+          defaultSendPath: "legacy_stream",
+          startStreamPath: "legacy_stream",
+          blockingReasons: [],
+          metadataSafeSummary: {
+            controlledPreviewApprovalReadiness: "default_chat_adapter",
+            metadataSafe: true,
+            readOnly: true,
+          },
+        },
+        manualReviewRequired: true,
+        notAutomaticMigration: true,
+        requiresSeparateImplementation: true,
+        requiresSeparateCutoverReview: true,
+        sourceSessionId: _args?.input?.sourceSessionId ?? "settings-dry-run",
+        inputMessageLength: 31,
+        inputMessageHash: "sha256:adaptercutovermessage",
+        stablePlanDigest: "sha256:adaptercutoverplan",
+        planSections: [
+          {
+            sectionKey: "implementationScope",
+            title: "Implementation Scope",
+            items: ["Keep default Chat unchanged."],
+          },
+          {
+            sectionKey: "explicitNonGoals",
+            title: "Explicit Non Goals",
+            items: ["Do not migrate default Chat."],
+          },
+        ],
+        blockingReasons: [],
+        metadataSafeSummary: {
+          cutoverImplementationPlan: "default_chat_adapter",
+          metadataSafe: true,
+          readOnly: true,
+          draftReady: true,
+          notAutomaticMigration: true,
+        },
+      } as T);
+    case "record_default_chat_adapter_cutover_plan_review_decision":
+      return Promise.resolve({
+        recorded: true,
+        evidenceId: "ev_adapter_cutover_plan_review_1",
+        decisionKind: _args?.input?.decisionKind ?? "approve",
+        sourceSessionId: _args?.input?.sourceSessionId ?? "settings-dry-run",
+        draftReady: true,
+        cutoverPlanDigest: "sha256:adaptercutoverplanreview",
+        planSectionCount: 9,
+        createdAt: new Date().toISOString(),
+        blockingReasons: [],
+      } as T);
+    case "get_default_chat_adapter_cutover_plan_review_summary":
+      return Promise.resolve({
+        latestDecision: {
+          evidenceId: "ev_adapter_cutover_plan_review_1",
+          decisionKind: "approve",
+          sourceSessionId: "settings-dry-run",
+          draftReady: true,
+          cutoverPlanDigest: "sha256:adaptercutoverplanreview",
+          planSectionCount: 9,
+          w45Ready: true,
+          reviewerNoteChecksum: null,
+          reviewerNoteLength: 0,
+          reviewerNoteCategory: "none",
+          createdAt: new Date().toISOString(),
+        },
+        approvedCount: 1,
+        rejectedCount: 0,
+        requestReworkCount: 0,
+        latestApprovedPlanDigest: "sha256:adaptercutoverplanreview",
+        latestTimestamp: new Date().toISOString(),
+        blockingReasons: [],
+        metadataSafeSummary: {
+          cutoverPlanReview: "default_chat_adapter",
+          metadataSafe: true,
+          readOnly: true,
+          approvedCount: 1,
+        },
+      } as T);
+    case "check_default_chat_adapter_cutover_plan_approval_readiness":
+      return Promise.resolve({
+        ready: true,
+        draftReady: true,
+        w45Ready: true,
+        cutoverPlanReviewApproved: true,
+        cutoverPlanDigestMatched: true,
+        currentPlanDigest: "sha256:adaptercutoverplanreview",
+        latestApprovedPlanDigest: "sha256:adaptercutoverplanreview",
+        latestDecision: {
+          evidenceId: "ev_adapter_cutover_plan_review_1",
+          decisionKind: "approve",
+          sourceSessionId: _args?.input?.sourceSessionId ?? "settings-dry-run",
+          draftReady: true,
+          cutoverPlanDigest: "sha256:adaptercutoverplanreview",
+          planSectionCount: 9,
+          w45Ready: true,
+          reviewerNoteChecksum: null,
+          reviewerNoteLength: 0,
+          reviewerNoteCategory: "none",
+          createdAt: new Date().toISOString(),
+        },
+        defaultChatUnchanged: true,
+        controlledAdapterEnabled: false,
+        automaticMigrationEnabled: false,
+        defaultSendPath: "legacy_stream",
+        startStreamPath: "legacy_stream",
+        blockingReasons: [],
+        metadataSafeSummary: {
+          cutoverPlanApprovalReadiness: "default_chat_adapter",
+          metadataSafe: true,
+          readOnly: true,
+          ready: true,
+          notAutomaticMigration: true,
+        },
+      } as T);
+    case "check_controlled_chat_pilot_eligibility":
+      return Promise.resolve({
+        eligible: true,
+        requiredCleanRuns: 3,
+        cleanRunCount: 3,
+        checkedRunIds: ["run-preview-clean-3", "run-preview-clean-2", "run-preview-clean-1"],
+        blockingReasons: [],
+        lastGateReport: {
+          defaultChatUnchanged: true,
+          previewPathHealthy: true,
+          metadataSafeTraceReady: true,
+          fallbackAvailable: true,
+          noExternalWrites: true,
+          proposalFirstPreserved: true,
+          blockingReasons: [],
+        },
+        defaultChatUnchanged: true,
+      } as T);
+    case "record_controlled_pilot_promotion_evidence":
+      return Promise.resolve({
+        evidenceId: "ev_promotion_1",
+        created: true,
+        pilotRunId: _args?.input?.pilotRunId ?? "run-controlled-pilot-1",
+        promotedAt: _args?.input?.promotedAt ?? new Date().toISOString(),
+      } as T);
+    case "get_controlled_pilot_promotion_evidence_summary":
+      return Promise.resolve({
+        promotedCount: 2,
+        recentPromotedPilotRunIds: ["run-controlled-pilot-2", "run-controlled-pilot-1"],
+        latestPromotionTimestamp: "2026-05-30T01:02:03Z",
+        sourceTargetMismatchBlockCount: 1,
+      } as T);
+    case "check_controlled_pilot_promotion_readiness":
+      return Promise.resolve({
+        ready: true,
+        requiredPromotions: 3,
+        promotedCount: 3,
+        recentPromotedPilotRunIds: [
+          "run-controlled-pilot-3",
+          "run-controlled-pilot-2",
+          "run-controlled-pilot-1",
+        ],
+        latestPromotionTimestamp: "2026-05-30T03:04:05Z",
+        sourceTargetMismatchBlockCount: 0,
+        metadataSafeEvidenceReady: true,
+        defaultChatUnchanged: true,
+        blockingReasons: [],
+      } as T);
+    case "draft_controlled_chat_migration_plan":
+      return Promise.resolve({
+        draftReady: true,
+        readinessReport: {
+          ready: true,
+          requiredPromotions: 3,
+          promotedCount: 3,
+          recentPromotedPilotRunIds: [
+            "run-controlled-pilot-3",
+            "run-controlled-pilot-2",
+            "run-controlled-pilot-1",
+          ],
+          latestPromotionTimestamp: "2026-05-30T03:04:05Z",
+          sourceTargetMismatchBlockCount: 0,
+          metadataSafeEvidenceReady: true,
+          defaultChatUnchanged: true,
+          blockingReasons: [],
+        },
+        migrationScope: [
+          "Draft scope is limited to a human-reviewed controlled pilot discussion; default Chat remains unchanged.",
+        ],
+        requiredPreconditions: [
+          "Separate human approval is required before any migration implementation work begins.",
+        ],
+        rollbackPlan: ["Disable the controlled pilot entry and keep default Chat unchanged."],
+        fallbackPlan: ["Use the existing default Chat send path whenever the pilot is blocked."],
+        testPlan: ["Verify send_message and start_stream_message do not call this draft command."],
+        manualReviewRequired: true,
+        notAutomaticMigration: true,
+        blockingReasons: [],
+      } as T);
+    case "record_controlled_chat_migration_review_decision":
+      return Promise.resolve({
+        recorded: true,
+        evidenceId: "ev_review_decision_1",
+        decisionKind: _args?.input?.decisionKind ?? "approve",
+        draftReady: true,
+        draftHash: "sha256:mock-migration-draft",
+        createdAt: "2026-05-31T01:02:03Z",
+        blockingReasons: [],
+      } as T);
+    case "get_controlled_chat_migration_review_decision_summary":
+      return Promise.resolve({
+        latestDecision: {
+          evidenceId: "ev_review_decision_1",
+          decisionKind: "request_rework",
+          draftReady: true,
+          draftHash: "sha256:mock-migration-draft",
+          createdAt: "2026-05-31T01:02:03Z",
+        },
+        approvedCount: 1,
+        reworkRejectCount: 2,
+        latestTimestamp: "2026-05-31T01:02:03Z",
+        blockingReasons: [],
+      } as T);
+    case "check_controlled_chat_migration_implementation_gate":
+      return Promise.resolve({
+        implementationEligible: true,
+        latestDecision: {
+          evidenceId: "ev_review_decision_2",
+          decisionKind: "approve",
+          draftReady: true,
+          draftHash: "sha256:mock-migration-draft",
+          createdAt: "2026-05-31T02:03:04Z",
+        },
+        readinessReport: {
+          ready: true,
+          requiredPromotions: 3,
+          promotedCount: 3,
+          recentPromotedPilotRunIds: [
+            "run-controlled-pilot-3",
+            "run-controlled-pilot-2",
+            "run-controlled-pilot-1",
+          ],
+          latestPromotionTimestamp: "2026-05-30T03:04:05Z",
+          sourceTargetMismatchBlockCount: 0,
+          metadataSafeEvidenceReady: true,
+          defaultChatUnchanged: true,
+          blockingReasons: [],
+        },
+        draftHashMatched: true,
+        approvedAfterLatestDraft: true,
+        blockingReasons: [],
+      } as T);
+    case "run_controlled_chat_migration_shadow_run":
+      return Promise.resolve({
+        shadowRunReady: true,
+        shadowRunId: "run-shadow-1",
+        implementationGateReport: {
+          implementationEligible: true,
+          latestDecision: {
+            evidenceId: "ev_review_decision_2",
+            decisionKind: "approve",
+            draftReady: true,
+            draftHash: "sha256:mock-migration-draft",
+            createdAt: "2026-05-31T02:03:04Z",
+          },
+          readinessReport: {
+            ready: true,
+            requiredPromotions: 3,
+            promotedCount: 3,
+            recentPromotedPilotRunIds: [
+              "run-controlled-pilot-3",
+              "run-controlled-pilot-2",
+              "run-controlled-pilot-1",
+            ],
+            latestPromotionTimestamp: "2026-05-30T03:04:05Z",
+            sourceTargetMismatchBlockCount: 0,
+            metadataSafeEvidenceReady: true,
+            defaultChatUnchanged: true,
+            blockingReasons: [],
+          },
+          draftHashMatched: true,
+          approvedAfterLatestDraft: true,
+          blockingReasons: [],
+        },
+        strategyKind: "react",
+        payloadKind: "react",
+        metadataSafeSummary: {
+          descriptorKind: _args?.input?.boundedTestPromptDescriptor ?? "default_readiness_probe",
+          allowWrites: false,
+          metadataSafe: true,
+          reasonCode: "default_react",
+          riskLevel: "low",
+        },
+        warnings: ["shadow runtime forced allowWrites=false"],
+        blockingReasons: [],
+      } as T);
+    case "record_controlled_chat_migration_shadow_review_decision":
+      return Promise.resolve({
+        recorded: true,
+        evidenceId: "ev_shadow_review_1",
+        shadowRunId: _args?.input?.shadowRunId ?? "run-shadow-1",
+        decisionKind: _args?.input?.decisionKind ?? "approve",
+        readinessSummaryDigest: "sha256:mock-shadow-readiness",
+        createdAt: "2026-05-31T04:05:06Z",
+        blockingReasons: [],
+      } as T);
+    case "get_controlled_chat_migration_shadow_review_summary":
+      return Promise.resolve({
+        latestDecision: {
+          evidenceId: "ev_shadow_review_1",
+          shadowRunId: "run-shadow-1",
+          decisionKind: "approve",
+          reviewerNoteChecksum: "sha256:reviewer-note",
+          reviewerNoteLength: 0,
+          reviewerNoteCategory: "none",
+          readinessSummaryDigest: "sha256:mock-shadow-readiness",
+          createdAt: "2026-05-31T04:05:06Z",
+        },
+        approvedCount: 1,
+        reworkRejectCount: 0,
+        latestTimestamp: "2026-05-31T04:05:06Z",
+        blockingReasons: [],
+      } as T);
+    case "check_controlled_chat_cutover_readiness":
+      return Promise.resolve({
+        cutoverPlanningEligible: true,
+        implementationGateReport: {
+          implementationEligible: true,
+          latestDecision: {
+            evidenceId: "ev_review_decision_2",
+            decisionKind: "approve",
+            draftReady: true,
+            draftHash: "sha256:mock-migration-draft",
+            createdAt: "2026-05-31T02:03:04Z",
+          },
+          readinessReport: {
+            ready: true,
+            requiredPromotions: 3,
+            promotedCount: 3,
+            recentPromotedPilotRunIds: [
+              "run-controlled-pilot-3",
+              "run-controlled-pilot-2",
+              "run-controlled-pilot-1",
+            ],
+            latestPromotionTimestamp: "2026-05-30T03:04:05Z",
+            sourceTargetMismatchBlockCount: 0,
+            metadataSafeEvidenceReady: true,
+            defaultChatUnchanged: true,
+            blockingReasons: [],
+          },
+          draftHashMatched: true,
+          approvedAfterLatestDraft: true,
+          blockingReasons: [],
+        },
+        latestShadowReviewDecision: {
+          evidenceId: "ev_shadow_review_1",
+          shadowRunId: "run-shadow-1",
+          decisionKind: "approve",
+          reviewerNoteChecksum: "sha256:reviewer-note",
+          reviewerNoteLength: 0,
+          reviewerNoteCategory: "none",
+          readinessSummaryDigest: "sha256:mock-shadow-readiness",
+          createdAt: "2026-05-31T04:05:06Z",
+        },
+        verifiedShadowRunId: "run-shadow-1",
+        readinessSummaryDigest: "sha256:mock-shadow-readiness",
+        defaultChatUnchanged: true,
+        requiredEvidenceReady: true,
+        blockingReasons: [],
+        metadataSafeSummary: {
+          cutoverReadinessGate: "controlled_chat_cutover_planning",
+          metadataSafe: true,
+          planningOnly: true,
+          implementationEligible: true,
+          shadowRunReady: true,
+          latestShadowReviewDecisionKind: "approve",
+          contentStorage: "none",
+          toolStorage: "none",
+        },
+      } as T);
+    case "run_controlled_chat_cutover_candidate":
+      return Promise.resolve({
+        candidateReady: true,
+        candidateRunId: "run-candidate-1",
+        outputPreview: "Cutover candidate: react / react",
+        userOutput: "Candidate-only answer",
+        contractShape: "send_message_compatible",
+        metadataSafeSummary: {
+          candidateAdapter: "controlled_chat_cutover_candidate",
+          metadataSafe: true,
+          nonDefault: true,
+          allowWrites: false,
+          maxToolCalls: 0,
+          chatHistoryStorage: "none",
+          proposalStorage: "none",
+          memoryStorage: "none",
+        },
+        warnings: ["candidate runtime forced allowWrites=false"],
+        blockingReasons: [],
+      } as T);
+    case "record_controlled_chat_cutover_candidate_review_decision":
+      return Promise.resolve({
+        recorded: true,
+        evidenceId: "ev_candidate_review_1",
+        candidateRunId: _args?.input?.candidateRunId ?? "run-candidate-1",
+        decisionKind: _args?.input?.decisionKind ?? "approve",
+        contractShape: "send_message_compatible",
+        candidateSummaryDigest: "sha256:mock-candidate-summary",
+        createdAt: "2026-05-31T06:07:08Z",
+        blockingReasons: [],
+      } as T);
+    case "get_controlled_chat_cutover_candidate_review_summary":
+      return Promise.resolve({
+        latestDecision: {
+          evidenceId: "ev_candidate_review_1",
+          candidateRunId: "run-candidate-1",
+          decisionKind: "approve",
+          contractShape: "send_message_compatible",
+          candidateSummaryDigest: "sha256:mock-candidate-summary",
+          reviewerNoteChecksum: null,
+          reviewerNoteLength: 0,
+          reviewerNoteCategory: "none",
+          createdAt: "2026-05-31T06:07:08Z",
+        },
+        approvedCount: 1,
+        reworkRejectCount: 0,
+        latestTimestamp: "2026-05-31T06:07:08Z",
+        blockingReasons: [],
+      } as T);
+    case "check_controlled_chat_cutover_candidate_promotion_readiness":
+      return Promise.resolve({
+        ready: true,
+        cutoverReadinessEligible: true,
+        requiredApprovedCandidates: _args?.input?.requiredApprovedCandidates ?? 1,
+        approvedCandidateCount: 1,
+        latestDecision: {
+          evidenceId: "ev_candidate_review_1",
+          candidateRunId: "run-candidate-1",
+          decisionKind: "approve",
+          contractShape: "send_message_compatible",
+          candidateSummaryDigest: "sha256:mock-candidate-summary",
+          reviewerNoteChecksum: null,
+          reviewerNoteLength: 0,
+          reviewerNoteCategory: "none",
+          createdAt: "2026-05-31T06:07:08Z",
+        },
+        approvedCandidates: [
+          {
+            evidenceId: "ev_candidate_review_1",
+            candidateRunId: "run-candidate-1",
+            contractShape: "send_message_compatible",
+            candidateSummaryDigest: "sha256:mock-candidate-summary",
+            runReadinessDigest: "sha256:mock-candidate-run-readiness",
+            decisionCreatedAt: "2026-05-31T06:07:08Z",
+            ready: true,
+            blockingReasons: [],
+          },
+        ],
+        defaultChatUnchanged: true,
+        blockingReasons: [],
+        metadataSafeSummary: {
+          promotionReadinessGate: "controlled_chat_cutover_candidate",
+          metadataSafe: true,
+          readOnly: true,
+          notAutomaticMigration: true,
+          defaultChatUnchanged: true,
+          approvedCandidateCount: 1,
+        },
+        checkedAt: "2026-05-31T06:08:00Z",
+      } as T);
     case "list_snapshots":
       return Promise.resolve(mockLifeModelVersions as T);
     case "get_agent_run":
+      if (_args?.runId === "run-preview-1") {
+        return Promise.resolve(mockPreviewAgentRun as T);
+      }
       return Promise.resolve(null as T);
     case "list_agent_runs":
       return Promise.resolve([] as T);
@@ -381,10 +2968,176 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
     case "batch_accept_low_risk_proposals":
       return Promise.resolve(0 as T);
     case "accept_proposal":
+      return Promise.resolve({
+        success: true,
+        patchResult: {
+          patchId: _args?.proposalId ?? _args?.proposal_id ?? "proposal-1",
+          success: true,
+          path: "mock",
+          operation: "accept",
+        },
+      } as T);
     case "reject_proposal":
     case "edit_proposal":
     case "postpone_proposal":
       return Promise.resolve(undefined as T);
+    case "draft_edit_memory_proposal":
+      return Promise.resolve({
+        proposalId: _args?.proposalId ?? _args?.proposal_id ?? "proposal-memory-1",
+        draftOnly: true,
+        durableWriteExecuted: false,
+        originalProvenancePreserved: true,
+        status: "pending",
+        beforeDigest: "before",
+        afterDigest: "after",
+      } as T);
+    case "list_memory_assets":
+      return Promise.resolve([
+        {
+          memoryId: "memory:active-1",
+          proposalId: "proposal-memory-1",
+          content: "Prefer concise reviews.",
+          scope: "workspace",
+          category: "preference",
+          riskLevel: "low",
+          status: "materialized",
+          materializationStatus: "materialized",
+          createdBy: "assistant",
+          acceptedBy: "user",
+          materializedViewId: "memory_view:1",
+          materializedViewVersion: 1,
+          evidenceIds: ["proposal-memory-1"],
+          confidence: 0.84,
+          conflictIds: [],
+        },
+      ] as T);
+    case "rollback_memory_asset":
+      return Promise.resolve({
+        record: {
+          memoryId: _args?.memoryId ?? _args?.memory_id ?? "memory:active-1",
+          proposalId: "proposal-memory-1",
+          content: "Prefer concise reviews.",
+          scope: "workspace",
+          category: "preference",
+          riskLevel: "low",
+          status: "rolled_back",
+          materializationStatus: "not_required",
+          createdBy: "assistant",
+          materializedViewVersion: 2,
+          evidenceIds: ["proposal-memory-1"],
+          confidence: 0.84,
+          conflictIds: [],
+          rolledBackByEventId: "memory_rollback:1",
+        },
+        rollbackEvent: {
+          rollbackEventId: "memory_rollback:1",
+          memoryId: _args?.memoryId ?? _args?.memory_id ?? "memory:active-1",
+          proposalId: "proposal-memory-1",
+          requestedBy: "user",
+          reason: _args?.reason ?? "mock rollback",
+          previousStatus: "materialized",
+          nextStatus: "rolled_back",
+          affectedMaterializedViewIds: ["memory_view:1"],
+          affectedRuntimeSurfaceIds: ["main_chat_context"],
+          createdAt: new Date().toISOString(),
+          auditDigest: "sha256:mock",
+        },
+        materializedView: {
+          materializedViewId: "memory_view:1",
+          version: 2,
+          activeMemoryIds: [],
+          runtimeSurfaceIds: ["main_chat_context"],
+          updatedAt: new Date().toISOString(),
+          contentDigest: "digest",
+        },
+      } as T);
+    case "list_stage4_knowledge_asset_inventory":
+      return Promise.resolve({
+        inventoryId: "stage4_knowledge_inventory:mock",
+        root: "/mock",
+        loadedAssets: [
+          {
+            assetId: "knowledge:USER.md",
+            relativePath: "USER.md",
+            source: "/mock:USER.md",
+            digest: "1234567890abcdef",
+            sizeBytes: 42,
+            truncated: false,
+            reason: "bounded user profile context surface",
+            contextOnly: true,
+          },
+          {
+            assetId: "knowledge:MEMORY.md",
+            relativePath: "MEMORY.md",
+            source: "/mock:MEMORY.md",
+            digest: "abcdef1234567890",
+            sizeBytes: 64,
+            truncated: false,
+            reason: "bounded curated memory context surface",
+            contextOnly: true,
+          },
+        ],
+        skippedAssets: [
+          {
+            assetId: "knowledge:SOUL.md",
+            relativePath: "SOUL.md",
+            source: "/mock:SOUL.md",
+            reason: "missing",
+          },
+          {
+            assetId: "knowledge:skills/other/SKILL.md",
+            relativePath: "skills/other/SKILL.md",
+            source: "/mock:skills/other/SKILL.md",
+            reason: "unselected_skill",
+            selectedSkillId: "other",
+          },
+        ],
+      } as T);
+    case "create_managed_knowledge_write_draft":
+      return Promise.resolve({
+        proposalId: "proposal-managed-knowledge-1",
+        targetPath: _args?.targetPath ?? _args?.target_path ?? "USER.md",
+        sourceProvenanceProposalId: "proposal-managed-knowledge-1",
+        linkedMemoryIds: _args?.linkedMemoryIds ?? _args?.linked_memory_ids ?? [],
+        beforeDigest: "before-digest",
+        afterDigest: "after-digest",
+        previewDiff: `--- ${_args?.targetPath ?? _args?.target_path ?? "USER.md"}\n+++ ${
+          _args?.targetPath ?? _args?.target_path ?? "USER.md"
+        }\n+mock`,
+        validation: { allowed: true, targetKind: "user_profile_projection" },
+        fileWrittenBeforeConfirmation: false,
+      } as T);
+    case "confirm_managed_knowledge_write":
+      return Promise.resolve({
+        proposalId: _args?.proposalId ?? _args?.proposal_id ?? "proposal-managed-knowledge-1",
+        targetPath: "USER.md",
+        versionId: "knowledge_version:1",
+        auditId: "knowledge_audit:1",
+        rollbackSnapshotId: "snapshot:1",
+        beforeDigest: "before-digest",
+        afterDigest: "after-digest",
+        contextReload: {
+          loaded: true,
+          digest: "after-digest",
+          source: "/mock:USER.md",
+          reason: "bounded user profile context surface",
+        },
+      } as T);
+    case "rollback_managed_knowledge_write":
+      return Promise.resolve({
+        proposalId: "proposal-managed-knowledge-1",
+        targetPath: "USER.md",
+        restoredVersionId: "knowledge_version:2",
+        rolledBackVersionId: _args?.versionId ?? _args?.version_id ?? "knowledge_version:1",
+        auditId: "knowledge_rollback_audit:1",
+        restoredDigest: "before-digest",
+        contextReload: {
+          loaded: true,
+          digest: "before-digest",
+          source: "/mock:USER.md",
+          reason: "bounded user profile context surface",
+        },
+      } as T);
     case "list_tool_permissions":
       return Promise.resolve([
         {
@@ -423,8 +3176,87 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
           },
           outputSchema: {},
           proposalPolicy: "review_required",
+          sourceKind: "built_in",
+          executionStatus: "executable_built_in",
+          capabilityFlags: ["bounded_context", "proposal_first", "metadata_safe_trace"],
+          pluginId: undefined,
         },
       ] as T);
+    case "get_skill_runtime_status":
+      return Promise.resolve({
+        reportKind: "w156.skillRuntimeStatus.v1",
+        readiness: {
+          reportKind: "w150.skillRuntimeReadiness.v1",
+          ready: true,
+          metadataSafe: true,
+          containsRawContent: false,
+          requiredBuiltinsPresent: true,
+          builtInSkillCount: 3,
+          pluginSkillCount: 0,
+          descriptors: [
+            {
+              id: "weekly_review",
+              name: "Weekly Review",
+              sourceKind: "built_in",
+              executionStatus: "executable_built_in",
+              inputSchemaDigest: "sha256:input",
+              outputSchemaDigest: "sha256:output",
+              proposalPolicy: "review_required",
+              requiredContextIds: ["agent_runs", "life_model.goals", "life_model.state", "memory"],
+              allowedToolIds: [],
+              allowedToolCount: 0,
+              executionBudget: {
+                maxSteps: 5,
+                maxToolCalls: 3,
+                timeoutSeconds: 60,
+                allowCloud: true,
+                allowWrites: false,
+              },
+              capabilityFlags: ["bounded_context", "proposal_first", "metadata_safe_trace"],
+              metadataSafe: true,
+              containsRawContent: false,
+              directWriteImplied: false,
+            },
+          ],
+          pluginBoundarySummary: {
+            pluginToolsDeclarativeOnly: true,
+            externalPluginToolExecutionEnabled: false,
+          },
+          proposalGovernanceSummary: {
+            proposalFirst: true,
+            autoApplyAllowed: false,
+            source: "skill_runtime",
+          },
+          privacyModelRouteBoundarySummary: {
+            hsPolicyEnforced: true,
+            highOrCriticalRequiresLocalOnly: true,
+            localOnlyFailsClosedWithoutLocalModel: true,
+            guidanceConsumptionDefaultDisabled: true,
+          },
+          traceContractSummary: {
+            actionTraceMetadataSafe: true,
+            observationTraceMetadataSafe: true,
+            generatedProposalsLinkedToRun: true,
+            rawRuntimePayloadExcludedFromStatus: true,
+          },
+          defaultChatUnchanged: true,
+          migrationPermission: false,
+          runtimeExecutionPerformed: false,
+          modelCallPerformed: false,
+          toolCallPerformed: false,
+          businessWritesPerformed: false,
+          blockers: [],
+        },
+        defaultChatUnchanged: true,
+        migrationPermission: false,
+        readOnly: true,
+        runtimeExecutionPerformed: false,
+        modelCallPerformed: false,
+        toolCallPerformed: false,
+        businessWritesPerformed: false,
+        metadataSafe: true,
+        blockers: [],
+      } as T);
     case "run_skill":
       return Promise.resolve({
         runId: "run-skill-1",
@@ -476,7 +3308,16 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
     case "create_snapshot":
       return Promise.resolve(mockLifeModelVersions[0] as T);
     case "restore_snapshot":
-      return Promise.resolve(mockLifeModel as T);
+      return Promise.resolve({
+        success: true,
+        legacy: false,
+        governed_operation: true,
+        warning: "metadata-safe",
+        metadata_safe: true,
+        durable_lifemodel_write: true,
+        restored_snapshot_version: args?.version ?? "0.1.0",
+        pre_restore_snapshot_created: true,
+      } as T);
     case "goal_capability_gap_analysis":
       return Promise.resolve(["需要提升编程技能", "需要更多学习时间"] as T);
     case "goal_capability_gap_report":
@@ -847,6 +3688,33 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
         life_model: {},
         messages: [],
         vectors: [],
+      } as T);
+    case "import_all_data":
+      return Promise.resolve({
+        success: true,
+        legacy: false,
+        governed_operation: true,
+        warning: "metadata-safe",
+        metadata_safe: true,
+        durable_lifemodel_write: true,
+        imported_message_count: args?.payload?.messages?.length ?? 0,
+        imported_vector_count: args?.payload?.vectors?.length ?? 0,
+      } as T);
+    case "generate_evolution_report":
+      return Promise.resolve({
+        success: true,
+        read_only: true,
+        metadata_safe: true,
+        durable_lifemodel_write: false,
+        evolution_rules_write: false,
+        applied_rule_count: 0,
+        liked_pattern_count: 2,
+        disliked_pattern_count: 1,
+        suggested_rule_count: 3,
+        proposal_candidate_count: 3,
+        candidate_status: "review_required_not_activated",
+        summary:
+          "Read-only feedback evolution report: 2 liked pattern(s), 1 disliked pattern(s), 3 review candidate(s).",
       } as T);
     case "test_llm_connection":
       return Promise.resolve({

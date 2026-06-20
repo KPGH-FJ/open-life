@@ -1,8 +1,16 @@
 # ADR 0001: LifeModel Patch 机制
 
+> Historical ADR. The proposal-based direction remains useful, but any
+> direct-write compatibility path described here is superseded by ADR 0013 and
+> W90-W97 Legacy Direct-Write Convergence.
+>
+> Current durable LifeModel-HS mutation must follow proposal-first/governed
+> boundaries unless a later authoritative document explicitly defines a
+> metadata-safe governed exception.
+
 ## 状态
 
-- **状态**: 已接受
+- **状态**: 历史参考；部分直接写入假设已被 ADR 0013 / W90-W97 覆盖
 - **日期**: 2026-04-20
 - **作者**: OpenLife Team
 

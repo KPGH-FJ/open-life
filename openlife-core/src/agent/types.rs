@@ -39,7 +39,7 @@ impl std::fmt::Display for AgentTaskKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentExecutionBudget {
     pub max_steps: u32,
@@ -231,6 +231,44 @@ pub struct ToolActionScope {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ReactActionTraceEnvelope {
+    #[serde(default)]
+    pub run_id: Option<String>,
+    pub action_id: String,
+    pub step_index: u32,
+    pub tool_call_index: u32,
+    pub action_type: String,
+    pub tool_id: String,
+    pub tool_name: String,
+    pub tool_source: String,
+    pub action_category: String,
+    pub risk_level: String,
+    #[serde(default)]
+    pub permission_decision: Option<String>,
+    pub status: String,
+    #[serde(default)]
+    pub proposal_id: Option<String>,
+    #[serde(default)]
+    pub observation_id: Option<String>,
+    #[serde(default)]
+    pub observation_status: Option<String>,
+    #[serde(default)]
+    pub output_preview: Option<String>,
+    #[serde(default)]
+    pub output_hash: Option<String>,
+    #[serde(default)]
+    pub output_byte_count: Option<usize>,
+    #[serde(default)]
+    pub output_item_count: Option<usize>,
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub finished_at: Option<DateTime<Utc>>,
+    pub metadata_safe: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentAction {
     pub id: String,
     pub action_type: String,
@@ -250,6 +288,8 @@ pub struct AgentAction {
     pub timestamp: DateTime<Utc>,
     #[serde(default)]
     pub tool_scope: Option<ToolActionScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub react_trace: Option<ReactActionTraceEnvelope>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,6 +303,8 @@ pub struct AgentObservation {
     #[serde(default)]
     pub structured_result: Option<serde_json::Value>,
     pub timestamp: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub react_trace: Option<ReactActionTraceEnvelope>,
 }
 
 /// Error information when a run fails.
@@ -272,6 +314,16 @@ pub struct AgentRunError {
     pub message: String,
     pub phase: String, // "preprocess" | "model" | "stream" | "fallback" | "reasoning"
     pub recoverable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HSBehaviorCheckSummary {
+    pub id: String,
+    pub label: String,
+    pub passed: bool,
+    #[serde(default)]
+    pub summary: Option<String>,
 }
 
 /// A single traceable execution of an Agent task.
@@ -298,6 +350,12 @@ pub struct AgentRun {
     pub reasoning_strategy: Option<String>,
     /// Trace from the reasoning process (e.g., LayeredReasoner phases)
     pub reasoning_trace: Option<crate::agent::reasoning::ReasoningTrace>,
+    /// Metadata-safe HS asset selection audit for this run.
+    #[serde(default)]
+    pub hs_selection_audit: Option<crate::agent::hs_selector::HSSelectionAudit>,
+    /// Metadata-safe deterministic behavior checks relevant to selected HS assets.
+    #[serde(default)]
+    pub behavior_checks: Vec<HSBehaviorCheckSummary>,
     /// Warnings generated during execution (e.g., parse warnings, budget warnings)
     #[serde(default)]
     pub warnings: Vec<String>,
@@ -335,6 +393,8 @@ impl AgentRun {
             observations: Vec::new(),
             reasoning_strategy: None,
             reasoning_trace: None,
+            hs_selection_audit: None,
+            behavior_checks: Vec::new(),
             warnings: Vec::new(),
             status_updates: Vec::new(),
             step_count: 0,
@@ -364,6 +424,8 @@ impl AgentRun {
             observations: Vec::new(),
             reasoning_strategy: None,
             reasoning_trace: None,
+            hs_selection_audit: None,
+            behavior_checks: Vec::new(),
             warnings: Vec::new(),
             status_updates: Vec::new(),
             step_count: 0,
@@ -393,6 +455,8 @@ impl AgentRun {
             observations: Vec::new(),
             reasoning_strategy: None,
             reasoning_trace: None,
+            hs_selection_audit: None,
+            behavior_checks: Vec::new(),
             warnings: Vec::new(),
             status_updates: Vec::new(),
             step_count: 0,
@@ -422,6 +486,8 @@ impl AgentRun {
             observations: Vec::new(),
             reasoning_strategy: None,
             reasoning_trace: None,
+            hs_selection_audit: None,
+            behavior_checks: Vec::new(),
             warnings: Vec::new(),
             status_updates: Vec::new(),
             step_count: 0,
@@ -542,6 +608,7 @@ pub enum ProposalSource {
     ChatConversation,
     /// Agent 主动发起的提案（如定期检查、触发式建议）
     ProactiveAgent,
+    PlanningSession,
 }
 
 impl std::fmt::Display for ProposalSource {
@@ -556,6 +623,7 @@ impl std::fmt::Display for ProposalSource {
             ProposalSource::Manual => write!(f, "manual"),
             ProposalSource::ChatConversation => write!(f, "chat_conversation"),
             ProposalSource::ProactiveAgent => write!(f, "proactive_agent"),
+            ProposalSource::PlanningSession => write!(f, "planning_session"),
         }
     }
 }
@@ -576,7 +644,9 @@ impl rusqlite::types::FromSql for ProposalSource {
             "skill_runtime" => Ok(ProposalSource::SkillRuntime),
             "plugin" => Ok(ProposalSource::Plugin),
             "manual" => Ok(ProposalSource::Manual),
+            "chat_conversation" => Ok(ProposalSource::ChatConversation),
             "proactive_agent" => Ok(ProposalSource::ProactiveAgent),
+            "planning_session" => Ok(ProposalSource::PlanningSession),
             _ => Err(rusqlite::types::FromSqlError::InvalidType),
         })
     }
@@ -664,6 +734,7 @@ impl AgentProposal {
             ProposalSource::Manual => chrono::Duration::days(365),
             ProposalSource::ChatConversation => chrono::Duration::days(3),
             ProposalSource::ProactiveAgent => chrono::Duration::days(7),
+            ProposalSource::PlanningSession => chrono::Duration::days(14),
         };
         Some(Utc::now() + duration)
     }

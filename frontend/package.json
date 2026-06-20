@@ -19,6 +19,7 @@
     "format:check": "prettier --check \"src/**/*.{ts,tsx}\"",
     "typecheck": "tsc --noEmit",
     "test:e2e": "playwright test",
+    "test:e2e:tauri": "node scripts/stage1-tauri-webdriver.mjs",
     "test:e2e:ui": "playwright test --ui"
   },
   "dependencies": {

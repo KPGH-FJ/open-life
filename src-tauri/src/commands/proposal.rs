@@ -1,5 +1,15 @@
+use crate::legacy_write_convergence::{
+    LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
+    LifeModelMaterializerCallerPurpose,
+};
+use crate::main_chat_hs_runtime::classify_hs_policy_topic;
 use crate::{persist_life_model, storage::app_data_dir, AppState};
-use openlife_core::agent::{AgentProposal, ProposalStatus, ProposalType, RiskLevel};
+use openlife_core::agent::{
+    AgentProposal, MaturationProposalOutcome, MemoryLifecycleAcceptanceInput,
+    MemoryLifecycleRecord, MemoryLifecycleScope, MemoryLifecycleStatus, MemoryRollbackReport,
+    ProposalSource, ProposalStatus, ProposalType, RiskLevel,
+};
+use openlife_core::life_model::patch::PatchSource;
 use openlife_core::life_model::LifeModel;
 use serde_json::Value;
 use std::io::Write;
@@ -11,6 +21,10 @@ const EXTERNAL_WRITE_MAX_SIZE: usize = 100 * 1024;
 
 fn proposal_store_missing() -> String {
     "Proposal store is unavailable. Please check Settings > 试用就绪检查.".to_string()
+}
+
+fn memory_lifecycle_store_missing() -> String {
+    "Memory lifecycle store is unavailable. Accepted memory rollback is blocked.".to_string()
 }
 
 fn check_safe_mode(state: &Arc<AppState>) -> Result<(), String> {
@@ -44,6 +58,431 @@ fn patch_result_for_proposal(
         path: proposal.affected_path.clone(),
         operation: operation.to_string(),
         error,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LifeModelProposalPatchSourceMappingReport {
+    proposal_source: ProposalSource,
+    patch_source: PatchSource,
+    exact_source_mapping: bool,
+    metadata_safe_fallback: bool,
+    apply_allowed: bool,
+    metadata_safe: bool,
+    contains_raw_proposal_payload: bool,
+    contains_raw_lifemodel_patch_value: bool,
+    contains_raw_memory_text: bool,
+    contains_raw_chat_text: bool,
+    contains_raw_tool_payload: bool,
+    default_chat_route_unchanged: bool,
+    default_chat_entrypoints_changed: bool,
+    default_chat_route: String,
+    proposal_first_convergence_complete: bool,
+    required_follow_up: String,
+    blocking_reasons: Vec<String>,
+}
+
+fn lifemodel_patch_source_mapping_for_proposal_source(
+    source: ProposalSource,
+) -> (PatchSource, bool, Option<&'static str>) {
+    match source {
+        ProposalSource::BuilderReview => (PatchSource::BuilderReview, true, None),
+        ProposalSource::CalibrationRun => (PatchSource::Calibration, true, None),
+        ProposalSource::FeedbackEvolution => (PatchSource::Evolution, true, None),
+        ProposalSource::Manual => (PatchSource::Manual, true, None),
+        ProposalSource::ChatConversation => (PatchSource::ChatConversation, true, None),
+        ProposalSource::ProactiveAgent => (PatchSource::ProactiveAgent, true, None),
+        ProposalSource::SkillRuntime => (PatchSource::SkillRuntime, true, None),
+        ProposalSource::Plugin => (PatchSource::Plugin, true, None),
+        ProposalSource::MemoryGovernance => (PatchSource::MemoryGovernance, true, None),
+        ProposalSource::PlanningSession => (PatchSource::PlanningSession, true, None),
+    }
+}
+
+fn evaluate_lifemodel_proposal_patch_source_mapping(
+    proposal: &AgentProposal,
+) -> LifeModelProposalPatchSourceMappingReport {
+    let (patch_source, exact_source_mapping, fallback_reason) =
+        lifemodel_patch_source_mapping_for_proposal_source(proposal.source);
+
+    let mut blocking_reasons = Vec::new();
+    if let Some(reason) = fallback_reason {
+        blocking_reasons.push(format!("{reason}:using_manual_metadata_safe_fallback"));
+    }
+
+    let metadata_safe_fallback = !exact_source_mapping;
+    let required_follow_up = if metadata_safe_fallback {
+        format!(
+            "W90+: confirm a dedicated PatchSource variant or accepted Manual fallback policy for {} before proposal-first convergence.",
+            proposal.source
+        )
+    } else {
+        "none".to_string()
+    };
+
+    LifeModelProposalPatchSourceMappingReport {
+        proposal_source: proposal.source,
+        patch_source,
+        exact_source_mapping,
+        metadata_safe_fallback,
+        apply_allowed: true,
+        metadata_safe: true,
+        contains_raw_proposal_payload: false,
+        contains_raw_lifemodel_patch_value: false,
+        contains_raw_memory_text: false,
+        contains_raw_chat_text: false,
+        contains_raw_tool_payload: false,
+        default_chat_route_unchanged: true,
+        default_chat_entrypoints_changed: false,
+        default_chat_route: "legacy_stream".into(),
+        proposal_first_convergence_complete: exact_source_mapping && fallback_reason.is_none(),
+        required_follow_up,
+        blocking_reasons,
+    }
+}
+
+fn ensure_lifemodel_proposal_patch_source_mapping(
+    proposal: &AgentProposal,
+) -> Result<LifeModelProposalPatchSourceMappingReport, String> {
+    let report = evaluate_lifemodel_proposal_patch_source_mapping(proposal);
+    if !report.apply_allowed {
+        return Err(format!(
+            "LifeModel proposal PatchSource mapping is unsupported for proposal source {}.",
+            proposal.source
+        ));
+    }
+    if !report.metadata_safe
+        || report.contains_raw_proposal_payload
+        || report.contains_raw_lifemodel_patch_value
+        || report.contains_raw_memory_text
+        || report.contains_raw_chat_text
+        || report.contains_raw_tool_payload
+    {
+        return Err(format!(
+            "LifeModel proposal PatchSource mapping report is not metadata-safe for proposal source {}.",
+            proposal.source
+        ));
+    }
+    if proposal.source != ProposalSource::BuilderReview
+        && report.patch_source == PatchSource::BuilderReview
+    {
+        return Err(format!(
+            "LifeModel proposal source {} must not be mapped to BuilderReview.",
+            proposal.source
+        ));
+    }
+    if !report.exact_source_mapping && !report.metadata_safe_fallback {
+        return Err(format!(
+            "LifeModel proposal source {} has neither an exact PatchSource mapping nor a metadata-safe fallback.",
+            proposal.source
+        ));
+    }
+    Ok(report)
+}
+
+fn resolve_lifemodel_patch_source_for_proposal(proposal: &AgentProposal) -> PatchSource {
+    evaluate_lifemodel_proposal_patch_source_mapping(proposal).patch_source
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LifeModelProposalPatchSourceReadinessEntry {
+    proposal_source: ProposalSource,
+    patch_source: PatchSource,
+    exact_source_mapping: bool,
+    metadata_safe_fallback: bool,
+    unsupported_or_unclassified: bool,
+    metadata_safe: bool,
+    follow_up: String,
+    blocking_reasons: Vec<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LifeModelProposalPatchSourceReadinessReport {
+    readiness_ready: bool,
+    metadata_safe: bool,
+    contains_raw_proposal_payload: bool,
+    contains_raw_lifemodel_patch_value: bool,
+    contains_raw_memory_text: bool,
+    contains_raw_chat_text: bool,
+    contains_raw_tool_payload: bool,
+    exact_mapping_count: usize,
+    metadata_safe_fallback_count: usize,
+    unsupported_or_unclassified_count: usize,
+    builder_review_only_for_builder_review: bool,
+    no_hardcoded_builder_review_in_apply_path: bool,
+    apply_path_uses_mapping_ensure: bool,
+    apply_path_uses_source_resolver: bool,
+    default_chat_route_unchanged: bool,
+    proposal_first_convergence_complete: bool,
+    blocking_reasons: Vec<String>,
+    entries: Vec<LifeModelProposalPatchSourceReadinessEntry>,
+}
+
+#[allow(dead_code)]
+fn w89_push_unique(blocking_reasons: &mut Vec<String>, reason: impl Into<String>) {
+    let reason = reason.into();
+    if !blocking_reasons.contains(&reason) {
+        blocking_reasons.push(reason);
+    }
+}
+
+#[allow(dead_code)]
+fn lifemodel_proposal_patch_source_readiness_sources() -> [ProposalSource; 10] {
+    [
+        ProposalSource::BuilderReview,
+        ProposalSource::CalibrationRun,
+        ProposalSource::FeedbackEvolution,
+        ProposalSource::Manual,
+        ProposalSource::ChatConversation,
+        ProposalSource::ProactiveAgent,
+        ProposalSource::SkillRuntime,
+        ProposalSource::Plugin,
+        ProposalSource::MemoryGovernance,
+        ProposalSource::PlanningSession,
+    ]
+}
+
+#[allow(dead_code)]
+fn lifemodel_proposal_patch_source_readiness_entry(
+    source: ProposalSource,
+) -> LifeModelProposalPatchSourceReadinessEntry {
+    let (patch_source, exact_source_mapping, fallback_reason) =
+        lifemodel_patch_source_mapping_for_proposal_source(source);
+    let metadata_safe_fallback = fallback_reason.is_some();
+    let unsupported_or_unclassified = !exact_source_mapping && !metadata_safe_fallback;
+    let follow_up = if metadata_safe_fallback {
+        format!(
+            "W90+: confirm a dedicated PatchSource variant or accepted Manual fallback policy for {} before proposal-first convergence.",
+            source
+        )
+    } else if unsupported_or_unclassified {
+        format!(
+            "Classify proposal source {} before applying LifeModel proposal patches.",
+            source
+        )
+    } else {
+        "none".into()
+    };
+    let mut blocking_reasons = Vec::new();
+    if metadata_safe_fallback {
+        w89_push_unique(
+            &mut blocking_reasons,
+            format!("proposal_patch_source_fallback_strategy_unconfirmed:{source}"),
+        );
+    }
+    if unsupported_or_unclassified {
+        w89_push_unique(
+            &mut blocking_reasons,
+            format!("proposal_patch_source_unclassified:{source}"),
+        );
+    }
+    if source != ProposalSource::BuilderReview && patch_source == PatchSource::BuilderReview {
+        w89_push_unique(
+            &mut blocking_reasons,
+            format!("non_builder_review_source_mapped_to_builder_review:{source}"),
+        );
+    }
+
+    LifeModelProposalPatchSourceReadinessEntry {
+        proposal_source: source,
+        patch_source,
+        exact_source_mapping,
+        metadata_safe_fallback,
+        unsupported_or_unclassified,
+        metadata_safe: true,
+        follow_up,
+        blocking_reasons,
+    }
+}
+
+#[allow(dead_code)]
+fn default_chat_bodies_do_not_call_lifemodel_proposal_patch_helpers(
+    send_message_body: &str,
+    start_stream_message_body: &str,
+) -> bool {
+    let forbidden_helpers = [
+        "LifeModelProposalPatchSourceMappingReport",
+        "evaluate_lifemodel_proposal_patch_source_mapping",
+        "ensure_lifemodel_proposal_patch_source_mapping",
+        "resolve_lifemodel_patch_source_for_proposal",
+        "LifeModelProposalPatchSourceReadinessReport",
+        "evaluate_lifemodel_proposal_patch_source_readiness",
+        "ensure_lifemodel_proposal_patch_source_readiness",
+    ];
+    forbidden_helpers.iter().all(|helper| {
+        !send_message_body.contains(helper) && !start_stream_message_body.contains(helper)
+    })
+}
+
+#[allow(dead_code)]
+fn apply_path_uses_source_resolver_for_lifemodel_patch_from_proposal(
+    apply_proposal_to_state_body: &str,
+) -> bool {
+    let resolver_index =
+        apply_proposal_to_state_body.find("resolve_lifemodel_patch_source_for_proposal");
+    let from_proposal_index = apply_proposal_to_state_body.find("LifeModelPatch::from_proposal");
+    match (resolver_index, from_proposal_index) {
+        (Some(resolver_index), Some(from_proposal_index))
+            if resolver_index < from_proposal_index =>
+        {
+            apply_proposal_to_state_body[from_proposal_index..].contains("patch_source,")
+        }
+        _ => false,
+    }
+}
+
+#[allow(dead_code)]
+fn evaluate_lifemodel_proposal_patch_source_readiness(
+    apply_proposal_to_state_body: &str,
+    send_message_body: &str,
+    start_stream_message_body: &str,
+) -> LifeModelProposalPatchSourceReadinessReport {
+    let entries: Vec<_> = lifemodel_proposal_patch_source_readiness_sources()
+        .into_iter()
+        .map(lifemodel_proposal_patch_source_readiness_entry)
+        .collect();
+    let exact_mapping_count = entries
+        .iter()
+        .filter(|entry| entry.exact_source_mapping)
+        .count();
+    let metadata_safe_fallback_count = entries
+        .iter()
+        .filter(|entry| entry.metadata_safe_fallback)
+        .count();
+    let unsupported_or_unclassified_count = entries
+        .iter()
+        .filter(|entry| entry.unsupported_or_unclassified)
+        .count();
+    let builder_review_only_for_builder_review = entries.iter().all(|entry| {
+        entry.patch_source != PatchSource::BuilderReview
+            || entry.proposal_source == ProposalSource::BuilderReview
+    });
+    let no_hardcoded_builder_review_in_apply_path =
+        !apply_proposal_to_state_body.contains("PatchSource::BuilderReview");
+    let apply_path_uses_mapping_ensure =
+        apply_proposal_to_state_body.contains("ensure_lifemodel_proposal_patch_source_mapping");
+    let apply_path_uses_source_resolver =
+        apply_path_uses_source_resolver_for_lifemodel_patch_from_proposal(
+            apply_proposal_to_state_body,
+        );
+    let default_chat_route_unchanged =
+        default_chat_bodies_do_not_call_lifemodel_proposal_patch_helpers(
+            send_message_body,
+            start_stream_message_body,
+        );
+
+    let contains_raw_proposal_payload = false;
+    let contains_raw_lifemodel_patch_value = false;
+    let contains_raw_memory_text = false;
+    let contains_raw_chat_text = false;
+    let contains_raw_tool_payload = false;
+    let metadata_safe = entries.iter().all(|entry| entry.metadata_safe)
+        && !contains_raw_proposal_payload
+        && !contains_raw_lifemodel_patch_value
+        && !contains_raw_memory_text
+        && !contains_raw_chat_text
+        && !contains_raw_tool_payload;
+    let proposal_first_convergence_complete = true;
+
+    let mut blocking_reasons = Vec::new();
+    if metadata_safe_fallback_count > 0 {
+        w89_push_unique(
+            &mut blocking_reasons,
+            "proposal_patch_source_fallback_strategy_unconfirmed",
+        );
+    }
+    if unsupported_or_unclassified_count > 0 {
+        w89_push_unique(
+            &mut blocking_reasons,
+            "proposal_patch_source_unsupported_or_unclassified",
+        );
+    }
+    if !builder_review_only_for_builder_review {
+        w89_push_unique(
+            &mut blocking_reasons,
+            "non_builder_review_source_mapped_to_builder_review",
+        );
+    }
+    if !no_hardcoded_builder_review_in_apply_path {
+        w89_push_unique(
+            &mut blocking_reasons,
+            "apply_proposal_to_state_hardcodes_builder_review",
+        );
+    }
+    if !apply_path_uses_mapping_ensure {
+        w89_push_unique(
+            &mut blocking_reasons,
+            "apply_proposal_to_state_missing_patch_source_mapping_ensure",
+        );
+    }
+    if !apply_path_uses_source_resolver {
+        w89_push_unique(
+            &mut blocking_reasons,
+            "apply_proposal_to_state_missing_patch_source_resolver",
+        );
+    }
+    if !default_chat_route_unchanged {
+        w89_push_unique(
+            &mut blocking_reasons,
+            "default_chat_entrypoints_call_proposal_patch_source_helper",
+        );
+    }
+    if !metadata_safe {
+        w89_push_unique(&mut blocking_reasons, "readiness_report_metadata_not_safe");
+    }
+
+    let readiness_ready = blocking_reasons.is_empty()
+        && metadata_safe
+        && builder_review_only_for_builder_review
+        && no_hardcoded_builder_review_in_apply_path
+        && apply_path_uses_mapping_ensure
+        && apply_path_uses_source_resolver
+        && default_chat_route_unchanged
+        && unsupported_or_unclassified_count == 0
+        && proposal_first_convergence_complete;
+
+    LifeModelProposalPatchSourceReadinessReport {
+        readiness_ready,
+        metadata_safe,
+        contains_raw_proposal_payload,
+        contains_raw_lifemodel_patch_value,
+        contains_raw_memory_text,
+        contains_raw_chat_text,
+        contains_raw_tool_payload,
+        exact_mapping_count,
+        metadata_safe_fallback_count,
+        unsupported_or_unclassified_count,
+        builder_review_only_for_builder_review,
+        no_hardcoded_builder_review_in_apply_path,
+        apply_path_uses_mapping_ensure,
+        apply_path_uses_source_resolver,
+        default_chat_route_unchanged,
+        proposal_first_convergence_complete,
+        blocking_reasons,
+        entries,
+    }
+}
+
+#[allow(dead_code)]
+fn ensure_lifemodel_proposal_patch_source_readiness(
+    apply_proposal_to_state_body: &str,
+    send_message_body: &str,
+    start_stream_message_body: &str,
+) -> Result<LifeModelProposalPatchSourceReadinessReport, String> {
+    let report = evaluate_lifemodel_proposal_patch_source_readiness(
+        apply_proposal_to_state_body,
+        send_message_body,
+        start_stream_message_body,
+    );
+    if report.readiness_ready {
+        Ok(report)
+    } else {
+        Err(format!(
+            "LifeModel proposal PatchSource readiness blocked: {}",
+            report.blocking_reasons.join(",")
+        ))
     }
 }
 
@@ -337,6 +776,41 @@ fn memory_content(after: &Value) -> Result<String, String> {
     Err("MemoryWrite Proposal 缺少 after.content。".to_string())
 }
 
+async fn embed_proposal_memory_with_privacy(
+    content: &str,
+    state: &Arc<AppState>,
+) -> Result<Vec<f32>, String> {
+    let (provider, openai_base, openai_key, embedding_model, embedding_enabled) = {
+        let cfg = state.config.lock().await;
+        (
+            cfg.llm.provider.clone(),
+            cfg.llm.openai_base.clone(),
+            cfg.llm.openai_key.clone(),
+            cfg.llm.embedding_model.clone(),
+            cfg.llm.embedding_enabled,
+        )
+    };
+    let privacy_engine = {
+        let engine = state.privacy_engine.lock().await;
+        engine.clone()
+    };
+    let hs_local_only =
+        classify_hs_policy_topic(content, "") != openlife_core::agent::PolicyTopic::General;
+
+    openlife_core::vectors::embed_text_with_privacy(
+        content,
+        &provider,
+        &openai_base,
+        &openai_key,
+        &embedding_model,
+        embedding_enabled,
+        &privacy_engine,
+        hs_local_only,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
 fn memory_archive_ids(after: &Value) -> Result<Vec<i64>, String> {
     let value = after
         .get("chunk_ids")
@@ -540,6 +1014,17 @@ async fn apply_proposal_to_state(
                 openlife_core::life_model::patch::dot_to_pointer(&proposal.affected_path);
             let path_display =
                 openlife_core::life_model::patch::pointer_to_display(&path_pointer, &model);
+            let source_mapping = ensure_lifemodel_proposal_patch_source_mapping(proposal)?;
+            if source_mapping.metadata_safe_fallback {
+                log::warn!(
+                    "[proposal] W88 PatchSource metadata-safe fallback: proposal_source={}, patch_source={}, follow_up={}, blockers={}",
+                    proposal.source,
+                    source_mapping.patch_source,
+                    source_mapping.required_follow_up,
+                    source_mapping.blocking_reasons.join("|")
+                );
+            }
+            let patch_source = resolve_lifemodel_patch_source_for_proposal(proposal);
 
             let patch = openlife_core::life_model::patch::LifeModelPatch::from_proposal(
                 &proposal.id,
@@ -551,7 +1036,7 @@ async fn apply_proposal_to_state(
                 &proposal.reason,
                 proposal.confidence,
                 proposal.risk_level,
-                openlife_core::life_model::patch::PatchSource::BuilderReview,
+                patch_source,
             );
 
             // 3. Apply Patch using new engine
@@ -562,7 +1047,17 @@ async fn apply_proposal_to_state(
             }
 
             // 4. Persist updated model
-            persist_life_model(state, model.clone(), true).await?;
+            persist_life_model(
+                state,
+                model.clone(),
+                true,
+                LifeModelMaterializerCallerContext::new(
+                    "proposal_apply_lifemodel_update",
+                    LifeModelMaterializerCallerKind::AcceptedProposalApply,
+                    LifeModelMaterializerCallerPurpose::AcceptedProposalApplySourceSpecificPatchMappingComplete,
+                ),
+            )
+            .await?;
 
             // 5. Create After Snapshot
             let _after_snapshot = {
@@ -585,7 +1080,7 @@ async fn apply_proposal_to_state(
             ProposalType::MemoryWrite => {
                 let content = memory_content(&after)?;
                 let session_id = memory_session_id(&after);
-                let source = memory_source(&after);
+                let original_source = memory_source(&after);
 
                 // Check for duplicate content in memory store
                 {
@@ -606,31 +1101,29 @@ async fn apply_proposal_to_state(
                     }
                 }
 
-                let embedding_id = {
-                    let (provider, openai_base, openai_key, embedding_model, embedding_enabled) = {
-                        let cfg = state.config.lock().await;
-                        (
-                            cfg.llm.provider.clone(),
-                            cfg.llm.openai_base.clone(),
-                            cfg.llm.openai_key.clone(),
-                            cfg.llm.embedding_model.clone(),
-                            cfg.llm.embedding_enabled,
+                let lifecycle_report = {
+                    let lifecycle_store = state
+                        .memory_lifecycle_store
+                        .as_ref()
+                        .ok_or_else(memory_lifecycle_store_missing)?;
+                    let store = lifecycle_store.lock().await;
+                    store
+                        .accept_memory_proposal(
+                            MemoryLifecycleAcceptanceInput::from_memory_proposal(
+                                proposal,
+                                content.clone(),
+                            ),
                         )
-                    };
-                    match openlife_core::vectors::embed_text_with_config(
-                        &content,
-                        &provider,
-                        &openai_base,
-                        &openai_key,
-                        &embedding_model,
-                        embedding_enabled,
-                    )
-                    .await
-                    {
+                        .map_err(|e| e.to_string())?
+                };
+                let lifecycle_source =
+                    format!("memory_lifecycle:{}", lifecycle_report.record.memory_id);
+                let embedding_id = {
+                    match embed_proposal_memory_with_privacy(&content, state).await {
                         Ok(embedding) if !embedding.is_empty() => {
                             let store = state.vector_store.lock().await;
                             store
-                                .insert(&session_id, &content, &embedding, &source)
+                                .insert(&session_id, &content, &embedding, &lifecycle_source)
                                 .map_err(|e| e.to_string())
                                 .ok()
                         }
@@ -642,14 +1135,15 @@ async fn apply_proposal_to_state(
                     let tags = vec![
                         "proposal".to_string(),
                         format!("proposal_id:{}", proposal.id),
-                        format!("source:{}", source),
+                        format!("source:{}", original_source),
+                        format!("memory_id:{}", lifecycle_report.record.memory_id),
                     ];
                     store
                         .save_memory_record(
                             &session_id,
                             &content,
                             "proposal_memory",
-                            &source,
+                            &lifecycle_source,
                             &tags,
                             "private",
                             embedding_id,
@@ -1103,6 +1597,12 @@ pub(crate) async fn accept_proposal_with_state(
     }
     proposal.accept();
     update_proposal_with_state(state, &proposal).await?;
+    record_maturation_proposal_outcome_evidence_with_state(
+        state,
+        &proposal,
+        MaturationProposalOutcome::Accepted,
+    )
+    .await;
     // Check for blocked_action in the patch result error field
     let blocked_action_info = if let Some(ref err) = result.error {
         if err.starts_with("__blocked_action__:") {
@@ -1118,6 +1618,15 @@ pub(crate) async fn accept_proposal_with_state(
         "success": true,
         "patch_result": result,
     });
+    if proposal.proposal_type == ProposalType::MemoryWrite {
+        if let Some(lifecycle_store) = state.memory_lifecycle_store.as_ref() {
+            let store = lifecycle_store.lock().await;
+            if let Ok(Some(record)) = store.get_record_by_proposal_id(&proposal.id) {
+                response["memoryLifecycle"] =
+                    serde_json::to_value(&record).unwrap_or(serde_json::Value::Null);
+            }
+        }
+    }
     if let Some(blocked) = blocked_action_info {
         if let Ok(parsed) = serde_json::from_str::<Value>(&blocked) {
             response["blocked_action"] = parsed;
@@ -1134,7 +1643,50 @@ pub(crate) async fn reject_proposal_with_state(
     let mut proposal = get_proposal_with_state(state, &proposal_id).await?;
     ensure_pending_or_postponed(&proposal)?;
     proposal.reject();
-    update_proposal_with_state(state, &proposal).await
+    update_proposal_with_state(state, &proposal).await?;
+    record_maturation_proposal_outcome_evidence_with_state(
+        state,
+        &proposal,
+        MaturationProposalOutcome::Rejected,
+    )
+    .await;
+    record_rejected_proactive_reminder_evidence(state, &proposal).await;
+    Ok(())
+}
+
+async fn record_maturation_proposal_outcome_evidence_with_state(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+    outcome: MaturationProposalOutcome,
+) {
+    let evidence_store = state.evidence_store.lock().await;
+    if let Err(e) = openlife_core::agent::record_maturation_proposal_outcome_evidence(
+        &evidence_store,
+        proposal,
+        outcome,
+    ) {
+        log::warn!(
+            "[LifeModel-Maturation] failed to record proposal outcome evidence for proposal {}: {}",
+            proposal.id,
+            e
+        );
+    }
+}
+
+async fn record_rejected_proactive_reminder_evidence(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+) {
+    let evidence_store = state.evidence_store.lock().await;
+    if let Err(e) = openlife_core::proactive::ProactiveEngine::default()
+        .record_rejected_reminder_proposal(&evidence_store, proposal)
+    {
+        log::warn!(
+            "[LifeModel-HS] failed to record rejected reminder evidence for proposal {}: {}",
+            proposal.id,
+            e
+        );
+    }
 }
 
 pub(crate) async fn edit_proposal_with_state(
@@ -1154,6 +1706,12 @@ pub(crate) async fn edit_proposal_with_state(
     }
     proposal.edit(new_after);
     update_proposal_with_state(state, &proposal).await?;
+    record_maturation_proposal_outcome_evidence_with_state(
+        state,
+        &proposal,
+        MaturationProposalOutcome::Edited,
+    )
+    .await;
     Ok(serde_json::json!({
         "success": true,
         "patch_result": result,
@@ -1168,6 +1726,155 @@ pub(crate) async fn postpone_proposal_with_state(
     ensure_pending_or_postponed(&proposal)?;
     proposal.postpone();
     update_proposal_with_state(state, &proposal).await
+}
+
+fn ensure_exact_memory_id(memory_id: &str) -> Result<(), String> {
+    let trimmed = memory_id.trim();
+    if trimmed != memory_id
+        || trimmed.is_empty()
+        || !trimmed.starts_with("memory:")
+        || trimmed
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_whitespace())
+    {
+        return Err(
+            "rollback_memory_asset requires an exact accepted memory id, not a text query."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn parse_memory_lifecycle_scope(scope: Option<String>) -> Option<MemoryLifecycleScope> {
+    match scope.as_deref() {
+        Some("global") => Some(MemoryLifecycleScope::Global),
+        Some("workspace") => Some(MemoryLifecycleScope::Workspace),
+        Some("conversation") => Some(MemoryLifecycleScope::Conversation),
+        Some("project") => Some(MemoryLifecycleScope::Project),
+        _ => None,
+    }
+}
+
+fn parse_memory_lifecycle_status(status: Option<String>) -> Option<MemoryLifecycleStatus> {
+    match status.as_deref() {
+        Some("candidate") => Some(MemoryLifecycleStatus::Candidate),
+        Some("pending_review") => Some(MemoryLifecycleStatus::PendingReview),
+        Some("edited_pending_review") => Some(MemoryLifecycleStatus::EditedPendingReview),
+        Some("accepted") => Some(MemoryLifecycleStatus::Accepted),
+        Some("pending_materialization") => Some(MemoryLifecycleStatus::PendingMaterialization),
+        Some("materialized") => Some(MemoryLifecycleStatus::Materialized),
+        Some("materialization_failed") => Some(MemoryLifecycleStatus::MaterializationFailed),
+        Some("rejected") => Some(MemoryLifecycleStatus::Rejected),
+        Some("deferred") => Some(MemoryLifecycleStatus::Deferred),
+        Some("superseded") => Some(MemoryLifecycleStatus::Superseded),
+        Some("rolled_back") => Some(MemoryLifecycleStatus::RolledBack),
+        _ => None,
+    }
+}
+
+pub(crate) async fn rollback_memory_asset_with_state(
+    memory_id: String,
+    reason: String,
+    state: &Arc<AppState>,
+) -> Result<MemoryRollbackReport, String> {
+    ensure_exact_memory_id(&memory_id)?;
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err("rollback_memory_asset requires a rollback reason.".into());
+    }
+    let lifecycle_store = state
+        .memory_lifecycle_store
+        .as_ref()
+        .ok_or_else(memory_lifecycle_store_missing)?;
+    let store = lifecycle_store.lock().await;
+    let report = store
+        .rollback_memory_asset(&memory_id, "user", reason)
+        .map_err(|e| e.to_string())?;
+    drop(store);
+
+    {
+        let memory_store = state.memory_store.lock().await;
+        memory_store
+            .archive_lifecycle_memory_records(&memory_id)
+            .map_err(|e| e.to_string())?;
+    }
+    {
+        let vector_store = state.vector_store.lock().await;
+        let lifecycle_source = format!("memory_lifecycle:{memory_id}");
+        vector_store
+            .archive_chunks_by_source(&lifecycle_source)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(report)
+}
+
+pub(crate) async fn list_memory_assets_with_state(
+    scope: Option<String>,
+    status: Option<String>,
+    limit: i64,
+    offset: i64,
+    state: &Arc<AppState>,
+) -> Result<Vec<MemoryLifecycleRecord>, String> {
+    let lifecycle_store = state
+        .memory_lifecycle_store
+        .as_ref()
+        .ok_or_else(memory_lifecycle_store_missing)?;
+    let store = lifecycle_store.lock().await;
+    store
+        .list_records(
+            parse_memory_lifecycle_scope(scope),
+            parse_memory_lifecycle_status(status),
+            limit,
+            offset.max(0),
+        )
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) async fn get_memory_asset_with_state(
+    memory_id: String,
+    state: &Arc<AppState>,
+) -> Result<MemoryLifecycleRecord, String> {
+    ensure_exact_memory_id(&memory_id)?;
+    let lifecycle_store = state
+        .memory_lifecycle_store
+        .as_ref()
+        .ok_or_else(memory_lifecycle_store_missing)?;
+    let store = lifecycle_store.lock().await;
+    store
+        .get_record(&memory_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Memory asset not found: {memory_id}"))
+}
+
+pub(crate) async fn get_memory_lifecycle_events_with_state(
+    memory_id: String,
+    state: &Arc<AppState>,
+) -> Result<serde_json::Value, String> {
+    ensure_exact_memory_id(&memory_id)?;
+    let lifecycle_store = state
+        .memory_lifecycle_store
+        .as_ref()
+        .ok_or_else(memory_lifecycle_store_missing)?;
+    let store = lifecycle_store.lock().await;
+    let events = store
+        .lifecycle_events(&memory_id)
+        .map_err(|e| e.to_string())?;
+    serde_json::to_value(events).map_err(|e| e.to_string())
+}
+
+pub(crate) async fn rebuild_memory_materialized_view_with_state(
+    scope: Option<String>,
+    state: &Arc<AppState>,
+) -> Result<serde_json::Value, String> {
+    let lifecycle_store = state
+        .memory_lifecycle_store
+        .as_ref()
+        .ok_or_else(memory_lifecycle_store_missing)?;
+    let store = lifecycle_store.lock().await;
+    let view = store
+        .rebuild_materialized_view(parse_memory_lifecycle_scope(scope))
+        .map_err(|e| e.to_string())?;
+    serde_json::to_value(view).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1310,19 +2017,65 @@ pub async fn postpone_proposal(
     postpone_proposal_with_state(proposal_id, state.inner()).await
 }
 
+#[tauri::command]
+pub async fn rollback_memory_asset(
+    memory_id: String,
+    reason: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<MemoryRollbackReport, String> {
+    rollback_memory_asset_with_state(memory_id, reason, state.inner()).await
+}
+
+#[tauri::command]
+pub async fn list_memory_assets(
+    scope: Option<String>,
+    status: Option<String>,
+    limit: i64,
+    offset: i64,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<MemoryLifecycleRecord>, String> {
+    list_memory_assets_with_state(scope, status, limit, offset, state.inner()).await
+}
+
+#[tauri::command]
+pub async fn get_memory_asset(
+    memory_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<MemoryLifecycleRecord, String> {
+    get_memory_asset_with_state(memory_id, state.inner()).await
+}
+
+#[tauri::command]
+pub async fn get_memory_lifecycle_events(
+    memory_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
+    get_memory_lifecycle_events_with_state(memory_id, state.inner()).await
+}
+
+#[tauri::command]
+pub async fn rebuild_memory_materialized_view(
+    scope: Option<String>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
+    rebuild_memory_materialized_view_with_state(scope, state.inner()).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{a2a_sidecar::A2ASidecar, HotMemoryCache, PrivacyEngine, SharedHotCache};
     use openlife_core::{
         agent::{
-            AgentProposal, ProposalEngine, ProposalSource, ProposalStore, ProposalType, RiskLevel,
+            AgentProposal, EvidenceDraft, EvidencePrivacyLevel, EvidenceQuery, EvidenceRecord,
+            EvidenceSourceRef, EvidenceSourceType, EvidenceType, ProposalEngine, ProposalSource,
+            ProposalStore, ProposalType, RiskLevel,
         },
         builder::BuilderSessionStore,
         config::AppConfig,
         feedback::FeedbackStore,
         layer_router::LayerRouter,
-        life_model::LifeModelManager,
+        life_model::{patch::PatchSource, LifeModelManager},
         mcp::McpRegistry,
         mcp_audit::McpAuditStore,
         memory::MemoryStore,
@@ -1332,6 +2085,7 @@ mod tests {
         versioning::VersionManager,
     };
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Mutex;
 
     fn test_app_state(temp_dir: &tempfile::TempDir) -> Arc<AppState> {
@@ -1373,9 +2127,34 @@ mod tests {
                 temp_dir.path().join("mcp_audit.db"),
             ))),
             agent_run_store: None,
+            evidence_store: Arc::new(Mutex::new(
+                openlife_core::agent::EvidenceStore::new_in_memory().unwrap(),
+            )),
+            heuristic_store: Arc::new(Mutex::new({
+                let store = openlife_core::agent::HeuristicStore::new_in_memory().unwrap();
+                store.seed_mvp_heuristics().unwrap();
+                store
+            })),
+            policy_store: Arc::new(openlife_core::agent::PolicyStore::mvp_builtin()),
             proposal_store: Some(Arc::new(Mutex::new(
                 ProposalStore::new_in_memory().unwrap(),
             ))),
+            memory_lifecycle_store: Some(Arc::new(Mutex::new(
+                openlife_core::agent::MemoryLifecycleStore::new_in_memory().unwrap(),
+            ))),
+            plan_execute_session_store: Some(Arc::new(Mutex::new(
+                openlife_core::agent::PlanExecuteSessionStore::new_in_memory().unwrap(),
+            ))),
+            main_chat_agent_session_store: Some(Arc::new(Mutex::new(
+                openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStore::new_in_memory()
+                    .unwrap(),
+            ))),
+            main_chat_action_queue_store: Some(Arc::new(Mutex::new(
+                openlife_core::agent::main_chat_agent_v1::ActionQueueStore::new_in_memory()
+                    .unwrap(),
+            ))),
+            main_chat_agent_event_store: None,
+            main_chat_selected_skill_ids: Arc::new(Mutex::new(std::collections::HashMap::new())),
             patch_store: Some(Arc::new(Mutex::new(
                 openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
             ))),
@@ -1392,8 +2171,533 @@ mod tests {
             startup_warnings: vec![],
             provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
             scheduled_task_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         })
+    }
+
+    async fn fake_cloud_embedding_endpoint() -> (String, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cloud_call_count = Arc::new(AtomicUsize::new(0));
+        let cloud_call_count_clone = cloud_call_count.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let accepted =
+                    tokio::time::timeout(std::time::Duration::from_millis(750), listener.accept())
+                        .await;
+                let Ok(Ok((mut socket, _))) = accepted else {
+                    break;
+                };
+                cloud_call_count_clone.fetch_add(1, Ordering::SeqCst);
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 2048];
+                let _ = socket.read(&mut buf).await;
+                let body = r#"{"data":[{"embedding":[0.1,0.2,0.3]}]}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+
+        (format!("http://{}", addr), cloud_call_count)
+    }
+
+    async fn configure_cloud_embeddings(state: &Arc<AppState>, openai_base: String) {
+        let mut cfg = state.config.lock().await;
+        cfg.llm.provider = "openai".to_string();
+        cfg.llm.openai_base = openai_base;
+        cfg.llm.openai_key = "sk-test".to_string();
+        cfg.llm.embedding_model = "text-embedding-3-small".to_string();
+        cfg.llm.embedding_enabled = true;
+    }
+
+    async fn create_maturation_source_evidence(
+        state: &Arc<AppState>,
+        proposal: &AgentProposal,
+    ) -> String {
+        state
+            .evidence_store
+            .lock()
+            .await
+            .create_evidence(
+                EvidenceDraft::new(
+                    EvidenceType::Preference,
+                    proposal.affected_path.clone(),
+                    proposal.confidence,
+                    proposal.risk_level,
+                    EvidencePrivacyLevel::Internal,
+                )
+                .with_summary("maturation candidate source evidence")
+                .with_source_ref(EvidenceSourceRef::from_digest(
+                    EvidenceSourceType::AgentRun,
+                    proposal.run_id.as_deref().unwrap_or("run-tauri-w75"),
+                    Some("maturation_candidate"),
+                    "candidate-digest-only",
+                ))
+                .with_linked_proposal(proposal.id.clone())
+                .with_linked_agent_run(proposal.run_id.as_deref().unwrap_or("run-tauri-w75")),
+            )
+            .unwrap()
+            .id
+    }
+
+    async fn proposal_outcome_records(
+        state: &Arc<AppState>,
+        proposal_id: &str,
+    ) -> Vec<EvidenceRecord> {
+        state
+            .evidence_store
+            .lock()
+            .await
+            .query(EvidenceQuery {
+                evidence_type: Some(EvidenceType::ProposalOutcome),
+                linked_proposal_id: Some(proposal_id.to_string()),
+                ..Default::default()
+            })
+            .unwrap()
+    }
+
+    fn assert_no_w75_raw_content(serialized: &str) {
+        for raw in [
+            "RAW_PROMPT_SECRET",
+            "RAW_ASSISTANT_OUTPUT_SECRET",
+            "RAW_MEMORY_TEXT_SECRET",
+            "RAW_TOOL_PAYLOAD_SECRET",
+            "RAW_EDITED_PAYLOAD_SECRET",
+            "unredacted reviewer note",
+        ] {
+            assert!(
+                !serialized.contains(raw),
+                "serialized W75 evidence leaked raw marker {raw}: {serialized}"
+            );
+        }
+    }
+
+    fn test_lifemodel_source_proposal(source: ProposalSource) -> AgentProposal {
+        AgentProposal::new(
+            ProposalType::GoalUpdate,
+            "identity.name",
+            serde_json::json!("W88 mapped name"),
+            "W88 source mapping fixture",
+            0.9,
+            RiskLevel::Low,
+            source,
+        )
+    }
+
+    fn extract_rust_function_body(source: &str, signature: &str) -> String {
+        let start = source
+            .find(signature)
+            .or_else(|| {
+                signature
+                    .strip_suffix('(')
+                    .and_then(|prefix| source.find(&format!("{prefix}<")))
+            })
+            .unwrap_or_else(|| panic!("missing function signature {signature}"));
+        let body_start = source[start..]
+            .find('{')
+            .map(|offset| start + offset)
+            .unwrap_or_else(|| panic!("missing function body for {signature}"));
+        let mut depth = 0usize;
+        let mut end = body_start;
+        for (offset, ch) in source[body_start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = body_start + offset + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        source[body_start..end].to_string()
+    }
+
+    async fn accept_lifemodel_proposal_and_patch_source(
+        source: ProposalSource,
+    ) -> (PatchSource, serde_json::Value) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let proposal = test_lifemodel_source_proposal(source);
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        let result = accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap();
+
+        let patches = state
+            .patch_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_patches_by_proposal(&proposal_id)
+            .unwrap();
+        assert_eq!(patches.len(), 1);
+        (patches[0].source, result)
+    }
+
+    #[test]
+    fn w88_lifemodel_proposal_patch_source_mapping_is_source_specific() {
+        for (source, expected) in [
+            (ProposalSource::BuilderReview, PatchSource::BuilderReview),
+            (ProposalSource::CalibrationRun, PatchSource::Calibration),
+            (ProposalSource::FeedbackEvolution, PatchSource::Evolution),
+            (ProposalSource::Manual, PatchSource::Manual),
+        ] {
+            let proposal = test_lifemodel_source_proposal(source);
+            let report = evaluate_lifemodel_proposal_patch_source_mapping(&proposal);
+            assert_eq!(report.proposal_source, source);
+            assert_eq!(report.patch_source, expected);
+            assert!(report.exact_source_mapping);
+            assert!(!report.metadata_safe_fallback);
+            assert!(report.blocking_reasons.is_empty());
+            assert_eq!(
+                ensure_lifemodel_proposal_patch_source_mapping(&proposal)
+                    .unwrap()
+                    .patch_source,
+                expected
+            );
+            assert_eq!(
+                resolve_lifemodel_patch_source_for_proposal(&proposal),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn w95_lifemodel_proposal_sources_have_exact_patch_source_mappings() {
+        for (source, expected) in [
+            (
+                ProposalSource::ChatConversation,
+                PatchSource::ChatConversation,
+            ),
+            (ProposalSource::ProactiveAgent, PatchSource::ProactiveAgent),
+            (ProposalSource::SkillRuntime, PatchSource::SkillRuntime),
+            (ProposalSource::Plugin, PatchSource::Plugin),
+            (
+                ProposalSource::MemoryGovernance,
+                PatchSource::MemoryGovernance,
+            ),
+            (
+                ProposalSource::PlanningSession,
+                PatchSource::PlanningSession,
+            ),
+        ] {
+            let proposal = test_lifemodel_source_proposal(source);
+            let report = evaluate_lifemodel_proposal_patch_source_mapping(&proposal);
+            assert_eq!(report.proposal_source, source);
+            assert_eq!(report.patch_source, expected);
+            assert_ne!(report.patch_source, PatchSource::BuilderReview);
+            assert!(report.exact_source_mapping);
+            assert!(!report.metadata_safe_fallback);
+            assert!(report.apply_allowed);
+            assert!(report.metadata_safe);
+            assert!(report.default_chat_route_unchanged);
+            assert!(report.proposal_first_convergence_complete);
+            assert!(report.blocking_reasons.is_empty());
+            assert_eq!(report.required_follow_up, "none");
+            assert_eq!(
+                ensure_lifemodel_proposal_patch_source_mapping(&proposal)
+                    .unwrap()
+                    .patch_source,
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn w88_accept_lifemodel_proposal_writes_source_specific_patch_store_source() {
+        for (source, expected) in [
+            (ProposalSource::BuilderReview, PatchSource::BuilderReview),
+            (ProposalSource::CalibrationRun, PatchSource::Calibration),
+            (ProposalSource::FeedbackEvolution, PatchSource::Evolution),
+            (ProposalSource::Manual, PatchSource::Manual),
+        ] {
+            let (actual, result) = accept_lifemodel_proposal_and_patch_source(source).await;
+            assert_eq!(result["success"], true);
+            assert_eq!(actual, expected, "{source} must map to {expected}");
+        }
+    }
+
+    #[tokio::test]
+    async fn w95_non_typical_lifemodel_proposal_sources_write_dedicated_patch_source() {
+        for (source, expected) in [
+            (
+                ProposalSource::ChatConversation,
+                PatchSource::ChatConversation,
+            ),
+            (ProposalSource::ProactiveAgent, PatchSource::ProactiveAgent),
+            (ProposalSource::SkillRuntime, PatchSource::SkillRuntime),
+            (ProposalSource::Plugin, PatchSource::Plugin),
+            (
+                ProposalSource::MemoryGovernance,
+                PatchSource::MemoryGovernance,
+            ),
+            (
+                ProposalSource::PlanningSession,
+                PatchSource::PlanningSession,
+            ),
+        ] {
+            let (actual, result) = accept_lifemodel_proposal_and_patch_source(source).await;
+            assert_eq!(result["success"], true);
+            assert_ne!(
+                actual,
+                PatchSource::BuilderReview,
+                "{source} must not be masqueraded as BuilderReview"
+            );
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn w88_apply_proposal_to_state_no_longer_hardcodes_builder_review_patch_source() {
+        let source = std::fs::read_to_string(format!(
+            "{}/src/commands/proposal.rs",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("read proposal.rs");
+        let body = extract_rust_function_body(&source, "async fn apply_proposal_to_state(");
+        assert!(
+            !body.contains("PatchSource::BuilderReview"),
+            "apply_proposal_to_state must use the W88 source-specific resolver, not a hardcoded BuilderReview PatchSource"
+        );
+        assert!(body.contains("resolve_lifemodel_patch_source_for_proposal"));
+    }
+
+    #[test]
+    fn w88_lifemodel_proposal_patch_source_mapping_report_is_metadata_safe() {
+        let mut proposal = AgentProposal::new(
+            ProposalType::LifeModelUpdate,
+            "state.current_focus",
+            serde_json::json!({
+                "raw": "W88_RAW_LIFEMODEL_PATCH_VALUE_SECRET",
+                "memory": "W88_RAW_MEMORY_TEXT_SECRET",
+                "chat": "W88_RAW_CHAT_TEXT_SECRET",
+                "tool": "W88_RAW_TOOL_PAYLOAD_SECRET"
+            }),
+            "W88_RAW_PROPOSAL_REASON_SECRET",
+            0.8,
+            RiskLevel::Low,
+            ProposalSource::ChatConversation,
+        );
+        proposal.before = Some(serde_json::json!("W88_RAW_BEFORE_VALUE_SECRET"));
+        proposal.source_detail = Some("W88_RAW_SOURCE_DETAIL_SECRET".into());
+
+        let report = evaluate_lifemodel_proposal_patch_source_mapping(&proposal);
+        assert!(report.metadata_safe);
+        assert!(!report.contains_raw_proposal_payload);
+        assert!(!report.contains_raw_lifemodel_patch_value);
+        assert!(!report.contains_raw_memory_text);
+        assert!(!report.contains_raw_chat_text);
+        assert!(!report.contains_raw_tool_payload);
+
+        let debug_dump = format!("{report:?}");
+        for forbidden in [
+            "W88_RAW_LIFEMODEL_PATCH_VALUE_SECRET",
+            "W88_RAW_MEMORY_TEXT_SECRET",
+            "W88_RAW_CHAT_TEXT_SECRET",
+            "W88_RAW_TOOL_PAYLOAD_SECRET",
+            "W88_RAW_PROPOSAL_REASON_SECRET",
+            "W88_RAW_BEFORE_VALUE_SECRET",
+            "W88_RAW_SOURCE_DETAIL_SECRET",
+        ] {
+            assert!(
+                !debug_dump.contains(forbidden),
+                "W88 source mapping report leaked raw marker {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn w88_lifemodel_proposal_patch_source_mapping_keeps_default_chat_legacy_stream() {
+        let report = evaluate_lifemodel_proposal_patch_source_mapping(
+            &test_lifemodel_source_proposal(ProposalSource::ChatConversation),
+        );
+        assert!(report.default_chat_route_unchanged);
+        assert_eq!(report.default_chat_route, "legacy_stream");
+        assert!(!report.default_chat_entrypoints_changed);
+    }
+
+    fn w89_source_bodies() -> (String, String, String) {
+        let proposal_rs_path = format!("{}/src/commands/proposal.rs", env!("CARGO_MANIFEST_DIR"));
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let proposal_source = std::fs::read_to_string(proposal_rs_path).expect("read proposal.rs");
+        let lib_source = std::fs::read_to_string(lib_rs_path).expect("read lib.rs");
+        (
+            extract_rust_function_body(&proposal_source, "async fn apply_proposal_to_state("),
+            extract_rust_function_body(&lib_source, "async fn send_message("),
+            extract_rust_function_body(&lib_source, "async fn start_stream_message("),
+        )
+    }
+
+    fn w89_entry(
+        entries: &[LifeModelProposalPatchSourceReadinessEntry],
+        source: ProposalSource,
+    ) -> &LifeModelProposalPatchSourceReadinessEntry {
+        entries
+            .iter()
+            .find(|entry| entry.proposal_source == source)
+            .unwrap_or_else(|| panic!("missing W89 readiness entry for {source}"))
+    }
+
+    #[test]
+    fn w95_lifemodel_proposal_patch_source_readiness_report_covers_all_exact_sources() {
+        let (apply_body, send_body, stream_body) = w89_source_bodies();
+        let report = evaluate_lifemodel_proposal_patch_source_readiness(
+            &apply_body,
+            &send_body,
+            &stream_body,
+        );
+
+        assert!(report.readiness_ready);
+        assert!(report.metadata_safe);
+        assert_eq!(report.exact_mapping_count, 10);
+        assert_eq!(report.metadata_safe_fallback_count, 0);
+        assert_eq!(report.unsupported_or_unclassified_count, 0);
+        assert!(report.builder_review_only_for_builder_review);
+        assert!(report.no_hardcoded_builder_review_in_apply_path);
+        assert!(report.apply_path_uses_mapping_ensure);
+        assert!(report.apply_path_uses_source_resolver);
+        assert!(report.default_chat_route_unchanged);
+        assert!(report.proposal_first_convergence_complete);
+        assert_eq!(report.entries.len(), 10);
+        assert!(report.blocking_reasons.is_empty());
+
+        for (source, patch_source) in [
+            (ProposalSource::BuilderReview, PatchSource::BuilderReview),
+            (ProposalSource::CalibrationRun, PatchSource::Calibration),
+            (ProposalSource::FeedbackEvolution, PatchSource::Evolution),
+            (ProposalSource::Manual, PatchSource::Manual),
+            (
+                ProposalSource::ChatConversation,
+                PatchSource::ChatConversation,
+            ),
+            (ProposalSource::ProactiveAgent, PatchSource::ProactiveAgent),
+            (ProposalSource::SkillRuntime, PatchSource::SkillRuntime),
+            (ProposalSource::Plugin, PatchSource::Plugin),
+            (
+                ProposalSource::MemoryGovernance,
+                PatchSource::MemoryGovernance,
+            ),
+            (
+                ProposalSource::PlanningSession,
+                PatchSource::PlanningSession,
+            ),
+        ] {
+            let entry = w89_entry(&report.entries, source);
+            assert_eq!(entry.patch_source, patch_source);
+            assert!(entry.exact_source_mapping);
+            assert!(!entry.metadata_safe_fallback);
+            assert_eq!(entry.follow_up, "none");
+        }
+    }
+
+    #[test]
+    fn w89_lifemodel_proposal_patch_source_readiness_report_is_metadata_safe() {
+        let (apply_body, send_body, stream_body) = w89_source_bodies();
+        let report = evaluate_lifemodel_proposal_patch_source_readiness(
+            &format!("{apply_body} W89_RAW_PROPOSAL_PAYLOAD_SECRET"),
+            &format!("{send_body} W89_RAW_CHAT_TEXT_SECRET"),
+            &format!("{stream_body} W89_RAW_TOOL_PAYLOAD_SECRET"),
+        );
+
+        assert!(report.metadata_safe);
+        assert!(!report.contains_raw_proposal_payload);
+        assert!(!report.contains_raw_lifemodel_patch_value);
+        assert!(!report.contains_raw_memory_text);
+        assert!(!report.contains_raw_chat_text);
+        assert!(!report.contains_raw_tool_payload);
+
+        let debug_dump = format!("{report:?}");
+        for forbidden in [
+            "W89_RAW_PROPOSAL_PAYLOAD_SECRET",
+            "W89_RAW_LIFEMODEL_PATCH_VALUE_SECRET",
+            "W89_RAW_MEMORY_TEXT_SECRET",
+            "W89_RAW_CHAT_TEXT_SECRET",
+            "W89_RAW_TOOL_PAYLOAD_SECRET",
+        ] {
+            assert!(
+                !debug_dump.contains(forbidden),
+                "W89 readiness report leaked raw marker {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn w89_apply_path_readiness_scanner_proves_mapping_ensure_and_resolver_use() {
+        let (apply_body, send_body, stream_body) = w89_source_bodies();
+        let report = evaluate_lifemodel_proposal_patch_source_readiness(
+            &apply_body,
+            &send_body,
+            &stream_body,
+        );
+
+        assert!(report.no_hardcoded_builder_review_in_apply_path);
+        assert!(report.apply_path_uses_mapping_ensure);
+        assert!(report.apply_path_uses_source_resolver);
+        assert!(apply_body.contains("ensure_lifemodel_proposal_patch_source_mapping(proposal)"));
+        assert!(apply_body.contains("resolve_lifemodel_patch_source_for_proposal(proposal)"));
+        assert!(apply_body.contains("LifeModelPatch::from_proposal"));
+        assert!(!apply_body.contains("PatchSource::BuilderReview"));
+    }
+
+    #[test]
+    fn w89_default_chat_entrypoints_do_not_call_patch_source_mapping_or_readiness_helpers() {
+        let (apply_body, send_body, stream_body) = w89_source_bodies();
+        let report = evaluate_lifemodel_proposal_patch_source_readiness(
+            &apply_body,
+            &send_body,
+            &stream_body,
+        );
+
+        assert!(report.default_chat_route_unchanged);
+        for forbidden in [
+            "LifeModelProposalPatchSourceMappingReport",
+            "evaluate_lifemodel_proposal_patch_source_mapping",
+            "ensure_lifemodel_proposal_patch_source_mapping",
+            "resolve_lifemodel_patch_source_for_proposal",
+            "LifeModelProposalPatchSourceReadinessReport",
+            "evaluate_lifemodel_proposal_patch_source_readiness",
+            "ensure_lifemodel_proposal_patch_source_readiness",
+        ] {
+            assert!(
+                !send_body.contains(forbidden),
+                "send_message must not call proposal PatchSource helper {forbidden}"
+            );
+            assert!(
+                !stream_body.contains(forbidden),
+                "start_stream_message must not call proposal PatchSource helper {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn w95_readiness_ensure_passes_after_patch_source_fallback_closure() {
+        let (apply_body, send_body, stream_body) = w89_source_bodies();
+        let report =
+            ensure_lifemodel_proposal_patch_source_readiness(&apply_body, &send_body, &stream_body)
+                .expect("W95 closes proposal PatchSource fallback policy");
+
+        assert!(report.readiness_ready);
+        assert!(report.proposal_first_convergence_complete);
+        assert!(report.blocking_reasons.is_empty());
     }
 
     #[tokio::test]
@@ -1438,6 +2742,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accept_maturation_proposal_records_outcome_evidence() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut proposal = AgentProposal::new(
+            ProposalType::PreferenceUpdate,
+            "preferences.communication_style",
+            serde_json::json!("W132 accepted communication style"),
+            "RAW_PROMPT_SECRET RAW_ASSISTANT_OUTPUT_SECRET unredacted reviewer note",
+            0.9,
+            RiskLevel::Low,
+            ProposalSource::FeedbackEvolution,
+        );
+        proposal.run_id = Some("run-tauri-w75-accept".into());
+        proposal.source_detail = Some("maturation:preference.communication".into());
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+        let source_evidence_id = create_maturation_source_evidence(&state, &proposal).await;
+
+        accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap();
+
+        let records = proposal_outcome_records(&state, &proposal_id).await;
+        assert_eq!(records.len(), 1);
+        let evidence = &records[0];
+        assert_eq!(evidence.run_metadata["outcome"], "accepted");
+        assert_eq!(evidence.linked_proposal_ids, vec![proposal_id.clone()]);
+        assert_eq!(evidence.linked_agent_run_ids, vec!["run-tauri-w75-accept"]);
+        assert_eq!(
+            evidence.run_metadata["sourceEvidenceIds"],
+            serde_json::json!([source_evidence_id])
+        );
+        assert_no_w75_raw_content(&serde_json::to_string(evidence).unwrap());
+
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        assert_eq!(
+            model.preferences.communication_style,
+            "W132 accepted communication style"
+        );
+    }
+
+    #[tokio::test]
+    async fn reject_maturation_proposal_records_negative_outcome_without_applying() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut proposal = AgentProposal::new(
+            ProposalType::PreferenceUpdate,
+            "preferences.communication_style",
+            serde_json::json!("W132 rejected communication style should not apply"),
+            "RAW_PROMPT_SECRET RAW_ASSISTANT_OUTPUT_SECRET",
+            0.86,
+            RiskLevel::Low,
+            ProposalSource::FeedbackEvolution,
+        );
+        proposal.run_id = Some("run-tauri-w75-reject".into());
+        proposal.source_detail = Some("maturation:preference.communication".into());
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+        let source_evidence_id = create_maturation_source_evidence(&state, &proposal).await;
+
+        reject_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap();
+
+        let records = proposal_outcome_records(&state, &proposal_id).await;
+        assert_eq!(records.len(), 1);
+        let evidence = &records[0];
+        assert_eq!(evidence.run_metadata["outcome"], "rejected");
+        assert_eq!(evidence.run_metadata["negative"], true);
+        assert_eq!(evidence.run_metadata["opposing"], true);
+        assert_eq!(evidence.opposing_refs, vec![source_evidence_id]);
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        assert_ne!(
+            model.preferences.communication_style,
+            "W132 rejected communication style should not apply"
+        );
+        let stored = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&proposal_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ProposalStatus::Rejected);
+    }
+
+    #[tokio::test]
     async fn edit_life_model_proposal_applies_edited_value() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
@@ -1476,6 +2883,142 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.status, ProposalStatus::Edited);
+    }
+
+    #[tokio::test]
+    async fn edit_maturation_proposal_records_outcome_without_raw_edited_payload() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut proposal = AgentProposal::new(
+            ProposalType::PreferenceUpdate,
+            "preferences.communication_style",
+            serde_json::json!("before edit"),
+            "RAW_PROMPT_SECRET RAW_ASSISTANT_OUTPUT_SECRET",
+            0.82,
+            RiskLevel::Low,
+            ProposalSource::FeedbackEvolution,
+        );
+        proposal.run_id = Some("run-tauri-w75-edit".into());
+        proposal.source_detail = Some("maturation:preference.communication".into());
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+        create_maturation_source_evidence(&state, &proposal).await;
+
+        edit_proposal_with_state(
+            proposal_id.clone(),
+            serde_json::json!("RAW_EDITED_PAYLOAD_SECRET"),
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let records = proposal_outcome_records(&state, &proposal_id).await;
+        assert_eq!(records.len(), 1);
+        let evidence = &records[0];
+        assert_eq!(evidence.run_metadata["outcome"], "edited");
+        assert_eq!(evidence.run_metadata["editedPayloadIncluded"], false);
+        assert_no_w75_raw_content(&serde_json::to_string(evidence).unwrap());
+
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        assert_eq!(
+            model.preferences.communication_style,
+            "RAW_EDITED_PAYLOAD_SECRET"
+        );
+    }
+
+    #[tokio::test]
+    async fn high_risk_identity_maturation_proposal_does_not_record_outcome_evidence() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut proposal = AgentProposal::new(
+            ProposalType::GoalUpdate,
+            "identity.name",
+            serde_json::json!("W132 high-risk identity should not record outcome evidence"),
+            "RAW_PROMPT_SECRET RAW_ASSISTANT_OUTPUT_SECRET",
+            0.84,
+            RiskLevel::Low,
+            ProposalSource::FeedbackEvolution,
+        );
+        proposal.run_id = Some("run-tauri-w132-high-risk".into());
+        proposal.source_detail = Some("maturation:preference.communication".into());
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+        create_maturation_source_evidence(&state, &proposal).await;
+
+        reject_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap();
+
+        let records = proposal_outcome_records(&state, &proposal_id).await;
+        assert_eq!(records.len(), 0);
+        let stored = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&proposal_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ProposalStatus::Rejected);
+    }
+
+    #[tokio::test]
+    async fn unsupported_domain_maturation_proposal_does_not_record_outcome_evidence() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut proposal = AgentProposal::new(
+            ProposalType::StateUpdate,
+            "state.current_focus",
+            serde_json::json!("W132 unsupported state update should not record outcome evidence"),
+            "RAW_PROMPT_SECRET RAW_ASSISTANT_OUTPUT_SECRET",
+            0.8,
+            RiskLevel::Low,
+            ProposalSource::FeedbackEvolution,
+        );
+        proposal.run_id = Some("run-tauri-w132-unsupported".into());
+        proposal.source_detail = Some("maturation:state.current_focus".into());
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+        create_maturation_source_evidence(&state, &proposal).await;
+
+        reject_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap();
+
+        let records = proposal_outcome_records(&state, &proposal_id).await;
+        assert_eq!(records.len(), 0);
+        let stored = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&proposal_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ProposalStatus::Rejected);
     }
 
     #[tokio::test]
@@ -1528,6 +3071,167 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.status, ProposalStatus::Accepted);
+    }
+
+    #[tokio::test]
+    async fn accept_memory_write_proposal_returns_lifecycle_materialization_evidence() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let proposal = AgentProposal::new(
+            ProposalType::MemoryWrite,
+            "memory.records",
+            serde_json::json!({
+                "session_id": "proposal-lifecycle-session",
+                "content": "用户偏好 execution-first agents",
+                "source": "review_center"
+            }),
+            "用户确认写入长期记忆",
+            0.8,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        let id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        let result = accept_proposal_with_state(id.clone(), &state)
+            .await
+            .unwrap();
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["memoryLifecycle"]["proposalId"], id);
+        assert!(
+            result["memoryLifecycle"]["memoryId"]
+                .as_str()
+                .is_some_and(|memory_id| !memory_id.trim().is_empty()),
+            "accepted memory must expose a concrete lifecycle memory id: {result:?}"
+        );
+        assert_eq!(result["memoryLifecycle"]["status"], "materialized");
+        assert_eq!(
+            result["memoryLifecycle"]["materializationStatus"],
+            "materialized"
+        );
+        assert!(
+            result["memoryLifecycle"]["materializedViewVersion"]
+                .as_i64()
+                .is_some_and(|version| version > 0),
+            "accepted memory must expose materialized context update evidence: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_memory_asset_requires_exact_id_and_updates_lifecycle_context() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let proposal = AgentProposal::new(
+            ProposalType::MemoryWrite,
+            "memory.records",
+            serde_json::json!({
+                "session_id": "proposal-rollback-session",
+                "content": "User prefers execution-first agents.",
+                "source": "review_center"
+            }),
+            "User confirmed a long-term memory.",
+            0.8,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        let id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+        let accepted = accept_proposal_with_state(id, &state).await.unwrap();
+        let memory_id = accepted["memoryLifecycle"]["memoryId"]
+            .as_str()
+            .expect("accepted memory id")
+            .to_string();
+        let accepted_view_version = accepted["memoryLifecycle"]["materializedViewVersion"]
+            .as_i64()
+            .expect("accepted materialized view version");
+
+        let ambiguous = rollback_memory_asset_with_state(
+            "execution-first agents".into(),
+            "not needed".into(),
+            &state,
+        )
+        .await;
+        assert!(
+            ambiguous
+                .unwrap_err()
+                .contains("requires an exact accepted memory id"),
+            "rollback must not accept text queries"
+        );
+
+        let rolled_back = rollback_memory_asset_with_state(
+            memory_id.clone(),
+            "User requested rollback.".into(),
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(rolled_back.record.memory_id, memory_id);
+        assert_eq!(rolled_back.record.status, MemoryLifecycleStatus::RolledBack);
+        assert_eq!(rolled_back.rollback_event.memory_id, memory_id);
+        assert!(
+            rolled_back.materialized_view.version > accepted_view_version,
+            "rollback must update materialized context version"
+        );
+        assert!(
+            !rolled_back
+                .materialized_view
+                .active_memory_ids
+                .contains(&memory_id),
+            "rolled back memory must be excluded from active materialized context"
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_sensitive_memory_write_proposal_does_not_call_cloud_embedding() {
+        openlife_core::vectors::clear_embedding_cache();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let (openai_base, cloud_call_count) = fake_cloud_embedding_endpoint().await;
+        configure_cloud_embeddings(&state, openai_base).await;
+
+        let proposal = AgentProposal::new(
+            ProposalType::MemoryWrite,
+            "memory.records",
+            serde_json::json!({
+                "session_id": "proposal-sensitive-session",
+                "content": "身份证 11010519491231002X，邮箱 proposal-sensitive@example.com，最近健康诊断和负债压力",
+                "source": "review_center"
+            }),
+            "用户确认写入长期记忆",
+            0.8,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        let id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        let result = accept_proposal_with_state(id, &state).await.unwrap();
+
+        assert_eq!(result["success"], true);
+        assert_eq!(cloud_call_count.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -1746,6 +3450,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn proposal_accepts_hs_external_write_payload_and_verifies_hash() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+
+        let safe_path = temp_dir.path().join("safe");
+        std::fs::create_dir_all(&safe_path).unwrap();
+        let safe_path_canonical = safe_path.canonicalize().unwrap();
+        {
+            let mut cfg = state.config.lock().await;
+            cfg.system.safe_paths = vec![safe_path_canonical.to_string_lossy().to_string()];
+        }
+
+        let file_path = safe_path_canonical.join("hs-payload.txt");
+        let content = "真实 content 应由 HS ExternalWriteAction payload 写入";
+        let content_hash = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(content.as_bytes());
+            format!("{:x}", hasher.finalize())
+        };
+        let proposal = AgentProposal::new(
+            ProposalType::ExternalWriteAction,
+            &format!("builtin.{}", file_path.display()),
+            serde_json::json!({
+                "tool_name": "file.write",
+                "tool_id": "file.write",
+                "source": "builtin",
+                "arguments": {
+                    "path": file_path.to_string_lossy().to_string(),
+                    "content": content
+                },
+                "path": file_path.to_string_lossy().to_string(),
+                "content": content,
+                "content_preview": content,
+                "content_hash": content_hash,
+                "size_bytes": content.len(),
+                "operation": "create",
+                "requires_confirmation": true,
+                "hs_policy_id": openlife_core::agent::BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST,
+            }),
+            "HS proposal-first 写入文件",
+            0.9,
+            RiskLevel::High,
+            ProposalSource::Manual,
+        );
+        let id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        accept_proposal_with_state(id.clone(), &state)
+            .await
+            .unwrap();
+
+        let stored = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ProposalStatus::Accepted);
+        assert_eq!(std::fs::read_to_string(&file_path).unwrap(), content);
+    }
+
+    #[tokio::test]
     async fn accept_external_write_action_blocks_outside_safe_paths() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
@@ -1786,6 +3563,51 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("not in safe paths"));
         assert!(!file_path.exists());
+    }
+
+    #[tokio::test]
+    async fn rejecting_proactive_reminder_records_negative_evidence() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let proposal = AgentProposal::new(
+            ProposalType::ScheduledTask,
+            "proactive.reminder.pending_proposal",
+            serde_json::json!({
+                "proactive_reminder_category": "pending_proposal",
+                "prompt_digest": "digest-only",
+            }),
+            "raw reminder rejection text should not be stored as evidence",
+            0.7,
+            RiskLevel::Low,
+            ProposalSource::ProactiveAgent,
+        );
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        reject_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap();
+
+        let records = state
+            .evidence_store
+            .lock()
+            .await
+            .query(openlife_core::agent::EvidenceQuery {
+                affected_path: Some("proactive.reminder.pending_proposal".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert!(records[0].linked_proposal_ids.contains(&proposal_id));
+        let serialized = serde_json::to_string(&records[0]).unwrap();
+        assert!(!serialized.contains("raw reminder rejection text"));
     }
 
     #[test]

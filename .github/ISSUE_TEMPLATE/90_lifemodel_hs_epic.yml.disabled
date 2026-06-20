@@ -1,3 +1,5 @@
+# Archived solo-mode template. Rename back to .yml only when OpenLife returns
+# to issue-driven LifeModel-HS tracking.
 name: LifeModel-HS Epic
 description: Track the full LifeModel-HS MVP phase.
 title: "Epic: LifeModel-HS MVP"

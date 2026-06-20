@@ -3,12 +3,13 @@ use crate::agent::action_executor::{
 };
 use crate::agent::runtime::{AgentRuntime, AgentRuntimeOutput};
 use crate::agent::types::{AgentObservation, AgentRun, AgentRunError, AgentRunStatus, AgentTask};
+use crate::agent::{RuntimeGuidanceConsumptionMode, RuntimeHSPacket, RuntimeInput, RuntimeOutput};
 use crate::layer_router::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
 use crate::privacy::PrivacyEngine;
 use crate::scheduler::InferenceScheduler;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use futures::StreamExt;
 use serde_json::Value;
 use std::sync::Arc;
@@ -27,6 +28,20 @@ pub struct AgentLoopConfig {
     pub role: AgentRole,
     /// Optional restrict to specific tools (empty = all allowed)
     pub toolset_allowlist: Vec<String>,
+    /// Optional restrict to exact governed action/target candidate pairs.
+    /// When set, this is stricter than toolset_allowlist and is evaluated as
+    /// action_type + target together.
+    pub tool_action_allowlist: Vec<AgentLoopAllowedToolAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentLoopAllowedToolAction {
+    pub action_type: String,
+    pub target: String,
+    /// Governed executor input for this exact candidate pair. When the model
+    /// selects the pair, this replaces model-supplied arguments before
+    /// ActionExecutor invocation.
+    pub input: Value,
 }
 
 /// Specialization role for the agent loop.
@@ -50,6 +65,7 @@ impl Default for AgentLoopConfig {
             shutdown_notify: None,
             role: AgentRole::default(),
             toolset_allowlist: Vec::new(),
+            tool_action_allowlist: Vec::new(),
         }
     }
 }
@@ -71,6 +87,28 @@ impl AgentLoopConfig {
     }
 }
 
+pub fn apply_react_guidance_to_config(
+    mut config: AgentLoopConfig,
+    packet: Option<&RuntimeHSPacket>,
+    mode: RuntimeGuidanceConsumptionMode,
+) -> AgentLoopConfig {
+    if !mode.is_enabled() {
+        return config;
+    }
+    let Some(packet) = packet else {
+        return config;
+    };
+    if packet
+        .guidance_refs
+        .iter()
+        .any(|guidance| guidance.impact_kind == "gentle_planning")
+    {
+        config.max_steps = config.max_steps.min(2);
+        config.max_tool_calls = config.max_tool_calls.min(2);
+    }
+    config
+}
+
 /// Bundles the 5 shared task/life-model/tools/privacy/memory parameters
 /// that flow through the entire agent loop, reducing argument counts below clippy limits.
 struct AgentLoopContext<'a> {
@@ -79,6 +117,8 @@ struct AgentLoopContext<'a> {
     pub tools_prompt: &'a str,
     pub memory_context: Option<String>,
     pub privacy_engine: PrivacyEngine,
+    pub hs_runtime_packet: Option<RuntimeHSPacket>,
+    pub guidance_consumption_mode: RuntimeGuidanceConsumptionMode,
 }
 
 /// Boundary markers for prompt injection defense.
@@ -149,6 +189,8 @@ struct StepContext<'a> {
     pub tools_prompt: &'a str,
     pub memory_context: Option<String>,
     pub privacy_engine: PrivacyEngine,
+    pub hs_runtime_packet: Option<RuntimeHSPacket>,
+    pub guidance_consumption_mode: RuntimeGuidanceConsumptionMode,
     pub action_ctx: &'a ActionExecutionContext<'a>,
     pub run: &'a mut AgentRun,
     pub tool_call_count: u32,
@@ -168,6 +210,7 @@ pub struct AgentLoop {
     action_executor: ActionExecutor,
     scheduler: InferenceScheduler,
     config: AgentLoopConfig,
+    scripted_replies: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
 }
 
 impl AgentLoop {
@@ -182,7 +225,26 @@ impl AgentLoop {
             action_executor,
             scheduler,
             config,
+            scripted_replies: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
         }
+    }
+
+    pub(crate) fn with_scripted_replies(self, replies: Vec<String>) -> Self {
+        Self {
+            scripted_replies: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::from(replies),
+            )),
+            ..self
+        }
+    }
+
+    fn next_scripted_reply(&self) -> Option<String> {
+        self.scripted_replies
+            .lock()
+            .ok()
+            .and_then(|mut replies| replies.pop_front())
     }
 
     fn emit_status(
@@ -226,6 +288,8 @@ impl AgentLoop {
             tools_prompt: actx.tools_prompt,
             memory_context: actx.memory_context.clone(),
             privacy_engine: actx.privacy_engine.clone(),
+            hs_runtime_packet: actx.hs_runtime_packet.clone(),
+            guidance_consumption_mode: actx.guidance_consumption_mode,
         };
 
         match self.generate_response(&repair_actx).await {
@@ -261,10 +325,24 @@ impl AgentLoop {
         actx: &AgentLoopContext<'_>,
         action_ctx: &ActionExecutionContext<'_>,
         callback: Option<Arc<dyn StreamingCallback>>,
+        config: &AgentLoopConfig,
     ) -> Result<AgentLoopResult> {
         let start_time = Instant::now();
         let mut run = AgentRun::new_chat_run(&actx.task.session_id, &actx.task.user_text);
         run.user_input = Some(actx.task.user_text.clone());
+        let mut current_hs_packet = actx.hs_runtime_packet.clone();
+        let guided_config = apply_react_guidance_to_config(
+            config.clone(),
+            current_hs_packet.as_ref(),
+            actx.guidance_consumption_mode,
+        );
+        if let Some(packet) = current_hs_packet.as_mut() {
+            if packet.audit.agent_run_id.is_none() {
+                packet.audit.agent_run_id = Some(run.id.clone());
+            }
+            run.hs_selection_audit = Some(packet.audit.clone());
+            run.behavior_checks = crate::agent::behavior_checks_for_packet(packet);
+        }
 
         let mut step_count: u32 = 0;
         let mut tool_call_count: u32 = 0;
@@ -273,7 +351,7 @@ impl AgentLoop {
         wrap_user_content(&mut current_task);
         let mut current_tools_prompt = actx.tools_prompt.to_string();
         // Append role-specific instruction if applicable
-        if let Some(role_instruction) = self.config.role_system_instruction() {
+        if let Some(role_instruction) = config.role_system_instruction() {
             if !current_tools_prompt.is_empty() {
                 current_tools_prompt.push_str("\n\n");
             }
@@ -307,19 +385,19 @@ impl AgentLoop {
             );
 
             // Check step budget
-            if step_count >= self.config.max_steps {
+            if step_count >= guided_config.max_steps {
                 stop_reason = "max_steps_reached".into();
                 if final_response.is_empty() {
                     final_response = format!(
                         "已达到最大执行步数 ({})。当前结果：{}",
-                        self.config.max_steps, final_response
+                        guided_config.max_steps, final_response
                     );
                 }
                 break;
             }
 
             // Check timeout
-            if start_time.elapsed().as_secs() >= self.config.timeout_seconds {
+            if start_time.elapsed().as_secs() >= config.timeout_seconds {
                 run.status = AgentRunStatus::Failed;
                 run.error = Some(AgentRunError {
                     message: "Agent loop timeout exceeded".into(),
@@ -355,11 +433,14 @@ impl AgentLoop {
                         tools_prompt: &current_tools_prompt,
                         memory_context,
                         privacy_engine: current_privacy_engine.clone(),
+                        hs_runtime_packet: current_hs_packet.clone(),
+                        guidance_consumption_mode: actx.guidance_consumption_mode,
                         action_ctx,
                         run: &mut run,
                         tool_call_count,
                     },
                     callback.clone(),
+                    &guided_config,
                 )
                 .await
             {
@@ -456,8 +537,75 @@ impl AgentLoop {
             tools_prompt,
             memory_context,
             privacy_engine,
+            hs_runtime_packet: action_ctx.hs_runtime_packet.cloned(),
+            guidance_consumption_mode: RuntimeGuidanceConsumptionMode::Disabled,
         };
-        self.run_loop_core(&actx, action_ctx, None).await
+        self.run_loop_core(&actx, action_ctx, None, &self.config)
+            .await
+    }
+
+    fn config_with_runtime_budget(&self, input: &RuntimeInput) -> AgentLoopConfig {
+        let mut config = self.config.clone();
+        let runtime_config = input.agent_loop_config();
+        config.max_steps = runtime_config.max_steps;
+        config.max_tool_calls = runtime_config.max_tool_calls;
+        config.timeout_seconds = runtime_config.timeout_seconds;
+        config.allow_writes = runtime_config.allow_writes;
+        config.allow_cloud = runtime_config.allow_cloud;
+        config
+    }
+
+    /// Run the iterative loop through the RuntimeInput contract while preserving
+    /// the existing AgentLoopResult surface for legacy callers.
+    pub async fn run_with_runtime_input(
+        &self,
+        input: &RuntimeInput,
+        privacy_engine: PrivacyEngine,
+        action_ctx: &ActionExecutionContext<'_>,
+    ) -> Result<AgentLoopResult> {
+        let hs_runtime_packet = input.hs_packet.as_ref().or(action_ctx.hs_runtime_packet);
+        let runtime_action_ctx = ActionExecutionContext {
+            registry: action_ctx.registry,
+            permission_store: action_ctx.permission_store,
+            audit_store: action_ctx.audit_store,
+            privacy_engine: action_ctx.privacy_engine,
+            safe_paths: action_ctx.safe_paths,
+            life_model: action_ctx.life_model,
+            memory_store: action_ctx.memory_store,
+            proposal_store: action_ctx.proposal_store,
+            agent_run_store: action_ctx.agent_run_store,
+            network_policy: action_ctx.network_policy,
+            hs_runtime_packet,
+            calendar_ics_paths: action_ctx.calendar_ics_paths,
+            web_search_fixture_output: action_ctx.web_search_fixture_output,
+        };
+        let actx = AgentLoopContext {
+            task: &input.task,
+            life_model: &input.life_model_compat,
+            tools_prompt: &input.tools_prompt,
+            memory_context: input.memory_context.clone(),
+            privacy_engine,
+            hs_runtime_packet: runtime_action_ctx.hs_runtime_packet.cloned(),
+            guidance_consumption_mode: input.guidance_consumption_mode,
+        };
+        let config = self.config_with_runtime_budget(input);
+
+        self.run_loop_core(&actx, &runtime_action_ctx, None, &config)
+            .await
+    }
+
+    /// Run the iterative loop through RuntimeInput and return the converged
+    /// RuntimeOutput contract.
+    pub async fn run_runtime_input(
+        &self,
+        input: RuntimeInput,
+        privacy_engine: PrivacyEngine,
+        action_ctx: &ActionExecutionContext<'_>,
+    ) -> Result<RuntimeOutput> {
+        let result = self
+            .run_with_runtime_input(&input, privacy_engine, action_ctx)
+            .await?;
+        Ok(RuntimeOutput::from_agent_loop_result(result))
     }
 
     /// Streaming variant of run(). Same logic but forwards token chunks
@@ -479,8 +627,11 @@ impl AgentLoop {
             tools_prompt,
             memory_context,
             privacy_engine,
+            hs_runtime_packet: action_ctx.hs_runtime_packet.cloned(),
+            guidance_consumption_mode: RuntimeGuidanceConsumptionMode::Disabled,
         };
-        self.run_loop_core(&actx, action_ctx, Some(callback)).await
+        self.run_loop_core(&actx, action_ctx, Some(callback), &self.config)
+            .await
     }
 
     /// Execute a single step of the agent loop.
@@ -489,6 +640,7 @@ impl AgentLoop {
         &self,
         mut ctx: StepContext<'_>,
         callback: Option<Arc<dyn StreamingCallback>>,
+        config: &AgentLoopConfig,
     ) -> Result<StepResult> {
         let mut status_updates: Vec<crate::agent::types::AgentLoopStatusUpdate> = Vec::new();
 
@@ -505,6 +657,8 @@ impl AgentLoop {
                 tools_prompt: ctx.tools_prompt,
                 memory_context: ctx.memory_context.clone(),
                 privacy_engine: ctx.privacy_engine.clone(),
+                hs_runtime_packet: ctx.hs_runtime_packet.clone(),
+                guidance_consumption_mode: ctx.guidance_consumption_mode,
             };
             if let Some(ref cb) = callback {
                 self.generate_response_streaming(&actx, cb.clone()).await
@@ -520,6 +674,12 @@ impl AgentLoop {
                 }
                 if ctx.run.reasoning_trace.is_none() {
                     ctx.run.reasoning_trace = Some(gen.runtime_output.reasoning_trace.clone());
+                }
+                if ctx.run.hs_selection_audit.is_none() {
+                    ctx.run.hs_selection_audit = gen.runtime_output.hs_selection_audit.clone();
+                }
+                if ctx.run.behavior_checks.is_empty() {
+                    ctx.run.behavior_checks = gen.runtime_output.hs_behavior_checks.clone();
                 }
 
                 let reply = gen.reply;
@@ -557,6 +717,8 @@ impl AgentLoop {
                                 tools_prompt: ctx.tools_prompt,
                                 memory_context: memory_ctx.clone(),
                                 privacy_engine: privacy.clone(),
+                                hs_runtime_packet: ctx.hs_runtime_packet.clone(),
+                                guidance_consumption_mode: ctx.guidance_consumption_mode,
                             },
                             ctx.action_ctx,
                             ctx.run,
@@ -566,7 +728,36 @@ impl AgentLoop {
                 }
 
                 let final_text = parsed.final_text;
-                let tool_actions = self.filter_tools_by_allowlist(parsed.actions);
+                let (tool_actions, rejected_tool_count) =
+                    self.partition_tools_by_allowlist(parsed.actions, config);
+                if rejected_tool_count > 0 {
+                    ctx.run.warnings.push(format!(
+                        "Tool selection blocked: disallowed_tool_count={rejected_tool_count}"
+                    ));
+                    self.emit_status(
+                        &mut status_updates,
+                        crate::agent::types::AgentLoopPhase::Failed,
+                        "Model selected a tool outside the configured allowlist",
+                        0,
+                        None,
+                    );
+                    if let Some(ref cb) = callback {
+                        cb.on_status(
+                            "failed",
+                            "Model selected a tool outside the configured allowlist",
+                            0,
+                        )
+                        .await;
+                    }
+                    return Ok(StepResult {
+                        stop_reason: "tool_allowlist_blocked".into(),
+                        final_response: final_text,
+                        should_continue: false,
+                        tool_call_count_delta: 0,
+                        observations: vec![],
+                        status_updates,
+                    });
+                }
 
                 if tool_actions.is_empty() {
                     self.emit_status(
@@ -619,6 +810,7 @@ impl AgentLoop {
                         &mut ctx.tool_call_count,
                         &callback,
                         &mut status_updates,
+                        config,
                     )
                     .await?;
 
@@ -630,6 +822,7 @@ impl AgentLoop {
                     final_text,
                     ctx.run,
                     &mut status_updates,
+                    config,
                 ))
             }
             Err(e) => {
@@ -669,31 +862,50 @@ impl AgentLoop {
         let memory_hits = Vec::new();
         let runtime_output = self
             .runtime
-            .execute_task(
+            .execute_task_with_hs_packet_and_guidance_mode(
                 actx.task,
                 actx.life_model,
                 actx.tools_prompt,
                 actx.memory_context.clone(),
                 memory_hits,
                 actx.privacy_engine.clone(),
+                actx.hs_runtime_packet.clone(),
+                actx.guidance_consumption_mode,
             )
             .await
             .map_err(|e| anyhow::anyhow!("runtime execution failed: {}", e))?;
+
+        if let Some(reply) = self.next_scripted_reply() {
+            return Ok(GeneratedAgentResponse {
+                runtime_output,
+                reply,
+            });
+        }
 
         let tools_prompt = if actx.tools_prompt.trim().is_empty() {
             None
         } else {
             Some(actx.tools_prompt)
         };
-        let reply = self
-            .scheduler
-            .generate(
-                runtime_output.final_messages.clone(),
-                actx.life_model,
-                tools_prompt,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("model generation failed: {}", e))?;
+        let reply = if let Some(ref packet) = actx.hs_runtime_packet {
+            self.scheduler
+                .generate_with_hs_packet(
+                    runtime_output.final_messages.clone(),
+                    actx.life_model,
+                    tools_prompt,
+                    packet,
+                )
+                .await
+        } else {
+            self.scheduler
+                .generate(
+                    runtime_output.final_messages.clone(),
+                    actx.life_model,
+                    tools_prompt,
+                )
+                .await
+        }
+        .map_err(|e| anyhow::anyhow!("model generation failed: {}", e))?;
 
         Ok(GeneratedAgentResponse {
             runtime_output,
@@ -711,16 +923,26 @@ impl AgentLoop {
         let memory_hits = Vec::new();
         let runtime_output = self
             .runtime
-            .execute_task(
+            .execute_task_with_hs_packet_and_guidance_mode(
                 actx.task,
                 actx.life_model,
                 actx.tools_prompt,
                 actx.memory_context.clone(),
                 memory_hits,
                 actx.privacy_engine.clone(),
+                actx.hs_runtime_packet.clone(),
+                actx.guidance_consumption_mode,
             )
             .await
             .map_err(|e| anyhow::anyhow!("runtime execution failed: {}", e))?;
+
+        if let Some(reply) = self.next_scripted_reply() {
+            callback.on_chunk(&reply, 0, "generating").await;
+            return Ok(GeneratedAgentResponse {
+                runtime_output,
+                reply,
+            });
+        }
 
         let tools_prompt = if actx.tools_prompt.trim().is_empty() {
             None
@@ -728,15 +950,25 @@ impl AgentLoop {
             Some(actx.tools_prompt)
         };
 
-        let mut stream = self
-            .scheduler
-            .generate_stream(
-                runtime_output.final_messages.clone(),
-                actx.life_model,
-                tools_prompt,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("stream generation failed: {}", e))?;
+        let mut stream = if let Some(ref packet) = actx.hs_runtime_packet {
+            self.scheduler
+                .generate_stream_with_hs_packet(
+                    runtime_output.final_messages.clone(),
+                    actx.life_model,
+                    tools_prompt,
+                    packet,
+                )
+                .await
+        } else {
+            self.scheduler
+                .generate_stream(
+                    runtime_output.final_messages.clone(),
+                    actx.life_model,
+                    tools_prompt,
+                )
+                .await
+        }
+        .map_err(|e| anyhow::anyhow!("stream generation failed: {}", e))?;
 
         let mut reply = String::new();
         loop {
@@ -778,7 +1010,7 @@ impl AgentLoop {
     pub(crate) fn parse_agent_reply(
         &self,
         reply: &str,
-        _action_ctx: &ActionExecutionContext<'_>,
+        action_ctx: &ActionExecutionContext<'_>,
         run: &mut AgentRun,
         tool_call_count: &mut u32,
     ) -> Result<ParsedAgentReply> {
@@ -816,12 +1048,16 @@ impl AgentLoop {
 
         // Check for thought_summary and warnings
         if let Some(thought) = v.get("thought_summary").and_then(|t| t.as_str()) {
-            run.warnings.push(format!("Model thought: {}", thought));
+            run.warnings.push(format!(
+                "Model thought: {}",
+                metadata_safe_model_note(thought)
+            ));
         }
         if let Some(warnings) = v.get("warnings").and_then(|w| w.as_array()) {
             for warning in warnings {
                 if let Some(w) = warning.as_str() {
-                    run.warnings.push(format!("Model warning: {}", w));
+                    run.warnings
+                        .push(format!("Model warning: {}", metadata_safe_model_note(w)));
                 }
             }
         }
@@ -864,26 +1100,57 @@ impl AgentLoop {
 
         let mut requests = Vec::new();
         for (idx, call) in calls.iter().enumerate() {
-            let name = call
+            let Some(name) = call
                 .get("name")
                 .or_else(|| call.get("tool"))
                 .and_then(|n| n.as_str())
-                .context("tool call missing name")?;
-            let args = call
+            else {
+                run.warnings.push(format!(
+                    "Parse warning: missing_tool_name at action_index={idx}"
+                ));
+                continue;
+            };
+            let args = match call
                 .get("arguments")
                 .or_else(|| call.get("args"))
                 .or_else(|| call.get("input"))
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!({}));
+            {
+                None => serde_json::json!({}),
+                Some(value) if value.is_object() => value.clone(),
+                Some(Value::Null) => serde_json::json!({}),
+                Some(_) => {
+                    run.warnings.push(format!(
+                        "Parse warning: invalid_arguments_defaulted_empty for action_index={idx}"
+                    ));
+                    serde_json::json!({})
+                }
+            };
+
+            let explicit_action_type = call.get("action_type").and_then(|t| t.as_str());
+            let registered_tool_like = action_ctx
+                .registry
+                .list_manifests()
+                .iter()
+                .any(|manifest| manifest.name == name || manifest.id == name);
+            let action_type = explicit_action_type
+                .map(ToString::to_string)
+                .unwrap_or_else(|| {
+                    if !registered_tool_like {
+                        run.warnings.push(format!(
+                            "Parse warning: unregistered_tool_defaulted_mcp_tool at action_index={idx}"
+                        ));
+                    }
+                    "mcp_tool".to_string()
+                });
+            let input = match action_type.as_str() {
+                "memory_search" | "session_search" => args.clone(),
+                _ => serde_json::json!({ "arguments": args }),
+            };
 
             requests.push(AgentActionRequest {
-                action_type: call
-                    .get("action_type")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("mcp_tool")
-                    .to_string(),
+                action_type,
                 target: name.to_string(),
-                input: serde_json::json!({ "arguments": args }),
+                input,
                 source_run_id: Some(run.id.clone()),
                 step_index: *tool_call_count + idx as u32,
             });
@@ -950,23 +1217,43 @@ impl AgentLoop {
         messages
     }
 
-    /// Filter tool actions by the configured allowlist.
-    /// Returns the filtered list (empty if allowlist is not configured).
-    fn filter_tools_by_allowlist(
+    /// Partition tool actions by the configured allowlist.
+    /// Returns all actions and zero rejected actions if allowlist is not configured.
+    fn partition_tools_by_allowlist(
         &self,
         actions: Vec<AgentActionRequest>,
-    ) -> Vec<AgentActionRequest> {
-        if self.config.toolset_allowlist.is_empty() {
-            return actions;
+        config: &AgentLoopConfig,
+    ) -> (Vec<AgentActionRequest>, usize) {
+        if config.tool_action_allowlist.is_empty() && config.toolset_allowlist.is_empty() {
+            return (actions, 0);
         }
-        actions
-            .into_iter()
-            .filter(|a| {
-                self.config.toolset_allowlist.iter().any(|allowed| {
-                    a.target == *allowed || a.target.starts_with(&format!("{}.", allowed))
+        let mut allowed_actions = Vec::new();
+        let mut rejected_count = 0;
+        for mut action in actions {
+            let matched_allowed_action = if config.tool_action_allowlist.is_empty() {
+                None
+            } else {
+                config.tool_action_allowlist.iter().find(|allowed| {
+                    action.action_type == allowed.action_type && action.target == allowed.target
                 })
-            })
-            .collect()
+            };
+            let target_allowed = if config.tool_action_allowlist.is_empty() {
+                config.toolset_allowlist.contains(&action.target)
+            } else {
+                matched_allowed_action.is_some()
+            };
+            let action_type_allowed =
+                config.allow_writes || agent_loop_read_only_action_type(&action.action_type);
+            if target_allowed && action_type_allowed {
+                if let Some(allowed) = matched_allowed_action {
+                    action.input = allowed.input.clone();
+                }
+                allowed_actions.push(action);
+            } else {
+                rejected_count += 1;
+            }
+        }
+        (allowed_actions, rejected_count)
     }
 
     /// Execute a batch of tool actions, collecting observations and status updates.
@@ -980,6 +1267,7 @@ impl AgentLoop {
         tool_call_count: &mut u32,
         callback: &Option<Arc<dyn StreamingCallback>>,
         status_updates: &mut Vec<crate::agent::types::AgentLoopStatusUpdate>,
+        config: &AgentLoopConfig,
     ) -> Result<(bool, u32, bool, Vec<AgentObservation>)> {
         let mut observations = Vec::new();
         let mut all_succeeded = true;
@@ -987,8 +1275,12 @@ impl AgentLoop {
         let mut budget_exceeded = false;
 
         for (idx, action_request) in tool_actions.iter().enumerate() {
-            if *tool_call_count + executed_this_step >= self.config.max_tool_calls {
-                let obs = self.create_budget_exceeded_observation(run, *tool_call_count);
+            if *tool_call_count + executed_this_step >= config.max_tool_calls {
+                let obs = self.create_budget_exceeded_observation(
+                    run,
+                    *tool_call_count,
+                    config.max_tool_calls,
+                );
                 observations.push(obs.clone());
                 run.observations.push(obs);
                 all_succeeded = false;
@@ -1039,6 +1331,7 @@ impl AgentLoop {
                         finished_at: Some(now),
                         timestamp: now,
                         tool_scope: None,
+                        react_trace: None,
                     };
                     let obs = AgentObservation {
                         id: format!("obs-fail-{}", now.timestamp_nanos_opt().unwrap_or_default()),
@@ -1047,6 +1340,7 @@ impl AgentLoop {
                         source: "action_executor".into(),
                         structured_result: Some(serde_json::json!({"error": e.to_string()})),
                         timestamp: now,
+                        react_trace: None,
                     };
                     run.actions.push(fail_action.clone());
                     observations.push(obs.clone());
@@ -1156,11 +1450,12 @@ impl AgentLoop {
         final_text: String,
         run: &mut AgentRun,
         status_updates: &mut Vec<crate::agent::types::AgentLoopStatusUpdate>,
+        config: &AgentLoopConfig,
     ) -> StepResult {
         if budget_exceeded {
             let final_response = format!(
                 "已达到最大工具调用次数 ({})。已完成的观察结果：\n{}",
-                self.config.max_tool_calls,
+                config.max_tool_calls,
                 observations
                     .iter()
                     .map(|o| format!("- {}", o.content))
@@ -1236,6 +1531,7 @@ impl AgentLoop {
         &self,
         _run: &AgentRun,
         tool_call_count: u32,
+        max_tool_calls: u32,
     ) -> AgentObservation {
         let now = chrono::Utc::now();
         AgentObservation {
@@ -1244,17 +1540,15 @@ impl AgentLoop {
                 now.timestamp_nanos_opt().unwrap_or_default()
             ),
             action_id: None,
-            content: format!(
-                "工具调用预算已耗尽 (max_tool_calls={})",
-                self.config.max_tool_calls
-            ),
+            content: format!("工具调用预算已耗尽 (max_tool_calls={})", max_tool_calls),
             source: "agent_loop".into(),
             structured_result: Some(serde_json::json!({
                 "error": "max_tool_calls exceeded",
-                "max_tool_calls": self.config.max_tool_calls,
+                "max_tool_calls": max_tool_calls,
                 "current_count": tool_call_count,
             })),
             timestamp: now,
+            react_trace: None,
         }
     }
 
@@ -1281,6 +1575,13 @@ impl AgentLoop {
     }
 }
 
+fn agent_loop_read_only_action_type(action_type: &str) -> bool {
+    matches!(
+        action_type,
+        "mcp_tool" | "builtin_tool" | "plugin_tool" | "memory_search" | "session_search"
+    )
+}
+
 struct GeneratedAgentResponse {
     runtime_output: AgentRuntimeOutput,
     reply: String,
@@ -1304,6 +1605,24 @@ pub(crate) struct ParsedAgentReply {
     /// True if the model generated a JSON-like response that failed to parse.
     /// When true, the caller should attempt a one-shot repair round.
     pub(crate) json_parse_failed: bool,
+}
+
+fn metadata_safe_model_note(note: &str) -> String {
+    let lower = note.to_ascii_lowercase();
+    let looks_sensitive = lower.contains("raw")
+        || lower.contains("secret")
+        || note.contains('@')
+        || lower.contains("prompt")
+        || lower.contains("assistant output")
+        || lower.contains("tool payload")
+        || lower.contains("memory context")
+        || lower.contains("lifemodel");
+    if looks_sensitive {
+        let (byte_count, hash) = crate::agent::react_beta::metadata_safe_text_digest(note);
+        format!("{byte_count} bytes redacted ({hash})")
+    } else {
+        note.to_string()
+    }
 }
 
 fn preview_text(text: &str, max_len: usize) -> String {
@@ -1383,6 +1702,8 @@ mod tests {
                 proposal_store: None,
                 agent_run_store: None,
                 network_policy: None,
+                web_search_fixture_output: None,
+                hs_runtime_packet: None,
                 calendar_ics_paths: &[],
             }
         }
@@ -1452,6 +1773,40 @@ mod tests {
     }
 
     #[test]
+    fn toolset_allowlist_rejects_prefixed_target_aliases() {
+        let agent = make_test_agent_loop();
+        let config = AgentLoopConfig {
+            allow_writes: false,
+            toolset_allowlist: vec!["memory.search".into()],
+            ..Default::default()
+        };
+        let exact_action = AgentActionRequest {
+            action_type: "memory_search".into(),
+            target: "memory.search".into(),
+            input: serde_json::json!({ "query": "safe" }),
+            source_run_id: None,
+            step_index: 0,
+        };
+        let prefixed_alias_action = AgentActionRequest {
+            action_type: "memory_search".into(),
+            target: "memory.search.exfiltrate".into(),
+            input: serde_json::json!({ "query": "unsafe" }),
+            source_run_id: None,
+            step_index: 1,
+        };
+
+        let (allowed, rejected_count) =
+            agent.partition_tools_by_allowlist(vec![exact_action, prefixed_alias_action], &config);
+
+        assert_eq!(allowed.len(), 1);
+        assert_eq!(allowed[0].target, "memory.search");
+        assert_eq!(
+            rejected_count, 1,
+            "toolset allowlist must reject prefixed aliases instead of treating them as governed targets"
+        );
+    }
+
+    #[test]
     fn parse_json_legacy_tool_calls() {
         let agent = make_test_agent_loop();
         let ctx = TestCtx::new();
@@ -1509,6 +1864,86 @@ mod tests {
         assert!(result.json_parse_failed, "should signal repair needed");
         assert!(result.actions.is_empty());
         assert!(!run.warnings.is_empty(), "should have recorded warning");
+    }
+
+    #[test]
+    fn react_beta_parse_missing_tool_name_fails_soft_without_raw_reply() {
+        let agent = make_test_agent_loop();
+        let ctx = TestCtx::new();
+        let action_ctx = ctx.as_ctx();
+        let mut run = AgentRun::new_chat_run("s1", "hello");
+        let mut tc: u32 = 0;
+
+        let reply = r#"{
+            "final": "checking",
+            "actions": [
+                {"arguments": {"query": "secret@example.com raw prompt"}}
+            ]
+        }"#;
+        let result = agent
+            .parse_agent_reply(reply, &action_ctx, &mut run, &mut tc)
+            .unwrap();
+
+        assert!(!result.json_parse_failed);
+        assert!(result.actions.is_empty());
+        let warnings = serde_json::to_string(&run.warnings).unwrap();
+        assert!(warnings.contains("missing_tool_name"));
+        assert!(!warnings.contains("secret@example.com"));
+        assert!(!warnings.contains("raw prompt"));
+    }
+
+    #[test]
+    fn react_beta_parse_invalid_arguments_defaults_empty_and_records_warning() {
+        let agent = make_test_agent_loop();
+        let ctx = TestCtx::new();
+        let action_ctx = ctx.as_ctx();
+        let mut run = AgentRun::new_chat_run("s1", "hello");
+        let mut tc: u32 = 2;
+
+        let reply = r#"{
+            "final": "checking",
+            "actions": [
+                {"name": "memory.search", "arguments": "not an object"}
+            ]
+        }"#;
+        let result = agent
+            .parse_agent_reply(reply, &action_ctx, &mut run, &mut tc)
+            .unwrap();
+
+        assert_eq!(result.actions.len(), 1);
+        assert_eq!(result.actions[0].step_index, 2);
+        assert_eq!(
+            result.actions[0].input,
+            serde_json::json!({ "arguments": {} })
+        );
+        assert!(run
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("invalid_arguments_defaulted_empty")));
+    }
+
+    #[test]
+    fn react_beta_broad_tools_prompt_text_alone_does_not_create_actions() {
+        let agent = make_test_agent_loop();
+        let ctx = TestCtx::new();
+        let action_ctx = ctx.as_ctx();
+        let mut run = AgentRun::new_chat_run("s1", "hello");
+        let mut tc: u32 = 0;
+
+        let result = agent
+            .parse_agent_reply(
+                "Available tools: memory.search, file.write_proposal. Use them when useful.",
+                &action_ctx,
+                &mut run,
+                &mut tc,
+            )
+            .unwrap();
+
+        assert!(result.actions.is_empty());
+        assert_eq!(
+            result.final_text,
+            "Available tools: memory.search, file.write_proposal. Use them when useful."
+        );
     }
 
     #[test]
@@ -1585,6 +2020,7 @@ mod tests {
             source: "web.search".into(),
             structured_result: None,
             timestamp: chrono::Utc::now(),
+            react_trace: None,
         }];
         let tools_prompt = "可用工具: web.search, file.read";
 
@@ -1645,6 +2081,7 @@ mod tests {
             source: "web.search".into(),
             structured_result: None,
             timestamp: chrono::Utc::now(),
+            react_trace: None,
         }];
 
         let messages = agent.build_follow_up_messages(&task, "查询天气中...", &obs, "工具: web");

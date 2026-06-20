@@ -7,9 +7,15 @@ use openlife_core::llm::{
 use openlife_core::mcp_audit::{AuditExport, AuditKeyConfig, KeyMode};
 use openlife_core::privacy::PrivacyPolicy;
 use openlife_core::scheduler::InferenceScheduler;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tauri::State;
 
+use crate::legacy_write_convergence::{
+    LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
+    LifeModelMaterializerCallerPurpose,
+};
 use crate::persist_life_model;
 use crate::storage::{
     app_data_dir, load_onboarding_status_from_path, mcp_audit_keyring_path, onboarding_status_path,
@@ -17,6 +23,95 @@ use crate::storage::{
     save_privacy_policy_to_path, OnboardingStatus,
 };
 use crate::AppState;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GovernedDataImportRequest {
+    pub purpose: String,
+    pub explicit_user_intent: bool,
+    pub create_pre_change_snapshot: bool,
+    pub import_targets: Vec<String>,
+}
+
+impl GovernedDataImportRequest {
+    #[cfg(test)]
+    fn manual_restore_all_targets() -> Self {
+        Self {
+            purpose: "manual_restore".into(),
+            explicit_user_intent: true,
+            create_pre_change_snapshot: true,
+            import_targets: vec!["life_model".into(), "messages".into(), "vectors".into()],
+        }
+    }
+
+    fn is_valid(&self) -> bool {
+        self.explicit_user_intent
+            && self.create_pre_change_snapshot
+            && matches!(self.purpose.as_str(), "manual_restore" | "migration")
+            && !self.import_targets.is_empty()
+            && self
+                .import_targets
+                .iter()
+                .all(|target| matches!(target.as_str(), "life_model" | "messages" | "vectors"))
+    }
+}
+
+fn require_governed_data_import_request(
+    import_request: Option<&GovernedDataImportRequest>,
+) -> Result<&GovernedDataImportRequest, AppError> {
+    if let Some(request) = import_request.filter(|request| request.is_valid()) {
+        Ok(request)
+    } else {
+        Err(AppError::permission(
+            "import_all_data requires an explicit governed import request with purpose manual_restore or migration, explicitUserIntent=true, createPreChangeSnapshot=true, and supported importTargets.",
+        ))
+    }
+}
+
+fn hash_json_value(value: &serde_json::Value) -> Result<String, AppError> {
+    let bytes = serde_json::to_vec(value)?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn validate_import_payload_shape(payload: &serde_json::Value) -> Result<(), AppError> {
+    let object = payload
+        .as_object()
+        .ok_or_else(|| AppError::external("导入 payload 必须是 JSON object"))?;
+    for key in object.keys() {
+        if !matches!(
+            key.as_str(),
+            "version" | "app_version" | "exported_at" | "life_model" | "messages" | "vectors"
+        ) {
+            return Err(AppError::permission(format!(
+                "import_all_data received unsupported import target: {key}"
+            )));
+        }
+    }
+    if !object.contains_key("life_model") {
+        return Err(AppError::external("导入 payload 缺少 life_model"));
+    }
+    Ok(())
+}
+
+fn validate_import_targets_cover_payload(
+    payload: &serde_json::Value,
+    request: &GovernedDataImportRequest,
+) -> Result<(), AppError> {
+    let object = payload
+        .as_object()
+        .ok_or_else(|| AppError::external("导入 payload 必须是 JSON object"))?;
+    for target in ["life_model", "messages", "vectors"] {
+        if object.contains_key(target) && !request.import_targets.iter().any(|item| item == target)
+        {
+            return Err(AppError::permission(format!(
+                "import_all_data payload contains {target}, but the governed import request did not include that import target."
+            )));
+        }
+    }
+    Ok(())
+}
 
 #[derive(serde::Serialize)]
 pub struct LastModelError {
@@ -114,6 +209,10 @@ pub async fn save_config(
 pub async fn export_all_data(
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, AppError> {
+    export_all_data_with_state(state.inner()).await
+}
+
+async fn export_all_data_with_state(state: &Arc<AppState>) -> Result<serde_json::Value, AppError> {
     let life_model = {
         let manager = state.life_model_manager.lock().await;
         manager.load().map_err(AppError::from)?
@@ -139,8 +238,46 @@ pub async fn export_all_data(
 #[tauri::command]
 pub async fn import_all_data(
     payload: serde_json::Value,
+    import_request: Option<GovernedDataImportRequest>,
     state: State<'_, Arc<AppState>>,
-) -> Result<(), AppError> {
+) -> Result<serde_json::Value, AppError> {
+    import_all_data_with_state_gated(payload, state.inner(), import_request).await
+}
+
+#[cfg(test)]
+async fn import_all_data_with_state(
+    payload: serde_json::Value,
+    state: &Arc<AppState>,
+) -> Result<serde_json::Value, AppError> {
+    import_all_data_with_state_gated(payload, state, None).await
+}
+
+#[cfg(test)]
+async fn import_all_data_with_state_for_governed_import(
+    payload: serde_json::Value,
+    state: &Arc<AppState>,
+    import_request: GovernedDataImportRequest,
+) -> Result<serde_json::Value, AppError> {
+    import_all_data_with_state_gated(payload, state, Some(import_request)).await
+}
+
+async fn import_all_data_with_state_gated(
+    payload: serde_json::Value,
+    state: &Arc<AppState>,
+    import_request: Option<GovernedDataImportRequest>,
+) -> Result<serde_json::Value, AppError> {
+    let request = require_governed_data_import_request(import_request.as_ref())?;
+    import_all_data_governed_operation(payload, state, request).await
+}
+
+async fn import_all_data_governed_operation(
+    payload: serde_json::Value,
+    state: &Arc<AppState>,
+    request: &GovernedDataImportRequest,
+) -> Result<serde_json::Value, AppError> {
+    validate_import_payload_shape(&payload)?;
+    validate_import_targets_cover_payload(&payload, request)?;
+    let import_payload_hash = hash_json_value(&payload)?;
     let life_model: LifeModel = serde_json::from_value(
         payload
             .get("life_model")
@@ -163,9 +300,19 @@ pub async fn import_all_data(
     )
     .map_err(|e| AppError::external(format!("解析 vectors 失败: {}", e)))?;
 
+    let imported_message_count = messages.len();
+    let imported_vector_count = vectors.len();
     let previous_model = {
         let manager = state.life_model_manager.lock().await;
         manager.load().map_err(AppError::from)?
+    };
+    let previous_model_hash = hash_json_value(&serde_json::to_value(&previous_model)?)?;
+    let imported_model_hash = hash_json_value(&serde_json::to_value(&life_model)?)?;
+    let pre_import_snapshot_version = {
+        let vm = state.version_manager.lock().await;
+        vm.snapshot(&previous_model, "auto:pre-import", "导入覆盖之前自动备份")
+            .ok()
+            .map(|snapshot| snapshot.version)
     };
     let previous_messages = {
         let store = state.memory_store.lock().await;
@@ -175,12 +322,14 @@ pub async fn import_all_data(
         let store = state.vector_store.lock().await;
         store.export_all_chunks().map_err(AppError::from)?
     };
+    let durable_lifemodel_write = serde_json::to_value(&previous_model).map_err(AppError::from)?
+        != serde_json::to_value(&life_model).map_err(AppError::from)?;
 
     if let Err(import_error) =
-        apply_import_payload(state.inner().clone(), life_model, messages, vectors).await
+        apply_import_payload(state.clone(), life_model, messages, vectors).await
     {
         let rollback_error = apply_import_payload(
-            state.inner().clone(),
+            state.clone(),
             previous_model,
             previous_messages,
             previous_vectors,
@@ -198,7 +347,37 @@ pub async fn import_all_data(
             import_error
         )));
     }
-    Ok(())
+    Ok(serde_json::json!({
+        "success": true,
+        "legacy": false,
+        "governed_operation": true,
+        "operation_kind": "data_import",
+        "operation_purpose": request.purpose,
+        "warning": "data import ran as an explicit governed restore/import operation.",
+        "metadata_safe": true,
+        "contains_raw_content": false,
+        "durable_lifemodel_write": durable_lifemodel_write,
+        "imported_message_count": imported_message_count,
+        "imported_vector_count": imported_vector_count,
+        "import_payload_hash": import_payload_hash,
+        "previous_model_hash": previous_model_hash,
+        "imported_model_hash": imported_model_hash,
+        "pre_import_snapshot_created": pre_import_snapshot_version.is_some(),
+        "pre_import_snapshot_version": pre_import_snapshot_version,
+        "audit": {
+            "source_kind": "data_import",
+            "operation_purpose": request.purpose,
+            "import_targets": request.import_targets,
+            "import_payload_hash": import_payload_hash,
+            "previous_model_hash": previous_model_hash,
+            "imported_model_hash": imported_model_hash,
+            "imported_message_count": imported_message_count,
+            "imported_vector_count": imported_vector_count,
+            "pre_change_snapshot_version": pre_import_snapshot_version,
+            "metadata_safe": true,
+            "contains_raw_content": false,
+        },
+    }))
 }
 
 async fn apply_import_payload(
@@ -207,7 +386,17 @@ async fn apply_import_payload(
     messages: Vec<openlife_core::memory::ExportedMessage>,
     vectors: Vec<openlife_core::vectors::ExportedVectorChunk>,
 ) -> Result<(), AppError> {
-    persist_life_model(&state, life_model, false).await?;
+    persist_life_model(
+        &state,
+        life_model,
+        false,
+        LifeModelMaterializerCallerContext::new(
+            "data_import_governed_operation",
+            LifeModelMaterializerCallerKind::GovernedRestoreImportOperation,
+            LifeModelMaterializerCallerPurpose::GovernedRestoreImportOperation,
+        ),
+    )
+    .await?;
     {
         let store = state.memory_store.lock().await;
         store
@@ -404,7 +593,15 @@ pub async fn mark_onboarding_completed() -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_masked_api_key, KEY_MASK};
+    use super::*;
+    use openlife_core::llm::ChatMessage;
+
+    const W84_IMPORT_CURRENT_NAME_SECRET: &str = "W84_IMPORT_CURRENT_LIFEMODEL_SECRET";
+    const W84_IMPORT_PAYLOAD_NAME_SECRET: &str = "W84_IMPORT_PAYLOAD_LIFEMODEL_SECRET";
+    const W84_IMPORT_CURRENT_MESSAGE_SECRET: &str = "W84_IMPORT_CURRENT_MESSAGE_SECRET";
+    const W84_IMPORT_PAYLOAD_MESSAGE_SECRET: &str = "W84_IMPORT_PAYLOAD_MESSAGE_SECRET";
+    const W84_IMPORT_CURRENT_VECTOR_SECRET: &str = "W84_IMPORT_CURRENT_VECTOR_SECRET";
+    const W84_IMPORT_PAYLOAD_VECTOR_SECRET: &str = "W84_IMPORT_PAYLOAD_VECTOR_SECRET";
 
     #[test]
     fn resolve_masked_api_key_uses_current_key_for_mask_or_empty() {
@@ -416,5 +613,314 @@ mod tests {
     #[test]
     fn resolve_masked_api_key_uses_submitted_new_key() {
         assert_eq!(resolve_masked_api_key("sk-new", "sk-current"), "sk-new");
+    }
+
+    async fn seed_current_data(state: &Arc<AppState>) {
+        {
+            let manager = state.life_model_manager.lock().await;
+            let mut model = manager.load().unwrap();
+            model.identity.name = W84_IMPORT_CURRENT_NAME_SECRET.into();
+            manager.save(&model).unwrap();
+        }
+        {
+            let store = state.memory_store.lock().await;
+            store
+                .save_message(
+                    "w84-current-session",
+                    &ChatMessage {
+                        role: "user".into(),
+                        content: W84_IMPORT_CURRENT_MESSAGE_SECRET.into(),
+                    },
+                )
+                .unwrap();
+        }
+        {
+            let store = state.vector_store.lock().await;
+            store
+                .insert(
+                    "w84-current-session",
+                    W84_IMPORT_CURRENT_VECTOR_SECRET,
+                    &[0.1, 0.2, 0.3, 0.4],
+                    "w84-current",
+                )
+                .unwrap();
+        }
+    }
+
+    fn import_payload() -> serde_json::Value {
+        let mut model = LifeModel::default_model();
+        model.identity.name = W84_IMPORT_PAYLOAD_NAME_SECRET.into();
+        serde_json::json!({
+            "version": "1.0",
+            "life_model": model,
+            "messages": [{
+                "session_id": "w84-import-session",
+                "role": "assistant",
+                "content": W84_IMPORT_PAYLOAD_MESSAGE_SECRET,
+                "created_at": "2026-06-03T00:00:00Z"
+            }],
+            "vectors": [{
+                "session_id": "w84-import-session",
+                "content": W84_IMPORT_PAYLOAD_VECTOR_SECRET,
+                "embedding": [0.4, 0.3, 0.2, 0.1],
+                "source": "w84-import",
+                "created_at": "2026-06-03T00:00:00Z",
+                "tier": 2,
+                "access_count": 0,
+                "last_accessed_at": "",
+                "importance_score": 0.5,
+                "archived": false,
+                "archived_at": null,
+                "summary": null
+            }]
+        })
+    }
+
+    async fn exported_message_contents(state: &Arc<AppState>) -> Vec<String> {
+        state
+            .memory_store
+            .lock()
+            .await
+            .export_all_messages()
+            .unwrap()
+            .into_iter()
+            .map(|message| message.content)
+            .collect()
+    }
+
+    async fn exported_vector_contents(state: &Arc<AppState>) -> Vec<String> {
+        state
+            .vector_store
+            .lock()
+            .await
+            .export_all_chunks()
+            .unwrap()
+            .into_iter()
+            .map(|chunk| chunk.content)
+            .collect()
+    }
+
+    async fn current_model_name(state: &Arc<AppState>) -> String {
+        state
+            .life_model_manager
+            .lock()
+            .await
+            .load()
+            .unwrap()
+            .identity
+            .name
+    }
+
+    #[tokio::test]
+    async fn w93_import_all_data_without_governed_request_fails_closed() {
+        let state = crate::test_utils::test_app_state();
+        seed_current_data(&state).await;
+
+        let err = import_all_data_with_state(import_payload(), &state)
+            .await
+            .expect_err("data import must fail closed by default");
+
+        assert!(matches!(err, AppError::PermissionDenied { .. }));
+        assert!(err.message().contains("import_all_data"));
+        assert!(err.message().contains("governed import request"));
+        assert!(err.message().contains("explicitUserIntent=true"));
+        assert_eq!(
+            current_model_name(&state).await,
+            W84_IMPORT_CURRENT_NAME_SECRET
+        );
+        assert_eq!(
+            exported_message_contents(&state).await,
+            vec![W84_IMPORT_CURRENT_MESSAGE_SECRET.to_string()]
+        );
+        assert_eq!(
+            exported_vector_contents(&state).await,
+            vec![W84_IMPORT_CURRENT_VECTOR_SECRET.to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn w93_import_all_data_governed_request_allows_metadata_safe_import() {
+        let state = crate::test_utils::test_app_state();
+        seed_current_data(&state).await;
+
+        let result = import_all_data_with_state_for_governed_import(
+            import_payload(),
+            &state,
+            GovernedDataImportRequest::manual_restore_all_targets(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["legacy"], false);
+        assert_eq!(result["governed_operation"], true);
+        assert_eq!(result["operation_kind"], "data_import");
+        assert_eq!(result["operation_purpose"], "manual_restore");
+        assert_eq!(result["metadata_safe"], true);
+        assert_eq!(result["contains_raw_content"], false);
+        assert_eq!(result["durable_lifemodel_write"], true);
+        assert_eq!(result["imported_message_count"], 1);
+        assert_eq!(result["imported_vector_count"], 1);
+        assert!(result["import_payload_hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:")));
+        assert!(result["previous_model_hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:")));
+        assert!(result["imported_model_hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:")));
+        assert_eq!(result["pre_import_snapshot_created"], true);
+        assert!(result["pre_import_snapshot_version"].is_string());
+        assert_eq!(result["audit"]["metadata_safe"], true);
+        assert_eq!(result["audit"]["contains_raw_content"], false);
+        assert!(result.get("life_model").is_none());
+        assert!(result.get("messages").is_none());
+        assert!(result.get("vectors").is_none());
+        assert!(result.get("payload").is_none());
+        assert!(result.get("import_payload").is_none());
+
+        let response_dump = result.to_string();
+        for forbidden in [
+            W84_IMPORT_CURRENT_NAME_SECRET,
+            W84_IMPORT_PAYLOAD_NAME_SECRET,
+            W84_IMPORT_CURRENT_MESSAGE_SECRET,
+            W84_IMPORT_PAYLOAD_MESSAGE_SECRET,
+            W84_IMPORT_CURRENT_VECTOR_SECRET,
+            W84_IMPORT_PAYLOAD_VECTOR_SECRET,
+        ] {
+            assert!(
+                !response_dump.contains(forbidden),
+                "data import response leaked raw marker {forbidden}"
+            );
+        }
+
+        assert_eq!(
+            current_model_name(&state).await,
+            W84_IMPORT_PAYLOAD_NAME_SECRET
+        );
+        assert_eq!(
+            exported_message_contents(&state).await,
+            vec![W84_IMPORT_PAYLOAD_MESSAGE_SECRET.to_string()]
+        );
+        assert_eq!(
+            exported_vector_contents(&state).await,
+            vec![W84_IMPORT_PAYLOAD_VECTOR_SECRET.to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn w93_import_all_data_invalid_governed_request_fails_closed() {
+        let state = crate::test_utils::test_app_state();
+        seed_current_data(&state).await;
+
+        let err = import_all_data_with_state_gated(
+            import_payload(),
+            &state,
+            Some(GovernedDataImportRequest {
+                purpose: "normal_product".into(),
+                explicit_user_intent: true,
+                create_pre_change_snapshot: true,
+                import_targets: vec!["life_model".into()],
+            }),
+        )
+        .await
+        .expect_err("invalid governed import purpose must fail closed");
+
+        assert!(matches!(err, AppError::PermissionDenied { .. }));
+        assert!(err.message().contains("manual_restore"));
+        assert_eq!(
+            current_model_name(&state).await,
+            W84_IMPORT_CURRENT_NAME_SECRET
+        );
+    }
+
+    #[tokio::test]
+    async fn w93_import_all_data_payload_targets_must_match_governed_request() {
+        let state = crate::test_utils::test_app_state();
+        seed_current_data(&state).await;
+
+        let err = import_all_data_with_state_for_governed_import(
+            import_payload(),
+            &state,
+            GovernedDataImportRequest {
+                purpose: "manual_restore".into(),
+                explicit_user_intent: true,
+                create_pre_change_snapshot: true,
+                import_targets: vec!["life_model".into()],
+            },
+        )
+        .await
+        .expect_err("payload targets outside the governed request must fail closed");
+
+        assert!(matches!(err, AppError::PermissionDenied { .. }));
+        assert!(err.message().contains("messages"));
+        assert!(err.message().contains("import target"));
+        assert_eq!(
+            current_model_name(&state).await,
+            W84_IMPORT_CURRENT_NAME_SECRET
+        );
+        assert_eq!(
+            exported_message_contents(&state).await,
+            vec![W84_IMPORT_CURRENT_MESSAGE_SECRET.to_string()]
+        );
+        assert_eq!(
+            exported_vector_contents(&state).await,
+            vec![W84_IMPORT_CURRENT_VECTOR_SECRET.to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn w93_import_all_data_unsupported_payload_target_fails_closed() {
+        let state = crate::test_utils::test_app_state();
+        seed_current_data(&state).await;
+        let mut payload = import_payload();
+        payload["unsupported_target"] =
+            serde_json::json!({"secret": W84_IMPORT_PAYLOAD_NAME_SECRET});
+
+        let err = import_all_data_with_state_for_governed_import(
+            payload,
+            &state,
+            GovernedDataImportRequest::manual_restore_all_targets(),
+        )
+        .await
+        .expect_err("unsupported import target must fail closed");
+
+        assert!(matches!(err, AppError::PermissionDenied { .. }));
+        assert!(err.message().contains("unsupported import target"));
+        assert_eq!(
+            current_model_name(&state).await,
+            W84_IMPORT_CURRENT_NAME_SECRET
+        );
+    }
+
+    #[tokio::test]
+    async fn w84_export_all_data_remains_read_only_and_ungated() {
+        let state = crate::test_utils::test_app_state();
+        seed_current_data(&state).await;
+
+        let exported = export_all_data_with_state(&state).await.unwrap();
+
+        assert_eq!(
+            current_model_name(&state).await,
+            W84_IMPORT_CURRENT_NAME_SECRET
+        );
+        assert_eq!(
+            exported_message_contents(&state).await,
+            vec![W84_IMPORT_CURRENT_MESSAGE_SECRET.to_string()]
+        );
+        assert_eq!(
+            exported_vector_contents(&state).await,
+            vec![W84_IMPORT_CURRENT_VECTOR_SECRET.to_string()]
+        );
+        assert!(exported
+            .to_string()
+            .contains(W84_IMPORT_CURRENT_NAME_SECRET));
+        assert!(exported
+            .to_string()
+            .contains(W84_IMPORT_CURRENT_MESSAGE_SECRET));
+        assert!(exported
+            .to_string()
+            .contains(W84_IMPORT_CURRENT_VECTOR_SECRET));
     }
 }

@@ -59,7 +59,20 @@ pub struct AppState {
     pub last_snapshot_date: Arc<Mutex<Option<String>>>,
     pub mcp_audit_store: Arc<Mutex<McpAuditStore>>,
     pub agent_run_store: Option<Arc<Mutex<openlife_core::agent::AgentRunStore>>>,
+    pub evidence_store: Arc<Mutex<openlife_core::agent::EvidenceStore>>,
+    pub heuristic_store: Arc<Mutex<openlife_core::agent::HeuristicStore>>,
+    pub policy_store: Arc<openlife_core::agent::PolicyStore>,
     pub proposal_store: Option<Arc<Mutex<openlife_core::agent::ProposalStore>>>,
+    pub memory_lifecycle_store: Option<Arc<Mutex<openlife_core::agent::MemoryLifecycleStore>>>,
+    pub plan_execute_session_store:
+        Option<Arc<Mutex<openlife_core::agent::PlanExecuteSessionStore>>>,
+    pub main_chat_agent_session_store:
+        Option<Arc<Mutex<openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStore>>>,
+    pub main_chat_action_queue_store:
+        Option<Arc<Mutex<openlife_core::agent::main_chat_agent_v1::ActionQueueStore>>>,
+    pub main_chat_agent_event_store:
+        Option<Arc<Mutex<crate::main_chat_event_stream::MainChatAgentEventStore>>>,
+    pub main_chat_selected_skill_ids: Arc<Mutex<HashMap<String, String>>>,
     pub patch_store: Option<Arc<Mutex<openlife_core::life_model::patch_store::PatchStore>>>,
     pub rollout_metrics_store: Option<Arc<Mutex<openlife_core::agent::RolloutMetricsStore>>>,
     pub tool_permission_store: Arc<Mutex<openlife_core::tool_permissions::ToolPermissionStore>>,
@@ -70,6 +83,7 @@ pub struct AppState {
     pub startup_warnings: Vec<String>,
     pub provider_health_cache: Arc<tokio::sync::Mutex<Option<ProviderHealthCache>>>,
     pub scheduled_task_mutex: Arc<tokio::sync::Mutex<()>>,
+    pub web_search_fixture_output: Arc<tokio::sync::Mutex<Option<String>>>,
     pub shutdown_notify: Arc<tokio::sync::Notify>,
 }
 

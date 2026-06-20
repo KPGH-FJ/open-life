@@ -1,8 +1,10 @@
 use crate::agent::action_executor::helpers::is_private_url;
 use crate::agent::action_executor::helpers::{
-    call_a2a_agent_blocking, canonical_tool_source, extract_host_from_url,
-    fetch_url_on_worker_thread, filesystem_access_error, is_path_in_safe_paths,
-    search_web_on_worker_thread, summarize_content_blocking, ToolCallInternalResult,
+    call_a2a_agent_blocking, canonical_tool_source, ensure_external_write_content_size,
+    external_write_content_preview, extract_host_from_url, fetch_url_on_worker_thread,
+    filesystem_access_error, hs_requires_external_write_proposal, is_direct_external_write_tool,
+    is_path_in_safe_paths, search_web_on_worker_thread, summarize_content_blocking,
+    ToolCallInternalResult,
 };
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 use crate::tool_manifest::ToolSource;
@@ -305,6 +307,14 @@ impl super::ActionExecutor {
                     });
                 }
 
+                if let Some(fixture_output) = ctx.web_search_fixture_output {
+                    return Ok(ToolCallInternalResult {
+                        success: true,
+                        output: Some(fixture_output.to_string()),
+                        error: None,
+                    });
+                }
+
                 search_web_on_worker_thread(query, max_results)
             }
             "mcp.call_tool" => {
@@ -354,6 +364,41 @@ impl super::ActionExecutor {
                         )),
                     });
                 };
+
+                if hs_requires_external_write_proposal(ctx)
+                    && is_direct_external_write_tool(&target_manifest)
+                {
+                    return match self.create_external_write_action_proposal_record(
+                        request,
+                        ctx,
+                        &target_manifest.name,
+                        &tool_args,
+                        &target_manifest,
+                    ) {
+                        Some(Ok(proposal_id)) => Ok(ToolCallInternalResult {
+                            success: false,
+                            output: Some(serde_json::json!({
+                                "proposal_required": true,
+                                "proposal_type": "external_write_action",
+                                "proposal_id": proposal_id.clone(),
+                                "target_tool": target_manifest.name,
+                            }).to_string()),
+                            error: Some(format!(
+                                "hs_external_write_proposal_first: created ExternalWriteAction proposal (id: {})",
+                                proposal_id
+                            )),
+                        }),
+                        Some(Err(e)) => Err(e),
+                        None => Ok(ToolCallInternalResult {
+                            success: false,
+                            output: None,
+                            error: Some(
+                                "hs_external_write_proposal_first: proposal store unavailable; direct execution blocked"
+                                    .to_string(),
+                            ),
+                        }),
+                    };
+                }
 
                 // 2. Check permission using target tool's canonical scope
                 let target_source = canonical_tool_source(&target_manifest);
@@ -422,6 +467,14 @@ impl super::ActionExecutor {
                     });
                 }
 
+                if let Err(e) = ensure_external_write_content_size(content) {
+                    return Ok(ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some(e.to_string()),
+                    });
+                }
+
                 // Compute content metadata
                 let hash = digest(&SHA256, content.as_bytes());
                 let content_hash: String =
@@ -432,16 +485,7 @@ impl super::ActionExecutor {
                 } else {
                     "create"
                 };
-                let content_preview = if content.len() > 4000 {
-                    let preview: String = content.chars().take(4000).collect();
-                    format!(
-                        "{}... [truncated {} bytes]",
-                        preview,
-                        content.len() - preview.len()
-                    )
-                } else {
-                    content.to_string()
-                };
+                let content_preview = external_write_content_preview(content);
 
                 // Auto-create ExternalWriteAction Proposal if path is non-empty
                 let mut proposal_id: Option<String> = None;
@@ -511,6 +555,139 @@ impl super::ActionExecutor {
                     output: Some(result_payload.to_string()),
                     error: None,
                 })
+            }
+            "calendar.propose_event" => {
+                let title = args
+                    .get("title")
+                    .and_then(|v: &Value| v.as_str())
+                    .unwrap_or("Untitled Event");
+                let scheduled_at = args
+                    .get("scheduled_at")
+                    .or_else(|| args.get("date"))
+                    .and_then(|v: &Value| v.as_str())
+                    .unwrap_or("");
+                let description = args
+                    .get("description")
+                    .and_then(|v: &Value| v.as_str())
+                    .unwrap_or("");
+                let location = args
+                    .get("location")
+                    .and_then(|v: &Value| v.as_str())
+                    .unwrap_or("");
+
+                let after = serde_json::json!({
+                    "title": title,
+                    "description": description,
+                    "location": location,
+                    "scheduled_at": scheduled_at,
+                    "priority": args.get("priority").and_then(|v| v.as_str()).unwrap_or("medium"),
+                    "tool": "calendar.propose_event",
+                    "proposal_kind": "calendar_event",
+                });
+
+                if let Some(proposal_store) = ctx.proposal_store {
+                    let mut proposal = AgentProposal::new(
+                        ProposalType::ScheduledTask,
+                        "calendar.events",
+                        after,
+                        &format!("Agent proposed calendar event: {}", title),
+                        0.85,
+                        RiskLevel::Medium,
+                        ProposalSource::Manual,
+                    );
+                    if let Some(ref run_id) = request.source_run_id {
+                        proposal.run_id = Some(run_id.clone());
+                    }
+                    let proposal_id = proposal.id.clone();
+                    match proposal_store.create_proposal(&proposal) {
+                        Ok(_) => Ok(ToolCallInternalResult {
+                            success: true,
+                            output: Some(
+                                serde_json::json!({
+                                    "status": "proposal_created",
+                                    "proposal_id": proposal_id,
+                                    "proposal_type": "scheduled_task",
+                                    "title": title,
+                                })
+                                .to_string(),
+                            ),
+                            error: None,
+                        }),
+                        Err(e) => Ok(ToolCallInternalResult {
+                            success: false,
+                            output: None,
+                            error: Some(format!("Failed to create calendar proposal: {}", e)),
+                        }),
+                    }
+                } else {
+                    Ok(ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some("ProposalStore not available in execution context".to_string()),
+                    })
+                }
+            }
+            "email.propose_draft" => {
+                let to = args.get("to").and_then(|v| v.as_str()).unwrap_or("");
+                let cc = args.get("cc").and_then(|v| v.as_str()).unwrap_or("");
+                let bcc = args.get("bcc").and_then(|v| v.as_str()).unwrap_or("");
+                let subject = args.get("subject").and_then(|v| v.as_str()).unwrap_or("");
+                let body = args.get("body").and_then(|v| v.as_str()).unwrap_or("");
+
+                let after = serde_json::json!({
+                    "to": to,
+                    "cc": cc,
+                    "bcc": bcc,
+                    "subject": subject,
+                    "body": body,
+                    "content": body,
+                    "filename": "email-draft.txt",
+                    "tool": "email.propose_draft",
+                    "proposal_kind": "email_draft",
+                });
+
+                if let Some(proposal_store) = ctx.proposal_store {
+                    let mut proposal = AgentProposal::new(
+                        ProposalType::DataExport,
+                        "email.drafts",
+                        after,
+                        &format!("Agent proposed email draft: {}", subject),
+                        0.85,
+                        RiskLevel::Medium,
+                        ProposalSource::Manual,
+                    );
+                    if let Some(ref run_id) = request.source_run_id {
+                        proposal.run_id = Some(run_id.clone());
+                    }
+                    let proposal_id = proposal.id.clone();
+                    match proposal_store.create_proposal(&proposal) {
+                        Ok(_) => Ok(ToolCallInternalResult {
+                            success: true,
+                            output: Some(
+                                serde_json::json!({
+                                    "status": "proposal_created",
+                                    "proposal_id": proposal_id,
+                                    "proposal_type": "data_export",
+                                    "proposal_kind": "email_draft",
+                                    "subject": subject,
+                                })
+                                .to_string(),
+                            ),
+                            error: None,
+                        }),
+                        Err(e) => Ok(ToolCallInternalResult {
+                            success: false,
+                            output: None,
+                            error: Some(format!("Failed to create email draft proposal: {}", e)),
+                        }),
+                    }
+                } else {
+                    Ok(ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some("ProposalStore not available in execution context".to_string()),
+                    })
+                }
             }
             "task.create_proposal" => {
                 let title = args

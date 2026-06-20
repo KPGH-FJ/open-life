@@ -169,9 +169,36 @@ mod tests {
                 openlife_core::mcp_audit::McpAuditStore::new(temp_dir.path().join("mcp_audit.db")),
             )),
             agent_run_store: None,
+            evidence_store: Arc::new(tokio::sync::Mutex::new(
+                openlife_core::agent::EvidenceStore::new_in_memory().unwrap(),
+            )),
+            heuristic_store: Arc::new(tokio::sync::Mutex::new({
+                let store = openlife_core::agent::HeuristicStore::new_in_memory().unwrap();
+                store.seed_mvp_heuristics().unwrap();
+                store
+            })),
+            policy_store: Arc::new(openlife_core::agent::PolicyStore::mvp_builtin()),
             proposal_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::ProposalStore::new_in_memory().unwrap(),
             ))),
+            memory_lifecycle_store: Some(Arc::new(tokio::sync::Mutex::new(
+                openlife_core::agent::MemoryLifecycleStore::new_in_memory().unwrap(),
+            ))),
+            plan_execute_session_store: Some(Arc::new(tokio::sync::Mutex::new(
+                openlife_core::agent::PlanExecuteSessionStore::new_in_memory().unwrap(),
+            ))),
+            main_chat_agent_session_store: Some(Arc::new(tokio::sync::Mutex::new(
+                openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStore::new_in_memory()
+                    .unwrap(),
+            ))),
+            main_chat_action_queue_store: Some(Arc::new(tokio::sync::Mutex::new(
+                openlife_core::agent::main_chat_agent_v1::ActionQueueStore::new_in_memory()
+                    .unwrap(),
+            ))),
+            main_chat_agent_event_store: None,
+            main_chat_selected_skill_ids: Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             patch_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
             ))),
@@ -192,6 +219,7 @@ mod tests {
             startup_warnings: vec![],
             provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
             scheduled_task_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         })
     }

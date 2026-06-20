@@ -164,6 +164,7 @@ async fn execute_scheduled_task(
             "memory.search".into(),
             "proposal.create".into(),
         ],
+        tool_action_allowlist: Vec::new(),
     };
     let agent_loop = AgentLoop::new(
         agent_runtime,
@@ -211,6 +212,8 @@ async fn execute_scheduled_task(
             proposal_store: proposal_store_guard.as_deref(),
             agent_run_store: agent_run_store_guard.as_deref(),
             network_policy: Some(&network_policy),
+            hs_runtime_packet: None,
+            web_search_fixture_output: None,
         };
 
         agent_loop

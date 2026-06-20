@@ -1,9 +1,17 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import App from "./App";
 import { invoke } from "@tauri-apps/api/core";
 import { mockInvoke } from "@/test/mocks/tauri";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import {
+  AGENT_STAGE_ASSET_ROOT,
+  PRIMARY_PRODUCT_ROUTES,
+  RETAINED_LEGACY_ROUTES,
+} from "./productShellContract";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -200,5 +208,326 @@ describe("App onboarding", () => {
 
     expect(await screen.findByText(/Beta 试用准备中/)).toBeInTheDocument();
     expect(screen.getByText("查看试用完成度")).toBeInTheDocument();
+  });
+
+  it("does not show onboarding over no-backend product route errors", async () => {
+    const noBackendError = new Error(
+      "当前不在 OpenLife 桌面应用环境中，无法调用原生功能。请在桌面窗口内操作。"
+    );
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (
+        cmd === "has_completed_onboarding" ||
+        cmd === "get_system_diagnostics" ||
+        cmd === "list_proposals" ||
+        cmd === "get_config"
+      ) {
+        return Promise.reject(noBackendError);
+      }
+      return Promise.resolve({});
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/mailbox"]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByTestId("mailbox-page")).toBeInTheDocument();
+    expect(await screen.findByText(/当前不在 OpenLife 桌面应用环境中/)).toBeInTheDocument();
+    expect(screen.queryByText("欢迎使用 OpenLife")).not.toBeInTheDocument();
+  });
+
+  it("declares the W159 product route and label contract", () => {
+    expect(PRIMARY_PRODUCT_ROUTES).toEqual([
+      { label: "陪伴", path: "/companion", legacyAlias: "/chat" },
+      { label: "今日", path: "/today", legacyAlias: "/" },
+      { label: "Life Model", path: "/life-model", legacyAlias: "/builder" },
+      { label: "邮箱", path: "/mailbox", legacyAlias: "/review" },
+    ]);
+    expect(RETAINED_LEGACY_ROUTES).toEqual([
+      "/chat",
+      "/agent",
+      "/review",
+      "/builder",
+      "/life",
+      "/map",
+      "/memory",
+      "/runs",
+      "/settings",
+      "/mcp",
+      "/a2a",
+      "/metrics",
+      "/versions",
+      "/calibration",
+    ]);
+    expect(AGENT_STAGE_ASSET_ROOT).toBe("/assets/agent-stage");
+  });
+
+  it("renders product tabs with an active companion tab and a restrained secondary tools menu", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/companion"]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    for (const route of PRIMARY_PRODUCT_ROUTES) {
+      expect(await screen.findByRole("link", { name: route.label })).toHaveAttribute(
+        "href",
+        route.path
+      );
+    }
+
+    expect(screen.getByRole("link", { name: "陪伴" })).toHaveAttribute("aria-current", "page");
+    expect(screen.queryByRole("link", { name: "Runs" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "更多" }));
+
+    for (const [label, path] of [
+      ["Runs", "/runs"],
+      ["设置", "/settings"],
+      ["MCP", "/mcp"],
+      ["A2A", "/a2a"],
+      ["版本", "/versions"],
+      ["Metrics", "/metrics"],
+      ["Calibration", "/calibration"],
+    ] as const) {
+      expect(screen.getByRole("link", { name: label })).toHaveAttribute("href", path);
+    }
+  });
+
+  it("lets keyboard users open and close the secondary tools menu", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
+      return mockInvoke(cmd, args);
+    });
+    const user = userEvent.setup();
+
+    render(
+      <MemoryRouter initialEntries={["/companion"]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    await screen.findByRole("link", { name: "陪伴" });
+    const menuButton = screen.getByRole("button", { name: "更多" });
+    menuButton.focus();
+    expect(menuButton).toHaveFocus();
+
+    await user.keyboard("{Enter}");
+    expect(screen.getByRole("link", { name: "MCP" })).toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(screen.queryByRole("link", { name: "MCP" })).not.toBeInTheDocument();
+    });
+    expect(menuButton).toHaveFocus();
+  });
+
+  it("keeps W166 product surface files free of disabled backend wrappers", () => {
+    const productSurfaceFiles = [
+      "src/App.tsx",
+      "src/components/ProductShell.tsx",
+      "src/components/AgentStage.tsx",
+      "src/pages/CompanionPage.tsx",
+      "src/pages/TodayPage.tsx",
+      "src/pages/LifeModelPage.tsx",
+      "src/pages/MailboxPage.tsx",
+    ];
+    const forbiddenWrappers = [
+      "saveLifeModel",
+      "builderApplySignals",
+      "batchAcceptLowRiskProposals",
+      "runSkill",
+      "getSkillRuntimeStatus",
+      "checkRuntimeMigrationGate",
+      "runMultiStrategyAgentPreview",
+    ];
+
+    for (const filePath of productSurfaceFiles) {
+      const source = readFileSync(join(process.cwd(), filePath), "utf8");
+      for (const forbiddenWrapper of forbiddenWrappers) {
+        expect(source, `${filePath} must not import ${forbiddenWrapper}`).not.toMatch(
+          new RegExp(`\\b${forbiddenWrapper}\\b`)
+        );
+      }
+    }
+  });
+
+  it("renders /companion as the W162 companion surface with AgentStage", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/companion"]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByTestId("companion-page")).toBeInTheDocument();
+    expect(screen.getByTestId("agent-stage")).toHaveAttribute("data-state", "idle");
+    expect(screen.getByRole("status", { name: /OpenLife Agent 状态/ })).toBeInTheDocument();
+  });
+
+  it.each(["/chat", "/agent"])("keeps %s on the legacy ChatPage route", async path => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter initialEntries={[path]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByTestId("chat-page")).toBeInTheDocument();
+    expect(screen.queryByTestId("companion-page")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("agent-stage")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["/companion", "陪伴", "在线"],
+    ["/today", "今日", "today-page"],
+    ["/life-model", "Life Model", "life-model-page"],
+    ["/mailbox", "邮箱", "mailbox-page"],
+  ])("renders the %s product entry for %s", async (path, _label, expectedText) => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter initialEntries={[path]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    if (expectedText.endsWith("-page")) {
+      expect(await screen.findByTestId(expectedText)).toBeInTheDocument();
+    } else {
+      expect(await screen.findByText(expectedText)).toBeInTheDocument();
+    }
+  });
+
+  it.each(["/", "/workspace"])("keeps %s on the legacy DashboardPage route", async path => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter initialEntries={[path]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText("仪表盘")).toBeInTheDocument();
+    expect(screen.queryByTestId("today-page")).not.toBeInTheDocument();
+  });
+
+  it("keeps the completed product entries on their product pages", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
+      return mockInvoke(cmd, args);
+    });
+
+    for (const [path, testId] of [
+      ["/companion", "companion-page"],
+      ["/life-model", "life-model-page"],
+      ["/mailbox", "mailbox-page"],
+    ] as const) {
+      const { unmount } = render(
+        <MemoryRouter initialEntries={[path]}>
+          <App />
+        </MemoryRouter>
+      );
+      expect(await screen.findByTestId(testId)).toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  it.each(["/builder", "/life"])("keeps %s on the legacy BuilderPage route", async path => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter initialEntries={[path]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText("人生模型构建")).toBeInTheDocument();
+    expect(screen.queryByTestId("life-model-page")).not.toBeInTheDocument();
+  });
+
+  it("keeps /memory on the legacy MemorySearch route", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/memory"]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText("语义检索记忆")).toBeInTheDocument();
+    expect(screen.queryByTestId("life-model-page")).not.toBeInTheDocument();
+  });
+
+  it("keeps /review on the legacy ProposalReviewPage route", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/review"]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText("Review Center")).toBeInTheDocument();
+    expect(screen.queryByTestId("mailbox-page")).not.toBeInTheDocument();
+  });
+
+  it("keeps Settings reachable as a secondary route", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/settings"]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText("试用控制台")).toBeInTheDocument();
+  });
+
+  it("keeps Runs reachable as a secondary route", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/runs"]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByRole("heading", { name: "Runs" })).toBeInTheDocument();
   });
 });

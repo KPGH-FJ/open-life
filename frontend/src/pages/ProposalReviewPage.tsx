@@ -1,16 +1,19 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import {
   AlertCircle,
   Check,
   Clock,
   Inbox,
+  FileText,
   RefreshCw,
   ShieldCheck,
   X,
   Edit2,
   Hammer,
   SlidersHorizontal,
+  CheckCircle2,
+  CircleAlert,
 } from "lucide-react";
 import {
   acceptProposal,
@@ -19,10 +22,24 @@ import {
   postponeProposal,
   rejectProposal,
   editProposal,
+  draftEditMemoryProposal,
   getSystemDiagnostics,
   getConfig,
+  resumeMainChatAgentTask,
+  listMemoryAssets,
+  rollbackMemoryAsset,
+  listStage4KnowledgeAssetInventory,
+  createManagedKnowledgeWriteDraft,
+  confirmManagedKnowledgeWrite,
+  rollbackManagedKnowledgeWrite,
+  runMainChatStage4MemoryKnowledgeReport,
   type AgentProposal,
   type AppConfig,
+  type ManagedKnowledgeWriteApplyReport,
+  type ManagedKnowledgeWriteDraft,
+  type MemoryLifecycleRecord,
+  type MainChatStage4MemoryKnowledgeReport,
+  type Stage4KnowledgeAssetInventory,
 } from "../tauri";
 import { isSafeMode, getSafeModeReason } from "../utils/safeMode";
 
@@ -40,6 +57,11 @@ function riskClass(risk: AgentProposal["riskLevel"]): string {
   if (risk === "high" || risk === "critical") return "border-rose-200 bg-rose-50 text-rose-800";
   if (risk === "medium") return "border-amber-200 bg-amber-50 text-amber-800";
   return "border-emerald-200 bg-emerald-50 text-emerald-800";
+}
+
+function shortDigest(value?: string): string | null {
+  if (!value) return null;
+  return value.length > 16 ? `${value.slice(0, 16)}...` : value;
 }
 
 const TYPE_OPTIONS = [
@@ -68,12 +90,23 @@ const RISK_OPTIONS = [
   { value: "critical", label: "Critical" },
 ];
 
+type ReviewRouteState = {
+  mainChatTaskSessionId?: unknown;
+  returnTo?: unknown;
+};
+
 export default function ProposalReviewPage() {
+  const location = useLocation();
+  const routeState = location.state as ReviewRouteState | null;
+  const mainChatTaskSessionId =
+    typeof routeState?.mainChatTaskSessionId === "string" ? routeState.mainChatTaskSessionId : null;
   const [proposals, setProposals] = useState<AgentProposal[]>([]);
   const [loading, setLoading] = useState(true);
   const [actingId, setActingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [mainChatResumeTaskId, setMainChatResumeTaskId] = useState<string | null>(null);
+  const [mainChatResumeBusy, setMainChatResumeBusy] = useState(false);
   const [filterType, setFilterType] = useState("");
   const [filterRisk, setFilterRisk] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -82,6 +115,20 @@ export default function ProposalReviewPage() {
   const [batchAccepting, setBatchAccepting] = useState(false);
   const [diagnostics, setDiagnostics] = useState<any>(null);
   const [safePaths, setSafePaths] = useState<string[]>([]);
+  const [memoryAssets, setMemoryAssets] = useState<MemoryLifecycleRecord[]>([]);
+  const [actingMemoryId, setActingMemoryId] = useState<string | null>(null);
+  const [knowledgeInventory, setKnowledgeInventory] =
+    useState<Stage4KnowledgeAssetInventory | null>(null);
+  const [stage4Report, setStage4Report] = useState<MainChatStage4MemoryKnowledgeReport | null>(
+    null
+  );
+  const [managedTarget, setManagedTarget] = useState<"USER.md" | "MEMORY.md">("USER.md");
+  const [managedContent, setManagedContent] = useState("");
+  const [managedDraft, setManagedDraft] = useState<ManagedKnowledgeWriteDraft | null>(null);
+  const [managedApplied, setManagedApplied] = useState<ManagedKnowledgeWriteApplyReport | null>(
+    null
+  );
+  const [managedBusy, setManagedBusy] = useState(false);
 
   const safeMode = isSafeMode(diagnostics);
   const safeModeReason = getSafeModeReason(diagnostics);
@@ -124,14 +171,20 @@ export default function ProposalReviewPage() {
     setLoading(true);
     setError(null);
     try {
-      const [data, diag, config] = await Promise.all([
+      const [data, diag, config, lifecycleRecords, inventory, report] = await Promise.all([
         listProposals("pending", filterType || undefined, filterRisk || undefined, 100),
         getSystemDiagnostics().catch(() => null),
         getConfig().catch(() => null),
+        listMemoryAssets({ limit: 100 }).catch(() => []),
+        listStage4KnowledgeAssetInventory().catch(() => null),
+        runMainChatStage4MemoryKnowledgeReport().catch(() => null),
       ]);
       setProposals(data);
       setDiagnostics(diag);
       setSafePaths((config as AppConfig | null)?.system?.safe_paths ?? []);
+      setMemoryAssets(Array.isArray(lifecycleRecords) ? lifecycleRecords : []);
+      setKnowledgeInventory(inventory as Stage4KnowledgeAssetInventory | null);
+      setStage4Report(report as MainChatStage4MemoryKnowledgeReport | null);
       setSelectedIds(new Set());
     } catch (e) {
       setError(`加载 Proposal 失败：${String(e)}`);
@@ -154,6 +207,12 @@ export default function ProposalReviewPage() {
     setActingId(proposal.id);
     setError(null);
     setNotice(null);
+    const linkedMainChatTaskId =
+      action === "accept" &&
+      mainChatTaskSessionId &&
+      proposal.sourceDetail === mainChatTaskSessionId
+        ? mainChatTaskSessionId
+        : null;
 
     // Prevent accepting unsupported proposal types
     if (action === "accept" && isUnsupportedType(proposal.proposalType)) {
@@ -168,6 +227,9 @@ export default function ProposalReviewPage() {
       if (action === "accept") {
         await acceptProposal(proposal.id);
         setNotice(appliedNotice(proposal));
+        if (linkedMainChatTaskId) {
+          setMainChatResumeTaskId(linkedMainChatTaskId);
+        }
       } else if (action === "reject") {
         await rejectProposal(proposal.id);
         setNotice(`已拒绝：${proposal.affectedPath}`);
@@ -189,6 +251,44 @@ export default function ProposalReviewPage() {
       }
     } finally {
       setActingId(null);
+    }
+  };
+
+  const handleResumeMainChatTask = async () => {
+    if (!mainChatResumeTaskId) return;
+    setMainChatResumeBusy(true);
+    setError(null);
+    try {
+      const state = await resumeMainChatAgentTask(mainChatResumeTaskId);
+      const status = state.session?.status?.replace(/_/g, " ") || "running";
+      setNotice(`Main Chat task resumed: ${status}`);
+    } catch (e) {
+      setError(`恢复 Main Chat task 失败：${String(e)}`);
+    } finally {
+      setMainChatResumeBusy(false);
+    }
+  };
+
+  const canRollbackMemory = (record: MemoryLifecycleRecord): boolean =>
+    record.status === "materialized" &&
+    record.materializationStatus === "materialized" &&
+    !record.runtimeContextExcludedAt;
+
+  const rollbackMemory = async (record: MemoryLifecycleRecord) => {
+    setActingMemoryId(record.memoryId);
+    setError(null);
+    setNotice(null);
+    try {
+      const report = await rollbackMemoryAsset(
+        record.memoryId,
+        "User requested rollback from Review Center."
+      );
+      setNotice(`Memory rollback recorded: ${report.rollbackEvent.rollbackEventId.slice(-12)}`);
+      await load();
+    } catch (e) {
+      setError(`回滚记忆失败：${String(e)}`);
+    } finally {
+      setActingMemoryId(null);
     }
   };
 
@@ -240,8 +340,16 @@ export default function ProposalReviewPage() {
       } catch {
         parsed = editValue;
       }
-      await editProposal(proposal.id, parsed);
-      setNotice(`已编辑并应用：${proposal.affectedPath}`);
+      if (
+        proposal.proposalType === "memory_write" ||
+        proposal.proposalType === "preference_update"
+      ) {
+        await draftEditMemoryProposal(proposal.id, parsed);
+        setNotice(`已保存记忆草稿，等待单独接受：${proposal.affectedPath}`);
+      } else {
+        await editProposal(proposal.id, parsed);
+        setNotice(`已编辑并应用：${proposal.affectedPath}`);
+      }
       setEditingId(null);
       await load();
     } catch (e) {
@@ -269,6 +377,70 @@ export default function ProposalReviewPage() {
         .filter(p => p.riskLevel !== "high" && p.riskLevel !== "critical")
         .map(p => p.id);
       setSelectedIds(new Set(ids));
+    }
+  };
+
+  const createManagedDraft = async () => {
+    setManagedBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const draft = await createManagedKnowledgeWriteDraft(
+        managedTarget,
+        managedContent,
+        undefined,
+        memoryAssets
+          .filter(record => record.status === "materialized")
+          .slice(0, 5)
+          .map(record => record.memoryId)
+      );
+      setManagedDraft(draft);
+      setManagedApplied(null);
+      setNotice(`Managed ${draft.targetPath} draft created: ${draft.proposalId.slice(-12)}`);
+      await load();
+    } catch (e) {
+      setError(`创建知识资产草稿失败：${String(e)}`);
+    } finally {
+      setManagedBusy(false);
+    }
+  };
+
+  const confirmManagedDraft = async () => {
+    if (!managedDraft) return;
+    setManagedBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const applied = await confirmManagedKnowledgeWrite(managedDraft.proposalId);
+      setManagedApplied(applied);
+      setNotice(`Managed ${applied.targetPath} write applied: ${applied.versionId.slice(-12)}`);
+      await load();
+    } catch (e) {
+      setError(`确认知识资产写入失败：${String(e)}`);
+    } finally {
+      setManagedBusy(false);
+    }
+  };
+
+  const rollbackManagedApplied = async () => {
+    if (!managedApplied) return;
+    setManagedBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const rolledBack = await rollbackManagedKnowledgeWrite(managedApplied.versionId);
+      setNotice(
+        `Managed ${rolledBack.targetPath} rollback applied: ${rolledBack.restoredVersionId.slice(
+          -12
+        )}`
+      );
+      setManagedApplied(null);
+      setManagedDraft(null);
+      await load();
+    } catch (e) {
+      setError(`回滚知识资产写入失败：${String(e)}`);
+    } finally {
+      setManagedBusy(false);
     }
   };
 
@@ -304,6 +476,25 @@ export default function ProposalReviewPage() {
         {notice && (
           <div className="rounded-2xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
             {notice}
+          </div>
+        )}
+        {mainChatResumeTaskId && (
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700">
+            <div>
+              <div className="font-medium text-stone-900">Main Chat task ready to resume</div>
+              <div className="mt-1 text-xs text-stone-500">
+                Session {mainChatResumeTaskId.slice(-8)}
+              </div>
+            </div>
+            <button
+              type="button"
+              aria-label="Resume Main Chat task"
+              onClick={handleResumeMainChatTask}
+              disabled={mainChatResumeBusy}
+              className="inline-flex items-center gap-1.5 rounded-full bg-stone-900 px-4 py-2 text-xs font-medium text-amber-50 hover:bg-stone-800 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {mainChatResumeBusy ? "Resuming..." : "Resume Main Chat task"}
+            </button>
           </div>
         )}
         {error && (
@@ -361,6 +552,207 @@ export default function ProposalReviewPage() {
             </button>
           )}
         </div>
+
+        {memoryAssets.length > 0 && (
+          <section className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold text-stone-950">Memory lifecycle</div>
+                <div className="mt-1 text-xs text-stone-500">
+                  Accepted memories, materialized view status, and rollback history.
+                </div>
+              </div>
+              <span className="rounded-full bg-stone-100 px-2.5 py-1 text-[11px] text-stone-600">
+                {memoryAssets.length} records
+              </span>
+            </div>
+            <div className="mt-4 divide-y divide-stone-200 border-y border-stone-200">
+              {memoryAssets.slice(0, 8).map(record => (
+                <div
+                  key={record.memoryId}
+                  className="grid gap-3 py-3 text-sm md:grid-cols-[1fr_auto]"
+                >
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium text-stone-950">
+                        {record.content || record.memoryId}
+                      </span>
+                      <span className="rounded-full border border-stone-200 bg-stone-50 px-2 py-0.5 text-[11px] text-stone-600">
+                        {record.status.replace(/_/g, " ")}
+                      </span>
+                      <span className="rounded-full border border-stone-200 bg-stone-50 px-2 py-0.5 text-[11px] text-stone-600">
+                        view v{record.materializedViewVersion ?? 0}
+                      </span>
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-stone-500">
+                      <span>{record.scope}</span>
+                      <span>{record.category}</span>
+                      <span>{record.materializationStatus.replace(/_/g, " ")}</span>
+                      {record.rolledBackByEventId && (
+                        <span>rollback {record.rolledBackByEventId.slice(-12)}</span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {canRollbackMemory(record) && (
+                      <button
+                        type="button"
+                        onClick={() => rollbackMemory(record)}
+                        disabled={actingMemoryId === record.memoryId}
+                        className="inline-flex items-center gap-1.5 rounded-full border border-stone-200 px-3 py-1.5 text-xs font-medium text-stone-700 hover:bg-stone-50 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <RefreshCw size={13} />
+                        Rollback memory
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {knowledgeInventory && (
+          <section className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2 text-sm font-semibold text-stone-950">
+                  <FileText size={15} />
+                  Knowledge assets
+                </div>
+                <div className="mt-1 text-xs text-stone-500">
+                  Loaded and skipped bounded context files for the current workspace.
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2 text-[11px] text-stone-600">
+                <span className="rounded-full bg-stone-100 px-2.5 py-1">
+                  loaded {knowledgeInventory.loadedAssets.length}
+                </span>
+                <span className="rounded-full bg-stone-100 px-2.5 py-1">
+                  skipped {knowledgeInventory.skippedAssets.length}
+                </span>
+              </div>
+            </div>
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              <div className="rounded-2xl border border-stone-200 p-3">
+                <div className="text-xs font-semibold text-stone-700">Loaded</div>
+                <div className="mt-2 space-y-2">
+                  {knowledgeInventory.loadedAssets.slice(0, 8).map(asset => (
+                    <div key={asset.assetId} className="text-xs text-stone-600">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-medium text-stone-900">{asset.relativePath}</span>
+                        {asset.truncated && (
+                          <span className="rounded-full bg-amber-100 px-2 py-0.5 text-amber-700">
+                            truncated
+                          </span>
+                        )}
+                        <span className="font-mono text-[10px] text-stone-400">
+                          {asset.digest.slice(0, 16)}
+                        </span>
+                      </div>
+                      <div className="mt-0.5 text-[11px] text-stone-400">{asset.reason}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="rounded-2xl border border-stone-200 p-3">
+                <div className="text-xs font-semibold text-stone-700">Skipped</div>
+                <div className="mt-2 space-y-2">
+                  {knowledgeInventory.skippedAssets.slice(0, 8).map(asset => (
+                    <div key={asset.assetId} className="flex flex-wrap gap-2 text-xs">
+                      <span className="font-medium text-stone-900">{asset.relativePath}</span>
+                      <span className="rounded-full bg-stone-100 px-2 py-0.5 text-stone-600">
+                        {asset.reason}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </section>
+        )}
+
+        <section className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-stone-950">Managed knowledge write</div>
+              <div className="mt-1 text-xs text-stone-500">
+                USER.md and MEMORY.md writes use proposal, diff, confirmation, audit, reload, and
+                rollback.
+              </div>
+            </div>
+            {stage4Report && (
+              <span className="rounded-full bg-stone-100 px-2.5 py-1 text-[11px] text-stone-600">
+                MK4 {stage4Report.passedScenarioCount}/{stage4Report.scenarioCount}
+              </span>
+            )}
+          </div>
+          <div className="mt-4 grid gap-3 lg:grid-cols-[180px_1fr_auto]">
+            <select
+              value={managedTarget}
+              onChange={event => setManagedTarget(event.target.value as "USER.md" | "MEMORY.md")}
+              className="rounded-2xl border border-stone-200 bg-white px-3 py-2 text-sm text-stone-700 outline-none"
+            >
+              <option value="USER.md">USER.md</option>
+              <option value="MEMORY.md">MEMORY.md</option>
+            </select>
+            <textarea
+              value={managedContent}
+              onChange={event => setManagedContent(event.target.value)}
+              rows={3}
+              className="min-h-[88px] rounded-2xl border border-stone-200 px-3 py-2 text-sm text-stone-700 outline-none focus:border-stone-400"
+              placeholder="Draft managed content"
+            />
+            <button
+              type="button"
+              onClick={createManagedDraft}
+              disabled={managedBusy || managedContent.trim().length === 0}
+              className="inline-flex items-center justify-center gap-1.5 rounded-full bg-stone-900 px-4 py-2 text-xs font-medium text-amber-50 hover:bg-stone-800 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <FileText size={13} />
+              Draft diff
+            </button>
+          </div>
+          {managedDraft && (
+            <div className="mt-4 rounded-2xl border border-stone-200 bg-stone-50 p-3 text-xs text-stone-600">
+              <div className="flex flex-wrap gap-2">
+                <span className="font-medium text-stone-900">{managedDraft.targetPath}</span>
+                <span>proposal {managedDraft.proposalId.slice(-12)}</span>
+                <span>before {managedDraft.beforeDigest.slice(0, 12)}</span>
+                <span>after {managedDraft.afterDigest.slice(0, 12)}</span>
+                <span>{managedDraft.validation.allowed ? "validation passed" : "blocked"}</span>
+              </div>
+              <pre className="mt-2 max-h-32 overflow-auto rounded-xl bg-white p-2 font-mono text-[11px] text-stone-600">
+                {managedDraft.previewDiff}
+              </pre>
+              <button
+                type="button"
+                onClick={confirmManagedDraft}
+                disabled={managedBusy || !managedDraft.validation.allowed}
+                className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Check size={13} />
+                Confirm write
+              </button>
+            </div>
+          )}
+          {managedApplied && (
+            <div className="mt-3 flex flex-wrap items-center gap-2 rounded-2xl border border-emerald-100 bg-emerald-50 p-3 text-xs text-emerald-800">
+              <span>version {managedApplied.versionId.slice(-12)}</span>
+              <span>audit {managedApplied.auditId.slice(-12)}</span>
+              <span>reload {managedApplied.contextReload.loaded ? "loaded" : "missing"}</span>
+              <button
+                type="button"
+                onClick={rollbackManagedApplied}
+                disabled={managedBusy}
+                className="ml-auto inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-white px-3 py-1.5 text-xs font-medium text-emerald-800 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <RefreshCw size={13} />
+                Rollback file
+              </button>
+            </div>
+          )}
+        </section>
 
         {loading ? (
           <div className="rounded-3xl border border-stone-200 bg-white p-8 text-sm text-stone-500">
@@ -496,6 +888,79 @@ export default function ProposalReviewPage() {
                             )}
                           </div>
                         )}
+                        {(proposal.whyOpenLifeThinksThis ||
+                          (proposal.evidenceSummaries?.length ?? 0) > 0 ||
+                          (proposal.behaviorChecks?.length ?? 0) > 0) && (
+                          <div className="mt-3 rounded-2xl border border-sky-100 bg-sky-50 p-3 text-xs text-sky-950">
+                            <div className="flex items-center gap-2 font-medium text-sky-800">
+                              <AlertCircle size={14} />
+                              why OpenLife thinks this
+                            </div>
+                            {proposal.whyOpenLifeThinksThis && (
+                              <p className="mt-2 leading-5">{proposal.whyOpenLifeThinksThis}</p>
+                            )}
+                            {(proposal.evidenceSummaries?.length ?? 0) > 0 && (
+                              <div className="mt-3 space-y-2">
+                                {proposal.evidenceSummaries?.map(summary => (
+                                  <div
+                                    key={summary.id}
+                                    className="rounded-lg border border-sky-100 bg-white/80 p-2"
+                                  >
+                                    <div className="font-medium text-stone-700">
+                                      {summary.summary}
+                                    </div>
+                                    <div className="mt-1 flex flex-wrap gap-2 text-[10px] text-stone-500">
+                                      {summary.sourceAssetIds?.slice(0, 3).map(sourceId => (
+                                        <span
+                                          key={sourceId}
+                                          className="rounded-full bg-stone-100 px-2 py-0.5"
+                                        >
+                                          source {sourceId}
+                                        </span>
+                                      ))}
+                                      {shortDigest(summary.contentDigest) && (
+                                        <span className="rounded-full bg-stone-100 px-2 py-0.5 font-mono">
+                                          digest {shortDigest(summary.contentDigest)}
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                            {(proposal.behaviorChecks?.length ?? 0) > 0 && (
+                              <div className="mt-3 space-y-2">
+                                <div className="text-[11px] font-medium text-stone-600">
+                                  behavior check
+                                </div>
+                                {proposal.behaviorChecks?.map(check => (
+                                  <div
+                                    key={check.id}
+                                    className="flex items-start gap-2 rounded-lg bg-white/80 p-2 text-stone-700"
+                                  >
+                                    {check.passed ? (
+                                      <CheckCircle2
+                                        size={14}
+                                        className="mt-0.5 shrink-0 text-emerald-600"
+                                      />
+                                    ) : (
+                                      <CircleAlert
+                                        size={14}
+                                        className="mt-0.5 shrink-0 text-amber-600"
+                                      />
+                                    )}
+                                    <div>
+                                      <div className="font-medium">{check.label}</div>
+                                      {check.summary && (
+                                        <div className="mt-0.5 text-stone-500">{check.summary}</div>
+                                      )}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
                         {proposal.proposalType === "external_write_action" && proposal.after && (
                           <div className="mt-3 rounded-lg border border-stone-200 bg-stone-50 p-3 space-y-2">
                             <div className="text-xs font-medium text-stone-700">文件写入详情</div>
@@ -628,7 +1093,10 @@ export default function ProposalReviewPage() {
                             className="inline-flex items-center gap-1.5 rounded-full bg-stone-900 px-3 py-1.5 text-xs text-amber-50 hover:bg-stone-800 disabled:opacity-50"
                           >
                             <Check size={13} />
-                            保存并应用
+                            {proposal.proposalType === "memory_write" ||
+                            proposal.proposalType === "preference_update"
+                              ? "保存草稿"
+                              : "保存并应用"}
                           </button>
                           <button
                             onClick={cancelEdit}

@@ -1,5 +1,9 @@
 # OpenLife 前端体验重构计划
 
+> Scoped UX reference. Do not use as current implementation order. Frontend work
+> must align with `plans/README.md` and
+> `plans/openlife_lifemodel_governed_agent_runtime.md`.
+
 > 当前目标：把 OpenLife 从“功能控制台”推进到“用户可理解、愿意每天打开的成长驾驶舱”。
 
 ## 核心判断

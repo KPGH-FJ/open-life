@@ -1,6 +1,14 @@
 # OpenLife 开发者接手指南
 
 > 本文档面向新加入的开发者，帮助你快速理解项目结构、开发流程与关键约定。
+>
+> Agent 开发前必须先读 `AGENTS.md`、`plans/README.md` 和
+> `plans/openlife_lifemodel_governed_agent_runtime.md`。若本文与这些入口冲突，
+> 以这些入口为准。
+>
+> 结构表和模块名是交接快照，可能落后于 W123 后的实际代码拆分。执行开发前
+> 必须用 `rg --files`、当前代码和 progress index 复核，不要按本文的旧文件名
+> 或旧 command 数量直接改代码。
 
 ---
 

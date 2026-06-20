@@ -4,6 +4,21 @@
 > Status: Architecture baseline for the next development cycle
 > Scope: Product definition, system architecture, migration route, and engineering boundaries
 
+> 2026-05-30 alignment note: Read this together with
+> `plans/openlife_lifemodel_governed_agent_runtime.md`. This document remains
+> the Agent Framework baseline, but LifeModel-HS should now be treated as the
+> shared protocol layer and ReAct as the current default runtime strategy, not
+> the final architecture boundary.
+>
+> 2026-06-04 W123 alignment note: W65-W72 default Chat adapter guard/prep,
+> W73-W78 LifeModel maturation proof slice, W90-W97 Legacy Direct-Write
+> Convergence, W98-W105 Plan-Execute Product Vertical, W106-W113
+> RuntimeStrategy maturity, and W114-W123 ReAct Beta Execution Hardening are
+> complete within their scoped boundaries. This architecture document is still
+> useful for concepts, but current implementation order, migration permission,
+> and Beta blockers are governed by `AGENTS.md`, `plans/README.md`, and
+> `plans/openlife_lifemodel_governed_agent_runtime.md`.
+
 ## 1. Executive Summary
 
 OpenLife should be treated as a local-first personal Agent framework, not merely a desktop chat app or a life dashboard.
@@ -11,7 +26,11 @@ OpenLife should be treated as a local-first personal Agent framework, not merely
 The core thesis is:
 
 ```text
-OpenLife = Personal LifeModel + Local/Cloud Model Router + Agent Runtime + Memory/Feedback Loop + User-Controlled Actions
+OpenLife = LifeModel-HS Protocol Layer
+         + Governed Agent Runtime
+         + Runtime Strategies
+         + Memory/Feedback/Maturation Loop
+         + User-Controlled Actions
 ```
 
 The product should let a user build and continuously refine a private LifeModel, then use that LifeModel as the context layer for many AI-driven tasks: conversation, planning, writing, reviewing, tool execution, reflection, goal tracking, state updates, and future proactive assistance.
@@ -29,7 +48,10 @@ The current codebase already contains many necessary building blocks:
 
 However, these capabilities are still organized like app features. The missing architectural center is an explicit Agent Runtime that turns user intent into traceable tasks, contextual reasoning, actions, observations, proposals, confirmations, and updates to the LifeModel.
 
-This document defines that target architecture and a migration route from the current implementation to a coherent OpenLife Agent framework.
+This document defines the Agent Framework target architecture and a migration
+route from the current implementation to a coherent OpenLife Agent framework.
+The more specific next implementation order is defined in
+`plans/openlife_lifemodel_governed_agent_runtime.md`.
 
 ## 2. Product Definition
 

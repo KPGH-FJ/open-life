@@ -4,7 +4,7 @@ Date: 2026-05-27
 Status: design-only architecture plan
 Scope: next-generation OpenLife LifeModel as a local-first, user-governed Personal Heuristic System
 
-This plan has been superseded as an implementation entry by `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` and `plans/lifemodel_hs_mvp_task_specs.md`. It remains the design baseline and does not itself require or include production code changes, migrations, runtime changes, or feature implementation.
+This plan has been superseded as an implementation entry by `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`, `plans/lifemodel_hs_mvp_task_specs.md`, and `plans/openlife_lifemodel_governed_agent_runtime.md`. It remains the design baseline and does not itself require or include production code changes, migrations, runtime changes, or feature implementation.
 
 ## 1. Executive Design
 
@@ -37,19 +37,24 @@ Current facts in this plan are based on the following project files:
 
 - `AGENTS.md`: current stage, architecture primitives, governance rules, runtime boundaries.
 - `README.md`: product definition, current beta state, next LifeModel stage direction.
-- `plans/openlife_post_beta_roadmap.md`: current post-beta status and LifeModel Evolution entry point.
-- `plans/openlife_vnext_core_primitives_and_boundaries.md`: AgentRunEvent, PromptStack, ToolRuntime, AgentSpec, MemoryEvidence, LifeModelEvolutionEngine boundaries.
+- `plans/openlife_remaining_tasks_plan.md`: current remaining-task context and LifeModel Evolution entry point.
+- `plans/openlife_agent_framework_architecture.md`: AgentRun, ContextAssembler, ModelRouter, ActionExecutor, ProposalStore, Memory, and LifeModel boundaries.
 - `openlife-core/src/life_model.rs`: current LifeModel schema, YAML-oriented state, validation, patch application.
 - `openlife-core/src/memory.rs`: current MemoryStore tables for messages, memories, snapshots, chat sessions, and state history.
 - `openlife-core/src/vectors.rs`: current VectorStore chunk, tier, archive, and retrieval maintenance model.
-- `openlife-core/src/agent/memory_evidence.rs`: current MemoryEvidence struct and evidence-to-proposal helper.
+- `openlife-core/src/agent/proposal_engine.rs` and `openlife-core/src/agent/proposal_generators/chat.rs`: current proposal generation and chat/memory signal extraction helpers.
 - `openlife-core/src/agent/proposal_engine.rs`: current proposal generators and proposal creation from runs.
 - `openlife-core/src/agent/proposal_generators/chat.rs`: current PromptStack-governed chat proposal extraction with heuristic fallback.
 - `openlife-core/src/agent/context_assembler.rs`: current category-level context assembly and ContextPolicy.
-- `openlife-core/src/agent/prompt_stack.rs`: current PromptBlock, PromptStack, privacy classification, and block trace.
-- `src-tauri/src/chat_preprocess.rs`: current chat preprocessing, privacy redaction, memory retrieval, hot cache injection, and ContextAssembler V2.
-- `src-tauri/src/chat_persistence.rs`: current chat persistence, vector memory persistence, and chat proposal generation timeout.
+- `openlife-core/src/agent/context_assembler.rs`, `openlife-core/src/agent/runtime.rs`, and `openlife-core/src/agent/agent_loop.rs`: current context assembly, prompt construction, privacy classification, and run trace path.
+- `src-tauri/src/lib.rs`: current chat preprocessing, privacy redaction, memory retrieval, ContextAssembler V2 usage, persistence, vector memory persistence, and chat proposal generation timeout.
 - `src-tauri/src/commands/proposal.rs`: current Proposal apply path, patch store interaction, memory write/archive, tool permission, and replay closure.
+
+Terminology note: this design sometimes uses `PromptStack`, `ToolRuntime`,
+`AgentRunEvent`, and `AgentSpec` as target architecture concepts. In the
+current codebase, the closest concrete implementation is distributed across
+`ContextAssembler`, `AgentRuntime`, `AgentLoop`, `ActionExecutor`,
+`tool_permissions`, `AgentRun`, and `agent::store`.
 - `src-tauri/src/commands/calibration.rs`: current calibration proposal-first path and legacy-gated direct apply path.
 
 ## 3. Current Fact vs Target Design
@@ -59,7 +64,7 @@ Current facts in this plan are based on the following project files:
 | LifeModel source of truth | `LifeModel` is a Rust struct serialized to YAML with identity, goals, capabilities, state, relationships, preferences, and `evolution_rules`. | Accepted HS assets become source of truth; YAML becomes a materialized compatibility view. |
 | Runtime injection | PromptStack can inject full YAML, state hint, evolution hint, or summary. ContextPolicy is category-level. | ContextSelector and HeuristicSelector select specific state fields, heuristics, evidence summaries, and policies by task, risk, privacy, and token budget. |
 | Memory | MemoryStore persists messages/memories/snapshots/state history. VectorStore retrieves chunks and supports tier/archive maintenance. | Memory remains raw/retrieval layer. EvidenceStore is a separate curated layer with provenance, negative evidence, confidence, conflict, decay, and governance status. |
-| Evidence | `MemoryEvidence` exists and can convert evidence into proposals. It is not a full persisted evidence graph. | EvidenceStore is first-class, append-only, queryable, conflict-aware, and linked to events, signals, proposals, heuristics, regressions, and materialized views. |
+| Evidence | Current chat/memory proposal extraction can produce candidate updates, but there is no full persisted evidence graph. | EvidenceStore is first-class, append-only, queryable, conflict-aware, and linked to events, signals, proposals, heuristics, regressions, and materialized views. |
 | Signal extraction | Chat proposal extraction uses local LLM with PromptStack and fallback heuristics. It can generate goal, state, capability, and memory proposals. | SignalExtractor emits typed Signals with extraction method, confidence, uncertainty, negative cues, and audit. Candidate generation cannot directly mutate HS. |
 | Governance | Proposal-first path exists for LifeModel, MemoryWrite, MemoryArchive, ToolPermission, external writes, scheduled tasks, data exports. | LifeModelGovernor governs candidate HS assets with risk policy, evidence thresholds, regression results, conflict checks, batching, and user review fatigue controls. |
 | Patches | LifeModel patch/risk/snapshot paths exist. | Patches remain the apply mechanism for materialized views, but accepted HS assets are canonical. PatchStore records view materialization and compatibility mutations. |
@@ -103,8 +108,8 @@ Current facts in this plan are based on the following project files:
 | LifeModel | The user-owned Personal Heuristic System: accepted state, policy, evidence, heuristics, regression, maintenance rules, and materialized views. Not just YAML, profile text, or prompt content. | Accepted HS assets, materialization policy, user edits, accepted proposals. | Materialized YAML, PromptStack blocks, UI summaries, runtime context packets, selector results. | Owned by user; maintained by LifeModelGovernor and MaintenanceEngine; versioned, auditable, rollbackable. | Current `LifeModel` struct becomes a materialized view and compatibility schema. |
 | Raw Life Data | Original records from conversations, files, tool results, calendars, feedback, state records, plans, AgentRunEvents, and external sources. Raw data is not trusted as model truth. | Chat messages, memories, vector chunks, tool outputs, run events, feedback, user uploads. | Normalization input only. | Owned by user; source-specific retention and privacy controls. | Current MemoryStore, VectorStore, AgentRunEvent, feedback, files, and state_history are raw sources. |
 | Life Event | A normalized, immutable event describing something that happened in the user's life or agent interaction. | Raw records plus source metadata. | Typed event with source refs, time, actor, privacy, payload digest, redacted summary. | Append-only; can be superseded but not mutated. | Extends AgentRunEvent idea into life-domain events without replacing AgentRunEvent. |
-| Signal | A possible meaningful pattern extracted from one or more Life Events. Signal is weaker than Evidence. | Life Events, source spans, extractor prompts/rules, model outputs. | Typed signal with confidence, uncertainty, polarity, affected domain, and extraction audit. | Created by SignalExtractor; promoted, weakened, or discarded. | Current chat extraction and MemoryEvidence detection become Signal-producing steps. |
-| Evidence | A supported claim about the user, with source lineage, confidence, recency, negative evidence, and conflict links. Evidence is stronger than Signal but still not a heuristic by itself. | Signals, user confirmations, accepted/rejected proposals, run outcomes, repeated observations. | Evidence record used by candidate generation, selectors, explanations, and regression. | Append-only versions; confidence decays; can be opposed, archived, or superseded. | Current `MemoryEvidence` is the seed shape but needs persistence and graph links. |
+| Signal | A possible meaningful pattern extracted from one or more Life Events. Signal is weaker than Evidence. | Life Events, source spans, extractor prompts/rules, model outputs. | Typed signal with confidence, uncertainty, polarity, affected domain, and extraction audit. | Created by SignalExtractor; promoted, weakened, or discarded. | Current chat and memory proposal extraction become Signal-producing steps. |
+| Evidence | A supported claim about the user, with source lineage, confidence, recency, negative evidence, and conflict links. Evidence is stronger than Signal but still not a heuristic by itself. | Signals, user confirmations, accepted/rejected proposals, run outcomes, repeated observations. | Evidence record used by candidate generation, selectors, explanations, and regression. | Append-only versions; confidence decays; can be opposed, archived, or superseded. | Current proposal extraction outputs are seed signals, not yet persisted evidence. |
 | Heuristic | An executable guidance unit for the Agent: scope, trigger, condition, guidance, priority, confidence, risk, evidence links, opposing evidence, and lifecycle state. | Evidence clusters, user-authored rules, accepted proposals, regression outcomes. | Runtime guidance, policy constraints, selector candidates, prompt blocks or tool constraints. | Draft -> proposed -> accepted -> active -> trial -> deprecated/archived; user governs high-risk changes. | Replaces freeform `evolution_rules` as typed, governable, executable assets. |
 | State | Time-sensitive representation of current or recent user condition, focus, energy, health, mood, obligations, and transient context. Not identity. | State events, check-ins, feedback, tool observations, user edits. | State assets and materialized current-state views. | Short TTL by default; must not promote to identity without repeated evidence and confirmation. | Current `state` fields and `state_history` become materialized and raw layers. |
 | Policy | Rules that govern privacy, model routing, context selection, tool behavior, confirmation, retention, and HS maintenance. | User settings, accepted policy proposals, risk classifier, defaults. | Runtime decisions, selector constraints, proposal requirements, audit reasons. | Versioned and user-visible; privacy policies require explicit confirmation. | Builds on PrivacyPolicy, ContextPolicy, ToolRuntime, risk classifier, network policy. |
@@ -354,8 +359,8 @@ Raw Life Data
 | Module | Responsibility | Data Structures | Current Relationship | Implementation Direction | Risks |
 | --- | --- | --- | --- | --- | --- |
 | LifeEventStore | Persist normalized immutable life events from raw sources. | `LifeEvent`, source refs, privacy metadata, digest. | Extends AgentRunEvent and MemoryStore without merging them. | SQLite table plus source adapters for chat, memory, tool, feedback, calibration, user edits. | Event duplication, privacy payload mistakes. |
-| SignalExtractor | Convert Life Events into weak Signals. | `Signal`, extractor audit, confidence, uncertainty. | Generalizes current chat proposal extraction and MemoryEvidence creation. | Start with deterministic + existing local LLM PromptStack helper; output Signals instead of Proposals. | False positives/negatives; extractor drift. |
-| EvidenceStore | Store curated supported claims and opposition. | `Evidence`, conflict links, confidence, recency, status. | Evolves current `MemoryEvidence` into persisted graph. | SQLite with indexes by affected_path, evidence_type, status, risk, privacy. | Evidence bloat and stale claims. |
+| SignalExtractor | Convert Life Events into weak Signals. | `Signal`, extractor audit, confidence, uncertainty. | Generalizes current chat and memory proposal extraction. | Start with deterministic + existing extraction helpers; output Signals instead of directly creating accepted facts. | False positives/negatives; extractor drift. |
+| EvidenceStore | Store curated supported claims and opposition. | `Evidence`, conflict links, confidence, recency, status. | Turns proposal extraction outputs and run outcomes into a persisted graph. | SQLite with indexes by affected_path, evidence_type, status, risk, privacy. | Evidence bloat and stale claims. |
 | HeuristicStore | Store executable personal heuristics. | `Heuristic` schema below, lifecycle, examples, validation. | Replaces freeform `evolution_rules` as canonical asset. | SQLite plus JSON columns for trigger/condition/guidance; deterministic materialization. | Rule bloat, overfitting, conflicts. |
 | StateStore | Store current and historical state assets separately from identity. | `StateAsset`, TTL, promotion guard, evidence links. | Builds on `state` and `state_history`. | Keep transient state separate; materialize into current LifeModel YAML state. | Short-term contamination of long-term identity. |
 | PolicyStore | Store privacy, route, context, confirmation, retention, and maintenance policies. | `PolicyAsset`. | Builds on PrivacyPolicy, ContextPolicy, ToolRuntime policy, risk classifier. | Start with read-only default policies and proposal-backed user changes. | Hidden policy complexity. |
@@ -1040,7 +1045,7 @@ Migration should be additive and compatibility-first. Do not rewrite the current
 ### Phase 1: EvidenceStore MVP
 
 - Add EvidenceStore as separate local store.
-- Adapt current `MemoryEvidence` shape into persisted evidence.
+- Adapt current chat/memory proposal extraction outputs into persisted evidence candidates.
 - Record proposal rejection as negative evidence.
 - Link evidence to memory ids, AgentRunEvent ids, proposals, and affected paths.
 - No runtime behavior change yet.
@@ -1179,6 +1184,6 @@ This design satisfies the required LifeModel-HS design areas now governed by ADR
 
 ## 26. Final Architecture Position
 
-LifeModel-HS should land as an additive architecture layer, not a rewrite. The current OpenLife Agent framework already has the right governance spine: ProposalStore, PatchStore, AgentRunEvent, PromptStack, ToolRuntime, ExecutionSandbox, ModelRouter, ContextAssembler, MemoryStore, VectorStore, and privacy policies. The next-generation LifeModel should use that spine to become a user-governed Personal Heuristic System.
+LifeModel-HS should land as an additive architecture layer, not a rewrite. The current OpenLife Agent framework already has the right governance spine: ProposalStore, PatchStore, AgentRun records, context/prompt assembly, ActionExecutor, tool-permission checks, ModelRouter, ContextAssembler, MemoryStore, VectorStore, and privacy policies. The next-generation LifeModel should use that spine to become a user-governed Personal Heuristic System.
 
 The most important product judgment is restraint. OpenLife should learn from traces, but it should not behave as if every trace is truth. It should turn life data into evidence, evidence into proposed heuristics, proposals into accepted assets, and accepted assets into better runtime behavior. The user remains the owner; HS remains explainable; materialized views remain rebuildable; and the Agent becomes more personal because it is more governed, not because it is more hidden.

@@ -112,15 +112,38 @@ impl ProposalStore {
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
         conn.execute(
             "UPDATE proposals SET
-                status = ?2,
-                after_json = ?3,
-                resolved_at = ?4
+                run_id = ?2,
+                proposal_type = ?3,
+                source = ?4,
+                source_detail = ?5,
+                affected_path = ?6,
+                before_json = ?7,
+                after_json = ?8,
+                reason = ?9,
+                confidence = ?10,
+                risk_level = ?11,
+                status = ?12,
+                resolved_at = ?13,
+                expires_at = ?14
             WHERE id = ?1",
             params![
                 proposal.id,
-                proposal.status.to_string(),
+                proposal.run_id.as_ref(),
+                proposal.proposal_type.to_string(),
+                proposal.source,
+                proposal.source_detail.as_ref(),
+                proposal.affected_path,
+                proposal
+                    .before
+                    .as_ref()
+                    .map(|b| serde_json::to_string(b).unwrap_or_default()),
                 serde_json::to_string(&proposal.after).unwrap_or_default(),
+                proposal.reason,
+                proposal.confidence,
+                proposal.risk_level.to_string(),
+                proposal.status.to_string(),
                 proposal.resolved_at.map(|t| t.to_rfc3339()),
+                proposal.expires_at.map(|t| t.to_rfc3339()),
             ],
         )?;
         Ok(())
@@ -479,6 +502,28 @@ mod tests {
         assert_eq!(fetched.id, proposal.id);
         assert_eq!(fetched.status, ProposalStatus::Pending);
         assert_eq!(fetched.source, ProposalSource::BuilderReview);
+        assert!(fetched.expires_at.is_some());
+    }
+
+    #[test]
+    fn test_create_and_get_chat_conversation_proposal() {
+        let store = ProposalStore::new_in_memory().unwrap();
+        let proposal = AgentProposal::new(
+            ProposalType::MemoryWrite,
+            "memory.candidates",
+            serde_json::json!({ "content": "prefers concise replies" }),
+            "Chat conversation suggested a memory candidate",
+            0.72,
+            RiskLevel::Medium,
+            ProposalSource::ChatConversation,
+        );
+        store.create_proposal(&proposal).unwrap();
+
+        let fetched = store.get_proposal(&proposal.id).unwrap().unwrap();
+        assert_eq!(fetched.id, proposal.id);
+        assert_eq!(fetched.proposal_type, ProposalType::MemoryWrite);
+        assert_eq!(fetched.source, ProposalSource::ChatConversation);
+        assert_eq!(fetched.after, proposal.after);
         assert!(fetched.expires_at.is_some());
     }
 

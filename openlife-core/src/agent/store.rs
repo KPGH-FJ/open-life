@@ -55,6 +55,8 @@ impl AgentRunStore {
                 observations_json TEXT DEFAULT '[]',
                 reasoning_strategy TEXT,
                 reasoning_trace_json TEXT,
+                hs_selection_audit_json TEXT,
+                behavior_checks_json TEXT DEFAULT '[]',
                 deleted_at TEXT,
                 delete_reason TEXT,
                 started_at TEXT NOT NULL,
@@ -80,6 +82,13 @@ impl AgentRunStore {
         )?;
         Self::add_column_if_missing(&conn, "agent_runs", "reasoning_strategy", "TEXT")?;
         Self::add_column_if_missing(&conn, "agent_runs", "reasoning_trace_json", "TEXT")?;
+        Self::add_column_if_missing(&conn, "agent_runs", "hs_selection_audit_json", "TEXT")?;
+        Self::add_column_if_missing(
+            &conn,
+            "agent_runs",
+            "behavior_checks_json",
+            "TEXT NOT NULL DEFAULT '[]'",
+        )?;
         // Phase 0 migration: status_updates, step_count, tool_call_count
         Self::add_column_if_missing(
             &conn,
@@ -178,9 +187,10 @@ impl AgentRunStore {
                 context_summary_json, model_route_json, output_preview, error_json,
                 generated_proposals_json, actions_json, observations_json,
                 reasoning_strategy, reasoning_trace_json,
+                hs_selection_audit_json, behavior_checks_json,
                 status_updates_json, step_count, tool_call_count,
                 deleted_at, delete_reason, started_at, finished_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
             params![
                 run.id,
                 run.task_id,
@@ -205,6 +215,10 @@ impl AgentRunStore {
                 run.reasoning_trace
                     .as_ref()
                     .map(|t| serde_json::to_string(t).unwrap_or_default()),
+                run.hs_selection_audit
+                    .as_ref()
+                    .map(|audit| serde_json::to_string(audit).unwrap_or_default()),
+                serde_json::to_string(&run.behavior_checks).unwrap_or_default(),
                 serde_json::to_string(&run.status_updates).unwrap_or_default(),
                 run.step_count,
                 run.tool_call_count,
@@ -234,12 +248,14 @@ impl AgentRunStore {
                 observations_json = ?9,
                 reasoning_strategy = ?10,
                 reasoning_trace_json = ?11,
-                status_updates_json = ?12,
-                step_count = ?13,
-                tool_call_count = ?14,
-                deleted_at = ?15,
-                delete_reason = ?16,
-                finished_at = ?17
+                hs_selection_audit_json = ?12,
+                behavior_checks_json = ?13,
+                status_updates_json = ?14,
+                step_count = ?15,
+                tool_call_count = ?16,
+                deleted_at = ?17,
+                delete_reason = ?18,
+                finished_at = ?19
             WHERE id = ?1",
             params![
                 run.id,
@@ -261,6 +277,10 @@ impl AgentRunStore {
                 run.reasoning_trace
                     .as_ref()
                     .map(|t| serde_json::to_string(t).unwrap_or_default()),
+                run.hs_selection_audit
+                    .as_ref()
+                    .map(|audit| serde_json::to_string(audit).unwrap_or_default()),
+                serde_json::to_string(&run.behavior_checks).unwrap_or_default(),
                 serde_json::to_string(&run.status_updates).unwrap_or_default(),
                 run.step_count,
                 run.tool_call_count,
@@ -282,6 +302,7 @@ impl AgentRunStore {
                     context_summary_json, model_route_json, output_preview, error_json,
                     generated_proposals_json, actions_json, observations_json,
                     reasoning_strategy, reasoning_trace_json,
+                    hs_selection_audit_json, behavior_checks_json,
                     status_updates_json, step_count, tool_call_count,
                     deleted_at, delete_reason, started_at, finished_at
              FROM agent_runs WHERE id = ?1",
@@ -297,13 +318,15 @@ impl AgentRunStore {
             let observations_json: Option<String> = row.get(12)?;
             let reasoning_strategy: Option<String> = row.get(13)?;
             let reasoning_trace_json: Option<String> = row.get(14)?;
-            let status_updates_json: Option<String> = row.get(15)?;
-            let step_count: u32 = row.get(16)?;
-            let tool_call_count: u32 = row.get(17)?;
-            let deleted_at_str: Option<String> = row.get(18)?;
-            let delete_reason: Option<String> = row.get(19)?;
-            let started_at_str: String = row.get(20)?;
-            let finished_at_str: Option<String> = row.get(21)?;
+            let hs_selection_audit_json: Option<String> = row.get(15)?;
+            let behavior_checks_json: Option<String> = row.get(16)?;
+            let status_updates_json: Option<String> = row.get(17)?;
+            let step_count: u32 = row.get(18)?;
+            let tool_call_count: u32 = row.get(19)?;
+            let deleted_at_str: Option<String> = row.get(20)?;
+            let delete_reason: Option<String> = row.get(21)?;
+            let started_at_str: String = row.get(22)?;
+            let finished_at_str: Option<String> = row.get(23)?;
 
             let status = match status_str.as_str() {
                 "running" => AgentRunStatus::Running,
@@ -377,6 +400,13 @@ impl AgentRunStore {
                 observations,
                 reasoning_strategy,
                 reasoning_trace,
+                hs_selection_audit: hs_selection_audit_json
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok()),
+                behavior_checks: behavior_checks_json
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default(),
                 warnings: Vec::new(),
                 status_updates: status_updates_json
                     .as_deref()
@@ -407,6 +437,7 @@ impl AgentRunStore {
                     context_summary_json, model_route_json, output_preview, error_json,
                     generated_proposals_json, actions_json, observations_json,
                     reasoning_strategy, reasoning_trace_json,
+                    hs_selection_audit_json, behavior_checks_json,
                     status_updates_json, step_count, tool_call_count,
                     deleted_at, delete_reason, started_at, finished_at
              FROM agent_runs
@@ -428,6 +459,7 @@ impl AgentRunStore {
                     context_summary_json, model_route_json, output_preview, error_json,
                     generated_proposals_json, actions_json, observations_json,
                     reasoning_strategy, reasoning_trace_json,
+                    hs_selection_audit_json, behavior_checks_json,
                     status_updates_json, step_count, tool_call_count,
                     deleted_at, delete_reason, started_at, finished_at
              FROM agent_runs
@@ -450,13 +482,15 @@ impl AgentRunStore {
         let observations_json: Option<String> = row.get(12)?;
         let reasoning_strategy: Option<String> = row.get(13)?;
         let reasoning_trace_json: Option<String> = row.get(14)?;
-        let status_updates_json: Option<String> = row.get(15)?;
-        let step_count: u32 = row.get(16)?;
-        let tool_call_count: u32 = row.get(17)?;
-        let deleted_at_str: Option<String> = row.get(18)?;
-        let delete_reason: Option<String> = row.get(19)?;
-        let started_at_str: String = row.get(20)?;
-        let finished_at_str: Option<String> = row.get(21)?;
+        let hs_selection_audit_json: Option<String> = row.get(15)?;
+        let behavior_checks_json: Option<String> = row.get(16)?;
+        let status_updates_json: Option<String> = row.get(17)?;
+        let step_count: u32 = row.get(18)?;
+        let tool_call_count: u32 = row.get(19)?;
+        let deleted_at_str: Option<String> = row.get(20)?;
+        let delete_reason: Option<String> = row.get(21)?;
+        let started_at_str: String = row.get(22)?;
+        let finished_at_str: Option<String> = row.get(23)?;
 
         let status = match status_str.as_str() {
             "running" => AgentRunStatus::Running,
@@ -530,6 +564,13 @@ impl AgentRunStore {
             observations,
             reasoning_strategy,
             reasoning_trace,
+            hs_selection_audit: hs_selection_audit_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok()),
+            behavior_checks: behavior_checks_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default(),
             warnings: Vec::new(),
             status_updates: status_updates_json
                 .as_deref()
@@ -563,6 +604,7 @@ impl AgentRunStore {
                     context_summary_json, model_route_json, output_preview, error_json,
                     generated_proposals_json, actions_json, observations_json,
                     reasoning_strategy, reasoning_trace_json,
+                    hs_selection_audit_json, behavior_checks_json,
                     status_updates_json, step_count, tool_call_count,
                     deleted_at, delete_reason, started_at, finished_at
              FROM agent_runs

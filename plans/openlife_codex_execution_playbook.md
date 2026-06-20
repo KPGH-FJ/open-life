@@ -2,6 +2,12 @@
 
 > 适用场景：你通过 Codex 持续 coding 推进 OpenLife
 > 目标：让每一轮开发都能稳定推进，而不是在大 PRD 里反复发散
+>
+> 2026-06-04 W123 note: this file describes execution discipline, slicing, and
+> verification habits. It is not the current task-order authority. Current
+> project status and next architecture direction are governed by `AGENTS.md`,
+> `plans/README.md`, and
+> `plans/openlife_lifemodel_governed_agent_runtime.md`.
 
 ---
 
@@ -18,27 +24,56 @@
 
 与其他文档的关系：
 
+- 下一阶段总纲：见 [plans/openlife_lifemodel_governed_agent_runtime.md](/Users/fujing/Desktop/偶来福/plans/openlife_lifemodel_governed_agent_runtime.md)
+- 当前进度索引：见 [plans/lifemodel_governed_runtime_progress.md](/Users/fujing/Desktop/偶来福/plans/lifemodel_governed_runtime_progress.md)
 - 长期目标和产品哲学：见 [OpenLife_Final_PRD.md](/Users/fujing/Desktop/偶来福/OpenLife_Final_PRD.md)
-- 当前阶段主计划：见 [plans/openlife_development_plan.md](/Users/fujing/Desktop/偶来福/plans/openlife_development_plan.md)
+- 当前执行路线参考：见 [plans/openlife_development_plan.md](/Users/fujing/Desktop/偶来福/plans/openlife_development_plan.md)
 - 本文档：规定 Codex 的日常执行方式
 
 ---
 
 ## 2. 当前目标
 
-当前阶段，OpenLife 的目标已经从“做出 Alpha 底座”进一步切换到：
+当前阶段，OpenLife 已经完成 W1-W127 的一大轮 LifeModel-Governed Runtime
+开发与整理。下一轮 Goal-mode 开发应以
+`plans/lifemodel_governed_backend_completion_goal_spec.md` 的 Goal 2 /
+Evidence Graph v1 为直接入口，并以
+`plans/README.md` 和 `plans/openlife_lifemodel_governed_agent_runtime.md`
+作为权威上下文：
 
-- 把现有 Alpha 收口成 **可稳定试用版本**
-- 让用户可以自己走完 `设置 → 构建 → 对话 → 仪表盘 → 校准/回滚`
-- 为接下来的“边试用边修改”建立一条可重复验证的主基线
+- 把 LifeModel-HS 作为 Agent Framework 的核心协议层
+- 让 ReAct 作为当前默认执行策略完成治理化收敛
+- 在已完成的 LifeModel maturation proof、Plan-Execute vertical、
+  RuntimeStrategy maturity、ReAct hardening 和 Backend Completion Goal 1
+  schema/bridge 基线之上完成进入大规模 UI/UX 前的后端 kernel
 
-当前版本优先围绕五个闭环推进：
+当前版本的实际下一步不是继续单点 controlled Chat migration follow-up，
+而是按新的 backend completion master spec 推进：
 
-1. 对话闭环
-2. 人生模型闭环
-3. 校准/进化闭环
-4. 工具审批/执行闭环
-5. 恢复/治理闭环
+```text
+Master contract and schemas
+-> LifeEvent / Signal pipeline
+-> Evidence Graph v1
+-> Maturation Engine v1
+-> accepted guidance and governed materialization
+-> RuntimeHSPacket guidance integration
+-> Policy / Privacy / Tool governance hardening
+-> backend golden paths
+-> pre-UI read model contract freeze
+```
+
+注意：`run_multi_strategy_agent_preview` 是 preview/beta command。它写入
+metadata-safe 外层 AgentRun audit，但不代表 MultiStrategy Runtime 已接管
+默认 Chat。`check_runtime_migration_gate` 只是只读诊断，不执行 ReAct、
+PlanExecute、工具调用或外部写入。
+
+当前版本优先围绕这些闭环推进：
+
+1. 工具 Proposal 治理闭环
+2. ReAct AgentRun / Action / Observation 闭环
+3. LifeModel-HS 协议选择闭环
+4. LifeEvent / Signal / Evidence / Governor 成熟化闭环
+5. Review Center / Apply / Replay / Audit 恢复治理闭环
 
 如果一项需求不能明显强化这五个闭环，就默认不进入当前迭代。
 
@@ -46,16 +81,22 @@
 
 当前更适合 Codex 做的，不是继续铺大功能，而是：
 
-- 收口跨页面说明
-- 补试用主链路中的断点
-- 强化错误可见性和恢复路径
-- 建立更真实的 smoke 验证
+- 使用 Runtime Migration Gate 对既有 preview AgentRun / audit 做只读迁移诊断
+- 保持 `calendar.propose_event` / `email.propose_draft` 的 proposal-only taxonomy 与测试覆盖
+- 维护 ExternalWriteAction 入库前 size limit 与 payload minimization 硬验收
+- 保持 MultiStrategy preview / guarded Chat preview 的非默认边界
+- 硬化 RuntimeStrategy adapter/registry 的 metadata-safe 输出、fallback 和 blocked 行为
+- 后续 Chat migration 最低准入：gate 无 blocking reason、fallback 可用、metadata-safe trace、无真实外部写入、proposal-first 保持、`make ci` 通过
 
 当前不建议优先做的：
 
 - 再开远期产品线
 - 大规模重构为“更优雅的架构”
 - 脱离试用主链新增复杂生态能力
+- 直接把默认 Chat 主流程替换成 MultiStrategy Runtime
+- 把 preview/beta command 描述成正式产品路径
+- 把 RuntimeStrategy adapter 边界扩展成动态插件加载或大规模重构
+- 在 evidence/governor 路径成熟前扩充大量 LifeModel 字段
 
 ---
 
@@ -82,11 +123,19 @@ Codex 单轮最适合处理以下粒度的任务：
 每轮开发尽量遵循这个顺序：
 
 1. 读相关代码和现有文档
-2. 判断任务归属哪个闭环
-3. 先补或修正契约，再改实现
-4. 实现最小可用闭环
-5. 跑测试或补测试
-6. 更新文档中的状态或执行说明
+2. 检查文档状态和代码状态是否一致，尤其是 runtime authority、Tool Taxonomy、proposal-only、metadata-safe audit、AgentRun trace
+3. 判断任务归属哪个闭环
+4. 先补或修正契约，再改实现
+5. 实现最小可用闭环
+6. 跑测试或补测试
+7. 更新文档中的状态或执行说明，尤其是 AGENTS.md Tool Taxonomy
+
+任何改变工具执行状态的任务，都必须同步检查：
+
+- [AGENTS.md](/Users/fujing/Desktop/偶来福/AGENTS.md)
+- [README.md](/Users/fujing/Desktop/偶来福/README.md)
+- [plans/openlife_development_plan.md](/Users/fujing/Desktop/偶来福/plans/openlife_development_plan.md)
+- [plans/openlife_react_beta_roadmap.md](/Users/fujing/Desktop/偶来福/plans/openlife_react_beta_roadmap.md)
 
 ### 3.3 单轮输出要求
 
@@ -247,6 +296,14 @@ Codex 做任何新增功能时，都应显式回答：
 
 涉及主链路时，优先同时做两边。
 
+当前发布门控始终是：
+
+```bash
+make ci
+```
+
+即使只改 Markdown 状态文档，也要运行 `make ci`，因为入口文档错误会误导后续开发 Agent。不要在文档里写死测试数量；以本次 `make ci` 输出为准。
+
 ### 7.2 当前最该补的测试类型
 
 优先补下面这些，而不是只补渲染测试：
@@ -316,9 +373,11 @@ Codex 做任何新增功能时，都应显式回答：
 优先级如下：
 
 1. 当前真实代码行为
-2. 当前阶段主计划
-3. Codex 执行手册
-4. 大 PRD
+2. `AGENTS.md` 与 `plans/README.md`
+3. `plans/openlife_lifemodel_governed_agent_runtime.md`
+4. 当前执行路线参考
+5. Codex 执行手册
+6. 大 PRD
 
 如果大 PRD 和当前实现明显冲突，先修正文档，不要强行让代码迎合过期叙述。
 

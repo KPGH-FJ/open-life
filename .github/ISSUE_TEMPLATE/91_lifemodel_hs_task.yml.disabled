@@ -1,3 +1,5 @@
+# Archived solo-mode template. Rename back to .yml only when OpenLife returns
+# to issue-driven LifeModel-HS tracking.
 name: LifeModel-HS Task
 description: Implement exactly one LMHS task from the LifeModel-HS MVP specs.
 title: "LMHS-N: Task Title"

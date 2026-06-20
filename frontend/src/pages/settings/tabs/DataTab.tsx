@@ -86,7 +86,9 @@ export default function DataTab({
               setEvolutionResult(null);
               try {
                 const res = await generateEvolutionReport();
-                setEvolutionResult(`已应用规则 ${res.applied_rules.length} 条\n${res.summary}`);
+                setEvolutionResult(
+                  `只读进化报告：候选 ${res.proposal_candidate_count} 条，已应用 ${res.applied_rule_count} 条\n${res.summary}`
+                );
               } catch (e: any) {
                 setEvolutionResult("生成失败: " + readableError(e));
               } finally {

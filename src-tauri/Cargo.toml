@@ -12,6 +12,7 @@ default-run = "openlife-tauri"
 [lib]
 name = "openlife_tauri_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+doctest = false
 
 [build-dependencies]
 tauri-build = { version = "2.2", features = [] }
@@ -35,6 +36,7 @@ chrono = "0.4"
 serde_yaml = "0.9"
 uuid = { version = "1.0", features = ["v4"] }
 sha2 = "0.10"
+rusqlite = { version = "0.32", features = ["bundled"] }
 # open: cross-platform URL/file opening (used for mailto: links)
 open = "5.3"
 axum = "0.7"
@@ -42,6 +44,7 @@ log = "0.4"
 openlife-core = { path = "../openlife-core" }
 
 [dev-dependencies]
+tauri = { version = "2.5", features = ["test"] }
 tempfile = "3.14"
 
 [[bin]]

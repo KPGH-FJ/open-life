@@ -2,7 +2,8 @@
 #
 # GitHub does not apply this file automatically. Use it as the canonical label
 # set when configuring repository labels manually or through a future label sync
-# tool. Keep issue templates and PR templates aligned with these names.
+# tool. Some issue-heavy labels are kept for future team mode, but solo-mode
+# templates should avoid applying them automatically.
 
 - name: lifemodel-hs
   color: "5319e7"
@@ -22,19 +23,19 @@
 
 - name: needs-plan
   color: "fbca04"
-  description: Requires an implementation plan before coding.
+  description: Reserved for issue-heavy/team-mode tasks that require a plan before coding.
 
 - name: needs-triage
   color: "d4c5f9"
-  description: Needs human triage before assignment.
+  description: Reserved for team-mode issues that need human triage before assignment.
 
 - name: ready-for-codex
   color: "0e8a16"
-  description: Issue has enough scope, context, and approval for Codex to work.
+  description: Optional issue/PR marker for work with enough scope and approval for Codex.
 
 - name: codex-in-progress
   color: "5319e7"
-  description: Codex is actively working on this issue or pull request.
+  description: Optional marker when Codex is actively working on an issue or pull request.
 
 - name: needs-human
   color: "b60205"

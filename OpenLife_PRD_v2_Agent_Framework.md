@@ -1,8 +1,12 @@
 # OpenLife PRD v2: Personal Agent Framework
 
 > Version: 2026-04-24
-> Status: Current product definition
+> Status: Product definition baseline; implementation order is governed by `plans/openlife_lifemodel_governed_agent_runtime.md`
 > Supersedes: `OpenLife_Final_PRD.md` for future planning
+
+> 2026-05-30 alignment note: Use this PRD for product intent, not current
+> execution order. For Agent development, read `AGENTS.md`, `plans/README.md`,
+> and `plans/openlife_lifemodel_governed_agent_runtime.md` first.
 
 ## 1. Product Definition
 
@@ -15,7 +19,10 @@ OpenLife is not just an app. It is a framework for personal AI execution.
 The core product formula is:
 
 ```text
-OpenLife = LifeModel + Agent Runtime + Local/Cloud Model Router + Memory + Feedback Loop
+OpenLife = LifeModel-HS Protocol Layer
+         + Governed Agent Runtime
+         + Runtime Strategies
+         + Memory/Feedback/Maturation Loop
 ```
 
 ## 2. Product Thesis
@@ -521,4 +528,3 @@ However, future product and engineering decisions should prioritize this PRD v2 
 
 - [`plans/openlife_agent_framework_architecture.md`](plans/openlife_agent_framework_architecture.md)
 - [`plans/openlife_development_plan.md`](plans/openlife_development_plan.md)
-

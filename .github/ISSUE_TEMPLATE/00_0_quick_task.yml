@@ -1,0 +1,37 @@
+name: Optional Quick Task
+description: Use only when a small task needs a durable GitHub checkpoint.
+title: "Task: "
+labels:
+  - task
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What should change, and why?
+      placeholder: "Keep this short. One task, one outcome. Skip GitHub entirely for ordinary local work."
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Link relevant files, notes, screenshots, or prior discussion if useful.
+
+  - type: textarea
+    id: done
+    attributes:
+      label: Done When
+      description: What would make this task clearly complete?
+      value: |
+        - [ ]
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: risk
+    attributes:
+      label: Risk
+      options:
+        - label: This touches LifeModel source of truth, memory, privacy, model routing, tool execution, proposals, audit, or runtime authority.

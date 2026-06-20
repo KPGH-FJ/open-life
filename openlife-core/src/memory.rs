@@ -133,11 +133,15 @@ impl MemoryStore {
                 tags_json TEXT NOT NULL DEFAULT '[]',
                 privacy_level TEXT NOT NULL DEFAULT 'private',
                 embedding_id INTEGER,
+                archived INTEGER NOT NULL DEFAULT 0,
+                archived_at TEXT,
                 checksum TEXT NOT NULL
             )",
             [],
         )?;
         Self::ensure_column_exists(&conn, "memories", "embedding_id", "INTEGER")?;
+        Self::ensure_column_exists(&conn, "memories", "archived", "INTEGER NOT NULL DEFAULT 0")?;
+        Self::ensure_column_exists(&conn, "memories", "archived_at", "TEXT")?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_memories_session_created ON memories(session_id, created_at DESC)",
             [],
@@ -148,6 +152,10 @@ impl MemoryStore {
         )?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_memories_embedding_id ON memories(embedding_id)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_archived ON memories(archived)",
             [],
         )?;
         conn.execute(
@@ -277,8 +285,8 @@ impl MemoryStore {
             "INSERT INTO memories (
                 session_id, content, content_type, source, role, created_at,
                 importance_score, access_count, last_accessed_at, tags_json,
-                privacy_level, embedding_id, checksum
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                privacy_level, embedding_id, archived, archived_at, checksum
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 session_id,
                 content,
@@ -292,6 +300,8 @@ impl MemoryStore {
                 tags_json,
                 privacy_level,
                 embedding_id,
+                0_i64,
+                Option::<String>::None,
                 checksum
             ],
         )?;
@@ -707,7 +717,7 @@ impl MemoryStore {
                 "SELECT m.id, m.session_id, m.content, m.source, m.created_at, m.access_count, m.last_accessed_at, bm25(memories_fts) AS rank
                  FROM memories_fts
                  JOIN memories m ON m.id = memories_fts.rowid
-                 WHERE memories_fts MATCH ?1 AND m.session_id = ?2
+                 WHERE memories_fts MATCH ?1 AND m.session_id = ?2 AND m.archived = 0
                  ORDER BY rank ASC, m.created_at DESC
                  LIMIT ?3",
             ) {
@@ -725,7 +735,7 @@ impl MemoryStore {
                 "SELECT m.id, m.session_id, m.content, m.source, m.created_at, m.access_count, m.last_accessed_at, bm25(memories_fts) AS rank
                  FROM memories_fts
                  JOIN memories m ON m.id = memories_fts.rowid
-                 WHERE memories_fts MATCH ?1
+                 WHERE memories_fts MATCH ?1 AND m.archived = 0
                  ORDER BY rank ASC, m.created_at DESC
                  LIMIT ?2",
             ) {
@@ -749,7 +759,7 @@ impl MemoryStore {
         if !ids.is_empty() {
             let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
             let sql = format!(
-                "UPDATE memories SET access_count = access_count + 1, last_accessed_at = ?1 WHERE id IN ({})",
+                "UPDATE memories SET access_count = access_count + 1, last_accessed_at = ?1 WHERE archived = 0 AND id IN ({})",
                 placeholders
             );
             let mut params_vec: Vec<&dyn rusqlite::ToSql> = vec![&now];
@@ -771,13 +781,13 @@ impl MemoryStore {
         let sql = if session_id.is_empty() {
             "SELECT id, session_id, content, source, created_at, access_count, last_accessed_at
              FROM memories
-             WHERE content LIKE ?1
+             WHERE archived = 0 AND content LIKE ?1
              ORDER BY created_at DESC
              LIMIT ?2"
         } else {
             "SELECT id, session_id, content, source, created_at, access_count, last_accessed_at
              FROM memories
-             WHERE session_id = ?1 AND content LIKE ?2
+             WHERE archived = 0 AND session_id = ?1 AND content LIKE ?2
              ORDER BY created_at DESC
              LIMIT ?3"
         };
@@ -848,6 +858,23 @@ impl MemoryStore {
             relevance_score: score,
             source_tier: source_tier.to_string(),
         }
+    }
+
+    pub fn archive_lifecycle_memory_records(&self, memory_id: &str) -> Result<usize> {
+        let lifecycle_source = format!("memory_lifecycle:{memory_id}");
+        let tag_match = format!("%memory_id:{memory_id}%");
+        let now = Utc::now().to_rfc3339();
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let archived = conn.execute(
+            "UPDATE memories
+             SET archived = 1, archived_at = ?1
+             WHERE archived = 0 AND (source = ?2 OR tags_json LIKE ?3)",
+            params![now, lifecycle_source, tag_match],
+        )?;
+        Ok(archived)
     }
 }
 

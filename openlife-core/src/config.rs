@@ -195,6 +195,9 @@ pub struct SystemConfig {
     /// Base URL for SearXNG instance (e.g. "https://searx.example.com")
     #[serde(default)]
     pub searxng_url: String,
+    /// Additional bounded knowledge roots for Main Chat context loading.
+    #[serde(default)]
+    pub knowledge_roots: Vec<String>,
 }
 
 impl Default for SystemConfig {
@@ -214,6 +217,7 @@ impl Default for SystemConfig {
             search_provider: default_search_provider(),
             search_provider_key: String::new(),
             searxng_url: String::new(),
+            knowledge_roots: Vec::new(),
         }
     }
 }

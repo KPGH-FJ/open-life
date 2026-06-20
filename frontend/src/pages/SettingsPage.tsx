@@ -28,17 +28,19 @@ import {
   type PluginRecord,
   type ToolManifest,
 } from "../tauri";
-import { LayoutDashboard, Cpu, Shield, Database, Puzzle } from "lucide-react";
+import { LayoutDashboard, Cpu, Shield, Database, Puzzle, FlaskConical } from "lucide-react";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, readTextFile } from "@tauri-apps/plugin-fs";
 import LoadingSpinner from "../components/LoadingSpinner";
 import { isSafeMode } from "../utils/safeMode";
+import { isInternalDebugSurfaceEnabled } from "../utils/internalDebug";
 import { buildRuntimeActionError, buildSafeModeBlockedMessage } from "../utils/runtimeMessages";
 import PluginSection from "./settings/PluginSection";
 import OverviewTab from "./settings/tabs/OverviewTab";
 import ProviderTab from "./settings/tabs/ProviderTab";
 import PrivacyTab from "./settings/tabs/PrivacyTab";
 import DataTab from "./settings/tabs/DataTab";
+import MultiStrategyPreviewSection from "./settings/MultiStrategyPreviewSection";
 
 function defaultConfig(): AppConfig {
   return {
@@ -103,6 +105,7 @@ export default function SettingsPage() {
   const [securityLoading, setSecurityLoading] = useState(false);
   const [securityMessage, setSecurityMessage] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<string>("overview");
+  const showInternalDebug = isInternalDebugSurfaceEnabled();
 
   useEffect(() => {
     getConfig()
@@ -119,6 +122,12 @@ export default function SettingsPage() {
   useEffect(() => {
     refreshAllDiagnostics();
   }, []);
+
+  useEffect(() => {
+    if (!showInternalDebug && activeTab === "experimental") {
+      setActiveTab("overview");
+    }
+  }, [activeTab, showInternalDebug]);
 
   const refreshAllDiagnostics = async () => {
     const [router, modelRouter, diag, cache, policy, permissions, pluginRecords, manifests] =
@@ -364,6 +373,9 @@ export default function SettingsPage() {
             { id: "privacy", label: "隐私安全", icon: Shield },
             { id: "data", label: "数据", icon: Database },
             { id: "plugins", label: "插件", icon: Puzzle },
+            ...(showInternalDebug
+              ? [{ id: "experimental", label: "实验", icon: FlaskConical }]
+              : []),
           ].map(tab => (
             <button
               key={tab.id}
@@ -407,6 +419,7 @@ export default function SettingsPage() {
             diagnostics={diagnostics}
             routerStatus={routerStatus}
             modelRouterStatus={modelRouterStatus}
+            showInternalDebug={showInternalDebug}
           />
         )}
 
@@ -463,6 +476,9 @@ export default function SettingsPage() {
             onRefreshDiagnostics={refreshAllDiagnostics}
           />
         )}
+
+        {/* Experimental Tab */}
+        {showInternalDebug && activeTab === "experimental" && <MultiStrategyPreviewSection />}
 
         {/* Save button - always visible */}
         <div className="flex justify-end pt-4 border-t">

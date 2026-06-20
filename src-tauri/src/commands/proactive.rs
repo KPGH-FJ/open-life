@@ -7,6 +7,12 @@ use tauri::State;
 pub async fn get_proactive_suggestions(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<openlife_core::proactive::ProactiveSuggestion>, String> {
+    get_proactive_suggestions_with_state(state.inner()).await
+}
+
+pub(crate) async fn get_proactive_suggestions_with_state(
+    state: &Arc<AppState>,
+) -> Result<Vec<openlife_core::proactive::ProactiveSuggestion>, String> {
     let cfg = state.config.lock().await;
     let config = ProactiveConfig {
         stale_goal_days: cfg.system.stale_goal_days,
@@ -52,5 +58,67 @@ pub async fn get_proactive_suggestions(
     };
 
     let engine = ProactiveEngine::new(config);
-    Ok(engine.generate_suggestions(&life_model, pending_count, high_risk_count, oldest_days))
+    let evidence_store = state.evidence_store.lock().await;
+    Ok(engine.generate_suggestions_with_evidence(
+        &life_model,
+        pending_count,
+        high_risk_count,
+        oldest_days,
+        &evidence_store,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
+    use openlife_core::proactive::{ProactiveCategory, ProactiveEngine, ProactivePriority};
+
+    #[tokio::test]
+    async fn proactive_suggestions_with_state_use_negative_reminder_evidence() {
+        let state = crate::test_utils::test_app_state();
+        let pending = AgentProposal::new(
+            ProposalType::ScheduledTask,
+            "proactive.reminder.pending_proposal",
+            serde_json::json!({
+                "proactive_reminder_category": "pending_proposal",
+                "prompt_digest": "pending-digest",
+            }),
+            "Pending proposal reminder",
+            0.7,
+            RiskLevel::High,
+            ProposalSource::ProactiveAgent,
+        );
+        {
+            let store = state.proposal_store.as_ref().unwrap().lock().await;
+            store.create_proposal(&pending).unwrap();
+        }
+
+        let mut rejected = AgentProposal::new(
+            ProposalType::ScheduledTask,
+            "proactive.reminder.pending_proposal",
+            serde_json::json!({
+                "proactive_reminder_category": "pending_proposal",
+                "prompt_digest": "rejected-digest",
+            }),
+            "raw rejected reminder copy should not affect suggestions",
+            0.7,
+            RiskLevel::Low,
+            ProposalSource::ProactiveAgent,
+        );
+        rejected.reject();
+        {
+            let evidence_store = state.evidence_store.lock().await;
+            ProactiveEngine::default()
+                .record_rejected_reminder_proposal(&evidence_store, &rejected)
+                .unwrap();
+        }
+
+        let suggestions = get_proactive_suggestions_with_state(&state).await.unwrap();
+        let pending = suggestions
+            .iter()
+            .find(|suggestion| suggestion.category == ProactiveCategory::PendingProposal)
+            .expect("pending proposal reminder should still exist");
+        assert_eq!(pending.priority, ProactivePriority::Low);
+    }
 }

@@ -14,7 +14,6 @@ import {
   generateCalibrationReport,
   generateMicroEvolutionChanges,
   applyCalibration,
-  calibrationCreateProposals,
   markCalibrationShown,
   getLifeModel,
   type EvolutionChange,
@@ -307,35 +306,12 @@ export default function CalibrationPage() {
     setApplyLoading(true);
     setPageError("");
     try {
-      const result = await applyCalibration(toApply, "direct");
-      await markCalibrationShown("weekly");
-      setPageError(result.message);
-      setTimeout(() => navigate("/dashboard"), 1200);
-    } catch (e: any) {
-      setPageError(String(e?.message ?? e));
-    } finally {
-      setApplyLoading(false);
-    }
-  };
-
-  const handleSendToReview = async () => {
-    if (!model) return;
-    const toSend = Array.from(selected)
-      .sort((a, b) => a - b)
-      .map(i => data.changes[i]);
-    if (toSend.length === 0) {
-      setPageError("请先选择至少一项变更");
-      return;
-    }
-    setApplyLoading(true);
-    setPageError("");
-    try {
-      const result = await calibrationCreateProposals(toSend);
+      const result = await applyCalibration(toApply);
       await markCalibrationShown("weekly");
       const runInfo = result.run_id ? `（Run #${result.run_id.slice(0, 8)}）` : "";
-      if (result.error_count > 0) {
+      if ((result.error_count ?? 0) > 0) {
         setPageError(
-          `${result.message}${runInfo}（${result.error_count} 个失败：${result.errors.join("；")}）`
+          `${result.message}${runInfo}（${result.error_count} 个失败：${(result.errors ?? []).join("；")}）`
         );
       } else {
         setPageError(`${result.message}${runInfo}`);
@@ -731,22 +707,15 @@ export default function CalibrationPage() {
           </div>
           <div className="flex items-center justify-end gap-3">
             <button
-              onClick={handleSendToReview}
+              onClick={handleApply}
               disabled={applyLoading || selected.size === 0}
-              className="px-5 py-2 rounded-md text-sm font-medium text-indigo-700 bg-indigo-50 border border-indigo-200 hover:bg-indigo-100 disabled:opacity-50"
+              className="px-5 py-2 rounded-md text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
             >
               {applyLoading ? "发送中…" : "发送到 Review Center"}
             </button>
-            <button
-              onClick={handleApply}
-              disabled={applyLoading || selected.size === 0 || data.requires_confirmation === false}
-              className="px-5 py-2 rounded-md text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
-            >
-              {applyLoading ? "应用中…" : "直接应用"}
-            </button>
           </div>
           <div className="text-xs text-gray-500 text-right">
-            高风险字段建议先发送到 Review Center 审阅，低 risk 字段可直接应用。
+            所选变更会进入 Review Center，确认后再写入人生模型。
           </div>
         </div>
       </div>

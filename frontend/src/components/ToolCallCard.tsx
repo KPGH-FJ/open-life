@@ -98,11 +98,18 @@ function PermissionLabel({ decision }: { decision?: string }) {
   );
 }
 
+function redactInline(text: string): string {
+  return text
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[redacted]")
+    .replace(/raw[-_\s][^\s,，。;；)）]+/gi, "[redacted]");
+}
+
 export default function ToolCallCard({ call, onExecute, onReplay }: Props) {
   const [executing, setExecuting] = useState(false);
   const [replaying, setReplaying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
+  const trace = call.react_trace;
 
   const isBlocked =
     call.status === "blocked" ||
@@ -112,6 +119,7 @@ export default function ToolCallCard({ call, onExecute, onReplay }: Props) {
     call.permission_decision === "ask_every_time";
 
   const isFailed = !call.success && (call.status === "error" || call.error);
+  const canReplay = Boolean(onReplay && call.replayable);
 
   const handleExecute = async () => {
     if (!onExecute || executing) return;
@@ -149,10 +157,9 @@ export default function ToolCallCard({ call, onExecute, onReplay }: Props) {
   };
 
   // Result preview (truncated)
-  const resultPreview =
-    call.success && call.output
-      ? call.output.slice(0, 120) + (call.output.length > 120 ? "..." : "")
-      : null;
+  const resultPreview = call.success
+    ? (trace?.outputPreview ?? (call.output ? `${call.output.length} bytes redacted` : null))
+    : null;
 
   return (
     <div className="border rounded-lg p-3 bg-white/60 text-sm space-y-2">
@@ -174,8 +181,9 @@ export default function ToolCallCard({ call, onExecute, onReplay }: Props) {
       {/* Result preview (when not expanded) */}
       {resultPreview && !expanded && (
         <div className="text-xs text-gray-600 bg-green-50/50 rounded px-2 py-1.5 border border-green-100">
-          <span className="font-medium text-green-700">结果: </span>
+          <span className="font-medium text-green-700">结果摘要: </span>
           <span className="line-clamp-2">{resultPreview}</span>
+          {trace?.outputHash && <span className="ml-2 text-green-700">{trace.outputHash}</span>}
         </div>
       )}
 
@@ -183,7 +191,7 @@ export default function ToolCallCard({ call, onExecute, onReplay }: Props) {
       {isFailed && !expanded && call.error && (
         <div className="text-xs text-red-600 bg-red-50 rounded px-2 py-1.5 border border-red-100">
           <span className="font-medium">错误: </span>
-          <span className="line-clamp-2">{call.error}</span>
+          <span className="line-clamp-2">{redactInline(call.error)}</span>
         </div>
       )}
 
@@ -203,7 +211,7 @@ export default function ToolCallCard({ call, onExecute, onReplay }: Props) {
               <div className="font-medium mb-1">隐私提醒:</div>
               <ul className="list-disc pl-4 space-y-1">
                 {call.privacy_warnings.map(warning => (
-                  <li key={warning}>{warning}</li>
+                  <li key={warning}>{redactInline(warning)}</li>
                 ))}
               </ul>
             </div>
@@ -238,7 +246,7 @@ export default function ToolCallCard({ call, onExecute, onReplay }: Props) {
       )}
 
       {/* Replay button for failed tools */}
-      {isFailed && !isBlocked && onReplay && (
+      {isFailed && !isBlocked && canReplay && (
         <div className="flex items-center gap-2">
           <button
             onClick={handleReplay}
@@ -262,12 +270,16 @@ export default function ToolCallCard({ call, onExecute, onReplay }: Props) {
 
       {expanded && (
         <div className="space-y-2">
-          {call.arguments && Object.keys(call.arguments).length > 0 && (
+          {trace && (
             <div className="text-xs text-gray-600 bg-gray-50 rounded p-2">
-              <div className="font-medium mb-1">参数:</div>
-              <pre className="whitespace-pre-wrap break-all">
-                {JSON.stringify(call.arguments, null, 2)}
-              </pre>
+              <div className="font-medium mb-1">Trace 摘要:</div>
+              <div>Source: {trace.toolSource}</div>
+              <div>Risk: {trace.riskLevel}</div>
+              <div>Status: {trace.status}</div>
+              {trace.outputPreview && <div>Output: {trace.outputPreview}</div>}
+              {trace.outputHash && <div>Hash: {trace.outputHash}</div>}
+              {trace.outputByteCount !== undefined && <div>Bytes: {trace.outputByteCount}</div>}
+              {trace.proposalId && <div>Proposal: {trace.proposalId}</div>}
             </div>
           )}
           {call.sanitized_arguments && Object.keys(call.sanitized_arguments).length > 0 && (
@@ -278,16 +290,17 @@ export default function ToolCallCard({ call, onExecute, onReplay }: Props) {
               </pre>
             </div>
           )}
-          {call.success && call.output && (
+          {call.success && (trace?.outputPreview || trace?.outputHash) && (
             <div className="text-xs text-gray-700 bg-green-50 rounded p-2">
-              <div className="font-medium mb-1">完整结果:</div>
-              <pre className="whitespace-pre-wrap break-all">{call.output}</pre>
+              <div className="font-medium mb-1">结果摘要:</div>
+              {trace?.outputPreview && <div>{trace.outputPreview}</div>}
+              {trace?.outputHash && <div>{trace.outputHash}</div>}
             </div>
           )}
           {call.error && (
             <div className="text-xs text-red-700 bg-red-50 rounded p-2">
               <div className="font-medium mb-1">错误详情:</div>
-              <pre className="whitespace-pre-wrap break-all">{call.error}</pre>
+              <pre className="whitespace-pre-wrap break-all">{redactInline(call.error)}</pre>
             </div>
           )}
           <div className="flex flex-wrap gap-x-3 text-xs text-gray-400">

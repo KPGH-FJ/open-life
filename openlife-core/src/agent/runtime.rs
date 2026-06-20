@@ -4,6 +4,10 @@ use crate::agent::reasoning::{
     ReasoningStrategy, ReasoningTrace,
 };
 use crate::agent::types::AgentTask;
+use crate::agent::{
+    behavior_checks_for_packet, HSBehaviorCheckSummary, HSSelectionAudit,
+    RuntimeGuidanceConsumptionMode, RuntimeHSPacket, RuntimeInput, RuntimeOutput,
+};
 use crate::layer_router::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
@@ -37,6 +41,7 @@ impl Default for AgentRuntimeConfig {
 pub struct AgentRuntime {
     context_assembler: CompositeAssembler,
     reasoning_strategies: HashMap<String, Box<dyn ReasoningStrategy>>,
+    scheduler: InferenceScheduler,
     config: AgentRuntimeConfig,
 }
 
@@ -72,6 +77,7 @@ impl AgentRuntime {
                 .with(Box::new(crate::agent::MemoryAssembler))
                 .with(Box::new(crate::agent::ToolsAssembler)),
             reasoning_strategies: strategies,
+            scheduler,
             config: AgentRuntimeConfig {
                 default_strategy: app_config.reasoning.default_strategy.clone(),
                 meaning_timeout_ms: app_config.reasoning.meaning_timeout_ms,
@@ -110,6 +116,138 @@ impl AgentRuntime {
         memory_context: Option<String>,
         memory_hits: Vec<crate::agent::context_assembler::MemoryHit>,
         privacy_engine: crate::privacy::PrivacyEngine,
+    ) -> Result<AgentRuntimeOutput, AgentRuntimeError> {
+        self.execute_task_inner(
+            task,
+            life_model,
+            tools_prompt,
+            memory_context,
+            memory_hits,
+            privacy_engine,
+            None,
+            RuntimeGuidanceConsumptionMode::Disabled,
+        )
+        .await
+    }
+
+    /// Execute the current runtime through the RuntimeInput/RuntimeOutput contract.
+    ///
+    /// This is intentionally a thin adapter over the existing task execution and
+    /// scheduler generation path. ReAct tool execution remains owned by AgentLoop.
+    pub async fn execute_runtime_input(
+        &self,
+        input: RuntimeInput,
+    ) -> Result<RuntimeOutput, AgentRuntimeError> {
+        let params = input.agent_runtime_params();
+        let runtime_output = self
+            .execute_task_with_hs_packet_and_guidance_mode(
+                params.task,
+                params.life_model,
+                params.tools_prompt,
+                params.memory_context,
+                vec![],
+                crate::privacy::PrivacyEngine::new(),
+                params.hs_packet,
+                params.guidance_consumption_mode,
+            )
+            .await?;
+
+        let tools_prompt = if input.tools_prompt.trim().is_empty() {
+            None
+        } else {
+            Some(input.tools_prompt.as_str())
+        };
+        let user_output = if let Some(ref packet) = input.hs_packet {
+            self.scheduler
+                .generate_with_hs_packet(
+                    runtime_output.final_messages.clone(),
+                    &input.life_model_compat,
+                    tools_prompt,
+                    packet,
+                )
+                .await
+        } else {
+            self.scheduler
+                .generate(
+                    runtime_output.final_messages.clone(),
+                    &input.life_model_compat,
+                    tools_prompt,
+                )
+                .await
+        }
+        .map_err(|e| AgentRuntimeError::Generation(e.to_string()))?;
+
+        Ok(RuntimeOutput {
+            run_id: Some(runtime_output.run_id),
+            user_output,
+            actions: Vec::new(),
+            observations: Vec::new(),
+            proposal_ids: Vec::new(),
+            life_event_candidates: Vec::new(),
+            warnings: Vec::new(),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_task_with_hs_packet(
+        &self,
+        task: &AgentTask,
+        life_model: &LifeModel,
+        tools_prompt: &str,
+        memory_context: Option<String>,
+        memory_hits: Vec<crate::agent::context_assembler::MemoryHit>,
+        privacy_engine: crate::privacy::PrivacyEngine,
+        hs_packet: Option<RuntimeHSPacket>,
+    ) -> Result<AgentRuntimeOutput, AgentRuntimeError> {
+        self.execute_task_inner(
+            task,
+            life_model,
+            tools_prompt,
+            memory_context,
+            memory_hits,
+            privacy_engine,
+            hs_packet,
+            RuntimeGuidanceConsumptionMode::Disabled,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_task_with_hs_packet_and_guidance_mode(
+        &self,
+        task: &AgentTask,
+        life_model: &LifeModel,
+        tools_prompt: &str,
+        memory_context: Option<String>,
+        memory_hits: Vec<crate::agent::context_assembler::MemoryHit>,
+        privacy_engine: crate::privacy::PrivacyEngine,
+        hs_packet: Option<RuntimeHSPacket>,
+        guidance_consumption_mode: RuntimeGuidanceConsumptionMode,
+    ) -> Result<AgentRuntimeOutput, AgentRuntimeError> {
+        self.execute_task_inner(
+            task,
+            life_model,
+            tools_prompt,
+            memory_context,
+            memory_hits,
+            privacy_engine,
+            hs_packet,
+            guidance_consumption_mode,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_task_inner(
+        &self,
+        task: &AgentTask,
+        life_model: &LifeModel,
+        tools_prompt: &str,
+        memory_context: Option<String>,
+        memory_hits: Vec<crate::agent::context_assembler::MemoryHit>,
+        privacy_engine: crate::privacy::PrivacyEngine,
+        hs_packet: Option<RuntimeHSPacket>,
+        guidance_consumption_mode: RuntimeGuidanceConsumptionMode,
     ) -> Result<AgentRuntimeOutput, AgentRuntimeError> {
         // 1. Build AssembleInput
         let input = AssembleInput {
@@ -171,13 +309,32 @@ impl AgentRuntime {
                 },
             );
         }
+        let hs_selection_audit = hs_packet.as_ref().map(|packet| packet.audit.clone());
+        let hs_behavior_checks = hs_packet
+            .as_ref()
+            .map(behavior_checks_for_packet)
+            .unwrap_or_default();
+        if guidance_consumption_mode.is_enabled() {
+            if let Some(prompt) = hs_packet.as_ref().and_then(build_hs_runtime_prompt) {
+                final_messages.insert(
+                    0,
+                    ChatMessage {
+                        role: "system".to_string(),
+                        content: prompt,
+                    },
+                );
+            }
+        }
 
         Ok(AgentRuntimeOutput {
+            run_id,
             final_messages,
             reasoning_trace: reasoning_output.trace,
             suggested_tools: reasoning_output.suggested_tools,
             plan_steps: reasoning_output.plan_steps,
             context_summary: context.context_summary,
+            hs_selection_audit,
+            hs_behavior_checks,
         })
     }
 
@@ -190,6 +347,80 @@ impl AgentRuntime {
         memory_context: Option<String>,
         memory_hits: Vec<crate::agent::context_assembler::MemoryHit>,
         privacy_engine: crate::privacy::PrivacyEngine,
+    ) -> Result<AgentRuntimeOutput, AgentRuntimeError> {
+        self.generate_direct_inner(
+            task,
+            life_model,
+            tools_prompt,
+            memory_context,
+            memory_hits,
+            privacy_engine,
+            None,
+            RuntimeGuidanceConsumptionMode::Disabled,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn generate_direct_with_hs_packet(
+        &self,
+        task: &AgentTask,
+        life_model: &LifeModel,
+        tools_prompt: &str,
+        memory_context: Option<String>,
+        memory_hits: Vec<crate::agent::context_assembler::MemoryHit>,
+        privacy_engine: crate::privacy::PrivacyEngine,
+        hs_packet: Option<RuntimeHSPacket>,
+    ) -> Result<AgentRuntimeOutput, AgentRuntimeError> {
+        self.generate_direct_inner(
+            task,
+            life_model,
+            tools_prompt,
+            memory_context,
+            memory_hits,
+            privacy_engine,
+            hs_packet,
+            RuntimeGuidanceConsumptionMode::Disabled,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn generate_direct_with_hs_packet_and_guidance_mode(
+        &self,
+        task: &AgentTask,
+        life_model: &LifeModel,
+        tools_prompt: &str,
+        memory_context: Option<String>,
+        memory_hits: Vec<crate::agent::context_assembler::MemoryHit>,
+        privacy_engine: crate::privacy::PrivacyEngine,
+        hs_packet: Option<RuntimeHSPacket>,
+        guidance_consumption_mode: RuntimeGuidanceConsumptionMode,
+    ) -> Result<AgentRuntimeOutput, AgentRuntimeError> {
+        self.generate_direct_inner(
+            task,
+            life_model,
+            tools_prompt,
+            memory_context,
+            memory_hits,
+            privacy_engine,
+            hs_packet,
+            guidance_consumption_mode,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn generate_direct_inner(
+        &self,
+        task: &AgentTask,
+        life_model: &LifeModel,
+        tools_prompt: &str,
+        memory_context: Option<String>,
+        memory_hits: Vec<crate::agent::context_assembler::MemoryHit>,
+        privacy_engine: crate::privacy::PrivacyEngine,
+        hs_packet: Option<RuntimeHSPacket>,
+        guidance_consumption_mode: RuntimeGuidanceConsumptionMode,
     ) -> Result<AgentRuntimeOutput, AgentRuntimeError> {
         let input = AssembleInput {
             session_id: task.session_id.clone(),
@@ -207,12 +438,34 @@ impl AgentRuntime {
             .assemble(&input)
             .map_err(|e| AgentRuntimeError::ContextAssembly(e.to_string()))?;
 
+        let run_id = Uuid::new_v4().to_string();
+        let mut final_messages = context.desensitized_messages.to_vec();
+        let hs_selection_audit = hs_packet.as_ref().map(|packet| packet.audit.clone());
+        let hs_behavior_checks = hs_packet
+            .as_ref()
+            .map(behavior_checks_for_packet)
+            .unwrap_or_default();
+        if guidance_consumption_mode.is_enabled() {
+            if let Some(prompt) = hs_packet.as_ref().and_then(build_hs_runtime_prompt) {
+                final_messages.insert(
+                    0,
+                    ChatMessage {
+                        role: "system".to_string(),
+                        content: prompt,
+                    },
+                );
+            }
+        }
+
         Ok(AgentRuntimeOutput {
-            final_messages: context.desensitized_messages.to_vec(),
+            run_id,
+            final_messages,
             reasoning_trace: ReasoningTrace::default(),
             suggested_tools: vec![],
             plan_steps: vec![],
             context_summary: context.context_summary,
+            hs_selection_audit,
+            hs_behavior_checks,
         })
     }
 }
@@ -220,11 +473,36 @@ impl AgentRuntime {
 /// Output from AgentRuntime execution.
 #[derive(Debug, Clone)]
 pub struct AgentRuntimeOutput {
+    pub run_id: String,
     pub final_messages: Vec<ChatMessage>,
     pub reasoning_trace: ReasoningTrace,
     pub suggested_tools: Vec<String>,
     pub plan_steps: Vec<String>,
     pub context_summary: crate::agent::types::ContextSummary,
+    pub hs_selection_audit: Option<HSSelectionAudit>,
+    pub hs_behavior_checks: Vec<HSBehaviorCheckSummary>,
+}
+
+fn build_hs_runtime_prompt(packet: &RuntimeHSPacket) -> Option<String> {
+    if packet.guidance_refs.is_empty() {
+        return None;
+    }
+    let guidance = packet
+        .guidance_refs
+        .iter()
+        .take(4)
+        .map(|guidance| {
+            format!(
+                "- [{}] {}: {}",
+                guidance.guidance_id, guidance.impact_kind, guidance.impact_summary
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(format!(
+        "Selected personal collaboration guidance for this run (metadata-safe summaries only):\n{}",
+        guidance
+    ))
 }
 
 /// Errors from AgentRuntime.
@@ -233,6 +511,7 @@ pub enum AgentRuntimeError {
     ContextAssembly(String),
     StrategyNotFound(String),
     Reasoning(ReasoningError),
+    Generation(String),
 }
 
 impl std::fmt::Display for AgentRuntimeError {
@@ -241,6 +520,7 @@ impl std::fmt::Display for AgentRuntimeError {
             AgentRuntimeError::ContextAssembly(e) => write!(f, "Context assembly failed: {}", e),
             AgentRuntimeError::StrategyNotFound(s) => write!(f, "Strategy not found: {}", s),
             AgentRuntimeError::Reasoning(e) => write!(f, "Reasoning failed: {}", e),
+            AgentRuntimeError::Generation(e) => write!(f, "Generation failed: {}", e),
         }
     }
 }

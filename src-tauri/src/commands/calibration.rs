@@ -1,5 +1,5 @@
 use crate::errors::AppError;
-use crate::{persist_life_model, AppState};
+use crate::AppState;
 use chrono::Datelike;
 use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 use openlife_core::evolution::{EvolutionChange, MicroEvolutionEngine};
@@ -96,32 +96,31 @@ fn change_to_proposal(
 pub async fn run_micro_evolution(
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, AppError> {
+    run_micro_evolution_with_state_gated(state.inner()).await
+}
+
+#[cfg(test)]
+async fn run_micro_evolution_with_state(
+    state: &Arc<AppState>,
+) -> Result<serde_json::Value, AppError> {
+    run_micro_evolution_with_state_gated(state).await
+}
+
+async fn run_micro_evolution_with_state_gated(
+    state: &Arc<AppState>,
+) -> Result<serde_json::Value, AppError> {
     let manager = state.life_model_manager.lock().await;
     let model = manager.load().map_err(AppError::from)?;
     let store = state.feedback_store.lock().await;
     let engine = MicroEvolutionEngine::new(&store);
-    let (result, signals) = engine.run_with_signals(&model).map_err(AppError::from)?;
+    let (_, signals) = engine.run_with_signals(&model).map_err(AppError::from)?;
     let signal_summary = signals.summary();
-    let mut snapshot_version = None;
-    if result.applied {
-        let mut new_model = model.clone();
-        MicroEvolutionEngine::apply_changes(&mut new_model, &result.changes)
-            .map_err(AppError::from)?;
-        drop(manager);
-        let new_model = persist_life_model(&state.inner().clone(), new_model, false).await?;
-        // auto snapshot after evolution
-        let vm = state.version_manager.lock().await;
-        if let Ok(snap) = vm.snapshot(&new_model, "auto:evolution", &result.message) {
-            snapshot_version = Some(snap.version);
-        }
-    }
-    Ok(serde_json::json!({
-        "changes": result.changes,
-        "applied": result.applied,
-        "message": result.message,
-        "snapshot_version": snapshot_version,
-        "signal_summary": signal_summary,
-    }))
+    drop(store);
+    drop(manager);
+    Err(AppError::permission(format!(
+        "run_micro_evolution has been retired as a Calibration legacy direct-write compatibility surface; create reviewable calibration proposals instead. Metadata-safe signal counts: feedback_terms={}, behavior_events={}, inference_items={}.",
+        signal_summary.feedback_terms, signal_summary.behavior_events, signal_summary.inference_items
+    )))
 }
 
 #[tauri::command]
@@ -188,47 +187,33 @@ pub async fn apply_calibration(
     mode: Option<String>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, AppError> {
-    let mode = mode.as_deref().unwrap_or("direct");
+    apply_calibration_with_state_gated(changes, mode, state.inner()).await
+}
 
-    if mode == "proposal" {
-        // 创建 Proposal 而不是直接应用
-        return calibration_create_proposals(changes, state).await;
+#[cfg(test)]
+async fn apply_calibration_with_state(
+    changes: Vec<EvolutionChange>,
+    mode: Option<String>,
+    state: &Arc<AppState>,
+) -> Result<serde_json::Value, AppError> {
+    apply_calibration_with_state_gated(changes, mode, state).await
+}
+
+async fn apply_calibration_with_state_gated(
+    changes: Vec<EvolutionChange>,
+    mode: Option<String>,
+    state: &Arc<AppState>,
+) -> Result<serde_json::Value, AppError> {
+    let mode = mode.as_deref().unwrap_or("proposal");
+
+    if mode != "direct" {
+        return calibration_create_proposals_with_state(changes, state).await;
     }
 
-    // direct 模式：直接应用变更
-    let mut agent_run = openlife_core::agent::AgentRun::new_calibration_run();
-
-    let manager = state.life_model_manager.lock().await;
-    let mut model = manager.load().map_err(AppError::from)?;
-    MicroEvolutionEngine::apply_changes(&mut model, &changes).map_err(AppError::from)?;
-    drop(manager);
-    let model = persist_life_model(&state.inner().clone(), model, false).await?;
-    let vm = state.version_manager.lock().await;
-    let snap = vm
-        .snapshot(&model, "auto:calibration", "用户确认并应用校准确认变更")
-        .map_err(AppError::from)?;
-    let store = state.feedback_store.lock().await;
-    let _ = store.log_event(
-        "calibration_applied",
-        None,
-        Some(&format!("applied_changes={}", changes.len())),
-    );
-
-    // Complete AgentRun
-    agent_run.output_preview = Some(format!("Applied {} calibration changes", changes.len()));
-    agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
-    agent_run.finished_at = Some(chrono::Utc::now());
-    if let Some(ref store_arc) = state.agent_run_store {
-        let store = store_arc.lock().await;
-        let _ = store.create_run(&agent_run);
-    }
-
-    Ok(serde_json::json!({
-        "success": true,
-        "snapshot_version": snap.version,
-        "applied_count": changes.len(),
-        "message": format!("已应用 {} 项校准变更，并创建快照 {}", changes.len(), snap.version),
-    }))
+    Err(AppError::permission(format!(
+        "apply_calibration(mode=\"direct\") has been retired as a Calibration legacy direct-write compatibility surface; use calibration_create_proposals or apply_calibration(mode=\"proposal\") for {} change(s).",
+        changes.len()
+    )))
 }
 
 #[tauri::command]
@@ -257,6 +242,13 @@ pub async fn should_show_calibration(
 pub async fn calibration_create_proposals(
     changes: Vec<EvolutionChange>,
     state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, AppError> {
+    calibration_create_proposals_with_state(changes, state.inner()).await
+}
+
+async fn calibration_create_proposals_with_state(
+    changes: Vec<EvolutionChange>,
+    state: &Arc<AppState>,
 ) -> Result<serde_json::Value, AppError> {
     // Create AgentRun for this calibration
     let mut agent_run = openlife_core::agent::AgentRun::new_calibration_run();
@@ -309,6 +301,7 @@ pub async fn calibration_create_proposals(
     }
 
     Ok(serde_json::json!({
+        "success": true,
         "created_count": created_ids.len(),
         "created_ids": created_ids,
         "run_id": run_id,
@@ -329,4 +322,218 @@ pub async fn mark_calibration_shown(
         .log_event(&event, None, None)
         .map_err(AppError::from)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn calibration_test_change() -> EvolutionChange {
+        EvolutionChange {
+            dimension: "identity.values".into(),
+            target_name: "W82_RAW_CALIBRATION_TARGET_SECRET".into(),
+            old_value: 5.0,
+            new_value: 7.0,
+            reason: "W82_RAW_CALIBRATION_REASON_SECRET".into(),
+            confidence: 0.8,
+            sources: vec![openlife_core::evolution::SignalSource {
+                source: "feedback".into(),
+                score: 0.8,
+                weight: 1.0,
+            }],
+        }
+    }
+
+    async fn seed_calibration_target(state: &Arc<AppState>) {
+        let manager = state.life_model_manager.lock().await;
+        let mut model = manager.load().unwrap();
+        model
+            .identity
+            .values
+            .push(openlife_core::life_model::ValueItem {
+                name: "W82_RAW_CALIBRATION_TARGET_SECRET".into(),
+                weight: 5,
+                description: "W82_RAW_CALIBRATION_DESCRIPTION_SECRET".into(),
+            });
+        manager.save(&model).unwrap();
+    }
+
+    async fn calibration_target_weight(state: &Arc<AppState>) -> u8 {
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        model
+            .identity
+            .values
+            .iter()
+            .find(|value| value.name == "W82_RAW_CALIBRATION_TARGET_SECRET")
+            .map(|value| value.weight)
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn calibration_default_mode_creates_proposals_instead_of_direct_apply() {
+        let state = crate::test_utils::test_app_state();
+
+        let result = apply_calibration_with_state(vec![calibration_test_change()], None, &state)
+            .await
+            .unwrap();
+
+        assert_eq!(result["created_count"], 1);
+        assert_eq!(result["success"], true);
+        let proposals = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_pending_proposals(10)
+            .unwrap();
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].source, ProposalSource::CalibrationRun);
+
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        assert!(model.is_effectively_empty());
+    }
+
+    #[tokio::test]
+    async fn w91_apply_calibration_direct_mode_fails_closed_as_retired_surface() {
+        let state = crate::test_utils::test_app_state();
+        seed_calibration_target(&state).await;
+
+        let err = apply_calibration_with_state(
+            vec![calibration_test_change()],
+            Some("direct".to_string()),
+            &state,
+        )
+        .await
+        .expect_err("calibration legacy direct apply must fail closed by default");
+
+        assert!(matches!(err, AppError::PermissionDenied { .. }));
+        assert!(err.message().contains("apply_calibration"));
+        assert!(err.message().contains("retired"));
+        assert!(err.message().contains("calibration_create_proposals"));
+
+        assert_eq!(calibration_target_weight(&state).await, 5);
+        let proposals = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_pending_proposals(10)
+            .unwrap();
+        assert!(proposals.is_empty());
+    }
+
+    #[tokio::test]
+    async fn w91_apply_calibration_direct_mode_is_retired_and_writes_no_lifemodel() {
+        let state = crate::test_utils::test_app_state();
+        seed_calibration_target(&state).await;
+
+        let err = apply_calibration_with_state(
+            vec![calibration_test_change()],
+            Some("direct".to_string()),
+            &state,
+        )
+        .await
+        .expect_err("W91 retires Calibration direct mode persistence");
+
+        assert!(matches!(err, AppError::PermissionDenied { .. }));
+        assert!(err.message().contains("apply_calibration"));
+        assert!(err.message().contains("retired"));
+        assert!(err.message().contains("calibration_create_proposals"));
+
+        let response_dump = err.message().to_string();
+        for forbidden in [
+            "W82_RAW_CALIBRATION_TARGET_SECRET",
+            "W82_RAW_CALIBRATION_REASON_SECRET",
+            "identity.values.W82_RAW_CALIBRATION_TARGET_SECRET",
+        ] {
+            assert!(
+                !response_dump.contains(forbidden),
+                "legacy calibration direct response leaked raw marker {forbidden}"
+            );
+        }
+
+        assert_eq!(calibration_target_weight(&state).await, 5);
+        let proposals = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_pending_proposals(10)
+            .unwrap();
+        assert!(proposals.is_empty());
+    }
+
+    #[tokio::test]
+    async fn w91_run_micro_evolution_default_fails_closed_after_retirement() {
+        let state = crate::test_utils::test_app_state();
+
+        let err = run_micro_evolution_with_state(&state)
+            .await
+            .expect_err("micro-evolution direct persist must fail closed by default");
+
+        assert!(matches!(err, AppError::PermissionDenied { .. }));
+        assert!(err.message().contains("run_micro_evolution"));
+        assert!(err.message().contains("retired"));
+        assert!(err.message().contains("proposals"));
+    }
+
+    #[tokio::test]
+    async fn w91_run_micro_evolution_is_retired_metadata_safe_and_writes_no_lifemodel() {
+        let state = crate::test_utils::test_app_state();
+
+        {
+            let manager = state.life_model_manager.lock().await;
+            let mut model = manager.load().unwrap();
+            model
+                .identity
+                .values
+                .push(openlife_core::life_model::ValueItem {
+                    name: "W82_RAW_EVOLUTION_TARGET_SECRET".into(),
+                    weight: 5,
+                    description: "W82_RAW_LIFEMODEL_DESCRIPTION_SECRET".into(),
+                });
+            manager.save(&model).unwrap();
+        }
+        {
+            let store = state.feedback_store.lock().await;
+            store
+                .save_conversation_inference(
+                    Some("w82"),
+                    "identity.values",
+                    "W82_RAW_EVOLUTION_TARGET_SECRET",
+                    0.03,
+                    1.0,
+                    "W82_RAW_EVOLUTION_REASON_SECRET",
+                )
+                .unwrap();
+        }
+
+        let err = run_micro_evolution_with_state(&state)
+            .await
+            .expect_err("W91 retires micro-evolution direct persistence");
+
+        assert!(matches!(err, AppError::PermissionDenied { .. }));
+        assert!(err.message().contains("run_micro_evolution"));
+        assert!(err.message().contains("retired"));
+        assert!(err.message().contains("feedback_terms"));
+
+        let response_dump = err.message().to_string();
+        for forbidden in [
+            "W82_RAW_EVOLUTION_TARGET_SECRET",
+            "W82_RAW_EVOLUTION_REASON_SECRET",
+            "W82_RAW_LIFEMODEL_DESCRIPTION_SECRET",
+            "identity.values:W82_RAW_EVOLUTION_TARGET_SECRET",
+        ] {
+            assert!(
+                !response_dump.contains(forbidden),
+                "legacy micro-evolution response leaked raw marker {forbidden}"
+            );
+        }
+
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        assert_eq!(model.identity.values[0].weight, 5);
+    }
 }

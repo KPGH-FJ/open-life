@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use ring::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -339,6 +340,344 @@ pub struct LifeModel {
     pub evolution_rules: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LifeModelCompatibilitySummary {
+    pub summary: String,
+    pub source_asset_ids: Vec<String>,
+    pub content_digest: String,
+}
+
+impl Default for LifeModelCompatibilitySummary {
+    fn default() -> Self {
+        Self::new("", Vec::new())
+    }
+}
+
+impl LifeModelCompatibilitySummary {
+    pub fn new(summary: impl Into<String>, source_asset_ids: Vec<String>) -> Self {
+        let summary = summary.into();
+        let content_digest = sha256_hex(
+            serde_json::json!({
+                "summary": summary,
+                "source_asset_ids": source_asset_ids,
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        Self {
+            summary,
+            source_asset_ids,
+            content_digest,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct LifeModelCompatibilityStateSummary {
+    pub current_focus: String,
+    pub current_mood: String,
+    pub energy_level: u8,
+    pub last_updated: Option<String>,
+    pub content_digest: String,
+}
+
+impl LifeModelCompatibilityStateSummary {
+    fn from_life_model(model: &LifeModel) -> Self {
+        let current_focus = model.state.current_focus.clone();
+        let current_mood = model.state.emotional_state.current_mood.clone();
+        let energy_level = model.state.health_status.energy_level;
+        let last_updated = model.state.last_updated.clone();
+        let content_digest = sha256_hex(
+            serde_json::json!({
+                "current_focus": current_focus,
+                "current_mood": current_mood,
+                "energy_level": energy_level,
+                "last_updated": last_updated,
+            })
+            .to_string()
+            .as_bytes(),
+        );
+        Self {
+            current_focus,
+            current_mood,
+            energy_level,
+            last_updated,
+            content_digest,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct LifeModelCompatibilityAssetRef {
+    pub asset_kind: String,
+    pub asset_id: String,
+    pub affected_path: String,
+    pub source_ids: Vec<String>,
+    pub content_digest: String,
+}
+
+impl LifeModelCompatibilityAssetRef {
+    fn from_evidence(record: &crate::agent::evidence_store::EvidenceRecord) -> Self {
+        let mut source_ids = record
+            .source_refs
+            .iter()
+            .map(|source| source.source_id.clone())
+            .collect::<Vec<_>>();
+        source_ids.extend(record.linked_proposal_ids.iter().cloned());
+        source_ids.extend(record.linked_agent_run_ids.iter().cloned());
+        source_ids.sort();
+        source_ids.dedup();
+
+        let content_digest = sha256_hex(
+            serde_json::json!({
+                "asset_kind": "evidence",
+                "asset_id": record.id,
+                "evidence_type": record.evidence_type.to_string(),
+                "affected_path": record.affected_path,
+                "status": record.status.to_string(),
+                "confidence": record.confidence,
+                "source_digests": record
+                    .source_refs
+                    .iter()
+                    .map(|source| source.digest.clone())
+                    .collect::<Vec<_>>(),
+            })
+            .to_string()
+            .as_bytes(),
+        );
+
+        Self {
+            asset_kind: "evidence".into(),
+            asset_id: record.id.clone(),
+            affected_path: record.affected_path.clone(),
+            source_ids,
+            content_digest,
+        }
+    }
+
+    fn from_heuristic(record: &crate::agent::heuristic_store::HeuristicRecord) -> Self {
+        let mut source_ids = record.evidence_refs.clone();
+        if let Some(source_proposal_id) = record.source_proposal_id.clone() {
+            source_ids.push(source_proposal_id);
+        }
+        source_ids.sort();
+        source_ids.dedup();
+
+        let affected_path = format!("heuristics.{}.{}", record.domain, record.trigger);
+        let content_digest = sha256_hex(
+            serde_json::json!({
+                "asset_kind": "heuristic",
+                "asset_id": record.id,
+                "domain": record.domain,
+                "trigger": record.trigger,
+                "priority": record.priority,
+                "status": record.status.to_string(),
+                "validation_state": record.validation_state,
+                "version": record.version,
+            })
+            .to_string()
+            .as_bytes(),
+        );
+
+        Self {
+            asset_kind: "heuristic".into(),
+            asset_id: record.id.clone(),
+            affected_path,
+            source_ids,
+            content_digest,
+        }
+    }
+
+    fn from_patch(record: &crate::life_model::patch::LifeModelPatch) -> Self {
+        let mut source_ids = Vec::new();
+        if let Some(proposal_id) = record.proposal_id.clone() {
+            source_ids.push(proposal_id);
+        }
+        source_ids.sort();
+        source_ids.dedup();
+
+        let content_digest = sha256_hex(
+            serde_json::json!({
+                "asset_kind": "patch",
+                "asset_id": record.id,
+                "proposal_id": record.proposal_id,
+                "path_pointer": record.path_pointer,
+                "operation": record.operation.to_string(),
+                "source": record.source.to_string(),
+                "risk_level": record.risk_level.to_string(),
+                "status": record.status.to_string(),
+            })
+            .to_string()
+            .as_bytes(),
+        );
+
+        Self {
+            asset_kind: "patch".into(),
+            asset_id: record.id.clone(),
+            affected_path: record.path_pointer.clone(),
+            source_ids,
+            content_digest,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct LifeModelMaterializedViewProvenance {
+    pub compatibility_materialized_view: bool,
+    pub accepted_source_of_truth: bool,
+    pub durable_truth_materialized: bool,
+    pub proposal_first_required_for_truth: bool,
+    pub source_proposal_ids: Vec<String>,
+    pub source_evidence_ids: Vec<String>,
+    pub source_patch_ids: Vec<String>,
+    pub source_heuristic_ids: Vec<String>,
+    pub proposal_source_digests: Vec<String>,
+    pub evidence_source_digests: Vec<String>,
+    pub patch_source_digests: Vec<String>,
+    pub heuristic_source_digests: Vec<String>,
+    pub provenance_digest: String,
+}
+
+impl LifeModelMaterializedViewProvenance {
+    fn from_sources(
+        evidence_records: &[crate::agent::evidence_store::EvidenceRecord],
+        heuristic_records: &[crate::agent::heuristic_store::HeuristicRecord],
+        patch_records: &[crate::life_model::patch::LifeModelPatch],
+    ) -> Self {
+        let mut source_proposal_ids = Vec::new();
+        let mut source_evidence_ids = evidence_records
+            .iter()
+            .map(|record| record.id.clone())
+            .collect::<Vec<_>>();
+        let mut source_patch_ids = patch_records
+            .iter()
+            .map(|record| record.id.clone())
+            .collect::<Vec<_>>();
+        let mut source_heuristic_ids = heuristic_records
+            .iter()
+            .map(|record| record.id.clone())
+            .collect::<Vec<_>>();
+
+        let mut proposal_source_digests = Vec::new();
+        let mut evidence_source_digests = evidence_records
+            .iter()
+            .map(|record| LifeModelCompatibilityAssetRef::from_evidence(record).content_digest)
+            .collect::<Vec<_>>();
+        let mut patch_source_digests = patch_records
+            .iter()
+            .map(|record| LifeModelCompatibilityAssetRef::from_patch(record).content_digest)
+            .collect::<Vec<_>>();
+        let mut heuristic_source_digests = heuristic_records
+            .iter()
+            .map(|record| LifeModelCompatibilityAssetRef::from_heuristic(record).content_digest)
+            .collect::<Vec<_>>();
+
+        for record in evidence_records {
+            for proposal_id in &record.linked_proposal_ids {
+                push_unique_lifemodel(&mut source_proposal_ids, proposal_id.clone());
+            }
+            for source_ref in &record.source_refs {
+                if source_ref.source_type
+                    == crate::agent::evidence_store::EvidenceSourceType::Proposal
+                {
+                    push_unique_lifemodel(&mut source_proposal_ids, source_ref.source_id.clone());
+                    push_unique_lifemodel(&mut proposal_source_digests, source_ref.digest.clone());
+                }
+            }
+        }
+        for record in heuristic_records {
+            if let Some(proposal_id) = record.source_proposal_id.clone() {
+                push_unique_lifemodel(&mut source_proposal_ids, proposal_id);
+            }
+        }
+        for record in patch_records {
+            if let Some(proposal_id) = record.proposal_id.clone() {
+                push_unique_lifemodel(&mut source_proposal_ids, proposal_id.clone());
+                push_unique_lifemodel(
+                    &mut proposal_source_digests,
+                    sha256_hex(proposal_id.as_bytes()),
+                );
+            }
+        }
+
+        sort_dedup_lifemodel(&mut source_proposal_ids);
+        sort_dedup_lifemodel(&mut source_evidence_ids);
+        sort_dedup_lifemodel(&mut source_patch_ids);
+        sort_dedup_lifemodel(&mut source_heuristic_ids);
+        sort_dedup_lifemodel(&mut proposal_source_digests);
+        sort_dedup_lifemodel(&mut evidence_source_digests);
+        sort_dedup_lifemodel(&mut patch_source_digests);
+        sort_dedup_lifemodel(&mut heuristic_source_digests);
+
+        let provenance_digest = sha256_hex(
+            serde_json::json!({
+                "schema": "w135.materializedLifeModelViewProvenance.v1",
+                "sourceProposalIds": source_proposal_ids.clone(),
+                "sourceEvidenceIds": source_evidence_ids.clone(),
+                "sourcePatchIds": source_patch_ids.clone(),
+                "sourceHeuristicIds": source_heuristic_ids.clone(),
+                "proposalSourceDigests": proposal_source_digests.clone(),
+                "evidenceSourceDigests": evidence_source_digests.clone(),
+                "patchSourceDigests": patch_source_digests.clone(),
+                "heuristicSourceDigests": heuristic_source_digests.clone(),
+                "acceptedSourceOfTruth": false,
+                "compatibilityMaterializedView": true,
+            })
+            .to_string()
+            .as_bytes(),
+        );
+
+        Self {
+            compatibility_materialized_view: true,
+            accepted_source_of_truth: false,
+            durable_truth_materialized: false,
+            proposal_first_required_for_truth: true,
+            source_proposal_ids,
+            source_evidence_ids,
+            source_patch_ids,
+            source_heuristic_ids,
+            proposal_source_digests,
+            evidence_source_digests,
+            patch_source_digests,
+            heuristic_source_digests,
+            provenance_digest,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct LifeModelHSCompatibilityView {
+    pub schema_version: String,
+    pub materialized_at: String,
+    pub current_state_summary: LifeModelCompatibilityStateSummary,
+    pub collaboration_summaries: Vec<LifeModelCompatibilitySummary>,
+    pub asset_refs: Vec<LifeModelCompatibilityAssetRef>,
+    pub provenance: LifeModelMaterializedViewProvenance,
+    pub source_digest: String,
+}
+
+#[derive(Serialize)]
+struct LifeModelCompatibilityEnvelope<'a> {
+    #[serde(flatten)]
+    life_model: &'a LifeModel,
+    hs_compatibility: LifeModelHSCompatibilityView,
+}
+
+pub fn extract_hs_compatibility_view_from_yaml(yaml: &str) -> Result<LifeModelHSCompatibilityView> {
+    let value: serde_yaml::Value =
+        serde_yaml::from_str(yaml).with_context(|| "解析 LifeModel HS 兼容视图失败")?;
+    let hs_value = value
+        .get("hs_compatibility")
+        .ok_or_else(|| anyhow::anyhow!("LifeModel HS 兼容视图缺少 hs_compatibility"))?
+        .clone();
+    serde_yaml::from_value(hs_value).with_context(|| "解析 LifeModel HS 兼容视图 provenance 失败")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct AlignmentIssue {
@@ -457,6 +796,87 @@ impl LifeModel {
             preferences: Preferences::default(),
             evolution_rules: vec![],
         }
+    }
+
+    pub fn materialize_yaml_compatibility_view(
+        &self,
+        collaboration_summaries: Vec<LifeModelCompatibilitySummary>,
+        evidence_records: &[crate::agent::evidence_store::EvidenceRecord],
+        heuristic_records: &[crate::agent::heuristic_store::HeuristicRecord],
+    ) -> Result<String> {
+        self.materialize_yaml_compatibility_view_with_provenance(
+            collaboration_summaries,
+            evidence_records,
+            heuristic_records,
+            &[],
+        )
+    }
+
+    pub fn materialize_yaml_compatibility_view_with_provenance(
+        &self,
+        collaboration_summaries: Vec<LifeModelCompatibilitySummary>,
+        evidence_records: &[crate::agent::evidence_store::EvidenceRecord],
+        heuristic_records: &[crate::agent::heuristic_store::HeuristicRecord],
+        patch_records: &[crate::life_model::patch::LifeModelPatch],
+    ) -> Result<String> {
+        let current_state_summary = LifeModelCompatibilityStateSummary::from_life_model(self);
+        let mut asset_refs = evidence_records
+            .iter()
+            .map(LifeModelCompatibilityAssetRef::from_evidence)
+            .chain(
+                heuristic_records
+                    .iter()
+                    .map(LifeModelCompatibilityAssetRef::from_heuristic),
+            )
+            .chain(
+                patch_records
+                    .iter()
+                    .map(LifeModelCompatibilityAssetRef::from_patch),
+            )
+            .collect::<Vec<_>>();
+        asset_refs.sort_by(|left, right| {
+            left.asset_kind
+                .cmp(&right.asset_kind)
+                .then_with(|| left.asset_id.cmp(&right.asset_id))
+        });
+        let provenance = LifeModelMaterializedViewProvenance::from_sources(
+            evidence_records,
+            heuristic_records,
+            patch_records,
+        );
+
+        let source_digest = sha256_hex(
+            serde_json::json!({
+                "life_model_version": self.metadata.version,
+                "life_model_updated_at": self.metadata.updated_at,
+                "state_digest": current_state_summary.content_digest,
+                "summary_digests": collaboration_summaries
+                    .iter()
+                    .map(|summary| summary.content_digest.clone())
+                    .collect::<Vec<_>>(),
+                "asset_digests": asset_refs
+                    .iter()
+                    .map(|asset| asset.content_digest.clone())
+                    .collect::<Vec<_>>(),
+                "provenance_digest": provenance.provenance_digest.clone(),
+            })
+            .to_string()
+            .as_bytes(),
+        );
+
+        let envelope = LifeModelCompatibilityEnvelope {
+            life_model: self,
+            hs_compatibility: LifeModelHSCompatibilityView {
+                schema_version: "lifemodel_hs_compat_v1".into(),
+                materialized_at: chrono::Utc::now().to_rfc3339(),
+                current_state_summary,
+                collaboration_summaries,
+                asset_refs,
+                provenance,
+                source_digest,
+            },
+        };
+        serde_yaml::to_string(&envelope).with_context(|| "序列化 LifeModel HS 兼容视图失败")
     }
 
     pub fn is_effectively_empty(&self) -> bool {
@@ -1245,12 +1665,40 @@ impl LifeModelManager {
     }
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    let hash = digest(&SHA256, bytes);
+    let bytes = hash.as_ref();
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push_str(&format!("{:02x}", b));
+    }
+    out
+}
+
+fn push_unique_lifemodel(values: &mut Vec<String>, value: String) {
+    if !value.trim().is_empty() && !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn sort_dedup_lifemodel(values: &mut Vec<String>) {
+    values.retain(|value| !value.trim().is_empty());
+    values.sort();
+    values.dedup();
+}
+
 pub mod patch;
 pub mod patch_store;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::evidence_store::{
+        EvidenceDraft, EvidencePrivacyLevel, EvidenceSourceRef, EvidenceSourceType, EvidenceStore,
+        EvidenceType,
+    };
+    use crate::agent::heuristic_store::{HeuristicDraft, HeuristicStore};
+    use crate::agent::types::RiskLevel;
 
     #[test]
     fn default_model_has_metadata() {
@@ -1405,5 +1853,131 @@ mod tests {
         mgr.save(&model).unwrap();
         let loaded = mgr.load().unwrap();
         assert_eq!(loaded.identity.name, "Test");
+    }
+
+    #[test]
+    fn materialized_compatibility_yaml_keeps_life_model_fields_and_allowed_sections() {
+        let mut model = LifeModel::default_model();
+        model.identity.name = "Compat User".into();
+        model.state.current_focus = "Shipping LMHS".into();
+        model.state.emotional_state.current_mood = "focused".into();
+        model.state.health_status.energy_level = 4;
+
+        let evidence_store = EvidenceStore::new_in_memory().unwrap();
+        let evidence = evidence_store
+            .create_evidence(
+                EvidenceDraft::new(
+                    EvidenceType::RuntimeBehavior,
+                    "proactive.reminder.pending_proposal",
+                    0.65,
+                    RiskLevel::Low,
+                    EvidencePrivacyLevel::Internal,
+                )
+                .with_summary("raw-private-evidence-summary-should-stay-out")
+                .with_source_ref(EvidenceSourceRef::from_payload(
+                    EvidenceSourceType::Proposal,
+                    "proposal-123",
+                    Some("raw source detail should stay out"),
+                    "raw source payload should stay out",
+                )),
+            )
+            .unwrap();
+        let heuristic_store = HeuristicStore::new_in_memory().unwrap();
+        let heuristic = heuristic_store
+            .create_heuristic(
+                HeuristicDraft::new(
+                    "planning",
+                    "low_energy",
+                    vec!["state.energy <= 3".into()],
+                    "full private heuristic guidance should stay out",
+                    90,
+                    RiskLevel::Low,
+                    EvidencePrivacyLevel::Internal,
+                )
+                .with_opposing_evidence_ref("opposing-raw-evidence-id"),
+            )
+            .unwrap();
+
+        let yaml = model
+            .materialize_yaml_compatibility_view(
+                vec![LifeModelCompatibilitySummary::new(
+                    "Prefer concise planning when energy is low.",
+                    vec![heuristic.id.clone()],
+                )],
+                &[evidence],
+                &[heuristic],
+            )
+            .unwrap();
+
+        assert!(yaml.contains("identity:"));
+        assert!(yaml.contains("hs_compatibility:"));
+        assert!(yaml.contains("current_state_summary:"));
+        assert!(yaml.contains("collaboration_summaries:"));
+        assert!(yaml.contains("asset_refs:"));
+        assert!(yaml.contains("proposal-123"));
+        assert!(yaml.contains("content_digest:"));
+        assert!(yaml.contains("source_digest:"));
+
+        let loaded: LifeModel = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(loaded.identity.name, "Compat User");
+        assert_eq!(loaded.state.current_focus, "Shipping LMHS");
+    }
+
+    #[test]
+    fn materialized_compatibility_yaml_omits_raw_hs_internals() {
+        let model = LifeModel::default_model();
+        let evidence_store = EvidenceStore::new_in_memory().unwrap();
+        let evidence = evidence_store
+            .create_evidence(
+                EvidenceDraft::new(
+                    EvidenceType::Preference,
+                    "identity.values",
+                    0.8,
+                    RiskLevel::Medium,
+                    EvidencePrivacyLevel::Sensitive,
+                )
+                .with_summary("raw-sensitive-evidence-body")
+                .with_source_ref(EvidenceSourceRef::from_payload(
+                    EvidenceSourceType::ChatMessage,
+                    "chat-1",
+                    Some("raw-chat-detail"),
+                    "raw-chat-source-text",
+                )),
+            )
+            .unwrap();
+        let heuristic_store = HeuristicStore::new_in_memory().unwrap();
+        let heuristic = heuristic_store
+            .create_heuristic(
+                HeuristicDraft::new(
+                    "identity",
+                    "private_trigger",
+                    vec!["raw condition should stay out".into()],
+                    "raw heuristic guidance should stay out",
+                    50,
+                    RiskLevel::Medium,
+                    EvidencePrivacyLevel::Sensitive,
+                )
+                .with_opposing_evidence_ref("opposing-evidence-raw"),
+            )
+            .unwrap();
+
+        let yaml = model
+            .materialize_yaml_compatibility_view(
+                vec![LifeModelCompatibilitySummary::new(
+                    "Concise collaboration summary is allowed.",
+                    vec![heuristic.id.clone(), evidence.id.clone()],
+                )],
+                &[evidence],
+                &[heuristic],
+            )
+            .unwrap();
+
+        assert!(yaml.contains("Concise collaboration summary is allowed."));
+        assert!(!yaml.contains("raw-sensitive-evidence-body"));
+        assert!(!yaml.contains("raw-chat-source-text"));
+        assert!(!yaml.contains("raw-chat-detail"));
+        assert!(!yaml.contains("raw heuristic guidance should stay out"));
+        assert!(!yaml.contains("raw condition should stay out"));
+        assert!(!yaml.contains("opposing-evidence-raw"));
     }
 }

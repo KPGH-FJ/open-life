@@ -149,7 +149,7 @@ impl FeedbackStore {
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM analytics WHERE event_name = ?1 AND DATE(created_at) = ?2",
+                "SELECT COUNT(*) FROM analytics WHERE event_name = ?1 AND DATE(created_at, 'localtime') = ?2",
                 params![event_name, today],
                 |row| row.get(0),
             )

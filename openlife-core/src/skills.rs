@@ -1,7 +1,13 @@
 use crate::agent::AgentExecutionBudget;
+use crate::agent::{ProposalSource, ProposalType, RiskLevel};
+use ring::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+
+const REQUIRED_BUILT_IN_SKILL_IDS: [&str; 3] =
+    ["weekly_review", "goal_breakdown", "memory_consolidation"];
+const SKILL_RUNTIME_READINESS_REPORT_KIND: &str = "w150.skillRuntimeReadiness.v1";
 
 /// JSON envelope that all skills must output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +30,24 @@ pub struct SkillProposalCandidate {
     pub confidence: f32,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillSourceKind {
+    #[default]
+    BuiltIn,
+    Plugin,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillExecutionStatus {
+    #[default]
+    ExecutableBuiltIn,
+    DisabledDeclarativeOnly,
+    ModelOnlyNoTools,
+    Blocked,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillManifest {
@@ -36,6 +60,32 @@ pub struct SkillManifest {
     pub input_schema: Value,
     pub output_schema: Value,
     pub proposal_policy: String,
+    #[serde(default)]
+    pub source_kind: SkillSourceKind,
+    #[serde(default)]
+    pub execution_status: SkillExecutionStatus,
+    #[serde(default)]
+    pub capability_flags: Vec<String>,
+    #[serde(default)]
+    pub plugin_id: Option<String>,
+}
+
+impl SkillManifest {
+    pub fn as_plugin_declarative_only(mut self, plugin_id: &str) -> Self {
+        self.source_kind = SkillSourceKind::Plugin;
+        self.execution_status = SkillExecutionStatus::DisabledDeclarativeOnly;
+        self.plugin_id = Some(plugin_id.to_string());
+        self.allowed_tools.clear();
+        self.execution_budget.allow_writes = false;
+        if !self
+            .capability_flags
+            .iter()
+            .any(|flag| flag == "plugin_declarative_only")
+        {
+            self.capability_flags.push("plugin_declarative_only".into());
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,14 +99,100 @@ pub struct SkillRunResult {
     pub parse_error: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillRuntimeDescriptor {
+    pub id: String,
+    pub name: String,
+    pub source_kind: SkillSourceKind,
+    pub execution_status: SkillExecutionStatus,
+    pub input_schema_digest: String,
+    pub output_schema_digest: String,
+    pub proposal_policy: String,
+    pub required_context_ids: Vec<String>,
+    pub allowed_tool_ids: Vec<String>,
+    pub allowed_tool_count: usize,
+    pub execution_budget: AgentExecutionBudget,
+    pub capability_flags: Vec<String>,
+    pub metadata_safe: bool,
+    pub contains_raw_content: bool,
+    pub direct_write_implied: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginSkillBoundarySummary {
+    pub built_in_skill_count: usize,
+    pub plugin_skill_count: usize,
+    pub disabled_declarative_only_count: usize,
+    pub model_only_no_tools_count: usize,
+    pub blocked_count: usize,
+    pub plugin_tools_declarative_only: bool,
+    pub external_plugin_tool_execution_enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillProposalGovernanceSummary {
+    pub allowed_proposal_types: Vec<String>,
+    pub proposal_first: bool,
+    pub auto_apply_allowed: bool,
+    pub source: String,
+    pub high_risk_requires_explicit_metadata: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillPrivacyModelRouteBoundarySummary {
+    pub hs_policy_enforced: bool,
+    pub high_or_critical_requires_local_only: bool,
+    pub local_only_fails_closed_without_local_model: bool,
+    pub guidance_consumption_default_disabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillTraceContractSummary {
+    pub action_trace_metadata_safe: bool,
+    pub observation_trace_metadata_safe: bool,
+    pub generated_proposals_linked_to_run: bool,
+    pub raw_runtime_payload_excluded_from_status: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillRuntimeReadinessReport {
+    pub report_kind: String,
+    pub ready: bool,
+    pub metadata_safe: bool,
+    pub contains_raw_content: bool,
+    pub required_builtins_present: bool,
+    pub built_in_skill_count: usize,
+    pub plugin_skill_count: usize,
+    pub descriptors: Vec<SkillRuntimeDescriptor>,
+    pub plugin_boundary_summary: PluginSkillBoundarySummary,
+    pub proposal_governance_summary: SkillProposalGovernanceSummary,
+    pub privacy_model_route_boundary_summary: SkillPrivacyModelRouteBoundarySummary,
+    pub trace_contract_summary: SkillTraceContractSummary,
+    pub default_chat_unchanged: bool,
+    pub migration_permission: bool,
+    pub runtime_execution_performed: bool,
+    pub model_call_performed: bool,
+    pub tool_call_performed: bool,
+    pub business_writes_performed: bool,
+    pub blockers: Vec<String>,
+}
+
 pub struct SkillRegistry {
     manifests: HashMap<String, SkillManifest>,
+    registration_counts: HashMap<String, usize>,
 }
 
 impl SkillRegistry {
     pub fn built_in() -> Self {
         let mut registry = Self {
             manifests: HashMap::new(),
+            registration_counts: HashMap::new(),
         };
         registry.register(Self::weekly_review());
         registry.register(Self::goal_breakdown());
@@ -65,6 +201,10 @@ impl SkillRegistry {
     }
 
     pub fn register(&mut self, manifest: SkillManifest) {
+        *self
+            .registration_counts
+            .entry(manifest.id.clone())
+            .or_insert(0) += 1;
         self.manifests.insert(manifest.id.clone(), manifest);
     }
 
@@ -80,10 +220,17 @@ impl SkillRegistry {
 
     pub fn remove(&mut self, id: &str) {
         self.manifests.remove(id);
+        self.registration_counts.remove(id);
     }
 
     pub fn remove_by_source_prefix(&mut self, prefix: &str) {
         self.manifests.retain(|id, _| !id.starts_with(prefix));
+        self.registration_counts
+            .retain(|id, _| !id.starts_with(prefix));
+    }
+
+    pub fn registration_count(&self, id: &str) -> usize {
+        self.registration_counts.get(id).copied().unwrap_or(0)
     }
 
     /// Build the system prompt for a skill.
@@ -150,13 +297,18 @@ impl SkillRegistry {
             .trim();
 
         let prompt = format!(
-            "[Skill: {}]\n用户输入: {}\n\n请基于你的技能能力生成回复。",
+            "[Skill: {}]\n用户输入: {}\n\nContext report:\n{}\n\n请基于你的技能能力生成回复。",
             manifest.name,
             if user_input.is_empty() {
                 "（无具体输入）"
             } else {
                 user_input
-            }
+            },
+            if _context.prompt_context.trim().is_empty() {
+                "no bounded context available"
+            } else {
+                &_context.prompt_context
+            },
         );
 
         Ok(prompt)
@@ -169,8 +321,8 @@ impl SkillRegistry {
             description: "汇总近期 AgentRun、目标、状态和记忆，生成周复盘与改进建议。".into(),
             required_context: vec![
                 "agent_runs".into(),
-                "goals".into(),
-                "state".into(),
+                "life_model.goals".into(),
+                "life_model.state".into(),
                 "memory".into(),
             ],
             allowed_tools: vec![],
@@ -203,6 +355,14 @@ impl SkillRegistry {
                 }
             }),
             proposal_policy: "review_required".into(),
+            source_kind: SkillSourceKind::BuiltIn,
+            execution_status: SkillExecutionStatus::ExecutableBuiltIn,
+            capability_flags: vec![
+                "bounded_context".into(),
+                "proposal_first".into(),
+                "metadata_safe_trace".into(),
+            ],
+            plugin_id: None,
         }
     }
 
@@ -211,7 +371,7 @@ impl SkillRegistry {
             id: "goal_breakdown".into(),
             name: "Goal Breakdown".into(),
             description: "将长期目标拆解为里程碑、每日行动和风险提示。".into(),
-            required_context: vec!["life_model.goals".into(), "state".into()],
+            required_context: vec!["life_model.goals".into(), "life_model.state".into()],
             allowed_tools: vec![],
             execution_budget: AgentExecutionBudget::default(),
             input_schema: serde_json::json!({
@@ -242,6 +402,14 @@ impl SkillRegistry {
                 }
             }),
             proposal_policy: "review_required".into(),
+            source_kind: SkillSourceKind::BuiltIn,
+            execution_status: SkillExecutionStatus::ExecutableBuiltIn,
+            capability_flags: vec![
+                "bounded_context".into(),
+                "proposal_first".into(),
+                "metadata_safe_trace".into(),
+            ],
+            plugin_id: None,
         }
     }
 
@@ -281,17 +449,69 @@ impl SkillRegistry {
                 }
             }),
             proposal_policy: "review_required".into(),
+            source_kind: SkillSourceKind::BuiltIn,
+            execution_status: SkillExecutionStatus::ExecutableBuiltIn,
+            capability_flags: vec![
+                "bounded_context".into(),
+                "proposal_first".into(),
+                "metadata_safe_trace".into(),
+            ],
+            plugin_id: None,
         }
     }
 }
 
 /// Context available to a skill during execution.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SkillContext {
-    pub life_model_json: Option<String>,
-    pub recent_runs_json: Option<String>,
-    pub recent_memory_json: Option<String>,
-    pub chat_history_json: Option<String>,
+    pub report: SkillContextReport,
+    pub prompt_context: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SkillContextAssemblyInput {
+    pub sources: Vec<SkillContextSource>,
+    pub max_summary_chars: usize,
+    pub max_excerpt_chars: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct SkillContextSource {
+    pub context_id: String,
+    pub item_count: usize,
+    pub ids: Vec<String>,
+    pub timestamps: Vec<String>,
+    pub summary: String,
+    pub raw_text: Option<String>,
+    pub safe_excerpt_permitted: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillContextReport {
+    pub metadata_safe: bool,
+    pub contains_raw_content: bool,
+    pub required_context_count: usize,
+    pub available_context_count: usize,
+    pub prompt_context_digest: String,
+    pub items: Vec<SkillContextItem>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillContextItem {
+    pub context_id: String,
+    pub available: bool,
+    pub item_count: usize,
+    pub id_count: usize,
+    pub ids: Vec<String>,
+    pub timestamps: Vec<String>,
+    pub summary: String,
+    pub digest: String,
+    pub byte_count: usize,
+    pub safe_excerpt: Option<String>,
 }
 
 /// Parse skill JSON output with fallback strategies.
@@ -327,20 +547,14 @@ pub fn parse_skill_json(text: &str) -> Result<SkillJsonEnvelope, String> {
 /// Never fails - always returns a usable envelope.
 pub fn validate_skill_envelope(
     mut envelope: SkillJsonEnvelope,
-    raw_output: &str,
+    _raw_output: &str,
 ) -> (SkillJsonEnvelope, Vec<String>) {
     let mut warnings = envelope.warnings.clone();
 
     // Validate summary
     if envelope.summary.is_empty() {
-        // Use raw output preview as fallback
-        let preview = if raw_output.len() > 200 {
-            format!("{}...", &raw_output[..200])
-        } else {
-            raw_output.to_string()
-        };
-        envelope.summary = preview;
-        warnings.push("summary 缺失或为空，使用原始输出预览兜底".to_string());
+        envelope.summary = "Skill output summary unavailable".to_string();
+        warnings.push("summary 缺失或为空，已使用 metadata-safe 兜底摘要".to_string());
     }
 
     // Validate structured_output
@@ -363,6 +577,477 @@ pub const VALID_SKILL_PROPOSAL_TYPES: &[&str] = &[
     "capability_update",
 ];
 
+pub fn evaluate_skill_runtime_readiness(registry: &SkillRegistry) -> SkillRuntimeReadinessReport {
+    let mut blockers = Vec::new();
+    let mut descriptors = registry
+        .list()
+        .into_iter()
+        .map(|manifest| descriptor_for_manifest(&manifest))
+        .collect::<Vec<_>>();
+    descriptors.sort_by(|a, b| a.id.cmp(&b.id));
+
+    for required_id in REQUIRED_BUILT_IN_SKILL_IDS {
+        match registry.get(required_id) {
+            Some(manifest) if manifest.source_kind == SkillSourceKind::BuiltIn => {
+                if registry.registration_count(required_id) != 1 {
+                    blockers.push(format!("duplicate_required_builtin:{}", required_id));
+                }
+            }
+            _ => blockers.push(format!("missing_required_builtin:{}", required_id)),
+        }
+    }
+
+    for descriptor in &descriptors {
+        if descriptor.proposal_policy != "review_required" {
+            blockers.push(format!("invalid_proposal_policy:{}", descriptor.id));
+        }
+        if descriptor.execution_budget.allow_writes {
+            blockers.push(format!("unsafe_write_budget:{}", descriptor.id));
+        }
+        if descriptor.direct_write_implied {
+            blockers.push(format!("direct_write_implied:{}", descriptor.id));
+        }
+        if !descriptor.metadata_safe || descriptor.contains_raw_content {
+            blockers.push(format!("metadata_unsafe_descriptor:{}", descriptor.id));
+        }
+        if descriptor.source_kind == SkillSourceKind::Plugin
+            && (descriptor.execution_status == SkillExecutionStatus::ExecutableBuiltIn
+                || descriptor.execution_budget.allow_writes
+                || !descriptor.allowed_tool_ids.is_empty())
+        {
+            blockers.push(format!(
+                "plugin_skill_executable_without_governance:{}",
+                descriptor.id
+            ));
+        }
+    }
+
+    let built_in_skill_count = descriptors
+        .iter()
+        .filter(|descriptor| descriptor.source_kind == SkillSourceKind::BuiltIn)
+        .count();
+    let plugin_skill_count = descriptors
+        .iter()
+        .filter(|descriptor| descriptor.source_kind == SkillSourceKind::Plugin)
+        .count();
+    let plugin_boundary_summary = PluginSkillBoundarySummary {
+        built_in_skill_count,
+        plugin_skill_count,
+        disabled_declarative_only_count: descriptors
+            .iter()
+            .filter(|descriptor| {
+                descriptor.source_kind == SkillSourceKind::Plugin
+                    && descriptor.execution_status == SkillExecutionStatus::DisabledDeclarativeOnly
+            })
+            .count(),
+        model_only_no_tools_count: descriptors
+            .iter()
+            .filter(|descriptor| {
+                descriptor.source_kind == SkillSourceKind::Plugin
+                    && descriptor.execution_status == SkillExecutionStatus::ModelOnlyNoTools
+            })
+            .count(),
+        blocked_count: descriptors
+            .iter()
+            .filter(|descriptor| {
+                descriptor.source_kind == SkillSourceKind::Plugin
+                    && descriptor.execution_status == SkillExecutionStatus::Blocked
+            })
+            .count(),
+        plugin_tools_declarative_only: true,
+        external_plugin_tool_execution_enabled: false,
+    };
+
+    let required_builtins_present = REQUIRED_BUILT_IN_SKILL_IDS
+        .iter()
+        .all(|id| registry.get(id).is_some() && registry.registration_count(id) == 1);
+    let ready = blockers.is_empty() && required_builtins_present;
+
+    SkillRuntimeReadinessReport {
+        report_kind: SKILL_RUNTIME_READINESS_REPORT_KIND.into(),
+        ready,
+        metadata_safe: true,
+        contains_raw_content: false,
+        required_builtins_present,
+        built_in_skill_count,
+        plugin_skill_count,
+        descriptors,
+        plugin_boundary_summary,
+        proposal_governance_summary: SkillProposalGovernanceSummary {
+            allowed_proposal_types: VALID_SKILL_PROPOSAL_TYPES
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
+            proposal_first: true,
+            auto_apply_allowed: false,
+            source: ProposalSource::SkillRuntime.to_string(),
+            high_risk_requires_explicit_metadata: true,
+        },
+        privacy_model_route_boundary_summary: SkillPrivacyModelRouteBoundarySummary {
+            hs_policy_enforced: true,
+            high_or_critical_requires_local_only: true,
+            local_only_fails_closed_without_local_model: true,
+            guidance_consumption_default_disabled: true,
+        },
+        trace_contract_summary: SkillTraceContractSummary {
+            action_trace_metadata_safe: true,
+            observation_trace_metadata_safe: true,
+            generated_proposals_linked_to_run: true,
+            raw_runtime_payload_excluded_from_status: true,
+        },
+        default_chat_unchanged: true,
+        migration_permission: false,
+        runtime_execution_performed: false,
+        model_call_performed: false,
+        tool_call_performed: false,
+        business_writes_performed: false,
+        blockers,
+    }
+}
+
+fn descriptor_for_manifest(manifest: &SkillManifest) -> SkillRuntimeDescriptor {
+    let direct_write_implied = manifest.execution_budget.allow_writes
+        || manifest
+            .allowed_tools
+            .iter()
+            .any(|tool| implies_write_or_external_side_effect(tool))
+        || manifest.proposal_policy.contains("direct");
+
+    SkillRuntimeDescriptor {
+        id: manifest.id.clone(),
+        name: manifest.name.clone(),
+        source_kind: manifest.source_kind,
+        execution_status: manifest.execution_status,
+        input_schema_digest: digest_json(&manifest.input_schema),
+        output_schema_digest: digest_json(&manifest.output_schema),
+        proposal_policy: manifest.proposal_policy.clone(),
+        required_context_ids: manifest.required_context.clone(),
+        allowed_tool_ids: manifest.allowed_tools.clone(),
+        allowed_tool_count: manifest.allowed_tools.len(),
+        execution_budget: manifest.execution_budget.clone(),
+        capability_flags: manifest.capability_flags.clone(),
+        metadata_safe: true,
+        contains_raw_content: false,
+        direct_write_implied,
+    }
+}
+
+pub fn assemble_skill_context(
+    manifest: &SkillManifest,
+    input: SkillContextAssemblyInput,
+) -> SkillContextReport {
+    let max_summary_chars = input.max_summary_chars.max(1);
+    let max_excerpt_chars = input.max_excerpt_chars;
+    let mut source_by_id = input
+        .sources
+        .into_iter()
+        .map(|source| (source.context_id.clone(), source))
+        .collect::<HashMap<_, _>>();
+    let mut items = Vec::new();
+    let mut warnings = Vec::new();
+    let mut prompt_parts = Vec::new();
+
+    for context_id in &manifest.required_context {
+        if let Some(source) = source_by_id.remove(context_id) {
+            let summary = bounded_chars(&source.summary, max_summary_chars);
+            let safe_excerpt = source.safe_excerpt_permitted.then(|| {
+                bounded_chars(
+                    if source.summary.trim().is_empty() {
+                        context_id
+                    } else {
+                        &source.summary
+                    },
+                    max_excerpt_chars.max(1),
+                )
+            });
+            let digest_material = format!(
+                "{}:{}:{}:{}",
+                source.context_id,
+                source.item_count,
+                source.ids.join(","),
+                source.raw_text.as_deref().unwrap_or(&source.summary)
+            );
+            let byte_count = source.raw_text.as_deref().unwrap_or(&source.summary).len();
+            prompt_parts.push(format!(
+                "{}: count={}, digest={}, summary={}",
+                context_id,
+                source.item_count,
+                digest_str(&digest_material),
+                summary
+            ));
+            items.push(SkillContextItem {
+                context_id: context_id.clone(),
+                available: true,
+                item_count: source.item_count,
+                id_count: source.ids.len(),
+                ids: source.ids.into_iter().take(8).collect(),
+                timestamps: source.timestamps.into_iter().take(8).collect(),
+                summary,
+                digest: digest_str(&digest_material),
+                byte_count,
+                safe_excerpt,
+            });
+        } else {
+            warnings.push(format!("missing_context:{}", context_id));
+            items.push(SkillContextItem {
+                context_id: context_id.clone(),
+                available: false,
+                item_count: 0,
+                id_count: 0,
+                ids: Vec::new(),
+                timestamps: Vec::new(),
+                summary: "context unavailable".into(),
+                digest: digest_str(&format!("missing:{}", context_id)),
+                byte_count: 0,
+                safe_excerpt: None,
+            });
+        }
+    }
+
+    let prompt_context = prompt_parts.join("\n");
+    SkillContextReport {
+        metadata_safe: true,
+        contains_raw_content: false,
+        required_context_count: manifest.required_context.len(),
+        available_context_count: items.iter().filter(|item| item.available).count(),
+        prompt_context_digest: digest_str(&prompt_context),
+        items,
+        warnings,
+    }
+}
+
+pub fn build_skill_context(
+    manifest: &SkillManifest,
+    input: SkillContextAssemblyInput,
+) -> SkillContext {
+    let report = assemble_skill_context(manifest, input);
+    let prompt_context = report
+        .items
+        .iter()
+        .filter(|item| item.available)
+        .map(|item| {
+            format!(
+                "{}: count={}, digest={}, summary={}",
+                item.context_id, item.item_count, item.digest, item.summary
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    SkillContext {
+        report,
+        prompt_context,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillOutputParseStatus {
+    Parsed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillOutputValidationStatus {
+    Valid,
+    ValidWithWarnings,
+    Skipped,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillOutputRedactionStatus {
+    pub raw_output_redacted: bool,
+    pub raw_output_digest: String,
+    pub raw_output_byte_count: usize,
+    pub raw_output_preview_included: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillOutputMetadata {
+    pub metadata_safe: bool,
+    pub contains_raw_content: bool,
+    pub summary_digest: String,
+    pub structured_output_digest: String,
+    pub proposal_candidate_count: usize,
+    pub warning_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NormalizedSkillOutput {
+    pub envelope: SkillJsonEnvelope,
+    pub warnings: Vec<String>,
+    pub parse_error: Option<String>,
+    pub parse_status: SkillOutputParseStatus,
+    pub validation_status: SkillOutputValidationStatus,
+    pub redaction_status: SkillOutputRedactionStatus,
+    pub metadata: SkillOutputMetadata,
+}
+
+pub fn normalize_skill_output(text: &str) -> NormalizedSkillOutput {
+    let raw_output_digest = digest_str(text);
+    let raw_output_byte_count = text.len();
+    match parse_skill_json(text) {
+        Ok(envelope) => {
+            let (envelope, warnings) = validate_skill_envelope(envelope, text);
+            let validation_status = if warnings.is_empty() {
+                SkillOutputValidationStatus::Valid
+            } else {
+                SkillOutputValidationStatus::ValidWithWarnings
+            };
+            normalized_output(
+                envelope,
+                warnings,
+                None,
+                SkillOutputParseStatus::Parsed,
+                validation_status,
+                raw_output_digest,
+                raw_output_byte_count,
+            )
+        }
+        Err(error) => {
+            let warnings = vec![format!("解析错误: {}", error)];
+            normalized_output(
+                SkillJsonEnvelope {
+                    summary: "JSON 解析失败".into(),
+                    structured_output: serde_json::json!({}),
+                    proposal_candidates: vec![],
+                    warnings: warnings.clone(),
+                },
+                warnings,
+                Some(error),
+                SkillOutputParseStatus::Failed,
+                SkillOutputValidationStatus::Skipped,
+                raw_output_digest,
+                raw_output_byte_count,
+            )
+        }
+    }
+}
+
+fn normalized_output(
+    mut envelope: SkillJsonEnvelope,
+    warnings: Vec<String>,
+    parse_error: Option<String>,
+    parse_status: SkillOutputParseStatus,
+    validation_status: SkillOutputValidationStatus,
+    raw_output_digest: String,
+    raw_output_byte_count: usize,
+) -> NormalizedSkillOutput {
+    envelope.warnings = warnings.clone();
+    let metadata = SkillOutputMetadata {
+        metadata_safe: true,
+        contains_raw_content: false,
+        summary_digest: digest_str(&envelope.summary),
+        structured_output_digest: digest_json(&envelope.structured_output),
+        proposal_candidate_count: envelope.proposal_candidates.len(),
+        warning_count: warnings.len(),
+    };
+    NormalizedSkillOutput {
+        envelope,
+        warnings,
+        parse_error,
+        parse_status,
+        validation_status,
+        redaction_status: SkillOutputRedactionStatus {
+            raw_output_redacted: true,
+            raw_output_digest,
+            raw_output_byte_count,
+            raw_output_preview_included: false,
+        },
+        metadata,
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GovernedSkillProposalCandidate {
+    pub candidate: SkillProposalCandidate,
+    pub proposal_type: ProposalType,
+    pub risk_level: RiskLevel,
+    pub source: ProposalSource,
+    pub metadata_safe_reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkippedSkillProposalCandidate {
+    pub proposal_type: String,
+    pub affected_path: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillProposalGovernanceReport {
+    pub accepted: Vec<GovernedSkillProposalCandidate>,
+    pub skipped: Vec<SkippedSkillProposalCandidate>,
+    pub warnings: Vec<String>,
+    pub proposal_first: bool,
+    pub direct_write_performed: bool,
+}
+
+pub fn govern_skill_proposal_candidates(
+    skill_id: &str,
+    candidates: &[SkillProposalCandidate],
+) -> SkillProposalGovernanceReport {
+    let mut accepted = Vec::new();
+    let mut skipped = Vec::new();
+    let mut warnings = Vec::new();
+
+    for candidate in candidates {
+        let Some(proposal_type) = map_skill_proposal_type(&candidate.proposal_type) else {
+            let reason = format!("unsupported_proposal_type:{}", candidate.proposal_type);
+            warnings.push(format!(
+                "{} affected_path={}",
+                reason, candidate.affected_path
+            ));
+            skipped.push(SkippedSkillProposalCandidate {
+                proposal_type: candidate.proposal_type.clone(),
+                affected_path: candidate.affected_path.clone(),
+                reason,
+            });
+            continue;
+        };
+
+        if !affected_path_allowed_for_skill(skill_id, proposal_type, &candidate.affected_path) {
+            let reason = format!(
+                "unsafe_affected_path:{}:{}",
+                candidate.proposal_type, candidate.affected_path
+            );
+            warnings.push(reason.clone());
+            skipped.push(SkippedSkillProposalCandidate {
+                proposal_type: candidate.proposal_type.clone(),
+                affected_path: candidate.affected_path.clone(),
+                reason,
+            });
+            continue;
+        }
+
+        let mut sanitized_candidate = candidate.clone();
+        sanitized_candidate.confidence = candidate.confidence.clamp(0.0, 1.0);
+        sanitized_candidate.reason = bounded_chars(&candidate.reason, 240);
+        let risk_level = classify_skill_candidate_risk(proposal_type, &candidate.affected_path);
+        accepted.push(GovernedSkillProposalCandidate {
+            candidate: sanitized_candidate,
+            proposal_type,
+            risk_level,
+            source: ProposalSource::SkillRuntime,
+            metadata_safe_reason: "allowlisted_skill_proposal_candidate".into(),
+        });
+    }
+
+    SkillProposalGovernanceReport {
+        accepted,
+        skipped,
+        warnings,
+        proposal_first: true,
+        direct_write_performed: false,
+    }
+}
+
 fn extract_json_from_fenced_block(text: &str) -> Option<&str> {
     let start = text.find("```json")? + 7;
     let end = text[start..].find("```")?;
@@ -371,6 +1056,130 @@ fn extract_json_from_fenced_block(text: &str) -> Option<&str> {
 
 fn extract_first_json_object(text: &str) -> Option<&str> {
     crate::json_utils::extract_first_json_object(text)
+}
+
+fn digest_json(value: &Value) -> String {
+    let serialized = serde_json::to_vec(value).unwrap_or_default();
+    digest_bytes(&serialized)
+}
+
+fn digest_str(value: &str) -> String {
+    digest_bytes(value.as_bytes())
+}
+
+fn digest_bytes(bytes: &[u8]) -> String {
+    let hash = digest(&SHA256, bytes);
+    let hex = hash
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("sha256:{}", hex)
+}
+
+fn bounded_chars(value: &str, max_chars: usize) -> String {
+    let max_chars = max_chars.max(1);
+    let total_chars = value.chars().count();
+    if total_chars <= max_chars {
+        return value.to_string();
+    }
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+    let mut output = value.chars().take(max_chars - 3).collect::<String>();
+    if total_chars > max_chars {
+        output.push_str("...");
+    }
+    output
+}
+
+fn implies_write_or_external_side_effect(value: &str) -> bool {
+    let lower = value.to_lowercase();
+    [
+        "write",
+        "send",
+        "external",
+        "calendar",
+        "email",
+        "file.update",
+        "file.delete",
+        "plugin.",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn map_skill_proposal_type(value: &str) -> Option<ProposalType> {
+    match value {
+        "goal_update" => Some(ProposalType::GoalUpdate),
+        "state_update" => Some(ProposalType::StateUpdate),
+        "memory_write" => Some(ProposalType::MemoryWrite),
+        "memory_archive" => Some(ProposalType::MemoryArchive),
+        "preference_update" => Some(ProposalType::PreferenceUpdate),
+        "capability_update" => Some(ProposalType::CapabilityUpdate),
+        _ => None,
+    }
+}
+
+fn affected_path_allowed_for_skill(
+    skill_id: &str,
+    proposal_type: ProposalType,
+    affected_path: &str,
+) -> bool {
+    if high_risk_path(affected_path) {
+        return false;
+    }
+    match (skill_id, proposal_type) {
+        ("weekly_review", ProposalType::GoalUpdate) => affected_path.starts_with("goals."),
+        ("weekly_review", ProposalType::StateUpdate) => affected_path.starts_with("state."),
+        ("goal_breakdown", ProposalType::GoalUpdate) => affected_path.starts_with("goals."),
+        ("memory_consolidation", ProposalType::MemoryWrite)
+        | ("memory_consolidation", ProposalType::MemoryArchive) => {
+            affected_path.starts_with("memory.")
+                || affected_path.starts_with("memories.")
+                || affected_path == "memory"
+        }
+        ("weekly_review", ProposalType::PreferenceUpdate) => {
+            affected_path.starts_with("preferences.")
+        }
+        ("weekly_review", ProposalType::CapabilityUpdate) => {
+            affected_path.starts_with("capabilities.")
+        }
+        _ => false,
+    }
+}
+
+fn high_risk_path(affected_path: &str) -> bool {
+    let lower = affected_path.to_lowercase();
+    [
+        "identity",
+        "values",
+        "relationships",
+        "relationship",
+        "health",
+        "finance",
+        "privacy",
+        "mission",
+        "long_term",
+        "life_goals",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn classify_skill_candidate_risk(proposal_type: ProposalType, affected_path: &str) -> RiskLevel {
+    if high_risk_path(affected_path) {
+        return RiskLevel::High;
+    }
+    match proposal_type {
+        ProposalType::StateUpdate => RiskLevel::Low,
+        ProposalType::GoalUpdate
+        | ProposalType::MemoryWrite
+        | ProposalType::MemoryArchive
+        | ProposalType::PreferenceUpdate
+        | ProposalType::CapabilityUpdate => RiskLevel::Medium,
+        _ => RiskLevel::High,
+    }
 }
 
 impl Default for SkillRegistry {
@@ -432,6 +1241,13 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_skill_json_first_object_extraction() {
+        let text = "prefix {\"summary\":\"first\",\"structured_output\":{},\"proposal_candidates\":[],\"warnings\":[]} suffix";
+        let result = parse_skill_json(text).unwrap();
+        assert_eq!(result.summary, "first");
+    }
+
+    #[test]
     fn test_parse_skill_json_invalid() {
         let json = "not json at all";
         let result = parse_skill_json(json);
@@ -474,5 +1290,167 @@ mod tests {
             "state_update"
         );
         assert_eq!(envelope.warnings.len(), 1);
+    }
+
+    #[test]
+    fn readiness_reports_metadata_safe_descriptors_and_missing_builtins_block() {
+        let mut registry = SkillRegistry::built_in();
+        let ready = evaluate_skill_runtime_readiness(&registry);
+
+        assert!(ready.ready);
+        assert!(ready.metadata_safe);
+        assert!(!ready.contains_raw_content);
+        assert!(ready.default_chat_unchanged);
+        assert!(!ready.migration_permission);
+        assert!(!ready.runtime_execution_performed);
+        assert!(!ready.model_call_performed);
+        assert!(!ready.tool_call_performed);
+        assert!(!ready.business_writes_performed);
+        assert_eq!(ready.built_in_skill_count, 3);
+        assert_eq!(ready.plugin_skill_count, 0);
+
+        let serialized = serde_json::to_string(&ready).unwrap();
+        assert!(!serialized.contains("\"inputSchema\":"));
+        assert!(!serialized.contains("\"outputSchema\":"));
+        assert!(!serialized.contains("life_model_json"));
+        assert!(!serialized.contains("recent_memory_json"));
+
+        registry.remove("weekly_review");
+        let blocked = evaluate_skill_runtime_readiness(&registry);
+        assert!(!blocked.ready);
+        assert!(blocked
+            .blockers
+            .contains(&"missing_required_builtin:weekly_review".to_string()));
+    }
+
+    #[test]
+    fn readiness_blocks_plugin_skill_marked_executable_without_governance() {
+        let mut registry = SkillRegistry::built_in();
+        let mut plugin_skill = SkillRegistry::goal_breakdown();
+        plugin_skill.id = "plugin:demo:goal_breakdown".into();
+        plugin_skill.source_kind = SkillSourceKind::Plugin;
+        plugin_skill.execution_status = SkillExecutionStatus::ExecutableBuiltIn;
+        plugin_skill.allowed_tools = vec!["plugin.demo.write_file".into()];
+        plugin_skill.execution_budget.allow_writes = true;
+        registry.register(plugin_skill);
+
+        let report = evaluate_skill_runtime_readiness(&registry);
+
+        assert!(!report.ready);
+        assert_eq!(report.plugin_skill_count, 1);
+        assert!(report
+            .blockers
+            .iter()
+            .any(|reason| reason.contains("plugin_skill_executable_without_governance")));
+        assert!(report.plugin_boundary_summary.plugin_tools_declarative_only);
+    }
+
+    #[test]
+    fn skill_context_assembly_is_bounded_and_metadata_safe() {
+        let manifest = SkillRegistry::built_in()
+            .get("memory_consolidation")
+            .unwrap();
+        let report = assemble_skill_context(
+            &manifest,
+            SkillContextAssemblyInput {
+                sources: vec![SkillContextSource {
+                    context_id: "memory".into(),
+                    item_count: 12,
+                    ids: vec!["mem-1".into(), "mem-2".into()],
+                    timestamps: vec!["2026-06-05T00:00:00Z".into()],
+                    summary: "recent memory candidates available".into(),
+                    raw_text: Some("private raw memory content that must not appear".into()),
+                    safe_excerpt_permitted: true,
+                }],
+                max_summary_chars: 24,
+                max_excerpt_chars: 18,
+            },
+        );
+
+        assert!(report.metadata_safe);
+        assert!(!report.contains_raw_content);
+        assert_eq!(report.required_context_count, 2);
+        assert_eq!(report.items.len(), 2);
+        let memory = report
+            .items
+            .iter()
+            .find(|item| item.context_id == "memory")
+            .unwrap();
+        assert!(memory.available);
+        assert_eq!(memory.item_count, 12);
+        assert!(memory.digest.starts_with("sha256:"));
+        assert!(memory.safe_excerpt.as_ref().unwrap().chars().count() <= 18);
+        assert!(report
+            .items
+            .iter()
+            .any(|item| item.context_id == "chat_history" && !item.available));
+
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains("private raw memory"));
+    }
+
+    #[test]
+    fn skill_output_normalization_is_fail_soft_and_metadata_safe() {
+        let normalized = normalize_skill_output("not json with private raw assistant output");
+
+        assert_eq!(normalized.parse_status, SkillOutputParseStatus::Failed);
+        assert_eq!(
+            normalized.validation_status,
+            SkillOutputValidationStatus::Skipped
+        );
+        assert!(normalized.redaction_status.raw_output_redacted);
+        assert!(normalized.envelope.proposal_candidates.is_empty());
+        assert!(normalized.warnings.iter().any(|w| w.contains("解析错误")));
+
+        let serialized = serde_json::to_string(&normalized.metadata).unwrap();
+        assert!(!serialized.contains("private raw assistant output"));
+        assert!(!serialized.contains("raw_output"));
+    }
+
+    #[test]
+    fn proposal_candidate_governance_skips_unsafe_candidates() {
+        let candidates = vec![
+            SkillProposalCandidate {
+                proposal_type: "goal_update".into(),
+                affected_path: "goals.short_term.0.name".into(),
+                after: serde_json::json!("ship Skill Runtime"),
+                reason: "safe goal refinement".into(),
+                confidence: 2.0,
+            },
+            SkillProposalCandidate {
+                proposal_type: "external_write_action".into(),
+                affected_path: "files./tmp/out".into(),
+                after: serde_json::json!({"body": "write"}),
+                reason: "unsafe external write".into(),
+                confidence: 0.9,
+            },
+            SkillProposalCandidate {
+                proposal_type: "goal_update".into(),
+                affected_path: "identity.values.0.name".into(),
+                after: serde_json::json!("unsafe identity change"),
+                reason: "unsafe high risk path".into(),
+                confidence: 0.9,
+            },
+        ];
+
+        let report = govern_skill_proposal_candidates("goal_breakdown", &candidates);
+
+        assert_eq!(report.accepted.len(), 1);
+        assert_eq!(report.accepted[0].candidate.confidence, 1.0);
+        assert_eq!(
+            report.accepted[0].risk_level,
+            crate::agent::RiskLevel::Medium
+        );
+        assert_eq!(report.skipped.len(), 2);
+        assert!(report.proposal_first);
+        assert!(!report.direct_write_performed);
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("unsupported_proposal_type")));
+        assert!(report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("unsafe_affected_path")));
     }
 }

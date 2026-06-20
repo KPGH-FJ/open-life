@@ -231,6 +231,1289 @@ export interface ChatMessage {
   run_id?: string;
 }
 
+export type MultiStrategyAgentPreviewLayer = "L1" | "L2" | "L3" | "l1" | "l2" | "l3";
+
+export interface MultiStrategyAgentPreviewExecutionBudget {
+  maxSteps?: number;
+  maxToolCalls?: number;
+  timeoutSeconds?: number;
+  allowCloud?: boolean;
+  allowWrites?: boolean;
+}
+
+export interface MultiStrategyAgentPreviewInput {
+  sessionId: string;
+  userText: string;
+  toolsPrompt?: string;
+  allowPlanning: boolean;
+  localModelAvailable: boolean;
+  layer?: MultiStrategyAgentPreviewLayer;
+  executionBudget?: MultiStrategyAgentPreviewExecutionBudget;
+}
+
+export type MultiStrategyAgentPreviewStrategyKind = "react" | "planExecute";
+export type MultiStrategyAgentPreviewPayloadKind = "react" | "planExecute" | "blocked";
+export type MultiStrategyAgentPreviewGovernanceDecisionKind = "allow" | "warn" | "block";
+
+export interface MultiStrategyAgentPreviewOutput {
+  runId?: string;
+  strategyKind: MultiStrategyAgentPreviewStrategyKind;
+  payloadKind: MultiStrategyAgentPreviewPayloadKind;
+  userOutput?: string;
+  plan?: unknown;
+  proposalIds: string[];
+  warnings: string[];
+  metadataSafeSummary: Record<string, unknown>;
+  governanceDecisionKind?: MultiStrategyAgentPreviewGovernanceDecisionKind;
+}
+
+export interface RuntimeStrategySideEffectBudget {
+  runtimeCalls: number;
+  modelCalls: number;
+  toolCalls: number;
+  storeWrites: number;
+  proposalWrites: number;
+  memoryWrites: number;
+  lifeModelWrites: number;
+  mcpAuditWrites: number;
+  externalWrites: number;
+}
+
+export interface RuntimeStrategyDescriptor {
+  strategyKind: string;
+  metadataSafeId: string;
+  metadataSafeName: string;
+  payloadKind: string;
+  capabilityIds: string[];
+  supportedTaskCategories: string[];
+  writePolicy: string;
+  sideEffectBudget: RuntimeStrategySideEffectBudget;
+  proposalFirstRequired: boolean;
+  metadataSafeTraceSupported: boolean;
+  defaultChatMigrationPermission: boolean;
+  metadataSafe: boolean;
+  executable: boolean;
+}
+
+export interface RuntimeStrategyDeclarativeDescriptor {
+  strategyKind: string;
+  metadataSafeId: string;
+  metadataSafeName: string;
+  capabilityIds: string[];
+  supportedTaskCategories: string[];
+  writePolicy: string;
+  sideEffectBudget: RuntimeStrategySideEffectBudget;
+  declarativeOnly: boolean;
+  executable: boolean;
+  defaultChatMigrationPermission: boolean;
+  metadataSafe: boolean;
+}
+
+export interface RuntimeStrategyRegistryReadinessReport {
+  reportKind: "runtime_strategy_registry_readiness";
+  ready: boolean;
+  metadataSafe: boolean;
+  executableStrategyCount: number;
+  executableDescriptors: RuntimeStrategyDescriptor[];
+  futureStrategyDescriptors: RuntimeStrategyDeclarativeDescriptor[];
+  requiredStrategyKinds: string[];
+  blockingReasons: string[];
+  defaultChatUnchanged: boolean;
+  migrationPermission: boolean;
+  noRuntimeModelToolExecution: boolean;
+  noBusinessWrites: boolean;
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export interface MultiStrategyRuntimeMaturityReport {
+  reportKind: "multi_strategy_runtime_maturity";
+  maturityReady: boolean;
+  registryReadiness: RuntimeStrategyRegistryReadinessReport;
+  executableStrategies: RuntimeStrategyDescriptor[];
+  futureStrategyDescriptors: RuntimeStrategyDeclarativeDescriptor[];
+  defaultChatUnchanged: boolean;
+  migrationPermission: boolean;
+  noRuntimeModelToolExecution: boolean;
+  noBusinessWrites: boolean;
+  statusCommandSideEffectBudget: RuntimeStrategySideEffectBudget;
+  blockingReasons: string[];
+  metadataSafe: boolean;
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export interface ToolRegistryBetaToolReport {
+  toolId: string;
+  requiredState: string;
+  actualState: string;
+  ready: boolean;
+  executable: boolean;
+  source?: string;
+  riskLevel?: string;
+  actionType?: string;
+  capabilities: string[];
+  proposalType?: string;
+  blockingReasons: string[];
+}
+
+export interface ToolRegistryBetaReadinessReport {
+  reportKind: "tool_registry_beta_readiness";
+  ready: boolean;
+  metadataSafe: boolean;
+  requiredToolIds: string[];
+  tools: ToolRegistryBetaToolReport[];
+  executableReadTools: string[];
+  proposalOnlyTools: string[];
+  permissionGatedTools: string[];
+  disabledOrDeclarativeOnlyTools: string[];
+  unsupportedOrMissingTools: string[];
+  unknownToolsBlocked: boolean;
+  pluginToolsExecutableWithoutExecutor: string[];
+  calendarEmailProposalToolsAvoidExternalWriteFallback: boolean;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export interface ReactBetaExecutionReadinessReport {
+  reportKind: "react_beta_execution_readiness";
+  ready: boolean;
+  reactLoopPresent: boolean;
+  actionSchemaReady: boolean;
+  toolRegistryReady: boolean;
+  actionExecutorManifestAuthorityReady: boolean;
+  agentRunTraceReady: boolean;
+  permissionReplayReady: boolean;
+  proposalFirstWritesReady: boolean;
+  runsTraceSurfaceReady: boolean;
+  defaultChatUnchanged: boolean;
+  migrationPermission: boolean;
+  runtimeStrategyReady: boolean;
+  blockingReasons: string[];
+  metadataSafe: boolean;
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export interface ReactBetaExecutionStatusReport {
+  reportKind: "react_beta_execution_status";
+  readiness: ReactBetaExecutionReadinessReport;
+  toolRegistryReadiness: ToolRegistryBetaReadinessReport;
+  defaultChatUnchanged: boolean;
+  migrationPermission: boolean;
+  noRuntimeModelToolExecution: boolean;
+  noBusinessWrites: boolean;
+  statusCommandSideEffectBudget: RuntimeStrategySideEffectBudget;
+  metadataSafe: boolean;
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export type PlanExecuteScenario = "weekly_planning";
+export type PlanExecuteSessionStatus =
+  | "draft"
+  | "finalized"
+  | "in_progress"
+  | "completed"
+  | "cancelled";
+export type PlanExecuteStepStatus =
+  | "planned"
+  | "skipped"
+  | "blocked"
+  | "requires_proposal"
+  | "requires_confirmation"
+  | "executed"
+  | "cancelled";
+export type PlanExecuteRiskLevel = "low" | "medium" | "high" | "critical";
+
+export interface PlanExecuteReviewItem {
+  stepId: string;
+  title: string;
+  status: string;
+  evidenceIds: string[];
+  linkedActionIds: string[];
+  linkedObservationIds: string[];
+  linkedProposalIds: string[];
+  blockerIds: string[];
+}
+
+export interface PlanExecuteReviewSummary {
+  reviewId: string;
+  planId: string;
+  planSessionId: string;
+  planStatus: string;
+  basePlanRevision: number;
+  reviewedAt?: string;
+  completedSteps: PlanExecuteReviewItem[];
+  skippedSteps: PlanExecuteReviewItem[];
+  blockedSteps: PlanExecuteReviewItem[];
+  proposalsCreated: PlanExecuteReviewItem[];
+  observationsUsed: PlanExecuteReviewItem[];
+  unresolved: PlanExecuteReviewItem[];
+  recommendedNextAction: string[];
+  completionClaimed: boolean;
+  metadataSafeSummary?: Record<string, any>;
+}
+
+export interface PlanExecuteStepRecord {
+  planId?: string;
+  stepId: string;
+  index?: number;
+  order: number;
+  title: string;
+  description?: string;
+  kind?: string;
+  intent: string;
+  toolName?: string | null;
+  actionKind: string;
+  riskLevel: PlanExecuteRiskLevel;
+  declaredWrite: boolean;
+  status: PlanExecuteStepStatus;
+  revision?: number;
+  basePlanRevision?: number;
+  linkedProposalId?: string | null;
+  linkedActionIds?: string[];
+  linkedObservationIds?: string[];
+  linkedProposalIds?: string[];
+  blockerIds?: string[];
+  linkedFinalDeliveryIds?: string[];
+  skipReason?: string | null;
+  observationSummary?: string | null;
+  policyReasonCode?: string | null;
+  policyDecisionId?: string | null;
+  statusReason?: string | null;
+  evidenceIds?: string[];
+  metadataSafeSummary?: Record<string, any>;
+}
+
+export interface PlanExecuteSession {
+  sessionId: string;
+  planId?: string;
+  sourceAgentRunId?: string | null;
+  sourceChatSessionId?: string | null;
+  scenario: PlanExecuteScenario;
+  status: PlanExecuteSessionStatus;
+  revision?: number;
+  revisionId?: string;
+  createdAt: string;
+  updatedAt: string;
+  finalizedAt?: string | null;
+  confirmedAt?: string | null;
+  reviewId?: string | null;
+  reviewSummary?: PlanExecuteReviewSummary | null;
+  sourceEvidenceIds?: string[];
+  supersededByPlanId?: string | null;
+  metadataSafeObjective: string;
+  stepCount: number;
+  completedStepCount: number;
+  proposalRequiredStepCount: number;
+  linkedProposalIds: string[];
+  warnings: string[];
+  steps: PlanExecuteStepRecord[];
+  metadataSafeSummary?: Record<string, any>;
+}
+
+export interface CreatePlanExecuteSessionInput {
+  scenarioId?: PlanExecuteScenario;
+  sourceChatSessionId?: string;
+  maxSteps?: number;
+}
+
+export interface PlanExecuteStepEditInput {
+  stepId: string;
+  title?: string;
+  intent?: string;
+  actionKind?: string;
+  toolName?: string;
+  declaredWrite?: boolean;
+  riskLevel?: PlanExecuteRiskLevel;
+}
+
+export interface UpdatePlanExecuteSessionDraftInput {
+  sessionId: string;
+  baseRevision?: number;
+  steps: PlanExecuteStepEditInput[];
+}
+
+export interface ExecutePlanExecuteStepInput {
+  sessionId: string;
+  stepId?: string;
+  baseRevision?: number;
+}
+
+export interface PlanExecuteStepExecutionResult {
+  sessionId: string;
+  planId?: string;
+  stepId: string;
+  stepStatus: PlanExecuteStepStatus;
+  revision?: number;
+  basePlanRevision?: number;
+  stepKind?: string;
+  linkedProposalId?: string | null;
+  linkedActionIds?: string[];
+  linkedObservationIds?: string[];
+  linkedProposalIds?: string[];
+  blockerIds?: string[];
+  linkedFinalDeliveryIds?: string[];
+  skipReason?: string | null;
+  observationSummary?: string | null;
+  policyDecisionId?: string | null;
+  statusReason?: string | null;
+  evidenceIds?: string[];
+  metadataSafeSummary?: Record<string, any>;
+}
+
+export interface ExecutePlanExecuteStepOutput {
+  session: PlanExecuteSession;
+  executedStep: PlanExecuteStepExecutionResult;
+  metadataSafeSummary?: Record<string, any>;
+}
+
+export interface SkipPlanExecuteStepInput {
+  sessionId: string;
+  stepId: string;
+  baseRevision: number;
+  reason: string;
+}
+
+export interface SkipPlanExecuteStepOutput {
+  session: PlanExecuteSession;
+  skippedStep: PlanExecuteStepExecutionResult;
+  metadataSafeSummary?: Record<string, any>;
+}
+
+export interface ReviewPlanExecuteSessionOutput {
+  session: PlanExecuteSession;
+  summary: PlanExecuteReviewSummary;
+  metadataSafeSummary?: Record<string, any>;
+}
+
+export interface RuntimeMigrationGateCheckInput {
+  previewRunId?: string;
+  sessionId?: string;
+}
+
+export interface RuntimeMigrationGateReport {
+  defaultChatUnchanged: boolean;
+  previewPathHealthy: boolean;
+  metadataSafeTraceReady: boolean;
+  fallbackAvailable: boolean;
+  noExternalWrites: boolean;
+  proposalFirstPreserved: boolean;
+  blockingReasons: string[];
+}
+
+export interface DefaultChatRuntimeBoundaryStatus {
+  currentMode: "legacy_stream";
+  controlledCandidateAvailable: boolean;
+  defaultChatUnchanged: boolean;
+  candidatePromotionReadinessRequired: boolean;
+  automaticMigrationEnabled: boolean;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export interface ControlledChatPilotEligibilityCheckInput {
+  requiredCleanRuns?: number;
+  sessionId?: string;
+}
+
+export interface ControlledChatPilotEligibilityReport {
+  eligible: boolean;
+  requiredCleanRuns: number;
+  cleanRunCount: number;
+  checkedRunIds: string[];
+  blockingReasons: string[];
+  lastGateReport?: RuntimeMigrationGateReport;
+  defaultChatUnchanged: boolean;
+}
+
+export interface ControlledPilotPromotionEvidenceInput {
+  pilotRunId: string;
+  sourceSessionId: string;
+  targetSessionId: string;
+  strategyKind: MultiStrategyAgentPreviewStrategyKind;
+  payloadKind: MultiStrategyAgentPreviewPayloadKind;
+  governanceDecisionKind: MultiStrategyAgentPreviewGovernanceDecisionKind | "unknown";
+  promotedMessageLength: number;
+  promotedMessageHash: string;
+  promotedAt: string;
+}
+
+export interface ControlledPilotPromotionEvidenceResult {
+  evidenceId: string;
+  created: boolean;
+  pilotRunId: string;
+  promotedAt: string;
+}
+
+export interface ControlledPilotPromotionEvidenceSummary {
+  promotedCount: number;
+  recentPromotedPilotRunIds: string[];
+  latestPromotionTimestamp?: string | null;
+  sourceTargetMismatchBlockCount: number;
+}
+
+export interface ControlledPilotPromotionReadinessCheckInput {
+  requiredPromotions?: number;
+  sessionId?: string;
+}
+
+export interface ControlledPilotPromotionReadinessReport {
+  ready: boolean;
+  requiredPromotions: number;
+  promotedCount: number;
+  recentPromotedPilotRunIds: string[];
+  latestPromotionTimestamp?: string | null;
+  sourceTargetMismatchBlockCount: number;
+  metadataSafeEvidenceReady: boolean;
+  defaultChatUnchanged: boolean;
+  blockingReasons: string[];
+}
+
+export interface ControlledChatMigrationPlanDraftInput {
+  requiredPromotions?: number;
+  sessionId?: string;
+}
+
+export interface ControlledChatMigrationPlanDraft {
+  draftReady: boolean;
+  readinessReport: ControlledPilotPromotionReadinessReport;
+  migrationScope: string[];
+  requiredPreconditions: string[];
+  rollbackPlan: string[];
+  fallbackPlan: string[];
+  testPlan: string[];
+  manualReviewRequired: boolean;
+  notAutomaticMigration: boolean;
+  blockingReasons: string[];
+}
+
+export type ControlledChatMigrationReviewDecisionKind = "approve" | "reject" | "request_rework";
+
+export interface ControlledChatMigrationReviewDecisionInput {
+  decisionKind: ControlledChatMigrationReviewDecisionKind;
+  requiredPromotions?: number;
+  sessionId?: string;
+  optionalReviewerNote?: string;
+}
+
+export interface ControlledChatMigrationReviewDecisionResult {
+  recorded: boolean;
+  evidenceId?: string | null;
+  decisionKind: ControlledChatMigrationReviewDecisionKind;
+  draftReady: boolean;
+  draftHash: string;
+  createdAt: string;
+  blockingReasons: string[];
+}
+
+export interface ControlledChatMigrationReviewLatestDecision {
+  evidenceId: string;
+  decisionKind: ControlledChatMigrationReviewDecisionKind;
+  draftReady: boolean;
+  draftHash: string;
+  createdAt: string;
+}
+
+export interface ControlledChatMigrationReviewDecisionSummary {
+  latestDecision?: ControlledChatMigrationReviewLatestDecision | null;
+  approvedCount: number;
+  reworkRejectCount: number;
+  latestTimestamp?: string | null;
+  blockingReasons: string[];
+}
+
+export interface ControlledChatMigrationImplementationGateInput {
+  requiredPromotions?: number;
+  sessionId?: string;
+}
+
+export interface ControlledChatMigrationImplementationGateReport {
+  implementationEligible: boolean;
+  latestDecision?: ControlledChatMigrationReviewLatestDecision | null;
+  readinessReport: ControlledPilotPromotionReadinessReport;
+  draftHashMatched: boolean;
+  approvedAfterLatestDraft: boolean;
+  blockingReasons: string[];
+}
+
+export type ControlledChatMigrationShadowRunDescriptor =
+  | "default_readiness_probe"
+  | "planning_readiness_probe"
+  | "sensitive_local_only_probe";
+
+export interface ControlledChatMigrationShadowRunInput {
+  sessionId: string;
+  userInputChecksum?: string;
+  boundedTestPromptDescriptor?: ControlledChatMigrationShadowRunDescriptor;
+  requiredPromotions?: number;
+}
+
+export interface ControlledChatMigrationShadowRunOutput {
+  shadowRunReady: boolean;
+  shadowRunId?: string | null;
+  implementationGateReport: ControlledChatMigrationImplementationGateReport;
+  strategyKind: string;
+  payloadKind: string;
+  metadataSafeSummary: Record<string, unknown>;
+  warnings: string[];
+  blockingReasons: string[];
+}
+
+export type ControlledChatMigrationShadowReviewDecisionKind =
+  | "approve"
+  | "reject"
+  | "request_rework";
+
+export interface ControlledChatMigrationShadowReviewDecisionInput {
+  shadowRunId: string;
+  decisionKind: ControlledChatMigrationShadowReviewDecisionKind;
+  optionalReviewerNote?: string;
+}
+
+export interface ControlledChatMigrationShadowReviewDecisionResult {
+  recorded: boolean;
+  evidenceId?: string | null;
+  shadowRunId: string;
+  decisionKind: ControlledChatMigrationShadowReviewDecisionKind;
+  readinessSummaryDigest: string;
+  createdAt: string;
+  blockingReasons: string[];
+}
+
+export interface ControlledChatMigrationShadowReviewLatestDecision {
+  evidenceId: string;
+  shadowRunId: string;
+  decisionKind: ControlledChatMigrationShadowReviewDecisionKind;
+  reviewerNoteChecksum?: string | null;
+  reviewerNoteLength: number;
+  reviewerNoteCategory: string;
+  readinessSummaryDigest: string;
+  createdAt: string;
+}
+
+export interface ControlledChatMigrationShadowReviewSummary {
+  latestDecision?: ControlledChatMigrationShadowReviewLatestDecision | null;
+  approvedCount: number;
+  reworkRejectCount: number;
+  latestTimestamp?: string | null;
+  blockingReasons: string[];
+}
+
+export interface ControlledChatCutoverReadinessInput {
+  requiredPromotions?: number;
+  sessionId?: string;
+}
+
+export interface ControlledChatCutoverReadinessReport {
+  cutoverPlanningEligible: boolean;
+  implementationGateReport: ControlledChatMigrationImplementationGateReport;
+  latestShadowReviewDecision?: ControlledChatMigrationShadowReviewLatestDecision | null;
+  verifiedShadowRunId?: string | null;
+  readinessSummaryDigest?: string | null;
+  defaultChatUnchanged: boolean;
+  requiredEvidenceReady: boolean;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export type ControlledChatCutoverCandidateDescriptor =
+  | "default_contract_probe"
+  | "concise_response_probe";
+
+export type ControlledChatCutoverCandidateContractShape =
+  | "send_message_compatible"
+  | "blocked"
+  | "failed";
+
+export interface ControlledChatCutoverCandidateInput {
+  sessionId: string;
+  userInputChecksum?: string;
+  boundedTestPromptDescriptor?: ControlledChatCutoverCandidateDescriptor;
+  requiredPromotions?: number;
+}
+
+export interface ControlledChatCutoverCandidateOutput {
+  candidateReady: boolean;
+  candidateRunId?: string | null;
+  outputPreview?: string | null;
+  userOutput?: string | null;
+  contractShape: ControlledChatCutoverCandidateContractShape;
+  metadataSafeSummary: Record<string, unknown>;
+  warnings: string[];
+  blockingReasons: string[];
+}
+
+export type ControlledChatCutoverCandidateReviewDecisionKind =
+  | "approve"
+  | "reject"
+  | "request_rework";
+
+export interface ControlledChatCutoverCandidateReviewDecisionInput {
+  candidateRunId: string;
+  decisionKind: ControlledChatCutoverCandidateReviewDecisionKind;
+  optionalReviewerNote?: string;
+}
+
+export interface ControlledChatCutoverCandidateReviewDecisionResult {
+  recorded: boolean;
+  evidenceId?: string | null;
+  candidateRunId: string;
+  decisionKind: ControlledChatCutoverCandidateReviewDecisionKind;
+  contractShape: string;
+  candidateSummaryDigest: string;
+  createdAt: string;
+  blockingReasons: string[];
+}
+
+export interface ControlledChatCutoverCandidateReviewLatestDecision {
+  evidenceId: string;
+  candidateRunId: string;
+  decisionKind: ControlledChatCutoverCandidateReviewDecisionKind;
+  contractShape: string;
+  candidateSummaryDigest: string;
+  reviewerNoteChecksum?: string | null;
+  reviewerNoteLength: number;
+  reviewerNoteCategory: string;
+  createdAt: string;
+}
+
+export interface ControlledChatCutoverCandidateReviewSummary {
+  latestDecision?: ControlledChatCutoverCandidateReviewLatestDecision | null;
+  approvedCount: number;
+  reworkRejectCount: number;
+  latestTimestamp?: string | null;
+  blockingReasons: string[];
+}
+
+export interface ControlledChatCutoverCandidatePromotionReadinessInput {
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+  sessionId?: string;
+}
+
+export interface ControlledChatCutoverCandidatePromotionApprovedCandidate {
+  evidenceId: string;
+  candidateRunId: string;
+  contractShape: string;
+  candidateSummaryDigest: string;
+  runReadinessDigest: string;
+  decisionCreatedAt: string;
+  ready: boolean;
+  blockingReasons: string[];
+}
+
+export interface ControlledChatCutoverCandidatePromotionReadinessReport {
+  ready: boolean;
+  cutoverReadinessEligible: boolean;
+  requiredApprovedCandidates: number;
+  approvedCandidateCount: number;
+  latestDecision?: ControlledChatCutoverCandidateReviewLatestDecision | null;
+  approvedCandidates: ControlledChatCutoverCandidatePromotionApprovedCandidate[];
+  defaultChatUnchanged: boolean;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+  checkedAt: string;
+}
+
+export interface DefaultChatAdapterActivationPlanDraftInput {
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+  sessionId?: string;
+}
+
+export interface DefaultChatAdapterActivationPlanDraft {
+  draftReady: boolean;
+  candidatePromotionReadinessReport: ControlledChatCutoverCandidatePromotionReadinessReport;
+  runtimeBoundaryStatus: DefaultChatRuntimeBoundaryStatus;
+  activationScope: string[];
+  requiredPreconditions: string[];
+  adapterContractChecks: string[];
+  fallbackPlan: string[];
+  rollbackPlan: string[];
+  observabilityPlan: string[];
+  testPlan: string[];
+  manualReviewRequired: boolean;
+  notAutomaticMigration: boolean;
+  requiresSeparateImplementation: boolean;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export type DefaultChatAdapterActivationReviewDecisionKind =
+  | "approve"
+  | "reject"
+  | "request_rework";
+
+export interface DefaultChatAdapterActivationReviewDecisionInput {
+  decisionKind: DefaultChatAdapterActivationReviewDecisionKind;
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+  sessionId?: string;
+  optionalReviewerNote?: string;
+}
+
+export interface DefaultChatAdapterActivationReviewDecisionResult {
+  recorded: boolean;
+  evidenceId?: string | null;
+  decisionKind: DefaultChatAdapterActivationReviewDecisionKind;
+  draftReady: boolean;
+  activationPlanDigest: string;
+  createdAt: string;
+  blockingReasons: string[];
+}
+
+export interface DefaultChatAdapterActivationReviewLatestDecision {
+  evidenceId: string;
+  decisionKind: DefaultChatAdapterActivationReviewDecisionKind;
+  draftReady: boolean;
+  activationPlanDigest: string;
+  candidatePromotionReady: boolean;
+  currentMode: string;
+  automaticMigrationEnabled: boolean;
+  reviewerNoteChecksum?: string | null;
+  reviewerNoteLength: number;
+  reviewerNoteCategory: string;
+  createdAt: string;
+}
+
+export interface DefaultChatAdapterActivationReviewSummary {
+  latestDecision?: DefaultChatAdapterActivationReviewLatestDecision | null;
+  approvedCount: number;
+  rejectOrReworkCount: number;
+  latestTimestamp?: string | null;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export interface DefaultChatAdapterActivationImplementationGateInput {
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+  sessionId?: string;
+}
+
+export interface DefaultChatAdapterActivationImplementationGateReport {
+  implementationGateEligible: boolean;
+  draftReady: boolean;
+  latestDecision?: DefaultChatAdapterActivationReviewLatestDecision | null;
+  currentActivationPlanDigest: string;
+  activationPlanDigestMatched: boolean;
+  defaultChatUnchanged: boolean;
+  automaticMigrationEnabled: boolean;
+  currentMode: string;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export interface DefaultChatAdapterRoutingStatusInput {
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+  sessionId?: string;
+}
+
+export interface DefaultChatAdapterRoutingStatus {
+  currentMode: string;
+  adapterScaffoldPresent: boolean;
+  controlledAdapterEnabled: boolean;
+  defaultSendPath: string;
+  startStreamPath: string;
+  activationImplementationGateEligible: boolean;
+  requiresSeparateCutoverImplementation: boolean;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export interface DefaultChatAdapterContractHarnessInput {
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+  sessionId?: string;
+}
+
+export interface DefaultChatAdapterContractCheck {
+  name: string;
+  ready: boolean;
+  expectedPath: string;
+  actualPath: string;
+  blockingReasons: string[];
+}
+
+export interface DefaultChatAdapterContractHarnessReport {
+  contractHarnessReady: boolean;
+  contractShape: string;
+  adapterDisabled: boolean;
+  activationImplementationGateEligible: boolean;
+  routingStatus: DefaultChatAdapterRoutingStatus;
+  sendMessageContract: DefaultChatAdapterContractCheck;
+  streamMessageContract: DefaultChatAdapterContractCheck;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export interface DefaultChatAdapterOrdinaryEntryPreflightCheck {
+  callsite: string;
+  preflightReady: boolean;
+  contractReady: boolean;
+  legacyEntryAllowed: boolean;
+  ordinaryEntryPath: string;
+  requiredEntryPath: string;
+  contractShape: string;
+  sideEffectLockEngaged: boolean;
+  defaultChatMigrationAllowed: boolean;
+  controlledAdapterExecutorAttached: boolean;
+  runtimeCallEnabled: boolean;
+  modelCallEnabled: boolean;
+  toolCallEnabled: boolean;
+  allowWrites: boolean;
+  maxToolCalls: number;
+  chatMessageSaved: boolean;
+  agentRunRecorded: boolean;
+  evidenceRecorded: boolean;
+  blockingReasons: string[];
+}
+
+export interface DefaultChatAdapterOrdinaryEntryPreflightStatus {
+  statusReady: boolean;
+  defaultChatUnchanged: boolean;
+  currentMode: string;
+  controlledAdapterEnabled: boolean;
+  automaticMigrationEnabled: boolean;
+  defaultSendPath: string;
+  startStreamPath: string;
+  sendMessagePreflight: DefaultChatAdapterOrdinaryEntryPreflightCheck;
+  streamMessagePreflight: DefaultChatAdapterOrdinaryEntryPreflightCheck;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export interface DefaultChatAdapterNarrowImplementationDiscussionGateInput {
+  sourceSessionId: string;
+  message: string;
+  requiredApprovedPreviews?: number;
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+}
+
+export interface DefaultChatAdapterNarrowImplementationDiscussionGateReport {
+  eligible: boolean;
+  defaultChatUnchanged: boolean;
+  cutoverPlanApprovalReady: boolean;
+  ordinaryEntryPreflightStatusReady: boolean;
+  sendPreflightReady: boolean;
+  streamPreflightReady: boolean;
+  controlledAdapterEnabled: boolean;
+  automaticMigrationEnabled: boolean;
+  defaultSendPath: string;
+  startStreamPath: string;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export interface DefaultChatAdapterNarrowImplementationPlanInput {
+  sourceSessionId: string;
+  message: string;
+  requiredApprovedPreviews?: number;
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+}
+
+export interface DefaultChatAdapterNarrowImplementationPlanSection {
+  sectionKey: string;
+  title: string;
+  items: string[];
+}
+
+export interface DefaultChatAdapterNarrowImplementationPlanDraft {
+  draftReady: boolean;
+  discussionGate: DefaultChatAdapterNarrowImplementationDiscussionGateReport;
+  manualReviewRequired: boolean;
+  notAutomaticMigration: boolean;
+  requiresSeparateImplementation: boolean;
+  requiresSeparateCutoverReview: boolean;
+  sourceSessionId: string;
+  inputMessageLength: number;
+  inputMessageHash: string;
+  stablePlanDigest?: string | null;
+  planSections: DefaultChatAdapterNarrowImplementationPlanSection[];
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export type DefaultChatAdapterNarrowImplementationPlanReviewDecisionKind =
+  | "approve"
+  | "reject"
+  | "request_rework";
+
+export interface DefaultChatAdapterNarrowImplementationPlanReviewDecisionInput {
+  decisionKind: DefaultChatAdapterNarrowImplementationPlanReviewDecisionKind;
+  sourceSessionId: string;
+  message: string;
+  requiredApprovedPreviews?: number;
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+  optionalReviewerNote?: string;
+}
+
+export interface DefaultChatAdapterNarrowImplementationPlanReviewDecisionResult {
+  recorded: boolean;
+  evidenceId?: string | null;
+  decisionKind: DefaultChatAdapterNarrowImplementationPlanReviewDecisionKind;
+  sourceSessionId: string;
+  draftReady: boolean;
+  narrowPlanDigest?: string | null;
+  planSectionCount: number;
+  createdAt: string;
+  blockingReasons: string[];
+}
+
+export interface DefaultChatAdapterNarrowImplementationPlanReviewLatestDecision {
+  evidenceId: string;
+  decisionKind: DefaultChatAdapterNarrowImplementationPlanReviewDecisionKind;
+  sourceSessionId: string;
+  draftReady: boolean;
+  narrowPlanDigest?: string | null;
+  planSectionCount: number;
+  w57Eligible: boolean;
+  reviewerNoteChecksum?: string | null;
+  reviewerNoteLength: number;
+  reviewerNoteCategory: string;
+  createdAt: string;
+}
+
+export interface DefaultChatAdapterNarrowImplementationPlanReviewSummary {
+  latestDecision?: DefaultChatAdapterNarrowImplementationPlanReviewLatestDecision | null;
+  approvedCount: number;
+  rejectedCount: number;
+  requestReworkCount: number;
+  latestApprovedPlanDigest?: string | null;
+  latestTimestamp?: string | null;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export interface DefaultChatAdapterNarrowImplementationPlanApprovalReadinessInput {
+  sourceSessionId: string;
+  message: string;
+  requiredApprovedPreviews?: number;
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+}
+
+export interface DefaultChatAdapterNarrowImplementationPlanApprovalReadinessReport {
+  ready: boolean;
+  draftReady: boolean;
+  discussionGateEligible: boolean;
+  narrowPlanReviewApproved: boolean;
+  narrowPlanDigestMatched: boolean;
+  currentPlanDigest?: string | null;
+  latestApprovedPlanDigest?: string | null;
+  latestDecision?: DefaultChatAdapterNarrowImplementationPlanReviewLatestDecision | null;
+  defaultChatUnchanged: boolean;
+  controlledAdapterEnabled: boolean;
+  automaticMigrationEnabled: boolean;
+  defaultSendPath: string;
+  startStreamPath: string;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export interface DefaultChatAdapterDryRunInput {
+  sessionId: string;
+  message: string;
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+}
+
+export interface DefaultChatAdapterDryRunReport {
+  dryRunReady: boolean;
+  blocked: boolean;
+  contractShape: string;
+  sourceSessionId: string;
+  adapterPath: string;
+  allowWrites: boolean;
+  maxToolCalls: number;
+  defaultChatPathUnchanged: boolean;
+  chatMessageSaved: boolean;
+  agentRunRecorded: boolean;
+  contractHarnessReady: boolean;
+  inputMessageLength: number;
+  inputMessageHash: string;
+  userOutputPreview?: string | null;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export type DefaultChatAdapterDryRunReviewDecisionKind = "approve" | "reject" | "request_rework";
+
+export interface DefaultChatAdapterDryRunReviewDecisionInput {
+  decisionKind: DefaultChatAdapterDryRunReviewDecisionKind;
+  sourceSessionId: string;
+  message: string;
+  dryRunSummaryDigest?: string;
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+  optionalReviewerNote?: string;
+}
+
+export interface DefaultChatAdapterDryRunReviewDecisionResult {
+  recorded: boolean;
+  evidenceId?: string | null;
+  decisionKind: DefaultChatAdapterDryRunReviewDecisionKind;
+  sourceSessionId: string;
+  contractShape: string;
+  dryRunReady: boolean;
+  dryRunSummaryDigest: string;
+  createdAt: string;
+  blockingReasons: string[];
+}
+
+export interface DefaultChatAdapterDryRunReviewLatestDecision {
+  evidenceId: string;
+  decisionKind: DefaultChatAdapterDryRunReviewDecisionKind;
+  sourceSessionId: string;
+  contractShape: string;
+  dryRunReady: boolean;
+  dryRunSummaryDigest: string;
+  reviewerNoteChecksum?: string | null;
+  reviewerNoteLength: number;
+  reviewerNoteCategory: string;
+  createdAt: string;
+}
+
+export interface DefaultChatAdapterDryRunReviewSummary {
+  latestDecision?: DefaultChatAdapterDryRunReviewLatestDecision | null;
+  approvedCount: number;
+  rejectOrReworkCount: number;
+  latestTimestamp?: string | null;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export interface DefaultChatAdapterImplementationReadinessInput {
+  sourceSessionId: string;
+  message: string;
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+}
+
+export interface DefaultChatAdapterImplementationReadinessReport {
+  implementationReady: boolean;
+  latestDryRunReviewDecision?: DefaultChatAdapterDryRunReviewLatestDecision | null;
+  activationImplementationGateEligible: boolean;
+  contractHarnessReady: boolean;
+  dryRunReady: boolean;
+  dryRunReviewApproved: boolean;
+  dryRunDigestMatched: boolean;
+  defaultChatUnchanged: boolean;
+  controlledAdapterEnabled: boolean;
+  automaticMigrationEnabled: boolean;
+  defaultSendPath: string;
+  startStreamPath: string;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export interface DefaultChatAdapterControlledPreviewInput {
+  sourceSessionId: string;
+  message: string;
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+}
+
+export interface DefaultChatAdapterControlledPreviewReport {
+  previewReady: boolean;
+  blocked: boolean;
+  contractShape: string;
+  sourceSessionId: string;
+  adapterPath: string;
+  reply?: string | null;
+  reasoningTrace: Record<string, unknown>;
+  toolCalls: unknown[];
+  runId?: string | null;
+  allowWrites: boolean;
+  maxToolCalls: number;
+  defaultChatPathUnchanged: boolean;
+  chatMessageSaved: boolean;
+  agentRunRecorded: boolean;
+  implementationReady: boolean;
+  warnings: string[];
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export type DefaultChatAdapterControlledPreviewReviewDecisionKind =
+  | "approve"
+  | "reject"
+  | "request_rework";
+
+export interface DefaultChatAdapterControlledPreviewReviewDecisionInput {
+  previewRunId: string;
+  decisionKind: DefaultChatAdapterControlledPreviewReviewDecisionKind;
+  optionalReviewerNote?: string;
+}
+
+export interface DefaultChatAdapterControlledPreviewReviewDecisionResult {
+  recorded: boolean;
+  evidenceId?: string | null;
+  previewRunId: string;
+  decisionKind: DefaultChatAdapterControlledPreviewReviewDecisionKind;
+  contractShape: string;
+  previewSummaryDigest: string;
+  createdAt: string;
+  blockingReasons: string[];
+}
+
+export interface DefaultChatAdapterControlledPreviewReviewLatestDecision {
+  evidenceId: string;
+  previewRunId: string;
+  decisionKind: DefaultChatAdapterControlledPreviewReviewDecisionKind;
+  contractShape: string;
+  previewSummaryDigest: string;
+  reviewerNoteChecksum?: string | null;
+  reviewerNoteLength: number;
+  reviewerNoteCategory: string;
+  createdAt: string;
+}
+
+export interface DefaultChatAdapterControlledPreviewReviewSummary {
+  latestDecision?: DefaultChatAdapterControlledPreviewReviewLatestDecision | null;
+  approvedCount: number;
+  rejectOrReworkCount: number;
+  latestTimestamp?: string | null;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export interface DefaultChatAdapterControlledPreviewApprovalReadinessInput {
+  sourceSessionId: string;
+  message: string;
+  requiredApprovedPreviews?: number;
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+}
+
+export interface DefaultChatAdapterControlledPreviewApprovalReadinessReport {
+  ready: boolean;
+  requiredApprovedPreviews: number;
+  approvedPreviewCount: number;
+  latestDecision?: DefaultChatAdapterControlledPreviewReviewLatestDecision | null;
+  verifiedPreviewRunIds: string[];
+  implementationReadinessReady: boolean;
+  previewReviewApproved: boolean;
+  previewDigestMatched: boolean;
+  defaultChatUnchanged: boolean;
+  controlledAdapterEnabled: boolean;
+  automaticMigrationEnabled: boolean;
+  defaultSendPath: string;
+  startStreamPath: string;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export interface DefaultChatAdapterCutoverImplementationPlanInput {
+  sourceSessionId: string;
+  message: string;
+  requiredApprovedPreviews?: number;
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+}
+
+export interface DefaultChatAdapterCutoverImplementationPlanSection {
+  sectionKey: string;
+  title: string;
+  items: string[];
+}
+
+export interface DefaultChatAdapterCutoverImplementationPlanDraft {
+  draftReady: boolean;
+  controlledPreviewApprovalReadiness: DefaultChatAdapterControlledPreviewApprovalReadinessReport;
+  manualReviewRequired: boolean;
+  notAutomaticMigration: boolean;
+  requiresSeparateImplementation: boolean;
+  requiresSeparateCutoverReview: boolean;
+  sourceSessionId: string;
+  inputMessageLength: number;
+  inputMessageHash: string;
+  stablePlanDigest?: string | null;
+  planSections: DefaultChatAdapterCutoverImplementationPlanSection[];
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export type DefaultChatAdapterCutoverPlanReviewDecisionKind =
+  | "approve"
+  | "reject"
+  | "request_rework";
+
+export interface DefaultChatAdapterCutoverPlanReviewDecisionInput {
+  decisionKind: DefaultChatAdapterCutoverPlanReviewDecisionKind;
+  sourceSessionId: string;
+  message: string;
+  requiredApprovedPreviews?: number;
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+  optionalReviewerNote?: string;
+}
+
+export interface DefaultChatAdapterCutoverPlanReviewDecisionResult {
+  recorded: boolean;
+  evidenceId?: string | null;
+  decisionKind: DefaultChatAdapterCutoverPlanReviewDecisionKind;
+  sourceSessionId: string;
+  draftReady: boolean;
+  cutoverPlanDigest?: string | null;
+  planSectionCount: number;
+  createdAt: string;
+  blockingReasons: string[];
+}
+
+export interface DefaultChatAdapterCutoverPlanReviewLatestDecision {
+  evidenceId: string;
+  decisionKind: DefaultChatAdapterCutoverPlanReviewDecisionKind;
+  sourceSessionId: string;
+  draftReady: boolean;
+  cutoverPlanDigest?: string | null;
+  planSectionCount: number;
+  w45Ready: boolean;
+  reviewerNoteChecksum?: string | null;
+  reviewerNoteLength: number;
+  reviewerNoteCategory: string;
+  createdAt: string;
+}
+
+export interface DefaultChatAdapterCutoverPlanReviewSummary {
+  latestDecision?: DefaultChatAdapterCutoverPlanReviewLatestDecision | null;
+  approvedCount: number;
+  rejectedCount: number;
+  requestReworkCount: number;
+  latestApprovedPlanDigest?: string | null;
+  latestTimestamp?: string | null;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export interface DefaultChatAdapterCutoverPlanApprovalReadinessInput {
+  sourceSessionId: string;
+  message: string;
+  requiredApprovedPreviews?: number;
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+}
+
+export interface DefaultChatAdapterCutoverPlanApprovalReadinessReport {
+  ready: boolean;
+  draftReady: boolean;
+  w45Ready: boolean;
+  cutoverPlanReviewApproved: boolean;
+  cutoverPlanDigestMatched: boolean;
+  currentPlanDigest?: string | null;
+  latestApprovedPlanDigest?: string | null;
+  latestDecision?: DefaultChatAdapterCutoverPlanReviewLatestDecision | null;
+  defaultChatUnchanged: boolean;
+  controlledAdapterEnabled: boolean;
+  automaticMigrationEnabled: boolean;
+  defaultSendPath: string;
+  startStreamPath: string;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
 export interface LifeModelVersion {
   version: string;
   timestamp: string;

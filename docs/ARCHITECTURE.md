@@ -1,6 +1,11 @@
 # OpenLife Architecture
 
 > 5 分钟快速理解 OpenLife 技术架构
+>
+> Current Agent development order is governed by `AGENTS.md`,
+> `plans/README.md`, and
+> `plans/openlife_lifemodel_governed_agent_runtime.md`. This file is a quick
+> explainer, not the current implementation authority.
 
 ## 一句话定义
 

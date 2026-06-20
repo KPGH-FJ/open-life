@@ -7,6 +7,11 @@ updates:
       day: monday
       time: "09:00"
       timezone: Asia/Shanghai
+    open-pull-requests-limit: 1
+    groups:
+      github-actions:
+        patterns:
+          - "*"
     labels:
       - dependencies
       - github-actions
@@ -18,6 +23,14 @@ updates:
       day: monday
       time: "09:15"
       timezone: Asia/Shanghai
+    open-pull-requests-limit: 3
+    groups:
+      frontend-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
     labels:
       - dependencies
       - frontend
@@ -29,6 +42,13 @@ updates:
       day: monday
       time: "09:30"
       timezone: Asia/Shanghai
+    open-pull-requests-limit: 3
+    groups:
+      rust-patch-updates:
+        patterns:
+          - "*"
+        update-types:
+          - patch
     labels:
       - dependencies
       - rust

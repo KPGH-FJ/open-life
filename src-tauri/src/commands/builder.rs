@@ -1,10 +1,10 @@
 use crate::errors::AppError;
-use crate::{persist_life_model, AppState};
+use crate::AppState;
 use openlife_core::agent::{
     AgentProposal, ProposalSource, ProposalType, RiskLevel as ProposalRiskLevel,
 };
 use openlife_core::builder::{
-    BuilderDimension, BuilderEngine, BuilderMode, BuilderSession, BuilderSummary, SignalUserStatus,
+    BuilderDimension, BuilderEngine, BuilderMode, BuilderSession, BuilderSummary,
 };
 use std::sync::Arc;
 use tauri::State;
@@ -181,9 +181,6 @@ async fn builder_step_with_state(
     user_reply: String,
     state: &Arc<AppState>,
 ) -> Result<serde_json::Value, AppError> {
-    // Create AgentRun for Builder tracking
-    let mut agent_run = openlife_core::agent::AgentRun::new_builder_run(&session_id);
-
     let mut session = {
         let mut sessions = state.builder_sessions.lock().await;
         sessions
@@ -201,9 +198,6 @@ async fn builder_step_with_state(
     let engine = BuilderEngine::new(&scheduler);
     let (prompt, updated_model) = engine.next_prompt(&mut session, &user_reply, &model).await;
     let finished = updated_model.is_some();
-    let response_model = updated_model
-        .as_ref()
-        .map(|m| serde_json::to_value(m).unwrap_or(serde_json::Value::Null));
     let progress = session.progress();
     let analysis = session
         .analysis
@@ -231,6 +225,14 @@ async fn builder_step_with_state(
         .collect();
 
     let waiting_for_review = finished && !session.pending_signals.is_empty();
+    let no_signal_completion = finished && session.pending_signals.is_empty();
+    let response_model = if no_signal_completion {
+        None
+    } else {
+        updated_model
+            .as_ref()
+            .map(|m| serde_json::to_value(m).unwrap_or(serde_json::Value::Null))
+    };
     if !finished || waiting_for_review {
         let mut sessions = state.builder_sessions.lock().await;
         if !finished {
@@ -239,22 +241,21 @@ async fn builder_step_with_state(
         let store = state.builder_session_store.lock().await;
         store.save_session(&session).map_err(AppError::from)?;
     } else {
-        if let Some(new_model) = updated_model {
-            persist_life_model(state, new_model.clone(), true).await?;
-        }
         let store = state.builder_session_store.lock().await;
         store.remove_session(&session_id).map_err(AppError::from)?;
     }
-    // Complete AgentRun
-    agent_run.output_preview = Some(prompt.clone());
-    agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
-    agent_run.finished_at = Some(chrono::Utc::now());
-    if let Some(ref store_arc) = state.agent_run_store {
-        let store = store_arc.lock().await;
-        let _ = store.create_run(&agent_run);
+    if !no_signal_completion {
+        let mut agent_run = openlife_core::agent::AgentRun::new_builder_run(&session_id);
+        agent_run.output_preview = Some(prompt.clone());
+        agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
+        agent_run.finished_at = Some(chrono::Utc::now());
+        if let Some(ref store_arc) = state.agent_run_store {
+            let store = store_arc.lock().await;
+            let _ = store.create_run(&agent_run);
+        }
     }
 
-    Ok(serde_json::json!({
+    let mut result = serde_json::json!({
         "prompt": prompt,
         "finished": finished,
         "model": response_model,
@@ -263,7 +264,12 @@ async fn builder_step_with_state(
         "pending_signals": pending_signals,
         "mode": format!("{:?}", session.mode),
         "target_dimension": session.target_dimension.as_ref().map(|d| format!("{:?}", d)),
-    }))
+    });
+    if no_signal_completion {
+        result["durable_lifemodel_write"] = serde_json::Value::Bool(false);
+        result["completion_cleanup"] = serde_json::Value::String("session_only".into());
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -379,157 +385,23 @@ pub async fn builder_get_pending_signals(
 ///
 /// Normal product flow should call `builder_create_proposals` and apply changes through
 /// Review Center so LifeModel writes remain reviewable, traceable, and reversible.
+#[cfg(test)]
 async fn builder_apply_signals_with_state(
     session_id: String,
     decisions: Vec<openlife_core::builder::BuilderSignalDecision>,
     state: &Arc<AppState>,
 ) -> Result<serde_json::Value, AppError> {
-    eprintln!(
-        "[Builder] legacy builder_apply_signals invoked for session {}; normal flow should use builder_create_proposals",
-        session_id
-    );
-    // Create AgentRun for this direct apply
-    let mut agent_run = openlife_core::agent::AgentRun::new_builder_run(&session_id);
-    let run_id = agent_run.id.clone();
-    if let Some(ref store_arc) = state.agent_run_store {
-        let store = store_arc.lock().await;
-        let _ = store.create_run(&agent_run);
-    }
+    builder_apply_signals_with_state_gated(session_id, decisions, state).await
+}
 
-    let in_memory_session = {
-        let mut sessions = state.builder_sessions.lock().await;
-        sessions.remove(&session_id)
-    };
-    let mut session = if let Some(session) = in_memory_session {
-        session
-    } else {
-        let store = state.builder_session_store.lock().await;
-        store
-            .get_session(&session_id)
-            .map_err(AppError::from)?
-            .ok_or_else(|| AppError::not_found("Session not found"))?
-    };
-
-    // Load current model
-    let mut model = {
-        let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(AppError::from)?
-    };
-
-    let mut edited_count = 0usize;
-    let mut rejected_count = 0usize;
-    let mut edited_fields = Vec::new();
-
-    // Build a lookup from decision id to decision
-    let decision_map: std::collections::HashMap<
-        String,
-        &openlife_core::builder::BuilderSignalDecision,
-    > = decisions.iter().map(|d| (d.id.clone(), d)).collect();
-
-    // Update signal statuses based on decisions
-    for signal in &mut session.pending_signals {
-        if let Some(decision) = decision_map.get(&signal.id) {
-            match decision.status.as_str() {
-                "accepted" => {
-                    signal.user_status = SignalUserStatus::Accepted;
-                }
-                "edited" => {
-                    signal.user_status = SignalUserStatus::Edited;
-                    if let Some(new_value) = &decision.proposed_value {
-                        signal.proposed_value = new_value.clone();
-                        edited_count += 1;
-                        edited_fields.push(format!("{}: edited", signal.affected_path));
-                    }
-                }
-                _ => {
-                    signal.user_status = SignalUserStatus::Rejected;
-                    rejected_count += 1;
-                }
-            }
-        } else {
-            // No decision for this signal -> reject by default
-            signal.user_status = SignalUserStatus::Rejected;
-            rejected_count += 1;
-        }
-    }
-
-    // Apply accepted and edited signals
-    let (applied, skipped) =
-        BuilderEngine::apply_signals_to_model(&mut model, &session.pending_signals);
-    let merged: Vec<String> = applied
-        .iter()
-        .filter(|field| field.contains("(merged)"))
-        .cloned()
-        .collect();
-
-    // Save the updated model
-    persist_life_model(state, model.clone(), true).await?;
-
-    // Create snapshot
-    {
-        let store = state.memory_store.lock().await;
-        let _ = store.save_snapshot(&session_id, &model);
-    }
-
-    // Log the completion with audit info
-    {
-        let feedback = state.feedback_store.lock().await;
-        let audit = format!(
-            "applied: {}, skipped: {}, edited: {:?}, rejected: {}",
-            applied.len(),
-            skipped.len(),
-            edited_fields,
-            rejected_count
-        );
-        let _ = feedback.log_event(
-            "legacy_builder_apply_signals_invoked",
-            Some(&session_id),
-            Some(&audit),
-        );
-    }
-
-    // Clean up session
-    let mut warnings = Vec::new();
-    {
-        let store = state.builder_session_store.lock().await;
-        if let Err(e) = store.remove_session(&session_id) {
-            warnings.push(format!("模型已写入，但构建会话清理失败: {}", e));
-        }
-    }
-
-    // Mark AgentRun as completed
-    if let Some(ref store_arc) = state.agent_run_store {
-        let store = store_arc.lock().await;
-        agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
-        agent_run.finished_at = Some(chrono::Utc::now());
-        let _ = store.update_run(&agent_run);
-    }
-
-    let legacy_warning =
-        "legacy direct apply path bypasses Review Center; use builder_create_proposals for product flow";
-    warnings.push(legacy_warning.to_string());
-
-    let mut result = serde_json::json!({
-        "success": true,
-        "legacy": true,
-        "warning": legacy_warning,
-        "applied_fields": applied,
-        "merged_fields": merged,
-        "skipped_fields": skipped,
-        "edited_count": edited_count,
-        "rejected_count": rejected_count,
-        "model": model,
-        "run_id": run_id,
-    });
-    if !warnings.is_empty() {
-        result["warnings"] = serde_json::Value::Array(
-            warnings
-                .into_iter()
-                .map(serde_json::Value::String)
-                .collect(),
-        );
-    }
-    Ok(result)
+async fn builder_apply_signals_with_state_gated(
+    _session_id: String,
+    _decisions: Vec<openlife_core::builder::BuilderSignalDecision>,
+    _state: &Arc<AppState>,
+) -> Result<serde_json::Value, AppError> {
+    Err(AppError::permission(
+        "builder_apply_signals has been retired as a legacy direct-write compatibility surface; use builder_create_proposals and Review Center for Builder LifeModel updates.",
+    ))
 }
 
 #[tauri::command]
@@ -538,7 +410,7 @@ pub async fn builder_apply_signals(
     decisions: Vec<openlife_core::builder::BuilderSignalDecision>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, AppError> {
-    builder_apply_signals_with_state(session_id, decisions, state.inner()).await
+    builder_apply_signals_with_state_gated(session_id, decisions, state.inner()).await
 }
 
 async fn builder_create_proposals_with_state(
@@ -732,7 +604,9 @@ pub async fn identity_goal_alignment_report(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openlife_core::builder::{BuilderSignal, BuilderSignalDecision, RiskLevel};
+    use openlife_core::builder::{
+        BuilderSignal, BuilderSignalDecision, RiskLevel, SignalUserStatus,
+    };
     use openlife_core::config::AppConfig;
     use openlife_core::feedback::FeedbackStore;
     use openlife_core::layer_router::LayerRouter;
@@ -798,9 +672,36 @@ mod tests {
                 temp_dir.path().join("mcp_audit.db"),
             ))),
             agent_run_store: None,
+            evidence_store: Arc::new(tokio::sync::Mutex::new(
+                openlife_core::agent::EvidenceStore::new_in_memory().unwrap(),
+            )),
+            heuristic_store: Arc::new(tokio::sync::Mutex::new({
+                let store = openlife_core::agent::HeuristicStore::new_in_memory().unwrap();
+                store.seed_mvp_heuristics().unwrap();
+                store
+            })),
+            policy_store: Arc::new(openlife_core::agent::PolicyStore::mvp_builtin()),
             proposal_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::ProposalStore::new_in_memory().unwrap(),
             ))),
+            memory_lifecycle_store: Some(Arc::new(tokio::sync::Mutex::new(
+                openlife_core::agent::MemoryLifecycleStore::new_in_memory().unwrap(),
+            ))),
+            plan_execute_session_store: Some(Arc::new(tokio::sync::Mutex::new(
+                openlife_core::agent::PlanExecuteSessionStore::new_in_memory().unwrap(),
+            ))),
+            main_chat_agent_session_store: Some(Arc::new(tokio::sync::Mutex::new(
+                openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStore::new_in_memory()
+                    .unwrap(),
+            ))),
+            main_chat_action_queue_store: Some(Arc::new(tokio::sync::Mutex::new(
+                openlife_core::agent::main_chat_agent_v1::ActionQueueStore::new_in_memory()
+                    .unwrap(),
+            ))),
+            main_chat_agent_event_store: None,
+            main_chat_selected_skill_ids: Arc::new(tokio::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             patch_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
             ))),
@@ -821,6 +722,7 @@ mod tests {
             startup_warnings: vec![],
             provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
             scheduled_task_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         })
     }
@@ -868,11 +770,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn legacy_direct_apply_builder_apply_signals_updates_model_and_removes_persisted_session()
-    {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let state = test_app_state(&temp_dir);
+    fn builder_apply_session_with_signals() -> BuilderSession {
         let mut session = BuilderSession::new("apply-session", BuilderMode::Quick);
         session.finished = true;
         session.pending_signals = vec![
@@ -922,14 +820,11 @@ mod tests {
                 user_status: SignalUserStatus::Pending,
             },
         ];
-        state
-            .builder_session_store
-            .lock()
-            .await
-            .save_session(&session)
-            .unwrap();
+        session
+    }
 
-        let decisions = vec![
+    fn accept_all_builder_apply_decisions() -> Vec<BuilderSignalDecision> {
+        vec![
             BuilderSignalDecision {
                 id: "sig_name".into(),
                 status: "accepted".into(),
@@ -945,43 +840,125 @@ mod tests {
                 status: "accepted".into(),
                 proposed_value: None,
             },
-        ];
+        ]
+    }
 
-        let res = builder_apply_signals_with_state("apply-session".into(), decisions, &state)
+    #[tokio::test]
+    async fn w90_builder_apply_signals_fails_closed_as_retired_surface() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let session = builder_apply_session_with_signals();
+        state
+            .builder_session_store
+            .lock()
             .await
+            .save_session(&session)
             .unwrap();
 
-        assert_eq!(res.get("success").and_then(|v| v.as_bool()), Some(true));
-        assert_eq!(res.get("legacy").and_then(|v| v.as_bool()), Some(true));
-        assert!(res
-            .get("warning")
-            .and_then(|v| v.as_str())
-            .is_some_and(|warning| warning.contains("Review Center")));
-        assert!(res
-            .get("warnings")
-            .and_then(|v| v.as_array())
-            .is_some_and(|warnings| warnings.iter().any(|warning| warning
-                .as_str()
-                .is_some_and(|warning| warning.contains("legacy direct apply")))));
-        assert!(res
-            .get("applied_fields")
-            .and_then(|v| v.as_array())
-            .is_some_and(|items| !items.is_empty()));
+        let err = builder_apply_signals_with_state(
+            "apply-session".into(),
+            accept_all_builder_apply_decisions(),
+            &state,
+        )
+        .await
+        .expect_err("legacy direct apply must fail closed by default");
+
+        assert!(matches!(err, AppError::PermissionDenied { .. }));
+        assert!(err.message().contains("builder_apply_signals"));
+        assert!(err.message().contains("retired"));
+        assert!(err.message().contains("builder_create_proposals"));
 
         let model = state.life_model_manager.lock().await.load().unwrap();
-        assert_eq!(model.identity.name, "fujing");
-        assert!(model
-            .goals
-            .short_term
-            .iter()
-            .any(|goal| goal.name == "把 OpenLife 跑通"));
-        assert_eq!(model.preferences.communication_style, "苏格拉底式追问型");
+        assert!(model.is_effectively_empty());
+        let persisted = state
+            .builder_session_store
+            .lock()
+            .await
+            .get_session("apply-session")
+            .unwrap();
+        assert!(persisted.is_some());
+    }
+
+    #[tokio::test]
+    async fn w90_builder_apply_signals_retirement_response_is_metadata_safe_and_writes_nothing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let session = builder_apply_session_with_signals();
+        state
+            .builder_session_store
+            .lock()
+            .await
+            .save_session(&session)
+            .unwrap();
+
+        let err = builder_apply_signals_with_state(
+            "apply-session".into(),
+            accept_all_builder_apply_decisions(),
+            &state,
+        )
+        .await
+        .expect_err("retired Builder direct apply must fail closed");
+
+        let response_dump = err.message().to_string();
+        for forbidden in ["fujing", "把 OpenLife 跑通", "苏格拉底式追问型"] {
+            assert!(
+                !response_dump.contains(forbidden),
+                "retired Builder direct apply error leaked raw builder value {forbidden}"
+            );
+        }
+
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        assert!(model.is_effectively_empty());
 
         let persisted = state
             .builder_session_store
             .lock()
             .await
             .get_session("apply-session")
+            .unwrap();
+        assert!(persisted.is_some());
+    }
+
+    #[tokio::test]
+    async fn w81_builder_step_no_signal_completion_does_not_write_durable_lifemodel_truth() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut session = BuilderSession::new("no-signal-session", BuilderMode::Quick);
+        session.step_index = 7;
+        state
+            .builder_sessions
+            .lock()
+            .await
+            .insert("no-signal-session".into(), session);
+
+        let res = builder_step_with_state("no-signal-session".into(), "".into(), &state)
+            .await
+            .unwrap();
+
+        assert_eq!(res.get("finished").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            res.get("pending_signals")
+                .and_then(|v| v.as_array())
+                .map(|signals| signals.len()),
+            Some(0)
+        );
+        assert!(res.get("model").is_none() || res.get("model") == Some(&serde_json::Value::Null));
+        assert_eq!(
+            res.get("durable_lifemodel_write").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            res.get("completion_cleanup").and_then(|v| v.as_str()),
+            Some("session_only")
+        );
+
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        assert!(model.is_effectively_empty());
+        let persisted = state
+            .builder_session_store
+            .lock()
+            .await
+            .get_session("no-signal-session")
             .unwrap();
         assert!(persisted.is_none());
     }

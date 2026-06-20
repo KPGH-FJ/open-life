@@ -1,38 +1,32 @@
 use crate::mcp::McpArgumentInspection;
 use crate::mcp::McpRegistry;
 use crate::mcp_audit::McpAuditStore;
-use crate::tool_manifest::ToolManifest;
+use crate::tool_manifest::{ToolManifest, ToolSource};
 use crate::tool_permissions::ToolPermissionDecision;
 use anyhow::Result;
 use serde_json::Value;
 
 use super::helpers::{
-    canonical_tool_source, filesystem_access_error, is_path_in_safe_paths, normalize_tool_name,
-    should_mark_needs_confirmation, ToolCallInternalResult,
+    canonical_tool_source, ensure_external_write_content_size, external_write_content_preview,
+    filesystem_access_error, hs_requires_external_write_proposal, is_direct_external_write_tool,
+    is_path_in_safe_paths, is_proposal_generation_tool, minimized_external_write_arguments,
+    normalize_tool_name, should_mark_needs_confirmation, ToolCallInternalResult,
 };
 use super::ActionExecutionContext;
 use super::ActionExecutionResult;
 use super::ActionExecutionStatus;
 use super::AgentActionRequest;
-use crate::agent::types::{
-    AgentAction, AgentObservation, AgentProposal, ProposalSource, ProposalType, RiskLevel,
-    ToolActionScope,
+use crate::agent::policy_store::BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST;
+use crate::agent::react_beta::{
+    metadata_safe_text_digest, metadata_safe_text_preview, metadata_safe_value_digest,
+    metadata_safe_value_preview,
 };
-
-/// Returns true if the tool name indicates a proposal-generation tool that
-/// only creates a user-confirmable Proposal (no direct side effect).
-fn is_proposal_generation_tool(name: &str) -> bool {
-    name.ends_with("_proposal")
-        || name.ends_with("_propose_write")
-        || name.ends_with("_propose_archive")
-        || name.ends_with("_propose_patch")
-        || name.ends_with("_propose_update")
-        || name.ends_with(".propose_write")
-        || name.ends_with(".propose_archive")
-        || name.ends_with(".propose_patch")
-        || name.ends_with(".propose_update")
-        || name.ends_with(".propose_event")
-}
+use crate::agent::types::{
+    AgentAction, AgentObservation, AgentProposal, ProposalSource, ProposalType,
+    ReactActionTraceEnvelope, RiskLevel, ToolActionScope,
+};
+use crate::agent::{ExternalWriteGovernanceInput, LifeModelGovernor, MemoryWriteGovernanceInput};
+use ring::digest::{digest, SHA256};
 
 impl super::ActionExecutor {
     /// Execute a tool action (MCP, builtin, or plugin).
@@ -58,6 +52,69 @@ impl super::ActionExecutor {
 
         // 2. Inspect PII
         let inspection = ctx.registry.inspect_call_arguments(tool_name, &args);
+
+        if manifest.is_none() {
+            let forced_decision = ToolPermissionDecision {
+                allowed: false,
+                requires_confirmation: false,
+                decision: "blocked".into(),
+                reason: "tool manifest not found for governed execution".into(),
+                policy_id: None,
+            };
+            let (action, observation) = self.build_blocked_action_observation(
+                tool_name,
+                &args,
+                &inspection,
+                &forced_decision,
+                None,
+                &request,
+            );
+            return Ok(ActionExecutionResult {
+                action,
+                observation,
+                status: ActionExecutionStatus::Blocked,
+                stop_reason: Some("tool_manifest_not_found".into()),
+                governance_report: None,
+            });
+        }
+
+        if let Some(m) = manifest
+            .as_ref()
+            .filter(|m| matches!(m.source, ToolSource::Plugin { .. } | ToolSource::A2A { .. }))
+        {
+            let forced_decision = ToolPermissionDecision {
+                allowed: false,
+                requires_confirmation: false,
+                decision: "blocked".into(),
+                reason:
+                    "tool source has no governed executor and remains disabled/declarative-only"
+                        .into(),
+                policy_id: None,
+            };
+            let (action, observation) = self.build_blocked_action_observation(
+                tool_name,
+                &args,
+                &inspection,
+                &forced_decision,
+                manifest.as_ref(),
+                &request,
+            );
+            let report = LifeModelGovernor
+                .govern_unsupported_tool_source(
+                    &m.name,
+                    manifest_risk_level(m),
+                    request.source_run_id.as_deref(),
+                    "unsupported_tool_source",
+                )
+                .to_report();
+            return Ok(ActionExecutionResult {
+                action,
+                observation,
+                status: ActionExecutionStatus::Blocked,
+                stop_reason: Some("unsupported_tool_source".into()),
+                governance_report: Some(report),
+            });
+        }
 
         // 3. Check permission with canonical decision order:
         //    unknown -> blocked
@@ -121,6 +178,36 @@ impl super::ActionExecutor {
             }
         };
 
+        if let Some(ref m) = manifest {
+            if !self.config.allow_writes
+                && is_direct_external_write_tool(m)
+                && !is_proposal_generation_tool(&m.name)
+            {
+                let forced_decision = ToolPermissionDecision {
+                    allowed: false,
+                    requires_confirmation: false,
+                    decision: "blocked".into(),
+                    reason: "write-like tool blocked because allow_writes=false".into(),
+                    policy_id: None,
+                };
+                let (action, observation) = self.build_blocked_action_observation(
+                    tool_name,
+                    &args,
+                    &inspection,
+                    &forced_decision,
+                    manifest.as_ref(),
+                    &request,
+                );
+                return Ok(ActionExecutionResult {
+                    action,
+                    observation,
+                    status: ActionExecutionStatus::Blocked,
+                    stop_reason: Some("allow_writes_false".into()),
+                    governance_report: None,
+                });
+            }
+        }
+
         // 4. Determine if blocked.
         // Proposal-generation tools (file.write_proposal, memory.propose_write, etc.)
         // only create proposals; they don't execute side effects directly.
@@ -129,9 +216,53 @@ impl super::ActionExecutor {
         let is_proposal_tool = manifest
             .as_ref()
             .is_none_or(|m| is_proposal_generation_tool(&m.name));
+
+        if let Some(m) = manifest.as_ref().filter(|m| {
+            hs_requires_external_write_proposal(ctx) && is_direct_external_write_tool(m)
+        }) {
+            if let Some(result) =
+                self.create_external_write_action_proposal(&request, ctx, tool_name, &args, m)
+            {
+                return result;
+            }
+
+            let forced_decision = ToolPermissionDecision {
+                allowed: false,
+                requires_confirmation: true,
+                decision: "proposal_required".into(),
+                reason: "HS proposal-first policy requires an ExternalWriteAction proposal before direct external write".into(),
+                policy_id: Some(BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST.into()),
+            };
+            let (action, observation) = self.build_blocked_action_observation(
+                tool_name,
+                &args,
+                &inspection,
+                &forced_decision,
+                manifest.as_ref(),
+                &request,
+            );
+            return Ok(ActionExecutionResult {
+                action,
+                observation,
+                status: ActionExecutionStatus::NeedsConfirmation,
+                stop_reason: Some("hs_external_write_proposal_first".into()),
+                governance_report: Some(
+                    LifeModelGovernor
+                        .govern_external_write(ExternalWriteGovernanceInput {
+                            tool_name: tool_name.clone(),
+                            risk_level: manifest_risk_level(m),
+                            source_run_id: request.source_run_id.clone(),
+                            proposal_already_created: false,
+                        })
+                        .to_report(),
+                ),
+            });
+        }
+
         let permission_blocks =
             !is_proposal_tool && (decision.requires_confirmation || !decision.allowed);
-        let inspection_blocks = inspection.requires_confirmation && inspection.pii_found;
+        let inspection_blocks =
+            !is_proposal_tool && inspection.requires_confirmation && inspection.pii_found;
         let blocked = manifest
             .as_ref()
             .is_none_or(|m| !m.enabled || m.declarative_only)
@@ -176,6 +307,20 @@ impl super::ActionExecutor {
 
             let needs_confirmation = should_mark_needs_confirmation(&decision, &inspection);
 
+            // HS proposal-first policies convert blocked direct writes into
+            // user-reviewable ExternalWriteAction proposals.
+            if needs_confirmation {
+                if let Some(m) = manifest.as_ref().filter(|m| {
+                    hs_requires_external_write_proposal(ctx) && is_direct_external_write_tool(m)
+                }) {
+                    if let Some(result) = self
+                        .create_external_write_action_proposal(&request, ctx, tool_name, &args, m)
+                    {
+                        return result;
+                    }
+                }
+            }
+
             // Auto-generate ToolPermission Proposal when blocked by policy
             // so the user can grant permission and continue in the Review Center.
             if needs_confirmation
@@ -214,6 +359,7 @@ impl super::ActionExecutor {
                 observation,
                 status,
                 stop_reason: Some("blocked_by_policy".into()),
+                governance_report: None,
             });
         }
 
@@ -244,6 +390,7 @@ impl super::ActionExecutor {
                         observation,
                         status: ActionExecutionStatus::Blocked,
                         stop_reason: Some("path_not_in_safe_paths".into()),
+                        governance_report: None,
                     });
                 }
             }
@@ -277,24 +424,47 @@ impl super::ActionExecutor {
             )
         };
 
-        let (mut action, observation) = self.build_success_action_observation(
+        let (mut action, mut observation) = self.build_success_action_observation(
             tool_name,
             &args,
             &result,
             manifest.as_ref(),
             &request,
         );
+        if is_web_network_policy_blocker(tool_name, result.error.as_deref()) {
+            action.status = "blocked".into();
+            action.permission_decision = Some("network_policy_blocked".into());
+            if let Some(structured) = observation.structured_result.as_mut() {
+                if let Some(object) = structured.as_object_mut() {
+                    object.insert("status".into(), serde_json::json!("blocked"));
+                    object.insert("requires_confirmation".into(), serde_json::json!(false));
+                    object.insert(
+                        "permission_decision".into(),
+                        serde_json::json!("network_policy_blocked"),
+                    );
+                    object.insert("network_policy_blocked".into(), serde_json::json!(true));
+                }
+            }
+            return Ok(ActionExecutionResult {
+                action,
+                observation,
+                status: ActionExecutionStatus::Blocked,
+                stop_reason: Some("network_policy_blocked".into()),
+                governance_report: None,
+            });
+        }
 
         // For mcp.call_tool: override tool_scope with target manifest and handle
         // target tool permission failures as NeedsConfirmation instead of Failed
         if tool_name == "mcp.call_tool" {
+            let mut target_permission_manifest: Option<ToolManifest> = None;
             if let Some(target_name) = args.get("tool_name").and_then(|v: &Value| v.as_str()) {
-                if let Some(target_manifest) = ctx
+                let target_manifest = ctx
                     .registry
                     .list_manifests()
                     .into_iter()
-                    .find(|m| m.name == target_name || m.id == target_name)
-                {
+                    .find(|m| m.name == target_name || m.id == target_name);
+                if let Some(target_manifest) = target_manifest {
                     action.tool_scope = Some(ToolActionScope {
                         tool_name: target_manifest.name.clone(),
                         tool_id: target_manifest.id.clone(),
@@ -305,18 +475,96 @@ impl super::ActionExecutor {
                         requires_confirmation: false,
                         allowed: result.success,
                     });
+                    target_permission_manifest = Some(target_manifest);
+                } else {
+                    action.status = "blocked".to_string();
+                    action.permission_decision = Some("mcp_read_tool_not_registered".into());
+                    if let Some(structured) = observation.structured_result.as_mut() {
+                        if let Some(object) = structured.as_object_mut() {
+                            object.insert("status".into(), serde_json::json!("blocked"));
+                            object.insert("requires_confirmation".into(), serde_json::json!(false));
+                            object.insert(
+                                "permission_decision".into(),
+                                serde_json::json!("mcp_read_tool_not_registered"),
+                            );
+                            object.insert(
+                                "blockerReason".into(),
+                                serde_json::json!("mcp_read_tool_not_registered"),
+                            );
+                            object.insert("directWritesExecuted".into(), serde_json::json!(false));
+                        }
+                    }
+                    return Ok(ActionExecutionResult {
+                        action,
+                        observation,
+                        status: ActionExecutionStatus::Blocked,
+                        stop_reason: Some("mcp_read_tool_not_registered".into()),
+                        governance_report: None,
+                    });
                 }
             }
             // If target tool permission was denied, treat as NeedsConfirmation
             if !result.success {
                 if let Some(ref error) = result.error {
+                    if error.contains("hs_external_write_proposal_first") {
+                        action.status = "needs_confirmation".to_string();
+                        action.permission_decision = Some("proposal_required".into());
+                        if let Some(structured) = observation.structured_result.as_mut() {
+                            if let Some(object) = structured.as_object_mut() {
+                                object.insert(
+                                    "status".into(),
+                                    serde_json::json!("needs_confirmation"),
+                                );
+                                object.insert(
+                                    "requires_confirmation".into(),
+                                    serde_json::json!(true),
+                                );
+                                object.insert(
+                                    "permission_decision".into(),
+                                    serde_json::json!("proposal_required"),
+                                );
+                                object.insert("proposal_required".into(), serde_json::json!(true));
+                            }
+                        }
+                        return Ok(ActionExecutionResult {
+                            action,
+                            observation,
+                            status: ActionExecutionStatus::NeedsConfirmation,
+                            stop_reason: Some("hs_external_write_proposal_first".into()),
+                            governance_report: None,
+                        });
+                    }
                     if error.contains("blocked") || error.contains("ask_every_time") {
+                        if let Some(target_manifest) = target_permission_manifest.as_ref() {
+                            let target_args = args
+                                .get("arguments")
+                                .cloned()
+                                .unwrap_or_else(|| serde_json::json!({}));
+                            let forced_decision = ToolPermissionDecision {
+                                allowed: false,
+                                requires_confirmation: true,
+                                decision: "ask_every_time".into(),
+                                reason: "target tool requires permission".into(),
+                                policy_id: None,
+                            };
+                            if let Some(result) = self.create_tool_permission_proposal(
+                                &request,
+                                ctx,
+                                &target_manifest.name,
+                                &target_args,
+                                Some(target_manifest),
+                                &forced_decision,
+                            ) {
+                                return result;
+                            }
+                        }
                         action.status = "needs_confirmation".to_string();
                         return Ok(ActionExecutionResult {
                             action,
                             observation,
                             status: ActionExecutionStatus::NeedsConfirmation,
                             stop_reason: Some("target_tool_needs_confirmation".into()),
+                            governance_report: None,
                         });
                     }
                 }
@@ -334,6 +582,7 @@ impl super::ActionExecutor {
             observation,
             status,
             stop_reason: None,
+            governance_report: None,
         })
     }
 
@@ -404,6 +653,24 @@ impl super::ActionExecutor {
             requires_confirmation: needs_confirmation,
             allowed: false,
         });
+        let observation_id = format!(
+            "observation-{}-{}",
+            request.step_index,
+            now.timestamp_nanos_opt().unwrap_or_default()
+        );
+        let trace = self.build_react_trace_envelope(
+            &action_id,
+            Some(&observation_id),
+            tool_name,
+            args,
+            None,
+            manifest,
+            request,
+            status,
+            Some(decision.decision.clone()),
+            Some(now),
+            Some(now),
+        );
 
         let action = AgentAction {
             id: action_id.clone(),
@@ -422,14 +689,11 @@ impl super::ActionExecutor {
                 Some(decision.reason.clone())
             },
             timestamp: now,
+            react_trace: Some(trace.clone()),
         };
 
         let observation = AgentObservation {
-            id: format!(
-                "observation-{}-{}",
-                request.step_index,
-                now.timestamp_nanos_opt().unwrap_or_default()
-            ),
+            id: observation_id,
             action_id: Some(action_id),
             content: if needs_confirmation {
                 "Tool call requires permission confirmation".to_string()
@@ -444,8 +708,10 @@ impl super::ActionExecutor {
                 "status": status,
                 "requires_confirmation": needs_confirmation,
                 "permission_decision": decision.decision,
+                "directWritesExecuted": false,
             })),
             timestamp: now,
+            react_trace: Some(trace),
         };
 
         (action, observation)
@@ -482,6 +748,24 @@ impl super::ActionExecutor {
             requires_confirmation: false,
             allowed: result.success,
         });
+        let observation_id = format!(
+            "observation-{}-{}",
+            request.step_index,
+            now.timestamp_nanos_opt().unwrap_or_default()
+        );
+        let trace = self.build_react_trace_envelope(
+            &action_id,
+            Some(&observation_id),
+            tool_name,
+            args,
+            result.output.as_deref().or(result.error.as_deref()),
+            manifest,
+            request,
+            status,
+            None,
+            Some(now),
+            Some(now),
+        );
 
         let action = AgentAction {
             id: action_id.clone(),
@@ -499,14 +783,11 @@ impl super::ActionExecutor {
             finished_at: Some(now),
             error: result.error.clone(),
             timestamp: now,
+            react_trace: Some(trace.clone()),
         };
 
         let observation = AgentObservation {
-            id: format!(
-                "observation-{}-{}",
-                request.step_index,
-                now.timestamp_nanos_opt().unwrap_or_default()
-            ),
+            id: observation_id,
             action_id: Some(action_id),
             content: result
                 .output
@@ -521,8 +802,10 @@ impl super::ActionExecutor {
                 "status": status,
                 "requires_confirmation": false,
                 "permission_decision": null,
+                "directWritesExecuted": false,
             })),
             timestamp: now,
+            react_trace: Some(trace),
         };
 
         (action, observation)
@@ -544,6 +827,24 @@ impl super::ActionExecutor {
         } else {
             "blocked"
         };
+        let observation_id = format!(
+            "observation-{}-{}",
+            request.step_index,
+            now.timestamp_nanos_opt().unwrap_or_default()
+        );
+        let trace = self.build_react_trace_envelope(
+            &action_id,
+            Some(&observation_id),
+            &request.target,
+            &request.input,
+            Some(reason),
+            None,
+            &request,
+            status,
+            Some("proposal_required".into()),
+            Some(now),
+            Some(now),
+        );
         let action = AgentAction {
             id: action_id.clone(),
             action_type: request.action_type.clone(),
@@ -557,13 +858,10 @@ impl super::ActionExecutor {
             finished_at: Some(now),
             error: Some(reason.to_string()),
             timestamp: now,
+            react_trace: Some(trace.clone()),
         };
         let observation = AgentObservation {
-            id: format!(
-                "observation-{}-{}",
-                request.step_index,
-                now.timestamp_nanos_opt().unwrap_or_default()
-            ),
+            id: observation_id,
             action_id: Some(action_id),
             content: reason.to_string(),
             source: "action_executor".into(),
@@ -575,7 +873,21 @@ impl super::ActionExecutor {
                 "proposal_required": true,
             })),
             timestamp: now,
+            react_trace: Some(trace),
         };
+        let governance_report = match request.action_type.as_str() {
+            "memory_write" | "memory_archive" => Some(
+                LifeModelGovernor
+                    .govern_memory_write(MemoryWriteGovernanceInput {
+                        risk_level: RiskLevel::Medium,
+                        source_run_id: request.source_run_id.clone(),
+                        proposal_already_created: false,
+                    })
+                    .to_report(),
+            ),
+            _ => None,
+        };
+
         ActionExecutionResult {
             action,
             observation,
@@ -585,6 +897,99 @@ impl super::ActionExecutor {
                 ActionExecutionStatus::Blocked
             },
             stop_reason: Some("proposal_required".into()),
+            governance_report,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_react_trace_envelope(
+        &self,
+        action_id: &str,
+        observation_id: Option<&str>,
+        tool_name: &str,
+        args: &Value,
+        output_or_error: Option<&str>,
+        manifest: Option<&ToolManifest>,
+        request: &AgentActionRequest,
+        status: &str,
+        permission_decision: Option<String>,
+        started_at: Option<chrono::DateTime<chrono::Utc>>,
+        finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> ReactActionTraceEnvelope {
+        let (output_byte_count, output_hash, output_preview) = if let Some(text) = output_or_error {
+            let (byte_count, hash) = metadata_safe_text_digest(text);
+            (
+                Some(byte_count),
+                Some(hash),
+                Some(metadata_safe_text_preview(text)),
+            )
+        } else {
+            let (byte_count, hash) = metadata_safe_value_digest(args);
+            (
+                Some(byte_count),
+                Some(hash),
+                Some(metadata_safe_value_preview(args)),
+            )
+        };
+        let output_item_count = output_or_error
+            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            .map(|value| match value {
+                Value::Array(items) => items.len(),
+                Value::Object(map) => map.len(),
+                Value::Null => 0,
+                _ => 1,
+            });
+        let proposal_id = output_or_error.and_then(extract_proposal_id_from_text);
+        let tool_source = manifest
+            .map(canonical_tool_source)
+            .unwrap_or_else(|| "unregistered".into());
+        let action_category = manifest
+            .map(|m| {
+                if proposal_id.is_some() || is_proposal_generation_tool(&m.name) {
+                    "proposal".to_string()
+                } else if m.action_type.is_empty() {
+                    "read".to_string()
+                } else {
+                    m.action_type.clone()
+                }
+            })
+            .unwrap_or_else(|| {
+                if request.action_type.contains("proposal") {
+                    "proposal".into()
+                } else {
+                    "unknown".into()
+                }
+            });
+
+        ReactActionTraceEnvelope {
+            run_id: request.source_run_id.clone(),
+            action_id: action_id.to_string(),
+            step_index: request.step_index,
+            tool_call_index: request.step_index,
+            action_type: request.action_type.clone(),
+            tool_id: manifest
+                .map(|m| m.id.clone())
+                .unwrap_or_else(|| tool_name.to_string()),
+            tool_name: manifest
+                .map(|m| m.name.clone())
+                .unwrap_or_else(|| tool_name.to_string()),
+            tool_source,
+            action_category,
+            risk_level: manifest
+                .map(|m| m.risk_level.clone())
+                .unwrap_or_else(|| "unknown".into()),
+            permission_decision,
+            status: status.to_string(),
+            proposal_id,
+            observation_id: observation_id.map(str::to_string),
+            observation_status: Some(status.to_string()),
+            output_preview,
+            output_hash,
+            output_byte_count,
+            output_item_count,
+            started_at,
+            finished_at,
+            metadata_safe: true,
         }
     }
 
@@ -607,22 +1012,40 @@ impl super::ActionExecutor {
         let risk_level = manifest
             .map(|m| m.risk_level.clone())
             .unwrap_or_else(|| "medium".to_string());
+        let action_type = manifest
+            .map(|m| m.action_type.clone())
+            .unwrap_or_else(|| request.action_type.clone());
+        let capabilities = manifest.map(|m| m.capabilities.clone()).unwrap_or_default();
+        let (input_length_bytes, input_hash) = metadata_safe_value_digest(args);
+        let input_preview = metadata_safe_value_preview(args);
 
         let after = serde_json::json!({
             "permission_action": "grant",
             "tool_name": tool_name,
-            "source": source,
-            "risk_level": risk_level,
+            "source": source.clone(),
+            "risk_level": risk_level.clone(),
             "policy": "allow_until_revoked",
+            "canonical_scope": {
+                "tool_name": tool_name,
+                "source": source.clone(),
+                "risk_level": risk_level.clone(),
+                "action_type": action_type,
+                "capabilities": capabilities,
+                "blocked_run_id": request.source_run_id,
+                "blocked_step_index": request.step_index,
+                "input_hash": input_hash,
+                "input_length_bytes": input_length_bytes,
+                "input_preview": input_preview,
+            },
             "blocked_action": {
                 "action_type": request.action_type,
                 "target": request.target,
-                "input": args,
                 "source_run_id": request.source_run_id,
                 "step_index": request.step_index,
             },
             "reason": decision.reason,
             "auto_generated": true,
+            "directWritesExecuted": false,
         });
 
         let affected_path = format!("tool_permission.{}.{}", source, tool_name);
@@ -651,14 +1074,221 @@ impl super::ActionExecutor {
             return None;
         }
 
-        let result = self.build_proposal_required_action(
+        let mut result = self.build_proposal_required_action(
             request.clone(),
             &format!(
                 "{}: 已创建 ToolPermission 提案 (id: {})，请前往 Review Center 审批",
                 tool_name, proposal.id
             ),
         );
+        result.status = ActionExecutionStatus::NeedsConfirmation;
+        result.stop_reason = Some("tool_permission_required".into());
+        result.action.status = "needs_confirmation".into();
+        result.action.permission_decision = Some("tool_permission_required".into());
+        if let Some(structured) = result.observation.structured_result.as_mut() {
+            if let Some(object) = structured.as_object_mut() {
+                object.insert("status".into(), serde_json::json!("needs_confirmation"));
+                object.insert("requires_confirmation".into(), serde_json::json!(true));
+                object.insert(
+                    "permission_decision".into(),
+                    serde_json::json!("tool_permission_required"),
+                );
+                object.insert("proposalId".into(), serde_json::json!(proposal.id.clone()));
+                object.insert("directWritesExecuted".into(), serde_json::json!(false));
+            }
+        }
+        if let Some(trace) = result.action.react_trace.as_mut() {
+            trace.proposal_id = Some(proposal.id.clone());
+            trace.status = "needs_confirmation".into();
+            trace.permission_decision = Some("tool_permission_required".into());
+            trace.action_category = "proposal".into();
+        }
+        if let Some(trace) = result.observation.react_trace.as_mut() {
+            trace.proposal_id = Some(proposal.id.clone());
+            trace.status = "needs_confirmation".into();
+            trace.observation_status = Some("needs_confirmation".into());
+            trace.permission_decision = Some("tool_permission_required".into());
+            trace.action_category = "proposal".into();
+        }
 
         Some(Ok(result))
+    }
+
+    pub(crate) fn create_external_write_action_proposal(
+        &self,
+        request: &AgentActionRequest,
+        ctx: &ActionExecutionContext<'_>,
+        tool_name: &str,
+        args: &Value,
+        manifest: &ToolManifest,
+    ) -> Option<anyhow::Result<ActionExecutionResult>> {
+        let proposal_id = match self
+            .create_external_write_action_proposal_record(request, ctx, tool_name, args, manifest)
+        {
+            Some(Ok(proposal_id)) => proposal_id,
+            Some(Err(e)) => return Some(Err(e)),
+            None => return None,
+        };
+
+        let mut result = self.build_proposal_required_action(
+            request.clone(),
+            &format!(
+                "{}: created ExternalWriteAction proposal (id: {}) for HS proposal-first policy",
+                tool_name, proposal_id
+            ),
+        );
+        result.stop_reason = Some("hs_external_write_proposal_first".into());
+        result.governance_report = Some(
+            LifeModelGovernor
+                .govern_external_write(ExternalWriteGovernanceInput {
+                    tool_name: tool_name.to_string(),
+                    risk_level: manifest_risk_level(manifest),
+                    source_run_id: request.source_run_id.clone(),
+                    proposal_already_created: false,
+                })
+                .to_report(),
+        );
+        if let Some(trace) = result.action.react_trace.as_mut() {
+            trace.proposal_id = Some(proposal_id.clone());
+            trace.action_category = "proposal".into();
+        }
+        if let Some(trace) = result.observation.react_trace.as_mut() {
+            trace.proposal_id = Some(proposal_id);
+            trace.action_category = "proposal".into();
+        }
+
+        Some(Ok(result))
+    }
+
+    pub(crate) fn create_external_write_action_proposal_record(
+        &self,
+        request: &AgentActionRequest,
+        ctx: &ActionExecutionContext<'_>,
+        tool_name: &str,
+        args: &Value,
+        manifest: &ToolManifest,
+    ) -> Option<anyhow::Result<String>> {
+        let proposal_store = ctx.proposal_store?;
+        let source = canonical_tool_source(manifest);
+        let server = match &manifest.source {
+            ToolSource::Mcp { server_name } => Some(server_name.clone()),
+            _ => None,
+        };
+        let risk_level = manifest.risk_level.clone();
+        let action_type = manifest.action_type.clone();
+        let capabilities = manifest.capabilities.clone();
+        let path = args
+            .get("path")
+            .or_else(|| args.get("file_path"))
+            .or_else(|| args.get("destination"))
+            .and_then(Value::as_str)
+            .unwrap_or(tool_name);
+        let content_value = args
+            .get("content")
+            .or_else(|| args.get("body"))
+            .or_else(|| args.get("data"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let content_text = content_value
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| content_value.to_string());
+        let hash = digest(&SHA256, content_text.as_bytes());
+        let content_hash: String = hash.as_ref().iter().map(|b| format!("{:02x}", b)).collect();
+        let size_bytes = content_text.len();
+        if let Err(e) = ensure_external_write_content_size(&content_text) {
+            return Some(Err(e));
+        }
+        let content_preview = external_write_content_preview(&content_text);
+        let minimized_arguments =
+            minimized_external_write_arguments(args, &content_hash, size_bytes, &content_preview);
+        let operation = if !path.is_empty() && std::path::Path::new(path).exists() {
+            "overwrite"
+        } else {
+            "create"
+        };
+
+        let mut proposal = AgentProposal::new(
+            ProposalType::ExternalWriteAction,
+            &format!("{}.{}", source, path),
+            serde_json::json!({
+                "tool_name": tool_name,
+                "tool_id": manifest.id,
+                "source": source,
+                "server": server,
+                "arguments": minimized_arguments,
+                "path": path,
+                "content": content_text,
+                "content_preview": content_preview,
+                "content_hash": content_hash,
+                "size_bytes": size_bytes,
+                "operation": operation,
+                "risk_level": risk_level,
+                "action_type": action_type,
+                "capabilities": capabilities,
+                "requires_confirmation": true,
+                "hs_policy_id": BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST,
+            }),
+            &format!(
+                "Agent proposed external write via '{}' ({})",
+                tool_name, operation
+            ),
+            0.9,
+            RiskLevel::High,
+            ProposalSource::Manual,
+        );
+
+        if let Some(ref run_id) = request.source_run_id {
+            proposal.run_id = Some(run_id.clone());
+        }
+        let proposal_id = proposal.id.clone();
+
+        if let Err(e) = proposal_store.create_proposal(&proposal) {
+            eprintln!(
+                "[warn] Failed to create ExternalWriteAction Proposal for {}: {}",
+                tool_name, e
+            );
+            return None;
+        }
+
+        Some(Ok(proposal_id))
+    }
+}
+
+fn is_web_network_policy_blocker(tool_name: &str, error: Option<&str>) -> bool {
+    if !matches!(tool_name, "web.fetch" | "web.search") {
+        return false;
+    }
+    let Some(error) = error else {
+        return false;
+    };
+    [
+        "Network tools are disabled by policy",
+        "denied by network policy override",
+        "network denylist",
+        "not in the network allowlist",
+        "private/internal address",
+        "Invalid URL scheme",
+    ]
+    .iter()
+    .any(|needle| error.contains(needle))
+}
+
+fn extract_proposal_id_from_text(text: &str) -> Option<String> {
+    serde_json::from_str::<Value>(text).ok().and_then(|value| {
+        value
+            .get("proposal_id")
+            .or_else(|| value.get("proposalId"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+    })
+}
+
+fn manifest_risk_level(manifest: &ToolManifest) -> RiskLevel {
+    match manifest.risk_level.trim().to_ascii_lowercase().as_str() {
+        "critical" => RiskLevel::Critical,
+        "high" => RiskLevel::High,
+        "medium" => RiskLevel::Medium,
+        _ => RiskLevel::Low,
     }
 }

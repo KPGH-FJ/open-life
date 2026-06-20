@@ -77,4 +77,44 @@ describe("ProviderTab", () => {
     });
     expect(screen.getByText(/Layer 1 路由状态/)).toBeInTheDocument();
   });
+
+  it("hides AgentLoop and ContextAssembler debug toggles by default", async () => {
+    await act(async () => {
+      render(
+        <MemoryRouter>
+          <ProviderTab
+            config={mockConfig}
+            setConfig={vi.fn()}
+            diagnostics={mockDiagnostics}
+            routerStatus={null}
+            modelRouterStatus={null}
+          />
+        </MemoryRouter>
+      );
+    });
+
+    expect(screen.queryByText(/启用 AgentLoop/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/ContextAssembler V2/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Safe Paths/)).toBeInTheDocument();
+  });
+
+  it("shows internal debug toggles only when explicitly enabled", async () => {
+    await act(async () => {
+      render(
+        <MemoryRouter>
+          <ProviderTab
+            config={mockConfig}
+            setConfig={vi.fn()}
+            diagnostics={mockDiagnostics}
+            routerStatus={null}
+            modelRouterStatus={null}
+            showInternalDebug
+          />
+        </MemoryRouter>
+      );
+    });
+
+    expect(screen.getByText(/启用 AgentLoop/)).toBeInTheDocument();
+    expect(screen.getByText(/ContextAssembler V2/)).toBeInTheDocument();
+  });
 });

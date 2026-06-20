@@ -346,6 +346,7 @@ pub async fn chat_with_openrouter_raw_stream(
 pub fn build_system_prompt(life_model: &LifeModel, tools_prompt: Option<&str>) -> String {
     let yaml = serde_yaml::to_string(life_model).unwrap_or_default();
     let tool_section = tools_prompt.unwrap_or("");
+    let time_context = build_local_time_context();
     let state_hint = format_state_hint(&life_model.state);
     let evolution_hint = if life_model.evolution_rules.is_empty() {
         "暂无进化规则".to_string()
@@ -375,6 +376,8 @@ pub fn build_system_prompt(life_model: &LifeModel, tools_prompt: Option<&str>) -
     format!(
         r#"你是 OpenLife，用户的终身成长合伙人。你的人设和行为必须严格基于下面这份「人生模型」。
 
+{}
+
 请记住以下关于用户的信息，所有建议都必须经过人生模型的价值观过滤：
 
 ```yaml
@@ -395,8 +398,38 @@ pub fn build_system_prompt(life_model: &LifeModel, tools_prompt: Option<&str>) -
 5. 如果用户的状态显示精力低、压力高或情绪低落，请主动表达关心并调整建议的强度和节奏
 {}{}
 "#,
-        yaml, state_hint, evolution_hint, tool_section, tool_call_instruction
+        time_context, yaml, state_hint, evolution_hint, tool_section, tool_call_instruction
     )
+}
+
+fn build_local_time_context() -> String {
+    use chrono::Datelike;
+
+    let now = chrono::Local::now();
+    let timezone = std::env::var("TZ")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| now.format("%:z").to_string());
+    format!(
+        "【本地时间上下文】\n- 本地日期: {}\n- 本地星期: {}\n- 本地时间: {}\n- 本地时区: {}\n\n当用户询问今天、明天、昨天、星期几或当前日期等相对时间问题时，优先使用上述本地上下文直接回答；不要声称无法访问实时钟表。",
+        now.format("%Y-%m-%d"),
+        chinese_weekday(now.weekday()),
+        now.format("%H:%M:%S"),
+        timezone
+    )
+}
+
+fn chinese_weekday(weekday: chrono::Weekday) -> &'static str {
+    match weekday {
+        chrono::Weekday::Mon => "星期一",
+        chrono::Weekday::Tue => "星期二",
+        chrono::Weekday::Wed => "星期三",
+        chrono::Weekday::Thu => "星期四",
+        chrono::Weekday::Fri => "星期五",
+        chrono::Weekday::Sat => "星期六",
+        chrono::Weekday::Sun => "星期日",
+    }
 }
 
 fn format_state_hint(state: &crate::life_model::State) -> String {
@@ -444,9 +477,11 @@ fn format_state_hint(state: &crate::life_model::State) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        chat_completions_url, default_base_for_provider, effective_api_key, extract_chat_content,
-        extract_stream_content, has_reasoning_content, provider_label, resolve_stream_chat_model,
+        build_system_prompt, chat_completions_url, default_base_for_provider, effective_api_key,
+        extract_chat_content, extract_stream_content, has_reasoning_content, provider_label,
+        resolve_stream_chat_model,
     };
+    use crate::life_model::LifeModel;
 
     #[test]
     fn deepseek_provider_uses_expected_label_and_base() {
@@ -489,6 +524,17 @@ mod tests {
             chat_completions_url("custom", "http://localhost:1234/v1/chat/completions"),
             "http://localhost:1234/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn system_prompt_includes_local_date_and_weekday_context() {
+        let prompt = build_system_prompt(&LifeModel::default(), None);
+
+        assert!(prompt.contains("【本地时间上下文】"));
+        assert!(prompt.contains("本地日期"));
+        assert!(prompt.contains("星期"));
+        assert!(prompt.contains("本地时区"));
+        assert!(prompt.contains("不要声称无法访问实时钟表"));
     }
 
     #[test]

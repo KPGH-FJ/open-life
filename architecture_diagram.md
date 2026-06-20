@@ -1,6 +1,10 @@
 # OpenLife 系统架构图
 
 > 本文档基于代码实际状态（2026-05-01）绘制，涵盖 Frontend / Tauri Shell / Core Engine 三层架构。
+>
+> 这是架构快照图，不是当前开发顺序依据。Agent 开发顺序以
+> `AGENTS.md`、`plans/README.md` 和
+> `plans/openlife_lifemodel_governed_agent_runtime.md` 为准。
 
 ---
 

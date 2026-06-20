@@ -37,7 +37,7 @@ describe("CalibrationPage", () => {
     expect(screen.getByText("健康")).toBeInTheDocument();
   });
 
-  it("applies selected calibration changes", async () => {
+  it("sends selected calibration changes to Review Center by default", async () => {
     render(
       <BrowserRouter>
         <CalibrationPage />
@@ -45,17 +45,19 @@ describe("CalibrationPage", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText("直接应用")).toBeInTheDocument();
+      expect(screen.getByText("发送到 Review Center")).toBeInTheDocument();
     });
+    expect(screen.queryByText("直接应用")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("checkbox"));
-    fireEvent.click(screen.getByText("直接应用"));
+    fireEvent.click(screen.getByText("发送到 Review Center"));
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith(
         "apply_calibration",
         expect.objectContaining({
           changes: expect.any(Array),
+          mode: "proposal",
         })
       );
     });
