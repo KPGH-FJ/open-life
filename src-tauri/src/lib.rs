@@ -57,6 +57,7 @@ pub(crate) mod main_chat_runtime_support;
 pub(crate) mod main_chat_send;
 pub(crate) mod main_chat_skills_tools;
 pub(crate) mod main_chat_stage3_execution_ux;
+pub(crate) mod main_chat_stage4_memory_knowledge;
 pub(crate) mod main_chat_strategy;
 pub(crate) mod main_chat_streaming;
 #[allow(dead_code)]
@@ -105,6 +106,9 @@ mod main_chat_agent_stage2_readiness_tests;
 
 #[cfg(test)]
 mod main_chat_stage3_execution_ux_tests;
+
+#[cfg(test)]
+mod main_chat_stage4_memory_knowledge_tests;
 
 #[cfg(test)]
 mod main_chat_event_stream_tests;
@@ -241,6 +245,11 @@ use commands::state::{
 };
 use commands::version::{create_snapshot, diff_snapshots, list_snapshots, restore_snapshot};
 use main_chat_event_stream::{get_main_chat_agent_state_snapshot, list_main_chat_agent_events};
+use main_chat_stage4_memory_knowledge::{
+    confirm_managed_knowledge_write, create_managed_knowledge_write_draft,
+    draft_edit_memory_proposal, list_stage4_knowledge_asset_inventory,
+    rollback_managed_knowledge_write, run_main_chat_stage4_memory_knowledge_report,
+};
 use main_chat_task_controls::{
     cancel_main_chat_agent_task, get_main_chat_agent_task_detail, get_main_chat_agent_task_state,
     list_main_chat_agent_tasks, refresh_main_chat_agent_task_context, resume_main_chat_agent_task,
@@ -731,12 +740,18 @@ pub fn run() {
             accept_proposal,
             reject_proposal,
             edit_proposal,
+            draft_edit_memory_proposal,
             postpone_proposal,
             rollback_memory_asset,
             list_memory_assets,
             get_memory_asset,
             get_memory_lifecycle_events,
             rebuild_memory_materialized_view,
+            list_stage4_knowledge_asset_inventory,
+            create_managed_knowledge_write_draft,
+            confirm_managed_knowledge_write,
+            rollback_managed_knowledge_write,
+            run_main_chat_stage4_memory_knowledge_report,
             send_message,
             start_stream_message,
             list_main_chat_agent_events,

@@ -5,6 +5,9 @@ import {
   acceptProposal,
   builderStart,
   applyCalibration,
+  confirmManagedKnowledgeWrite,
+  createManagedKnowledgeWriteDraft,
+  draftEditMemoryProposal,
   editProposal,
   getStateHistory,
   recordState,
@@ -66,6 +69,9 @@ import {
   runMainChatAgentProductMaturityV2SkillsGate,
   runMainChatAgentProductizationV1Gate,
   runMainChatStage3ExecutionUxReport,
+  runMainChatStage4MemoryKnowledgeReport,
+  listStage4KnowledgeAssetInventory,
+  rollbackManagedKnowledgeWrite,
   selectMainChatSkill,
   listMainChatAgentEvents,
   getMainChatAgentStateSnapshot,
@@ -411,6 +417,7 @@ describe("tauri command argument aliases", () => {
   it("normalizes proposal command arguments", async () => {
     await acceptProposal("proposal-1");
     await editProposal("proposal-1", { name: "新值" });
+    await draftEditMemoryProposal("proposal-memory-1", { content: "draft" });
 
     expect(invoke).toHaveBeenCalledWith(
       "accept_proposal",
@@ -426,6 +433,57 @@ describe("tauri command argument aliases", () => {
         proposal_id: "proposal-1",
         newAfter: { name: "新值" },
         new_after: { name: "新值" },
+      })
+    );
+    expect(invoke).toHaveBeenCalledWith(
+      "draft_edit_memory_proposal",
+      expect.objectContaining({
+        proposalId: "proposal-memory-1",
+        proposal_id: "proposal-memory-1",
+        newAfter: { content: "draft" },
+        new_after: { content: "draft" },
+      })
+    );
+  });
+
+  it("normalizes Stage 4 managed knowledge command arguments", async () => {
+    await listStage4KnowledgeAssetInventory("review");
+    await createManagedKnowledgeWriteDraft("USER.md", "profile", "proposal-1", ["memory:1"]);
+    await confirmManagedKnowledgeWrite("proposal-managed-1");
+    await rollbackManagedKnowledgeWrite("knowledge_version:1");
+
+    expect(invoke).toHaveBeenCalledWith(
+      "list_stage4_knowledge_asset_inventory",
+      expect.objectContaining({
+        selectedSkillId: "review",
+        selected_skill_id: "review",
+      })
+    );
+    expect(invoke).toHaveBeenCalledWith(
+      "create_managed_knowledge_write_draft",
+      expect.objectContaining({
+        targetPath: "USER.md",
+        target_path: "USER.md",
+        afterContent: "profile",
+        after_content: "profile",
+        sourceProposalId: "proposal-1",
+        source_proposal_id: "proposal-1",
+        linkedMemoryIds: ["memory:1"],
+        linked_memory_ids: ["memory:1"],
+      })
+    );
+    expect(invoke).toHaveBeenCalledWith(
+      "confirm_managed_knowledge_write",
+      expect.objectContaining({
+        proposalId: "proposal-managed-1",
+        proposal_id: "proposal-managed-1",
+      })
+    );
+    expect(invoke).toHaveBeenCalledWith(
+      "rollback_managed_knowledge_write",
+      expect.objectContaining({
+        versionId: "knowledge_version:1",
+        version_id: "knowledge_version:1",
       })
     );
   });
@@ -655,6 +713,41 @@ describe("tauri command argument aliases", () => {
     expect(result.readyForLimitedInternalTrial).toBe(false);
     expect(result.readinessRecommendation).toBe("not_ready_for_limited_internal_trial");
     expect(result.nonGoals).toContain("manual_dogfood_rows_not_run_or_fabricated");
+  });
+
+  it("invokes Main Chat Stage 4 memory knowledge report without readiness claim", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      reportKind: "main_chat_stage4_memory_knowledge",
+      schemaVersion: "stage4.v1",
+      scenarioCount: 18,
+      passedScenarioCount: 18,
+      blockedScenarioCount: 0,
+      notAReadinessGate: true,
+      readinessClaim: false,
+      stage2ReadinessPreserved: true,
+      rows: [],
+      evidenceIds: [],
+      blockers: [],
+      activeMemoryIds: [],
+      excludedMemoryIds: [],
+      loadedKnowledgeAssetIds: [],
+      skippedKnowledgeAssetIds: [],
+      managedKnowledgeWriteAssetIds: [],
+      managedKnowledgeWriteVersionIds: [],
+      managedKnowledgeWriteAuditIds: [],
+      managedKnowledgeRollbackSnapshotIds: [],
+      directWriteCount: 0,
+      confirmedKnowledgeWriteCount: 0,
+      rollbackEventCount: 0,
+    });
+
+    const result = await runMainChatStage4MemoryKnowledgeReport();
+
+    expect(invoke).toHaveBeenCalledWith("run_main_chat_stage4_memory_knowledge_report", undefined);
+    expect(result.scenarioCount).toBe(18);
+    expect(result.notAReadinessGate).toBe(true);
+    expect(result.readinessClaim).toBe(false);
+    expect(result.stage2ReadinessPreserved).toBe(true);
   });
 
   it("invokes external live productization gate as opt-in non-default evidence", async () => {

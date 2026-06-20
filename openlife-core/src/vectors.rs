@@ -473,6 +473,27 @@ impl VectorStore {
         Ok(archived as usize)
     }
 
+    pub fn archive_chunks_by_source(&self, source: &str) -> Result<usize> {
+        let trimmed = source.trim();
+        if trimmed.is_empty() || trimmed != source {
+            return Ok(0);
+        }
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let tx = conn.transaction()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let archived = tx.execute(
+            "UPDATE vectors
+             SET archived = 1, archived_at = ?1, summary = substr(content, 1, 200)
+             WHERE archived = 0 AND source = ?2",
+            params![now, source],
+        )?;
+        tx.commit()?;
+        Ok(archived as usize)
+    }
+
     /// List archived chunks with summary (no embedding to save memory).
     pub fn list_archived(&self, limit: usize) -> Result<Vec<ArchivedChunkSummary>> {
         let conn = self

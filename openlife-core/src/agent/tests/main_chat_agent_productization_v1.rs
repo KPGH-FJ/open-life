@@ -1,7 +1,8 @@
 use crate::agent::main_chat_agent_productization_v1::{
     assemble_main_chat_agent_state, main_chat_agent_product_scenarios,
-    MainChatAgentProductScenarioRunMode, MainChatAgentProductStrategyRoute,
-    MainChatAgentStateAssemblerInput, MainChatAgentStateEventType,
+    MainChatAgentProductProposalStatus, MainChatAgentProductScenarioRunMode,
+    MainChatAgentProductStrategyRoute, MainChatAgentStateAssemblerInput,
+    MainChatAgentStateEventType,
 };
 use crate::agent::main_chat_agent_v1::{
     ActionQueueStore, AgentTaskSessionDraft, AgentTaskSessionStatus, AgentTaskSessionStore,
@@ -12,6 +13,10 @@ use crate::agent::main_chat_agent_v1::{
 use crate::agent::types::{
     AgentProposal, AgentRun, AgentRunStatus, AgentTaskKind, ContextSummary, ModelRouteTrace,
     ProposalSource, ProposalType, RedactionLevel, RiskLevel,
+};
+use crate::agent::{
+    MemoryLifecycleCategory, MemoryLifecycleRecord, MemoryLifecycleRiskLevel, MemoryLifecycleScope,
+    MemoryLifecycleStatus, MemoryMaterializationStatus,
 };
 
 fn fixture_run(session_id: &str, output: &str) -> AgentRun {
@@ -494,6 +499,192 @@ fn main_chat_agent_productization_v1_does_not_promote_assistant_text_to_runtime_
         .collect::<Vec<_>>();
     assert!(gap_codes.contains(&"missing_run_identity"));
     assert!(gap_codes.contains(&"missing_final_delivery"));
+}
+
+#[test]
+fn main_chat_agent_productization_v1_final_delivery_lists_durable_memory_changes() {
+    let session_store = AgentTaskSessionStore::new_in_memory().expect("session store");
+    let session = session_store
+        .create_session(AgentTaskSessionDraft {
+            chat_session_id: "chat-stage4-durable-memory".into(),
+            user_goal: "Accept a memory and report durable delivery.".into(),
+            selected_strategy: MainChatAgentStrategy::MemoryProposal,
+            current_plan_summary: None,
+            context_snapshot_refs: vec![],
+        })
+        .expect("create session");
+    let task_session_id = session.id.clone();
+    let final_entry = session_store
+        .append_transcript_entry(ExecutionTranscriptEntryDraft {
+            session_id: session.id.clone(),
+            kind: ExecutionTranscriptEntryKind::FinalResult,
+            summary: "Accepted memory was materialized.".into(),
+            metadata: serde_json::json!({"directWritesExecuted": false}),
+        })
+        .expect("final");
+    let session = session_store
+        .complete_session(&session.id, "Accepted memory was materialized.")
+        .expect("complete session");
+
+    let mut proposal = AgentProposal::new(
+        ProposalType::MemoryWrite,
+        "memory.stage4.delivery",
+        serde_json::json!({"content": "Prefer stage 4 durable delivery."}),
+        "Accept memory for Stage 4 delivery proof.",
+        0.9,
+        RiskLevel::Low,
+        ProposalSource::ChatConversation,
+    );
+    proposal.id = "proposal-stage4-durable-memory".into();
+    proposal.accept();
+    let memory = MemoryLifecycleRecord {
+        memory_id: "memory:stage4-durable".into(),
+        proposal_id: proposal.id.clone(),
+        source_task_session_id: Some(session.id.clone()),
+        source_run_id: Some("run-productization-fixture".into()),
+        content: "Prefer stage 4 durable delivery.".into(),
+        scope: MemoryLifecycleScope::Workspace,
+        category: MemoryLifecycleCategory::Preference,
+        risk_level: MemoryLifecycleRiskLevel::Low,
+        status: MemoryLifecycleStatus::Materialized,
+        materialization_status: MemoryMaterializationStatus::Materialized,
+        materialization_error_code: None,
+        created_by: "assistant".into(),
+        accepted_by: Some("user".into()),
+        accepted_at: Some(chrono::Utc::now()),
+        materialized_view_id: Some("memory_view:stage4".into()),
+        materialized_view_version: Some(7),
+        evidence_ids: vec![proposal.id.clone()],
+        confidence: 0.9,
+        conflict_ids: Vec::new(),
+        supersedes_memory_id: None,
+        replacement_memory_id: None,
+        rolled_back_by_event_id: None,
+        runtime_context_excluded_at: None,
+    };
+    let mut context_only_memory = memory.clone();
+    context_only_memory.memory_id = "memory:stage4-context-only".into();
+    context_only_memory.proposal_id = "proposal-not-in-snapshot".into();
+
+    let snapshot = assemble_main_chat_agent_state(MainChatAgentStateAssemblerInput {
+        session,
+        run: Some(fixture_run(
+            "chat-stage4-durable-memory",
+            &final_entry.summary,
+        )),
+        transcript: session_store
+            .list_transcript_entries(&task_session_id)
+            .unwrap_or_default(),
+        actions: Vec::new(),
+        proposals: vec![proposal],
+        memory_lifecycle_records: vec![memory, context_only_memory],
+    })
+    .expect("snapshot");
+
+    let delivery = snapshot.final_delivery.expect("final delivery");
+    assert!(
+        delivery.durable_changes.iter().any(|change| {
+            change.change_type == "memory.materialized"
+                && change.target == "memory:stage4-durable"
+                && change.provenance_id == "proposal-stage4-durable-memory"
+                && change.rollback_available
+        }),
+        "final delivery must include accepted/materialized memory durable changes: {:?}",
+        delivery.durable_changes
+    );
+    assert!(
+        delivery
+            .durable_changes
+            .iter()
+            .all(|change| change.target != "memory:stage4-context-only"),
+        "context-only lifecycle memory must not be reported as a new durable delivery change: {:?}",
+        delivery.durable_changes
+    );
+    assert!(snapshot.proposals.iter().any(|proposal| {
+        proposal.status == MainChatAgentProductProposalStatus::Accepted
+            && proposal.memory_lifecycle.is_some()
+    }));
+}
+
+#[test]
+fn main_chat_agent_productization_v1_final_delivery_lists_managed_knowledge_file_changes() {
+    let session_store = AgentTaskSessionStore::new_in_memory().expect("session store");
+    let session = session_store
+        .create_session(AgentTaskSessionDraft {
+            chat_session_id: "chat-productization-managed-knowledge".into(),
+            user_goal: "Confirm a managed USER.md write.".into(),
+            selected_strategy: MainChatAgentStrategy::MemoryProposal,
+            current_plan_summary: Some("Confirm managed knowledge write after review.".into()),
+            context_snapshot_refs: vec!["knowledge:USER.md".into()],
+        })
+        .expect("create session");
+    session_store
+        .append_transcript_entry(ExecutionTranscriptEntryDraft {
+            session_id: session.id.clone(),
+            kind: ExecutionTranscriptEntryKind::RouteDecision,
+            summary: "Route: memory proposal".into(),
+            metadata: serde_json::json!({ "strategy": "memory_proposal" }),
+        })
+        .expect("route");
+    let final_entry = session_store
+        .append_transcript_entry(ExecutionTranscriptEntryDraft {
+            session_id: session.id.clone(),
+            kind: ExecutionTranscriptEntryKind::FinalResult,
+            summary: "Managed USER.md write was confirmed and reloaded.".into(),
+            metadata: serde_json::json!({"directWritesExecuted": false}),
+        })
+        .expect("final");
+    let session = session_store
+        .complete_session(&session.id, "Managed USER.md write was confirmed.")
+        .expect("complete session");
+    let task_session_id = session.id.clone();
+
+    let mut proposal = AgentProposal::new(
+        ProposalType::ExternalWriteAction,
+        "USER.md",
+        serde_json::json!({
+            "kind": "managed_knowledge_write",
+            "targetPath": "USER.md",
+            "beforeDigest": "before-digest",
+            "afterDigest": "after-digest",
+            "versionId": "knowledge_version:stage4",
+            "auditId": "knowledge_audit:stage4",
+            "contextReloadDigest": "after-digest"
+        }),
+        "Managed USER.md write confirmed after explicit review.",
+        0.86,
+        RiskLevel::Medium,
+        ProposalSource::MemoryGovernance,
+    );
+    proposal.id = "proposal-managed-knowledge-delivery".into();
+    proposal.accept();
+
+    let snapshot = assemble_main_chat_agent_state(MainChatAgentStateAssemblerInput {
+        session,
+        run: Some(fixture_run(
+            "chat-productization-managed-knowledge",
+            &final_entry.summary,
+        )),
+        transcript: session_store
+            .list_transcript_entries(&task_session_id)
+            .unwrap_or_default(),
+        actions: Vec::new(),
+        proposals: vec![proposal],
+        memory_lifecycle_records: Vec::new(),
+    })
+    .expect("snapshot");
+
+    let delivery = snapshot.final_delivery.expect("final delivery");
+    assert!(
+        delivery.durable_changes.iter().any(|change| {
+            change.change_type == "knowledge_file.updated"
+                && change.target == "USER.md"
+                && change.provenance_id == "knowledge_version:stage4"
+                && change.rollback_available
+        }),
+        "final delivery must include confirmed managed knowledge-file durable changes: {:?}",
+        delivery.durable_changes
+    );
 }
 
 #[test]

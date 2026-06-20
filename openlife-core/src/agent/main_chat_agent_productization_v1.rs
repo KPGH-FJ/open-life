@@ -3,7 +3,9 @@ use crate::agent::main_chat_agent_v1::{
     ExecutionTranscriptEntryKind, MainChatAgentStrategy, MainChatPolicyLevel,
     QueuedExecutionAction,
 };
-use crate::agent::memory_lifecycle::{MemoryLifecycleRecord, MemoryLifecycleStatus};
+use crate::agent::memory_lifecycle::{
+    MemoryLifecycleRecord, MemoryLifecycleStatus, MemoryMaterializationStatus,
+};
 use crate::agent::plan_execute::PlanExecuteReviewSummary;
 use crate::agent::types::{AgentProposal, AgentRun, ProposalStatus, ProposalType};
 use anyhow::Result;
@@ -1460,6 +1462,8 @@ pub fn assemble_main_chat_agent_state(
             observations: &observations,
             blockers: &blockers,
             proposals: &proposals,
+            raw_proposals: &input.proposals,
+            memory_lifecycle_records: &input.memory_lifecycle_records,
         },
         &mut diagnostics,
     );
@@ -2153,6 +2157,8 @@ struct FinalDeliveryEvidenceInput<'a> {
     observations: &'a [ObservationEvidence],
     blockers: &'a [BlockerEvidence],
     proposals: &'a [ProposalEvidence],
+    raw_proposals: &'a [AgentProposal],
+    memory_lifecycle_records: &'a [MemoryLifecycleRecord],
 }
 
 fn final_delivery_from_evidence(
@@ -2167,6 +2173,8 @@ fn final_delivery_from_evidence(
     let observations = input.observations;
     let blockers = input.blockers;
     let proposals = input.proposals;
+    let raw_proposals = input.raw_proposals;
+    let memory_lifecycle_records = input.memory_lifecycle_records;
     let terminal = matches!(
         session.status,
         AgentTaskSessionStatus::Completed
@@ -2278,10 +2286,139 @@ fn final_delivery_from_evidence(
         blockers: blocker_summaries,
         skipped_work,
         pending_user_actions,
-        durable_changes: Vec::new(),
+        durable_changes: durable_changes_from(memory_lifecycle_records, proposals, raw_proposals),
         next_steps: next_steps_for_status(status),
         trace_available: !transcript.is_empty(),
     })
+}
+
+fn durable_changes_from(
+    memory_lifecycle_records: &[MemoryLifecycleRecord],
+    proposals: &[ProposalEvidence],
+    raw_proposals: &[AgentProposal],
+) -> Vec<DurableChangeSummary> {
+    let mut changes = durable_changes_from_memory_lifecycle(memory_lifecycle_records, proposals);
+    changes.extend(durable_changes_from_managed_knowledge_proposals(
+        raw_proposals,
+    ));
+    changes
+}
+
+fn durable_changes_from_memory_lifecycle(
+    records: &[MemoryLifecycleRecord],
+    proposals: &[ProposalEvidence],
+) -> Vec<DurableChangeSummary> {
+    let proposal_backed_memory_ids = proposals
+        .iter()
+        .filter(|proposal| {
+            matches!(
+                proposal.status,
+                MainChatAgentProductProposalStatus::Accepted
+                    | MainChatAgentProductProposalStatus::RolledBack
+            ) && proposal.memory_lifecycle.is_some()
+        })
+        .map(|proposal| proposal.proposal_id.as_str())
+        .collect::<BTreeSet<_>>();
+
+    records
+        .iter()
+        .filter(|record| proposal_backed_memory_ids.contains(record.proposal_id.as_str()))
+        .filter_map(|record| {
+            if record.status == MemoryLifecycleStatus::Materialized
+                && record.materialization_status == MemoryMaterializationStatus::Materialized
+                && record.runtime_context_excluded_at.is_none()
+            {
+                return Some(DurableChangeSummary {
+                    change_type: "memory.materialized".into(),
+                    target: record.memory_id.clone(),
+                    provenance_id: record.proposal_id.clone(),
+                    rollback_available: true,
+                });
+            }
+            if record.status == MemoryLifecycleStatus::RolledBack
+                || record.rolled_back_by_event_id.is_some()
+            {
+                return Some(DurableChangeSummary {
+                    change_type: "memory.rolled_back".into(),
+                    target: record.memory_id.clone(),
+                    provenance_id: record
+                        .rolled_back_by_event_id
+                        .clone()
+                        .unwrap_or_else(|| record.proposal_id.clone()),
+                    rollback_available: false,
+                });
+            }
+            if record.status == MemoryLifecycleStatus::MaterializationFailed
+                || record.materialization_status == MemoryMaterializationStatus::Failed
+            {
+                return Some(DurableChangeSummary {
+                    change_type: "memory.materialization_failed".into(),
+                    target: record.memory_id.clone(),
+                    provenance_id: record.proposal_id.clone(),
+                    rollback_available: false,
+                });
+            }
+            None
+        })
+        .collect()
+}
+
+fn durable_changes_from_managed_knowledge_proposals(
+    proposals: &[AgentProposal],
+) -> Vec<DurableChangeSummary> {
+    proposals
+        .iter()
+        .filter(|proposal| {
+            proposal.status == ProposalStatus::Accepted
+                && proposal.proposal_type == ProposalType::ExternalWriteAction
+        })
+        .filter_map(|proposal| {
+            let kind = proposal.after.get("kind").and_then(Value::as_str)?;
+            let target = proposal
+                .after
+                .get("targetPath")
+                .and_then(Value::as_str)
+                .unwrap_or(proposal.affected_path.as_str());
+            if target != "USER.md" && target != "MEMORY.md" {
+                return None;
+            }
+            match kind {
+                "managed_knowledge_write" => {
+                    let provenance_id = proposal
+                        .after
+                        .get("versionId")
+                        .and_then(Value::as_str)
+                        .unwrap_or(proposal.id.as_str());
+                    Some(DurableChangeSummary {
+                        change_type: "knowledge_file.updated".into(),
+                        target: target.into(),
+                        provenance_id: provenance_id.into(),
+                        rollback_available: true,
+                    })
+                }
+                "managed_knowledge_rollback" => {
+                    let provenance_id = proposal
+                        .after
+                        .get("restoredVersionId")
+                        .and_then(Value::as_str)
+                        .or_else(|| {
+                            proposal
+                                .after
+                                .get("rolledBackVersionId")
+                                .and_then(Value::as_str)
+                        })
+                        .unwrap_or(proposal.id.as_str());
+                    Some(DurableChangeSummary {
+                        change_type: "knowledge_file.rolled_back".into(),
+                        target: target.into(),
+                        provenance_id: provenance_id.into(),
+                        rollback_available: false,
+                    })
+                }
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 fn skipped_work_from_plan(plan: Option<&PlanEvidence>) -> Vec<SkippedWorkSummary> {

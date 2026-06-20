@@ -184,15 +184,27 @@ pub(crate) async fn preprocess_chat_input(
                 state,
             )
             .await;
-            memory_hit_count = results.len();
+            let active_lifecycle_records =
+                if let Some(lifecycle_store) = state.memory_lifecycle_store.as_ref() {
+                    let store = lifecycle_store.lock().await;
+                    store.list_active_records(None, 5).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+            memory_hit_count = results.len() + active_lifecycle_records.len();
             memory_sources = results
                 .iter()
                 .map(|(chunk, _)| chunk.source.clone())
+                .chain(
+                    active_lifecycle_records
+                        .iter()
+                        .map(|record| format!("memory_lifecycle:{}", record.memory_id)),
+                )
                 .collect();
-            if results.is_empty() {
+            if results.is_empty() && active_lifecycle_records.is_empty() {
                 String::new()
             } else {
-                let snippets: Vec<String> = results
+                let mut snippets: Vec<String> = results
                     .iter()
                     .map(|(chunk, score)| {
                         format!(
@@ -203,8 +215,17 @@ pub(crate) async fn preprocess_chat_input(
                         )
                     })
                     .collect();
+                for record in active_lifecycle_records {
+                    snippets.push(format!(
+                        "- [memory_lifecycle:{}] Accepted memory [{}:{}]: {}",
+                        record.memory_id,
+                        record.scope,
+                        record.category,
+                        record.content.replace('\n', " ")
+                    ));
+                }
                 format!(
-                    "\n以下是你过去记忆中的相关内容，请在回应中自然地参考它们：\n{}",
+                    "\n以下是已确认且仍处于 active 状态的相关记忆/历史检索结果，请在回应中自然地参考它们，不要把 rejected 或 rolled-back 记忆当作事实：\n{}",
                     snippets.join("\n")
                 )
             }
@@ -404,9 +425,45 @@ pub(crate) async fn preprocess_chat_input_v2(
         );
     }
 
-    if !output.memory_context.is_empty() {
+    let active_lifecycle_records =
+        if let Some(lifecycle_store) = state.memory_lifecycle_store.as_ref() {
+            let store = lifecycle_store.lock().await;
+            store.list_active_records(None, 5).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+    let active_lifecycle_context = if active_lifecycle_records.is_empty() {
+        String::new()
+    } else {
+        let snippets = active_lifecycle_records
+            .iter()
+            .map(|record| {
+                format!(
+                    "- [memory_lifecycle:{}] Accepted memory [{}:{}]: {}",
+                    record.memory_id,
+                    record.scope,
+                    record.category,
+                    record.content.replace('\n', " ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "\n以下是已确认且仍处于 active 状态的记忆，请在回应中自然地参考它们，不要把 rejected 或 rolled-back 记忆当作事实：\n{snippets}"
+        )
+    };
+    let combined_memory_context = [
+        output.memory_context.as_str(),
+        active_lifecycle_context.as_str(),
+    ]
+    .into_iter()
+    .filter(|part| !part.trim().is_empty())
+    .collect::<Vec<_>>()
+    .join("\n\n");
+
+    if !combined_memory_context.is_empty() {
         if let Some(last_user) = desensitized_messages.iter_mut().rfind(|m| m.role == "user") {
-            last_user.content = format!("{}\n\n{}", last_user.content, output.memory_context);
+            last_user.content = format!("{}\n\n{}", last_user.content, combined_memory_context);
         }
     }
 
@@ -428,6 +485,14 @@ pub(crate) async fn preprocess_chat_input_v2(
         let _ = store.record_metric(&metric);
     }
 
+    let mut context_summary = output.context_summary;
+    context_summary.memory_hit_count += active_lifecycle_records.len() as i64;
+    context_summary.memory_sources.extend(
+        active_lifecycle_records
+            .iter()
+            .map(|record| format!("memory_lifecycle:{}", record.memory_id)),
+    );
+
     Ok((
         output.life_model.as_ref().clone(),
         output.tools_prompt,
@@ -435,7 +500,7 @@ pub(crate) async fn preprocess_chat_input_v2(
         output.privacy_map,
         desensitized_messages.to_vec(),
         embed_err,
-        output.context_summary,
+        context_summary,
     ))
 }
 

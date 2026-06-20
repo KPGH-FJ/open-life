@@ -53,6 +53,7 @@ import {
   acceptProposal,
   rejectProposal,
   editProposal,
+  draftEditMemoryProposal,
   postponeProposal,
   runMultiStrategyAgentPreview,
   checkControlledChatPilotEligibility,
@@ -2083,7 +2084,14 @@ export default function ChatPage({
         );
         if (draft === null) return;
         const parsed = JSON.parse(draft);
-        await editProposal(proposalId, parsed);
+        if (
+          proposal.proposalType === "memory_write" ||
+          proposal.proposalType === "preference_update"
+        ) {
+          await draftEditMemoryProposal(proposalId, parsed);
+        } else {
+          await editProposal(proposalId, parsed);
+        }
         await refreshMainChatControlState(taskSessionId);
       } catch (e) {
         setAgentTaskControlError(`Edit proposal failed: ${readablePreviewError(e)}`);

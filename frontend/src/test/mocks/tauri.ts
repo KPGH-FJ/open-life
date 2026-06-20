@@ -777,6 +777,37 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         })),
         blockers: [],
       } as T);
+    case "run_main_chat_stage4_memory_knowledge_report":
+      return Promise.resolve({
+        reportKind: "main_chat_stage4_memory_knowledge",
+        schemaVersion: "stage4.v1",
+        scenarioCount: 18,
+        passedScenarioCount: 17,
+        blockedScenarioCount: 1,
+        notAReadinessGate: true,
+        readinessClaim: false,
+        stage2ReadinessPreserved: true,
+        rows: Array.from({ length: 18 }, (_, index) => ({
+          id: `MK4-${String(index + 1).padStart(2, "0")}`,
+          scenario: "mock stage4 scenario",
+          status: index === 17 ? "blocked" : "passed",
+          evidenceIds: ["mock-stage4"],
+          blockers: index === 17 ? ["managed_user_memory_write_lifecycle_not_yet_exercised"] : [],
+        })),
+        evidenceIds: ["mock-stage4"],
+        blockers: ["managed_user_memory_write_lifecycle_not_yet_exercised"],
+        activeMemoryIds: ["memory:active-1"],
+        excludedMemoryIds: ["memory:rolled-back-1"],
+        loadedKnowledgeAssetIds: ["knowledge:USER.md", "knowledge:MEMORY.md"],
+        skippedKnowledgeAssetIds: ["knowledge:SOUL.md"],
+        managedKnowledgeWriteAssetIds: [],
+        managedKnowledgeWriteVersionIds: [],
+        managedKnowledgeWriteAuditIds: [],
+        managedKnowledgeRollbackSnapshotIds: [],
+        directWriteCount: 0,
+        confirmedKnowledgeWriteCount: 0,
+        rollbackEventCount: 1,
+      } as T);
     case "run_main_chat_agent_product_maturity_v2_event_gate":
       return Promise.resolve({
         scenarioCount: 8,
@@ -2613,10 +2644,176 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
     case "batch_accept_low_risk_proposals":
       return Promise.resolve(0 as T);
     case "accept_proposal":
+      return Promise.resolve({
+        success: true,
+        patchResult: {
+          patchId: _args?.proposalId ?? _args?.proposal_id ?? "proposal-1",
+          success: true,
+          path: "mock",
+          operation: "accept",
+        },
+      } as T);
     case "reject_proposal":
     case "edit_proposal":
     case "postpone_proposal":
       return Promise.resolve(undefined as T);
+    case "draft_edit_memory_proposal":
+      return Promise.resolve({
+        proposalId: _args?.proposalId ?? _args?.proposal_id ?? "proposal-memory-1",
+        draftOnly: true,
+        durableWriteExecuted: false,
+        originalProvenancePreserved: true,
+        status: "pending",
+        beforeDigest: "before",
+        afterDigest: "after",
+      } as T);
+    case "list_memory_assets":
+      return Promise.resolve([
+        {
+          memoryId: "memory:active-1",
+          proposalId: "proposal-memory-1",
+          content: "Prefer concise reviews.",
+          scope: "workspace",
+          category: "preference",
+          riskLevel: "low",
+          status: "materialized",
+          materializationStatus: "materialized",
+          createdBy: "assistant",
+          acceptedBy: "user",
+          materializedViewId: "memory_view:1",
+          materializedViewVersion: 1,
+          evidenceIds: ["proposal-memory-1"],
+          confidence: 0.84,
+          conflictIds: [],
+        },
+      ] as T);
+    case "rollback_memory_asset":
+      return Promise.resolve({
+        record: {
+          memoryId: _args?.memoryId ?? _args?.memory_id ?? "memory:active-1",
+          proposalId: "proposal-memory-1",
+          content: "Prefer concise reviews.",
+          scope: "workspace",
+          category: "preference",
+          riskLevel: "low",
+          status: "rolled_back",
+          materializationStatus: "not_required",
+          createdBy: "assistant",
+          materializedViewVersion: 2,
+          evidenceIds: ["proposal-memory-1"],
+          confidence: 0.84,
+          conflictIds: [],
+          rolledBackByEventId: "memory_rollback:1",
+        },
+        rollbackEvent: {
+          rollbackEventId: "memory_rollback:1",
+          memoryId: _args?.memoryId ?? _args?.memory_id ?? "memory:active-1",
+          proposalId: "proposal-memory-1",
+          requestedBy: "user",
+          reason: _args?.reason ?? "mock rollback",
+          previousStatus: "materialized",
+          nextStatus: "rolled_back",
+          affectedMaterializedViewIds: ["memory_view:1"],
+          affectedRuntimeSurfaceIds: ["main_chat_context"],
+          createdAt: new Date().toISOString(),
+          auditDigest: "sha256:mock",
+        },
+        materializedView: {
+          materializedViewId: "memory_view:1",
+          version: 2,
+          activeMemoryIds: [],
+          runtimeSurfaceIds: ["main_chat_context"],
+          updatedAt: new Date().toISOString(),
+          contentDigest: "digest",
+        },
+      } as T);
+    case "list_stage4_knowledge_asset_inventory":
+      return Promise.resolve({
+        inventoryId: "stage4_knowledge_inventory:mock",
+        root: "/mock",
+        loadedAssets: [
+          {
+            assetId: "knowledge:USER.md",
+            relativePath: "USER.md",
+            source: "/mock:USER.md",
+            digest: "1234567890abcdef",
+            sizeBytes: 42,
+            truncated: false,
+            reason: "bounded user profile context surface",
+            contextOnly: true,
+          },
+          {
+            assetId: "knowledge:MEMORY.md",
+            relativePath: "MEMORY.md",
+            source: "/mock:MEMORY.md",
+            digest: "abcdef1234567890",
+            sizeBytes: 64,
+            truncated: false,
+            reason: "bounded curated memory context surface",
+            contextOnly: true,
+          },
+        ],
+        skippedAssets: [
+          {
+            assetId: "knowledge:SOUL.md",
+            relativePath: "SOUL.md",
+            source: "/mock:SOUL.md",
+            reason: "missing",
+          },
+          {
+            assetId: "knowledge:skills/other/SKILL.md",
+            relativePath: "skills/other/SKILL.md",
+            source: "/mock:skills/other/SKILL.md",
+            reason: "unselected_skill",
+            selectedSkillId: "other",
+          },
+        ],
+      } as T);
+    case "create_managed_knowledge_write_draft":
+      return Promise.resolve({
+        proposalId: "proposal-managed-knowledge-1",
+        targetPath: _args?.targetPath ?? _args?.target_path ?? "USER.md",
+        sourceProvenanceProposalId: "proposal-managed-knowledge-1",
+        linkedMemoryIds: _args?.linkedMemoryIds ?? _args?.linked_memory_ids ?? [],
+        beforeDigest: "before-digest",
+        afterDigest: "after-digest",
+        previewDiff: `--- ${_args?.targetPath ?? _args?.target_path ?? "USER.md"}\n+++ ${
+          _args?.targetPath ?? _args?.target_path ?? "USER.md"
+        }\n+mock`,
+        validation: { allowed: true, targetKind: "user_profile_projection" },
+        fileWrittenBeforeConfirmation: false,
+      } as T);
+    case "confirm_managed_knowledge_write":
+      return Promise.resolve({
+        proposalId: _args?.proposalId ?? _args?.proposal_id ?? "proposal-managed-knowledge-1",
+        targetPath: "USER.md",
+        versionId: "knowledge_version:1",
+        auditId: "knowledge_audit:1",
+        rollbackSnapshotId: "snapshot:1",
+        beforeDigest: "before-digest",
+        afterDigest: "after-digest",
+        contextReload: {
+          loaded: true,
+          digest: "after-digest",
+          source: "/mock:USER.md",
+          reason: "bounded user profile context surface",
+        },
+      } as T);
+    case "rollback_managed_knowledge_write":
+      return Promise.resolve({
+        proposalId: "proposal-managed-knowledge-1",
+        targetPath: "USER.md",
+        restoredVersionId: "knowledge_version:2",
+        rolledBackVersionId: _args?.versionId ?? _args?.version_id ?? "knowledge_version:1",
+        auditId: "knowledge_rollback_audit:1",
+        restoredDigest: "before-digest",
+        contextReload: {
+          loaded: true,
+          digest: "before-digest",
+          source: "/mock:USER.md",
+          reason: "bounded user profile context surface",
+        },
+      } as T);
     case "list_tool_permissions":
       return Promise.resolve([
         {

@@ -137,4 +137,85 @@ describe("ProposalReviewPage", () => {
     expect(screen.getByTitle("查看来源 Run: run-skill-123456")).toBeInTheDocument();
     expect(screen.queryByText(/raw-sensitive-payload/)).not.toBeInTheDocument();
   });
+
+  it("shows Stage 4 knowledge inventory and managed knowledge write controls", async () => {
+    renderProposalReviewPage();
+
+    expect(await screen.findByText("Knowledge assets")).toBeInTheDocument();
+    expect(screen.getAllByText("USER.md").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("MEMORY.md").length).toBeGreaterThan(0);
+    expect(screen.getByText("unselected_skill")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("Draft managed content"), {
+      target: { value: "Managed profile summary" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Draft diff/i }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "create_managed_knowledge_write_draft",
+        expect.objectContaining({
+          targetPath: "USER.md",
+          afterContent: "Managed profile summary",
+        })
+      );
+    });
+    expect(await screen.findByText(/Managed USER.md draft created/)).toBeInTheDocument();
+    expect(screen.getByText(/\+mock/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Confirm write/i }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "confirm_managed_knowledge_write",
+        expect.objectContaining({ proposalId: "proposal-managed-knowledge-1" })
+      );
+    });
+  });
+
+  it("uses draft-only edit for pending memory proposals", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_pending_proposals" || cmd === "list_proposals") {
+        const proposal: AgentProposal = {
+          id: "proposal-memory-draft",
+          proposalType: "memory_write",
+          source: "chat_conversation",
+          sourceDetail: "task-session-1",
+          affectedPath: "memory.preference.review_style",
+          after: { content: "Prefer concise reviews." },
+          reason: "User asked OpenLife to remember this.",
+          confidence: 0.8,
+          riskLevel: "low",
+          status: "pending",
+          createdAt: new Date().toISOString(),
+        };
+        return Promise.resolve([proposal]);
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderProposalReviewPage();
+
+    expect(await screen.findByText("memory.preference.review_style")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("编辑"));
+    const textboxes = screen.getAllByRole("textbox");
+    const editTextArea = textboxes[textboxes.length - 1];
+    expect(editTextArea).toBeTruthy();
+    fireEvent.change(editTextArea!, {
+      target: { value: JSON.stringify({ content: "Prefer concise and rigorous reviews." }) },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "draft_edit_memory_proposal",
+        expect.objectContaining({
+          proposalId: "proposal-memory-draft",
+          newAfter: { content: "Prefer concise and rigorous reviews." },
+        })
+      );
+    });
+    expect(invoke).not.toHaveBeenCalledWith(
+      "edit_proposal",
+      expect.objectContaining({ proposalId: "proposal-memory-draft" })
+    );
+  });
 });

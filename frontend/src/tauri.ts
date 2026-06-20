@@ -3699,6 +3699,123 @@ export interface MemoryRollbackReport {
   materializedView: MemoryMaterializedView;
 }
 
+export interface MemoryProposalDraftEditReport {
+  proposalId: string;
+  draftOnly: boolean;
+  durableWriteExecuted: boolean;
+  originalProvenancePreserved: boolean;
+  status: string;
+  beforeDigest: string;
+  afterDigest: string;
+}
+
+export interface Stage4KnowledgeAssetLoaded {
+  assetId: string;
+  relativePath: string;
+  source: string;
+  digest: string;
+  sizeBytes: number;
+  truncated: boolean;
+  reason: string;
+  selectedSkillId?: string;
+  contextOnly: boolean;
+}
+
+export interface Stage4KnowledgeAssetSkipped {
+  assetId: string;
+  relativePath: string;
+  source: string;
+  reason: string;
+  selectedSkillId?: string;
+}
+
+export interface Stage4KnowledgeAssetInventory {
+  inventoryId: string;
+  root: string;
+  selectedSkillId?: string;
+  loadedAssets: Stage4KnowledgeAssetLoaded[];
+  skippedAssets: Stage4KnowledgeAssetSkipped[];
+}
+
+export interface ManagedKnowledgeValidation {
+  allowed: boolean;
+  targetKind: string;
+  blocker?: string;
+}
+
+export interface ManagedKnowledgeContextReloadProof {
+  loaded: boolean;
+  digest: string;
+  source: string;
+  reason: string;
+}
+
+export interface ManagedKnowledgeWriteDraft {
+  proposalId: string;
+  targetPath: string;
+  sourceProvenanceProposalId: string;
+  linkedMemoryIds: string[];
+  beforeDigest: string;
+  afterDigest: string;
+  previewDiff: string;
+  validation: ManagedKnowledgeValidation;
+  fileWrittenBeforeConfirmation: boolean;
+}
+
+export interface ManagedKnowledgeWriteApplyReport {
+  proposalId: string;
+  targetPath: string;
+  versionId: string;
+  auditId: string;
+  rollbackSnapshotId: string;
+  beforeDigest: string;
+  afterDigest: string;
+  contextReload: ManagedKnowledgeContextReloadProof;
+}
+
+export interface ManagedKnowledgeWriteRollbackReport {
+  proposalId: string;
+  targetPath: string;
+  restoredVersionId: string;
+  rolledBackVersionId: string;
+  auditId: string;
+  restoredDigest: string;
+  contextReload: ManagedKnowledgeContextReloadProof;
+}
+
+export interface MainChatStage4MemoryKnowledgeRow {
+  id: string;
+  scenario: string;
+  status: string;
+  evidenceIds: string[];
+  blockers: string[];
+}
+
+export interface MainChatStage4MemoryKnowledgeReport {
+  reportKind: string;
+  schemaVersion: string;
+  scenarioCount: number;
+  passedScenarioCount: number;
+  blockedScenarioCount: number;
+  notAReadinessGate: boolean;
+  readinessClaim: boolean;
+  stage2ReadinessPreserved: boolean;
+  rows: MainChatStage4MemoryKnowledgeRow[];
+  evidenceIds: string[];
+  blockers: string[];
+  activeMemoryIds: string[];
+  excludedMemoryIds: string[];
+  loadedKnowledgeAssetIds: string[];
+  skippedKnowledgeAssetIds: string[];
+  managedKnowledgeWriteAssetIds: string[];
+  managedKnowledgeWriteVersionIds: string[];
+  managedKnowledgeWriteAuditIds: string[];
+  managedKnowledgeRollbackSnapshotIds: string[];
+  directWriteCount: number;
+  confirmedKnowledgeWriteCount: number;
+  rollbackEventCount: number;
+}
+
 export async function getPendingProposals(limit: number = 50): Promise<AgentProposal[]> {
   return safeInvoke<AgentProposal[]>("get_pending_proposals", { limit });
 }
@@ -3760,6 +3877,67 @@ export async function editProposal(
     newAfter,
     new_after: newAfter,
   });
+}
+
+export async function draftEditMemoryProposal(
+  proposalId: string,
+  newAfter: any
+): Promise<MemoryProposalDraftEditReport> {
+  return safeInvoke("draft_edit_memory_proposal", {
+    proposalId,
+    proposal_id: proposalId,
+    newAfter,
+    new_after: newAfter,
+  });
+}
+
+export async function listStage4KnowledgeAssetInventory(
+  selectedSkillId?: string
+): Promise<Stage4KnowledgeAssetInventory> {
+  return safeInvoke("list_stage4_knowledge_asset_inventory", {
+    selectedSkillId,
+    selected_skill_id: selectedSkillId,
+  });
+}
+
+export async function createManagedKnowledgeWriteDraft(
+  targetPath: string,
+  afterContent: string,
+  sourceProposalId?: string,
+  linkedMemoryIds: string[] = []
+): Promise<ManagedKnowledgeWriteDraft> {
+  return safeInvoke("create_managed_knowledge_write_draft", {
+    targetPath,
+    target_path: targetPath,
+    afterContent,
+    after_content: afterContent,
+    sourceProposalId,
+    source_proposal_id: sourceProposalId,
+    linkedMemoryIds,
+    linked_memory_ids: linkedMemoryIds,
+  });
+}
+
+export async function confirmManagedKnowledgeWrite(
+  proposalId: string
+): Promise<ManagedKnowledgeWriteApplyReport> {
+  return safeInvoke("confirm_managed_knowledge_write", {
+    proposalId,
+    proposal_id: proposalId,
+  });
+}
+
+export async function rollbackManagedKnowledgeWrite(
+  versionId: string
+): Promise<ManagedKnowledgeWriteRollbackReport> {
+  return safeInvoke("rollback_managed_knowledge_write", {
+    versionId,
+    version_id: versionId,
+  });
+}
+
+export async function runMainChatStage4MemoryKnowledgeReport(): Promise<MainChatStage4MemoryKnowledgeReport> {
+  return safeInvoke("run_main_chat_stage4_memory_knowledge_report");
 }
 
 export async function postponeProposal(proposalId: string): Promise<void> {

@@ -1,8 +1,9 @@
 use openlife_core::agent::main_chat_agent_productization_v1::{
     assemble_main_chat_agent_state, main_chat_agent_product_scenarios,
-    MainChatAgentProductScenario, MainChatAgentProductScenarioExpectation,
-    MainChatAgentProductScenarioRunMode, MainChatAgentProductStrategyRoute,
-    MainChatAgentStateAssemblerInput, MainChatAgentStateEventType, MainChatAgentStateSnapshot,
+    MainChatAgentProductProposalStatus, MainChatAgentProductScenario,
+    MainChatAgentProductScenarioExpectation, MainChatAgentProductScenarioRunMode,
+    MainChatAgentProductStrategyRoute, MainChatAgentStateAssemblerInput,
+    MainChatAgentStateEventType, MainChatAgentStateSnapshot,
 };
 use openlife_core::agent::main_chat_agent_v1::{
     ActionQueueStore, AgentTaskSession, AgentTaskSessionDraft, AgentTaskSessionStatus,
@@ -2318,11 +2319,7 @@ fn validate_runtime_snapshot_for_scenario(
         }
     }
 
-    if snapshot
-        .final_delivery
-        .as_ref()
-        .is_some_and(|delivery| !delivery.durable_changes.is_empty())
-    {
+    if runtime_snapshot_has_unexpected_durable_changes(scenario, snapshot) {
         diagnostics.push("runtime proof included silent durable changes".into());
     }
 
@@ -2380,6 +2377,49 @@ fn validate_runtime_snapshot_for_scenario(
         | MainChatAgentProductStrategyRoute::Unknown => {}
     }
     diagnostics
+}
+
+fn runtime_snapshot_has_unexpected_durable_changes(
+    scenario: &MainChatAgentProductScenario,
+    snapshot: &MainChatAgentStateSnapshot,
+) -> bool {
+    let Some(delivery) = snapshot.final_delivery.as_ref() else {
+        return false;
+    };
+    if delivery.durable_changes.is_empty() {
+        return false;
+    }
+    if scenario.id != "MP-06" {
+        return true;
+    }
+
+    !delivery
+        .durable_changes
+        .iter()
+        .all(|change| snapshot_has_governed_memory_durable_change(snapshot, change))
+}
+
+fn snapshot_has_governed_memory_durable_change(
+    snapshot: &MainChatAgentStateSnapshot,
+    change: &openlife_core::agent::main_chat_agent_productization_v1::DurableChangeSummary,
+) -> bool {
+    snapshot.proposals.iter().any(|proposal| {
+        let Some(record) = proposal.memory_lifecycle.as_ref() else {
+            return false;
+        };
+        if !matches!(
+            proposal.status,
+            MainChatAgentProductProposalStatus::Accepted
+                | MainChatAgentProductProposalStatus::RolledBack
+        ) {
+            return false;
+        }
+        if !change.change_type.starts_with("memory.") || change.target != record.memory_id {
+            return false;
+        }
+        change.provenance_id == record.proposal_id
+            || record.rolled_back_by_event_id.as_deref() == Some(change.provenance_id.as_str())
+    })
 }
 
 fn memory_proposal_fixture(session_id: &str, suffix: &str) -> AgentProposal {

@@ -1787,9 +1787,25 @@ pub(crate) async fn rollback_memory_asset_with_state(
         .as_ref()
         .ok_or_else(memory_lifecycle_store_missing)?;
     let store = lifecycle_store.lock().await;
-    store
+    let report = store
         .rollback_memory_asset(&memory_id, "user", reason)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    drop(store);
+
+    {
+        let memory_store = state.memory_store.lock().await;
+        memory_store
+            .archive_lifecycle_memory_records(&memory_id)
+            .map_err(|e| e.to_string())?;
+    }
+    {
+        let vector_store = state.vector_store.lock().await;
+        let lifecycle_source = format!("memory_lifecycle:{memory_id}");
+        vector_store
+            .archive_chunks_by_source(&lifecycle_source)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(report)
 }
 
 pub(crate) async fn list_memory_assets_with_state(
