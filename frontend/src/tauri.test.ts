@@ -70,6 +70,16 @@ import {
   runMainChatAgentProductizationV1Gate,
   runMainChatStage3ExecutionUxReport,
   runMainChatStage4MemoryKnowledgeReport,
+  evaluateMainChatStage5ReleaseDebugPreflight,
+  exportMainChatAgentDebugBundle,
+  createMainChatInternalIssueReport,
+  listMainChatDebugBundles,
+  getMainChatDebugBundle,
+  deleteMainChatDebugBundle,
+  listMainChatInternalIssueReports,
+  getMainChatInternalIssueReport,
+  deleteMainChatInternalIssueReport,
+  runMainChatStage5ReleaseDebugReport,
   listStage4KnowledgeAssetInventory,
   rollbackManagedKnowledgeWrite,
   selectMainChatSkill,
@@ -748,6 +758,164 @@ describe("tauri command argument aliases", () => {
     expect(result.notAReadinessGate).toBe(true);
     expect(result.readinessClaim).toBe(false);
     expect(result.stage2ReadinessPreserved).toBe(true);
+  });
+
+  it("invokes Main Chat Stage 5 release/debug operations with metadata-safe arguments", async () => {
+    vi.mocked(invoke)
+      .mockResolvedValueOnce({
+        reportKind: "main_chat_stage5_release_debug_preflight",
+        schemaVersion: "stage5-preflight-v1",
+        failure: { class: "environment_preflight_failure" },
+        provider: { keyPresent: false },
+        externalProviderInvokedByDefault: false,
+        modelInvoked: false,
+        directWritesExecuted: false,
+        metadataSafe: true,
+      })
+      .mockResolvedValueOnce({
+        bundleId: "stage5-bundle-test",
+        schemaVersion: "stage5-debug-bundle-v1",
+        task: { taskSessionId: "task-stage5", runId: "run-stage5" },
+        failure: { class: "tool_selection_failure" },
+        artifact: {
+          artifactId: "stage5-bundle-test",
+          storageAlias: "stage5/debug_bundles/stage5-bundle-test.json",
+          byteSize: 2048,
+        },
+      })
+      .mockResolvedValueOnce({
+        reportId: "stage5-issue-test",
+        schemaVersion: "stage5-issue-report-v1",
+        notesPreview: null,
+        artifact: { artifactId: "stage5-issue-test", byteSize: 512 },
+      })
+      .mockResolvedValueOnce([{ artifactId: "stage5-bundle-test" }])
+      .mockResolvedValueOnce({ bundleId: "stage5-bundle-test" })
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce([{ artifactId: "stage5-issue-test" }])
+      .mockResolvedValueOnce({ reportId: "stage5-issue-test" })
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce({
+        reportKind: "main_chat_stage5_release_debug",
+        schemaVersion: "stage5-release-debug-v1",
+        scenarioCount: 24,
+        passedScenarioCount: 12,
+        blockedScenarioCount: 12,
+        notAReadinessGate: true,
+        readinessClaim: false,
+        managedKnowledgeEval: {
+          isolatedEvalAppState: true,
+          tempWorkspace: true,
+          realWorkspaceWriteExecuted: false,
+          userWriteCompleted: true,
+          memoryRollbackCompleted: true,
+          managedKnowledgeWriteVersionIds: ["knowledge_version:test"],
+          managedKnowledgeAuditIds: ["knowledge_audit:test"],
+          rollbackSnapshotIds: ["snapshot:test"],
+          evidenceIds: ["stage5_isolated_managed_knowledge_eval"],
+          blockers: [],
+        },
+        stage2ReadinessPreserved: true,
+      });
+
+    const callStart = vi.mocked(invoke).mock.calls.length;
+    const preflight = await evaluateMainChatStage5ReleaseDebugPreflight();
+    const bundle = await exportMainChatAgentDebugBundle("task-stage5", {
+      scenarioId: "DBG5-04",
+      reviewerId: "tester-alpha",
+      uiEvidence: {
+        frontendRoute: "/chat",
+        surface: "AgentControlPlane",
+        visibleControlLabels: ["Export debug bundle"],
+        taskSessionId: "task-stage5",
+        timestamp: "2026-06-20T00:00:00Z",
+      },
+    });
+    const issue = await createMainChatInternalIssueReport({
+      scenarioId: "DBG5-19",
+      reviewerId: "tester-alpha",
+      status: "fail",
+      taskSessionId: "task-stage5",
+      runId: "run-stage5",
+      bundleId: "stage5-bundle-test",
+      failureClass: "tool_selection_failure",
+      notes: "Authorization: Bearer sk-stage5-secret",
+    });
+    const bundles = await listMainChatDebugBundles();
+    await getMainChatDebugBundle("stage5-bundle-test");
+    await deleteMainChatDebugBundle("stage5-bundle-test");
+    const issues = await listMainChatInternalIssueReports();
+    await getMainChatInternalIssueReport("stage5-issue-test");
+    await deleteMainChatInternalIssueReport("stage5-issue-test");
+    const report = await runMainChatStage5ReleaseDebugReport();
+    const calls = vi.mocked(invoke).mock.calls.slice(callStart);
+
+    expect(calls[0]).toEqual(["evaluate_main_chat_stage5_release_debug_preflight", undefined]);
+    expect(calls[1]).toEqual([
+      "export_main_chat_agent_debug_bundle",
+      expect.objectContaining({
+        taskSessionId: "task-stage5",
+        task_session_id: "task-stage5",
+        scenarioId: "DBG5-04",
+        scenario_id: "DBG5-04",
+      }),
+    ]);
+    expect(calls[2]).toEqual([
+      "create_main_chat_internal_issue_report",
+      expect.objectContaining({
+        input: expect.objectContaining({
+          notes: "Authorization: Bearer sk-stage5-secret",
+        }),
+      }),
+    ]);
+    expect(calls[3]).toEqual(["list_main_chat_debug_bundles", undefined]);
+    expect(calls[4]).toEqual([
+      "get_main_chat_debug_bundle",
+      expect.objectContaining({
+        bundleId: "stage5-bundle-test",
+        bundle_id: "stage5-bundle-test",
+      }),
+    ]);
+    expect(calls[5]).toEqual([
+      "delete_main_chat_debug_bundle",
+      expect.objectContaining({
+        bundleId: "stage5-bundle-test",
+        bundle_id: "stage5-bundle-test",
+      }),
+    ]);
+    expect(calls[6]).toEqual(["list_main_chat_internal_issue_reports", undefined]);
+    expect(calls[7]).toEqual([
+      "get_main_chat_internal_issue_report",
+      expect.objectContaining({
+        reportId: "stage5-issue-test",
+        report_id: "stage5-issue-test",
+      }),
+    ]);
+    expect(calls[8]).toEqual([
+      "delete_main_chat_internal_issue_report",
+      expect.objectContaining({
+        reportId: "stage5-issue-test",
+        report_id: "stage5-issue-test",
+      }),
+    ]);
+    expect(calls[9]).toEqual(["run_main_chat_stage5_release_debug_report", undefined]);
+    expect(preflight.externalProviderInvokedByDefault).toBe(false);
+    expect(bundle.artifact.storageAlias).toMatch(/^stage5\/debug_bundles\//);
+    expect(issue.notesPreview).toBeNull();
+    expect(bundles).toHaveLength(1);
+    expect(issues).toHaveLength(1);
+    expect(report.notAReadinessGate).toBe(true);
+    expect(report.readinessClaim).toBe(false);
+    expect(report.managedKnowledgeEval.isolatedEvalAppState).toBe(true);
+    expect(report.managedKnowledgeEval.realWorkspaceWriteExecuted).toBe(false);
+
+    const redacted = redactInvokeArgs("create_main_chat_internal_issue_report", {
+      input: {
+        notes: "Authorization: Bearer sk-stage5-secret",
+      },
+    });
+    expect(JSON.stringify(redacted)).not.toContain("sk-stage5-secret");
+    expect(JSON.stringify(redacted)).not.toContain("Authorization");
   });
 
   it("invokes external live productization gate as opt-in non-default evidence", async () => {

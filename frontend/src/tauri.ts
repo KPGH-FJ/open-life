@@ -130,6 +130,7 @@ const SECRET_KEY_RE = /(openai_key|api_key|password|token|secret|authorization|c
 const PAYLOAD_KEY_RE = /(payload|import|export)/i;
 const TOOL_ARGUMENT_KEY_RE = /^(arguments|args|toolArguments|tool_arguments)$/i;
 const CONTENT_KEY_RE = /^(content|fileContent|file_content|body|emailBody|email_body)$/i;
+const NOTES_KEY_RE = /^(notes|note|testerNotes|tester_notes)$/i;
 const SESSION_KEY_RE = /^(sessionId|session_id)$/;
 
 export function redactInvokeArgs(
@@ -152,6 +153,7 @@ function redactValue(value: any, key: string): RedactedValue {
   if (PAYLOAD_KEY_RE.test(key)) return summarizeSensitive(value);
   if (TOOL_ARGUMENT_KEY_RE.test(key)) return summarizeSensitive(value);
   if (CONTENT_KEY_RE.test(key)) return summarizeSensitive(value);
+  if (NOTES_KEY_RE.test(key)) return summarizeSensitive(value);
 
   if (Array.isArray(value)) {
     if (key === "messages") {
@@ -3816,6 +3818,267 @@ export interface MainChatStage4MemoryKnowledgeReport {
   rollbackEventCount: number;
 }
 
+export interface MainChatStage5BuildInfo {
+  commit?: string | null;
+  branch?: string | null;
+  appVersion: string;
+  buildTimestamp?: string | null;
+  dirtyState?: boolean | null;
+  blockers: string[];
+}
+
+export interface MainChatStage5ProviderPreflight {
+  provider: string;
+  model: string;
+  routeType: string;
+  keyPresent: boolean;
+  networkOptIn: boolean;
+  liveProviderInvocationAllowed: boolean;
+  liveProviderPreflightStatus: string;
+  blockers: string[];
+}
+
+export interface MainChatStage5FailureClassification {
+  class: string;
+  severity: string;
+  scope: string;
+  recoverability: string;
+  recoveryRecommendation: string;
+  evidence: string[];
+}
+
+export interface MainChatStage5GateSummary {
+  recommendation: string;
+  blockers: string[];
+}
+
+export interface MainChatStage5PreflightReport {
+  reportKind: string;
+  schemaVersion: string;
+  createdAt: string;
+  build: MainChatStage5BuildInfo;
+  provider: MainChatStage5ProviderPreflight;
+  scheduler: {
+    schedulerType: string;
+    scriptedProviderResponsePresent: boolean;
+    preferLocal: boolean;
+    localModelConfigured: boolean;
+  };
+  workspace: {
+    rootDigest: string;
+    safePathCount: number;
+    safePathsDigest: string;
+    safePathsConfigured: boolean;
+    blockers: string[];
+  };
+  mcp: {
+    registryAvailable: boolean;
+    manifestCount: number;
+    readCandidateCount: number;
+    blockers: string[];
+  };
+  database: {
+    memoryStoreAvailable: boolean;
+    agentRunStoreAvailable: boolean;
+    taskSessionStoreAvailable: boolean;
+    actionQueueStoreAvailable: boolean;
+    proposalStoreAvailable: boolean;
+    memoryLifecycleStoreAvailable: boolean;
+    blockers: string[];
+  };
+  stage2Readiness: MainChatStage5GateSummary;
+  finalAcceptance: MainChatStage5GateSummary;
+  failure: MainChatStage5FailureClassification;
+  externalProviderInvokedByDefault: boolean;
+  modelInvoked: boolean;
+  directWritesExecuted: boolean;
+  metadataSafe: boolean;
+  blockers: string[];
+}
+
+export interface MainChatStage5ArtifactMetadata {
+  artifactId: string;
+  artifactKind: string;
+  schemaVersion: string;
+  createdAt: string;
+  storageAlias: string;
+  digest: string;
+  byteSize: number;
+}
+
+export interface MainChatStage5UiEvidence {
+  frontendRoute: string;
+  surface: string;
+  visibleControlLabels: string[];
+  taskSessionId: string;
+  backendSnapshotId?: string | null;
+  timestamp: string;
+  domDigest?: string | null;
+  screenshotDigest?: string | null;
+}
+
+export interface MainChatStage5DebugBundle {
+  bundleId: string;
+  schemaVersion: string;
+  createdAt: string;
+  build: MainChatStage5BuildInfo;
+  environment: MainChatStage5PreflightReport;
+  scenario: {
+    scenarioId?: string | null;
+    reviewerId?: string | null;
+    status?: string | null;
+    notesDigest?: string | null;
+  };
+  task: {
+    chatSessionId: string;
+    taskSessionId: string;
+    runId?: string | null;
+    strategy: string;
+    status: string;
+    userGoalDigest: string;
+    transcriptEntryCount: number;
+    actionCount: number;
+    proposalCount: number;
+    blockerCount: number;
+    finalDeliveryId?: string | null;
+  };
+  route: {
+    routeType: string;
+    provider?: string | null;
+    model?: string | null;
+    localOnly: boolean;
+    liveProviderAttempted: boolean;
+    providerEndpointKind?: string | null;
+  };
+  timeline: Array<{
+    itemId: string;
+    kind: string;
+    summaryPreview: string;
+    metadataDigest: string;
+  }>;
+  tools: {
+    candidateCount: number;
+    selectedTool?: string | null;
+    actionType?: string | null;
+    targetDigest?: string | null;
+    policyDecision?: string | null;
+    observationCount: number;
+    actionStatuses: string[];
+  };
+  context: {
+    activeMemoryIds: string[];
+    excludedMemoryIds: string[];
+    knowledgeAssetIds: string[];
+    selectedSkillId?: string | null;
+    contextSourceDigests: string[];
+  };
+  memory: {
+    proposalIds: string[];
+    acceptedMemoryIds: string[];
+    rolledBackMemoryIds: string[];
+    managedKnowledgeVersionIds: string[];
+  };
+  finalDelivery: {
+    completedWorkCount: number;
+    durableChangeCount: number;
+    pendingUserActionCount: number;
+    skippedWorkCount: number;
+    blockerCount: number;
+    finalDeliveryDigest?: string | null;
+  };
+  failure: MainChatStage5FailureClassification;
+  redaction: {
+    mode: string;
+    rawContentIncluded: boolean;
+    secretsDetected: boolean;
+    unsafeFieldCount: number;
+    unsafeFieldsDropped: string[];
+    previewLimit: number;
+    promptDigest?: string | null;
+    responseDigest?: string | null;
+    contextDigest?: string | null;
+  };
+  uiEvidence?: MainChatStage5UiEvidence | null;
+  artifact: MainChatStage5ArtifactMetadata;
+}
+
+export interface MainChatStage5IssueReportInput {
+  scenarioId: string;
+  reviewerId: string;
+  status: string;
+  taskSessionId?: string | null;
+  runId?: string | null;
+  bundleId?: string | null;
+  failureClass?: string | null;
+  notes?: string | null;
+  preflightOnlyMissingTaskReason?: string | null;
+}
+
+export interface MainChatStage5IssueReport {
+  reportId: string;
+  schemaVersion: string;
+  createdAt: string;
+  scenarioId: string;
+  reviewerId: string;
+  status: string;
+  taskSessionId?: string | null;
+  runId?: string | null;
+  bundleId?: string | null;
+  buildCommit?: string | null;
+  appVersion: string;
+  redactionMode: string;
+  failureClass?: string | null;
+  notesDigest?: string | null;
+  notesPreview?: string | null;
+  missingTaskRunReason?: string | null;
+  blockers: string[];
+  artifact: MainChatStage5ArtifactMetadata;
+}
+
+export interface MainChatStage5ReportRow {
+  id: string;
+  scenario: string;
+  status: string;
+  evidenceIds: string[];
+  bundleIds: string[];
+  issueArtifactIds: string[];
+  blockers: string[];
+}
+
+export interface MainChatStage5ManagedKnowledgeEval {
+  isolatedEvalAppState: boolean;
+  tempWorkspace: boolean;
+  realWorkspaceWriteExecuted: boolean;
+  userWriteCompleted: boolean;
+  memoryRollbackCompleted: boolean;
+  managedKnowledgeWriteVersionIds: string[];
+  managedKnowledgeAuditIds: string[];
+  rollbackSnapshotIds: string[];
+  evidenceIds: string[];
+  blockers: string[];
+}
+
+export interface MainChatStage5ReleaseDebugReport {
+  reportKind: string;
+  schemaVersion: string;
+  scenarioCount: number;
+  passedScenarioCount: number;
+  blockedScenarioCount: number;
+  notAReadinessGate: boolean;
+  readinessClaim: boolean;
+  rows: MainChatStage5ReportRow[];
+  evidenceIds: string[];
+  blockers: string[];
+  build: MainChatStage5BuildInfo;
+  preflightSummary: MainChatStage5PreflightReport;
+  bundleIds: string[];
+  issueArtifactIds: string[];
+  artifactStorageSummary: MainChatStage5ArtifactMetadata[];
+  redactionSummary: MainChatStage5DebugBundle["redaction"];
+  managedKnowledgeEval: MainChatStage5ManagedKnowledgeEval;
+  stage2ReadinessPreserved: boolean;
+}
+
 export async function getPendingProposals(limit: number = 50): Promise<AgentProposal[]> {
   return safeInvoke<AgentProposal[]>("get_pending_proposals", { limit });
 }
@@ -3938,6 +4201,68 @@ export async function rollbackManagedKnowledgeWrite(
 
 export async function runMainChatStage4MemoryKnowledgeReport(): Promise<MainChatStage4MemoryKnowledgeReport> {
   return safeInvoke("run_main_chat_stage4_memory_knowledge_report");
+}
+
+export async function evaluateMainChatStage5ReleaseDebugPreflight(): Promise<MainChatStage5PreflightReport> {
+  return safeInvoke("evaluate_main_chat_stage5_release_debug_preflight");
+}
+
+export async function exportMainChatAgentDebugBundle(
+  taskSessionId: string,
+  options: {
+    scenarioId?: string;
+    reviewerId?: string;
+    uiEvidence?: MainChatStage5UiEvidence;
+  } = {}
+): Promise<MainChatStage5DebugBundle> {
+  return safeInvoke("export_main_chat_agent_debug_bundle", {
+    taskSessionId,
+    task_session_id: taskSessionId,
+    scenarioId: options.scenarioId,
+    scenario_id: options.scenarioId,
+    reviewerId: options.reviewerId,
+    reviewer_id: options.reviewerId,
+    uiEvidence: options.uiEvidence,
+    ui_evidence: options.uiEvidence,
+  });
+}
+
+export async function createMainChatInternalIssueReport(
+  input: MainChatStage5IssueReportInput
+): Promise<MainChatStage5IssueReport> {
+  return safeInvoke("create_main_chat_internal_issue_report", { input });
+}
+
+export async function listMainChatDebugBundles(): Promise<MainChatStage5ArtifactMetadata[]> {
+  return safeInvoke("list_main_chat_debug_bundles");
+}
+
+export async function getMainChatDebugBundle(bundleId: string): Promise<MainChatStage5DebugBundle> {
+  return safeInvoke("get_main_chat_debug_bundle", { bundleId, bundle_id: bundleId });
+}
+
+export async function deleteMainChatDebugBundle(bundleId: string): Promise<boolean> {
+  return safeInvoke("delete_main_chat_debug_bundle", { bundleId, bundle_id: bundleId });
+}
+
+export async function listMainChatInternalIssueReports(): Promise<
+  MainChatStage5ArtifactMetadata[]
+> {
+  return safeInvoke("list_main_chat_internal_issue_reports");
+}
+
+export async function getMainChatInternalIssueReport(
+  reportId: string
+): Promise<MainChatStage5IssueReport> {
+  return safeInvoke("get_main_chat_internal_issue_report", { reportId, report_id: reportId });
+}
+
+export async function deleteMainChatInternalIssueReport(reportId: string): Promise<boolean> {
+  return safeInvoke("delete_main_chat_internal_issue_report", { reportId, report_id: reportId });
+}
+
+export async function runMainChatStage5ReleaseDebugReport(): Promise<MainChatStage5ReleaseDebugReport> {
+  return safeInvoke("run_main_chat_stage5_release_debug_report");
 }
 
 export async function postponeProposal(proposalId: string): Promise<void> {

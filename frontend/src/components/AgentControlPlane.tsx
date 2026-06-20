@@ -1,8 +1,10 @@
 import {
   Ban,
+  Bug,
   CheckCircle2,
   Clock,
   Copy,
+  Download,
   FileText,
   Pencil,
   Play,
@@ -13,7 +15,14 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
-import type { MainChatAgentDurableEvent, MainChatAgentStateSnapshot } from "../tauri";
+import type {
+  MainChatAgentDurableEvent,
+  MainChatAgentStateSnapshot,
+  MainChatStage5ArtifactMetadata,
+  MainChatStage5DebugBundle,
+  MainChatStage5IssueReport,
+  MainChatStage5PreflightReport,
+} from "../tauri";
 import type { PlanExecuteReviewItem } from "../types";
 
 type ControlTarget = {
@@ -55,10 +64,22 @@ type ControlHandlers = {
   ) => void;
   onCancelPlan?: (target: PlanControlTarget) => void;
   onReviewPlan?: (target: PlanControlTarget) => void;
+  onRefreshStage5Preflight?: () => void;
+  onExportDebugBundle?: () => void;
+  onCreateIssueReport?: () => void;
   busy?: boolean;
   canResume?: boolean;
   canRetry?: boolean;
   canCancel?: boolean;
+};
+
+type Stage5DebugOperationsState = {
+  preflight?: MainChatStage5PreflightReport | null;
+  latestBundle?: MainChatStage5DebugBundle | null;
+  latestIssue?: MainChatStage5IssueReport | null;
+  artifacts?: MainChatStage5ArtifactMetadata[];
+  busy?: boolean;
+  error?: string | null;
 };
 
 type Props = ControlHandlers & {
@@ -69,6 +90,7 @@ type Props = ControlHandlers & {
     lastAppliedSequence: number;
     events: MainChatAgentDurableEvent[];
   };
+  stage5Debug?: Stage5DebugOperationsState;
 };
 
 function statusClass(status: string): string {
@@ -372,11 +394,15 @@ export default function AgentControlPlane({
   onSkipPlanStep,
   onCancelPlan,
   onReviewPlan,
+  onRefreshStage5Preflight,
+  onExportDebugBundle,
+  onCreateIssueReport,
   busy = false,
   canResume = false,
   canRetry = false,
   canCancel = false,
   eventStream,
+  stage5Debug,
 }: Props) {
   const resumeSupported = supportsControl(state, ["resume_task", "continue_task", "resume"]);
   const retrySupported = supportsControl(state, ["retry_failed_action", "retry_action", "retry"]);
@@ -402,6 +428,16 @@ export default function AgentControlPlane({
   ].filter((title): title is string => Boolean(title));
   const blockerCodes = state.blockers.map(blocker => blocker.reasonCode || blocker.blockerId);
   const reviewerTraceLine = reviewerTraceJson(state, blockerCodes);
+  const showStage5Debug =
+    Boolean(stage5Debug) ||
+    Boolean(onRefreshStage5Preflight || onExportDebugBundle || onCreateIssueReport);
+  const stage5Busy = busy || Boolean(stage5Debug?.busy);
+  const stage5BundleArtifact = stage5Debug?.latestBundle?.artifact;
+  const stage5IssueArtifact = stage5Debug?.latestIssue?.artifact;
+  const stage5ArtifactCount =
+    (stage5Debug?.artifacts?.length ?? 0) +
+    (stage5BundleArtifact ? 1 : 0) +
+    (stage5IssueArtifact ? 1 : 0);
   const timelineVisible =
     Boolean(plan?.steps?.length) ||
     state.actions.length > 0 ||
@@ -531,6 +567,85 @@ export default function AgentControlPlane({
           <span>Copy</span>
         </button>
       </div>
+
+      {showStage5Debug && (
+        <div
+          data-testid="stage5-debug-operations"
+          data-task-session-id={state.task.taskId}
+          data-run-id={state.task.runId}
+          data-preflight-status={stage5Debug?.preflight?.failure.class ?? "not_loaded"}
+          data-metadata-safe={stage5Debug?.preflight?.metadataSafe ? "true" : "false"}
+          data-external-provider-invoked={
+            stage5Debug?.preflight?.externalProviderInvokedByDefault ? "true" : "false"
+          }
+          data-artifact-count={stage5ArtifactCount}
+          className="mt-3 border-l border-cyan-300 bg-cyan-50/70 px-2 py-2"
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-semibold text-stone-950">Internal debug ops</span>
+            <span className="inline-flex h-5 items-center rounded-md border border-cyan-200 bg-white px-1.5 font-medium text-cyan-900">
+              metadata-safe
+            </span>
+            <span className="text-stone-600">
+              {stage5Debug?.preflight?.failure.class ?? "preflight not loaded"}
+            </span>
+            {stage5Debug?.preflight && (
+              <span className="text-stone-500">
+                provider key {stage5Debug.preflight.provider.keyPresent ? "present" : "missing"}
+              </span>
+            )}
+            {stage5BundleArtifact && (
+              <span className="text-stone-500">
+                bundle {shortId(stage5BundleArtifact.artifactId)} · {stage5BundleArtifact.byteSize}{" "}
+                bytes
+              </span>
+            )}
+            {stage5IssueArtifact && (
+              <span className="text-stone-500">
+                issue {shortId(stage5IssueArtifact.artifactId)}
+              </span>
+            )}
+          </div>
+          <div className="mt-2 flex flex-wrap gap-1">
+            <button
+              type="button"
+              aria-label="Refresh Stage 5 preflight"
+              title="Refresh Stage 5 preflight"
+              disabled={!onRefreshStage5Preflight || stage5Busy}
+              onClick={onRefreshStage5Preflight}
+              className="inline-flex min-h-6 items-center gap-1 rounded-md border border-cyan-200 bg-white px-2 font-medium text-cyan-950 hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <ShieldAlert size={12} />
+              <span>Preflight</span>
+            </button>
+            <button
+              type="button"
+              aria-label="Export debug bundle"
+              title="Export debug bundle"
+              disabled={!onExportDebugBundle || stage5Busy || !state.task.taskId}
+              onClick={onExportDebugBundle}
+              className="inline-flex min-h-6 items-center gap-1 rounded-md border border-cyan-200 bg-white px-2 font-medium text-cyan-950 hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Download size={12} />
+              <span>Export debug bundle</span>
+            </button>
+            <button
+              type="button"
+              aria-label="Create issue report"
+              title="Create issue report"
+              disabled={!onCreateIssueReport || stage5Busy || !stage5Debug?.latestBundle}
+              onClick={onCreateIssueReport}
+              className="inline-flex min-h-6 items-center gap-1 rounded-md border border-cyan-200 bg-white px-2 font-medium text-cyan-950 hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              <Bug size={12} />
+              <span>Create issue report</span>
+            </button>
+          </div>
+          {stage5Debug?.error && (
+            <div className="mt-1 text-rose-700">{boundedTraceString(stage5Debug.error)}</div>
+          )}
+        </div>
+      )}
 
       {eventStream && (
         <div

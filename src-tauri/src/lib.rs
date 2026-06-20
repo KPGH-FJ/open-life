@@ -58,6 +58,7 @@ pub(crate) mod main_chat_send;
 pub(crate) mod main_chat_skills_tools;
 pub(crate) mod main_chat_stage3_execution_ux;
 pub(crate) mod main_chat_stage4_memory_knowledge;
+pub(crate) mod main_chat_stage5_release_debug;
 pub(crate) mod main_chat_strategy;
 pub(crate) mod main_chat_streaming;
 #[allow(dead_code)]
@@ -109,6 +110,9 @@ mod main_chat_stage3_execution_ux_tests;
 
 #[cfg(test)]
 mod main_chat_stage4_memory_knowledge_tests;
+
+#[cfg(test)]
+mod main_chat_stage5_release_debug_tests;
 
 #[cfg(test)]
 mod main_chat_event_stream_tests;
@@ -249,6 +253,13 @@ use main_chat_stage4_memory_knowledge::{
     confirm_managed_knowledge_write, create_managed_knowledge_write_draft,
     draft_edit_memory_proposal, list_stage4_knowledge_asset_inventory,
     rollback_managed_knowledge_write, run_main_chat_stage4_memory_knowledge_report,
+};
+use main_chat_stage5_release_debug::{
+    create_main_chat_internal_issue_report, delete_main_chat_debug_bundle,
+    delete_main_chat_internal_issue_report, evaluate_main_chat_stage5_release_debug_preflight,
+    export_main_chat_agent_debug_bundle, get_main_chat_debug_bundle,
+    get_main_chat_internal_issue_report, list_main_chat_debug_bundles,
+    list_main_chat_internal_issue_reports, run_main_chat_stage5_release_debug_report,
 };
 use main_chat_task_controls::{
     cancel_main_chat_agent_task, get_main_chat_agent_task_detail, get_main_chat_agent_task_state,
@@ -752,6 +763,16 @@ pub fn run() {
             confirm_managed_knowledge_write,
             rollback_managed_knowledge_write,
             run_main_chat_stage4_memory_knowledge_report,
+            evaluate_main_chat_stage5_release_debug_preflight,
+            export_main_chat_agent_debug_bundle,
+            create_main_chat_internal_issue_report,
+            list_main_chat_debug_bundles,
+            get_main_chat_debug_bundle,
+            delete_main_chat_debug_bundle,
+            list_main_chat_internal_issue_reports,
+            get_main_chat_internal_issue_report,
+            delete_main_chat_internal_issue_report,
+            run_main_chat_stage5_release_debug_report,
             send_message,
             start_stream_message,
             list_main_chat_agent_events,

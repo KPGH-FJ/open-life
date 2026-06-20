@@ -79,6 +79,10 @@ import {
   selectMainChatSkill,
   clearMainChatSkill,
   listMainChatToolCandidates,
+  evaluateMainChatStage5ReleaseDebugPreflight,
+  exportMainChatAgentDebugBundle,
+  createMainChatInternalIssueReport,
+  listMainChatDebugBundles,
 } from "../tauri";
 import type {
   AgentRun,
@@ -100,6 +104,10 @@ import type {
   MainChatSkillDetail,
   MainChatSelectedSkill,
   MainChatToolCandidateList,
+  MainChatStage5ArtifactMetadata,
+  MainChatStage5DebugBundle,
+  MainChatStage5IssueReport,
+  MainChatStage5PreflightReport,
 } from "../tauri";
 import type {
   ControlledPilotPromotionEvidenceInput,
@@ -639,6 +647,18 @@ export default function ChatPage({
     useState<MainChatEventStreamViewState | null>(null);
   const [agentTaskControlBusy, setAgentTaskControlBusy] = useState(false);
   const [agentTaskControlError, setAgentTaskControlError] = useState<string | null>(null);
+  const [stage5Preflight, setStage5Preflight] = useState<MainChatStage5PreflightReport | null>(
+    null
+  );
+  const [stage5LatestBundle, setStage5LatestBundle] = useState<MainChatStage5DebugBundle | null>(
+    null
+  );
+  const [stage5LatestIssue, setStage5LatestIssue] = useState<MainChatStage5IssueReport | null>(
+    null
+  );
+  const [stage5Artifacts, setStage5Artifacts] = useState<MainChatStage5ArtifactMetadata[]>([]);
+  const [stage5DebugBusy, setStage5DebugBusy] = useState(false);
+  const [stage5DebugError, setStage5DebugError] = useState<string | null>(null);
   const [legacyFallbackUsed, setLegacyFallbackUsed] = useState(false);
   const [pendingProposals, setPendingProposals] = useState<AgentProposal[]>([]);
   const [feedbackGiven, setFeedbackGiven] = useState<Record<number, "up" | "down">>({});
@@ -1667,6 +1687,98 @@ export default function ChatPage({
     currentAgentState?.task?.taskId,
     currentAgentTaskState?.session?.id,
   ]);
+
+  const refreshStage5DebugArtifacts = useCallback(async () => {
+    try {
+      const artifacts = await listMainChatDebugBundles();
+      setStage5Artifacts(artifacts);
+    } catch {
+      setStage5Artifacts([]);
+    }
+  }, []);
+
+  const handleRefreshStage5Preflight = useCallback(async () => {
+    setStage5DebugBusy(true);
+    setStage5DebugError(null);
+    try {
+      const preflight = await evaluateMainChatStage5ReleaseDebugPreflight();
+      setStage5Preflight(preflight);
+      await refreshStage5DebugArtifacts();
+    } catch (error) {
+      setStage5DebugError(`Stage 5 preflight failed: ${readablePreviewError(error)}`);
+    } finally {
+      setStage5DebugBusy(false);
+    }
+  }, [refreshStage5DebugArtifacts]);
+
+  useEffect(() => {
+    if (companionMode) return;
+    void handleRefreshStage5Preflight();
+  }, [companionMode, handleRefreshStage5Preflight]);
+
+  const buildStage5UiEvidence = useCallback(
+    (taskSessionId: string) => ({
+      frontendRoute: "/chat",
+      surface: "AgentControlPlane",
+      visibleControlLabels: ["Preflight", "Export debug bundle", "Create issue report"],
+      taskSessionId,
+      backendSnapshotId: currentAgentState
+        ? `sequence:${currentAgentState.sequence}`
+        : currentAgentTaskState?.session?.id,
+      timestamp: new Date().toISOString(),
+    }),
+    [currentAgentState, currentAgentTaskState?.session?.id]
+  );
+
+  const handleExportStage5DebugBundle = useCallback(async () => {
+    const taskSessionId = currentMainChatTaskSessionId();
+    if (!taskSessionId || stage5DebugBusy) return;
+    setStage5DebugBusy(true);
+    setStage5DebugError(null);
+    try {
+      const bundle = await exportMainChatAgentDebugBundle(taskSessionId, {
+        scenarioId: "DBG5-manual",
+        reviewerId: "internal-tester",
+        uiEvidence: buildStage5UiEvidence(taskSessionId),
+      });
+      setStage5LatestBundle(bundle);
+      setStage5Preflight(bundle.environment);
+      await refreshStage5DebugArtifacts();
+    } catch (error) {
+      setStage5DebugError(`Stage 5 debug bundle export failed: ${readablePreviewError(error)}`);
+    } finally {
+      setStage5DebugBusy(false);
+    }
+  }, [
+    buildStage5UiEvidence,
+    currentMainChatTaskSessionId,
+    refreshStage5DebugArtifacts,
+    stage5DebugBusy,
+  ]);
+
+  const handleCreateStage5IssueReport = useCallback(async () => {
+    const bundle = stage5LatestBundle;
+    if (!bundle || stage5DebugBusy) return;
+    setStage5DebugBusy(true);
+    setStage5DebugError(null);
+    try {
+      const issue = await createMainChatInternalIssueReport({
+        scenarioId: bundle.scenario.scenarioId ?? "DBG5-19",
+        reviewerId: bundle.scenario.reviewerId ?? "internal-tester",
+        status: bundle.failure.class === "unknown_failure" ? "blocked_by_environment" : "fail",
+        taskSessionId: bundle.task.taskSessionId,
+        runId: bundle.task.runId ?? currentAgentState?.task?.runId ?? currentRunId,
+        bundleId: bundle.bundleId,
+        failureClass: bundle.failure.class,
+        notes: "Created from AgentControlPlane internal debug ops.",
+      });
+      setStage5LatestIssue(issue);
+    } catch (error) {
+      setStage5DebugError(`Stage 5 issue report failed: ${readablePreviewError(error)}`);
+    } finally {
+      setStage5DebugBusy(false);
+    }
+  }, [currentAgentState?.task?.runId, currentRunId, stage5DebugBusy, stage5LatestBundle]);
 
   const loadSkillToolSurface = useCallback(
     async (taskSessionId?: string) => {
@@ -3757,6 +3869,17 @@ export default function ChatPage({
                 onSkipPlanStep={handleSkipPlanStep}
                 onCancelPlan={handleCancelPlan}
                 onReviewPlan={handleReviewPlan}
+                onRefreshStage5Preflight={handleRefreshStage5Preflight}
+                onExportDebugBundle={handleExportStage5DebugBundle}
+                onCreateIssueReport={handleCreateStage5IssueReport}
+                stage5Debug={{
+                  preflight: stage5Preflight,
+                  latestBundle: stage5LatestBundle,
+                  latestIssue: stage5LatestIssue,
+                  artifacts: stage5Artifacts,
+                  busy: stage5DebugBusy,
+                  error: stage5DebugError,
+                }}
               />
               {agentTaskControlError && (
                 <div className="border-b border-rose-200 bg-rose-50 px-4 py-2 text-xs text-rose-800">

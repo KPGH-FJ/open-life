@@ -379,6 +379,81 @@ export const mockLifeModelVersions: LifeModelVersion[] = [
   },
 ];
 
+function mockStage5PreflightFixture() {
+  return {
+    reportKind: "main_chat_stage5_release_debug_preflight",
+    schemaVersion: "stage5-preflight-v1",
+    createdAt: "2026-06-20T00:00:00Z",
+    build: {
+      commit: null,
+      branch: null,
+      appVersion: "0.1.0",
+      buildTimestamp: null,
+      dirtyState: null,
+      blockers: ["build_commit_unavailable"],
+    },
+    provider: {
+      provider: "openai",
+      model: "gpt-4.1-mini",
+      routeType: "default_preflight_no_invocation",
+      keyPresent: false,
+      networkOptIn: false,
+      liveProviderInvocationAllowed: false,
+      liveProviderPreflightStatus: "blocked",
+      blockers: ["provider_api_key_missing"],
+    },
+    scheduler: {
+      schedulerType: "scripted_eval",
+      scriptedProviderResponsePresent: true,
+      preferLocal: false,
+      localModelConfigured: false,
+    },
+    workspace: {
+      rootDigest: "sha256:workspace",
+      safePathCount: 1,
+      safePathsDigest: "sha256:safe-paths",
+      safePathsConfigured: true,
+      blockers: [],
+    },
+    mcp: {
+      registryAvailable: true,
+      manifestCount: 1,
+      readCandidateCount: 1,
+      blockers: [],
+    },
+    database: {
+      memoryStoreAvailable: true,
+      agentRunStoreAvailable: true,
+      taskSessionStoreAvailable: true,
+      actionQueueStoreAvailable: true,
+      proposalStoreAvailable: true,
+      memoryLifecycleStoreAvailable: true,
+      blockers: [],
+    },
+    stage2Readiness: {
+      recommendation: "not_ready_for_limited_internal_trial",
+      blockers: ["stage2_manual_dogfood_evidence_missing"],
+    },
+    finalAcceptance: {
+      recommendation: "not_final_completion_ready",
+      blockers: ["live_provider_generation_not_executed"],
+    },
+    failure: {
+      class: "environment_preflight_failure",
+      severity: "p1",
+      scope: "environment",
+      recoverability: "needs_environment_fix",
+      recoveryRecommendation: "Fix local provider, workspace, MCP, or store configuration.",
+      evidence: ["provider_api_key_missing"],
+    },
+    externalProviderInvokedByDefault: false,
+    modelInvoked: false,
+    directWritesExecuted: false,
+    metadataSafe: true,
+    blockers: ["provider_api_key_missing"],
+  };
+}
+
 export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Promise<T> => {
   const _args = args;
   switch (cmd) {
@@ -807,6 +882,255 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         directWriteCount: 0,
         confirmedKnowledgeWriteCount: 0,
         rollbackEventCount: 1,
+      } as T);
+    case "evaluate_main_chat_stage5_release_debug_preflight":
+      return Promise.resolve(mockStage5PreflightFixture() as T);
+    case "export_main_chat_agent_debug_bundle":
+      return Promise.resolve({
+        bundleId: "stage5-bundle-mock",
+        schemaVersion: "stage5-debug-bundle-v1",
+        createdAt: "2026-06-20T00:00:01Z",
+        build: {
+          commit: null,
+          branch: null,
+          appVersion: "0.1.0",
+          buildTimestamp: null,
+          dirtyState: null,
+          blockers: ["build_commit_unavailable"],
+        },
+        environment: mockStage5PreflightFixture(),
+        scenario: {
+          scenarioId: args?.scenarioId ?? args?.scenario_id ?? "DBG5-04",
+          reviewerId: args?.reviewerId ?? args?.reviewer_id ?? "internal-tester",
+          status: null,
+          notesDigest: null,
+        },
+        task: {
+          chatSessionId: "chat-stage5-mock",
+          taskSessionId: args?.taskSessionId ?? args?.task_session_id ?? "task-stage5-mock",
+          runId: "run-stage5-mock",
+          strategy: "direct_answer",
+          status: "completed",
+          userGoalDigest: "sha256:user-goal",
+          transcriptEntryCount: 3,
+          actionCount: 0,
+          proposalCount: 0,
+          blockerCount: 0,
+          finalDeliveryId: "delivery-stage5-mock",
+        },
+        route: {
+          routeType: "governed_direct_answer",
+          provider: "scripted_eval",
+          model: "mock-model",
+          localOnly: false,
+          liveProviderAttempted: false,
+          providerEndpointKind: "local_synthetic",
+        },
+        timeline: [
+          {
+            itemId: "transcript-stage5-1",
+            kind: "final_result",
+            summaryPreview: "metadata-safe final result summary",
+            metadataDigest: "sha256:transcript",
+          },
+        ],
+        tools: {
+          candidateCount: 0,
+          selectedTool: null,
+          actionType: null,
+          targetDigest: null,
+          policyDecision: null,
+          observationCount: 0,
+          actionStatuses: [],
+        },
+        context: {
+          activeMemoryIds: [],
+          excludedMemoryIds: [],
+          knowledgeAssetIds: [],
+          selectedSkillId: null,
+          contextSourceDigests: [],
+        },
+        memory: {
+          proposalIds: [],
+          acceptedMemoryIds: [],
+          rolledBackMemoryIds: [],
+          managedKnowledgeVersionIds: [],
+        },
+        finalDelivery: {
+          completedWorkCount: 1,
+          durableChangeCount: 0,
+          pendingUserActionCount: 0,
+          skippedWorkCount: 0,
+          blockerCount: 0,
+          finalDeliveryDigest: "sha256:final-delivery",
+        },
+        failure: {
+          class: "unknown_failure",
+          severity: "p2",
+          scope: "unknown",
+          recoverability: "needs_developer_fix",
+          recoveryRecommendation: "Triage with trace-backed evidence.",
+          evidence: ["final_delivery_present"],
+        },
+        redaction: {
+          mode: "metadata_safe",
+          rawContentIncluded: false,
+          secretsDetected: false,
+          unsafeFieldCount: 0,
+          unsafeFieldsDropped: [],
+          previewLimit: 160,
+          promptDigest: "sha256:prompt",
+          responseDigest: "sha256:response",
+          contextDigest: "sha256:context",
+        },
+        uiEvidence: args?.uiEvidence ?? args?.ui_evidence ?? null,
+        artifact: {
+          artifactId: "stage5-bundle-mock",
+          artifactKind: "debug_bundle",
+          schemaVersion: "stage5-debug-bundle-v1",
+          createdAt: "2026-06-20T00:00:01Z",
+          storageAlias: "stage5/debug_bundles/stage5-bundle-mock.json",
+          digest: "sha256:bundle",
+          byteSize: 4096,
+        },
+      } as T);
+    case "create_main_chat_internal_issue_report":
+      return Promise.resolve({
+        reportId: "stage5-issue-mock",
+        schemaVersion: "stage5-issue-report-v1",
+        createdAt: "2026-06-20T00:00:02Z",
+        scenarioId: args?.input?.scenarioId ?? "DBG5-19",
+        reviewerId: args?.input?.reviewerId ?? "internal-tester",
+        status: args?.input?.status ?? "fail",
+        taskSessionId: args?.input?.taskSessionId ?? "task-stage5-mock",
+        runId: args?.input?.runId ?? "run-stage5-mock",
+        bundleId: args?.input?.bundleId ?? "stage5-bundle-mock",
+        buildCommit: null,
+        appVersion: "0.1.0",
+        redactionMode: "metadata_safe",
+        failureClass: args?.input?.failureClass ?? "unknown_failure",
+        notesDigest: "sha256:notes",
+        notesPreview: null,
+        missingTaskRunReason: null,
+        blockers: ["stage5_issue_notes_preview_redacted"],
+        artifact: {
+          artifactId: "stage5-issue-mock",
+          artifactKind: "issue_report",
+          schemaVersion: "stage5-issue-report-v1",
+          createdAt: "2026-06-20T00:00:02Z",
+          storageAlias: "stage5/issue_reports/stage5-issue-mock.json",
+          digest: "sha256:issue",
+          byteSize: 1024,
+        },
+      } as T);
+    case "list_main_chat_debug_bundles":
+      return Promise.resolve([
+        {
+          artifactId: "stage5-bundle-mock",
+          artifactKind: "debug_bundle",
+          schemaVersion: "stage5-debug-bundle-v1",
+          createdAt: "2026-06-20T00:00:01Z",
+          storageAlias: "stage5/debug_bundles/stage5-bundle-mock.json",
+          digest: "sha256:bundle",
+          byteSize: 4096,
+        },
+      ] as T);
+    case "get_main_chat_debug_bundle":
+      return mockInvoke("export_main_chat_agent_debug_bundle", args) as Promise<T>;
+    case "delete_main_chat_debug_bundle":
+      return Promise.resolve(true as T);
+    case "list_main_chat_internal_issue_reports":
+      return Promise.resolve([
+        {
+          artifactId: "stage5-issue-mock",
+          artifactKind: "issue_report",
+          schemaVersion: "stage5-issue-report-v1",
+          createdAt: "2026-06-20T00:00:02Z",
+          storageAlias: "stage5/issue_reports/stage5-issue-mock.json",
+          digest: "sha256:issue",
+          byteSize: 1024,
+        },
+      ] as T);
+    case "get_main_chat_internal_issue_report":
+      return mockInvoke("create_main_chat_internal_issue_report", {
+        input: {
+          scenarioId: "DBG5-19",
+          reviewerId: "internal-tester",
+          status: "fail",
+          taskSessionId: "task-stage5-mock",
+          runId: "run-stage5-mock",
+          bundleId: args?.reportId ?? args?.report_id ?? "stage5-bundle-mock",
+          failureClass: "unknown_failure",
+        },
+      }) as Promise<T>;
+    case "delete_main_chat_internal_issue_report":
+      return Promise.resolve(true as T);
+    case "run_main_chat_stage5_release_debug_report":
+      return Promise.resolve({
+        reportKind: "main_chat_stage5_release_debug",
+        schemaVersion: "stage5-release-debug-v1",
+        scenarioCount: 24,
+        passedScenarioCount: 20,
+        blockedScenarioCount: 4,
+        notAReadinessGate: true,
+        readinessClaim: false,
+        rows: Array.from({ length: 24 }, (_, index) => ({
+          id: `DBG5-${String(index + 1).padStart(2, "0")}`,
+          scenario: "mock stage5 scenario",
+          status: index < 20 ? "passed" : "blocked",
+          evidenceIds: ["stage5_release_debug_report"],
+          bundleIds: ["stage5-bundle-mock"],
+          issueArtifactIds: index === 18 ? ["stage5-issue-mock"] : [],
+          blockers: index < 20 ? [] : ["stage5_scenario_evidence_missing"],
+        })),
+        evidenceIds: ["stage5_release_debug_report"],
+        blockers: ["DBG5-24:stage5_scenario_evidence_missing"],
+        build: {
+          commit: null,
+          branch: null,
+          appVersion: "0.1.0",
+          buildTimestamp: null,
+          dirtyState: null,
+          blockers: ["build_commit_unavailable"],
+        },
+        preflightSummary: mockStage5PreflightFixture(),
+        bundleIds: ["stage5-bundle-mock"],
+        issueArtifactIds: ["stage5-issue-mock"],
+        artifactStorageSummary: [
+          {
+            artifactId: "stage5-bundle-mock",
+            artifactKind: "debug_bundle",
+            schemaVersion: "stage5-debug-bundle-v1",
+            createdAt: "2026-06-20T00:00:01Z",
+            storageAlias: "stage5/debug_bundles/stage5-bundle-mock.json",
+            digest: "sha256:bundle",
+            byteSize: 4096,
+          },
+        ],
+        redactionSummary: {
+          mode: "metadata_safe",
+          rawContentIncluded: false,
+          secretsDetected: false,
+          unsafeFieldCount: 0,
+          unsafeFieldsDropped: [],
+          previewLimit: 160,
+          promptDigest: null,
+          responseDigest: null,
+          contextDigest: "sha256:stage5-report",
+        },
+        managedKnowledgeEval: {
+          isolatedEvalAppState: true,
+          tempWorkspace: true,
+          realWorkspaceWriteExecuted: false,
+          userWriteCompleted: true,
+          memoryRollbackCompleted: true,
+          managedKnowledgeWriteVersionIds: ["knowledge_version:stage5-mock"],
+          managedKnowledgeAuditIds: ["knowledge_audit:stage5-mock"],
+          rollbackSnapshotIds: ["snapshot:stage5-mock"],
+          evidenceIds: ["stage5_isolated_managed_knowledge_eval"],
+          blockers: [],
+        },
+        stage2ReadinessPreserved: true,
       } as T);
     case "run_main_chat_agent_product_maturity_v2_event_gate":
       return Promise.resolve({
