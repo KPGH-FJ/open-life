@@ -36,7 +36,7 @@ chrono = "0.4"
 serde_yaml = "0.9"
 uuid = { version = "1.0", features = ["v4"] }
 sha2 = "0.10"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 # open: cross-platform URL/file opening (used for mailto: links)
 open = "5.3"
 axum = "0.7"
