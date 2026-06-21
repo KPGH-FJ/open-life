@@ -25,25 +25,8 @@ fn stage2_test_current_build_commit() -> Option<String> {
         .or_else(|_| std::env::var("OPENLIFE_BUILD_COMMIT"))
         .ok()
         .filter(|value| {
-            crate::main_chat_agent_stage2_readiness::metadata_safe_label_for_tests(value)
-                && !stage2_test_fake_build_commit(value)
+            crate::main_chat_agent_stage2_readiness::known_stage2_commit_label_for_tests(value)
         })
-}
-
-fn stage2_test_fake_build_commit(value: &str) -> bool {
-    let value = value.to_ascii_lowercase();
-    value == "unknown"
-        || value == "none"
-        || [
-            "local",
-            "localhost",
-            "mock",
-            "fixture",
-            "synthetic",
-            "scripted",
-        ]
-        .iter()
-        .any(|alias| value.contains(alias))
 }
 
 #[test]
