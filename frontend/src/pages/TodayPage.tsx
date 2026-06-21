@@ -9,6 +9,7 @@ import {
   type AgentProposal,
   type SystemDiagnostics,
 } from "../tauri";
+import { splitDailyGoalsByDisplayQuality } from "../utils/dailyGoalDisplayGuard";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
 
 type TodayPageState = {
@@ -99,7 +100,14 @@ export default function TodayPage() {
 
   const safeMode = isSafeMode(state.diagnostics);
   const safeModeReason = getSafeModeReason(state.diagnostics);
-  const primaryGoal = useMemo(() => choosePrimaryGoal(state.dailyGoals), [state.dailyGoals]);
+  const goalQuality = useMemo(
+    () => splitDailyGoalsByDisplayQuality(state.dailyGoals),
+    [state.dailyGoals]
+  );
+  const primaryGoal = useMemo(
+    () => choosePrimaryGoal(goalQuality.displayable),
+    [goalQuality.displayable]
+  );
   const pendingCount =
     state.pendingProposals.length || state.diagnostics?.pending_proposal_count || 0;
 
@@ -193,6 +201,30 @@ export default function TodayPage() {
             </div>
           )}
         </section>
+
+        {goalQuality.suspicious.length > 0 && (
+          <section className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-4">
+            <div className="text-sm font-semibold text-amber-950">
+              已从今日建议中忽略 {goalQuality.suspicious.length} 条异常目标
+            </div>
+            <div className="mt-1 text-sm text-amber-800">
+              这些内容看起来像状态记录或系统反馈，仍保留在原始数据中，但不会生成“先做 10 分钟”的行动建议。
+            </div>
+            <div className="mt-3 grid gap-2">
+              {goalQuality.suspicious.slice(0, 3).map(({ goal, guard, originalIndex }) => (
+                <div
+                  key={`${originalIndex}-${goal.name}`}
+                  className="rounded-md border border-amber-200 bg-white/75 px-3 py-2"
+                >
+                  <div className="text-sm font-medium text-amber-950">{goal.name}</div>
+                  <div className="mt-0.5 text-xs text-amber-800">
+                    {guard.reason} {guard.recoveryAction}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
 
         <section className="rounded-lg border border-stone-200 bg-white px-4 py-4">
           <div className="text-sm font-semibold text-stone-950">下一步</div>

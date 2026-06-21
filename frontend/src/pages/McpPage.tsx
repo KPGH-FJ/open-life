@@ -246,6 +246,32 @@ export default function McpPage() {
           MCP 管理
         </h2>
 
+        <section className="rounded-xl border border-indigo-100 bg-indigo-50/70 p-5">
+          <div className="flex items-start gap-3">
+            <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-white text-indigo-700">
+              <Shield size={16} aria-hidden="true" />
+            </div>
+            <div>
+              <h3 className="text-sm font-semibold text-indigo-950">Chat 外部能力如何生效</h3>
+              <p className="mt-1 text-sm leading-6 text-indigo-900">
+                天气、网页和第三方数据读取需要这里先接入安全的 read-only 工具。Chat 每次调用仍会经过候选
+                allowlist、隐私规则和必要确认；未接入时，助手应解释“工具未启用”，而不是泄露治理错误码。
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                <span className="rounded-md bg-white px-2.5 py-1 font-medium text-indigo-800">
+                  已注册 Server：{servers.length}
+                </span>
+                <span className="rounded-md bg-white px-2.5 py-1 font-medium text-indigo-800">
+                  当前工具：{tools.length}
+                </span>
+                <span className="rounded-md bg-white px-2.5 py-1 font-medium text-indigo-800">
+                  隐私规则：{privacyRules.length}
+                </span>
+              </div>
+            </div>
+          </div>
+        </section>
+
         <section className="space-y-4 border rounded-xl p-5 bg-gray-50">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-2">

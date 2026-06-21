@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import {
+  AlertTriangle,
   ArrowRight,
   Brain,
   CheckCircle2,
@@ -24,6 +25,11 @@ import {
   type TierStats,
   type UnfinishedBuilderSession,
 } from "../tauri";
+import {
+  getLifeModelQualityIssues,
+  issuesForLifeModelDimension,
+  type LifeModelQualityIssue,
+} from "../utils/lifeModelQuality";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
 
 type LifeModelSection = "build" | "overview" | "evidence";
@@ -393,8 +399,15 @@ function OverviewSection({
   lifeModel: LifeModel | null;
   diagnostics: SystemDiagnostics | null;
 }) {
+  const [ignoredIssueIds, setIgnoredIssueIds] = useState<Set<string>>(new Set());
+  const [deferredIssueIds, setDeferredIssueIds] = useState<Set<string>>(new Set());
   const empty = isModelEmpty(lifeModel, diagnostics);
   const dimensions = useMemo(() => (lifeModel ? buildDimensions(lifeModel) : []), [lifeModel]);
+  const qualityIssues = useMemo(() => getLifeModelQualityIssues(lifeModel), [lifeModel]);
+  const visibleQualityIssues = useMemo(
+    () => qualityIssues.filter(issue => !ignoredIssueIds.has(issue.id)),
+    [ignoredIssueIds, qualityIssues]
+  );
 
   if (empty) {
     return (
@@ -427,6 +440,26 @@ function OverviewSection({
           只显示短摘要；完整构建和确认仍在 Builder 与邮箱中完成。
         </p>
       </div>
+      {visibleQualityIssues.length > 0 && (
+        <QualityIssuePanel
+          issues={visibleQualityIssues}
+          deferredIssueIds={deferredIssueIds}
+          onIgnore={issueId => {
+            setIgnoredIssueIds(current => {
+              const next = new Set(current);
+              next.add(issueId);
+              return next;
+            });
+          }}
+          onDefer={issueId => {
+            setDeferredIssueIds(current => {
+              const next = new Set(current);
+              next.add(issueId);
+              return next;
+            });
+          }}
+        />
+      )}
       <div className="rounded-lg border border-stone-200 bg-white">
         {dimensions.map((dimension, index) => (
           <div
@@ -439,6 +472,12 @@ function OverviewSection({
             <div>
               <div className="text-sm font-semibold text-stone-950">{dimension.title}</div>
               <div className="mt-0.5 text-xs text-stone-500">{dimension.items.length} 条摘要</div>
+              {issuesForLifeModelDimension(visibleQualityIssues, dimension.key).length > 0 && (
+                <div className="mt-1 inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-800">
+                  <AlertTriangle size={12} aria-hidden="true" />
+                  需要确认
+                </div>
+              )}
             </div>
             {dimension.items.length ? (
               <ul className="grid gap-1.5 text-sm text-stone-700">
@@ -456,6 +495,70 @@ function OverviewSection({
         ))}
       </div>
     </section>
+  );
+}
+
+function QualityIssuePanel({
+  issues,
+  deferredIssueIds,
+  onIgnore,
+  onDefer,
+}: {
+  issues: LifeModelQualityIssue[];
+  deferredIssueIds: Set<string>;
+  onIgnore: (issueId: string) => void;
+  onDefer: (issueId: string) => void;
+}) {
+  return (
+    <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+      <div className="flex items-start gap-2">
+        <AlertTriangle size={16} aria-hidden="true" className="mt-0.5 shrink-0 text-amber-800" />
+        <div>
+          <div className="text-sm font-semibold text-amber-950">发现可能影响画像可信度的字段</div>
+          <div className="mt-0.5 text-xs text-amber-800">
+            本次视图处理，不会改写 Life Model；正式更新仍需邮箱确认。
+          </div>
+        </div>
+      </div>
+      <div className="mt-3 grid gap-2">
+        {issues.map((issue, index) => (
+          <div
+            key={`${issue.dimension}-${issue.label}-${index}`}
+            className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-200 bg-white/80 px-3 py-2"
+          >
+            <div>
+              <div className="text-sm font-medium text-amber-950">{issue.label}</div>
+              <div className="mt-0.5 text-xs text-amber-800">{issue.detail}</div>
+              {deferredIssueIds.has(issue.id) && (
+                <div className="mt-1 text-xs font-medium text-stone-600">已标记稍后处理</div>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Link
+                to={issue.route}
+                className="rounded-md bg-amber-900 px-2.5 py-1 text-xs font-semibold text-white hover:bg-amber-950"
+              >
+                修正
+              </Link>
+              <button
+                type="button"
+                onClick={() => onIgnore(issue.id)}
+                className="rounded-md border border-amber-200 bg-white px-2.5 py-1 text-xs font-semibold text-amber-900 hover:bg-amber-50"
+              >
+                不采用
+              </button>
+              <button
+                type="button"
+                onClick={() => onDefer(issue.id)}
+                className="rounded-md border border-stone-200 bg-white px-2.5 py-1 text-xs font-semibold text-stone-700 hover:bg-stone-50"
+              >
+                稍后处理
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -546,6 +649,12 @@ function EvidenceSection({
                 <div className="mt-0.5 text-xs text-stone-500">
                   {sourceLabel(proposal.source)} · 影响 {proposal.riskLevel}
                 </div>
+                <div className="mt-1 text-xs text-stone-600">
+                  {proposal.whyOpenLifeThinksThis?.trim() ||
+                    (proposal.evidenceSummaries?.length
+                      ? `${proposal.evidenceSummaries.length} 条依据摘要待你确认`
+                      : "暂无足够依据摘要")}
+                </div>
               </div>
               <Link
                 to="/mailbox"
@@ -624,7 +733,9 @@ export default function LifeModelPage() {
   const pendingCount =
     state.pendingProposals.length || state.diagnostics?.pending_proposal_count || 0;
   const topStatus =
-    state.diagnostics?.life_model_ready && !state.diagnostics?.model_empty ? "本地模型" : "待构建";
+    state.diagnostics?.life_model_ready && !state.diagnostics?.model_empty
+      ? "Life Model 本地可读"
+      : "待构建";
 
   return (
     <div

@@ -385,8 +385,13 @@ export default function SettingsPage() {
         onCancel={() => setPendingImport(null)}
       />
       <div className="max-w-2xl mx-auto bg-white rounded-xl shadow p-6 space-y-6">
-        <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-gray-800">试用控制台</h2>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-800">能力与设置</h2>
+            <p className="mt-1 text-xs leading-5 text-gray-500">
+              这里汇总模型、工具、Life Model、数据和恢复状态；Chat 的能力说明应与这里保持一致。
+            </p>
+          </div>
           <button
             onClick={refreshAllDiagnostics}
             className="rounded-md border border-gray-200 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50"

@@ -116,6 +116,13 @@ import type {
   MultiStrategyAgentPreviewOutput,
 } from "../types";
 import { getModelEmptyState } from "../utils/modelEmpty";
+import {
+  buildCapabilityStatusViewModel,
+  explainGovernanceBlocker,
+  userFacingAssistantContent,
+  type CapabilityTone,
+} from "../utils/capabilityStatus";
+import { inspectDailyGoalName } from "../utils/dailyGoalDisplayGuard";
 import { listen } from "@tauri-apps/api/event";
 import ReasoningTracePanel from "../components/ReasoningTracePanel";
 import ToolCallCard from "../components/ToolCallCard";
@@ -175,33 +182,11 @@ function buildReadinessSummary(diagnostics: SystemDiagnostics | null): {
   return { status: "需要检查", tone: "warning", detail: "部分运行状态异常，请查看设置页诊断。" };
 }
 
-function companionRouteStatus(diagnostics: SystemDiagnostics | null): string {
-  if (!diagnostics) return "状态读取中";
-  if (diagnostics.chat_ready && diagnostics.prefer_local_model && diagnostics.ollama_online) {
-    return "本地优先";
-  }
-  if (
-    diagnostics.chat_ready &&
-    (diagnostics.cloud_api_configured || diagnostics.cloud_api_validated)
-  ) {
-    return "云端可用";
-  }
-  return "需要配置";
-}
-
-function companionLifeModelStatus(diagnostics: SystemDiagnostics | null): string {
-  if (!diagnostics) return "Life Model 检查中";
-  return diagnostics.life_model_ready && !diagnostics.model_empty
-    ? "Life Model 已加载"
-    : "Life Model 待构建";
-}
-
-function companionPendingStatus(
-  diagnostics: SystemDiagnostics | null,
-  pendingProposals: AgentProposal[]
-): string {
-  const count = pendingProposals.length || diagnostics?.pending_proposal_count || 0;
-  return count > 0 ? `有信等你回 ${count}` : "没有待回复的信";
+function companionCapabilityChipClass(tone: CapabilityTone): string {
+  if (tone === "ready") return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  if (tone === "warning") return "border-amber-200 bg-amber-50 text-amber-900";
+  if (tone === "error") return "border-rose-200 bg-rose-50 text-rose-800";
+  return "border-stone-200 bg-white text-stone-700";
 }
 
 function companionModelRouteSummary(run: AgentRun | null): string {
@@ -400,6 +385,8 @@ function formatChatRuntimeError(error: unknown, diagnostics: SystemDiagnostics |
     return `暂时无法发送普通对话：\n${diagnostics.readiness_issues.map(issue => `- ${issue}`).join("\n")}\n\n请去设置页查看“试用就绪检查”。`;
   }
   const raw = error instanceof Error ? error.message : String(error);
+  const governanceHint = explainGovernanceBlocker(raw, diagnostics);
+  if (governanceHint) return governanceHint;
   const lower = raw.toLowerCase();
   let hint = raw;
   const provider = diagnostics?.cloud_provider ?? "云端模型";
@@ -1519,6 +1506,10 @@ export default function ChatPage({
         if (command.startsWith("add ")) {
           const goalName = command.slice(4).trim();
           if (!goalName) return "请在 /goal add 后面补充目标名称。";
+          const guard = inspectDailyGoalName(goalName);
+          if (!guard.valid) {
+            return `没有添加今日目标：${guard.reason}\n${guard.recoveryAction ?? "请改成一个可执行目标。"}`;
+          }
           await addDailyGoal(goalName);
           return `✅ 已添加今日目标：${goalName}`;
         }
@@ -2492,6 +2483,15 @@ export default function ChatPage({
   );
 
   const readiness = useMemo(() => buildReadinessSummary(diagnostics), [diagnostics]);
+  const capabilityStatus = useMemo(
+    () =>
+      buildCapabilityStatusViewModel(
+        diagnostics,
+        pendingProposals.length || diagnostics?.pending_proposal_count || 0,
+        currentRun
+      ),
+    [currentRun, diagnostics, pendingProposals.length]
+  );
   const governedPreviewSummaryEntries = useMemo(
     () => safeSummaryEntries(governedPreviewResult?.metadataSafeSummary ?? {}),
     [governedPreviewResult]
@@ -2674,6 +2674,17 @@ export default function ChatPage({
       .slice(0, 30)
       .trim();
     if (!name) return;
+    const guard = inspectDailyGoalName(name);
+    if (!guard.valid) {
+      setMessages(prev => [
+        ...prev,
+        {
+          role: "assistant",
+          content: `没有保存为今日目标：${guard.reason}\n${guard.recoveryAction ?? "请改成一个可执行目标。"}`,
+        },
+      ]);
+      return;
+    }
     try {
       await addDailyGoal(name);
     } catch (e) {
@@ -2955,22 +2966,33 @@ export default function ChatPage({
                 </div>
                 <div>
                   <div className="text-base font-semibold leading-5 text-stone-950">OpenLife</div>
-                  <div className="mt-1 text-sm font-medium leading-4 text-stone-500">在线</div>
+                  <div className="mt-1 text-sm font-medium leading-4 text-stone-600">
+                    {capabilityStatus.headline}
+                  </div>
                 </div>
               </div>
-              <div className="mt-2 flex flex-wrap gap-2 text-xs font-medium text-stone-600">
-                {[
-                  companionRouteStatus(diagnostics),
-                  companionLifeModelStatus(diagnostics),
-                  companionPendingStatus(diagnostics, pendingProposals),
-                ].map(label => (
+              <div className="mt-2 flex flex-wrap gap-2 text-xs font-medium">
+                {capabilityStatus.chips.map(chip => (
                   <span
-                    key={label}
-                    className="inline-flex h-6 items-center rounded-md border border-stone-200 bg-white px-2"
+                    key={chip.label}
+                    title={chip.detail}
+                    className={[
+                      "inline-flex min-h-6 items-center rounded-md border px-2 py-0.5",
+                      companionCapabilityChipClass(chip.tone),
+                    ].join(" ")}
                   >
-                    {label}
+                    {chip.label}
                   </span>
                 ))}
+              </div>
+              <div className="mt-2 max-w-3xl text-xs leading-5 text-stone-500">
+                {capabilityStatus.detail}
+                <Link
+                  to={capabilityStatus.primaryActionHref}
+                  className="ml-2 font-semibold text-stone-700 underline-offset-4 hover:underline"
+                >
+                  {capabilityStatus.primaryActionLabel}
+                </Link>
               </div>
             </div>
           </div>
@@ -2992,16 +3014,18 @@ export default function ChatPage({
                   )}
                 </div>
                 <div className="text-xs mt-0.5">
-                  {readiness.detail}
+                  {capabilityStatus.detail}
                   {diagnostics && (
                     <span className="ml-2">
                       本地：{diagnostics.resolved_local_model || diagnostics.local_model} · 云端
-                      API：
-                      {diagnostics.cloud_api_configured ? "已配置" : "未配置"}
+                      API：{capabilityStatus.cloudApiStatusLabel}
                     </span>
                   )}
-                  <Link to="/settings" className="ml-2 underline font-medium">
-                    去设置页检查
+                  <Link
+                    to={capabilityStatus.primaryActionHref}
+                    className="ml-2 underline font-medium"
+                  >
+                    {capabilityStatus.primaryActionLabel}
                   </Link>
                 </div>
               </div>
@@ -3725,15 +3749,20 @@ export default function ChatPage({
               <LoadingSpinner text="正在加载历史消息..." />
             </div>
           )}
-          {messages.map((m, i) => (
-            <div
-              key={i}
-              className={classNames(
-                "flex",
-                m.role === "user" ? "justify-end" : "justify-start",
-                companionMode && "items-start gap-3"
-              )}
-            >
+          {messages.map((m, i) => {
+            const displayContent =
+              m.role === "assistant"
+                ? userFacingAssistantContent(m.content, diagnostics)
+                : m.content;
+            return (
+              <div
+                key={i}
+                className={classNames(
+                  "flex",
+                  m.role === "user" ? "justify-end" : "justify-start",
+                  companionMode && "items-start gap-3"
+                )}
+              >
               {companionMode && m.role === "assistant" && (
                 <div
                   aria-hidden="true"
@@ -3755,7 +3784,7 @@ export default function ChatPage({
                       : "rounded-bl-none bg-gray-100 text-gray-800"
                 )}
               >
-                <div className="whitespace-pre-wrap">{m.content}</div>
+                <div className="whitespace-pre-wrap">{displayContent}</div>
                 {m.role === "assistant" && companionMode && m.run_id && (
                   <div className="mt-3 border-t border-stone-100 pt-2">
                     <button
@@ -3856,26 +3885,32 @@ export default function ChatPage({
                     <div className="flex flex-wrap gap-2">
                       <button
                         onClick={() =>
-                          fillPrompt(buildAssistantActionPrompt("continue", m.content))
+                          fillPrompt(buildAssistantActionPrompt("continue", displayContent))
                         }
                         className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
                       >
                         <MessageSquare size={12} /> 继续追问
                       </button>
                       <button
-                        onClick={() => fillPrompt(buildAssistantActionPrompt("action", m.content))}
+                        onClick={() =>
+                          fillPrompt(buildAssistantActionPrompt("action", displayContent))
+                        }
                         className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
                       >
                         <CheckCircle2 size={12} /> 提炼行动
                       </button>
                       <button
-                        onClick={() => fillPrompt(buildAssistantActionPrompt("state", m.content))}
+                        onClick={() =>
+                          fillPrompt(buildAssistantActionPrompt("state", displayContent))
+                        }
                         className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
                       >
                         <Activity size={12} /> 记录状态
                       </button>
                       <button
-                        onClick={() => fillPrompt(buildAssistantActionPrompt("goal", m.content))}
+                        onClick={() =>
+                          fillPrompt(buildAssistantActionPrompt("goal", displayContent))
+                        }
                         className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
                       >
                         <Target size={12} /> 拆成目标
@@ -3883,14 +3918,14 @@ export default function ChatPage({
                       {!companionMode && (
                         <>
                           <button
-                            onClick={() => handleSaveAsDailyGoal(m.content)}
+                            onClick={() => handleSaveAsDailyGoal(displayContent)}
                             className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
                             title="将回复首句保存为今日目标"
                           >
                             <CheckCircle2 size={12} /> 设为今日目标
                           </button>
                           <button
-                            onClick={() => handleIndexMemory(m.content)}
+                            onClick={() => handleIndexMemory(displayContent)}
                             className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
                             title="将这条回复加入长期记忆"
                           >
@@ -3934,8 +3969,9 @@ export default function ChatPage({
                   你
                 </div>
               )}
-            </div>
-          ))}
+              </div>
+            );
+          })}
           {sending && streamingReply && (
             <div className="flex justify-start">
               <div className="max-w-2xl px-4 py-3 rounded-xl text-sm bg-gray-100 text-gray-800 rounded-bl-none">

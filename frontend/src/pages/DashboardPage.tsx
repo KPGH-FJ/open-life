@@ -65,6 +65,7 @@ import EmptyState from "../components/EmptyState";
 import ErrorBanner from "../components/ErrorBanner";
 import WorkspaceOverview from "../components/WorkspaceOverview";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
+import { inspectDailyGoalName } from "../utils/dailyGoalDisplayGuard";
 
 type TrendDirection = "up" | "down" | "stable";
 
@@ -289,6 +290,7 @@ export default function DashboardPage() {
   const [newGoalName, setNewGoalName] = useState("");
   const [editingGoalIndex, setEditingGoalIndex] = useState<number | null>(null);
   const [editGoalName, setEditGoalName] = useState("");
+  const [goalGuardMessage, setGoalGuardMessage] = useState<string | null>(null);
 
   // State
   const [dimensions, setDimensions] = useState<CustomStateDimension[]>([]);
@@ -510,7 +512,13 @@ export default function DashboardPage() {
   // Daily goals handlers
   const onAddGoal = async () => {
     if (!newGoalName.trim()) return;
+    const guard = inspectDailyGoalName(newGoalName);
+    if (!guard.valid) {
+      setGoalGuardMessage(`${guard.reason} ${guard.recoveryAction ?? ""}`.trim());
+      return;
+    }
     await addDailyGoal(newGoalName.trim());
+    setGoalGuardMessage(null);
     setNewGoalName("");
     setAddingGoal(false);
     setDailyGoals(await getDailyGoals());
@@ -533,7 +541,13 @@ export default function DashboardPage() {
 
   const onSaveEditGoal = async (idx: number) => {
     if (!editGoalName.trim()) return;
+    const guard = inspectDailyGoalName(editGoalName);
+    if (!guard.valid) {
+      setGoalGuardMessage(`${guard.reason} ${guard.recoveryAction ?? ""}`.trim());
+      return;
+    }
     await updateDailyGoal(idx, editGoalName.trim(), undefined);
+    setGoalGuardMessage(null);
     setEditingGoalIndex(null);
     setDailyGoals(await getDailyGoals());
   };
@@ -1358,6 +1372,11 @@ export default function DashboardPage() {
                   description="添加一个小目标，开启一天的好状态。"
                   className="py-4"
                 />
+              )}
+              {goalGuardMessage && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  {goalGuardMessage}
+                </div>
               )}
               {addingGoal ? (
                 <div className="flex items-center gap-2">

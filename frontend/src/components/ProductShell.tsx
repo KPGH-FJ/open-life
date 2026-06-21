@@ -19,14 +19,24 @@ const PRODUCT_ROUTE_ALIASES: Record<ProductRouteLabel, readonly string[]> = {
   邮箱: ["/mailbox", "/review"],
 };
 
-const SECONDARY_TOOLS = [
-  { label: "Runs", path: "/runs" },
-  { label: "设置", path: "/settings" },
-  { label: "MCP", path: "/mcp" },
-  { label: "A2A", path: "/a2a" },
-  { label: "版本", path: "/versions" },
-  { label: "Metrics", path: "/metrics" },
-  { label: "Calibration", path: "/calibration" },
+const SECONDARY_TOOL_GROUPS = [
+  {
+    label: "能力与设置",
+    items: [
+      { label: "设置总览", path: "/settings" },
+      { label: "MCP 工具", path: "/mcp" },
+      { label: "A2A 连接", path: "/a2a" },
+    ],
+  },
+  {
+    label: "记录与诊断",
+    items: [
+      { label: "Runs", path: "/runs" },
+      { label: "版本", path: "/versions" },
+      { label: "Metrics", path: "/metrics" },
+      { label: "Calibration", path: "/calibration" },
+    ],
+  },
 ] as const;
 
 function matchesRoute(pathname: string, routePath: string): boolean {
@@ -106,28 +116,35 @@ function SecondaryToolsMenu() {
         className="inline-flex h-9 items-center gap-1.5 rounded-md border border-stone-200 bg-white px-2.5 text-xs font-semibold text-stone-700 shadow-sm hover:bg-stone-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-stone-900/20"
       >
         <CircleEllipsis size={15} aria-hidden="true" />
-        更多
+        能力与设置
       </button>
       {open && (
         <nav
           id="secondary-tools-panel"
           aria-label="更多功能"
-          className="absolute right-0 top-11 z-30 w-44 rounded-lg border border-stone-200 bg-white p-1.5 shadow-lg"
+          className="absolute right-0 top-11 z-30 w-56 rounded-lg border border-stone-200 bg-white p-1.5 shadow-lg"
         >
-          {SECONDARY_TOOLS.map(item => (
-            <NavLink
-              key={item.path}
-              to={item.path}
-              onClick={() => setOpen(false)}
-              className={({ isActive }) =>
-                [
-                  "flex h-9 items-center rounded-md px-3 text-sm font-medium transition",
-                  isActive ? "bg-stone-900 text-white" : "text-stone-700 hover:bg-stone-100",
-                ].join(" ")
-              }
-            >
-              {item.label}
-            </NavLink>
+          {SECONDARY_TOOL_GROUPS.map(group => (
+            <div key={group.label} className="py-1">
+              <div className="px-3 pb-1 pt-1 text-[11px] font-semibold text-stone-400">
+                {group.label}
+              </div>
+              {group.items.map(item => (
+                <NavLink
+                  key={item.path}
+                  to={item.path}
+                  onClick={() => setOpen(false)}
+                  className={({ isActive }) =>
+                    [
+                      "flex h-9 items-center rounded-md px-3 text-sm font-medium transition",
+                      isActive ? "bg-stone-900 text-white" : "text-stone-700 hover:bg-stone-100",
+                    ].join(" ")
+                  }
+                >
+                  {item.label}
+                </NavLink>
+              ))}
+            </div>
           ))}
         </nav>
       )}

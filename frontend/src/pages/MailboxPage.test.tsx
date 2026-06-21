@@ -46,6 +46,24 @@ const lowRiskProposal: AgentProposal = {
   expiresAt: "2026-07-01T10:00:00.000Z",
 };
 
+const readableGoalProposal: AgentProposal = {
+  id: "proposal-readable-goal-1",
+  runId: "run-readable-goal-1",
+  proposalType: "goal_update",
+  source: "chat_conversation",
+  sourceDetail: "chat-session-1",
+  affectedPath: "goals.short_term[0].name",
+  before: "睡前刷手机",
+  after: "23 点前睡觉",
+  reason: "用户明确表示近期想先修复睡眠节律。",
+  confidence: 0.78,
+  riskLevel: "low",
+  status: "pending",
+  whyOpenLifeThinksThis: "用户在对话中直接确认了新的短期目标。",
+  createdAt: "2026-06-03T09:00:00.000Z",
+  expiresAt: "2026-07-03T09:00:00.000Z",
+};
+
 const unsupportedProposal: AgentProposal = {
   id: "proposal-plugin-1",
   runId: "run-plugin-1",
@@ -172,20 +190,21 @@ describe("MailboxPage", () => {
     expect(screen.getByText("已处理")).toBeInTheDocument();
     expect(screen.getByText("草稿修改")).toBeInTheDocument();
     expect(screen.getAllByText("OpenLife").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("OpenLife 想更新目标").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("OpenLife 需要你确认一次外部操作").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("新增目标").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("确认外部能力").length).toBeGreaterThan(0);
   });
 
   it("selects rows and renders the selected proposal reader", async () => {
     render(<MailboxPage />);
 
-    expect((await screen.findAllByText("OpenLife 想更新目标")).length).toBeGreaterThan(0);
-    fireEvent.click(screen.getByRole("button", { name: /OpenLife 需要你确认一次外部操作/ }));
+    expect((await screen.findAllByText("新增目标")).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: /确认外部能力/ }));
 
     expect(screen.getByTestId("mail-reader")).toHaveTextContent("OpenLife");
-    expect(screen.getAllByText("OpenLife 需要你确认一次外部操作").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("确认外部能力").length).toBeGreaterThan(0);
     expect(screen.getByTestId("mail-reader")).toHaveTextContent("插件请求获得写权限。");
     expect(screen.getByText(/会影响哪里/)).toBeInTheDocument();
+    expect(screen.getByText("技术详情")).toBeInTheDocument();
     expect(screen.getByText(/plugins\.demo\.write/)).toBeInTheDocument();
   });
 
@@ -204,6 +223,31 @@ describe("MailboxPage", () => {
     );
     expect(screen.getByText("Builder confirmation supports the candidate.")).toBeInTheDocument();
     expect(screen.getByText("Proposal-first write path")).toBeInTheDocument();
+    expect(screen.queryByText("raw-sensitive-payload-should-not-render")).not.toBeInTheDocument();
+    expect(screen.queryByText(/sha256:abcdef1234567890/)).not.toBeInTheDocument();
+  });
+
+  it("shows readable before and after diff rows for ordinary low-risk updates", async () => {
+    mockProposals([readableGoalProposal]);
+
+    render(<MailboxPage />);
+
+    expect(await screen.findByText("OpenLife 想做什么")).toBeInTheDocument();
+    expect(screen.getByText("字段")).toBeInTheDocument();
+    expect(screen.getByText("当前值")).toBeInTheDocument();
+    expect(screen.getByText("将变为")).toBeInTheDocument();
+    expect(screen.getByText("name")).toBeInTheDocument();
+    expect(screen.getByText("「睡前刷手机」")).toBeInTheDocument();
+    expect(screen.getByText("「23 点前睡觉」")).toBeInTheDocument();
+  });
+
+  it("redacts sensitive payload-like values from the main diff panel", async () => {
+    render(<MailboxPage />);
+
+    expect(await screen.findByText("OpenLife 想做什么")).toBeInTheDocument();
+    expect(screen.getAllByText("该字段可能包含敏感或原始内容，主面板只显示摘要。").length).toBeGreaterThan(
+      0
+    );
     expect(screen.queryByText("raw-sensitive-payload-should-not-render")).not.toBeInTheDocument();
   });
 
@@ -226,7 +270,7 @@ describe("MailboxPage", () => {
   it("does not allow unsupported proposal types to be accepted", async () => {
     render(<MailboxPage />);
 
-    fireEvent.click(await screen.findByRole("button", { name: /OpenLife 需要你确认一次外部操作/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /确认外部能力/ }));
 
     const unsupportedAccept = await screen.findByRole("button", { name: "同意" });
     expect(unsupportedAccept).toBeDisabled();

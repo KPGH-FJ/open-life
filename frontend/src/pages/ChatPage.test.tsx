@@ -721,6 +721,30 @@ describe("ChatPage", () => {
     expect(screen.getByText(/云端 API：未配置/)).toBeInTheDocument();
   });
 
+  it("shows configured but unvalidated cloud API without implying it is available", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_system_diagnostics") {
+        return mockInvoke(cmd, args).then(base => ({
+          ...(base as SystemDiagnostics),
+          cloud_api_configured: true,
+          cloud_api_validated: false,
+          cloud_provider: "DeepSeek",
+        }));
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    expect(await screen.findByText("聊天就绪")).toBeInTheDocument();
+    expect(screen.getByText(/云端 API：DeepSeek 已配置，连接未验证/)).toBeInTheDocument();
+    expect(screen.queryByText(/DeepSeek 已验证可用/)).not.toBeInTheDocument();
+  });
+
   it("shows companion cockpit with life model pulse", async () => {
     render(
       <BrowserRouter>
@@ -3098,16 +3122,20 @@ describe("ChatPage", () => {
       </MemoryRouter>
     );
 
-    expect(await screen.findByText("本地优先")).toBeInTheDocument();
+    expect(await screen.findByText("对话就绪，工具受治理控制")).toBeInTheDocument();
+    expect(screen.getAllByText(/最近实际路线 · 本地 · Ollama · llama3:latest/).length).toBeGreaterThan(
+      0
+    );
     expect(screen.getByText("Life Model 已加载")).toBeInTheDocument();
-    expect(screen.getByText("有信等你回 1")).toBeInTheDocument();
+    expect(screen.getByText("工具候选 2")).toBeInTheDocument();
+    expect(screen.getByText("待确认 1")).toBeInTheDocument();
     expect(await screen.findByText("先做最小的一步。")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "查看依据" }));
 
     expect(screen.getByText("使用 Life Model：是")).toBeInTheDocument();
     expect(screen.getByText("参考记忆：3 条")).toBeInTheDocument();
-    expect(screen.getByText("模型路线：本地 / Ollama / llama3:latest")).toBeInTheDocument();
+    expect(screen.getByText("本次实际路线：本地 / Ollama / llama3:latest")).toBeInTheDocument();
     expect(screen.getByText("产生待确认：是")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "查看完整记录" })).toHaveAttribute(
       "href",
@@ -3728,6 +3756,51 @@ describe("ChatPage", () => {
       expect(invoke).toHaveBeenCalledWith("add_daily_goal", { name: "阅读30分钟" });
     });
     expect(await screen.findByText(/已添加今日目标：阅读30分钟/)).toBeInTheDocument();
+  });
+
+  it("blocks governance blocker text from slash goal add without saving it", async () => {
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    fireEvent.change(textarea, {
+      target: { value: "/goal add blocked by governance: model_selected_disallowed_tool" },
+    });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+
+    expect(await screen.findByText(/没有添加今日目标：这看起来像系统或治理阻断说明/)).toBeInTheDocument();
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "add_daily_goal")).toBe(false);
+  });
+
+  it("does not save assistant governance blocker explanations as a daily goal", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_chat_history") {
+        return Promise.resolve([
+          {
+            role: "assistant",
+            content: "That tool call is blocked by governance: model_selected_disallowed_tool",
+          },
+        ]);
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    expect(await screen.findByText(/本轮选择了未允许的工具或目标/)).toBeInTheDocument();
+    expect(screen.queryByText(/model_selected_disallowed_tool/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "设为今日目标" }));
+
+    expect(await screen.findByText(/没有保存为今日目标：这看起来像系统反馈文本/)).toBeInTheDocument();
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "add_daily_goal")).toBe(false);
   });
 
   it("supports completing a daily goal from slash command", async () => {
