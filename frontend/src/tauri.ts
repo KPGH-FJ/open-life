@@ -2274,6 +2274,7 @@ export interface SystemDiagnostics {
   vector_corrupt_embedding_count?: number;
   unfinished_builder_sessions: number;
   pending_builder_review_sessions?: number;
+  ollama_service_online?: boolean;
   ollama_online: boolean;
   local_model: string;
   resolved_local_model?: string | null;

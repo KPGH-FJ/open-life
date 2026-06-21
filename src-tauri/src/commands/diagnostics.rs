@@ -1,7 +1,7 @@
 use crate::errors::AppError;
 use crate::storage::{app_data_dir, load_onboarding_status_from_path, onboarding_status_path};
-use crate::{AppState, BuilderCompletion, SystemDiagnostics};
-use openlife_core::ollama::resolve_ollama_model;
+use crate::{AppState, BuilderCompletion, OllamaModelInfo, SystemDiagnostics};
+use openlife_core::ollama::inspect_ollama_status;
 use openlife_core::router::RouterStatus;
 use std::sync::Arc;
 use tauri::State;
@@ -86,7 +86,17 @@ pub async fn get_system_diagnostics(
             cfg.llm.embedding_enabled,
         )
     };
-    let resolved_local_model = resolve_ollama_model(&local_model).await;
+    let ollama_status = inspect_ollama_status(&local_model).await;
+    let ollama_service_online = ollama_status.server_online;
+    let ollama_models = ollama_status
+        .models
+        .iter()
+        .map(|(name, size)| OllamaModelInfo {
+            name: name.clone(),
+            size_mb: size / 1024 / 1024,
+        })
+        .collect::<Vec<_>>();
+    let resolved_local_model = ollama_status.resolved_model;
     let ollama_online = resolved_local_model.is_some();
     let snapshot_count = {
         let vm = state.version_manager.lock().await;
@@ -308,6 +318,7 @@ pub async fn get_system_diagnostics(
         vector_corrupt_embedding_count,
         unfinished_builder_sessions,
         pending_builder_review_sessions,
+        ollama_service_online,
         ollama_online,
         local_model,
         resolved_local_model,
@@ -336,6 +347,7 @@ pub async fn get_system_diagnostics(
         beta_ready,
         beta_readiness_issues,
         builder_completion,
+        ollama_models,
         agent_run_count,
         agent_run_store_status,
         pending_proposal_count,
@@ -345,9 +357,8 @@ pub async fn get_system_diagnostics(
 }
 
 #[tauri::command]
-pub async fn check_ollama_status(state: State<'_, Arc<AppState>>) -> Result<bool, AppError> {
-    let local_model = { state.scheduler.lock().await.local_model.clone() };
-    Ok(openlife_core::ollama::is_ollama_available(&local_model).await)
+pub async fn check_ollama_status(_state: State<'_, Arc<AppState>>) -> Result<bool, AppError> {
+    Ok(openlife_core::ollama::is_ollama_server_online().await)
 }
 
 #[tauri::command]

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, act } from "@testing-library/react";
+import { fireEvent, render, screen, act } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import ProviderTab from "./ProviderTab";
@@ -76,6 +76,90 @@ describe("ProviderTab", () => {
       );
     });
     expect(screen.getByText(/Layer 1 路由状态/)).toBeInTheDocument();
+  });
+
+  it("shows llama 3.1 as a local preset when Ollama resolved that installed tag", async () => {
+    await act(async () => {
+      render(
+        <MemoryRouter>
+          <ProviderTab
+            config={mockConfig}
+            setConfig={vi.fn()}
+            diagnostics={
+              {
+                ...mockDiagnostics,
+                ollama_service_online: true,
+                ollama_online: true,
+                resolved_local_model: "llama3.1:8b",
+                ollama_models: [{ name: "llama3.1:8b", size_mb: 8192 }],
+              } as any
+            }
+            routerStatus={null}
+            modelRouterStatus={null}
+          />
+        </MemoryRouter>
+      );
+    });
+
+    expect(screen.getByRole("option", { name: "Llama 3.1" })).toBeInTheDocument();
+    expect(screen.getByText(/Ollama 在线/)).toHaveTextContent("llama3.1:8b");
+    expect(screen.queryByText(/Ollama 离线/)).not.toBeInTheDocument();
+  });
+
+  it("lists arbitrary installed Ollama models as selectable local options", async () => {
+    await act(async () => {
+      render(
+        <MemoryRouter>
+          <ProviderTab
+            config={mockConfig}
+            setConfig={vi.fn()}
+            diagnostics={
+              {
+                ...mockDiagnostics,
+                ollama_service_online: true,
+                ollama_online: true,
+                resolved_local_model: "qwen3:8b",
+                ollama_models: [
+                  { name: "qwen3:8b", size_mb: 8192 },
+                  { name: "llava:13b", size_mb: 13312 },
+                ],
+              } as any
+            }
+            routerStatus={null}
+            modelRouterStatus={null}
+          />
+        </MemoryRouter>
+      );
+    });
+
+    expect(screen.getByRole("option", { name: "qwen3:8b" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "llava:13b" })).toBeInTheDocument();
+  });
+
+  it("allows entering a custom Ollama model tag without waiting for a preset", async () => {
+    const setConfig = vi.fn();
+    await act(async () => {
+      render(
+        <MemoryRouter>
+          <ProviderTab
+            config={mockConfig}
+            setConfig={setConfig}
+            diagnostics={mockDiagnostics}
+            routerStatus={null}
+            modelRouterStatus={null}
+          />
+        </MemoryRouter>
+      );
+    });
+
+    fireEvent.change(screen.getByPlaceholderText(/qwen3:8b/), {
+      target: { value: "future-model:latest" },
+    });
+
+    expect(setConfig).toHaveBeenCalledWith({
+      ...mockConfig,
+      local_model: "future-model:latest",
+    });
   });
 
   it("hides AgentLoop and ContextAssembler debug toggles by default", async () => {
