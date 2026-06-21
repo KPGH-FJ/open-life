@@ -354,7 +354,10 @@ export default function ProviderConfigSection({
             <ul className="list-disc pl-4 space-y-0.5">
               <li>Ollama 尚未安装：访问 ollama.com 下载安装</li>
               <li>Ollama 未启动：在终端运行 ollama serve</li>
-              <li>使用了非默认端口：当前只检测 localhost:11434</li>
+              <li>
+                使用了非默认端口：当前默认检测 127.0.0.1/localhost:11434，也可通过
+                OPENLIFE_OLLAMA_BASE_URL 或 OLLAMA_HOST 指定
+              </li>
             </ul>
           </div>
         )}
