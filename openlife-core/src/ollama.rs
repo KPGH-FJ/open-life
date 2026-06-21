@@ -23,6 +23,11 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+const DEFAULT_OLLAMA_IPV4_BASE_URL: &str = "http://127.0.0.1:11434";
+const DEFAULT_OLLAMA_LOCALHOST_BASE_URL: &str = "http://localhost:11434";
+const DEFAULT_OLLAMA_IPV6_BASE_URL: &str = "http://[::1]:11434";
+const OLLAMA_BASE_ENV_KEYS: [&str; 2] = ["OPENLIFE_OLLAMA_BASE_URL", "OLLAMA_HOST"];
+
 struct OllamaCache {
     checked_at: Instant,
     model: String,
@@ -46,6 +51,47 @@ pub fn set_ollama_cache_ttl_seconds(seconds: u64) {
 
 fn get_ollama_cache_ttl() -> Duration {
     Duration::from_secs(OLLAMA_CACHE_TTL_SECONDS.load(Ordering::Relaxed))
+}
+
+fn ollama_base_url_candidates() -> Vec<String> {
+    let explicit_base = OLLAMA_BASE_ENV_KEYS.iter().find_map(|key| {
+        std::env::var(key)
+            .ok()
+            .and_then(|value| normalize_ollama_base_url(&value))
+    });
+    ollama_base_url_candidates_for(explicit_base.as_deref())
+}
+
+fn ollama_base_url_candidates_for(explicit_base: Option<&str>) -> Vec<String> {
+    if let Some(base) = explicit_base.and_then(normalize_ollama_base_url) {
+        return vec![base];
+    }
+
+    vec![
+        DEFAULT_OLLAMA_IPV4_BASE_URL.to_string(),
+        DEFAULT_OLLAMA_LOCALHOST_BASE_URL.to_string(),
+        DEFAULT_OLLAMA_IPV6_BASE_URL.to_string(),
+    ]
+}
+
+fn normalize_ollama_base_url(value: &str) -> Option<String> {
+    let trimmed = value.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        Some(trimmed.to_string())
+    } else {
+        Some(format!("http://{trimmed}"))
+    }
+}
+
+fn ollama_api_url(base_url: &str, path: &str) -> String {
+    format!(
+        "{}/{}",
+        base_url.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
 }
 
 /// Check if Ollama is reachable and the requested model is available.
@@ -86,14 +132,20 @@ async fn fetch_ollama_models_from_server() -> Option<Vec<(String, u64)>> {
         Ok(c) => c,
         Err(_) => return None,
     };
-    let res = client.get("http://localhost:11434/api/tags").send().await;
-    match res {
-        Ok(r) if r.status().is_success() => {
-            let body = r.json::<serde_json::Value>().await.ok()?;
-            Some(parse_ollama_models_from_tags_body(&body))
+    for base_url in ollama_base_url_candidates() {
+        let res = client
+            .get(ollama_api_url(&base_url, "api/tags"))
+            .send()
+            .await;
+        if let Ok(r) = res {
+            if r.status().is_success() {
+                if let Ok(body) = r.json::<serde_json::Value>().await {
+                    return Some(parse_ollama_models_from_tags_body(&body));
+                }
+            }
         }
-        _ => None,
     }
+    None
 }
 
 /// Resolve the configured model name to an actually available Ollama tag.
@@ -285,29 +337,39 @@ pub async fn chat_with_ollama_raw(
     });
 
     let client = reqwest::Client::new();
-    let res = client
-        .post("http://localhost:11434/api/chat")
-        .json(&body)
-        .send()
-        .await
-        .with_context(|| "Ollama 请求失败")?;
+    let mut last_error = None;
+    for base_url in ollama_base_url_candidates() {
+        match client
+            .post(ollama_api_url(&base_url, "api/chat"))
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(res) => {
+                let status = res.status();
+                let text = res.text().await.with_context(|| "读取 Ollama 响应失败")?;
+                if !status.is_success() {
+                    last_error = Some(anyhow::anyhow!("Ollama 错误 ({}): {}", status, text));
+                    continue;
+                }
 
-    let status = res.status();
-    let text = res.text().await.with_context(|| "读取 Ollama 响应失败")?;
+                let json: serde_json::Value = serde_json::from_str(&text)
+                    .with_context(|| format!("解析 Ollama 响应 JSON 失败: {}", text))?;
 
-    if !status.is_success() {
-        return Err(anyhow::anyhow!("Ollama 错误 ({}): {}", status, text));
+                let content = json["message"]["content"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+
+                return Ok(content);
+            }
+            Err(err) => {
+                last_error = Some(anyhow::anyhow!("Ollama 请求失败: {}", err));
+            }
+        }
     }
 
-    let json: serde_json::Value = serde_json::from_str(&text)
-        .with_context(|| format!("解析 Ollama 响应 JSON 失败: {}", text))?;
-
-    let content = json["message"]["content"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
-
-    Ok(content)
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Ollama 请求失败")))
 }
 
 /// Stream chat with a local Ollama model using a raw system prompt.
@@ -342,22 +404,36 @@ pub async fn chat_with_ollama_raw_stream(
     });
 
     let client = reqwest::Client::new();
-    let res = client
-        .post("http://localhost:11434/api/chat")
-        .json(&body)
-        .send()
-        .await
-        .with_context(|| "Ollama stream request failed")?;
-
-    let status = res.status();
-    if !status.is_success() {
-        let text = res.text().await.unwrap_or_default();
-        return Err(anyhow::anyhow!(
-            "Ollama stream error ({}): {}",
-            status,
-            text
-        ));
+    let mut last_error = None;
+    let mut successful_response = None;
+    for base_url in ollama_base_url_candidates() {
+        match client
+            .post(ollama_api_url(&base_url, "api/chat"))
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(res) => {
+                let status = res.status();
+                if status.is_success() {
+                    successful_response = Some(res);
+                    break;
+                }
+                let text = res.text().await.unwrap_or_default();
+                last_error = Some(anyhow::anyhow!(
+                    "Ollama stream error ({}): {}",
+                    status,
+                    text
+                ));
+            }
+            Err(err) => {
+                last_error = Some(anyhow::anyhow!("Ollama stream request failed: {}", err));
+            }
+        }
     }
+    let res = successful_response.ok_or_else(|| {
+        last_error.unwrap_or_else(|| anyhow::anyhow!("Ollama stream request failed"))
+    })?;
 
     let byte_stream = res.bytes_stream();
 
@@ -410,39 +486,52 @@ pub async fn ollama_embed(text: &str, model: &str) -> anyhow::Result<Vec<f32>> {
         "model": model,
         "prompt": text,
     });
-    let res = client
-        .post("http://localhost:11434/api/embeddings")
-        .json(&body)
-        .send()
-        .await
-        .with_context(|| "Ollama embedding request failed")?;
+    let mut last_error = None;
+    for base_url in ollama_base_url_candidates() {
+        let res = client
+            .post(ollama_api_url(&base_url, "api/embeddings"))
+            .json(&body)
+            .send()
+            .await;
 
-    let status = res.status();
-    let json: serde_json::Value = res
-        .json()
-        .await
-        .with_context(|| "parse Ollama embedding response failed")?;
+        let res = match res {
+            Ok(res) => res,
+            Err(err) => {
+                last_error = Some(anyhow::anyhow!("Ollama embedding request failed: {}", err));
+                continue;
+            }
+        };
 
-    if !status.is_success() {
-        return Err(anyhow::anyhow!(
-            "Ollama embedding error ({}): {:?}",
-            status,
-            json
-        ));
+        let status = res.status();
+        let json: serde_json::Value = res
+            .json()
+            .await
+            .with_context(|| "parse Ollama embedding response failed")?;
+
+        if !status.is_success() {
+            last_error = Some(anyhow::anyhow!(
+                "Ollama embedding error ({}): {:?}",
+                status,
+                json
+            ));
+            continue;
+        }
+
+        let embedding = json["embedding"]
+            .as_array()
+            .with_context(|| "missing embedding array in Ollama response")?
+            .iter()
+            .filter_map(|v| v.as_f64().map(|f| f as f32))
+            .collect::<Vec<f32>>();
+
+        if embedding.is_empty() {
+            return Err(anyhow::anyhow!("empty embedding returned from Ollama"));
+        }
+
+        return Ok(embedding);
     }
 
-    let embedding = json["embedding"]
-        .as_array()
-        .with_context(|| "missing embedding array in Ollama response")?
-        .iter()
-        .filter_map(|v| v.as_f64().map(|f| f as f32))
-        .collect::<Vec<f32>>();
-
-    if embedding.is_empty() {
-        return Err(anyhow::anyhow!("empty embedding returned from Ollama"));
-    }
-
-    Ok(embedding)
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Ollama embedding request failed")))
 }
 
 /// Simple deterministic fallback embedding when no API or Ollama is available.
@@ -544,6 +633,38 @@ mod tests {
         assert_eq!(
             parse_ollama_models_from_tags_body(&body),
             vec![("llama3.1:8b".to_string(), 8_000)]
+        );
+    }
+
+    #[test]
+    fn defaults_to_ipv4_loopback_before_localhost_for_ollama() {
+        assert_eq!(
+            ollama_base_url_candidates_for(None),
+            vec![
+                "http://127.0.0.1:11434".to_string(),
+                "http://localhost:11434".to_string(),
+                "http://[::1]:11434".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_ollama_base_url_uses_single_normalized_candidate() {
+        assert_eq!(
+            ollama_base_url_candidates_for(Some("127.0.0.1:11435/")),
+            vec!["http://127.0.0.1:11435".to_string()]
+        );
+        assert_eq!(
+            ollama_base_url_candidates_for(Some("http://localhost:11435/")),
+            vec!["http://localhost:11435".to_string()]
+        );
+    }
+
+    #[test]
+    fn builds_ollama_api_urls_without_duplicate_slashes() {
+        assert_eq!(
+            ollama_api_url("http://127.0.0.1:11434/", "/api/tags"),
+            "http://127.0.0.1:11434/api/tags"
         );
     }
 }
