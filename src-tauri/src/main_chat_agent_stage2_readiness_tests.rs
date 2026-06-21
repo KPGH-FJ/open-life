@@ -20,6 +20,15 @@ fn complete_manual_records() -> Vec<Stage2ManualDogfoodRecord> {
     complete_stage2_manual_dogfood_records("reviewer-a", "reviewer-b", "abc123")
 }
 
+fn stage2_test_current_build_commit() -> Option<String> {
+    std::env::var("GITHUB_SHA")
+        .or_else(|_| std::env::var("OPENLIFE_BUILD_COMMIT"))
+        .ok()
+        .filter(|value| {
+            crate::main_chat_agent_stage2_readiness::known_stage2_commit_label_for_tests(value)
+        })
+}
+
 #[test]
 fn main_chat_stage2_manual_dogfood_template_is_non_evidence_and_covers_required_p0_rows() {
     let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2110,9 +2119,11 @@ async fn main_chat_stage2_live_provider_preflight_blocker_applies_to_all_l2_rows
     assert!(summary
         .blockers
         .contains(&"stage2_live_provider_main_chat_invocation_missing".to_string()));
-    assert!(summary
-        .blockers
-        .contains(&"stage2_live_artifact_commit_missing".to_string()));
+    if stage2_test_current_build_commit().is_none() {
+        assert!(summary
+            .blockers
+            .contains(&"stage2_live_artifact_commit_missing".to_string()));
+    }
     assert!(summary.scenario_reports.iter().all(|row| {
         row.status == "blocked"
             && !row.credited
@@ -2347,9 +2358,10 @@ async fn main_chat_stage2_live_provider_loads_existing_artifact_without_invoking
         "openlife-stage2-existing-live-artifact-{}.json",
         uuid::Uuid::new_v4()
     ));
+    let artifact_commit = stage2_test_current_build_commit().unwrap_or_else(|| "abc123".into());
     let valid_artifact = crate::main_chat_agent_stage2_readiness::Stage2LiveProviderArtifact {
         schema_version: "stage2-live-provider-evidence-v1".into(),
-        commit: "abc123".into(),
+        commit: artifact_commit.clone(),
         required_scenario_count: 10,
         scenario_evidence: complete_stage2_live_provider_evidence_for_tests(
             "openai",
@@ -2379,7 +2391,7 @@ async fn main_chat_stage2_live_provider_loads_existing_artifact_without_invoking
 
     let invalid_artifact = crate::main_chat_agent_stage2_readiness::Stage2LiveProviderArtifact {
         schema_version: "stage2-live-provider-evidence-v0".into(),
-        commit: "abc123".into(),
+        commit: artifact_commit,
         required_scenario_count: 9,
         scenario_evidence: complete_stage2_live_provider_evidence_for_tests(
             "openai",

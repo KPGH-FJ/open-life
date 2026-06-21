@@ -29,6 +29,13 @@ struct OllamaCache {
     resolved_model: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OllamaStatus {
+    pub server_online: bool,
+    pub resolved_model: Option<String>,
+    pub models: Vec<(String, u64)>,
+}
+
 static OLLAMA_CACHE: Mutex<Option<OllamaCache>> = Mutex::new(None);
 static OLLAMA_CACHE_TTL_SECONDS: AtomicU64 = AtomicU64::new(10);
 
@@ -46,33 +53,46 @@ pub async fn is_ollama_available(model: &str) -> bool {
     resolve_ollama_model(model).await.is_some()
 }
 
+/// Check if the Ollama HTTP service is reachable, regardless of the selected model.
+pub async fn is_ollama_server_online() -> bool {
+    fetch_ollama_models_from_server().await.is_some()
+}
+
 /// Fetch the list of installed Ollama models for UI display.
 pub async fn list_ollama_models() -> Vec<(String, u64)> {
+    fetch_ollama_models_from_server().await.unwrap_or_default()
+}
+
+pub async fn inspect_ollama_status(model: &str) -> OllamaStatus {
+    match fetch_ollama_models_from_server().await {
+        Some(models) => OllamaStatus {
+            server_online: true,
+            resolved_model: resolve_ollama_model_from_models(model, &models),
+            models,
+        },
+        None => OllamaStatus {
+            server_online: false,
+            resolved_model: None,
+            models: Vec::new(),
+        },
+    }
+}
+
+async fn fetch_ollama_models_from_server() -> Option<Vec<(String, u64)>> {
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()
     {
         Ok(c) => c,
-        Err(_) => return Vec::new(),
+        Err(_) => return None,
     };
     let res = client.get("http://localhost:11434/api/tags").send().await;
     match res {
         Ok(r) if r.status().is_success() => {
-            if let Ok(body) = r.json::<serde_json::Value>().await {
-                if let Some(models) = body.get("models").and_then(|m| m.as_array()) {
-                    return models
-                        .iter()
-                        .filter_map(|m| {
-                            let name = m.get("name")?.as_str()?.to_string();
-                            let size = m.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
-                            Some((name, size))
-                        })
-                        .collect();
-                }
-            }
-            Vec::new()
+            let body = r.json::<serde_json::Value>().await.ok()?;
+            Some(parse_ollama_models_from_tags_body(&body))
         }
-        _ => Vec::new(),
+        _ => None,
     }
 }
 
@@ -87,41 +107,9 @@ pub async fn resolve_ollama_model(model: &str) -> Option<String> {
             }
         }
     }
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return None,
-    };
-    let res = client.get("http://localhost:11434/api/tags").send().await;
-    let resolved_model = match res {
-        Ok(r) if r.status().is_success() => {
-            if let Ok(body) = r.json::<serde_json::Value>().await {
-                if let Some(models) = body.get("models").and_then(|m| m.as_array()) {
-                    let requested = model.trim();
-                    let matched = models.iter().find_map(|m| {
-                        m.get("name")
-                            .and_then(|n| n.as_str())
-                            .filter(|n| *n == requested || n.starts_with(requested))
-                            .map(|n| n.to_string())
-                    });
-                    matched.or_else(|| {
-                        models.iter().find_map(|m| {
-                            m.get("name")
-                                .and_then(|n| n.as_str())
-                                .map(|n| n.to_string())
-                        })
-                    })
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        }
-        _ => None,
-    };
+    let resolved_model = fetch_ollama_models_from_server()
+        .await
+        .and_then(|models| resolve_ollama_model_from_models(model, &models));
     let mut guard = OLLAMA_CACHE.lock().unwrap();
     *guard = Some(OllamaCache {
         checked_at: Instant::now(),
@@ -129,6 +117,111 @@ pub async fn resolve_ollama_model(model: &str) -> Option<String> {
         resolved_model: resolved_model.clone(),
     });
     resolved_model
+}
+
+fn parse_ollama_models_from_tags_body(body: &serde_json::Value) -> Vec<(String, u64)> {
+    body.get("models")
+        .and_then(|models| models.as_array())
+        .map(|models| {
+            models
+                .iter()
+                .filter_map(|model| {
+                    let name = ollama_model_name(model)?;
+                    let size = model.get("size").and_then(|s| s.as_u64()).unwrap_or(0);
+                    Some((name.to_string(), size))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn ollama_model_name(model: &serde_json::Value) -> Option<&str> {
+    ["name", "model"]
+        .iter()
+        .filter_map(|key| model.get(*key).and_then(|value| value.as_str()))
+        .map(str::trim)
+        .find(|name| !name.is_empty())
+}
+
+fn resolve_ollama_model_from_models(model: &str, models: &[(String, u64)]) -> Option<String> {
+    let requested = model.trim();
+    if models.is_empty() {
+        return None;
+    }
+    if requested.is_empty() {
+        return models.first().map(|(name, _)| name.clone());
+    }
+
+    models
+        .iter()
+        .find(|(name, _)| name.trim().eq_ignore_ascii_case(requested))
+        .or_else(|| {
+            models
+                .iter()
+                .find(|(name, _)| model_matches_requested(name, requested))
+        })
+        .or_else(|| models.first())
+        .map(|(name, _)| name.clone())
+}
+
+fn model_matches_requested(available: &str, requested: &str) -> bool {
+    let available = available.trim();
+    let requested = requested.trim();
+    if requested.is_empty() || available.is_empty() {
+        return false;
+    }
+
+    let available_tokens = model_family_tokens(available);
+    let requested_tokens = model_family_tokens(requested);
+    !requested_tokens.is_empty()
+        && available_tokens.len() >= requested_tokens.len()
+        && available_tokens
+            .iter()
+            .zip(requested_tokens.iter())
+            .all(|(available, requested)| available == requested)
+}
+
+fn model_family_tokens(value: &str) -> Vec<String> {
+    let family = value.split(':').next().unwrap_or(value);
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut current_kind: Option<ModelTokenKind> = None;
+
+    for ch in family.chars() {
+        let kind = if ch.is_ascii_alphabetic() {
+            Some(ModelTokenKind::Alpha)
+        } else if ch.is_ascii_digit() {
+            Some(ModelTokenKind::Digit)
+        } else {
+            None
+        };
+
+        let Some(kind) = kind else {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+            current_kind = None;
+            continue;
+        };
+
+        if current_kind.is_some_and(|existing| existing != kind) && !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+        current_kind = Some(kind);
+        current.push(ch.to_ascii_lowercase());
+    }
+
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    tokens
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ModelTokenKind {
+    Alpha,
+    Digit,
 }
 
 /// Chat with a local Ollama model.
@@ -374,4 +467,83 @@ pub fn fallback_embed(text: &str) -> Vec<f32> {
         }
     }
     vec
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_llama3_preset_to_installed_llama31_tag() {
+        let models = vec![
+            ("qwen2.5:7b".to_string(), 4_000),
+            ("llama3.1:8b".to_string(), 8_000),
+        ];
+
+        assert_eq!(
+            resolve_ollama_model_from_models("llama3", &models),
+            Some("llama3.1:8b".to_string())
+        );
+    }
+
+    #[test]
+    fn resolves_display_style_llama3_name_to_installed_llama31_tag() {
+        let models = vec![
+            ("qwen2.5:7b".to_string(), 4_000),
+            ("llama3.1:8b".to_string(), 8_000),
+        ];
+
+        assert_eq!(
+            resolve_ollama_model_from_models("Llama 3", &models),
+            Some("llama3.1:8b".to_string())
+        );
+    }
+
+    #[test]
+    fn does_not_match_unrelated_longer_prefix_before_family_version_match() {
+        let models = vec![
+            ("llama30:latest".to_string(), 30_000),
+            ("llama3.1:8b".to_string(), 8_000),
+        ];
+
+        assert_eq!(
+            resolve_ollama_model_from_models("llama3", &models),
+            Some("llama3.1:8b".to_string())
+        );
+    }
+
+    #[test]
+    fn resolves_display_style_names_for_other_model_families() {
+        let models = vec![
+            ("gemma2:9b".to_string(), 9_000),
+            ("qwen2.5:7b".to_string(), 7_000),
+            ("deepseek-r1:8b".to_string(), 8_000),
+        ];
+
+        assert_eq!(
+            resolve_ollama_model_from_models("Qwen 2.5", &models),
+            Some("qwen2.5:7b".to_string())
+        );
+        assert_eq!(
+            resolve_ollama_model_from_models("DeepSeek R1", &models),
+            Some("deepseek-r1:8b".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_ollama_tags_model_field_when_name_is_missing() {
+        let body = serde_json::json!({
+            "models": [
+                {
+                    "model": "llama3.1:8b",
+                    "size": 8_000
+                }
+            ]
+        });
+
+        assert_eq!(
+            parse_ollama_models_from_tags_body(&body),
+            vec![("llama3.1:8b".to_string(), 8_000)]
+        );
+    }
 }

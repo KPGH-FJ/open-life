@@ -77,10 +77,12 @@ export default function OverviewTab({
     },
     {
       label: "本地模型",
-      ok: diagnostics?.ollama_online ?? false,
+      ok: diagnostics?.ollama_online ?? diagnostics?.ollama_service_online ?? false,
       detail: diagnostics?.ollama_online
         ? `${diagnostics?.resolved_local_model || diagnostics?.local_model} 在线`
-        : "Ollama 离线，若走本地模型需要先启动",
+        : diagnostics?.ollama_service_online
+          ? `Ollama 已启动，但未找到可用模型：${diagnostics?.local_model || "本地模型"}`
+          : "Ollama 离线，若走本地模型需要先启动",
       action: "查看本地配置",
       href: "#local-model-settings",
     },

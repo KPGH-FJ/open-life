@@ -46,6 +46,7 @@ const PROVIDER_PRESETS: Record<
 const LOCAL_MODEL_OPTIONS = [
   { value: "llama2", label: "Llama 2" },
   { value: "llama3", label: "Llama 3" },
+  { value: "llama3.1", label: "Llama 3.1" },
   { value: "mistral", label: "Mistral" },
   { value: "qwen2.5", label: "Qwen 2.5" },
   { value: "gemma2", label: "Gemma 2" },
@@ -82,6 +83,22 @@ export default function ProviderConfigSection({
   const provider = config.llm.provider ?? "deepseek";
   const preset = PROVIDER_PRESETS[provider];
   const isDeepSeekReasoner = config.llm.chat_model === "deepseek-reasoner";
+  const ollamaServiceOnline = diagnostics?.ollama_service_online ?? ollamaOnline;
+  const resolvedLocalModel = diagnostics?.resolved_local_model ?? null;
+  const selectedLocalModel = config.local_model || diagnostics?.local_model || "本地模型";
+  const presetLocalModelValues = new Set(LOCAL_MODEL_OPTIONS.map(opt => opt.value));
+  const detectedLocalModelOptions = (diagnostics?.ollama_models ?? []).filter(
+    (model, index, models) =>
+      model.name.trim() &&
+      !presetLocalModelValues.has(model.name) &&
+      models.findIndex(candidate => candidate.name === model.name) === index
+  );
+  const selectLocalModelValues = new Set([
+    ...LOCAL_MODEL_OPTIONS.map(opt => opt.value),
+    ...detectedLocalModelOptions.map(model => model.name),
+  ]);
+  const shouldShowCurrentLocalModelOption =
+    config.local_model.trim() !== "" && !selectLocalModelValues.has(config.local_model);
 
   const updateLlm = (field: keyof AppConfig["llm"], value: string) => {
     onConfigChange({
@@ -269,18 +286,39 @@ export default function ProviderConfigSection({
               onChange={e => onConfigChange({ ...config, local_model: e.target.value })}
               className="w-full border rounded-md px-3 py-2 text-sm bg-white"
             >
+              {shouldShowCurrentLocalModelOption && (
+                <option value={config.local_model}>当前：{config.local_model}</option>
+              )}
               {LOCAL_MODEL_OPTIONS.map(opt => (
                 <option key={opt.value} value={opt.value}>
                   {opt.label}
                 </option>
               ))}
+              {detectedLocalModelOptions.length > 0 && (
+                <optgroup label="已安装模型">
+                  {detectedLocalModelOptions.map(model => (
+                    <option key={model.name} value={model.name}>
+                      {model.name}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
             </select>
+            <input
+              type="text"
+              value={config.local_model}
+              onChange={e => onConfigChange({ ...config, local_model: e.target.value })}
+              className="mt-2 w-full border rounded-md px-3 py-2 text-sm"
+              placeholder="例如 qwen3:8b、llama3.2:latest"
+            />
           </div>
           <div className="text-sm">
-            {ollamaOnline === null ? (
+            {ollamaServiceOnline === null ? (
               <span className="text-gray-400">正在检测 Ollama...</span>
-            ) : ollamaOnline ? (
-              <span className="text-emerald-600">● Ollama 在线</span>
+            ) : ollamaServiceOnline ? (
+              <span className="text-emerald-600">
+                ● Ollama 在线{resolvedLocalModel ? ` · ${resolvedLocalModel}` : ""}
+              </span>
             ) : (
               <span className="text-red-600">● Ollama 离线</span>
             )}
@@ -310,13 +348,22 @@ export default function ProviderConfigSection({
             </div>
           </div>
         )}
-        {ollamaOnline === false && (
+        {ollamaServiceOnline === false && (
           <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 text-xs text-amber-800 space-y-1">
             <div className="font-medium">Ollama 未检测到，可能的原因：</div>
             <ul className="list-disc pl-4 space-y-0.5">
               <li>Ollama 尚未安装：访问 ollama.com 下载安装</li>
               <li>Ollama 未启动：在终端运行 ollama serve</li>
               <li>使用了非默认端口：当前只检测 localhost:11434</li>
+            </ul>
+          </div>
+        )}
+        {ollamaServiceOnline === true && diagnostics && !diagnostics.ollama_online && (
+          <div className="rounded-lg bg-blue-50 border border-blue-200 p-3 text-xs text-blue-800 space-y-1">
+            <div className="font-medium">Ollama 已启动，但当前模型未匹配：{selectedLocalModel}</div>
+            <ul className="list-disc pl-4 space-y-0.5">
+              <li>如果已下载 llama3.1，请选择 Llama 3.1，或点击上方检测到的模型。</li>
+              <li>如果想继续使用当前名称，请先运行 ollama pull {selectedLocalModel}。</li>
             </ul>
           </div>
         )}

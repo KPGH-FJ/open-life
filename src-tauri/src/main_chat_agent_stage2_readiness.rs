@@ -4620,6 +4620,11 @@ pub(crate) fn metadata_safe_label_for_tests(value: &str) -> bool {
 }
 
 #[cfg(test)]
+pub(crate) fn known_stage2_commit_label_for_tests(value: &str) -> bool {
+    known_stage2_commit_label(value)
+}
+
+#[cfg(test)]
 pub(crate) fn stage2_artifacts_for_tests(
     manual: &Stage2ManualDogfoodSummary,
     live: &Stage2LiveProviderSummary,

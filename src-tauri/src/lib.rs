@@ -322,6 +322,12 @@ pub struct BuilderCompletion {
 }
 
 #[derive(serde::Serialize)]
+pub struct OllamaModelInfo {
+    pub name: String,
+    pub size_mb: u64,
+}
+
+#[derive(serde::Serialize)]
 pub struct SystemDiagnostics {
     pub router: RouterStatus,
     pub mcp_server_count: usize,
@@ -332,6 +338,7 @@ pub struct SystemDiagnostics {
     pub vector_corrupt_embedding_count: usize,
     pub unfinished_builder_sessions: usize,
     pub pending_builder_review_sessions: usize,
+    pub ollama_service_online: bool,
     pub ollama_online: bool,
     pub local_model: String,
     pub resolved_local_model: Option<String>,
@@ -356,6 +363,7 @@ pub struct SystemDiagnostics {
     pub beta_ready: bool,
     pub beta_readiness_issues: Vec<String>,
     pub builder_completion: BuilderCompletion,
+    pub ollama_models: Vec<OllamaModelInfo>,
     pub agent_run_count: usize,
     pub agent_run_store_status: String,
     pub pending_proposal_count: usize,
