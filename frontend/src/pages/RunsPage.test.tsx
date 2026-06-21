@@ -53,6 +53,19 @@ describe("RunsPage contract", () => {
             startedAt: new Date().toISOString(),
           },
           {
+            id: "run-sensitive-1",
+            taskId: "task-sensitive-1",
+            sessionId: "session-sensitive",
+            status: "running",
+            kind: "conversation",
+            userInput: "Contact qa@example.com with sk-sensitive-token-123456789",
+            outputPreview: "Token pk-sensitive-output-token-123456789 should redact",
+            generatedProposals: [],
+            actions: [],
+            observations: [],
+            startedAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+          },
+          {
             id: "run-2",
             taskId: "task-2",
             status: "completed",
@@ -142,6 +155,25 @@ describe("RunsPage contract", () => {
           },
         ]);
       }
+      if (cmd === "list_main_chat_agent_tasks") {
+        return Promise.resolve([
+          {
+            taskSessionId: "task-session-sensitive",
+            conversationId: "session-sensitive",
+            runId: "run-sensitive-1",
+            title: "Sensitive running task",
+            strategy: "direct_answer",
+            status: "running",
+            lastUpdatedAt: new Date().toISOString(),
+            lastObservationPreview: "Waiting for model",
+            pendingBlockerCount: 0,
+            pendingProposalCount: 0,
+            nextRecommendedControl: "cancel",
+            staleState: "stale",
+            resumeSafetyDigest: "sha256:test",
+          },
+        ]);
+      }
       return mockInvoke(cmd, args);
     });
   });
@@ -157,7 +189,13 @@ describe("RunsPage contract", () => {
       </MemoryRouter>
     );
 
-    expect(await screen.findByText("25 chars redacted")).toBeInTheDocument();
+    expect(await screen.findByText("camel case user input")).toBeInTheDocument();
+    expect(screen.getByText("camel case output preview")).toBeInTheDocument();
+    expect(screen.queryByText(/qa@example\.com/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/sk-sensitive-token/)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/\[email\]/).length).toBeGreaterThan(0);
+    expect(screen.getByText("Task running")).toBeInTheDocument();
+    expect(screen.getByText("可能已卡住")).toBeInTheDocument();
     expect(screen.getAllByText("1 个提案").length).toBeGreaterThan(0);
     expect(screen.getByText("Multi-Strategy Preview")).toBeInTheDocument();
     expect(screen.getByText("Strategy: planExecute")).toBeInTheDocument();
@@ -171,8 +209,6 @@ describe("RunsPage contract", () => {
     expect(
       screen.queryByText("raw-sensitive-weekly-plan-should-not-render")
     ).not.toBeInTheDocument();
-    expect(screen.queryByText("camel case output preview")).not.toBeInTheDocument();
-    expect(screen.queryByText(/camel case user input/)).not.toBeInTheDocument();
     expect(screen.queryByText("hidden by default")).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByPlaceholderText("搜索工具、来源或状态..."), {
@@ -192,8 +228,7 @@ describe("RunsPage contract", () => {
 
     fireEvent.click(screen.getByText("已删除"));
     await waitFor(() => {
-      expect(screen.getByText("17 chars redacted")).toBeInTheDocument();
+      expect(screen.getByText("deleted run")).toBeInTheDocument();
     });
-    expect(screen.queryByText("hidden by default")).not.toBeInTheDocument();
   });
 });

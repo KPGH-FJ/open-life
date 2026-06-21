@@ -143,4 +143,43 @@ describe("CalibrationPage", () => {
     expect(screen.getByText("行为记录")).toBeInTheDocument();
     expect(screen.getByText("对话推断")).toBeInTheDocument();
   });
+
+  it("does not offer reject-all when there are no calibration changes", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "generate_calibration_report") {
+        return Promise.resolve({
+          period_days: 7,
+          feedback_up: 0,
+          feedback_down: 0,
+          top_liked_patterns: [],
+          top_disliked_patterns: [],
+          value_changes: [],
+          suggested_actions: [],
+          summary_text: "暂无",
+        });
+      }
+      if (cmd === "generate_micro_evolution_changes") {
+        return Promise.resolve({
+          message: "近7天暂无足够信号生成微调建议",
+          changes: [],
+          applied: false,
+          before: null,
+          after: null,
+          requires_confirmation: true,
+          signal_summary: null,
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <CalibrationPage />
+      </BrowserRouter>
+    );
+
+    expect(await screen.findByText("近7天暂无足够信号生成微调建议")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "全部拒绝" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "返回今日" })).toBeInTheDocument();
+  });
 });

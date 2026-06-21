@@ -68,4 +68,15 @@ describe("DataTab", () => {
     render(<DataTab {...baseProps} evolutionResult="已应用规则 2 条" />);
     expect(screen.getByText("已应用规则 2 条")).toBeInTheDocument();
   });
+
+  it("requires confirmation before running memory tier maintenance", () => {
+    render(<DataTab {...baseProps} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "运行记忆层级维护" }));
+    expect(screen.getByRole("dialog", { name: "确认运行记忆层级维护" })).toBeInTheDocument();
+    expect(invoke).not.toHaveBeenCalledWith("run_memory_tier_maintenance", undefined);
+
+    fireEvent.click(screen.getByRole("button", { name: "运行维护" }));
+    expect(invoke).toHaveBeenCalledWith("run_memory_tier_maintenance", undefined);
+  });
 });

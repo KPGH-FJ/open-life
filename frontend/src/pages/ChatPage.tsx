@@ -208,8 +208,12 @@ function companionModelRouteSummary(run: AgentRun | null): string {
   if (!run?.modelRoute) return "模型路线：未读取";
   const route = run.modelRoute;
   const routeLabel =
-    route.routeType === "local" || route.preferLocal ? "本地" : route.provider ? "云端" : "未读取";
-  return `模型路线：${routeLabel} / ${route.provider || "unknown"} / ${route.model || "unknown"}`;
+    route.routeType === "local"
+      ? "本地"
+      : route.routeType === "cloud"
+        ? "云端"
+        : route.routeType || "未读取";
+  return `本次实际路线：${routeLabel} / ${route.provider || "unknown"} / ${route.model || "unknown"}`;
 }
 
 function companionRunSummary(run: AgentRun | null): string[] {
@@ -221,6 +225,89 @@ function companionRunSummary(run: AgentRun | null): string[] {
     companionModelRouteSummary(run),
     `产生待确认：${proposalCount > 0 ? "是" : "否"}`,
   ];
+}
+
+function CompanionTaskControlStrip({
+  taskState,
+  busy,
+  error,
+  onResume,
+  onRetry,
+  onCancel,
+  onRefresh,
+}: {
+  taskState: MainChatAgentTaskState | null;
+  busy: boolean;
+  error: string | null;
+  onResume: () => void;
+  onRetry: () => void;
+  onCancel: () => void;
+  onRefresh: () => void;
+}) {
+  const status = taskState?.session?.status?.replace(/_/g, " ") ?? "读取任务状态";
+  const activeToolCount = taskState?.activeToolCount ?? 0;
+  const pendingApprovalCount = taskState?.pendingApprovalCount ?? 0;
+
+  return (
+    <div
+      data-testid="companion-task-controls"
+      className="mx-4 rounded-lg border border-stone-200 bg-white px-3 py-2 text-xs text-stone-700 shadow-sm"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="inline-flex h-6 items-center rounded-md bg-stone-900 px-2 font-semibold text-white">
+          {status}
+        </span>
+        <span className="text-stone-500">{activeToolCount} active</span>
+        <span className="text-stone-500">{pendingApprovalCount} pending</span>
+        <div className="ml-auto flex shrink-0 items-center gap-1">
+          <button
+            type="button"
+            aria-label="Resume task"
+            title="Resume task"
+            disabled={!taskState?.canResume || busy}
+            onClick={onResume}
+            className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Play size={14} aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            aria-label="Retry failed action"
+            title="Retry failed action"
+            disabled={!taskState?.canRetry || busy}
+            onClick={onRetry}
+            className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <RotateCw size={14} aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            aria-label="Cancel task"
+            title="Cancel task"
+            disabled={!taskState?.canCancel || busy}
+            onClick={onCancel}
+            className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Ban size={14} aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            aria-label="Refresh task state"
+            title="Refresh task state"
+            disabled={busy}
+            onClick={onRefresh}
+            className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <RotateCw size={14} aria-hidden="true" className={busy ? "animate-spin" : ""} />
+          </button>
+        </div>
+      </div>
+      {taskState?.session?.currentPlanSummary && (
+        <div className="mt-2 truncate text-stone-600">{taskState.session.currentPlanSummary}</div>
+      )}
+      {error && <div className="mt-2 rounded-md bg-rose-50 px-2 py-1 text-rose-800">{error}</div>}
+    </div>
+  );
 }
 
 function recordArrayLength(value: Record<string, unknown> | null | undefined, key: string): number {
@@ -1878,6 +1965,32 @@ export default function ChatPage({
     },
     [applyMainChatAgentStateSnapshot, loadTaskContinuityList]
   );
+
+  const handleRefreshCurrentMainChatTask = useCallback(async () => {
+    const taskSessionId = currentMainChatTaskSessionId();
+    if (!taskSessionId || agentTaskControlBusy) return;
+    setAgentTaskControlBusy(true);
+    setAgentTaskControlError(null);
+    try {
+      await refreshMainChatControlState(taskSessionId);
+    } catch (error) {
+      setAgentTaskControlError(`Refresh failed: ${readablePreviewError(error)}`);
+    } finally {
+      setAgentTaskControlBusy(false);
+    }
+  }, [agentTaskControlBusy, currentMainChatTaskSessionId, refreshMainChatControlState]);
+
+  useEffect(() => {
+    if (!companionMode || !sending) return;
+    const taskSessionId = currentMainChatTaskSessionId();
+    if (!taskSessionId) return;
+
+    const timer = window.setInterval(() => {
+      void loadMainChatTaskState(taskSessionId, currentSessionIdRef.current);
+    }, 3000);
+
+    return () => window.clearInterval(timer);
+  }, [companionMode, currentMainChatTaskSessionId, sending]);
 
   const handleResumeMainChatTask = useCallback(async () => {
     const taskSessionId = currentMainChatTaskSessionId();
@@ -3843,6 +3956,17 @@ export default function ChatPage({
                 />
               </div>
             </div>
+          )}
+          {companionMode && (sending || currentAgentTaskState) && (
+            <CompanionTaskControlStrip
+              taskState={currentAgentTaskState}
+              busy={agentTaskControlBusy}
+              error={agentTaskControlError}
+              onResume={handleResumeMainChatTask}
+              onRetry={() => handleRetryMainChatAction()}
+              onCancel={handleCancelMainChatTask}
+              onRefresh={handleRefreshCurrentMainChatTask}
+            />
           )}
           {!companionMode && currentAgentState && (
             <div className="px-4 py-2">

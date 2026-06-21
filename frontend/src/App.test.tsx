@@ -328,6 +328,28 @@ describe("App onboarding", () => {
     expect(menuButton).toHaveFocus();
   });
 
+  it("closes the secondary tools menu when the route changes", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/companion"]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    await screen.findByRole("link", { name: "陪伴" });
+    fireEvent.click(screen.getByRole("button", { name: "更多" }));
+    expect(screen.getByRole("link", { name: "MCP" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("link", { name: "今日" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("link", { name: "MCP" })).not.toBeInTheDocument();
+    });
+  });
+
   it("keeps W166 product surface files free of disabled backend wrappers", () => {
     const productSurfaceFiles = [
       "src/App.tsx",

@@ -43,6 +43,26 @@ fn main_chat_runtime_module_tests_are_not_concentrated_in_lib_rs() {
 }
 
 #[test]
+fn main_window_visibility_uses_tauri_window_config_not_hardcoded_index_asset() {
+    let lib_rs_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
+    let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
+    let helper = source
+        .split("fn ensure_main_window_visible")
+        .nth(1)
+        .and_then(|rest| rest.split("#[cfg_attr").next())
+        .expect("ensure_main_window_visible helper body");
+
+    assert!(
+        helper.contains("WebviewWindowBuilder::from_config"),
+        "main fallback window must be recreated from tauri.conf.json so devUrl and frontendDist stay authoritative"
+    );
+    assert!(
+        !helper.contains("WebviewUrl::App(\"index.html\""),
+        "main fallback window must not hard-code index.html, which can reopen a stale bundled UI"
+    );
+}
+
+#[test]
 fn main_chat_conversation_update_helpers_are_extracted_from_lib_rs() {
     let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
     let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");

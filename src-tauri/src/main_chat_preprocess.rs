@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use openlife_core::agent::ContextAssembler;
+use openlife_core::agent::{ContextAssembler, MemoryLifecycleCategory, MemoryLifecycleRecord};
 use openlife_core::life_model::LifeModel;
 use openlife_core::llm::ChatMessage;
 use openlife_core::memory::MemorySearchHit;
@@ -15,6 +15,8 @@ use crate::main_chat_hs_runtime::classify_hs_policy_topic;
 use crate::AppState;
 
 const MEMORY_LIFECYCLE_SOURCE_PREFIX: &str = "memory_lifecycle:";
+const MEMORY_LIFECYCLE_CANDIDATE_LIMIT: i64 = 25;
+const MEMORY_LIFECYCLE_CONTEXT_LIMIT: usize = 5;
 
 pub(crate) async fn filter_lifecycle_active_memory_results(
     results: Vec<(MemoryChunk, f32)>,
@@ -56,6 +58,143 @@ fn lifecycle_memory_id_from_source(source: &str) -> Option<&str> {
     } else {
         None
     }
+}
+
+fn relevant_active_lifecycle_records(
+    records: Vec<MemoryLifecycleRecord>,
+    query: &str,
+    limit: usize,
+) -> Vec<MemoryLifecycleRecord> {
+    records
+        .into_iter()
+        .filter(|record| is_lifecycle_record_relevant(record, query))
+        .take(limit)
+        .collect()
+}
+
+fn is_lifecycle_record_relevant(record: &MemoryLifecycleRecord, query: &str) -> bool {
+    if record.runtime_context_excluded_at.is_some() {
+        return false;
+    }
+
+    let terms = relevance_terms(query);
+    if terms.is_empty() {
+        return false;
+    }
+
+    let haystack = format!(
+        "{} {} {} {}",
+        record.content,
+        record.scope,
+        record.category,
+        record.evidence_ids.join(" ")
+    )
+    .to_lowercase();
+
+    if terms.iter().any(|term| haystack.contains(term)) {
+        return true;
+    }
+
+    record.category == MemoryLifecycleCategory::Boundary
+        && terms.iter().any(|term| {
+            matches!(
+                term.as_str(),
+                "安全"
+                    | "边界"
+                    | "权限"
+                    | "隐私"
+                    | "外部"
+                    | "写入"
+                    | "删除"
+                    | "api"
+                    | "key"
+                    | "token"
+            )
+        })
+}
+
+fn relevance_terms(value: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut ascii = String::new();
+    let mut cjk = String::new();
+
+    let flush_ascii = |buffer: &mut String, terms: &mut Vec<String>| {
+        if buffer.len() >= 3 {
+            terms.push(buffer.to_lowercase());
+        }
+        buffer.clear();
+    };
+    let flush_cjk = |buffer: &mut String, terms: &mut Vec<String>| {
+        let chars = buffer.chars().collect::<Vec<_>>();
+        if chars.len() >= 2 {
+            for window in chars.windows(2) {
+                let token = window.iter().collect::<String>();
+                if !is_common_cjk_token(&token) {
+                    terms.push(token);
+                }
+            }
+        }
+        buffer.clear();
+    };
+
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            flush_cjk(&mut cjk, &mut terms);
+            ascii.push(ch);
+        } else if is_cjk(ch) {
+            flush_ascii(&mut ascii, &mut terms);
+            cjk.push(ch);
+        } else {
+            flush_ascii(&mut ascii, &mut terms);
+            flush_cjk(&mut cjk, &mut terms);
+        }
+    }
+    flush_ascii(&mut ascii, &mut terms);
+    flush_cjk(&mut cjk, &mut terms);
+
+    terms.sort();
+    terms.dedup();
+    terms
+}
+
+fn is_cjk(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{3400}'..='\u{4DBF}'
+            | '\u{4E00}'..='\u{9FFF}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{20000}'..='\u{2A6DF}'
+            | '\u{2A700}'..='\u{2B73F}'
+            | '\u{2B740}'..='\u{2B81F}'
+            | '\u{2B820}'..='\u{2CEAF}'
+    )
+}
+
+fn is_common_cjk_token(token: &str) -> bool {
+    matches!(
+        token,
+        "这个"
+            | "那个"
+            | "什么"
+            | "现在"
+            | "今天"
+            | "明天"
+            | "昨天"
+            | "当前"
+            | "请你"
+            | "帮我"
+            | "一下"
+            | "可以"
+            | "需要"
+            | "回复"
+            | "问题"
+            | "测试"
+            | "输入"
+            | "输出"
+            | "进行"
+            | "一个"
+            | "我们"
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -187,7 +326,13 @@ pub(crate) async fn preprocess_chat_input(
             let active_lifecycle_records =
                 if let Some(lifecycle_store) = state.memory_lifecycle_store.as_ref() {
                     let store = lifecycle_store.lock().await;
-                    store.list_active_records(None, 5).unwrap_or_default()
+                    relevant_active_lifecycle_records(
+                        store
+                            .list_active_records(None, MEMORY_LIFECYCLE_CANDIDATE_LIMIT)
+                            .unwrap_or_default(),
+                        &memory_query,
+                        MEMORY_LIFECYCLE_CONTEXT_LIMIT,
+                    )
                 } else {
                     Vec::new()
                 };
@@ -225,7 +370,7 @@ pub(crate) async fn preprocess_chat_input(
                     ));
                 }
                 format!(
-                    "\n以下是已确认且仍处于 active 状态的相关记忆/历史检索结果，请在回应中自然地参考它们，不要把 rejected 或 rolled-back 记忆当作事实：\n{}",
+                    "\n以下是已确认且与当前问题相关的 active 记忆/历史检索结果。仅在和当前用户指令直接相关时参考它们；当前用户指令优先，不要把 rejected、rolled-back 或无关历史当作事实：\n{}",
                     snippets.join("\n")
                 )
             }
@@ -425,10 +570,21 @@ pub(crate) async fn preprocess_chat_input_v2(
         );
     }
 
+    let lifecycle_query = messages
+        .last()
+        .filter(|message| message.role == "user")
+        .map(|message| privacy_engine.desensitize(&message.content).0)
+        .unwrap_or_default();
     let active_lifecycle_records =
         if let Some(lifecycle_store) = state.memory_lifecycle_store.as_ref() {
             let store = lifecycle_store.lock().await;
-            store.list_active_records(None, 5).unwrap_or_default()
+            relevant_active_lifecycle_records(
+                store
+                    .list_active_records(None, MEMORY_LIFECYCLE_CANDIDATE_LIMIT)
+                    .unwrap_or_default(),
+                &lifecycle_query,
+                MEMORY_LIFECYCLE_CONTEXT_LIMIT,
+            )
         } else {
             Vec::new()
         };
@@ -449,7 +605,7 @@ pub(crate) async fn preprocess_chat_input_v2(
             .collect::<Vec<_>>()
             .join("\n");
         format!(
-            "\n以下是已确认且仍处于 active 状态的记忆，请在回应中自然地参考它们，不要把 rejected 或 rolled-back 记忆当作事实：\n{snippets}"
+            "\n以下是已确认且与当前问题相关的 active 记忆。仅在和当前用户指令直接相关时参考它们；当前用户指令优先，不要把 rejected、rolled-back 或无关历史当作事实：\n{snippets}"
         )
     };
     let combined_memory_context = [
@@ -533,4 +689,73 @@ pub(crate) fn merge_memory_hits(
     results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     results.truncate(top_k);
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openlife_core::agent::{
+        MemoryLifecycleCategory, MemoryLifecycleRiskLevel, MemoryLifecycleScope,
+        MemoryLifecycleStatus, MemoryMaterializationStatus,
+    };
+
+    fn lifecycle_record(memory_id: &str, content: &str) -> MemoryLifecycleRecord {
+        MemoryLifecycleRecord {
+            memory_id: memory_id.to_string(),
+            proposal_id: format!("proposal-{memory_id}"),
+            source_task_session_id: None,
+            source_run_id: None,
+            content: content.to_string(),
+            scope: MemoryLifecycleScope::Global,
+            category: MemoryLifecycleCategory::Fact,
+            risk_level: MemoryLifecycleRiskLevel::Low,
+            status: MemoryLifecycleStatus::Materialized,
+            materialization_status: MemoryMaterializationStatus::Materialized,
+            materialization_error_code: None,
+            created_by: "test".into(),
+            accepted_by: Some("test".into()),
+            accepted_at: None,
+            materialized_view_id: Some("view".into()),
+            materialized_view_version: Some(1),
+            evidence_ids: vec![],
+            confidence: 0.9,
+            conflict_ids: vec![],
+            supersedes_memory_id: None,
+            replacement_memory_id: None,
+            rolled_back_by_event_id: None,
+            runtime_context_excluded_at: None,
+        }
+    }
+
+    #[test]
+    fn lifecycle_memory_filter_excludes_unrelated_active_records() {
+        let records = vec![lifecycle_record(
+            "memory:kaizhou",
+            "用户曾询问重庆开州的位置和天气。",
+        )];
+
+        let filtered = relevant_active_lifecycle_records(
+            records,
+            "QA-2026-06-21 current-ui smoke: reply with one short sentence.",
+            5,
+        );
+
+        assert!(
+            filtered.is_empty(),
+            "unrelated active lifecycle memory must not pollute an unrelated current-ui smoke prompt"
+        );
+    }
+
+    #[test]
+    fn lifecycle_memory_filter_keeps_query_relevant_records() {
+        let records = vec![
+            lifecycle_record("memory:kaizhou", "用户曾询问重庆开州的位置和天气。"),
+            lifecycle_record("memory:other", "用户正在测试 current-ui。"),
+        ];
+
+        let filtered = relevant_active_lifecycle_records(records, "重庆开州在哪里？", 5);
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].memory_id, "memory:kaizhou");
+    }
 }

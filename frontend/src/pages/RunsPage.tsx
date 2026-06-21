@@ -1,6 +1,18 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { listAgentRuns, deleteAgentRun, type AgentRun } from "../tauri";
+import {
+  listAgentRuns,
+  deleteAgentRun,
+  listMainChatAgentTasks,
+  resumeMainChatAgentTask,
+  cancelMainChatAgentTask,
+  retryMainChatAgentAction,
+  refreshMainChatAgentTaskContext,
+  getMainChatAgentTaskDetail,
+  type AgentRun,
+  type MainChatTaskSummary,
+} from "../tauri";
+import { safePreviewText } from "../utils/safePreview";
 import {
   getPlanExecuteProductTrace,
   planExecuteProductSearchText,
@@ -67,7 +79,7 @@ function runSubtitle(run: AgentRun): string {
   if (audit) {
     return [audit.strategyKind, audit.payloadKind, audit.reasonCode].filter(Boolean).join(" · ");
   }
-  return run.userInput ? `${run.userInput.length} chars redacted` : "No user input";
+  return run.userInput ? safePreviewText(run.userInput, 96) : "No user input";
 }
 
 function reactTraceSearchText(run: AgentRun): string {
@@ -89,11 +101,23 @@ function reactTraceSearchText(run: AgentRun): string {
 }
 
 const PAGE_SIZE = 20;
+const STALE_RUN_THRESHOLD_MS = 10 * 60 * 1000;
+
+function isPossiblyStaleRun(run: AgentRun, summary?: MainChatTaskSummary): boolean {
+  if (summary?.staleState && !["fresh", "none", "ok"].includes(summary.staleState)) {
+    return true;
+  }
+  if (run.status !== "running") return false;
+  const startedAt = new Date(run.startedAt).getTime();
+  return Number.isFinite(startedAt) && Date.now() - startedAt > STALE_RUN_THRESHOLD_MS;
+}
 
 export default function RunsPage() {
   const [runs, setRuns] = useState<AgentRun[]>([]);
+  const [taskSummaries, setTaskSummaries] = useState<MainChatTaskSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [taskActionBusy, setTaskActionBusy] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [kindFilter, setKindFilter] = useState<string>("all");
   const [searchQuery, setSearchQuery] = useState("");
@@ -109,13 +133,48 @@ export default function RunsPage() {
   async function loadRuns() {
     try {
       setLoading(true);
-      const data = await listAgentRuns(100, 0);
+      const [data, tasks] = await Promise.all([
+        listAgentRuns(100, 0),
+        listMainChatAgentTasks({ includeTerminal: true, includeStale: true }, 100, 0).catch(
+          () => []
+        ),
+      ]);
       setRuns(data);
+      setTaskSummaries(tasks);
       setError(null);
     } catch (e) {
       setError(String(e));
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleTaskControl(
+    summary: MainChatTaskSummary,
+    control: "resume" | "cancel" | "retry" | "refresh"
+  ) {
+    setTaskActionBusy(`${summary.taskSessionId}:${control}`);
+    setError(null);
+    try {
+      if (control === "resume") {
+        await resumeMainChatAgentTask(summary.taskSessionId);
+      } else if (control === "cancel") {
+        await cancelMainChatAgentTask(summary.taskSessionId);
+      } else if (control === "refresh") {
+        await refreshMainChatAgentTaskContext(summary.taskSessionId);
+      } else {
+        const detail = await getMainChatAgentTaskDetail(summary.taskSessionId);
+        const failedAction = detail.actions.find(action => action.status === "failed");
+        if (!failedAction) {
+          throw new Error("没有可重试的失败 action");
+        }
+        await retryMainChatAgentAction(summary.taskSessionId, failedAction.id);
+      }
+      await loadRuns();
+    } catch (e) {
+      setError(`任务控制失败: ${String(e)}`);
+    } finally {
+      setTaskActionBusy(null);
     }
   }
 
@@ -154,6 +213,7 @@ export default function RunsPage() {
 
   const paginatedRuns = filteredRuns.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
   const totalPages = Math.ceil(filteredRuns.length / PAGE_SIZE);
+  const taskSummaryByRunId = new Map(taskSummaries.map(summary => [summary.runId, summary]));
 
   function toggleSelect(runId: string) {
     const newSet = new Set(selectedRuns);
@@ -371,6 +431,8 @@ export default function RunsPage() {
                 const previewAudit = getMultiStrategyPreviewAudit(run);
                 const productTrace = getPlanExecuteProductTrace(run);
                 const warningCount = previewAudit?.warnings?.length ?? 0;
+                const taskSummary = taskSummaryByRunId.get(run.id);
+                const stale = isPossiblyStaleRun(run, taskSummary);
                 return (
                   <div
                     key={run.id}
@@ -399,21 +461,74 @@ export default function RunsPage() {
                               <div className="text-xs text-stone-500 mt-0.5">
                                 {runSubtitle(run)}
                               </div>
-                            </div>
-                          </div>
-                          <div className="text-right">
+	                            </div>
+	                          </div>
+	                          <div className="text-right">
                             <div className="text-xs text-stone-400 flex items-center gap-1">
                               <Clock size={12} />
                               {new Date(run.startedAt).toLocaleString()}
                             </div>
                             {!productTrace && run.outputPreview && (
                               <div className="text-xs text-stone-500 mt-1 max-w-xs truncate">
-                                {run.outputPreview.length} chars redacted
+                                {safePreviewText(run.outputPreview, 96)}
                               </div>
                             )}
+	                          </div>
+	                        </div>
+                        {taskSummary && (
+                          <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs text-stone-600">
+                            <span className="font-semibold text-stone-800">
+                              Task {taskSummary.status.replace(/_/g, " ")}
+                            </span>
+                            <span>{taskSummary.nextRecommendedControl}</span>
+                            {stale && (
+                              <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 font-medium text-amber-800">
+                                可能已卡住
+                              </span>
+                            )}
+                            <div className="ml-auto flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={event => {
+                                  event.stopPropagation();
+                                  void handleTaskControl(taskSummary, "resume");
+                                }}
+                                disabled={taskActionBusy !== null}
+                                className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700 disabled:opacity-50"
+                              >
+                                Resume
+                              </button>
+                              <button
+                                type="button"
+                                onClick={event => {
+                                  event.stopPropagation();
+                                  void handleTaskControl(taskSummary, "retry");
+                                }}
+                                disabled={taskActionBusy !== null}
+                                className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700 disabled:opacity-50"
+                              >
+                                Retry
+                              </button>
+                              <button
+                                type="button"
+                                onClick={event => {
+                                  event.stopPropagation();
+                                  void handleTaskControl(taskSummary, "cancel");
+                                }}
+                                disabled={taskActionBusy !== null}
+                                className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700 disabled:opacity-50"
+                              >
+                                Cancel
+                              </button>
+                            </div>
                           </div>
-                        </div>
-                        {previewAudit && (
+                        )}
+                        {!taskSummary && run.status === "running" && (
+                          <div className="mt-3 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs text-stone-500">
+                            旧 run 或缺少 task session，当前无法直接控制。
+                          </div>
+                        )}
+	                        {previewAudit && (
                           <div className="mt-2 flex flex-wrap gap-2 text-xs">
                             <span className="rounded bg-stone-100 px-2 py-1 text-stone-700">
                               Preview
