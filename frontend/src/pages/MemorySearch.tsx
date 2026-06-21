@@ -42,6 +42,8 @@ export default function MemorySearch() {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<MemoryResult[]>([]);
   const [loading, setLoading] = useState(false);
+  const [showLowConfidenceResults, setShowLowConfidenceResults] = useState(false);
+  const [expandedResults, setExpandedResults] = useState<Set<number>>(new Set());
 
   const [content, setContent] = useState("");
   const [source, setSource] = useState("manual");
@@ -77,6 +79,8 @@ export default function MemorySearch() {
     try {
       const res = await searchMemory(query.trim(), 5);
       setResults(res);
+      setShowLowConfidenceResults(false);
+      setExpandedResults(new Set());
     } catch (e) {
       console.error("记忆搜索失败", e);
     } finally {
@@ -145,6 +149,18 @@ export default function MemorySearch() {
     },
     [safeMode, diagnostics]
   );
+
+  const normalizedQuery = query.trim().toLowerCase();
+  const sortedResults = [...results].sort((a, b) => {
+    const aExact =
+      normalizedQuery.length > 0 && a.chunk.content.toLowerCase().includes(normalizedQuery);
+    const bExact =
+      normalizedQuery.length > 0 && b.chunk.content.toLowerCase().includes(normalizedQuery);
+    if (aExact !== bExact) return aExact ? -1 : 1;
+    return b.score - a.score;
+  });
+  const visibleResults = sortedResults.filter(result => showLowConfidenceResults || result.score >= 0.3);
+  const hiddenLowConfidenceCount = sortedResults.length - visibleResults.length;
 
   return (
     <div className="h-full overflow-auto bg-white">
@@ -329,7 +345,16 @@ export default function MemorySearch() {
                 className="py-4"
               />
             )}
-            {results.map((r, idx) => {
+            {hiddenLowConfidenceCount > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowLowConfidenceResults(true)}
+                className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800 hover:bg-amber-100"
+              >
+                显示 {hiddenLowConfidenceCount} 条低相关结果
+              </button>
+            )}
+            {visibleResults.map(r => {
               const sourceIcon =
                 r.chunk.source === "chat" || r.chunk.source === "assistant" ? (
                   <Bot size={12} />
@@ -350,9 +375,18 @@ export default function MemorySearch() {
                       : r.chunk.source === "manual"
                         ? "手动添加"
                         : r.chunk.source;
+              const expanded = expandedResults.has(r.chunk.id);
+              const contentPreview =
+                expanded || r.chunk.content.length <= 240
+                  ? r.chunk.content
+                  : `${r.chunk.content.slice(0, 240).trimEnd()}...`;
+              const scoreBand =
+                r.score >= 0.7 ? "高相关" : r.score >= 0.3 ? "中相关" : "低相关";
+              const exactMatch =
+                normalizedQuery.length > 0 && r.chunk.content.toLowerCase().includes(normalizedQuery);
               return (
                 <div
-                  key={idx}
+                  key={r.chunk.id}
                   className="border rounded-lg p-4 bg-gray-50 hover:bg-gray-100 transition"
                 >
                   <div className="flex items-center justify-between mb-2">
@@ -369,10 +403,34 @@ export default function MemorySearch() {
                       )}
                     </div>
                     <span className="text-xs text-gray-500">
-                      相关度 {Math.round(r.score * 100)}%
+                      {scoreBand} · {Math.round(r.score * 100)}%
                     </span>
                   </div>
-                  <p className="text-sm text-gray-800 whitespace-pre-wrap">{r.chunk.content}</p>
+                  {exactMatch && (
+                    <div className="mb-2 inline-flex rounded-full border border-emerald-100 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700">
+                      包含精确查询文本
+                    </div>
+                  )}
+                  <p className="text-sm text-gray-800 whitespace-pre-wrap">{contentPreview}</p>
+                  {r.chunk.content.length > 240 && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setExpandedResults(prev => {
+                          const next = new Set(prev);
+                          if (next.has(r.chunk.id)) {
+                            next.delete(r.chunk.id);
+                          } else {
+                            next.add(r.chunk.id);
+                          }
+                          return next;
+                        })
+                      }
+                      className="mt-2 text-xs font-medium text-indigo-600 hover:text-indigo-800"
+                    >
+                      {expanded ? "收起" : "展开完整内容"}
+                    </button>
+                  )}
                   <p className="text-xs text-gray-400 mt-2">
                     {new Date(r.chunk.created_at).toLocaleString("zh-CN", {
                       month: "short",

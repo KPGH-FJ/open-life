@@ -206,6 +206,7 @@ export default function ChatInputArea({
         <div className="flex gap-3">
           <textarea
             data-testid="chat-input"
+            aria-label="消息输入"
             value={input}
             onChange={e => onInputChange(e.target.value)}
             onFocus={onComposerFocus}
@@ -225,6 +226,9 @@ export default function ChatInputArea({
           />
           <button
             data-testid="send-button"
+            type="button"
+            aria-label={sending ? "正在发送消息" : "发送消息"}
+            title={sending ? "正在发送消息" : "发送消息"}
             onClick={onSend}
             disabled={sending || !input.trim()}
             className={
@@ -233,7 +237,11 @@ export default function ChatInputArea({
                 : "rounded-lg bg-indigo-600 px-4 py-2 text-white hover:bg-indigo-700 disabled:opacity-50"
             }
           >
-            {sending ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}
+            {sending ? (
+              <Loader2 size={18} className="animate-spin" aria-hidden="true" />
+            ) : (
+              <Send size={18} aria-hidden="true" />
+            )}
           </button>
         </div>
       </div>

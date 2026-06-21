@@ -41,6 +41,7 @@ import ProviderTab from "./settings/tabs/ProviderTab";
 import PrivacyTab from "./settings/tabs/PrivacyTab";
 import DataTab from "./settings/tabs/DataTab";
 import MultiStrategyPreviewSection from "./settings/MultiStrategyPreviewSection";
+import ConfirmDangerDialog from "../components/ConfirmDangerDialog";
 
 function defaultConfig(): AppConfig {
   return {
@@ -105,6 +106,10 @@ export default function SettingsPage() {
   const [securityLoading, setSecurityLoading] = useState(false);
   const [securityMessage, setSecurityMessage] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<string>("overview");
+  const [pendingImport, setPendingImport] = useState<{
+    payload: ExportPayload;
+    path: string;
+  } | null>(null);
   const showInternalDebug = isInternalDebugSurfaceEnabled();
 
   useEffect(() => {
@@ -247,7 +252,22 @@ export default function SettingsPage() {
       }
       const text = await readTextFile(path);
       const payload: ExportPayload = JSON.parse(text);
-      await importAllData(payload);
+      setPendingImport({ payload, path });
+      setMessage("已读取导入文件，请确认覆盖导入。");
+    } catch (e: any) {
+      setMessage(buildRuntimeActionError("导入数据", e, "data"));
+    } finally {
+      setImportLoading(false);
+    }
+  };
+
+  const confirmImport = async () => {
+    if (!pendingImport) return;
+    setImportLoading(true);
+    setMessage(null);
+    try {
+      await importAllData(pendingImport.payload);
+      setPendingImport(null);
       setMessage("导入成功，请刷新页面以查看最新数据");
       await refreshAllDiagnostics();
     } catch (e: any) {
@@ -343,6 +363,27 @@ export default function SettingsPage() {
 
   return (
     <div className="h-full overflow-auto p-6">
+      <ConfirmDangerDialog
+        open={Boolean(pendingImport)}
+        title="确认覆盖导入全部数据"
+        description={
+          <div className="space-y-1">
+            <div>导入会覆盖当前 LifeModel、聊天记录与记忆数据。</div>
+            <div>文件：{pendingImport?.path ?? ""}</div>
+            <div>
+              版本：{pendingImport?.payload.version ?? "unknown"}
+              {pendingImport?.payload.app_version
+                ? ` / 应用 ${pendingImport.payload.app_version}`
+                : ""}
+            </div>
+          </div>
+        }
+        confirmationText="IMPORT"
+        confirmLabel="覆盖导入"
+        busy={importLoading}
+        onConfirm={() => void confirmImport()}
+        onCancel={() => setPendingImport(null)}
+      />
       <div className="max-w-2xl mx-auto bg-white rounded-xl shadow p-6 space-y-6">
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-semibold text-gray-800">试用控制台</h2>

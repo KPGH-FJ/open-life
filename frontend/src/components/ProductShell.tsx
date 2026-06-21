@@ -1,5 +1,5 @@
 import type { KeyboardEvent, ReactNode } from "react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { CircleEllipsis } from "lucide-react";
 import { PRIMARY_PRODUCT_ROUTES, type ProductRouteLabel } from "../productShellContract";
@@ -77,6 +77,7 @@ export function MainTabs() {
 function SecondaryToolsMenu() {
   const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const location = useLocation();
 
   const closeMenu = () => {
     setOpen(false);
@@ -89,6 +90,10 @@ function SecondaryToolsMenu() {
       closeMenu();
     }
   };
+
+  useEffect(() => {
+    setOpen(false);
+  }, [location.pathname]);
 
   return (
     <div className="relative" onKeyDown={handleKeyDown}>

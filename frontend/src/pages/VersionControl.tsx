@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   listSnapshots,
@@ -183,6 +183,7 @@ export default function VersionControl() {
   const [diffText, setDiffText] = useState<string>("");
   const [diffing, setDiffing] = useState(false);
   const [structuredDiff, setStructuredDiff] = useState<DiffLine[]>([]);
+  const diffResultRef = useRef<HTMLElement | null>(null);
   const diffSummary = summarizeStructuredDiff(structuredDiff);
   const safeMode = isSafeMode(diagnostics);
   const safeModeReason = getSafeModeReason(diagnostics);
@@ -245,6 +246,8 @@ export default function VersionControl() {
   };
 
   const toggleSelect = (version: string) => {
+    setDiffText("");
+    setStructuredDiff([]);
     setSelected(prev => {
       if (prev.includes(version)) {
         return prev.filter(v => v !== version);
@@ -263,6 +266,10 @@ export default function VersionControl() {
       const text = await diffSnapshots(selected[0], selected[1]);
       setDiffText(text);
       setStructuredDiff(parseStructuredDiff(text));
+      window.requestAnimationFrame(() => {
+        diffResultRef.current?.scrollIntoView({ block: "start" });
+        diffResultRef.current?.focus();
+      });
     } catch (e) {
       setNotice("对比失败: " + String(e));
     } finally {
@@ -441,8 +448,15 @@ export default function VersionControl() {
         </section>
 
         {diffText && (
-          <section className="space-y-2">
-            <h3 className="text-lg font-semibold text-gray-700">差异对比</h3>
+          <section
+            ref={diffResultRef}
+            tabIndex={-1}
+            aria-live="polite"
+            className="space-y-2 focus:outline-none"
+          >
+            <h3 className="text-lg font-semibold text-gray-700">
+              差异对比：{selected[0]} → {selected[1]}
+            </h3>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div className="rounded-lg border bg-indigo-50/70 px-4 py-3">
                 <div className="text-xs text-indigo-500">总变更</div>

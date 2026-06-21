@@ -572,18 +572,14 @@ fn ensure_main_window_visible<R: tauri::Runtime, M: Manager<R>>(manager: &M) -> 
     let window = if let Some(window) = manager.get_webview_window("main") {
         window
     } else {
-        tauri::WebviewWindowBuilder::new(
-            manager,
-            "main",
-            tauri::WebviewUrl::App("index.html".into()),
-        )
-        .title("OpenLife")
-        .inner_size(1280.0, 800.0)
-        .resizable(true)
-        .center()
-        .visible(true)
-        .focused(true)
-        .build()?
+        let main_window_config = manager
+            .config()
+            .app
+            .windows
+            .iter()
+            .find(|config| config.label == "main")
+            .ok_or_else(|| anyhow::anyhow!("tauri config is missing the main window"))?;
+        tauri::WebviewWindowBuilder::from_config(manager, main_window_config)?.build()?
     };
 
     let _ = window.show();

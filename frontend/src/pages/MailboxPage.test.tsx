@@ -172,14 +172,14 @@ describe("MailboxPage", () => {
     expect(screen.getByText("已处理")).toBeInTheDocument();
     expect(screen.getByText("草稿修改")).toBeInTheDocument();
     expect(screen.getAllByText("OpenLife").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("OpenLife 想更新一个目标").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("OpenLife 想更新目标").length).toBeGreaterThan(0);
     expect(screen.getAllByText("OpenLife 需要你确认一次外部操作").length).toBeGreaterThan(0);
   });
 
   it("selects rows and renders the selected proposal reader", async () => {
     render(<MailboxPage />);
 
-    expect((await screen.findAllByText("OpenLife 想更新一个目标")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("OpenLife 想更新目标")).length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: /OpenLife 需要你确认一次外部操作/ }));
 
     expect(screen.getByTestId("mail-reader")).toHaveTextContent("OpenLife");
@@ -269,7 +269,11 @@ describe("MailboxPage", () => {
     });
 
     fireEvent.click(await screen.findByRole("button", { name: "改一下" }));
-    expect(await screen.findByLabelText("你想改成什么")).toBeInTheDocument();
+    const editField = await screen.findByLabelText("你想改成什么");
+    expect(editField).toBeInTheDocument();
+    expect((editField as HTMLTextAreaElement).value).toContain(
+      "raw-sensitive-payload-should-not-render"
+    );
   });
 
   it("keeps Safe Mode protection on accept and edit quick replies", async () => {

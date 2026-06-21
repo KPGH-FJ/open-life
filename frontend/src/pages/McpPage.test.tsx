@@ -75,4 +75,25 @@ describe("McpPage", () => {
     // Privacy rules section
     expect(screen.getByText("隐私保护规则")).toBeInTheDocument();
   });
+
+  it("requires confirmation before clearing old audit logs", async () => {
+    render(
+      <BrowserRouter>
+        <McpPage />
+      </BrowserRouter>
+    );
+
+    await screen.findByText("安全审计中心");
+    fireEvent.click(screen.getByRole("button", { name: "清理 7 天前日志" }));
+
+    expect(await screen.findByRole("dialog", { name: "确认清理 MCP 审计日志" })).toBeInTheDocument();
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "clear_mcp_audit_logs")).toBe(
+      false
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "清理日志" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("clear_mcp_audit_logs", { days: 7 });
+    });
+  });
 });

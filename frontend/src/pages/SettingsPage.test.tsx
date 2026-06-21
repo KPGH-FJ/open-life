@@ -4,8 +4,8 @@ import { MemoryRouter, useLocation } from "react-router-dom";
 import SettingsPage from "./SettingsPage";
 import { invoke } from "@tauri-apps/api/core";
 import { mockInvoke } from "@/test/mocks/tauri";
-import { save } from "@tauri-apps/plugin-dialog";
-import { writeTextFile } from "@tauri-apps/plugin-fs";
+import { save, open } from "@tauri-apps/plugin-dialog";
+import { writeTextFile, readTextFile } from "@tauri-apps/plugin-fs";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -169,6 +169,40 @@ describe("SettingsPage", () => {
       expect(writeTextFile).toHaveBeenCalled();
     });
     expect(await screen.findByText(/应用版本 0.1.0/)).toBeInTheDocument();
+  });
+
+  it("requires typed confirmation before importing data", async () => {
+    vi.mocked(open).mockResolvedValue("/tmp/openlife-import.json");
+    vi.mocked(readTextFile).mockResolvedValue(
+      JSON.stringify({
+        version: "2.0",
+        app_version: "0.1.0",
+        messages: [],
+        vectors: [],
+      })
+    );
+
+    renderSettings();
+
+    await clickTab("数据");
+    fireEvent.click(await screen.findByRole("button", { name: "导入全部数据" }));
+
+    expect(await screen.findByRole("dialog", { name: "确认覆盖导入全部数据" })).toBeInTheDocument();
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "import_all_data")).toBe(false);
+
+    const confirmButton = screen.getByRole("button", { name: "覆盖导入" });
+    expect(confirmButton).toBeDisabled();
+    fireEvent.change(screen.getByLabelText(/输入 IMPORT 以继续/), { target: { value: "IMPORT" } });
+    fireEvent.click(confirmButton);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "import_all_data",
+        expect.objectContaining({
+          payload: expect.objectContaining({ version: "2.0" }),
+        })
+      );
+    });
   });
 
   it("shows feedback evolution report as read-only candidates, not applied rules", async () => {

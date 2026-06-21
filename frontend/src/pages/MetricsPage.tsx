@@ -26,6 +26,8 @@ const MetricsPage: React.FC = () => {
   const [summary, setSummary] = useState<RolloutSummary | null>(null);
   const [errors, setErrors] = useState<RolloutMetric[]>([]);
   const [loading, setLoading] = useState(true);
+  const [hasLoaded, setHasLoaded] = useState(false);
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<Date | null>(null);
 
   useEffect(() => {
     loadData();
@@ -51,14 +53,16 @@ const MetricsPage: React.FC = () => {
       setMetrics(metricsData);
       setSummary(summaryData);
       setErrors(errorsData);
+      setLastRefreshedAt(new Date());
     } catch (e) {
       console.error("Failed to load metrics:", e);
     } finally {
       setLoading(false);
+      setHasLoaded(true);
     }
   };
 
-  if (loading) {
+  if (loading && !hasLoaded) {
     return (
       <div className="flex items-center justify-center h-full">
         <div className="text-lg text-gray-500">加载中...</div>
@@ -70,12 +74,20 @@ const MetricsPage: React.FC = () => {
     <div className="p-6 max-w-7xl mx-auto">
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-gray-900">灰度监控 Dashboard</h1>
-        <button
-          onClick={loadData}
-          className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
-        >
-          刷新数据
-        </button>
+        <div className="flex items-center gap-3">
+          {lastRefreshedAt && (
+            <span className="text-xs text-gray-500">
+              最后刷新 {lastRefreshedAt.toLocaleTimeString()}
+            </span>
+          )}
+          <button
+            onClick={loadData}
+            disabled={loading}
+            className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors disabled:opacity-50"
+          >
+            {loading ? "刷新中..." : "刷新数据"}
+          </button>
+        </div>
       </div>
 
       {/* Summary Cards */}
@@ -150,13 +162,24 @@ const MetricsPage: React.FC = () => {
         <h2 className="text-lg font-semibold mb-4">最近调用记录 ({metrics.length})</h2>
         <div className="overflow-x-auto">
           <table className="min-w-full">
+            <caption className="sr-only">最近 context_assembler 灰度调用记录</caption>
             <thead>
               <tr className="border-b">
-                <th className="text-left py-2 px-3 text-sm font-medium text-gray-500">版本</th>
-                <th className="text-left py-2 px-3 text-sm font-medium text-gray-500">耗时</th>
-                <th className="text-left py-2 px-3 text-sm font-medium text-gray-500">状态</th>
-                <th className="text-left py-2 px-3 text-sm font-medium text-gray-500">时间</th>
-                <th className="text-left py-2 px-3 text-sm font-medium text-gray-500">元数据</th>
+                <th scope="col" className="text-left py-2 px-3 text-sm font-medium text-gray-500">
+                  版本
+                </th>
+                <th scope="col" className="text-left py-2 px-3 text-sm font-medium text-gray-500">
+                  耗时
+                </th>
+                <th scope="col" className="text-left py-2 px-3 text-sm font-medium text-gray-500">
+                  状态
+                </th>
+                <th scope="col" className="text-left py-2 px-3 text-sm font-medium text-gray-500">
+                  时间
+                </th>
+                <th scope="col" className="text-left py-2 px-3 text-sm font-medium text-gray-500">
+                  元数据
+                </th>
               </tr>
             </thead>
             <tbody>

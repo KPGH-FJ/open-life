@@ -325,6 +325,10 @@ export default function CalibrationPage() {
   };
 
   const handleRejectAll = async () => {
+    if (data.changes.length === 0) {
+      navigate("/today");
+      return;
+    }
     await markCalibrationShown("weekly");
     navigate("/dashboard");
   };
@@ -693,31 +697,42 @@ export default function CalibrationPage() {
         </div>
 
         {/* Action bar */}
-        <div className="flex flex-col gap-3 bg-white rounded-xl shadow p-4">
-          <div className="flex items-center justify-between">
+        {data.changes.length === 0 ? (
+          <div className="flex items-center justify-end bg-white rounded-xl shadow p-4">
             <button
-              onClick={handleRejectAll}
+              onClick={() => navigate("/today")}
               className="px-4 py-2 rounded-md text-sm font-medium text-gray-600 hover:bg-gray-100"
             >
-              全部拒绝
-            </button>
-            <span className="text-sm text-gray-500">
-              已选择 {selected.size} / {data.changes.length} 项
-            </span>
-          </div>
-          <div className="flex items-center justify-end gap-3">
-            <button
-              onClick={handleApply}
-              disabled={applyLoading || selected.size === 0}
-              className="px-5 py-2 rounded-md text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
-            >
-              {applyLoading ? "发送中…" : "发送到 Review Center"}
+              返回今日
             </button>
           </div>
-          <div className="text-xs text-gray-500 text-right">
-            所选变更会进入 Review Center，确认后再写入人生模型。
+        ) : (
+          <div className="flex flex-col gap-3 bg-white rounded-xl shadow p-4">
+            <div className="flex items-center justify-between">
+              <button
+                onClick={handleRejectAll}
+                className="px-4 py-2 rounded-md text-sm font-medium text-gray-600 hover:bg-gray-100"
+              >
+                全部拒绝
+              </button>
+              <span className="text-sm text-gray-500">
+                已选择 {selected.size} / {data.changes.length} 项
+              </span>
+            </div>
+            <div className="flex items-center justify-end gap-3">
+              <button
+                onClick={handleApply}
+                disabled={applyLoading || selected.size === 0}
+                className="px-5 py-2 rounded-md text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {applyLoading ? "发送中…" : "发送到 Review Center"}
+              </button>
+            </div>
+            <div className="text-xs text-gray-500 text-right">
+              所选变更会进入 Review Center，确认后再写入人生模型。
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );

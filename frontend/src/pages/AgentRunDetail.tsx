@@ -1,7 +1,21 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { getAgentRun, deleteAgentRun, replayAgentAction, type AgentRun } from "../tauri";
+import {
+  getAgentRun,
+  deleteAgentRun,
+  replayAgentAction,
+  listMainChatAgentTasks,
+  getMainChatAgentTaskDetail,
+  resumeMainChatAgentTask,
+  cancelMainChatAgentTask,
+  retryMainChatAgentAction,
+  refreshMainChatAgentTaskContext,
+  type AgentRun,
+  type MainChatTaskSummary,
+  type MainChatTaskDetail,
+} from "../tauri";
 import RunTracePanel from "../components/RunTracePanel";
+import { safePreviewText } from "../utils/safePreview";
 import {
   ArrowLeft,
   Activity,
@@ -16,12 +30,11 @@ import {
   Eye,
   Zap,
   ListOrdered,
+  RotateCw,
+  Ban,
 } from "lucide-react";
 
-function redactedLength(value?: string | null): string {
-  if (!value) return "0 chars redacted";
-  return `${value.length} chars redacted`;
-}
+const STALE_RUN_THRESHOLD_MS = 10 * 60 * 1000;
 
 function statusIcon(status: string) {
   switch (status) {
@@ -60,6 +73,9 @@ export default function AgentRunDetail() {
   const { runId } = useParams<{ runId: string }>();
   const navigate = useNavigate();
   const [run, setRun] = useState<AgentRun | null>(null);
+  const [taskSummary, setTaskSummary] = useState<MainChatTaskSummary | null>(null);
+  const [taskDetail, setTaskDetail] = useState<MainChatTaskDetail | null>(null);
+  const [taskBusy, setTaskBusy] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -72,13 +88,54 @@ export default function AgentRunDetail() {
   async function loadRun(id: string) {
     try {
       setLoading(true);
-      const data = await getAgentRun(id);
+      const [data, summaries] = await Promise.all([
+        getAgentRun(id),
+        listMainChatAgentTasks({ includeTerminal: true, includeStale: true }, 100, 0).catch(
+          () => []
+        ),
+      ]);
       setRun(data);
+      const summary = summaries.find(item => item.runId === id) ?? null;
+      setTaskSummary(summary);
+      if (summary) {
+        const detail = await getMainChatAgentTaskDetail(summary.taskSessionId).catch(() => null);
+        setTaskDetail(detail);
+      } else {
+        setTaskDetail(null);
+      }
       setError(null);
     } catch (e) {
       setError(String(e));
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleTaskControl(control: "resume" | "cancel" | "retry" | "refresh") {
+    if (!runId || !taskSummary) return;
+    setTaskBusy(control);
+    setError(null);
+    try {
+      if (control === "resume") {
+        await resumeMainChatAgentTask(taskSummary.taskSessionId);
+      } else if (control === "cancel") {
+        await cancelMainChatAgentTask(taskSummary.taskSessionId);
+      } else if (control === "refresh") {
+        await refreshMainChatAgentTaskContext(taskSummary.taskSessionId);
+      } else {
+        const detail =
+          taskDetail ?? (await getMainChatAgentTaskDetail(taskSummary.taskSessionId));
+        const failedAction = detail.actions.find(action => action.status === "failed");
+        if (!failedAction) {
+          throw new Error("没有可重试的失败 action");
+        }
+        await retryMainChatAgentAction(taskSummary.taskSessionId, failedAction.id);
+      }
+      await loadRun(runId);
+    } catch (e) {
+      setError(`任务控制失败: ${String(e)}`);
+    } finally {
+      setTaskBusy(null);
     }
   }
 
@@ -134,6 +191,13 @@ export default function AgentRunDetail() {
       </div>
     );
   }
+
+  const startedAt = new Date(run.startedAt).getTime();
+  const stale =
+    (taskSummary?.staleState && !["fresh", "none", "ok"].includes(taskSummary.staleState)) ||
+    (run.status === "running" &&
+      Number.isFinite(startedAt) &&
+      Date.now() - startedAt > STALE_RUN_THRESHOLD_MS);
 
   return (
     <div className="h-full overflow-auto p-6">
@@ -210,7 +274,7 @@ export default function AgentRunDetail() {
             </div>
           </div>
 
-          {/* Duration */}
+	          {/* Duration */}
           {run.finishedAt && (
             <div className="mb-6 text-xs text-stone-500">
               持续时间:{" "}
@@ -224,23 +288,91 @@ export default function AgentRunDetail() {
             </div>
           )}
 
-          {run.userInput && (
-            <div className="mb-6">
-              <h3 className="text-sm font-semibold text-stone-700 mb-2">用户输入摘要</h3>
-              <div className="bg-stone-50 rounded-lg p-3 text-sm text-stone-800">
-                {redactedLength(run.userInput)}
-              </div>
-            </div>
-          )}
+	          {run.userInput && (
+	            <div className="mb-6">
+	              <h3 className="text-sm font-semibold text-stone-700 mb-2">用户输入摘要</h3>
+	              <div className="bg-stone-50 rounded-lg p-3 text-sm text-stone-800">
+	                {safePreviewText(run.userInput, 160)}
+	              </div>
+	            </div>
+	          )}
 
           {run.outputPreview && (
             <div className="mb-6">
-              <h3 className="text-sm font-semibold text-stone-700 mb-2">输出摘要</h3>
-              <div className="bg-stone-50 rounded-lg p-3 text-sm text-stone-800">
-                {redactedLength(run.outputPreview)}
-              </div>
-            </div>
-          )}
+	              <h3 className="text-sm font-semibold text-stone-700 mb-2">输出摘要</h3>
+	              <div className="bg-stone-50 rounded-lg p-3 text-sm text-stone-800">
+	                {safePreviewText(run.outputPreview, 160)}
+	              </div>
+	            </div>
+	          )}
+
+	          <div className="mb-6">
+	            <h3 className="text-sm font-semibold text-stone-700 mb-2">任务控制</h3>
+	            {taskSummary ? (
+	              <div className="rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm text-stone-700">
+	                <div className="flex flex-wrap items-center gap-2">
+	                  <span className="rounded-md bg-stone-900 px-2 py-1 text-xs font-semibold text-white">
+	                    {taskSummary.status.replace(/_/g, " ")}
+	                  </span>
+	                  <span>Session {taskSummary.taskSessionId.slice(-8)}</span>
+	                  <span>推荐：{taskSummary.nextRecommendedControl}</span>
+	                  {stale && (
+	                    <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800">
+	                      可能已卡住
+	                    </span>
+	                  )}
+	                </div>
+	                {taskSummary.lastObservationPreview && (
+	                  <div className="mt-2 text-xs text-stone-500">
+	                    最近观察：{safePreviewText(taskSummary.lastObservationPreview, 140)}
+	                  </div>
+	                )}
+	                <div className="mt-3 flex flex-wrap gap-2">
+	                  <button
+	                    type="button"
+	                    onClick={() => void handleTaskControl("resume")}
+	                    disabled={taskBusy !== null}
+	                    className="inline-flex items-center gap-1 rounded-md border border-stone-200 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 disabled:opacity-50"
+	                  >
+	                    <Play size={12} aria-hidden="true" /> Resume
+	                  </button>
+	                  <button
+	                    type="button"
+	                    onClick={() => void handleTaskControl("retry")}
+	                    disabled={taskBusy !== null}
+	                    className="inline-flex items-center gap-1 rounded-md border border-stone-200 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 disabled:opacity-50"
+	                  >
+	                    <RotateCw size={12} aria-hidden="true" /> Retry
+	                  </button>
+	                  <button
+	                    type="button"
+	                    onClick={() => void handleTaskControl("cancel")}
+	                    disabled={taskBusy !== null}
+	                    className="inline-flex items-center gap-1 rounded-md border border-stone-200 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 disabled:opacity-50"
+	                  >
+	                    <Ban size={12} aria-hidden="true" /> Cancel
+	                  </button>
+	                  <button
+	                    type="button"
+	                    onClick={() => void handleTaskControl("refresh")}
+	                    disabled={taskBusy !== null}
+	                    className="inline-flex items-center gap-1 rounded-md border border-stone-200 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 disabled:opacity-50"
+	                  >
+	                    <RotateCw
+	                      size={12}
+	                      aria-hidden="true"
+	                      className={taskBusy === "refresh" ? "animate-spin" : ""}
+	                    />{" "}
+	                    Refresh
+	                  </button>
+	                </div>
+	              </div>
+	            ) : (
+	              <div className="rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm text-stone-500">
+	                旧 run 或缺少 task session，当前无法直接控制。
+	              </div>
+	            )}
+	          </div>
 
           {run.error && (
             <div className="mb-6">
@@ -500,11 +632,11 @@ export default function AgentRunDetail() {
                               </button>
                             </div>
                           )}
-                          {action.error && (
-                            <div className="mt-2 rounded bg-red-50 px-2 py-1 text-xs text-red-700">
-                              {redactedLength(action.error)}
-                            </div>
-                          )}
+	                          {action.error && (
+	                            <div className="mt-2 rounded bg-red-50 px-2 py-1 text-xs text-red-700">
+	                              {safePreviewText(action.error, 140)}
+	                            </div>
+	                          )}
                         </div>
                       );
                     } else {
@@ -521,9 +653,9 @@ export default function AgentRunDetail() {
                               {new Date(obs.timestamp).toLocaleString()}
                             </span>
                           </div>
-                          <div className="text-stone-800">
-                            {trace?.outputPreview ?? redactedLength(obs.content)}
-                          </div>
+	                          <div className="text-stone-800">
+	                            {trace?.outputPreview ?? safePreviewText(obs.content, 140)}
+	                          </div>
                           <div className="text-xs text-stone-500 mt-1">
                             Source: {obs.source}
                             {obs.actionId ? ` · Action: ${obs.actionId.slice(0, 8)}` : ""}

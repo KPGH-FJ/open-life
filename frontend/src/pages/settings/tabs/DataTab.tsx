@@ -4,6 +4,8 @@ import {
   type SystemDiagnostics,
 } from "../../../tauri";
 import { buildSafeModeBlockedMessage } from "../../../utils/runtimeMessages";
+import { useState } from "react";
+import ConfirmDangerDialog from "../../../components/ConfirmDangerDialog";
 
 function readableError(e: unknown): string {
   if (typeof e === "string") return e;
@@ -49,8 +51,38 @@ export default function DataTab({
   setTierResult,
   handleExportDiagnostics,
 }: DataTabProps) {
+  const [confirmTierMaintenance, setConfirmTierMaintenance] = useState(false);
+
+  const runTierMaintenance = async () => {
+    setConfirmTierMaintenance(false);
+    if (safeMode) {
+      setTierResult(buildSafeModeBlockedMessage("记忆层级维护", diagnostics));
+      return;
+    }
+    setTierLoading(true);
+    setTierResult(null);
+    try {
+      const res = await runMemoryTierMaintenance();
+      setTierResult(`记忆层级维护完成：晋升 ${res.promoted} 条，降级 ${res.demoted} 条`);
+    } catch (e: any) {
+      setTierResult("维护失败: " + readableError(e));
+    } finally {
+      setTierLoading(false);
+    }
+  };
+
   return (
     <>
+      <ConfirmDangerDialog
+        open={confirmTierMaintenance}
+        title="确认运行记忆层级维护"
+        description="这个操作会调整本地记忆的冷热层级，影响后续检索优先级。运行前请确认当前数据环境稳定。"
+        confirmLabel="运行维护"
+        severity="warning"
+        busy={tierLoading}
+        onConfirm={() => void runTierMaintenance()}
+        onCancel={() => setConfirmTierMaintenance(false)}
+      />
       {/* Data Migration */}
       <section className="space-y-4 border-t pt-4">
         <h3 className="text-sm font-medium text-gray-700">数字遗产 / 数据迁移</h3>
@@ -101,22 +133,7 @@ export default function DataTab({
             {evolutionLoading ? "生成中..." : "生成进化报告"}
           </button>
           <button
-            onClick={async () => {
-              if (safeMode) {
-                setTierResult(buildSafeModeBlockedMessage("记忆层级维护", diagnostics));
-                return;
-              }
-              setTierLoading(true);
-              setTierResult(null);
-              try {
-                const res = await runMemoryTierMaintenance();
-                setTierResult(`记忆层级维护完成：晋升 ${res.promoted} 条，降级 ${res.demoted} 条`);
-              } catch (e: any) {
-                setTierResult("维护失败: " + readableError(e));
-              } finally {
-                setTierLoading(false);
-              }
-            }}
+            onClick={() => setConfirmTierMaintenance(true)}
             disabled={tierLoading || safeMode}
             className="px-3 py-2 bg-amber-600 text-white rounded-md text-sm font-medium hover:bg-amber-700 disabled:opacity-50"
           >

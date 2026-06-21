@@ -148,9 +148,25 @@ pub(crate) async fn try_run_main_chat_agent_strategy(
             let live_provider_invoked = !scripted_provider_response
                 && direct_answer_model_route.provider != "none"
                 && direct_answer_model_route.route_type == "cloud";
+            let mut routed_generation_messages = messages_for_generation.to_vec();
+            routed_generation_messages.insert(
+                0,
+                ChatMessage {
+                    role: "system".into(),
+                    content: format!(
+                        "Runtime route facts for this turn: provider={}, model={}, routeType={}, reason={}, localModel={}, preferLocal={}. If the user asks what model/provider is being used or whether external network/search is available, answer only from these route facts and explicit tool availability. Do not infer web/search/API capabilities from provider configuration.",
+                        direct_answer_model_route.provider,
+                        direct_answer_model_route.model,
+                        direct_answer_model_route.route_type,
+                        direct_answer_model_route.reason,
+                        direct_answer_model_route.local_model,
+                        direct_answer_model_route.prefer_local
+                    ),
+                },
+            );
             let generated = generate_non_stream_fallback(
                 &scheduler,
-                messages_for_generation.to_vec(),
+                routed_generation_messages,
                 life_model,
                 "",
                 hs_packet.clone(),

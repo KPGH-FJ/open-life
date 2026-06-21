@@ -41,6 +41,9 @@ describe("VersionControl", () => {
     expect(screen.getByText(/身份 · \d+ 处/)).toBeInTheDocument();
     expect(screen.getByText(/目标 · \d+ 处/)).toBeInTheDocument();
     expect(screen.getByText("关键变化")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: /差异对比/ }).closest("section")).toHaveFocus();
+    });
   });
 
   it("shows safe mode banner and blocks create/restore actions when diagnostics are degraded", async () => {

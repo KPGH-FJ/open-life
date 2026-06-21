@@ -132,4 +132,52 @@ describe("MemorySearch", () => {
     );
     expect(invoke).not.toHaveBeenCalledWith("restore_archived_chunks", expect.anything());
   });
+
+  it("collapses low confidence search noise by default", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "search_memory") {
+        return Promise.resolve([
+          [
+            {
+              id: 1,
+              session_id: "sess-1",
+              content: "重庆开州是用户查询过的地点。",
+              source: "manual",
+              created_at: new Date().toISOString(),
+            },
+            0.92,
+          ],
+          [
+            {
+              id: 2,
+              session_id: "sess-2",
+              content: "一条低相关历史记忆，应该默认折叠。",
+              source: "chat",
+              created_at: new Date().toISOString(),
+            },
+            0.12,
+          ],
+        ]);
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <MemorySearch />
+      </BrowserRouter>
+    );
+
+    fireEvent.change(await screen.findByPlaceholderText("输入查询语义..."), {
+      target: { value: "重庆开州" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+
+    expect(await screen.findByText("重庆开州是用户查询过的地点。")).toBeInTheDocument();
+    expect(screen.getByText("包含精确查询文本")).toBeInTheDocument();
+    expect(screen.queryByText("一条低相关历史记忆，应该默认折叠。")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "显示 1 条低相关结果" }));
+    expect(await screen.findByText("一条低相关历史记忆，应该默认折叠。")).toBeInTheDocument();
+  });
 });

@@ -59,12 +59,25 @@ function isUnsupportedType(type: string): boolean {
   );
 }
 
-function typeLabel(type: string): string {
-  return TYPE_LABELS[type] ?? type.replace(/_/g, " ");
+function proposalDomainLabel(proposal: AgentProposal): string {
+  const path = proposal.affectedPath.toLowerCase();
+  if (path.startsWith("identity.")) return "身份信息";
+  if (path.startsWith("preferences.")) return "偏好记录";
+  if (path.startsWith("state.")) return "当前状态";
+  if (path.startsWith("capabilities.")) return "能力信息";
+  if (path.startsWith("goals.")) return "目标";
+  return TYPE_LABELS[proposal.proposalType] ?? proposal.proposalType.replace(/_/g, " ");
+}
+
+function typeLabel(proposal: AgentProposal): string {
+  const domain = proposalDomainLabel(proposal);
+  const raw = TYPE_LABELS[proposal.proposalType] ?? proposal.proposalType.replace(/_/g, " ");
+  return domain === raw ? raw : `${domain} · ${raw}`;
 }
 
 function proposalSubject(proposal: AgentProposal): string {
-  if (proposal.proposalType === "goal_update") return "OpenLife 想更新一个目标";
+  const domain = proposalDomainLabel(proposal);
+  if (proposal.proposalType === "goal_update") return `OpenLife 想更新${domain}`;
   if (proposal.proposalType === "memory_write" || proposal.proposalType === "preference_update") {
     return "OpenLife 想记住一条偏好";
   }
@@ -78,6 +91,11 @@ function proposalSubject(proposal: AgentProposal): string {
     return "OpenLife 需要你确认一次外部操作";
   }
   return "OpenLife 想调整 Life Model";
+}
+
+function editableProposalValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  return JSON.stringify(value ?? null, null, 2);
 }
 
 function folderMatches(proposal: AgentProposal, folder: FolderId): boolean {
@@ -358,7 +376,7 @@ export default function MailboxPage() {
 
   const startEdit = (proposal: AgentProposal) => {
     setEditingId(proposal.id);
-    setEditValue("");
+    setEditValue(editableProposalValue(proposal.after));
     setError(null);
     setNotice(null);
   };
@@ -620,8 +638,9 @@ export default function MailboxPage() {
                     </div>
                     <div className="mt-3 grid gap-2 text-sm text-stone-700 md:grid-cols-2">
                       <div>位置：{selectedProposal.affectedPath}</div>
-                      <div>类型：{typeLabel(selectedProposal.proposalType)}</div>
+                      <div>类型：{typeLabel(selectedProposal)}</div>
                       <div>变更摘要：{metadataValueSummary(selectedProposal.after)}</div>
+                      <div>原值摘要：{metadataValueSummary(selectedProposal.before)}</div>
                       <div>来源：{sourceLabel(selectedProposal.source)}</div>
                       <div>状态：{statusLabel(selectedProposal.status)}</div>
                       {selectedProposal.sourceDetail && (

@@ -43,14 +43,67 @@ describe("A2APage", () => {
       expect(screen.getByText("桥接运行")).toBeInTheDocument();
     });
 
-    const inputs = screen.getAllByRole("textbox");
-    fireEvent.change(inputs[3], { target: { value: "帮我做一个决策摘要" } });
+    fireEvent.change(screen.getByPlaceholderText("输入要送入 OpenLife/A2A 桥接的文本"), {
+      target: { value: "帮我做一个决策摘要" },
+    });
     fireEvent.click(screen.getByText("桥接运行"));
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith(
         "a2a_bridge_local",
         expect.objectContaining({ text: "帮我做一个决策摘要" })
+      );
+    });
+  });
+
+  it("keeps local service and bridge inputs independent", async () => {
+    render(
+      <BrowserRouter>
+        <A2APage />
+      </BrowserRouter>
+    );
+
+    await screen.findByText("OpenLife ↔ A2A 桥接调试");
+    fireEvent.change(screen.getByPlaceholderText("输入本地固定技能的查询内容"), {
+      target: { value: "本地服务输入" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("输入要送入 OpenLife/A2A 桥接的文本"), {
+      target: { value: "桥接输入" },
+    });
+    fireEvent.click(screen.getByText("桥接运行"));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "a2a_bridge_local",
+        expect.objectContaining({ text: "桥接输入" })
+      );
+    });
+  });
+
+  it("requires confirmation before sending to an external A2A URL", async () => {
+    render(
+      <BrowserRouter>
+        <A2APage />
+      </BrowserRouter>
+    );
+
+    await screen.findByText("A2A Client - 发送 Task");
+    fireEvent.change(screen.getByPlaceholderText("Agent Base URL"), {
+      target: { value: "https://example.com/a2a" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("输入要发送给 Agent 的内容"), {
+      target: { value: "外部发送测试" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByRole("dialog", { name: "确认发送 A2A Task" })).toBeInTheDocument();
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "a2a_send_task")).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "发送 Task" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "a2a_send_task",
+        expect.objectContaining({ url: "https://example.com/a2a" })
       );
     });
   });

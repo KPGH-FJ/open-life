@@ -39,6 +39,7 @@ describe("CompanionPage", () => {
     expect(stage).toHaveAttribute("data-state", "idle");
     expect(screen.getByRole("status", { name: /OpenLife Agent 状态/ })).toBeInTheDocument();
     expect(await screen.findByPlaceholderText(/输入消息/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "发送消息" })).toBeInTheDocument();
   });
 
   it("keeps AgentStage static when the composer receives focus", async () => {
