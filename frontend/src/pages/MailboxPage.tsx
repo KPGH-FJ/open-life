@@ -23,6 +23,7 @@ import {
   type AppConfig,
   type ProposalStatus,
 } from "../tauri";
+import { buildProposalDisplayModel, proposalSubject } from "../utils/proposalDisplay";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
 
 type FolderId = "pending" | "accepted" | "archived" | "needs_edit";
@@ -35,62 +36,10 @@ const FOLDERS: Array<{ id: FolderId; label: string; icon: typeof Inbox }> = [
   { id: "needs_edit", label: "草稿修改", icon: Edit2 },
 ];
 
-const TYPE_LABELS: Record<string, string> = {
-  life_model_update: "Life Model 调整",
-  goal_update: "目标更新",
-  state_update: "状态更新",
-  preference_update: "偏好记录",
-  capability_update: "能力更新",
-  memory_write: "记住偏好",
-  memory_archive: "整理记忆",
-  tool_permission: "外部操作确认",
-  plugin_permission: "外部操作确认",
-  schedule_checkin: "提醒确认",
-  scheduled_task: "外部操作确认",
-  external_write_action: "外部操作确认",
-  model_policy_change: "模型策略确认",
-  data_export: "外部操作确认",
-  unsupported: "暂不支持的确认",
-};
-
 function isUnsupportedType(type: string): boolean {
   return ["plugin_permission", "model_policy_change", "schedule_checkin", "unsupported"].includes(
     type
   );
-}
-
-function proposalDomainLabel(proposal: AgentProposal): string {
-  const path = proposal.affectedPath.toLowerCase();
-  if (path.startsWith("identity.")) return "身份信息";
-  if (path.startsWith("preferences.")) return "偏好记录";
-  if (path.startsWith("state.")) return "当前状态";
-  if (path.startsWith("capabilities.")) return "能力信息";
-  if (path.startsWith("goals.")) return "目标";
-  return TYPE_LABELS[proposal.proposalType] ?? proposal.proposalType.replace(/_/g, " ");
-}
-
-function typeLabel(proposal: AgentProposal): string {
-  const domain = proposalDomainLabel(proposal);
-  const raw = TYPE_LABELS[proposal.proposalType] ?? proposal.proposalType.replace(/_/g, " ");
-  return domain === raw ? raw : `${domain} · ${raw}`;
-}
-
-function proposalSubject(proposal: AgentProposal): string {
-  const domain = proposalDomainLabel(proposal);
-  if (proposal.proposalType === "goal_update") return `OpenLife 想更新${domain}`;
-  if (proposal.proposalType === "memory_write" || proposal.proposalType === "preference_update") {
-    return "OpenLife 想记住一条偏好";
-  }
-  if (
-    proposal.proposalType === "tool_permission" ||
-    proposal.proposalType === "plugin_permission" ||
-    proposal.proposalType === "scheduled_task" ||
-    proposal.proposalType === "external_write_action" ||
-    proposal.proposalType === "data_export"
-  ) {
-    return "OpenLife 需要你确认一次外部操作";
-  }
-  return "OpenLife 想调整 Life Model";
 }
 
 function editableProposalValue(value: unknown): string {
@@ -109,22 +58,6 @@ function folderMatches(proposal: AgentProposal, folder: FolderId): boolean {
 
 function senderFor(_proposal: AgentProposal): string {
   return "OpenLife";
-}
-
-function sourceLabel(source: string): string {
-  const labels: Record<string, string> = {
-    builder_review: "构建",
-    calibration_run: "校准",
-    feedback_evolution: "反馈",
-    memory_governance: "记忆整理",
-    skill_runtime: "技能候选",
-    plugin: "插件",
-    manual: "手动调整",
-    chat_conversation: "对话",
-    proactive_agent: "OpenLife 主动提醒",
-    planning_session: "规划",
-  };
-  return labels[source] ?? "OpenLife";
 }
 
 function impactLabel(risk: AgentProposal["riskLevel"]): string {
@@ -165,32 +98,6 @@ function formatDate(value: string): string {
 
 function truncate(value: string, length = 88): string {
   return value.length > length ? `${value.slice(0, length)}...` : value;
-}
-
-function shortDigest(value?: string): string | null {
-  if (!value) return null;
-  return value.length > 18 ? `${value.slice(0, 18)}...` : value;
-}
-
-function stableHash(value: string): string {
-  let hash = 2166136261;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return `fnv1a:${(hash >>> 0).toString(16).padStart(8, "0")}`;
-}
-
-function metadataValueSummary(value: unknown): string {
-  if (value === null || value === undefined) return "空";
-  if (typeof value === "string") return `文本 ${value.length} 字 · ${stableHash(value)}`;
-  if (typeof value === "number" || typeof value === "boolean") return `${typeof value}: ${value}`;
-  if (Array.isArray(value)) return `数组 ${value.length} 项`;
-  if (typeof value === "object") {
-    const keys = Object.keys(value as Record<string, unknown>).sort();
-    return keys.length > 0 ? `对象字段：${keys.slice(0, 8).join(", ")}` : "空对象";
-  }
-  return typeof value;
 }
 
 function isPathInSafePaths(path: string | undefined, safePaths: string[]): boolean {
@@ -331,6 +238,7 @@ export default function MailboxPage() {
 
   const selectedProposal =
     visibleProposals.find(proposal => proposal.id === selectedId) ?? visibleProposals[0] ?? null;
+  const selectedDisplay = selectedProposal ? buildProposalDisplayModel(selectedProposal) : null;
 
   const runAction = async (proposal: AgentProposal, action: QuickAction) => {
     setActingId(proposal.id);
@@ -590,7 +498,7 @@ export default function MailboxPage() {
                     <span>{formatDate(selectedProposal.createdAt)}</span>
                   </div>
                   <h3 className="mt-2 text-lg font-bold tracking-normal text-stone-950">
-                    {proposalSubject(selectedProposal)}
+                    {selectedDisplay?.title}
                   </h3>
                   <div className="mt-3 flex flex-wrap items-center gap-2">
                     <span
@@ -610,6 +518,9 @@ export default function MailboxPage() {
                     <span className="rounded-full bg-stone-100 px-2.5 py-1 text-[11px] text-stone-600">
                       把握：{Math.round(selectedProposal.confidence * 100)}%
                     </span>
+                    <span className="rounded-full bg-stone-100 px-2.5 py-1 text-[11px] text-stone-600">
+                      {selectedDisplay?.typeLabel}
+                    </span>
                   </div>
                 </header>
 
@@ -619,7 +530,7 @@ export default function MailboxPage() {
                       OpenLife 想做什么
                     </div>
                     <p className="mt-2 text-sm leading-6 text-stone-800">
-                      {proposalSubject(selectedProposal)}
+                      {selectedDisplay?.intent}
                     </p>
                   </section>
 
@@ -636,54 +547,67 @@ export default function MailboxPage() {
                     <div className="text-xs font-semibold uppercase tracking-normal text-stone-500">
                       会影响哪里
                     </div>
-                    <div className="mt-3 grid gap-2 text-sm text-stone-700 md:grid-cols-2">
-                      <div>位置：{selectedProposal.affectedPath}</div>
-                      <div>类型：{typeLabel(selectedProposal)}</div>
-                      <div>变更摘要：{metadataValueSummary(selectedProposal.after)}</div>
-                      <div>原值摘要：{metadataValueSummary(selectedProposal.before)}</div>
-                      <div>来源：{sourceLabel(selectedProposal.source)}</div>
-                      <div>状态：{statusLabel(selectedProposal.status)}</div>
-                      {selectedProposal.sourceDetail && (
-                        <div className="md:col-span-2">
-                          来源详情：{metadataValueSummary(selectedProposal.sourceDetail)}
+                    <div className="mt-3 grid gap-3 text-sm text-stone-700 md:grid-cols-2">
+                      <div className="rounded-md bg-white px-3 py-2">
+                        <div className="text-xs font-medium text-stone-500">领域</div>
+                        <div className="mt-1 font-medium text-stone-900">
+                          {selectedDisplay?.domain}
                         </div>
-                      )}
-                      {selectedProposal.runId && (
-                        <div className="md:col-span-2">
-                          Run：
-                          <a
-                            className="text-stone-900 underline"
-                            href={`#/runs/${selectedProposal.runId}`}
-                          >
-                            {selectedProposal.runId}
-                          </a>
-                        </div>
-                      )}
+                      </div>
+                      <div className="rounded-md bg-white px-3 py-2">
+                        <div className="text-xs font-medium text-stone-500">影响说明</div>
+                        <div className="mt-1 text-stone-800">{selectedDisplay?.plainImpact}</div>
+                      </div>
                     </div>
+
+                    <div className="mt-3 overflow-hidden rounded-md border border-stone-200 bg-white">
+                      <div className="grid grid-cols-[minmax(90px,0.8fr)_minmax(0,1fr)_minmax(0,1fr)] border-b border-stone-100 bg-stone-50 px-3 py-2 text-xs font-semibold text-stone-500">
+                        <div>字段</div>
+                        <div>当前值</div>
+                        <div>将变为</div>
+                      </div>
+                      {selectedDisplay?.diffRows.map(row => (
+                        <div
+                          key={row.field}
+                          className="grid grid-cols-[minmax(90px,0.8fr)_minmax(0,1fr)_minmax(0,1fr)] gap-3 border-b border-stone-100 px-3 py-2 text-sm last:border-b-0"
+                        >
+                          <div className="font-medium text-stone-700">{row.field}</div>
+                          <div className="break-words text-stone-700">{row.before}</div>
+                          <div className="break-words text-stone-900">{row.after}</div>
+                          {row.redacted && (
+                            <div className="col-span-3 text-xs text-stone-500">
+                              该字段可能包含敏感或原始内容，主面板只显示摘要。
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+
+                    <details className="mt-3 rounded-md border border-stone-200 bg-white px-3 py-2">
+                      <summary className="cursor-pointer text-xs font-semibold text-stone-600">
+                        技术详情
+                      </summary>
+                      <div className="mt-3 grid gap-2 text-xs text-stone-600 md:grid-cols-2">
+                        {selectedDisplay?.technicalRows.map(row => (
+                          <div key={`${row.label}-${row.value}`} className="min-w-0">
+                            <span className="text-stone-400">{row.label}：</span>
+                            {row.href ? (
+                              <a className="break-all text-stone-900 underline" href={row.href}>
+                                {row.value}
+                              </a>
+                            ) : (
+                              <span className="break-all">{row.value}</span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </details>
 
                     {selectedProposal.proposalType === "external_write_action" && (
                       <div className="mt-3 rounded-md border border-stone-200 bg-white p-3 text-xs text-stone-600">
                         <div className="font-semibold text-stone-700">外部操作边界</div>
-                        <div className="mt-2 grid gap-1.5 md:grid-cols-2">
-                          <div>路径：{selectedProposal.after?.path || "未提供"}</div>
-                          <div>操作：{selectedProposal.after?.operation || "unknown"}</div>
-                          <div>
-                            大小：
-                            {selectedProposal.after?.size_bytes != null
-                              ? `${selectedProposal.after.size_bytes} bytes`
-                              : "unknown"}
-                          </div>
-                          <div>
-                            Safe Paths：
-                            {isPathInSafePaths(selectedProposal.after?.path, safePaths)
-                              ? "允许范围内"
-                              : "不在允许范围内"}
-                          </div>
-                          {selectedProposal.after?.content_hash && (
-                            <div className="md:col-span-2">
-                              摘要 {shortDigest(selectedProposal.after.content_hash)}
-                            </div>
-                          )}
+                        <div className="mt-2 leading-5">
+                          这会请求外部写入；未同意前不会执行。路径、内容摘要和 Run 信息只放在技术详情中。
                         </div>
                       </div>
                     )}
@@ -706,28 +630,14 @@ export default function MailboxPage() {
                       <ShieldCheck size={14} aria-hidden="true" />
                       依据摘要
                     </div>
-                    {selectedProposal.whyOpenLifeThinksThis && (
-                      <p className="mt-2 text-sm leading-6 text-sky-950">
-                        {selectedProposal.whyOpenLifeThinksThis}
-                      </p>
-                    )}
+                    <p className="mt-2 text-sm leading-6 text-sky-950">
+                      {selectedDisplay?.evidenceSummary}
+                    </p>
                     {(selectedProposal.evidenceSummaries?.length ?? 0) > 0 && (
                       <div className="mt-3 space-y-2">
                         {selectedProposal.evidenceSummaries?.map(summary => (
                           <div key={summary.id} className="rounded-md bg-white/80 p-3 text-sm">
                             <div className="font-medium text-stone-800">{summary.summary}</div>
-                            <div className="mt-2 flex flex-wrap gap-2 text-[10px] text-stone-500">
-                              {summary.sourceAssetIds?.slice(0, 3).map(sourceId => (
-                                <span key={sourceId} className="rounded bg-stone-100 px-2 py-0.5">
-                                  来源 {sourceId}
-                                </span>
-                              ))}
-                              {shortDigest(summary.contentDigest) && (
-                                <span className="rounded bg-stone-100 px-2 py-0.5 font-mono">
-                                  摘要 {shortDigest(summary.contentDigest)}
-                                </span>
-                              )}
-                            </div>
                           </div>
                         ))}
                       </div>
@@ -744,11 +654,6 @@ export default function MailboxPage() {
                         ))}
                       </div>
                     )}
-                    {!selectedProposal.whyOpenLifeThinksThis &&
-                      (selectedProposal.evidenceSummaries?.length ?? 0) === 0 &&
-                      (selectedProposal.behaviorChecks?.length ?? 0) === 0 && (
-                        <div className="mt-2 text-sm text-sky-900">暂无可展示的依据摘要。</div>
-                      )}
                   </section>
 
                   <section className="rounded-lg border border-stone-200 p-4">

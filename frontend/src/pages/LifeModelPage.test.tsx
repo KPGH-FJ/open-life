@@ -211,6 +211,64 @@ describe("LifeModelPage", () => {
     expect(screen.queryByText(/proposal/i)).not.toBeInTheDocument();
   });
 
+  it("shows three local handling actions for Life Model quality issues without writing data", async () => {
+    const lowQualityModel = {
+      ...mockLifeModel,
+      identity: {
+        ...mockLifeModel.identity,
+        name: "l",
+      },
+      goals: {
+        ...mockLifeModel.goals,
+        daily: [{ name: "已记录状态 qapressure = 8 points", done: false }],
+      },
+      capabilities: {
+        ...mockLifeModel.capabilities,
+        skills: [{ name: "l", proficiency: 0.2, description: "" }],
+      },
+      state: {
+        ...mockLifeModel.state,
+        focus_areas: ["工作", "工作"],
+      },
+    };
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_life_model") return Promise.resolve(lowQualityModel);
+      if (cmd === "get_system_diagnostics") return Promise.resolve(safeDiagnostics);
+      if (cmd === "list_proposals") return Promise.resolve([pendingProposal]);
+      return mockInvoke(cmd, args);
+    });
+
+    renderPage();
+    fireEvent.click(await screen.findByRole("tab", { name: "概览" }));
+
+    expect(await screen.findByText("发现可能影响画像可信度的字段")).toBeInTheDocument();
+    expect(screen.getByText("本次视图处理，不会改写 Life Model；正式更新仍需邮箱确认。")).toBeInTheDocument();
+    expect(screen.getByText("身份摘要过短")).toBeInTheDocument();
+    expect(screen.getByText("目标里混入了状态或系统回执")).toBeInTheDocument();
+    expect(screen.getByText("能力字段像碎片句")).toBeInTheDocument();
+    expect(screen.getByText("状态标签重复")).toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: "修正" }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("button", { name: "不采用" }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("button", { name: "稍后处理" }).length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "稍后处理" })[0]);
+    expect(screen.getByText("已标记稍后处理")).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "不采用" })[0]);
+    expect(screen.queryByText("身份摘要过短")).not.toBeInTheDocument();
+
+    const calledCommands = vi.mocked(invoke).mock.calls.map(([command]) => command);
+    for (const forbidden of [
+      "accept_proposal",
+      "edit_proposal",
+      "save_life_model",
+      "builder_apply_signals",
+      "batch_accept_low_risk_proposals",
+    ]) {
+      expect(calledCommands).not.toContain(forbidden);
+    }
+  });
+
   it("does not show direct-write actions in Safe Mode", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_system_diagnostics") {

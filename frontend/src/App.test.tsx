@@ -285,13 +285,13 @@ describe("App onboarding", () => {
     expect(screen.getByRole("link", { name: "陪伴" })).toHaveAttribute("aria-current", "page");
     expect(screen.queryByRole("link", { name: "Runs" })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "更多" }));
+    fireEvent.click(screen.getByRole("button", { name: "能力与设置" }));
 
     for (const [label, path] of [
+      ["设置总览", "/settings"],
+      ["MCP 工具", "/mcp"],
+      ["A2A 连接", "/a2a"],
       ["Runs", "/runs"],
-      ["设置", "/settings"],
-      ["MCP", "/mcp"],
-      ["A2A", "/a2a"],
       ["版本", "/versions"],
       ["Metrics", "/metrics"],
       ["Calibration", "/calibration"],
@@ -314,16 +314,16 @@ describe("App onboarding", () => {
     );
 
     await screen.findByRole("link", { name: "陪伴" });
-    const menuButton = screen.getByRole("button", { name: "更多" });
+    const menuButton = screen.getByRole("button", { name: "能力与设置" });
     menuButton.focus();
     expect(menuButton).toHaveFocus();
 
     await user.keyboard("{Enter}");
-    expect(screen.getByRole("link", { name: "MCP" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "MCP 工具" })).toBeInTheDocument();
 
     await user.keyboard("{Escape}");
     await waitFor(() => {
-      expect(screen.queryByRole("link", { name: "MCP" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: "MCP 工具" })).not.toBeInTheDocument();
     });
     expect(menuButton).toHaveFocus();
   });
@@ -341,12 +341,12 @@ describe("App onboarding", () => {
     );
 
     await screen.findByRole("link", { name: "陪伴" });
-    fireEvent.click(screen.getByRole("button", { name: "更多" }));
-    expect(screen.getByRole("link", { name: "MCP" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "能力与设置" }));
+    expect(screen.getByRole("link", { name: "MCP 工具" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("link", { name: "今日" }));
     await waitFor(() => {
-      expect(screen.queryByRole("link", { name: "MCP" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: "MCP 工具" })).not.toBeInTheDocument();
     });
   });
 
@@ -415,7 +415,7 @@ describe("App onboarding", () => {
   });
 
   it.each([
-    ["/companion", "陪伴", "在线"],
+    ["/companion", "陪伴", "companion-page"],
     ["/today", "今日", "today-page"],
     ["/life-model", "Life Model", "life-model-page"],
     ["/mailbox", "邮箱", "mailbox-page"],
@@ -535,7 +535,7 @@ describe("App onboarding", () => {
       </MemoryRouter>
     );
 
-    expect(await screen.findByText("试用控制台")).toBeInTheDocument();
+    expect(await screen.findByText("能力与设置")).toBeInTheDocument();
   });
 
   it("keeps Runs reachable as a secondary route", async () => {

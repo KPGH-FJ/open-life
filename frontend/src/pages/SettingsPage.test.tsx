@@ -61,7 +61,7 @@ describe("SettingsPage", () => {
     renderSettings();
 
     await waitFor(() => {
-      expect(screen.getByText("试用控制台")).toBeInTheDocument();
+      expect(screen.getByText("能力与设置")).toBeInTheDocument();
     });
 
     expect(screen.getByText(/试用路径 Checklist/)).toBeInTheDocument();
@@ -77,7 +77,7 @@ describe("SettingsPage", () => {
     renderSettings();
 
     await waitFor(() => {
-      expect(screen.getByText("试用控制台")).toBeInTheDocument();
+      expect(screen.getByText("能力与设置")).toBeInTheDocument();
     });
 
     expect(screen.queryByRole("button", { name: "实验" })).not.toBeInTheDocument();

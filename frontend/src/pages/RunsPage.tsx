@@ -19,6 +19,7 @@ import {
   planExecuteProductSubtitle,
 } from "../utils/planExecuteProduct";
 import { getMultiStrategyPreviewAudit, previewWarningLabel } from "../utils/previewAudit";
+import { buildRunDisplaySummary } from "../utils/runDisplaySummary";
 import {
   Activity,
   Clock,
@@ -178,6 +179,8 @@ export default function RunsPage() {
     }
   }
 
+  const taskSummaryByRunId = new Map(taskSummaries.map(summary => [summary.runId, summary]));
+
   const filteredRuns = runs.filter(run => {
     // Trash filter
     if (showTrash) {
@@ -195,6 +198,7 @@ export default function RunsPage() {
     // Search
     if (searchQuery) {
       const query = searchQuery.toLowerCase();
+      const displaySummary = buildRunDisplaySummary(run, taskSummaryByRunId.get(run.id));
       const audit = getMultiStrategyPreviewAudit(run);
       const productTrace = getPlanExecuteProductTrace(run);
       const auditText = audit
@@ -204,7 +208,7 @@ export default function RunsPage() {
       const outputText = productTrace ? "" : "";
       const traceText = reactTraceSearchText(run);
       const text =
-        `${outputText} ${run.kind} ${auditText} ${productText} ${traceText}`.toLowerCase();
+        `${outputText} ${run.kind} ${displaySummary.searchableText} ${auditText} ${productText} ${traceText}`.toLowerCase();
       if (!text.includes(query)) return false;
     }
 
@@ -213,7 +217,6 @@ export default function RunsPage() {
 
   const paginatedRuns = filteredRuns.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
   const totalPages = Math.ceil(filteredRuns.length / PAGE_SIZE);
-  const taskSummaryByRunId = new Map(taskSummaries.map(summary => [summary.runId, summary]));
 
   function toggleSelect(runId: string) {
     const newSet = new Set(selectedRuns);
@@ -432,6 +435,9 @@ export default function RunsPage() {
                 const productTrace = getPlanExecuteProductTrace(run);
                 const warningCount = previewAudit?.warnings?.length ?? 0;
                 const taskSummary = taskSummaryByRunId.get(run.id);
+                const displaySummary = buildRunDisplaySummary(run, taskSummary);
+                const subtitle =
+                  productTrace || previewAudit ? runSubtitle(run) : displaySummary.subtitle;
                 const stale = isPossiblyStaleRun(run, taskSummary);
                 return (
                   <div
@@ -458,9 +464,7 @@ export default function RunsPage() {
                             {statusIcon(run.status)}
                             <div>
                               <div className="font-medium text-stone-900">{runKindLabel(run)}</div>
-                              <div className="text-xs text-stone-500 mt-0.5">
-                                {runSubtitle(run)}
-                              </div>
+                              <div className="text-xs text-stone-500 mt-0.5">{subtitle}</div>
 	                            </div>
 	                          </div>
 	                          <div className="text-right">
@@ -475,6 +479,20 @@ export default function RunsPage() {
                             )}
 	                          </div>
 	                        </div>
+                        <div className="mt-3 grid gap-2 text-xs text-stone-600 sm:grid-cols-2 lg:grid-cols-4">
+                          <span className="rounded-lg border border-stone-200 bg-stone-50 px-2.5 py-2">
+                            {displaySummary.outcome}
+                          </span>
+                          <span className="rounded-lg border border-stone-200 bg-stone-50 px-2.5 py-2">
+                            {displaySummary.route}
+                          </span>
+                          <span className="rounded-lg border border-stone-200 bg-stone-50 px-2.5 py-2">
+                            {displaySummary.tools}
+                          </span>
+                          <span className="rounded-lg border border-stone-200 bg-stone-50 px-2.5 py-2">
+                            {displaySummary.proposals}
+                          </span>
+                        </div>
                         {taskSummary && (
                           <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs text-stone-600">
                             <span className="font-semibold text-stone-800">
