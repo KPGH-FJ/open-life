@@ -125,8 +125,11 @@ export function splitDailyGoalsByDisplayQuality(goals: DailyGoal[]): {
   suspicious: Array<{ goal: DailyGoal; guard: DailyGoalDisplayGuard; originalIndex: number }>;
 } {
   const displayable: DailyGoal[] = [];
-  const suspicious: Array<{ goal: DailyGoal; guard: DailyGoalDisplayGuard; originalIndex: number }> =
-    [];
+  const suspicious: Array<{
+    goal: DailyGoal;
+    guard: DailyGoalDisplayGuard;
+    originalIndex: number;
+  }> = [];
 
   goals.forEach((goal, originalIndex) => {
     const guard = inspectDailyGoalName(goal.name);

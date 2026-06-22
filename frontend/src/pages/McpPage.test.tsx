@@ -86,7 +86,9 @@ describe("McpPage", () => {
     await screen.findByText("安全审计中心");
     fireEvent.click(screen.getByRole("button", { name: "清理 7 天前日志" }));
 
-    expect(await screen.findByRole("dialog", { name: "确认清理 MCP 审计日志" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("dialog", { name: "确认清理 MCP 审计日志" })
+    ).toBeInTheDocument();
     expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "clear_mcp_audit_logs")).toBe(
       false
     );

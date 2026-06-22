@@ -179,7 +179,14 @@ function buildDiffRows(proposal: AgentProposal): ProposalDisplayDiffRow[] {
     const field = pathFieldLabel(proposal.affectedPath);
     const before = safeDisplayValue(proposal.before, proposal.affectedPath);
     const after = safeDisplayValue(proposal.after, proposal.affectedPath);
-    return [{ field, before: before.text, after: after.text, redacted: before.redacted || after.redacted }];
+    return [
+      {
+        field,
+        before: before.text,
+        after: after.text,
+        redacted: before.redacted || after.redacted,
+      },
+    ];
   }
 
   return keys.map(key => {
