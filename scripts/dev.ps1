@@ -53,8 +53,21 @@ if (-not $env:A2A_PORT) {
 }
 $VitePort = if ($env:PORT) { $env:PORT } else { "5173" }
 $env:OPENLIFE_DEV_URL = "http://127.0.0.1:$VitePort"
-$env:OPENLIFE_FRONTEND_DIST = Join-Path $FrontendDir "dist"
+$env:OPENLIFE_FRONTEND_DIST = Join-Path $RepoRoot "target/openlife-dev/frontend-dist-placeholder"
 $env:OPENLIFE_FRONTEND_MODE = "dev_server"
+New-Item -ItemType Directory -Force -Path $env:OPENLIFE_FRONTEND_DIST | Out-Null
+@"
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>OpenLife Dev Server Placeholder</title>
+  </head>
+  <body>
+    OpenLife dev server placeholder. If you see this, Vite did not load.
+  </body>
+</html>
+"@ | Set-Content -Encoding UTF8 -Path (Join-Path $env:OPENLIFE_FRONTEND_DIST "index.html")
 $TauriConfigOverride = @{
     build = @{
         beforeDevCommand = "cd `"$FrontendDir`" && corepack pnpm dev --host 127.0.0.1 --port $VitePort"
@@ -93,6 +106,7 @@ Write-Host ""
 Write-Host "OpenLife - 开发模式启动" -ForegroundColor Blue
 Write-Host "[INFO] Profile: $OpenLifeProfile" -ForegroundColor Blue
 Write-Host "[INFO] Vite: $($env:OPENLIFE_DEV_URL)" -ForegroundColor Blue
+Write-Host "[INFO] Dev frontendDist placeholder: $($env:OPENLIFE_FRONTEND_DIST)" -ForegroundColor Blue
 Write-Host "[INFO] A2A: 127.0.0.1:$($env:A2A_PORT)" -ForegroundColor Blue
 Write-Host ""
 Write-Host "╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Green

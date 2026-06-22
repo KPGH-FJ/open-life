@@ -177,8 +177,21 @@ configure_runtime_profile() {
 tauri_config_override() {
     local frontend_dir_json dev_url_json frontend_dist_json
     OPENLIFE_DEV_URL="http://127.0.0.1:$VITE_PORT"
-    OPENLIFE_FRONTEND_DIST="$FRONTEND_DIR/dist"
+    OPENLIFE_FRONTEND_DIST="$REPO_ROOT/target/openlife-dev/frontend-dist-placeholder"
     export OPENLIFE_DEV_URL OPENLIFE_FRONTEND_DIST OPENLIFE_FRONTEND_MODE="dev_server"
+    mkdir -p "$OPENLIFE_FRONTEND_DIST"
+    cat > "$OPENLIFE_FRONTEND_DIST/index.html" <<'HTML'
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>OpenLife Dev Server Placeholder</title>
+  </head>
+  <body>
+    OpenLife dev server placeholder. If you see this, Vite did not load.
+  </body>
+</html>
+HTML
     frontend_dir_json="$(json_escape "$FRONTEND_DIR")"
     dev_url_json="$(json_escape "$OPENLIFE_DEV_URL")"
     frontend_dist_json="$(json_escape "$OPENLIFE_FRONTEND_DIST")"
