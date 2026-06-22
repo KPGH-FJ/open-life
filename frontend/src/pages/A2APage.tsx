@@ -36,7 +36,9 @@ function StructuredJsonResult({ value }: { value: string }) {
   }
 
   if (!parsed) {
-    return <pre className="bg-gray-50 border rounded-lg p-4 text-xs overflow-auto max-h-64">{value}</pre>;
+    return (
+      <pre className="bg-gray-50 border rounded-lg p-4 text-xs overflow-auto max-h-64">{value}</pre>
+    );
   }
 
   const status = parsed.status?.state ?? parsed.status ?? parsed.result?.status ?? "unknown";
@@ -244,7 +246,10 @@ export default function A2APage() {
     if (action === "stop") await runStopSidecar();
   };
 
-  const pendingCopy: Record<PendingA2AAction, { title: string; description: string; label: string }> = {
+  const pendingCopy: Record<
+    PendingA2AAction,
+    { title: string; description: string; label: string }
+  > = {
     discover: {
       title: "确认发现外部 A2A Agent",
       description: `将向 ${agentUrl} 发起网络请求读取 Agent Card。`,
@@ -365,9 +370,7 @@ export default function A2APage() {
               发送
             </button>
           </div>
-          {taskResult && (
-            <StructuredJsonResult value={taskResult} />
-          )}
+          {taskResult && <StructuredJsonResult value={taskResult} />}
         </section>
 
         <section className="space-y-3">
@@ -409,19 +412,19 @@ export default function A2APage() {
           )}
           <div className="flex flex-col gap-3">
             <div className="flex gap-2">
-	              <input
-	                value={localServiceInput}
-	                onChange={e => setLocalServiceInput(e.target.value)}
-	                placeholder="输入本地固定技能的查询内容"
-	                className="flex-1 border rounded-lg px-3 py-2 text-sm"
-	              />
-	              <button
-	                onClick={() =>
-	                  handleLocalService(
-	                    "openlife.query_life_model",
-	                    localServiceInput || "查询人生模型"
-	                  )
-	                }
+              <input
+                value={localServiceInput}
+                onChange={e => setLocalServiceInput(e.target.value)}
+                placeholder="输入本地固定技能的查询内容"
+                className="flex-1 border rounded-lg px-3 py-2 text-sm"
+              />
+              <button
+                onClick={() =>
+                  handleLocalService(
+                    "openlife.query_life_model",
+                    localServiceInput || "查询人生模型"
+                  )
+                }
                 disabled={loadingLocal}
                 className="bg-white border px-3 py-2 rounded-lg text-sm hover:bg-gray-50 flex items-center gap-2"
               >
@@ -430,21 +433,18 @@ export default function A2APage() {
             </div>
             <div className="flex gap-2">
               <button
-	                onClick={() =>
-	                  handleLocalService("openlife.assess_values", localServiceInput || "评估这段话")
-	                }
+                onClick={() =>
+                  handleLocalService("openlife.assess_values", localServiceInput || "评估这段话")
+                }
                 disabled={loadingLocal}
                 className="bg-white border px-3 py-2 rounded-lg text-sm hover:bg-gray-50 flex items-center gap-2"
               >
                 <Shield size={16} /> 价值观评估
               </button>
               <button
-	                onClick={() =>
-	                  handleLocalService(
-	                    "openlife.reasoning_bridge",
-	                    localServiceInput || "帮我做决策"
-	                  )
-	                }
+                onClick={() =>
+                  handleLocalService("openlife.reasoning_bridge", localServiceInput || "帮我做决策")
+                }
                 disabled={loadingLocal}
                 className="bg-white border px-3 py-2 rounded-lg text-sm hover:bg-gray-50 flex items-center gap-2"
               >
@@ -458,9 +458,7 @@ export default function A2APage() {
               </div>
             )}
           </div>
-          {localResult && (
-            <StructuredJsonResult value={localResult} />
-          )}
+          {localResult && <StructuredJsonResult value={localResult} />}
         </section>
 
         <section className="space-y-3">
@@ -472,15 +470,15 @@ export default function A2APage() {
               placeholder="推理方法"
               className="w-40 border rounded-lg px-3 py-2 text-sm"
             />
-	            <input
-	              value={bridgeInput}
-	              onChange={e => setBridgeInput(e.target.value)}
-	              placeholder="输入要送入 OpenLife/A2A 桥接的文本"
+            <input
+              value={bridgeInput}
+              onChange={e => setBridgeInput(e.target.value)}
+              placeholder="输入要送入 OpenLife/A2A 桥接的文本"
               className="flex-1 border rounded-lg px-3 py-2 text-sm"
             />
-	            <button
-	              onClick={handleBridge}
-	              disabled={bridgeLoading || !bridgeInput.trim()}
+            <button
+              onClick={handleBridge}
+              disabled={bridgeLoading || !bridgeInput.trim()}
               className="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-2"
             >
               {bridgeLoading ? (
@@ -495,9 +493,7 @@ export default function A2APage() {
             这个区域会展示 OpenLife 请求如何映射成 A2A Task，以及 A2A 响应如何重新转换回 OpenLife
             结果。
           </div>
-          {bridgeResult && (
-            <StructuredJsonResult value={bridgeResult} />
-          )}
+          {bridgeResult && <StructuredJsonResult value={bridgeResult} />}
         </section>
       </div>
     </div>

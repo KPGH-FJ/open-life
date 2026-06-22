@@ -254,7 +254,8 @@ export default function McpPage() {
             <div>
               <h3 className="text-sm font-semibold text-indigo-950">Chat 外部能力如何生效</h3>
               <p className="mt-1 text-sm leading-6 text-indigo-900">
-                天气、网页和第三方数据读取需要这里先接入安全的 read-only 工具。Chat 每次调用仍会经过候选
+                天气、网页和第三方数据读取需要这里先接入安全的 read-only 工具。Chat
+                每次调用仍会经过候选
                 allowlist、隐私规则和必要确认；未接入时，助手应解释“工具未启用”，而不是泄露治理错误码。
               </p>
               <div className="mt-3 flex flex-wrap gap-2 text-xs">

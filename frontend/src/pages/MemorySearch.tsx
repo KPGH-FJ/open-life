@@ -159,7 +159,9 @@ export default function MemorySearch() {
     if (aExact !== bExact) return aExact ? -1 : 1;
     return b.score - a.score;
   });
-  const visibleResults = sortedResults.filter(result => showLowConfidenceResults || result.score >= 0.3);
+  const visibleResults = sortedResults.filter(
+    result => showLowConfidenceResults || result.score >= 0.3
+  );
   const hiddenLowConfidenceCount = sortedResults.length - visibleResults.length;
 
   return (
@@ -380,10 +382,10 @@ export default function MemorySearch() {
                 expanded || r.chunk.content.length <= 240
                   ? r.chunk.content
                   : `${r.chunk.content.slice(0, 240).trimEnd()}...`;
-              const scoreBand =
-                r.score >= 0.7 ? "高相关" : r.score >= 0.3 ? "中相关" : "低相关";
+              const scoreBand = r.score >= 0.7 ? "高相关" : r.score >= 0.3 ? "中相关" : "低相关";
               const exactMatch =
-                normalizedQuery.length > 0 && r.chunk.content.toLowerCase().includes(normalizedQuery);
+                normalizedQuery.length > 0 &&
+                r.chunk.content.toLowerCase().includes(normalizedQuery);
               return (
                 <div
                   key={r.chunk.id}
