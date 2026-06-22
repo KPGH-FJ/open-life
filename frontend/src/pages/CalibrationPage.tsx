@@ -347,7 +347,7 @@ export default function CalibrationPage() {
         <div className="max-w-lg w-full rounded-xl border border-amber-100 bg-amber-50 p-6 text-center">
           <EmptyState title="校准报告生成失败" description={error} className="py-0" />
           <p className="mt-3 text-sm text-amber-800">
-            这通常与人生模型读取、反馈数据不足或模型服务配置有关。你可以稍后重试，或去设置页查看“试用就绪检查”。
+            这通常与人生模型读取、反馈数据不足或模型服务配置有关。你可以稍后重试，或去设置页查看“启动检查”。
           </p>
           <div className="mt-5 flex justify-center gap-3">
             <button

@@ -184,8 +184,8 @@ describe("MailboxPage", () => {
     render(<MailboxPage />);
 
     expect(await screen.findByTestId("mailbox-page")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "邮箱" })).toBeInTheDocument();
-    expect(screen.getByText("收件箱")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Review Inbox" })).toBeInTheDocument();
+    expect(screen.getByText("待确认")).toBeInTheDocument();
     expect(screen.getByText("已同意")).toBeInTheDocument();
     expect(screen.getByText("已处理")).toBeInTheDocument();
     expect(screen.getByText("草稿修改")).toBeInTheDocument();
@@ -203,7 +203,7 @@ describe("MailboxPage", () => {
     expect(screen.getByTestId("mail-reader")).toHaveTextContent("OpenLife");
     expect(screen.getAllByText("确认外部能力").length).toBeGreaterThan(0);
     expect(screen.getByTestId("mail-reader")).toHaveTextContent("插件请求获得写权限。");
-    expect(screen.getByText(/会影响哪里/)).toBeInTheDocument();
+    expect(screen.getByText(/影响与风险/)).toBeInTheDocument();
     expect(screen.getByText("技术详情")).toBeInTheDocument();
     expect(screen.getByText(/plugins\.demo\.write/)).toBeInTheDocument();
   });
@@ -211,10 +211,10 @@ describe("MailboxPage", () => {
   it("shows human reader sections with impact, confidence, and evidence summary", async () => {
     render(<MailboxPage />);
 
-    expect(await screen.findByText("OpenLife 想做什么")).toBeInTheDocument();
+    expect(await screen.findByText("Before / After")).toBeInTheDocument();
     expect(screen.getByText("为什么问你")).toBeInTheDocument();
-    expect(screen.getByText("会影响哪里")).toBeInTheDocument();
-    expect(screen.getByText("依据摘要")).toBeInTheDocument();
+    expect(screen.getByText("依据")).toBeInTheDocument();
+    expect(screen.getByText("影响与风险")).toBeInTheDocument();
     expect(screen.getByText("你的回复")).toBeInTheDocument();
     expect(screen.getAllByText(/影响：低/).length).toBeGreaterThan(0);
     expect(screen.getByText(/把握：86%/)).toBeInTheDocument();
@@ -222,7 +222,7 @@ describe("MailboxPage", () => {
       "Builder review produced a confirmed low-risk goal candidate."
     );
     expect(screen.getByText("Builder confirmation supports the candidate.")).toBeInTheDocument();
-    expect(screen.getByText("Proposal-first write path")).toBeInTheDocument();
+    expect(screen.getByText(/为什么问你/)).toBeInTheDocument();
     expect(screen.queryByText("raw-sensitive-payload-should-not-render")).not.toBeInTheDocument();
     expect(screen.queryByText(/sha256:abcdef1234567890/)).not.toBeInTheDocument();
   });
@@ -232,7 +232,7 @@ describe("MailboxPage", () => {
 
     render(<MailboxPage />);
 
-    expect(await screen.findByText("OpenLife 想做什么")).toBeInTheDocument();
+    expect(await screen.findByText("Before / After")).toBeInTheDocument();
     expect(screen.getByText("字段")).toBeInTheDocument();
     expect(screen.getByText("当前值")).toBeInTheDocument();
     expect(screen.getByText("将变为")).toBeInTheDocument();
@@ -244,10 +244,10 @@ describe("MailboxPage", () => {
   it("redacts sensitive payload-like values from the main diff panel", async () => {
     render(<MailboxPage />);
 
-    expect(await screen.findByText("OpenLife 想做什么")).toBeInTheDocument();
-    expect(screen.getAllByText("该字段可能包含敏感或原始内容，主面板只显示摘要。").length).toBeGreaterThan(
-      0
-    );
+    expect(await screen.findByText("Before / After")).toBeInTheDocument();
+    expect(
+      screen.getAllByText("该字段可能包含敏感或原始内容，主面板只显示摘要。").length
+    ).toBeGreaterThan(0);
     expect(screen.queryByText("raw-sensitive-payload-should-not-render")).not.toBeInTheDocument();
   });
 

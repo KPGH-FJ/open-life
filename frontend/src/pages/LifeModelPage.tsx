@@ -30,7 +30,17 @@ import {
   issuesForLifeModelDimension,
   type LifeModelQualityIssue,
 } from "../utils/lifeModelQuality";
+import {
+  buildLifeModelTrustViews,
+  splitLifeModelItemsByDisplayQuality,
+  type LifeModelDimensionKey,
+  type LifeModelDisplayQualityIssue,
+} from "../utils/lifeModelTrust";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
+import {
+  StatusChip as ProductStatusChip,
+  TrustDrawer,
+} from "../components/product/ProductPrimitives";
 
 type LifeModelSection = "build" | "overview" | "evidence";
 
@@ -40,9 +50,10 @@ type SectionConfig = {
 };
 
 type ModelDimension = {
-  key: "identity" | "goals" | "capabilities" | "state";
+  key: LifeModelDimensionKey;
   title: string;
   items: string[];
+  suppressedIssues: LifeModelDisplayQualityIssue[];
 };
 
 type LifeModelPageState = {
@@ -175,48 +186,46 @@ function isModelEmpty(model: LifeModel | null, diagnostics: SystemDiagnostics | 
 }
 
 function buildDimensions(model: LifeModel): ModelDimension[] {
+  function dimension(
+    key: LifeModelDimensionKey,
+    title: string,
+    rawItems: Array<string | null | undefined>
+  ): ModelDimension {
+    const quality = splitLifeModelItemsByDisplayQuality(uniqueShortItems(rawItems, 8));
+    return {
+      key,
+      title,
+      items: quality.displayable.slice(0, 3),
+      suppressedIssues: quality.suppressed,
+    };
+  }
+
   return [
-    {
-      key: "identity",
-      title: "Identity",
-      items: uniqueShortItems([
-        model.identity.name,
-        model.identity.role_definition.primary_role,
-        ...model.identity.values.map(value => value.name),
-        model.identity.mission_statement,
-      ]),
-    },
-    {
-      key: "goals",
-      title: "Goals",
-      items: uniqueShortItems([
-        ...model.goals.daily.map(goal => goal.name),
-        ...model.goals.short_term.map(goal => goal.name),
-        ...model.goals.medium_term.map(goal => goal.name),
-        ...model.goals.long_term.map(goal => goal.name),
-        ...model.goals.life_goals.map(goal => goal.name),
-      ]),
-    },
-    {
-      key: "capabilities",
-      title: "Capabilities",
-      items: uniqueShortItems([
-        ...model.capabilities.skills.map(skill => skill.name),
-        ...model.capabilities.knowledge_domains.map(domain => domain.domain),
-        ...model.capabilities.resources.map(resource => resource.name),
-      ]),
-    },
-    {
-      key: "state",
-      title: "State",
-      items: uniqueShortItems([
-        model.state.current_focus ? `当前专注：${model.state.current_focus}` : null,
-        ...model.state.focus_areas,
-        model.state.health_status.energy_level
-          ? `能量：${model.state.health_status.energy_level}/10`
-          : null,
-      ]),
-    },
+    dimension("identity", "Identity", [
+      model.identity.name,
+      model.identity.role_definition.primary_role,
+      ...model.identity.values.map(value => value.name),
+      model.identity.mission_statement,
+    ]),
+    dimension("goals", "Goals", [
+      ...model.goals.daily.map(goal => goal.name),
+      ...model.goals.short_term.map(goal => goal.name),
+      ...model.goals.medium_term.map(goal => goal.name),
+      ...model.goals.long_term.map(goal => goal.name),
+      ...model.goals.life_goals.map(goal => goal.name),
+    ]),
+    dimension("capabilities", "Capabilities", [
+      ...model.capabilities.skills.map(skill => skill.name),
+      ...model.capabilities.knowledge_domains.map(domain => domain.domain),
+      ...model.capabilities.resources.map(resource => resource.name),
+    ]),
+    dimension("state", "State", [
+      model.state.current_focus ? `当前专注：${model.state.current_focus}` : null,
+      ...model.state.focus_areas,
+      model.state.health_status.energy_level
+        ? `能量：${model.state.health_status.energy_level}/10`
+        : null,
+    ]),
   ];
 }
 
@@ -302,7 +311,7 @@ function BuildSection({
         <div>
           <h2 className="text-sm font-semibold text-stone-950">构建状态</h2>
           <p className="mt-1 text-sm text-stone-600">
-            构建产生候选，邮箱确认后才会更新 Life Model。
+            构建产生候选，Review 确认后才会更新 Life Model。
           </p>
         </div>
       </div>
@@ -366,7 +375,7 @@ function BuildSection({
           <div className="p-4">
             <div className="text-xs font-medium text-stone-500">待确认更新</div>
             <div className="mt-1 text-lg font-semibold text-stone-950">{builderReviewCount}</div>
-            <div className="mt-1 text-xs text-stone-500">通过邮箱处理</div>
+            <div className="mt-1 text-xs text-stone-500">通过 Review 处理</div>
           </div>
         </div>
       </div>
@@ -376,14 +385,14 @@ function BuildSection({
           <div>
             <div className="text-sm font-semibold text-amber-950">有构建内容等待确认</div>
             <div className="mt-0.5 text-xs text-amber-800">
-              这里不直接应用更新；请在邮箱中逐项处理。
+              这里不直接应用更新；请在 Review 中逐项处理。
             </div>
           </div>
           <Link
             to="/mailbox"
             className="inline-flex h-8 items-center gap-2 rounded-md bg-amber-900 px-3 text-xs font-semibold text-white hover:bg-amber-950"
           >
-            打开邮箱
+            打开 Review
             <Inbox size={14} aria-hidden="true" />
           </Link>
         </div>
@@ -395,14 +404,45 @@ function BuildSection({
 function OverviewSection({
   lifeModel,
   diagnostics,
+  completion,
+  pendingProposals,
 }: {
   lifeModel: LifeModel | null;
   diagnostics: SystemDiagnostics | null;
+  completion: Model4DCompletion | null;
+  pendingProposals: AgentProposal[];
 }) {
   const [ignoredIssueIds, setIgnoredIssueIds] = useState<Set<string>>(new Set());
   const [deferredIssueIds, setDeferredIssueIds] = useState<Set<string>>(new Set());
   const empty = isModelEmpty(lifeModel, diagnostics);
   const dimensions = useMemo(() => (lifeModel ? buildDimensions(lifeModel) : []), [lifeModel]);
+  const suppressedByDimension = useMemo(
+    () =>
+      dimensions.reduce(
+        (acc, dimension) => {
+          acc[dimension.key] = dimension.suppressedIssues;
+          return acc;
+        },
+        {
+          identity: [],
+          goals: [],
+          capabilities: [],
+          state: [],
+        } as Record<LifeModelDimensionKey, LifeModelDisplayQualityIssue[]>
+      ),
+    [dimensions]
+  );
+  const trustViews = useMemo(
+    () =>
+      buildLifeModelTrustViews({
+        lifeModel,
+        diagnostics,
+        completion,
+        pendingProposals,
+        suppressedByDimension,
+      }),
+    [completion, diagnostics, lifeModel, pendingProposals, suppressedByDimension]
+  );
   const qualityIssues = useMemo(() => getLifeModelQualityIssues(lifeModel), [lifeModel]);
   const visibleQualityIssues = useMemo(
     () => qualityIssues.filter(issue => !ignoredIssueIds.has(issue.id)),
@@ -437,7 +477,7 @@ function OverviewSection({
       <div>
         <h2 className="text-sm font-semibold text-stone-950">四维摘要</h2>
         <p className="mt-1 text-sm text-stone-600">
-          只显示短摘要；完整构建和确认仍在 Builder 与邮箱中完成。
+          只显示短摘要；完整构建和确认仍在 Builder 与 Review 中完成。
         </p>
       </div>
       {visibleQualityIssues.length > 0 && (
@@ -472,25 +512,85 @@ function OverviewSection({
             <div>
               <div className="text-sm font-semibold text-stone-950">{dimension.title}</div>
               <div className="mt-0.5 text-xs text-stone-500">{dimension.items.length} 条摘要</div>
-              {issuesForLifeModelDimension(visibleQualityIssues, dimension.key).length > 0 && (
-                <div className="mt-1 inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-800">
-                  <AlertTriangle size={12} aria-hidden="true" />
-                  需要确认
+              <div className="mt-2 flex flex-wrap gap-1">
+                {trustViews[dimension.key].pendingProposalCount > 0 && (
+                  <ProductStatusChip label="Review 待确认" tone="warning" />
+                )}
+                {dimension.suppressedIssues.length > 0 && (
+                  <ProductStatusChip label="原始抽取已降级" tone="warning" />
+                )}
+                {issuesForLifeModelDimension(visibleQualityIssues, dimension.key).length > 0 && (
+                  <ProductStatusChip label="需要修正" tone="warning" />
+                )}
+              </div>
+            </div>
+            <div className="space-y-3">
+              {dimension.items.length ? (
+                <ul className="grid gap-1.5 text-sm text-stone-700">
+                  {dimension.items.slice(0, 3).map(item => (
+                    <li key={item} className="flex items-center gap-2">
+                      <span className="h-1.5 w-1.5 rounded-full bg-stone-400" aria-hidden="true" />
+                      <span>{item}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="text-sm text-stone-500">
+                  {dimension.suppressedIssues.length > 0
+                    ? "暂无已确认摘要；低质量抽取已放入依据。"
+                    : "暂无摘要"}
                 </div>
               )}
+              <TrustDrawer
+                title={`${dimension.title} 可信度`}
+                subtitle={`${trustViews[dimension.key].statusLabel} · ${trustViews[dimension.key].confidenceLabel}`}
+              >
+                <div className="grid gap-2 text-xs text-stone-600 md:grid-cols-2">
+                  <div>来源：{trustViews[dimension.key].sourceSummary}</div>
+                  <div>{trustViews[dimension.key].updatedAtLabel}</div>
+                  <div>待确认：{trustViews[dimension.key].pendingProposalCount}</div>
+                  <div>依据：{trustViews[dimension.key].evidenceSummary}</div>
+                </div>
+                {dimension.suppressedIssues.length > 0 && (
+                  <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2">
+                    <div className="text-xs font-semibold text-amber-950">
+                      不进入正式摘要的原始抽取
+                    </div>
+                    <div className="mt-2 space-y-2">
+                      {dimension.suppressedIssues.slice(0, 3).map(issue => (
+                        <div key={issue.value} className="text-xs text-amber-900">
+                          <div className="font-medium">{issue.value}</div>
+                          <div className="mt-0.5">
+                            {issue.reason} {issue.recoveryAction}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Link
+                    to="/mailbox"
+                    className="rounded-md bg-stone-900 px-2.5 py-1 text-xs font-semibold text-white hover:bg-stone-800"
+                  >
+                    Open Review
+                  </Link>
+                  <Link
+                    to="/builder"
+                    className="rounded-md border border-stone-200 bg-white px-2.5 py-1 text-xs font-semibold text-stone-700 hover:bg-stone-50"
+                  >
+                    Correct
+                  </Link>
+                  <button
+                    type="button"
+                    disabled
+                    className="rounded-md border border-stone-200 bg-stone-50 px-2.5 py-1 text-xs font-semibold text-stone-400"
+                  >
+                    Forget
+                  </button>
+                </div>
+              </TrustDrawer>
             </div>
-            {dimension.items.length ? (
-              <ul className="grid gap-1.5 text-sm text-stone-700">
-                {dimension.items.slice(0, 3).map(item => (
-                  <li key={item} className="flex items-center gap-2">
-                    <span className="h-1.5 w-1.5 rounded-full bg-stone-400" aria-hidden="true" />
-                    <span>{item}</span>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <div className="text-sm text-stone-500">暂无摘要</div>
-            )}
           </div>
         ))}
       </div>
@@ -516,7 +616,7 @@ function QualityIssuePanel({
         <div>
           <div className="text-sm font-semibold text-amber-950">发现可能影响画像可信度的字段</div>
           <div className="mt-0.5 text-xs text-amber-800">
-            本次视图处理，不会改写 Life Model；正式更新仍需邮箱确认。
+            本次视图处理，不会改写 Life Model；正式更新仍需 Review 确认。
           </div>
         </div>
       </div>
@@ -602,7 +702,7 @@ function EvidenceSection({
             to="/mailbox"
             className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-stone-900 px-3 text-sm font-semibold text-white hover:bg-stone-800"
           >
-            打开邮箱
+            打开 Review
             <Inbox size={15} aria-hidden="true" />
           </Link>
         </div>
@@ -622,7 +722,7 @@ function EvidenceSection({
           <div className="p-4">
             <div className="text-xs font-medium text-stone-500">待确认更新</div>
             <div className="mt-1 text-lg font-semibold text-stone-950">{pendingCount}</div>
-            <div className="mt-1 text-xs text-stone-500">进入邮箱确认</div>
+            <div className="mt-1 text-xs text-stone-500">进入 Review 确认</div>
           </div>
           <div className="p-4">
             <div className="text-xs font-medium text-stone-500">最近依据来源</div>
@@ -660,7 +760,7 @@ function EvidenceSection({
                 to="/mailbox"
                 className="text-xs font-semibold text-stone-700 underline-offset-4 hover:underline"
               >
-                去邮箱处理
+                去 Review 处理
               </Link>
             </div>
           ))}
@@ -800,7 +900,12 @@ export default function LifeModelPage() {
             />
           )}
           {activeSection === "overview" && (
-            <OverviewSection lifeModel={state.lifeModel} diagnostics={state.diagnostics} />
+            <OverviewSection
+              lifeModel={state.lifeModel}
+              diagnostics={state.diagnostics}
+              completion={state.completion}
+              pendingProposals={state.pendingProposals}
+            />
           )}
           {activeSection === "evidence" && (
             <EvidenceSection

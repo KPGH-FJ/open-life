@@ -19,7 +19,6 @@ import {
   Heart,
   CheckCircle2,
   ShieldCheck,
-  XCircle,
   RotateCw,
   Ban,
   Play,
@@ -129,7 +128,9 @@ import ToolCallCard from "../components/ToolCallCard";
 import AgentStateIndicator from "../components/AgentStateIndicator";
 import AgentControlPlane from "../components/AgentControlPlane";
 import type { AgentStageState } from "../components/AgentStage";
+import RuntimeDisclosureStrip from "../components/RuntimeDisclosureStrip";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
+import { buildRuntimeDisclosure } from "../utils/runtimeDisclosure";
 import ChatSidebar from "./chat/ChatSidebar";
 import ChatInputArea from "./chat/ChatInputArea";
 
@@ -187,29 +188,6 @@ function companionCapabilityChipClass(tone: CapabilityTone): string {
   if (tone === "warning") return "border-amber-200 bg-amber-50 text-amber-900";
   if (tone === "error") return "border-rose-200 bg-rose-50 text-rose-800";
   return "border-stone-200 bg-white text-stone-700";
-}
-
-function companionModelRouteSummary(run: AgentRun | null): string {
-  if (!run?.modelRoute) return "模型路线：未读取";
-  const route = run.modelRoute;
-  const routeLabel =
-    route.routeType === "local"
-      ? "本地"
-      : route.routeType === "cloud"
-        ? "云端"
-        : route.routeType || "未读取";
-  return `本次实际路线：${routeLabel} / ${route.provider || "unknown"} / ${route.model || "unknown"}`;
-}
-
-function companionRunSummary(run: AgentRun | null): string[] {
-  const context = run?.contextSummary;
-  const proposalCount = run?.generatedProposals?.length ?? 0;
-  return [
-    `使用 Life Model：${context ? (context.lifeModelEmpty ? "否" : "是") : "未读取"}`,
-    `参考记忆：${context?.memoryHitCount ?? 0} 条`,
-    companionModelRouteSummary(run),
-    `产生待确认：${proposalCount > 0 ? "是" : "否"}`,
-  ];
 }
 
 function CompanionTaskControlStrip({
@@ -382,7 +360,7 @@ function getFixSuggestion(
 
 function formatChatRuntimeError(error: unknown, diagnostics: SystemDiagnostics | null): string {
   if (diagnostics && !diagnostics.chat_ready && diagnostics.readiness_issues?.length) {
-    return `暂时无法发送普通对话：\n${diagnostics.readiness_issues.map(issue => `- ${issue}`).join("\n")}\n\n请去设置页查看“试用就绪检查”。`;
+    return `暂时无法发送普通对话：\n${diagnostics.readiness_issues.map(issue => `- ${issue}`).join("\n")}\n\n请去设置页查看“启动检查”。`;
   }
   const raw = error instanceof Error ? error.message : String(error);
   const governanceHint = explainGovernanceBlocker(raw, diagnostics);
@@ -444,7 +422,7 @@ function formatChatRuntimeError(error: unknown, diagnostics: SystemDiagnostics |
     hint =
       "没有可用的模型后端。请在设置页配置 DeepSeek/OpenAI/OpenRouter API Key，或启动本地 Ollama。";
   }
-  return `${hint}\n\n请去设置页查看“试用就绪检查”。`;
+  return `${hint}\n\n请去设置页查看“启动检查”。`;
 }
 
 const CHAT_PREVIEW_NO_TOOLS_PROMPT = "No developer tools catalog supplied for this chat preview.";
@@ -586,6 +564,7 @@ function inferStageFromToolCalls(toolCalls: ToolCallResult[]): AgentStageState |
   if (toolCalls.some(call => call.requires_confirmation || call.permission_level === "high")) {
     return "privacy";
   }
+  if (toolCalls.length > 0) return "tool";
   return null;
 }
 
@@ -702,6 +681,7 @@ export default function ChatPage({
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const [streamInterrupted, setStreamInterrupted] = useState(false);
   const [currentRun, setCurrentRun] = useState<AgentRun | null>(null);
+  const [runById, setRunById] = useState<Record<string, AgentRun>>({});
   const [currentAgentIngress, setCurrentAgentIngress] =
     useState<MainChatAgentIngressDecision | null>(null);
   const [currentExecutionTranscript, setCurrentExecutionTranscript] = useState<
@@ -768,7 +748,6 @@ export default function ChatPage({
   const [savedControlledPilotPromotionKeys, setSavedControlledPilotPromotionKeys] = useState<
     Record<string, boolean>
   >({});
-  const [openEvidenceRunId, setOpenEvidenceRunId] = useState<string | null>(null);
 
   // Throttle streaming updates to reduce React re-render pressure
   const streamingBufferRef = useRef("");
@@ -961,6 +940,12 @@ export default function ChatPage({
       const runs = await listAgentRunsForSession(sessionId, 10);
       if (currentSessionIdRef.current === sessionId) {
         setCurrentRun(runs[0] ?? null);
+        if (runs.length > 0) {
+          setRunById(prev => ({
+            ...prev,
+            ...Object.fromEntries(runs.map(run => [run.id, run])),
+          }));
+        }
       }
     } catch {
       if (currentSessionIdRef.current === sessionId) {
@@ -975,6 +960,9 @@ export default function ChatPage({
       const run = await getAgentRun(runId);
       if (currentSessionIdRef.current === sessionId) {
         setCurrentRun(run);
+        if (run) {
+          setRunById(prev => ({ ...prev, [run.id]: run }));
+        }
       }
     } catch {
       if (currentSessionIdRef.current === sessionId) {
@@ -1106,6 +1094,10 @@ export default function ChatPage({
     }
     if (currentRun?.status === "running") {
       emitCompanionStage("sorting");
+      return;
+    }
+    if (currentRun?.status === "completed") {
+      emitCompanionStage("done");
     }
   }, [currentRun, emitCompanionStage]);
 
@@ -3068,7 +3060,7 @@ export default function ChatPage({
                 </span>
               </div>
               <Link to="/mailbox" className="underline font-medium">
-                去邮箱确认
+                去 Review 确认
               </Link>
             </div>
           </div>
@@ -3754,6 +3746,9 @@ export default function ChatPage({
               m.role === "assistant"
                 ? userFacingAssistantContent(m.content, diagnostics)
                 : m.content;
+            const runForMessage = m.run_id
+              ? (runById[m.run_id] ?? (currentRun?.id === m.run_id ? currentRun : null))
+              : null;
             return (
               <div
                 key={i}
@@ -3763,212 +3758,156 @@ export default function ChatPage({
                   companionMode && "items-start gap-3"
                 )}
               >
-              {companionMode && m.role === "assistant" && (
-                <div
-                  aria-hidden="true"
-                  className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-stone-900 text-sm font-bold text-white"
-                >
-                  O
-                </div>
-              )}
-              <div
-                data-testid={m.role === "assistant" ? "assistant-message" : "user-message"}
-                className={classNames(
-                  "max-w-2xl rounded-xl px-4 py-3 text-sm",
-                  companionMode
-                    ? m.role === "user"
-                      ? "rounded-tr-none bg-stone-900 text-white"
-                      : "rounded-tl-none border border-stone-200 bg-white text-stone-900"
-                    : m.role === "user"
-                      ? "rounded-br-none bg-indigo-600 text-white"
-                      : "rounded-bl-none bg-gray-100 text-gray-800"
-                )}
-              >
-                <div className="whitespace-pre-wrap">{displayContent}</div>
-                {m.role === "assistant" && companionMode && m.run_id && (
-                  <div className="mt-3 border-t border-stone-100 pt-2">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setOpenEvidenceRunId(current =>
-                          current === m.run_id ? null : (m.run_id ?? null)
-                        )
-                      }
-                      className="text-xs font-semibold text-stone-600 underline-offset-4 hover:text-stone-950 hover:underline"
-                    >
-                      查看依据
-                    </button>
-                    {openEvidenceRunId === m.run_id && (
-                      <div className="mt-2 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-700">
-                        {companionRunSummary(
-                          currentRun && currentRun.id === m.run_id ? currentRun : null
-                        ).map(line => (
-                          <div key={line}>{line}</div>
-                        ))}
-                        <Link
-                          to={`/runs/${m.run_id}`}
-                          className="mt-2 inline-flex font-semibold text-stone-900 underline-offset-4 hover:underline"
-                        >
-                          查看完整记录
-                        </Link>
-                      </div>
-                    )}
+                {companionMode && m.role === "assistant" && (
+                  <div
+                    aria-hidden="true"
+                    className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-stone-900 text-sm font-bold text-white"
+                  >
+                    O
                   </div>
                 )}
-                {m.role === "assistant" && !companionMode && (
-                  <div className="mt-3 space-y-2">
-                    {(() => {
-                      const runMatches = m.run_id && currentRun && currentRun.id === m.run_id;
-                      const isLast = i === messages.length - 1;
-                      if ((!runMatches && !isLast) || !currentRun) return null;
-                      const run = currentRun;
-                      return (
-                        <>
-                          <div className="flex items-center gap-3 text-[10px] text-gray-400">
-                            <span className="flex items-center gap-1">
-                              <Activity size={10} />
-                              {run.modelRoute?.provider || "unknown"}
-                              {run.modelRoute?.preferLocal && " (local)"}
-                            </span>
-                            <span>{run.actions?.length || 0} 工具</span>
-                            <span>{run.generatedProposals?.length || 0} 待确认</span>
-                            {run.modelRoute?.fallbackReason && (
-                              <span className="text-amber-500">fallback</span>
-                            )}
-                          </div>
-                          {/* Execution summary line */}
-                          <div className="flex items-center gap-2">
-                            <span
-                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium ${
-                                run.status === "completed"
-                                  ? "bg-green-50 text-green-700"
-                                  : run.status === "waiting_permission"
-                                    ? "bg-amber-50 text-amber-700"
-                                    : run.status === "failed"
-                                      ? "bg-red-50 text-red-700"
-                                      : "bg-blue-50 text-blue-700"
-                              }`}
-                            >
-                              {run.status === "completed" && (
-                                <>
-                                  <CheckCircle2 size={12} />
-                                  已完成 · {run.stepCount || 0}步 · {run.toolCallCount || 0}工具
-                                </>
-                              )}
-                              {run.status === "waiting_permission" && (
-                                <>
-                                  <ShieldCheck size={12} />
-                                  等待确认 ·{" "}
-                                  {run.actions?.filter(
-                                    (a: any) => a.status === "needs_confirmation"
-                                  ).length || 0}
-                                  个权限请求
-                                </>
-                              )}
-                              {run.status === "failed" && (
-                                <>
-                                  <XCircle size={12} />
-                                  失败 · {run.error?.phase || "unknown"}
-                                </>
-                              )}
-                              {run.status === "running" && (
-                                <>
-                                  <Loader2 size={12} className="animate-spin" />
-                                  运行中...
-                                </>
-                              )}
-                            </span>
-                          </div>
-                        </>
-                      );
-                    })()}
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        onClick={() =>
-                          fillPrompt(buildAssistantActionPrompt("continue", displayContent))
-                        }
-                        className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
-                      >
-                        <MessageSquare size={12} /> 继续追问
-                      </button>
-                      <button
-                        onClick={() =>
-                          fillPrompt(buildAssistantActionPrompt("action", displayContent))
-                        }
-                        className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
-                      >
-                        <CheckCircle2 size={12} /> 提炼行动
-                      </button>
-                      <button
-                        onClick={() =>
-                          fillPrompt(buildAssistantActionPrompt("state", displayContent))
-                        }
-                        className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
-                      >
-                        <Activity size={12} /> 记录状态
-                      </button>
-                      <button
-                        onClick={() =>
-                          fillPrompt(buildAssistantActionPrompt("goal", displayContent))
-                        }
-                        className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
-                      >
-                        <Target size={12} /> 拆成目标
-                      </button>
-                      {!companionMode && (
-                        <>
-                          <button
-                            onClick={() => handleSaveAsDailyGoal(displayContent)}
-                            className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
-                            title="将回复首句保存为今日目标"
+                <div
+                  data-testid={m.role === "assistant" ? "assistant-message" : "user-message"}
+                  className={classNames(
+                    "max-w-2xl rounded-xl px-4 py-3 text-sm",
+                    companionMode
+                      ? m.role === "user"
+                        ? "rounded-tr-none bg-stone-900 text-white"
+                        : "rounded-tl-none border border-stone-200 bg-white text-stone-900"
+                      : m.role === "user"
+                        ? "rounded-br-none bg-indigo-600 text-white"
+                        : "rounded-bl-none bg-gray-100 text-gray-800"
+                  )}
+                >
+                  <div className="whitespace-pre-wrap">{displayContent}</div>
+                  {m.role === "assistant" && companionMode && m.run_id && (
+                    <div className="mt-3 border-t border-stone-100 pt-2">
+                      {runForMessage ? (
+                        <RuntimeDisclosureStrip
+                          view={buildRuntimeDisclosure(runForMessage, {
+                            taskState: currentAgentTaskState,
+                            ingress: currentAgentIngress,
+                          })}
+                          runId={m.run_id}
+                        />
+                      ) : (
+                        <div className="rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600">
+                          正在读取运行记录。
+                          <Link
+                            to={`/runs/${m.run_id}`}
+                            className="ml-2 font-semibold text-stone-900 underline-offset-4 hover:underline"
                           >
-                            <CheckCircle2 size={12} /> 设为今日目标
-                          </button>
-                          <button
-                            onClick={() => handleIndexMemory(displayContent)}
-                            className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
-                            title="将这条回复加入长期记忆"
-                          >
-                            <Sparkles size={12} /> 加入记忆
-                          </button>
-                        </>
+                            打开 Activity
+                          </Link>
+                        </div>
                       )}
                     </div>
-                    <div className="flex items-center justify-end gap-2">
-                      <button
-                        onClick={() => handleFeedback(i, "up")}
-                        className={`transition ${
-                          feedbackGiven[i] === "up"
-                            ? "text-green-600"
-                            : "text-gray-500 hover:text-green-600"
-                        }`}
-                        title="有帮助"
-                      >
-                        <ThumbsUp size={14} />
-                      </button>
-                      <button
-                        onClick={() => handleFeedback(i, "down")}
-                        className={`transition ${
-                          feedbackGiven[i] === "down"
-                            ? "text-red-600"
-                            : "text-gray-500 hover:text-red-600"
-                        }`}
-                        title="没帮助"
-                      >
-                        <ThumbsDown size={14} />
-                      </button>
+                  )}
+                  {m.role === "assistant" && !companionMode && (
+                    <div className="mt-3 space-y-2">
+                      {(() => {
+                        const runMatches = Boolean(runForMessage);
+                        const isLast = i === messages.length - 1;
+                        if ((!runMatches && !isLast) || !runForMessage) return null;
+                        const run = runForMessage;
+                        return (
+                          <RuntimeDisclosureStrip
+                            view={buildRuntimeDisclosure(run, {
+                              taskState: currentAgentTaskState,
+                              ingress: currentAgentIngress,
+                            })}
+                            runId={run.id}
+                            compact
+                          />
+                        );
+                      })()}
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          onClick={() =>
+                            fillPrompt(buildAssistantActionPrompt("continue", displayContent))
+                          }
+                          className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
+                        >
+                          <MessageSquare size={12} /> 继续追问
+                        </button>
+                        <button
+                          onClick={() =>
+                            fillPrompt(buildAssistantActionPrompt("action", displayContent))
+                          }
+                          className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
+                        >
+                          <CheckCircle2 size={12} /> 提炼行动
+                        </button>
+                        <button
+                          onClick={() =>
+                            fillPrompt(buildAssistantActionPrompt("state", displayContent))
+                          }
+                          className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
+                        >
+                          <Activity size={12} /> 记录状态
+                        </button>
+                        <button
+                          onClick={() =>
+                            fillPrompt(buildAssistantActionPrompt("goal", displayContent))
+                          }
+                          className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
+                        >
+                          <Target size={12} /> 拆成目标
+                        </button>
+                        {!companionMode && (
+                          <>
+                            <button
+                              onClick={() => handleSaveAsDailyGoal(displayContent)}
+                              className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
+                              title="将回复首句保存为今日目标"
+                            >
+                              <CheckCircle2 size={12} /> 设为今日目标
+                            </button>
+                            <button
+                              onClick={() => handleIndexMemory(displayContent)}
+                              className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
+                              title="将这条回复加入长期记忆"
+                            >
+                              <Sparkles size={12} /> 加入记忆
+                            </button>
+                          </>
+                        )}
+                      </div>
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          onClick={() => handleFeedback(i, "up")}
+                          className={`transition ${
+                            feedbackGiven[i] === "up"
+                              ? "text-green-600"
+                              : "text-gray-500 hover:text-green-600"
+                          }`}
+                          title="有帮助"
+                        >
+                          <ThumbsUp size={14} />
+                        </button>
+                        <button
+                          onClick={() => handleFeedback(i, "down")}
+                          className={`transition ${
+                            feedbackGiven[i] === "down"
+                              ? "text-red-600"
+                              : "text-gray-500 hover:text-red-600"
+                          }`}
+                          title="没帮助"
+                        >
+                          <ThumbsDown size={14} />
+                        </button>
+                      </div>
                     </div>
+                  )}
+                </div>
+                {companionMode && m.role === "user" && (
+                  <div
+                    aria-hidden="true"
+                    className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-stone-100 text-sm font-semibold text-stone-700"
+                  >
+                    你
                   </div>
                 )}
-              </div>
-              {companionMode && m.role === "user" && (
-                <div
-                  aria-hidden="true"
-                  className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-stone-100 text-sm font-semibold text-stone-700"
-                >
-                  你
-                </div>
-              )}
               </div>
             );
           })}
@@ -4815,33 +4754,14 @@ export default function ChatPage({
           )}
           {!companionMode && currentRun && (
             <div className="px-4 py-2">
-              <div className="text-xs text-gray-400 space-y-1">
-                <div className="flex items-center gap-2">
-                  <span
-                    className={`inline-block w-2 h-2 rounded-full ${
-                      currentRun.status === "completed"
-                        ? "bg-green-400"
-                        : currentRun.status === "failed"
-                          ? "bg-red-400"
-                          : currentRun.status === "running"
-                            ? "bg-yellow-400"
-                            : "bg-gray-400"
-                    }`}
-                  />
-                  <span>
-                    Run {currentRun.status} · {currentRun.modelRoute?.provider || "unknown"} ·{" "}
-                    {currentRun.modelRoute?.model || "unknown"}
-                    {currentRun.error && ` · Error: ${currentRun.error.phase}`}
-                  </span>
-                </div>
-                {currentRun.contextSummary && (
-                  <div className="text-gray-500">
-                    Memory: {currentRun.contextSummary.memoryHitCount} hits · LifeModel:{" "}
-                    {currentRun.contextSummary.lifeModelEmpty ? "empty" : "loaded"} · Route:{" "}
-                    {currentRun.modelRoute?.reason || "unknown"}
-                  </div>
-                )}
-              </div>
+              <RuntimeDisclosureStrip
+                view={buildRuntimeDisclosure(currentRun, {
+                  taskState: currentAgentTaskState,
+                  ingress: currentAgentIngress,
+                })}
+                runId={currentRun.id}
+                compact
+              />
             </div>
           )}
           <div ref={bottomRef} />

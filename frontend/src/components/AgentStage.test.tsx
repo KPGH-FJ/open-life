@@ -8,8 +8,10 @@ const expectedLabels: Record<AgentStageState, string> = {
   sorting: "整理中",
   memory: "翻看记忆",
   planning: "规划下一步",
+  tool: "使用工具",
   review: "有信等你回",
   privacy: "边界开启",
+  done: "已完成",
   error: "需要修复",
 };
 

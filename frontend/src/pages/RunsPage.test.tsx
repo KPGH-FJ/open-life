@@ -194,37 +194,38 @@ describe("RunsPage contract", () => {
     expect(screen.queryByText(/qa@example\.com/)).not.toBeInTheDocument();
     expect(screen.queryByText(/sk-sensitive-token/)).not.toBeInTheDocument();
     expect(screen.getAllByText(/\[email\]/).length).toBeGreaterThan(0);
-    expect(screen.getByText("Task running")).toBeInTheDocument();
+    expect(screen.getByText("任务运行中")).toBeInTheDocument();
+    expect(screen.getByText("下一步：取消")).toBeInTheDocument();
     expect(screen.getByText("可能已卡住")).toBeInTheDocument();
-    expect(screen.getAllByText("1 个提案").length).toBeGreaterThan(0);
-    expect(screen.getByText("Multi-Strategy Preview")).toBeInTheDocument();
-    expect(screen.getByText("Strategy: planExecute")).toBeInTheDocument();
-    expect(screen.getByText("Governance: warn")).toBeInTheDocument();
+    expect(screen.getAllByText("待确认 1").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("策略预览").length).toBeGreaterThan(0);
+    expect(screen.getByText("策略：planExecute")).toBeInTheDocument();
+    expect(screen.getByText("治理：warn")).toBeInTheDocument();
     expect(screen.getByText("1 warning")).toBeInTheDocument();
-    expect(screen.getByText("Plan-Execute Weekly Plan")).toBeInTheDocument();
-    expect(screen.getByText("weekly_planning · 3 steps · 1 proposal")).toBeInTheDocument();
-    expect(screen.getByText("Status: finalized")).toBeInTheDocument();
-    expect(screen.getByText("Steps: 3")).toBeInTheDocument();
-    expect(screen.getByText("Proposals: 1")).toBeInTheDocument();
+    expect(screen.getAllByText("计划执行").length).toBeGreaterThan(0);
+    expect(screen.getByText("weekly_planning · 3 步 · 待确认 1")).toBeInTheDocument();
+    expect(screen.getByText("状态：finalized")).toBeInTheDocument();
+    expect(screen.getByText("步骤：3")).toBeInTheDocument();
+    expect(screen.getByText("待确认：1")).toBeInTheDocument();
     expect(
       screen.queryByText("raw-sensitive-weekly-plan-should-not-render")
     ).not.toBeInTheDocument();
     expect(screen.queryByText("hidden by default")).not.toBeInTheDocument();
 
-    fireEvent.change(screen.getByPlaceholderText("搜索工具、来源或状态..."), {
+    fireEvent.change(screen.getByPlaceholderText("搜索任务、模型、工具、状态..."), {
       target: { value: "plan-session-1" },
     });
-    expect(screen.getByText("Plan-Execute Weekly Plan")).toBeInTheDocument();
+    expect(screen.getAllByText("计划执行").length).toBeGreaterThan(0);
 
-    fireEvent.change(screen.getByPlaceholderText("搜索工具、来源或状态..."), {
+    fireEvent.change(screen.getByPlaceholderText("搜索任务、模型、工具、状态..."), {
       target: { value: "weekly_planning_product" },
     });
-    expect(screen.getByText("Plan-Execute Weekly Plan")).toBeInTheDocument();
+    expect(screen.getAllByText("计划执行").length).toBeGreaterThan(0);
 
-    fireEvent.change(screen.getByPlaceholderText("搜索工具、来源或状态..."), {
+    fireEvent.change(screen.getByPlaceholderText("搜索任务、模型、工具、状态..."), {
       target: { value: "memory.search" },
     });
-    expect(screen.getAllByText("Chat").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("对话任务").length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByText("已删除"));
     await waitFor(() => {

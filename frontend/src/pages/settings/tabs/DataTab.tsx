@@ -6,6 +6,7 @@ import {
 import { buildSafeModeBlockedMessage } from "../../../utils/runtimeMessages";
 import { useState } from "react";
 import ConfirmDangerDialog from "../../../components/ConfirmDangerDialog";
+import { DangerZone } from "../../../components/product/ProductPrimitives";
 
 function readableError(e: unknown): string {
   if (typeof e === "string") return e;
@@ -85,7 +86,10 @@ export default function DataTab({
       />
       {/* Data Migration */}
       <section className="space-y-4 border-t pt-4">
-        <h3 className="text-sm font-medium text-gray-700">数字遗产 / 数据迁移</h3>
+        <h3 className="text-sm font-medium text-gray-700">数据导出</h3>
+        <p className="text-xs leading-5 text-gray-500">
+          导出会生成本地 JSON 备份，包含 Life Model、聊天记录与向量记忆数据。
+        </p>
         <div className="flex flex-wrap gap-3">
           <button
             onClick={handleExport}
@@ -94,23 +98,24 @@ export default function DataTab({
           >
             {exportLoading ? "导出中..." : "导出全部数据"}
           </button>
+        </div>
+        <DangerZone
+          title="恢复向导"
+          description="导入会覆盖当前 Life Model、聊天记录与记忆数据。跨主版本导入会被拒绝，执行前会要求二次确认。"
+        >
           <button
             onClick={handleImport}
             disabled={importLoading || safeMode}
-            className="px-3 py-2 bg-white border border-gray-300 text-gray-700 rounded-md text-sm font-medium hover:bg-gray-50 disabled:opacity-50"
+            className="px-3 py-2 bg-white border border-rose-200 text-rose-700 rounded-md text-sm font-medium hover:bg-rose-100 disabled:opacity-50"
           >
-            {importLoading ? "导入中..." : "导入全部数据"}
+            {importLoading ? "导入中..." : "导入覆盖备份"}
           </button>
-        </div>
-        <p className="text-xs text-gray-500">
-          导出将包含 LifeModel、聊天记录与向量记忆数据，格式为
-          JSON（带版本号与主版本校验）。导入会覆盖当前数据，跨主版本导入会被拒绝，请谨慎操作。
-        </p>
+        </DangerZone>
       </section>
 
       {/* Maintenance */}
       <section className="space-y-4 border-t pt-4">
-        <h3 className="text-sm font-medium text-gray-700">系统维护</h3>
+        <h3 className="text-sm font-medium text-gray-700">高级维护</h3>
         <div className="flex flex-wrap gap-3">
           <button
             onClick={async () => {

@@ -91,8 +91,8 @@ describe("OverviewTab readiness smoke", () => {
         <OverviewTab {...baseProps} />
       </MemoryRouter>
     );
-    expect(screen.getByText("试用路径 Checklist")).toBeInTheDocument();
-    expect(screen.getByText("可开始试用")).toBeInTheDocument();
+    expect(screen.getByText("启动检查清单")).toBeInTheDocument();
+    expect(screen.getByText("可开始使用")).toBeInTheDocument();
     expect(screen.getByText(/核心链路已就绪/)).toBeInTheDocument();
   });
 
@@ -127,7 +127,7 @@ describe("OverviewTab readiness smoke", () => {
       </MemoryRouter>
     );
     expect(screen.getAllByText("Safe Mode").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText(/建议先备份，再继续试用/)).toBeInTheDocument();
+    expect(screen.getByText(/建议先备份，再继续使用/)).toBeInTheDocument();
     expect(screen.getByText(/恢复控制台/)).toBeInTheDocument();
   });
 

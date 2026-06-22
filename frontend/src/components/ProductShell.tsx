@@ -15,23 +15,28 @@ type ProductShellProps = {
 const PRODUCT_ROUTE_ALIASES: Record<ProductRouteLabel, readonly string[]> = {
   陪伴: ["/companion", "/chat", "/agent"],
   今日: ["/today", "/", "/workspace"],
+  Review: ["/mailbox", "/review"],
   "Life Model": ["/life-model", "/builder", "/life", "/map", "/memory"],
-  邮箱: ["/mailbox", "/review"],
 };
 
 const SECONDARY_TOOL_GROUPS = [
   {
-    label: "能力与设置",
+    label: "产品设置",
     items: [
-      { label: "设置总览", path: "/settings" },
+      { label: "Settings", path: "/settings" },
+      { label: "Activity", path: "/runs" },
+    ],
+  },
+  {
+    label: "高级连接",
+    items: [
       { label: "MCP 工具", path: "/mcp" },
       { label: "A2A 连接", path: "/a2a" },
     ],
   },
   {
-    label: "记录与诊断",
+    label: "诊断",
     items: [
-      { label: "Runs", path: "/runs" },
       { label: "版本", path: "/versions" },
       { label: "Metrics", path: "/metrics" },
       { label: "Calibration", path: "/calibration" },
@@ -139,7 +144,7 @@ function SecondaryToolsMenu() {
         className="inline-flex h-9 items-center gap-1.5 rounded-md border border-stone-200 bg-white px-2.5 text-xs font-semibold text-stone-700 shadow-sm hover:bg-stone-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-stone-900/20"
       >
         <CircleEllipsis size={15} aria-hidden="true" />
-        能力与设置
+        更多
       </button>
       {open && (
         <nav
@@ -218,7 +223,7 @@ export default function ProductShell({
                 </div>
                 <div className="mt-1 text-xs text-amber-800">{safeModeReason}</div>
                 <div className="mt-1 text-xs text-amber-700">
-                  建议先去设置页的“恢复控制台”导出备份，再继续试用。
+                  建议先去设置页的“恢复控制台”导出备份，再继续使用。
                 </div>
               </div>
               <div className="flex gap-2">
@@ -245,15 +250,15 @@ export default function ProductShell({
           >
             <div className="mx-auto flex max-w-[1500px] flex-wrap items-center justify-between gap-3">
               <div className="text-xs text-blue-900">
-                <span className="font-semibold">Beta 试用准备中：</span>
+                <span className="font-semibold">Beta 使用准备中：</span>
                 {diagnostics.beta_readiness_issues?.[0] ??
-                  "继续完成设置、构建和首轮对话，就能形成完整试用闭环。"}
+                  "继续完成设置、构建和首轮对话，就能形成完整使用闭环。"}
               </div>
               <NavLink
                 to="/settings"
                 className="rounded-md bg-blue-700 px-3 py-1 text-[11px] font-medium text-white hover:bg-blue-800"
               >
-                查看试用完成度
+                查看准备状态
               </NavLink>
             </div>
           </div>

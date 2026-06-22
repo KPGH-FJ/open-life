@@ -1000,14 +1000,14 @@ export default function ProposalReviewPage() {
                                 </div>
                               )}
                               <div className="col-span-2">
-                                <span className="text-stone-400">Safe Path：</span>
+                                <span className="text-stone-400">文件访问范围：</span>
                                 {isPathInSafePaths(proposal.after.path) ? (
                                   <span className="text-green-600 font-medium">
-                                    ✅ 在 Safe Paths 内
+                                    在文件访问范围内
                                   </span>
                                 ) : (
                                   <span className="text-red-600 font-medium">
-                                    ❌ 不在 Safe Paths 内（接受将失败）
+                                    不在文件访问范围内（接受将失败）
                                   </span>
                                 )}
                               </div>
@@ -1065,7 +1065,7 @@ export default function ProposalReviewPage() {
                             : proposal.proposalType === "external_write_action" &&
                                 proposal.after &&
                                 !isPathInSafePaths(proposal.after.path)
-                              ? "目标路径不在 Safe Paths 内，无法应用"
+                              ? "目标路径不在文件访问范围内，无法应用"
                               : undefined
                         }
                         className="inline-flex items-center gap-1.5 rounded-full bg-stone-900 px-3 py-1.5 text-xs text-amber-50 hover:bg-stone-800 disabled:opacity-50"

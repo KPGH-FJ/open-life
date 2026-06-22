@@ -76,9 +76,9 @@ describe("OnboardingWizard", () => {
     fireEvent.click(screen.getByText("下一步"));
     fireEvent.click(screen.getByText("下一步"));
     fireEvent.click(screen.getByText("下一步"));
-    expect(screen.getByText("准备开始试用")).toBeInTheDocument();
+    expect(screen.getByText("准备开始使用")).toBeInTheDocument();
     expect(screen.getByText(/PII 检测引擎/)).toBeInTheDocument();
-    expect(screen.getByText("推荐试用路线")).toBeInTheDocument();
+    expect(screen.getByText("推荐启动路线")).toBeInTheDocument();
     expect(screen.getByText("2. 开始第一次对话")).toBeInTheDocument();
   });
 

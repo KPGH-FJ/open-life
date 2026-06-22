@@ -33,14 +33,14 @@ describe("DataTab", () => {
 
   it("renders data migration section", () => {
     render(<DataTab {...baseProps} />);
-    expect(screen.getByText(/数字遗产/)).toBeInTheDocument();
+    expect(screen.getByText(/数据导出/)).toBeInTheDocument();
     expect(screen.getByText("导出全部数据")).toBeInTheDocument();
-    expect(screen.getByText("导入全部数据")).toBeInTheDocument();
+    expect(screen.getByText("导入覆盖备份")).toBeInTheDocument();
   });
 
   it("renders maintenance section with buttons", () => {
     render(<DataTab {...baseProps} />);
-    expect(screen.getByText(/系统维护/)).toBeInTheDocument();
+    expect(screen.getByText(/高级维护/)).toBeInTheDocument();
     expect(screen.getByText("生成进化报告")).toBeInTheDocument();
     expect(screen.getByText("运行记忆层级维护")).toBeInTheDocument();
     expect(screen.getByText("导出诊断报告")).toBeInTheDocument();
@@ -48,7 +48,7 @@ describe("DataTab", () => {
 
   it("disables import button in safe mode", () => {
     render(<DataTab {...baseProps} safeMode={true} />);
-    const importBtn = screen.getByText("导入全部数据");
+    const importBtn = screen.getByText("导入覆盖备份");
     expect(importBtn).toBeDisabled();
   });
 

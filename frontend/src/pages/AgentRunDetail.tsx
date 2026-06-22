@@ -15,6 +15,9 @@ import {
   type MainChatTaskDetail,
 } from "../tauri";
 import RunTracePanel from "../components/RunTracePanel";
+import RuntimeDisclosureStrip from "../components/RuntimeDisclosureStrip";
+import { DangerZone, StatusChip } from "../components/product/ProductPrimitives";
+import { buildRuntimeDisclosure } from "../utils/runtimeDisclosure";
 import { safePreviewText } from "../utils/safePreview";
 import {
   ArrowLeft,
@@ -67,6 +70,131 @@ function kindLabel(kind: string): string {
     plugin: "Plugin",
   };
   return labels[kind] || kind;
+}
+
+type ActivityTimelineItem = {
+  id: string;
+  title: string;
+  body: string;
+  timestamp?: string;
+  tone: "neutral" | "info" | "warning" | "danger" | "ready";
+};
+
+function transcriptTitle(kind: string): string {
+  const labels: Record<string, string> = {
+    user_input: "用户目标",
+    route_decision: "路线选择",
+    plan: "计划",
+    action: "执行动作",
+    observation: "观察结果",
+    permission_request: "需要权限",
+    proposal_request: "创建 Review 建议",
+    error: "发生错误",
+    retry: "重试",
+    final_result: "最终结果",
+    fallback: "降级处理",
+    follow_up: "后续回复",
+  };
+  return labels[kind] ?? kind.replace(/_/g, " ");
+}
+
+function timelineTone(kind: string, status?: string): ActivityTimelineItem["tone"] {
+  if (kind === "error" || status === "failed") return "danger";
+  if (
+    kind === "permission_request" ||
+    kind === "proposal_request" ||
+    status === "needs_confirmation"
+  ) {
+    return "warning";
+  }
+  if (kind === "final_result" || status === "completed" || status === "observed") return "ready";
+  if (kind === "route_decision" || kind === "plan" || kind === "action") return "info";
+  return "neutral";
+}
+
+function buildActivityTimeline(
+  run: AgentRun,
+  taskDetail: MainChatTaskDetail | null
+): ActivityTimelineItem[] {
+  const transcriptItems =
+    taskDetail?.transcript.map(entry => ({
+      id: entry.id,
+      title: transcriptTitle(entry.kind),
+      body: safePreviewText(entry.summary, 220),
+      timestamp: entry.createdAt,
+      tone: timelineTone(entry.kind),
+    })) ?? [];
+
+  if (transcriptItems.length > 0) return transcriptItems;
+
+  const statusItems =
+    run.statusUpdates?.map((update, index) => ({
+      id: `status-${index}`,
+      title: transcriptTitle(update.phase),
+      body: safePreviewText(update.message, 220),
+      timestamp: update.timestamp,
+      tone: timelineTone(update.phase),
+    })) ?? [];
+
+  const actionItems = run.actions.map(action => ({
+    id: `action-${action.id}`,
+    title:
+      action.status === "needs_confirmation"
+        ? "需要确认"
+        : action.actionType === "tool"
+          ? "工具动作"
+          : "执行动作",
+    body: safePreviewText(
+      [action.actionType, action.target, action.error, action.reactTrace?.outputPreview]
+        .filter(Boolean)
+        .join(" · "),
+      220
+    ),
+    timestamp: action.startedAt ?? action.timestamp,
+    tone: timelineTone("action", action.status),
+  }));
+
+  const observationItems = run.observations.map(observation => ({
+    id: `observation-${observation.id}`,
+    title: "观察结果",
+    body: safePreviewText(observation.reactTrace?.outputPreview ?? observation.content, 220),
+    timestamp: observation.timestamp,
+    tone: "ready" as const,
+  }));
+
+  const proposalItems = run.generatedProposals.map(proposalId => ({
+    id: `proposal-${proposalId}`,
+    title: "创建 Review 建议",
+    body: `已创建待确认建议 ${proposalId}`,
+    timestamp: run.finishedAt ?? run.startedAt,
+    tone: "warning" as const,
+  }));
+
+  const finalItems = run.outputPreview
+    ? [
+        {
+          id: "final-result",
+          title: "最终结果",
+          body: safePreviewText(run.outputPreview, 220),
+          timestamp: run.finishedAt,
+          tone: "ready" as const,
+        },
+      ]
+    : [];
+
+  return [
+    ...statusItems,
+    ...actionItems,
+    ...observationItems,
+    ...proposalItems,
+    ...finalItems,
+  ].sort((a, b) => {
+    const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+    const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+    if (!Number.isFinite(timeA) || timeA === 0) return 1;
+    if (!Number.isFinite(timeB) || timeB === 0) return -1;
+    return timeA - timeB;
+  });
 }
 
 export default function AgentRunDetail() {
@@ -123,8 +251,7 @@ export default function AgentRunDetail() {
       } else if (control === "refresh") {
         await refreshMainChatAgentTaskContext(taskSummary.taskSessionId);
       } else {
-        const detail =
-          taskDetail ?? (await getMainChatAgentTaskDetail(taskSummary.taskSessionId));
+        const detail = taskDetail ?? (await getMainChatAgentTaskDetail(taskSummary.taskSessionId));
         const failedAction = detail.actions.find(action => action.status === "failed");
         if (!failedAction) {
           throw new Error("没有可重试的失败 action");
@@ -198,6 +325,7 @@ export default function AgentRunDetail() {
     (run.status === "running" &&
       Number.isFinite(startedAt) &&
       Date.now() - startedAt > STALE_RUN_THRESHOLD_MS);
+  const activityTimeline = buildActivityTimeline(run, taskDetail);
 
   return (
     <div className="h-full overflow-auto p-6">
@@ -218,13 +346,6 @@ export default function AgentRunDetail() {
               <Download size={14} />
               导出 Trace
             </button>
-            <button
-              onClick={handleDelete}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-50 text-red-600 hover:bg-red-100 text-sm"
-            >
-              <Trash2 size={14} />
-              删除
-            </button>
           </div>
         </div>
 
@@ -240,6 +361,13 @@ export default function AgentRunDetail() {
                 <span>{new Date(run.startedAt).toLocaleString()}</span>
               </div>
             </div>
+          </div>
+
+          <div className="mb-6">
+            <RuntimeDisclosureStrip
+              view={buildRuntimeDisclosure(run, { taskSummary: taskSummary ?? undefined })}
+              runId={run.id}
+            />
           </div>
 
           {/* Stats Summary */}
@@ -274,7 +402,7 @@ export default function AgentRunDetail() {
             </div>
           </div>
 
-	          {/* Duration */}
+          {/* Duration */}
           {run.finishedAt && (
             <div className="mb-6 text-xs text-stone-500">
               持续时间:{" "}
@@ -288,91 +416,123 @@ export default function AgentRunDetail() {
             </div>
           )}
 
-	          {run.userInput && (
-	            <div className="mb-6">
-	              <h3 className="text-sm font-semibold text-stone-700 mb-2">用户输入摘要</h3>
-	              <div className="bg-stone-50 rounded-lg p-3 text-sm text-stone-800">
-	                {safePreviewText(run.userInput, 160)}
-	              </div>
-	            </div>
-	          )}
+          {run.userInput && (
+            <div className="mb-6">
+              <h3 className="text-sm font-semibold text-stone-700 mb-2">用户输入摘要</h3>
+              <div className="bg-stone-50 rounded-lg p-3 text-sm text-stone-800">
+                {safePreviewText(run.userInput, 160)}
+              </div>
+            </div>
+          )}
 
           {run.outputPreview && (
             <div className="mb-6">
-	              <h3 className="text-sm font-semibold text-stone-700 mb-2">输出摘要</h3>
-	              <div className="bg-stone-50 rounded-lg p-3 text-sm text-stone-800">
-	                {safePreviewText(run.outputPreview, 160)}
-	              </div>
-	            </div>
-	          )}
+              <h3 className="text-sm font-semibold text-stone-700 mb-2">输出摘要</h3>
+              <div className="bg-stone-50 rounded-lg p-3 text-sm text-stone-800">
+                {safePreviewText(run.outputPreview, 160)}
+              </div>
+            </div>
+          )}
 
-	          <div className="mb-6">
-	            <h3 className="text-sm font-semibold text-stone-700 mb-2">任务控制</h3>
-	            {taskSummary ? (
-	              <div className="rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm text-stone-700">
-	                <div className="flex flex-wrap items-center gap-2">
-	                  <span className="rounded-md bg-stone-900 px-2 py-1 text-xs font-semibold text-white">
-	                    {taskSummary.status.replace(/_/g, " ")}
-	                  </span>
-	                  <span>Session {taskSummary.taskSessionId.slice(-8)}</span>
-	                  <span>推荐：{taskSummary.nextRecommendedControl}</span>
-	                  {stale && (
-	                    <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800">
-	                      可能已卡住
-	                    </span>
-	                  )}
-	                </div>
-	                {taskSummary.lastObservationPreview && (
-	                  <div className="mt-2 text-xs text-stone-500">
-	                    最近观察：{safePreviewText(taskSummary.lastObservationPreview, 140)}
-	                  </div>
-	                )}
-	                <div className="mt-3 flex flex-wrap gap-2">
-	                  <button
-	                    type="button"
-	                    onClick={() => void handleTaskControl("resume")}
-	                    disabled={taskBusy !== null}
-	                    className="inline-flex items-center gap-1 rounded-md border border-stone-200 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 disabled:opacity-50"
-	                  >
-	                    <Play size={12} aria-hidden="true" /> Resume
-	                  </button>
-	                  <button
-	                    type="button"
-	                    onClick={() => void handleTaskControl("retry")}
-	                    disabled={taskBusy !== null}
-	                    className="inline-flex items-center gap-1 rounded-md border border-stone-200 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 disabled:opacity-50"
-	                  >
-	                    <RotateCw size={12} aria-hidden="true" /> Retry
-	                  </button>
-	                  <button
-	                    type="button"
-	                    onClick={() => void handleTaskControl("cancel")}
-	                    disabled={taskBusy !== null}
-	                    className="inline-flex items-center gap-1 rounded-md border border-stone-200 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 disabled:opacity-50"
-	                  >
-	                    <Ban size={12} aria-hidden="true" /> Cancel
-	                  </button>
-	                  <button
-	                    type="button"
-	                    onClick={() => void handleTaskControl("refresh")}
-	                    disabled={taskBusy !== null}
-	                    className="inline-flex items-center gap-1 rounded-md border border-stone-200 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 disabled:opacity-50"
-	                  >
-	                    <RotateCw
-	                      size={12}
-	                      aria-hidden="true"
-	                      className={taskBusy === "refresh" ? "animate-spin" : ""}
-	                    />{" "}
-	                    Refresh
-	                  </button>
-	                </div>
-	              </div>
-	            ) : (
-	              <div className="rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm text-stone-500">
-	                旧 run 或缺少 task session，当前无法直接控制。
-	              </div>
-	            )}
-	          </div>
+          <div className="mb-6">
+            <h3 className="mb-3 text-sm font-semibold text-stone-700">Activity timeline</h3>
+            {activityTimeline.length > 0 ? (
+              <div className="space-y-2">
+                {activityTimeline.map((item, index) => (
+                  <div
+                    key={item.id}
+                    className="grid gap-3 rounded-lg border border-stone-200 bg-white px-3 py-3 text-sm sm:grid-cols-[90px_1fr]"
+                  >
+                    <div className="text-xs text-stone-500">
+                      <div>
+                        {item.timestamp ? new Date(item.timestamp).toLocaleTimeString() : "-"}
+                      </div>
+                      <div className="mt-1">Step {index + 1}</div>
+                    </div>
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-semibold text-stone-950">{item.title}</span>
+                        <StatusChip label={item.tone} tone={item.tone} />
+                      </div>
+                      <div className="mt-1 leading-6 text-stone-700">{item.body}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="rounded-lg border border-dashed border-stone-200 bg-stone-50 px-4 py-6 text-sm text-stone-500">
+                这个运行记录还没有可展示的 timeline。
+              </div>
+            )}
+          </div>
+
+          <div className="mb-6">
+            <h3 className="text-sm font-semibold text-stone-700 mb-2">任务控制</h3>
+            {taskSummary ? (
+              <div className="rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm text-stone-700">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="rounded-md bg-stone-900 px-2 py-1 text-xs font-semibold text-white">
+                    {taskSummary.status.replace(/_/g, " ")}
+                  </span>
+                  <span>Session {taskSummary.taskSessionId.slice(-8)}</span>
+                  <span>推荐：{taskSummary.nextRecommendedControl}</span>
+                  {stale && (
+                    <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800">
+                      可能已卡住
+                    </span>
+                  )}
+                </div>
+                {taskSummary.lastObservationPreview && (
+                  <div className="mt-2 text-xs text-stone-500">
+                    最近观察：{safePreviewText(taskSummary.lastObservationPreview, 140)}
+                  </div>
+                )}
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void handleTaskControl("resume")}
+                    disabled={taskBusy !== null}
+                    className="inline-flex items-center gap-1 rounded-md border border-stone-200 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 disabled:opacity-50"
+                  >
+                    <Play size={12} aria-hidden="true" /> Resume
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleTaskControl("retry")}
+                    disabled={taskBusy !== null}
+                    className="inline-flex items-center gap-1 rounded-md border border-stone-200 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 disabled:opacity-50"
+                  >
+                    <RotateCw size={12} aria-hidden="true" /> Retry
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleTaskControl("cancel")}
+                    disabled={taskBusy !== null}
+                    className="inline-flex items-center gap-1 rounded-md border border-stone-200 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 disabled:opacity-50"
+                  >
+                    <Ban size={12} aria-hidden="true" /> Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleTaskControl("refresh")}
+                    disabled={taskBusy !== null}
+                    className="inline-flex items-center gap-1 rounded-md border border-stone-200 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 disabled:opacity-50"
+                  >
+                    <RotateCw
+                      size={12}
+                      aria-hidden="true"
+                      className={taskBusy === "refresh" ? "animate-spin" : ""}
+                    />{" "}
+                    Refresh
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm text-stone-500">
+                旧 run 或缺少 task session，当前无法直接控制。
+              </div>
+            )}
+          </div>
 
           {run.error && (
             <div className="mb-6">
@@ -414,7 +574,7 @@ export default function AgentRunDetail() {
 
           {run.modelRoute && (
             <div className="mb-6">
-              <h3 className="text-sm font-semibold text-stone-700 mb-2">模型路由</h3>
+              <h3 className="text-sm font-semibold text-stone-700 mb-2">路线详情</h3>
               <div className="bg-stone-50 rounded-lg p-3 text-sm text-stone-800 space-y-1">
                 <div>Provider: {run.modelRoute.provider}</div>
                 <div>Model: {run.modelRoute.model}</div>
@@ -632,11 +792,11 @@ export default function AgentRunDetail() {
                               </button>
                             </div>
                           )}
-	                          {action.error && (
-	                            <div className="mt-2 rounded bg-red-50 px-2 py-1 text-xs text-red-700">
-	                              {safePreviewText(action.error, 140)}
-	                            </div>
-	                          )}
+                          {action.error && (
+                            <div className="mt-2 rounded bg-red-50 px-2 py-1 text-xs text-red-700">
+                              {safePreviewText(action.error, 140)}
+                            </div>
+                          )}
                         </div>
                       );
                     } else {
@@ -653,9 +813,9 @@ export default function AgentRunDetail() {
                               {new Date(obs.timestamp).toLocaleString()}
                             </span>
                           </div>
-	                          <div className="text-stone-800">
-	                            {trace?.outputPreview ?? safePreviewText(obs.content, 140)}
-	                          </div>
+                          <div className="text-stone-800">
+                            {trace?.outputPreview ?? safePreviewText(obs.content, 140)}
+                          </div>
                           <div className="text-xs text-stone-500 mt-1">
                             Source: {obs.source}
                             {obs.actionId ? ` · Action: ${obs.actionId.slice(0, 8)}` : ""}
@@ -673,6 +833,19 @@ export default function AgentRunDetail() {
               </div>
             </div>
           )}
+
+          <DangerZone
+            title="危险操作"
+            description="删除运行记录只应在确认不再需要审计线索时使用；删除后当前版本不可恢复。"
+          >
+            <button
+              onClick={handleDelete}
+              className="inline-flex items-center gap-1.5 rounded-md bg-white px-3 py-2 text-sm font-medium text-rose-700 ring-1 ring-rose-200 hover:bg-rose-100"
+            >
+              <Trash2 size={14} />
+              删除运行记录
+            </button>
+          </DangerZone>
         </div>
       </div>
     </div>

@@ -1,8 +1,8 @@
 export const PRIMARY_PRODUCT_ROUTES = [
   { label: "陪伴", path: "/companion", legacyAlias: "/chat" },
   { label: "今日", path: "/today", legacyAlias: "/" },
+  { label: "Review", path: "/mailbox", legacyAlias: "/review" },
   { label: "Life Model", path: "/life-model", legacyAlias: "/builder" },
-  { label: "邮箱", path: "/mailbox", legacyAlias: "/review" },
 ] as const;
 
 export type ProductRouteLabel = (typeof PRIMARY_PRODUCT_ROUTES)[number]["label"];

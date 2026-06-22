@@ -7,8 +7,10 @@ export const AGENT_STAGE_STATES = [
   "sorting",
   "memory",
   "planning",
+  "tool",
   "review",
   "privacy",
+  "done",
   "error",
 ] as const;
 
@@ -59,6 +61,12 @@ const STATE_CONFIG: Record<AgentStageState, AgentStageConfig> = {
     signal: "bg-lime-300",
     card: "bg-[#fefff8]",
   },
+  tool: {
+    title: "使用工具",
+    status: "正在调用已允许的工具，并把结果带回当前任务。",
+    signal: "bg-violet-300",
+    card: "bg-[#fdfbff]",
+  },
   review: {
     title: "有信等你回",
     status: "有内容需要你过目后再继续。",
@@ -70,6 +78,12 @@ const STATE_CONFIG: Record<AgentStageState, AgentStageConfig> = {
     status: "隐私、权限或本地优先边界已开启。",
     signal: "bg-cyan-300",
     card: "bg-[#fbfeff]",
+  },
+  done: {
+    title: "已完成",
+    status: "这次任务已经收束，可以查看结果或继续追问。",
+    signal: "bg-emerald-400",
+    card: "bg-[#fbfffc]",
   },
   error: {
     title: "需要修复",

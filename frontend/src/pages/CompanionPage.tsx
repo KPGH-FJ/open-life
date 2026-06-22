@@ -1,7 +1,11 @@
+import { useState } from "react";
 import AgentStage from "../components/AgentStage";
+import type { AgentStageState } from "../components/AgentStage";
 import ChatPage from "./ChatPage";
 
 export default function CompanionPage() {
+  const [stageState, setStageState] = useState<AgentStageState>("idle");
+
   return (
     <section
       data-testid="companion-page"
@@ -10,11 +14,11 @@ export default function CompanionPage() {
     >
       <div className="mx-auto grid h-full min-h-0 w-full max-w-[1500px] grid-rows-[auto_minmax(0,1fr)] gap-5 lg:grid-cols-[minmax(360px,42%)_minmax(560px,58%)] lg:grid-rows-1">
         <aside className="min-h-0">
-          <AgentStage state="idle" compact />
+          <AgentStage state={stageState} compact />
         </aside>
 
         <div className="min-h-0 overflow-hidden rounded-xl border border-stone-200 bg-[#fffefa] shadow-sm">
-          <ChatPage companionMode />
+          <ChatPage companionMode onCompanionStageChange={setStageState} />
         </div>
       </div>
     </section>

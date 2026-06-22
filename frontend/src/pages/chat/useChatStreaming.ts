@@ -13,7 +13,7 @@ import { listen } from "@tauri-apps/api/event";
 
 function formatChatRuntimeError(error: unknown, diagnostics: SystemDiagnostics | null): string {
   if (diagnostics && !diagnostics.chat_ready && diagnostics.readiness_issues?.length) {
-    return `暂时无法发送普通对话：\n${diagnostics.readiness_issues.map(issue => `- ${issue}`).join("\n")}\n\n请去设置页查看\u201c试用就绪检查\u201d。`;
+    return `暂时无法发送普通对话：\n${diagnostics.readiness_issues.map(issue => `- ${issue}`).join("\n")}\n\n请去设置页查看\u201c启动检查\u201d。`;
   }
   const raw = error instanceof Error ? error.message : String(error);
   const lower = raw.toLowerCase();
@@ -73,7 +73,7 @@ function formatChatRuntimeError(error: unknown, diagnostics: SystemDiagnostics |
     hint =
       "没有可用的模型后端。请在设置页配置 DeepSeek/OpenAI/OpenRouter API Key，或启动本地 Ollama。";
   }
-  return `${hint}\n\n请去设置页查看\u201c试用就绪检查\u201d。`;
+  return `${hint}\n\n请去设置页查看\u201c启动检查\u201d。`;
 }
 
 interface UseChatStreamingOpts {

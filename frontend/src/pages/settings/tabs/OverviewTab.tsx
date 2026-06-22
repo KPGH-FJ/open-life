@@ -179,7 +179,7 @@ export default function OverviewTab({
       detail:
         (diagnostics?.snapshot_count ?? 0) > 0
           ? `已经有 ${diagnostics?.snapshot_count} 个快照，版本安全网已建立。`
-          : "至少确认一次快照/回滚路径，Beta 试用才算具备可恢复能力。",
+          : "至少确认一次快照/回滚路径，使用闭环才算具备可恢复能力。",
       to: "#/versions",
       action: "看版本控制",
     },
@@ -223,7 +223,7 @@ export default function OverviewTab({
       ? [
           {
             title: "数据库模式已降级",
-            detail: "当前应用没有运行在完全健康的数据模式下，继续试用前建议先导出备份。",
+            detail: "当前应用没有运行在完全健康的数据模式下，继续使用前建议先导出备份。",
             tone: "warning" as const,
           },
         ]
@@ -232,7 +232,7 @@ export default function OverviewTab({
 
   return (
     <>
-      {/* Trial Checklist */}
+      {/* Readiness Checklist */}
       <section className="space-y-4">
         <div
           className={classNames(
@@ -244,11 +244,11 @@ export default function OverviewTab({
         >
           <div className="flex items-start justify-between gap-3">
             <div>
-              <div className="text-sm font-semibold text-stone-900">试用路径 Checklist</div>
+              <div className="text-sm font-semibold text-stone-900">启动检查清单</div>
               <div className="mt-1 text-xs text-stone-500">
                 {diagnostics?.chat_ready
-                  ? "核心链路已就绪，可以开始试用 Chat / Builder / Calibration。"
-                  : "按这些项逐个修复，桌面端试用会稳定很多。"}
+                  ? "核心链路已就绪，可以开始使用 Chat / Builder / Calibration。"
+                  : "按这些项逐个修复，桌面端使用会稳定很多。"}
               </div>
             </div>
             <span
@@ -259,7 +259,7 @@ export default function OverviewTab({
                   : "bg-amber-100 text-amber-700"
               )}
             >
-              {diagnostics?.chat_ready ? "可开始试用" : "还有阻塞"}
+              {diagnostics?.chat_ready ? "可开始使用" : "还有阻塞"}
             </span>
           </div>
           <div className="mt-4 space-y-2">
@@ -306,10 +306,10 @@ export default function OverviewTab({
         <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
           <div className="flex items-start justify-between gap-3">
             <div>
-              <div className="text-sm font-semibold text-stone-900">试用闭环定义</div>
+              <div className="text-sm font-semibold text-stone-900">使用闭环定义</div>
               <div className="mt-1 text-xs text-stone-500">
-                下面这 4 步都跑通，才算真正完成了一次 OpenLife Beta
-                试用，而不是只停留在配置或单页体验。
+                下面这 4 步都跑通，才算真正形成一次可恢复的 OpenLife
+                使用闭环，而不是只停留在配置或单页体验。
               </div>
             </div>
             <span
@@ -396,7 +396,7 @@ export default function OverviewTab({
             <div>
               <h3 className="text-sm font-semibold text-amber-950">恢复控制台</h3>
               <p className="mt-1 text-xs text-amber-800">
-                当前检测到启动降级、数据库异常或记忆索引损坏。建议先备份，再继续试用 Builder /
+                当前检测到启动降级、数据库异常或记忆索引损坏。建议先备份，再继续使用 Builder /
                 Chat。
               </p>
             </div>
@@ -486,7 +486,7 @@ export default function OverviewTab({
                   setRebuildResult(
                     `向量索引重建完成：共处理 ${res.processed} 条消息，重建 ${res.indexed} 条，跳过 ${res.skipped} 条。${
                       recovered
-                        ? " 当前数据环境已恢复，可继续试用。"
+                        ? " 当前数据环境已恢复，可继续使用。"
                         : " 已刷新诊断，请继续确认数据环境是否恢复。"
                     }`
                   );

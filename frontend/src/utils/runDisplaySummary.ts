@@ -1,5 +1,6 @@
 import type { AgentRun, MainChatTaskSummary } from "../tauri";
 import { safePreviewText } from "./safePreview";
+import { buildRuntimeDisclosure } from "./runtimeDisclosure";
 
 export type RunDisplaySummary = {
   title: string;
@@ -41,36 +42,23 @@ function statusLabel(status: string): string {
   return labels[status] ?? status;
 }
 
-function routeLabel(run: AgentRun): string {
-  const route = run.modelRoute;
-  if (!route) return "模型路线未记录";
-  const type =
-    route.routeType === "local" ? "本地" : route.routeType === "cloud" ? "云端" : route.routeType;
-  return `${type || "未知"} · ${route.provider || "unknown"} · ${route.model || "unknown"}`;
-}
-
 export function buildRunDisplaySummary(
   run: AgentRun,
   taskSummary?: MainChatTaskSummary
 ): RunDisplaySummary {
+  const disclosure = buildRuntimeDisclosure(run, { taskSummary });
   const title = kindLabel(run.kind);
   const taskPart = taskSummary ? `Task ${taskSummary.status.replace(/_/g, " ")}` : null;
   const inputPart = run.userInput ? safePreviewText(run.userInput, 96) : "无用户输入正文";
   const subtitle = [taskPart, inputPart].filter(Boolean).join(" · ");
   const actionCount = run.actions?.length ?? 0;
   const observationCount = run.observations?.length ?? 0;
-  const proposalCount = run.generatedProposals?.length ?? 0;
-  const route = routeLabel(run);
+  const route = disclosure.routeLabel;
   const outcome = run.error?.message
     ? `${statusLabel(run.status)} · ${run.error.phase || "unknown"}`
     : `${statusLabel(run.status)} · ${actionCount} 个 action · ${observationCount} 个 observation`;
-  const tools =
-    actionCount > 0
-      ? `工具 ${actionCount}`
-      : run.contextSummary?.usedToolsPrompt
-        ? "工具提示已注入"
-        : "未调用工具";
-  const proposals = proposalCount > 0 ? `待确认 ${proposalCount}` : "无新提案";
+  const tools = disclosure.toolsLabel;
+  const proposals = disclosure.proposalsLabel;
 
   return {
     title,
