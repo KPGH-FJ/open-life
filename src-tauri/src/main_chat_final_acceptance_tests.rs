@@ -326,6 +326,45 @@ pub(crate) async fn run_main_chat_command_surface_eval_gate() -> MainChatCommand
     main_chat_command_surface_eval::run_main_chat_command_surface_eval_report().await
 }
 
+fn complete_local_kernel_command_surface_report() -> MainChatCommandSurfaceEvalReport {
+    MainChatCommandSurfaceEvalReport {
+        total_cases: 38,
+        failed_cases: 0,
+        send_coverage: 0.5,
+        stream_coverage: 0.5,
+        provider_generation_coverage: 1.0 / 38.0,
+        file_read_coverage: 1.0 / 38.0,
+        plan_execute_coverage: 1.0 / 38.0,
+        proposal_coverage: 1.0 / 38.0,
+        web_policy_blocker_coverage: 1.0 / 38.0,
+        web_agent_loop_blocker_coverage: 1.0 / 38.0,
+        web_agent_loop_success_coverage: 1.0 / 38.0,
+        mcp_missing_read_target_blocker_coverage: 1.0 / 38.0,
+        mcp_registered_read_success_coverage: 1.0 / 38.0,
+        mcp_agent_loop_success_coverage: 1.0 / 38.0,
+        mcp_tool_permission_proposal_coverage: 1.0 / 38.0,
+        mcp_agent_loop_tool_permission_proposal_coverage: 1.0 / 38.0,
+        final_completion_ready: false,
+        final_completion_blockers: vec![
+            "live_provider_generation_not_executed".into(),
+            "provider_backed_web_mcp_agent_loop_not_executed".into(),
+            "provider_backed_web_agent_loop_not_executed".into(),
+            "provider_backed_mcp_agent_loop_not_executed".into(),
+            "provider_live_proposal_permission_not_executed".into(),
+        ],
+        kernel_backed_case_count: 38,
+        kernel_direct_answer_case_count: 8,
+        kernel_read_only_tool_case_count: 18,
+        kernel_proposal_write_case_count: 4,
+        kernel_plan_execute_case_count: 4,
+        kernel_blocker_case_count: 10,
+        kernel_hs_context_case_count: 38,
+        kernel_web_tool_case_count: 6,
+        kernel_mcp_tool_case_count: 8,
+        ..Default::default()
+    }
+}
+
 #[tokio::test]
 async fn main_chat_final_acceptance_gate_uses_real_command_surface_eval_evidence() {
     let command_surface_report = run_main_chat_command_surface_eval_gate().await;
@@ -448,33 +487,7 @@ fn main_chat_final_acceptance_gate_accepts_complete_live_evidence_overlaying_loc
             runtime_report,
             &live_provider,
         );
-    let command_surface_report = MainChatCommandSurfaceEvalReport {
-        total_cases: 38,
-        failed_cases: 0,
-        send_coverage: 0.5,
-        stream_coverage: 0.5,
-        provider_generation_coverage: 1.0 / 38.0,
-        file_read_coverage: 1.0 / 38.0,
-        plan_execute_coverage: 1.0 / 38.0,
-        proposal_coverage: 1.0 / 38.0,
-        web_policy_blocker_coverage: 1.0 / 38.0,
-        web_agent_loop_blocker_coverage: 1.0 / 38.0,
-        web_agent_loop_success_coverage: 1.0 / 38.0,
-        mcp_missing_read_target_blocker_coverage: 1.0 / 38.0,
-        mcp_registered_read_success_coverage: 1.0 / 38.0,
-        mcp_agent_loop_success_coverage: 1.0 / 38.0,
-        mcp_tool_permission_proposal_coverage: 1.0 / 38.0,
-        mcp_agent_loop_tool_permission_proposal_coverage: 1.0 / 38.0,
-        final_completion_ready: false,
-        final_completion_blockers: vec![
-            "live_provider_generation_not_executed".into(),
-            "provider_backed_web_mcp_agent_loop_not_executed".into(),
-            "provider_backed_web_agent_loop_not_executed".into(),
-            "provider_backed_mcp_agent_loop_not_executed".into(),
-            "provider_live_proposal_permission_not_executed".into(),
-        ],
-        ..Default::default()
-    };
+    let command_surface_report = complete_local_kernel_command_surface_report();
 
     let report = openlife_core::agent::main_chat_agent_v1::evaluate_main_chat_agent_execution_v1_acceptance_gate(
         openlife_core::agent::main_chat_agent_v1::MainChatAgentExecutionV1AcceptanceInput {
@@ -498,33 +511,7 @@ fn main_chat_final_acceptance_gate_report_rejects_live_reports_without_attempt_p
         openlife_core::agent::main_chat_agent_v1::run_main_chat_agent_v1_runtime_eval_suite(
             openlife_core::agent::main_chat_agent_v1::main_chat_runtime_eval_cases(),
         );
-    let command_surface_report = MainChatCommandSurfaceEvalReport {
-        total_cases: 38,
-        failed_cases: 0,
-        send_coverage: 0.5,
-        stream_coverage: 0.5,
-        provider_generation_coverage: 1.0 / 38.0,
-        file_read_coverage: 1.0 / 38.0,
-        plan_execute_coverage: 1.0 / 38.0,
-        proposal_coverage: 1.0 / 38.0,
-        web_policy_blocker_coverage: 1.0 / 38.0,
-        web_agent_loop_blocker_coverage: 1.0 / 38.0,
-        web_agent_loop_success_coverage: 1.0 / 38.0,
-        mcp_missing_read_target_blocker_coverage: 1.0 / 38.0,
-        mcp_registered_read_success_coverage: 1.0 / 38.0,
-        mcp_agent_loop_success_coverage: 1.0 / 38.0,
-        mcp_tool_permission_proposal_coverage: 1.0 / 38.0,
-        mcp_agent_loop_tool_permission_proposal_coverage: 1.0 / 38.0,
-        final_completion_ready: false,
-        final_completion_blockers: vec![
-            "live_provider_generation_not_executed".into(),
-            "provider_backed_web_mcp_agent_loop_not_executed".into(),
-            "provider_backed_web_agent_loop_not_executed".into(),
-            "provider_backed_mcp_agent_loop_not_executed".into(),
-            "provider_live_proposal_permission_not_executed".into(),
-        ],
-        ..Default::default()
-    };
+    let command_surface_report = complete_local_kernel_command_surface_report();
 
     let report = main_chat_agent_execution_v1_final_gate_report_from_parts(
         runtime_report,
@@ -569,25 +556,7 @@ fn main_chat_final_acceptance_gate_report_preserves_live_provider_failure_audit(
         openlife_core::agent::main_chat_agent_v1::run_main_chat_agent_v1_runtime_eval_suite(
             openlife_core::agent::main_chat_agent_v1::main_chat_runtime_eval_cases(),
         );
-    let command_surface_report = MainChatCommandSurfaceEvalReport {
-        total_cases: 38,
-        failed_cases: 0,
-        send_coverage: 0.5,
-        stream_coverage: 0.5,
-        provider_generation_coverage: 1.0 / 38.0,
-        file_read_coverage: 1.0 / 38.0,
-        plan_execute_coverage: 1.0 / 38.0,
-        proposal_coverage: 1.0 / 38.0,
-        web_policy_blocker_coverage: 1.0 / 38.0,
-        web_agent_loop_blocker_coverage: 1.0 / 38.0,
-        web_agent_loop_success_coverage: 1.0 / 38.0,
-        mcp_missing_read_target_blocker_coverage: 1.0 / 38.0,
-        mcp_registered_read_success_coverage: 1.0 / 38.0,
-        mcp_agent_loop_success_coverage: 1.0 / 38.0,
-        mcp_tool_permission_proposal_coverage: 1.0 / 38.0,
-        mcp_agent_loop_tool_permission_proposal_coverage: 1.0 / 38.0,
-        ..Default::default()
-    };
+    let command_surface_report = complete_local_kernel_command_surface_report();
 
     let report = main_chat_agent_execution_v1_final_gate_report_from_parts(
         runtime_report,
@@ -643,25 +612,7 @@ fn main_chat_final_acceptance_gate_report_derives_post_invocation_live_provider_
         openlife_core::agent::main_chat_agent_v1::run_main_chat_agent_v1_runtime_eval_suite(
             openlife_core::agent::main_chat_agent_v1::main_chat_runtime_eval_cases(),
         );
-    let command_surface_report = MainChatCommandSurfaceEvalReport {
-        total_cases: 38,
-        failed_cases: 0,
-        send_coverage: 0.5,
-        stream_coverage: 0.5,
-        provider_generation_coverage: 1.0 / 38.0,
-        file_read_coverage: 1.0 / 38.0,
-        plan_execute_coverage: 1.0 / 38.0,
-        proposal_coverage: 1.0 / 38.0,
-        web_policy_blocker_coverage: 1.0 / 38.0,
-        web_agent_loop_blocker_coverage: 1.0 / 38.0,
-        web_agent_loop_success_coverage: 1.0 / 38.0,
-        mcp_missing_read_target_blocker_coverage: 1.0 / 38.0,
-        mcp_registered_read_success_coverage: 1.0 / 38.0,
-        mcp_agent_loop_success_coverage: 1.0 / 38.0,
-        mcp_tool_permission_proposal_coverage: 1.0 / 38.0,
-        mcp_agent_loop_tool_permission_proposal_coverage: 1.0 / 38.0,
-        ..Default::default()
-    };
+    let command_surface_report = complete_local_kernel_command_surface_report();
     let mut failed_web = successful_live_provider_harness_report(
         MainChatLiveProviderEvalHarnessScenario::WebAgentLoop,
     );
@@ -694,25 +645,7 @@ fn main_chat_final_acceptance_gate_report_counts_only_auditable_live_ready_repor
         openlife_core::agent::main_chat_agent_v1::run_main_chat_agent_v1_runtime_eval_suite(
             openlife_core::agent::main_chat_agent_v1::main_chat_runtime_eval_cases(),
         );
-    let command_surface_report = MainChatCommandSurfaceEvalReport {
-        total_cases: 38,
-        failed_cases: 0,
-        send_coverage: 0.5,
-        stream_coverage: 0.5,
-        provider_generation_coverage: 1.0 / 38.0,
-        file_read_coverage: 1.0 / 38.0,
-        plan_execute_coverage: 1.0 / 38.0,
-        proposal_coverage: 1.0 / 38.0,
-        web_policy_blocker_coverage: 1.0 / 38.0,
-        web_agent_loop_blocker_coverage: 1.0 / 38.0,
-        web_agent_loop_success_coverage: 1.0 / 38.0,
-        mcp_missing_read_target_blocker_coverage: 1.0 / 38.0,
-        mcp_registered_read_success_coverage: 1.0 / 38.0,
-        mcp_agent_loop_success_coverage: 1.0 / 38.0,
-        mcp_tool_permission_proposal_coverage: 1.0 / 38.0,
-        mcp_agent_loop_tool_permission_proposal_coverage: 1.0 / 38.0,
-        ..Default::default()
-    };
+    let command_surface_report = complete_local_kernel_command_surface_report();
     let mut untraceable_ready = successful_live_provider_harness_report(
         MainChatLiveProviderEvalHarnessScenario::DirectAnswer,
     );

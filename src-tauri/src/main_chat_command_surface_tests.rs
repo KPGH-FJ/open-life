@@ -406,9 +406,7 @@ fn assert_kernel_mcp_read_selection_metadata(
         Some("builtin_echo")
     );
     assert_eq!(
-        metadata
-            .get("target")
-            .and_then(serde_json::Value::as_str),
+        metadata.get("target").and_then(serde_json::Value::as_str),
         Some("builtin_echo")
     );
     assert_eq!(
@@ -446,34 +444,25 @@ fn assert_kernel_mcp_read_selection_metadata(
         .and_then(serde_json::Value::as_array)
         .expect("kernel MCP target allowlist");
     assert_eq!(target_allowlist.len(), candidate_count);
-    assert!(target_allowlist.iter().any(|target| target == "builtin_echo"));
+    assert!(target_allowlist
+        .iter()
+        .any(|target| target == "builtin_echo"));
     let action_target_allowlist = metadata
         .get("actionTargetAllowlist")
         .and_then(serde_json::Value::as_array)
         .expect("kernel MCP action-target allowlist");
     assert_eq!(action_target_allowlist.len(), candidate_count);
     assert!(action_target_allowlist.iter().all(|entry| {
-        entry
-            .as_object()
-            .is_some_and(|object| object.len() == 2)
-            && entry
-                .get("actionType")
-                .and_then(serde_json::Value::as_str)
-                == Some("mcp_tool")
+        entry.as_object().is_some_and(|object| object.len() == 2)
+            && entry.get("actionType").and_then(serde_json::Value::as_str) == Some("mcp_tool")
             && entry
                 .get("target")
                 .and_then(serde_json::Value::as_str)
                 .is_some()
     }));
     assert!(action_target_allowlist.iter().any(|entry| {
-        entry
-            .get("actionType")
-            .and_then(serde_json::Value::as_str)
-            == Some("mcp_tool")
-            && entry
-                .get("target")
-                .and_then(serde_json::Value::as_str)
-                == Some("builtin_echo")
+        entry.get("actionType").and_then(serde_json::Value::as_str) == Some("mcp_tool")
+            && entry.get("target").and_then(serde_json::Value::as_str) == Some("builtin_echo")
     }));
 }
 
@@ -548,6 +537,36 @@ async fn main_chat_command_surface_eval_gate_covers_send_stream_runtime_matrix()
         .contains(&"provider_live_proposal_permission_not_executed".to_string()));
     assert_eq!(report.legacy_fallback_count, 0);
     assert_eq!(report.silent_write_count, 0);
+    let missing_kernel_cases = report
+        .case_evidence
+        .iter()
+        .filter(|case| !case.kernel_backed)
+        .map(|case| {
+            format!(
+                "{}:{}",
+                case.entry_point.as_label(),
+                case.scenario.as_label()
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        missing_kernel_cases.is_empty(),
+        "all command-surface eval cases must be MainChatKernel-backed: {:?}",
+        missing_kernel_cases
+    );
+    assert_eq!(report.kernel_backed_case_count, report.total_cases);
+    assert!(report.kernel_direct_answer_case_count > 0);
+    assert!(report.kernel_read_only_tool_case_count > 0);
+    assert!(report.kernel_proposal_write_case_count > 0);
+    assert!(report.kernel_plan_execute_case_count > 0);
+    assert!(report.kernel_blocker_case_count > 0);
+    assert!(report.kernel_hs_context_case_count > 0);
+    assert!(report.kernel_web_tool_case_count > 0);
+    assert!(report.kernel_mcp_tool_case_count > 0);
+    assert_eq!(
+        report.acceptance_evidence().send_stream_matrix_coverage,
+        1.0
+    );
 }
 
 #[tokio::test]
@@ -3501,7 +3520,10 @@ async fn send_message_registered_mcp_read_completes_through_agent_loop_not_fallb
         .and_then(serde_json::Value::as_bool)
         == Some(true)
     {
-        assert_eq!(observation["executorStatus"], serde_json::json!("succeeded"));
+        assert_eq!(
+            observation["executorStatus"],
+            serde_json::json!("succeeded")
+        );
         assert_kernel_mcp_read_selection_metadata(observation, 1);
     } else {
         assert_eq!(observation["agentLoopSucceeded"], serde_json::json!(true));
@@ -3695,7 +3717,10 @@ async fn start_stream_message_registered_mcp_read_completes_through_agent_loop_n
         .and_then(serde_json::Value::as_bool)
         == Some(true)
     {
-        assert_eq!(observation["executorStatus"], serde_json::json!("succeeded"));
+        assert_eq!(
+            observation["executorStatus"],
+            serde_json::json!("succeeded")
+        );
         assert_kernel_mcp_read_selection_metadata(observation, 1);
     } else {
         assert_eq!(observation["agentLoopSucceeded"], serde_json::json!(true));
@@ -3897,7 +3922,10 @@ async fn send_message_registered_mcp_multi_candidate_agent_loop_selects_allowed_
         .and_then(serde_json::Value::as_bool)
         == Some(true)
     {
-        assert_eq!(observation["executorStatus"], serde_json::json!("succeeded"));
+        assert_eq!(
+            observation["executorStatus"],
+            serde_json::json!("succeeded")
+        );
         assert_kernel_mcp_read_selection_metadata(observation, 2);
     } else {
         assert_eq!(observation["agentLoopSucceeded"], serde_json::json!(true));

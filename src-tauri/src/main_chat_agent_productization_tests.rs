@@ -2397,14 +2397,14 @@ async fn main_chat_agent_beta_v1_b22_multi_read_runs_through_command_surface() {
 
     assert!(
         proof.passed,
-        "B22 multi-read should pass with ordinary command-surface AgentLoop evidence: {:?}",
+        "B22 multi-read should pass with ordinary command-surface kernel-loop evidence: {:?}",
         proof.blockers
     );
     assert_eq!(proof.actual_outcome, "success");
     assert_eq!(proof.command_surface, "both");
     assert!(
         proof.task_session_id.is_some(),
-        "B22 should expose the runtime task session used for multi-read AgentLoop"
+        "B22 should expose the runtime task session used for the multi-read kernel loop"
     );
     assert!(
         proof.actions_attempted >= 2 && proof.actions_executed >= 2,
@@ -2436,7 +2436,7 @@ async fn main_chat_agent_beta_v1_b22_multi_read_runs_through_command_surface() {
             .evidence_sources
             .iter()
             .any(|source| source == "multi_read_agent_loop:tool_calls=2:observations=2"),
-        "B22 should prove two tool calls and two observations from AgentLoop: {:?}",
+        "B22 should prove two tool calls and two observations from the kernel read loop: {:?}",
         proof.evidence_sources
     );
 }
