@@ -38,6 +38,8 @@ pub(crate) mod main_chat_event_stream;
 pub(crate) mod main_chat_final_gate;
 pub(crate) mod main_chat_generation_support;
 pub(crate) mod main_chat_hs_runtime;
+#[allow(dead_code)]
+pub(crate) mod main_chat_kernel;
 pub(crate) mod main_chat_legacy_agent_loop;
 pub(crate) mod main_chat_legacy_fallback;
 #[allow(dead_code)]
