@@ -57,6 +57,8 @@ pub struct MainChatTurnInput {
     #[serde(default)]
     pub selected_skill_id: Option<String>,
     #[serde(default)]
+    pub selected_strategy: Option<MainChatAgentStrategy>,
+    #[serde(default)]
     pub model_supplied_tool_arguments: Option<Value>,
 }
 
@@ -67,6 +69,8 @@ pub struct MainChatTurnResult {
     pub blockers: Vec<String>,
     pub proposals: Vec<String>,
     pub tool_calls: Vec<MainChatKernelToolCall>,
+    #[serde(default)]
+    pub write_outcome: Option<MainChatKernelWriteOutcome>,
     pub route_metadata: Option<MainChatRouteMetadata>,
     pub context_metadata: Option<MainChatKernelContextMetadata>,
     pub direct_writes_executed: bool,
@@ -80,6 +84,7 @@ impl MainChatTurnResult {
             blockers: vec![code.into()],
             proposals: Vec::new(),
             tool_calls: Vec::new(),
+            write_outcome: None,
             route_metadata: None,
             context_metadata: None,
             direct_writes_executed: false,
@@ -106,6 +111,44 @@ pub struct MainChatKernelToolCall {
     pub observation_metadata: Option<Value>,
     #[serde(default)]
     pub model_arguments_ignored: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MainChatKernelWriteOutcomeKind {
+    MemoryProposal,
+    LifeModelProposal,
+    FileWriteProposal,
+    ExternalConfirmationBlocker,
+    DangerousHardBlock,
+}
+
+impl MainChatKernelWriteOutcomeKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::MemoryProposal => "memory_proposal",
+            Self::LifeModelProposal => "lifemodel_proposal",
+            Self::FileWriteProposal => "file_write_proposal",
+            Self::ExternalConfirmationBlocker => "external_confirmation_blocker",
+            Self::DangerousHardBlock => "dangerous_hard_block",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MainChatKernelWriteOutcome {
+    pub kind: MainChatKernelWriteOutcomeKind,
+    pub action_type: String,
+    pub target: String,
+    pub reason: String,
+    pub payload_summary: String,
+    pub governed_input: Value,
+    pub proposal_type: Option<String>,
+    pub blocker_code: Option<String>,
+    pub requires_confirmation: bool,
+    pub hard_blocked: bool,
+    pub replayable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -170,6 +213,14 @@ pub enum MainChatKernelEvent {
         status: String,
         output_preview: String,
         blocker: Option<String>,
+    },
+    WriteIntentDecision {
+        outcome_kind: MainChatKernelWriteOutcomeKind,
+        action_type: String,
+        target: String,
+        reason: String,
+        requires_confirmation: bool,
+        hard_blocked: bool,
     },
     Blocker {
         code: String,
@@ -747,6 +798,7 @@ where
                 session_id: session_id.to_string(),
                 messages,
                 selected_skill_id: sanitized_selected_skill_id.clone(),
+                selected_strategy: Some(main_chat_agent_turn.decision.selected_strategy),
                 model_supplied_tool_arguments: None,
             },
             event_sink,
@@ -754,6 +806,22 @@ where
         .await;
 
     let kernel_events = event_sink.events().to_vec();
+
+    if kernel_result.write_outcome.is_some() {
+        return build_kernel_write_outcome_command_surface_result(
+            session_id,
+            &user_text,
+            state,
+            main_chat_agent_turn,
+            execution_transcript,
+            kernel_result,
+            scheduler,
+            life_model,
+            event_sink_label,
+            kernel_events,
+        )
+        .await;
+    }
 
     if !kernel_result.blockers.is_empty() {
         return build_blocked_kernel_command_surface_result(
@@ -803,10 +871,15 @@ pub(crate) fn main_chat_kernel_supports_turn(
                 session_id: "kernel_support_probe".into(),
                 messages: messages.to_vec(),
                 selected_skill_id: None,
+                selected_strategy: Some(*selected_strategy),
                 model_supplied_tool_arguments: None,
             };
             plan_kernel_read_tool(&input, false).is_some()
+                || plan_kernel_write_outcome(&input, false).is_some()
         }
+        MainChatAgentStrategy::MemoryProposal
+        | MainChatAgentStrategy::LifeModelProposal
+        | MainChatAgentStrategy::BlockedConfirmation => true,
         _ => false,
     }
 }
@@ -869,6 +942,7 @@ async fn append_main_chat_kernel_read_tool_contract_transcript(
             content: user_text.to_string(),
         }],
         selected_skill_id: selected_skill_id.map(str::to_string),
+        selected_strategy: Some(main_chat_agent_turn.decision.selected_strategy),
         model_supplied_tool_arguments: None,
     };
     let decision = plan_kernel_read_tool(&probe, false);
@@ -1103,14 +1177,25 @@ where
         });
 
         let mut route_metadata = self.model_client.route_metadata();
+        let write_outcome =
+            plan_kernel_write_outcome(&input, input.model_supplied_tool_arguments.is_some());
         let read_tool_decision =
             plan_kernel_read_tool(&input, input.model_supplied_tool_arguments.is_some());
-        if read_tool_decision.is_some() {
+        if read_tool_decision.is_some() || write_outcome.is_some() {
             route_metadata.tools_enabled = true;
         }
         event_sink.emit(MainChatKernelEvent::RouteSelected {
             route_metadata: route_metadata.clone(),
         });
+
+        if let Some(outcome) = write_outcome {
+            return self.run_write_outcome_turn(
+                context_metadata,
+                route_metadata,
+                outcome,
+                event_sink,
+            );
+        }
 
         if let Some(decision) = read_tool_decision {
             return self
@@ -1149,6 +1234,7 @@ where
                     blockers: Vec::new(),
                     proposals: Vec::new(),
                     tool_calls: Vec::new(),
+                    write_outcome: None,
                     route_metadata: Some(route_metadata),
                     context_metadata: Some(context_metadata),
                     direct_writes_executed: false,
@@ -1247,6 +1333,56 @@ where
             blockers,
             proposals: Vec::new(),
             tool_calls: vec![tool_call],
+            write_outcome: None,
+            route_metadata: Some(route_metadata),
+            context_metadata: Some(context_metadata),
+            direct_writes_executed: false,
+            legacy_fallback_used: false,
+        }
+    }
+
+    fn run_write_outcome_turn<S>(
+        &self,
+        context_metadata: MainChatKernelContextMetadata,
+        route_metadata: MainChatRouteMetadata,
+        outcome: MainChatKernelWriteOutcome,
+        event_sink: &mut S,
+    ) -> MainChatTurnResult
+    where
+        S: MainChatEventSink + ?Sized,
+    {
+        event_sink.emit(MainChatKernelEvent::WriteIntentDecision {
+            outcome_kind: outcome.kind,
+            action_type: outcome.action_type.clone(),
+            target: outcome.target.clone(),
+            reason: outcome.reason.clone(),
+            requires_confirmation: outcome.requires_confirmation,
+            hard_blocked: outcome.hard_blocked,
+        });
+        if let Some(code) = outcome.blocker_code.as_ref() {
+            event_sink.emit(MainChatKernelEvent::Blocker { code: code.clone() });
+        }
+        let reply = synthesize_write_outcome_answer(&outcome);
+        event_sink.emit(MainChatKernelEvent::FinalAnswer {
+            content_preview: bounded_label(&reply, MAX_ASSISTANT_PREVIEW_CHARS),
+            content_chars: reply.chars().count(),
+        });
+        let assistant_message = ChatMessage {
+            role: "assistant".into(),
+            content: reply,
+        };
+        let blockers = outcome
+            .blocker_code
+            .as_ref()
+            .map(|code| vec![code.clone()])
+            .unwrap_or_default();
+
+        MainChatTurnResult {
+            assistant_message: Some(assistant_message),
+            blockers,
+            proposals: Vec::new(),
+            tool_calls: Vec::new(),
+            write_outcome: Some(outcome),
             route_metadata: Some(route_metadata),
             context_metadata: Some(context_metadata),
             direct_writes_executed: false,
@@ -1403,6 +1539,84 @@ async fn build_successful_kernel_command_surface_result(
     agent_run.tool_call_count = kernel_result.tool_calls.len() as u32;
     agent_run.step_count = if read_tool_loop_used { 1 } else { 0 };
     agent_run.complete(&preview_text(&reply, 200), model_route, context_summary);
+    let mut proposal_tool_calls = Vec::new();
+    let mut pending_proposal_ids = Vec::new();
+    if read_tool_loop_used
+        && kernel_result
+            .tool_calls
+            .iter()
+            .any(|tool_call| tool_call.status == "succeeded")
+        && user_text_requests_memory_proposal_after_read(user_text)
+    {
+        let outcome = kernel_followup_memory_proposal_outcome(user_text);
+        let queued = enqueue_main_chat_agent_action(
+            state,
+            task_session_id,
+            &outcome.action_type,
+            &kernel_write_action_description(&outcome),
+            &mut execution_transcript,
+        )
+        .await?;
+        transition_main_chat_action(state, &queued.id, ExecutionQueueStatus::Executing, None)
+            .await?;
+        let proposal = create_kernel_write_proposal(
+            state,
+            task_session_id,
+            &agent_run.id,
+            &outcome,
+            user_text,
+        )
+        .await?;
+        agent_run.add_generated_proposal(&proposal.id);
+        pending_proposal_ids.push(proposal.id.clone());
+        let proposal_metadata = serde_json::json!({
+            "kernelBackedProposalOnlyWrite": true,
+            "kernelBackedReadOnlyToolLoop": true,
+            "writeOutcomeKind": outcome.kind.as_str(),
+            "proposalId": proposal.id,
+            "proposalType": proposal.proposal_type,
+            "affectedPath": proposal.affected_path,
+            "sourceRunId": agent_run.id,
+            "sourceTaskSessionId": task_session_id,
+            "payloadSummary": outcome.payload_summary,
+            "reviewStatus": proposal.status,
+            "blockedWriteActionType": kernel_blocked_write_action_type(outcome.kind),
+            "directWritesExecuted": false,
+            "acceptedDurableTruthWritten": false,
+        });
+        transition_main_chat_action(
+            state,
+            &queued.id,
+            ExecutionQueueStatus::Observed,
+            Some(proposal_metadata.clone()),
+        )
+        .await?;
+        transition_main_chat_action(state, &queued.id, ExecutionQueueStatus::Completed, None)
+            .await?;
+        execution_transcript.extend(
+            append_main_chat_agent_transcript(
+                state,
+                Some(task_session_id),
+                ExecutionTranscriptEntryKind::ProposalRequest,
+                "MainChatKernel created a Memory proposal after a governed read.",
+                proposal_metadata.clone(),
+            )
+            .await,
+        );
+        proposal_tool_calls.push(kernel_write_tool_call(
+            "proposal.create",
+            &queued.id,
+            Some(&agent_run.id),
+            proposal_metadata,
+            true,
+            ToolCallStatus::Pending,
+            None,
+            false,
+        ));
+        agent_run.tool_call_count =
+            (kernel_result.tool_calls.len() + proposal_tool_calls.len()) as u32;
+        agent_run.step_count = agent_run.tool_call_count;
+    }
     let mut reasoning_trace = ReasoningTrace {
         generation_result: Some({
             let mut generation = generation_metadata;
@@ -1442,22 +1656,46 @@ async fn build_successful_kernel_command_surface_result(
         &mut execution_transcript,
     )
     .await?;
-    complete_main_chat_agent_turn_session(
-        state,
-        main_chat_agent_turn,
-        if read_tool_loop_used {
-            "MainChatKernel read-only tool loop completed without writes."
-        } else {
-            "DirectAnswer completed without tool execution."
-        },
-    )
-    .await;
+    let mut tool_calls = tool_calls;
+    tool_calls.extend(proposal_tool_calls);
+    if pending_proposal_ids.is_empty() {
+        complete_main_chat_agent_turn_session(
+            state,
+            main_chat_agent_turn,
+            if read_tool_loop_used {
+                "MainChatKernel read-only tool loop completed without writes."
+            } else {
+                "DirectAnswer completed without tool execution."
+            },
+        )
+        .await;
+    } else if let Some(ref store_arc) = state.main_chat_agent_session_store {
+        let store = store_arc.lock().await;
+        let blockers = pending_proposal_ids
+            .iter()
+            .map(|proposal_id| format!("proposal:{proposal_id}"))
+            .collect::<Vec<_>>();
+        if let Err(err) = store.set_pending_blockers(task_session_id, blockers) {
+            log::warn!(
+                "[MainChatKernel] set read follow-up proposal blockers failed: {}",
+                err
+            );
+        }
+        if let Err(err) = store.mark_waiting_permission(task_session_id) {
+            log::warn!(
+                "[MainChatKernel] mark read follow-up proposal waiting failed: {}",
+                err
+            );
+        }
+    }
     execution_transcript.extend(
         append_main_chat_agent_transcript(
             state,
             Some(task_session_id),
             ExecutionTranscriptEntryKind::FinalResult,
-            if read_tool_loop_used {
+            if !pending_proposal_ids.is_empty() {
+                "MainChatKernel read-only tool loop completed with a pending proposal."
+            } else if read_tool_loop_used {
                 "MainChatKernel read-only tool loop completed."
             } else {
                 "DirectAnswer completed without tool execution."
@@ -1468,9 +1706,520 @@ async fn build_successful_kernel_command_surface_result(
                 "legacyFallbackUsed": false,
                 "kernelBackedDirectAnswer": !read_tool_loop_used,
                 "kernelBackedReadOnlyToolLoop": read_tool_loop_used,
-                "toolCallCount": kernel_result.tool_calls.len(),
+                "kernelBackedProposalOnlyWrite": !pending_proposal_ids.is_empty(),
+                "toolCallCount": tool_calls.len(),
+                "proposalIds": pending_proposal_ids.clone(),
                 "directWritesExecuted": false,
-                "pendingBlockerCount": 0,
+                "pendingBlockerCount": pending_proposal_ids.len(),
+            }),
+        )
+        .await,
+    );
+    let agent_state =
+        assemble_main_chat_agent_state_for_turn(state, Some(task_session_id), Some(&agent_run.id))
+            .await;
+    let durable_events =
+        materialize_optional_main_chat_agent_events(state, agent_state.as_ref()).await?;
+
+    Ok(MainChatKernelCommandSurfaceResult {
+        reply,
+        reasoning_trace,
+        tool_calls,
+        run_id: Some(agent_run.id),
+        agent_ingress: Some(main_chat_agent_turn.decision.clone()),
+        agent_state,
+        execution_transcript,
+        legacy_fallback_used: false,
+        durable_events,
+        kernel_events,
+    })
+}
+
+fn is_kernel_proposal_outcome(kind: MainChatKernelWriteOutcomeKind) -> bool {
+    matches!(
+        kind,
+        MainChatKernelWriteOutcomeKind::MemoryProposal
+            | MainChatKernelWriteOutcomeKind::LifeModelProposal
+            | MainChatKernelWriteOutcomeKind::FileWriteProposal
+    )
+}
+
+fn kernel_write_action_description(outcome: &MainChatKernelWriteOutcome) -> String {
+    match outcome.kind {
+        MainChatKernelWriteOutcomeKind::MemoryProposal => {
+            "Create a Review Center Memory proposal from MainChatKernel.".into()
+        }
+        MainChatKernelWriteOutcomeKind::LifeModelProposal => {
+            "Create a Review Center LifeModel proposal from MainChatKernel.".into()
+        }
+        MainChatKernelWriteOutcomeKind::FileWriteProposal => {
+            "Create a Review Center file write proposal from MainChatKernel.".into()
+        }
+        MainChatKernelWriteOutcomeKind::ExternalConfirmationBlocker => {
+            "External write requested from MainChatKernel; wait for explicit confirmation.".into()
+        }
+        MainChatKernelWriteOutcomeKind::DangerousHardBlock => {
+            "Dangerous shell request hard-blocked by MainChatKernel.".into()
+        }
+    }
+}
+
+fn kernel_blocked_write_action_type(kind: MainChatKernelWriteOutcomeKind) -> &'static str {
+    match kind {
+        MainChatKernelWriteOutcomeKind::MemoryProposal => "memory.write",
+        MainChatKernelWriteOutcomeKind::LifeModelProposal => "life_model.update",
+        MainChatKernelWriteOutcomeKind::FileWriteProposal => "file.write",
+        MainChatKernelWriteOutcomeKind::ExternalConfirmationBlocker => "external.write",
+        MainChatKernelWriteOutcomeKind::DangerousHardBlock => "shell.destructive",
+    }
+}
+
+async fn create_kernel_write_proposal(
+    state: &Arc<AppState>,
+    task_session_id: &str,
+    run_id: &str,
+    outcome: &MainChatKernelWriteOutcome,
+    user_text: &str,
+) -> Result<openlife_core::agent::AgentProposal, String> {
+    use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
+
+    let (proposal_type, affected_path, reason, risk_level, after) = match outcome.kind {
+        MainChatKernelWriteOutcomeKind::MemoryProposal => (
+            ProposalType::MemoryWrite,
+            "memory.pending.chat_conversation".to_string(),
+            "User requested a proposal-first memory update from MainChatKernel.".to_string(),
+            RiskLevel::Medium,
+            serde_json::json!({
+                "content": outcome
+                    .governed_input
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or(user_text),
+                "source": "main_chat_kernel",
+                "originatingTaskSessionId": task_session_id,
+                "sourceRunId": run_id,
+                "payloadSummary": outcome.payload_summary,
+                "directMemoryWrite": false,
+                "acceptedDurableTruthWritten": false,
+                "directWritesExecuted": false,
+            }),
+        ),
+        MainChatKernelWriteOutcomeKind::LifeModelProposal => {
+            let requested_change = outcome
+                .governed_input
+                .get("requestedChange")
+                .and_then(Value::as_str)
+                .unwrap_or(user_text);
+            let after = if let Some(asset_id) = outcome.target.strip_prefix("knowledge_asset.") {
+                serde_json::json!({
+                    "assetId": asset_id,
+                    "assetKind": "knowledge_markdown",
+                    "requestedChange": requested_change,
+                    "source": "main_chat_kernel",
+                    "originatingTaskSessionId": task_session_id,
+                    "sourceRunId": run_id,
+                    "payloadSummary": outcome.payload_summary,
+                    "proposedDiff": {
+                        "operation": "append_note",
+                        "target": asset_id,
+                        "summary": "Add bounded knowledge asset note from Main Chat.",
+                    },
+                    "directKnowledgeFileWrite": false,
+                    "requiresReviewCenterApproval": true,
+                    "directLifeModelWrite": false,
+                    "acceptedDurableTruthWritten": false,
+                    "directWritesExecuted": false,
+                })
+            } else {
+                serde_json::json!({
+                    "requestedChange": requested_change,
+                    "source": "main_chat_kernel",
+                    "originatingTaskSessionId": task_session_id,
+                    "sourceRunId": run_id,
+                    "payloadSummary": outcome.payload_summary,
+                    "directLifeModelWrite": false,
+                    "acceptedDurableTruthWritten": false,
+                    "directWritesExecuted": false,
+                })
+            };
+            (
+                ProposalType::LifeModelUpdate,
+                outcome.target.clone(),
+                "User requested a proposal-first LifeModel update from MainChatKernel.".to_string(),
+                RiskLevel::High,
+                after,
+            )
+        }
+        MainChatKernelWriteOutcomeKind::FileWriteProposal => {
+            let path = outcome
+                .governed_input
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or("workspace.pending_file_write");
+            let content = outcome
+                .governed_input
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            (
+                ProposalType::ExternalWriteAction,
+                format!("filesystem.{path}"),
+                "User requested a proposal-first file write from MainChatKernel.".to_string(),
+                RiskLevel::High,
+                serde_json::json!({
+                    "path": path,
+                    "content": content,
+                    "content_preview": bounded_text(content, MAX_TOOL_QUERY_CHARS),
+                    "encoding": "utf-8",
+                    "operation": "propose_write",
+                    "source": "main_chat_kernel",
+                    "originatingTaskSessionId": task_session_id,
+                    "sourceRunId": run_id,
+                    "payloadSummary": outcome.payload_summary,
+                    "directFileWrite": false,
+                    "fileWritten": false,
+                    "externalWritesExecuted": false,
+                    "directWritesExecuted": false,
+                }),
+            )
+        }
+        MainChatKernelWriteOutcomeKind::ExternalConfirmationBlocker
+        | MainChatKernelWriteOutcomeKind::DangerousHardBlock => {
+            return Err("kernel blocker outcome cannot create proposal".into());
+        }
+    };
+
+    let mut proposal = AgentProposal::new(
+        proposal_type,
+        &affected_path,
+        after,
+        &reason,
+        0.86,
+        risk_level,
+        ProposalSource::ChatConversation,
+    );
+    proposal.run_id = Some(run_id.to_string());
+    proposal.source_detail = Some(task_session_id.to_string());
+
+    let store_arc = state
+        .proposal_store
+        .as_ref()
+        .ok_or_else(|| "Proposal store not available".to_string())?;
+    let store = store_arc.lock().await;
+    store
+        .create_proposal(&proposal)
+        .map_err(|err| format!("create kernel write proposal failed: {err}"))?;
+    Ok(proposal)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn kernel_write_tool_call(
+    name: &str,
+    action_id: &str,
+    run_id: Option<&str>,
+    metadata: serde_json::Value,
+    success: bool,
+    status: ToolCallStatus,
+    error: Option<&str>,
+    requires_confirmation: bool,
+) -> ToolCallResult {
+    ToolCallResult {
+        name: name.into(),
+        arguments: metadata.clone(),
+        sanitized_arguments: Some(metadata),
+        success,
+        output: if success {
+            Some("MainChatKernel write-safety outcome recorded.".into())
+        } else {
+            None
+        },
+        error: error.map(str::to_string),
+        permission_level: "governed".into(),
+        status,
+        requires_confirmation,
+        pii_found: false,
+        privacy_warnings: Vec::new(),
+        action_id: Some(action_id.into()),
+        run_id: run_id.map(str::to_string),
+        permission_decision: None,
+        react_trace: None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_kernel_write_outcome_command_surface_result(
+    session_id: &str,
+    user_text: &str,
+    state: &Arc<AppState>,
+    main_chat_agent_turn: &MainChatAgentTurn,
+    mut execution_transcript: Vec<ExecutionTranscriptEntry>,
+    kernel_result: MainChatTurnResult,
+    scheduler: InferenceScheduler,
+    life_model: LifeModel,
+    event_sink_label: &'static str,
+    kernel_events: Vec<MainChatKernelEvent>,
+) -> Result<MainChatKernelCommandSurfaceResult, String> {
+    let task_session_id = main_chat_agent_turn
+        .decision
+        .agent_task_session_id
+        .as_deref()
+        .ok_or_else(|| "Main Chat kernel task session missing".to_string())?;
+    let outcome = kernel_result
+        .write_outcome
+        .clone()
+        .ok_or_else(|| "Main Chat kernel write outcome missing".to_string())?;
+    let route_metadata = kernel_result
+        .route_metadata
+        .clone()
+        .ok_or_else(|| "Main Chat kernel write outcome missing route metadata".to_string())?;
+    let model_route = model_route_from_kernel_route(&route_metadata);
+    let context_summary = context_summary_from_kernel_result(&kernel_result, &life_model);
+    let mut reply = kernel_result
+        .assistant_message
+        .as_ref()
+        .map(|message| message.content.clone())
+        .unwrap_or_else(|| synthesize_write_outcome_answer(&outcome));
+    let mut agent_run = AgentRun::new_chat_run(session_id, user_text);
+    agent_run.reasoning_strategy = Some(format!(
+        "main_chat_agent_v1_kernel_{}",
+        outcome.kind.as_str()
+    ));
+
+    let queued = enqueue_main_chat_agent_action(
+        state,
+        task_session_id,
+        &outcome.action_type,
+        &kernel_write_action_description(&outcome),
+        &mut execution_transcript,
+    )
+    .await?;
+
+    let mut pending_blockers = Vec::new();
+    let mut tool_calls = Vec::new();
+    let mut generated_proposals = Vec::new();
+
+    if is_kernel_proposal_outcome(outcome.kind) {
+        transition_main_chat_action(state, &queued.id, ExecutionQueueStatus::Executing, None)
+            .await?;
+        let proposal = create_kernel_write_proposal(
+            state,
+            task_session_id,
+            &agent_run.id,
+            &outcome,
+            user_text,
+        )
+        .await?;
+        generated_proposals.push(proposal.id.clone());
+        agent_run.add_generated_proposal(&proposal.id);
+        pending_blockers.push(format!("proposal:{}", proposal.id));
+        let proposal_metadata = serde_json::json!({
+            "kernelBackedProposalOnlyWrite": true,
+            "writeOutcomeKind": outcome.kind.as_str(),
+            "proposalId": proposal.id,
+            "proposalType": proposal.proposal_type,
+            "affectedPath": proposal.affected_path,
+            "sourceRunId": agent_run.id,
+            "sourceTaskSessionId": task_session_id,
+            "payloadSummary": outcome.payload_summary,
+            "reviewStatus": proposal.status,
+            "blockedWriteActionType": kernel_blocked_write_action_type(outcome.kind),
+            "directWritesExecuted": false,
+            "acceptedDurableTruthWritten": false,
+            "fileWritten": false,
+            "externalWritesExecuted": false,
+        });
+        transition_main_chat_action(
+            state,
+            &queued.id,
+            ExecutionQueueStatus::Observed,
+            Some(proposal_metadata.clone()),
+        )
+        .await?;
+        transition_main_chat_action(state, &queued.id, ExecutionQueueStatus::Completed, None)
+            .await?;
+        execution_transcript.extend(
+            append_main_chat_agent_transcript(
+                state,
+                Some(task_session_id),
+                ExecutionTranscriptEntryKind::ProposalRequest,
+                "MainChatKernel created a proposal-only write outcome.",
+                proposal_metadata.clone(),
+            )
+            .await,
+        );
+        reply = format!("{} Proposal id: {}.", reply, proposal.id);
+        tool_calls.push(kernel_write_tool_call(
+            "proposal.create",
+            &queued.id,
+            Some(&agent_run.id),
+            proposal_metadata,
+            true,
+            ToolCallStatus::Pending,
+            None,
+            false,
+        ));
+    } else if outcome.kind == MainChatKernelWriteOutcomeKind::ExternalConfirmationBlocker {
+        let blocker = outcome
+            .blocker_code
+            .clone()
+            .unwrap_or_else(|| "external_write_requires_confirmation".into());
+        pending_blockers.push(blocker.clone());
+        let permission_metadata = serde_json::json!({
+            "kernelBackedProposalOnlyWrite": true,
+            "writeOutcomeKind": outcome.kind.as_str(),
+            "actionId": queued.id,
+            "actionType": outcome.action_type.clone(),
+            "target": outcome.target.clone(),
+            "reasonCode": blocker,
+            "requiresConfirmation": true,
+            "allowedDecisionTypes": ["confirm", "reject"],
+            "replayIdentity": queued.id,
+            "directWritesExecuted": false,
+            "externalWritesExecuted": false,
+        });
+        execution_transcript.extend(
+            append_main_chat_agent_transcript(
+                state,
+                Some(task_session_id),
+                ExecutionTranscriptEntryKind::PermissionRequest,
+                "MainChatKernel blocked an external write pending explicit confirmation.",
+                permission_metadata.clone(),
+            )
+            .await,
+        );
+        tool_calls.push(kernel_write_tool_call(
+            &outcome.action_type,
+            &queued.id,
+            Some(&agent_run.id),
+            permission_metadata,
+            false,
+            ToolCallStatus::NeedsConfirmation,
+            Some("external_write_requires_confirmation"),
+            true,
+        ));
+    } else {
+        let blocker = outcome
+            .blocker_code
+            .clone()
+            .unwrap_or_else(|| "dangerous_action_hard_block".into());
+        pending_blockers.push(blocker.clone());
+        let hard_block_metadata = serde_json::json!({
+            "kernelBackedProposalOnlyWrite": true,
+            "writeOutcomeKind": outcome.kind.as_str(),
+            "actionId": queued.id,
+            "actionType": outcome.action_type.clone(),
+            "target": outcome.target.clone(),
+            "reasonCode": blocker,
+            "hardBlocked": true,
+            "replayable": false,
+            "proposalCreated": false,
+            "directWritesExecuted": false,
+            "externalWritesExecuted": false,
+        });
+        fail_main_chat_action(state, &queued.id, &blocker, hard_block_metadata.clone()).await?;
+        execution_transcript.extend(
+            append_main_chat_agent_transcript(
+                state,
+                Some(task_session_id),
+                ExecutionTranscriptEntryKind::Error,
+                "MainChatKernel hard-blocked a dangerous write-like request.",
+                hard_block_metadata.clone(),
+            )
+            .await,
+        );
+        tool_calls.push(kernel_write_tool_call(
+            &outcome.action_type,
+            &queued.id,
+            Some(&agent_run.id),
+            hard_block_metadata,
+            false,
+            ToolCallStatus::Blocked,
+            Some("dangerous_action_hard_block"),
+            false,
+        ));
+    }
+
+    if let Some(ref store_arc) = state.main_chat_agent_session_store {
+        let store = store_arc.lock().await;
+        if let Err(err) = store.set_pending_blockers(task_session_id, pending_blockers.clone()) {
+            log::warn!("[MainChatKernel] set write blockers failed: {}", err);
+        }
+        let transition = if outcome.hard_blocked {
+            store.block_session(
+                task_session_id,
+                "MainChatKernel hard-blocked a write request.",
+            )
+        } else {
+            store.mark_waiting_permission(task_session_id)
+        };
+        if let Err(err) = transition {
+            log::warn!(
+                "[MainChatKernel] mark write outcome session failed: {}",
+                err
+            );
+        }
+    }
+
+    let generation_metadata = serde_json::json!({
+        "text": reply,
+        "mainChatAgentV1": true,
+        "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
+        "legacyFallbackUsed": false,
+        "directWritesExecuted": false,
+        "kernelBackedProposalOnlyWrite": true,
+        "writeOutcomeKind": outcome.kind.as_str(),
+        "proposalIds": generated_proposals,
+        "pendingBlockerCount": pending_blockers.len(),
+        "kernelEventSink": event_sink_label,
+        "kernelEventCount": kernel_events.len(),
+        "modelGenerated": false,
+        "schedulerGenerationCalled": false,
+        "providerGenerationPath": "main_chat_kernel_proposal_only_write",
+        "provider": route_metadata.provider,
+        "model": route_metadata.model,
+        "routeType": route_metadata.route_type,
+        "routeReason": route_metadata.reason,
+        "scriptedProviderResponse": route_metadata.scripted_response_configured,
+        "liveProviderInvoked": false,
+        "providerEndpointKind": main_chat_provider_endpoint_kind(&scheduler, route_metadata.scripted_response_configured),
+    });
+    agent_run.tool_call_count = tool_calls.len() as u32;
+    agent_run.step_count = 1;
+    agent_run.complete(&preview_text(&reply, 200), model_route, context_summary);
+    let assistant_message = ChatMessage {
+        role: "assistant".into(),
+        content: reply.clone(),
+    };
+    let mut reasoning_trace = ReasoningTrace {
+        generation_result: Some(generation_metadata),
+        ..Default::default()
+    };
+    finalize_chat_agent_run(
+        session_id,
+        &assistant_message,
+        &reply,
+        &mut reasoning_trace,
+        &mut agent_run,
+        &life_model,
+        state,
+    )
+    .await?;
+    execution_transcript.extend(
+        append_main_chat_agent_transcript(
+            state,
+            Some(task_session_id),
+            ExecutionTranscriptEntryKind::FinalResult,
+            "MainChatKernel write-safety outcome was delivered.",
+            serde_json::json!({
+                "runId": agent_run.id,
+                "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
+                "legacyFallbackUsed": false,
+                "directWritesExecuted": false,
+                "kernelBackedProposalOnlyWrite": true,
+                "writeOutcomeKind": outcome.kind.as_str(),
+                "proposalIds": agent_run.generated_proposals.clone(),
+                "pendingBlockerCount": pending_blockers.len(),
+                "hardBlocked": outcome.hard_blocked,
             }),
         )
         .await,
@@ -1955,6 +2704,303 @@ fn plan_kernel_read_tool(
     None
 }
 
+fn plan_kernel_write_outcome(
+    input: &MainChatTurnInput,
+    model_arguments_ignored: bool,
+) -> Option<MainChatKernelWriteOutcome> {
+    let user_text = latest_user_text(&input.messages)?;
+    let lower = user_text.to_ascii_lowercase();
+    let selected_strategy = input.selected_strategy;
+
+    if is_dangerous_shell_write_intent(&lower) {
+        return Some(MainChatKernelWriteOutcome {
+            kind: MainChatKernelWriteOutcomeKind::DangerousHardBlock,
+            action_type: "shell.destructive".into(),
+            target: "dangerous_shell".into(),
+            reason: "dangerous shell or destructive local action is hard-blocked".into(),
+            payload_summary: bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
+            governed_input: serde_json::json!({
+                "rawUserTextPreview": bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
+                "governedInputSource": "kernel_dangerous_shell_hard_block",
+                "modelArgumentsIgnored": model_arguments_ignored,
+                "directWritesExecuted": false,
+                "replayable": false,
+            }),
+            proposal_type: None,
+            blocker_code: Some("dangerous_action_hard_block".into()),
+            requires_confirmation: false,
+            hard_blocked: true,
+            replayable: false,
+        });
+    }
+
+    if (selected_strategy == Some(MainChatAgentStrategy::MemoryProposal)
+        || is_memory_write_intent(&lower))
+        && !user_text_requests_memory_proposal_after_read(user_text)
+    {
+        return Some(MainChatKernelWriteOutcome {
+            kind: MainChatKernelWriteOutcomeKind::MemoryProposal,
+            action_type: "proposal.create".into(),
+            target: "memory.pending.chat_conversation".into(),
+            reason: "memory write request must create a governed Memory proposal".into(),
+            payload_summary: bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
+            governed_input: serde_json::json!({
+                "content": bounded_text(user_text, MAX_TOOL_OBSERVATION_PREVIEW_CHARS),
+                "governedInputSource": "kernel_memory_write_proposal",
+                "directMemoryWrite": false,
+                "directWritesExecuted": false,
+                "modelArgumentsIgnored": model_arguments_ignored,
+            }),
+            proposal_type: Some("memory_write".into()),
+            blocker_code: Some("proposal_review_required".into()),
+            requires_confirmation: false,
+            hard_blocked: false,
+            replayable: true,
+        });
+    }
+
+    if selected_strategy == Some(MainChatAgentStrategy::LifeModelProposal)
+        || is_lifemodel_write_intent(&lower)
+    {
+        let target = main_chat_lifemodel_write_target(user_text);
+        return Some(MainChatKernelWriteOutcome {
+            kind: MainChatKernelWriteOutcomeKind::LifeModelProposal,
+            action_type: "proposal.create".into(),
+            target: target.clone(),
+            reason: "LifeModel-affecting request must create a governed LifeModel proposal".into(),
+            payload_summary: bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
+            governed_input: serde_json::json!({
+                "requestedChange": bounded_text(user_text, MAX_TOOL_OBSERVATION_PREVIEW_CHARS),
+                "target": target,
+                "governedInputSource": "kernel_lifemodel_update_proposal",
+                "directLifeModelWrite": false,
+                "directWritesExecuted": false,
+                "modelArgumentsIgnored": model_arguments_ignored,
+            }),
+            proposal_type: Some("life_model_update".into()),
+            blocker_code: Some("proposal_review_required".into()),
+            requires_confirmation: false,
+            hard_blocked: false,
+            replayable: true,
+        });
+    }
+
+    if is_file_write_intent(&lower) {
+        let path = extract_backtick_value(user_text).unwrap_or("workspace.pending_file_write");
+        let content = extract_second_backtick_value(user_text).unwrap_or("");
+        return Some(MainChatKernelWriteOutcome {
+            kind: MainChatKernelWriteOutcomeKind::FileWriteProposal,
+            action_type: "proposal.create".into(),
+            target: bounded_text(path, MAX_TOOL_QUERY_CHARS),
+            reason: "file write request must create a governed ExternalWriteAction proposal".into(),
+            payload_summary: bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
+            governed_input: serde_json::json!({
+                "path": bounded_text(path, MAX_TOOL_QUERY_CHARS),
+                "content": content,
+                "contentPreview": bounded_text(content, MAX_TOOL_QUERY_CHARS),
+                "governedInputSource": "kernel_file_write_proposal",
+                "directFileWrite": false,
+                "directWritesExecuted": false,
+                "modelArgumentsIgnored": model_arguments_ignored,
+            }),
+            proposal_type: Some("external_write_action".into()),
+            blocker_code: Some("proposal_review_required".into()),
+            requires_confirmation: false,
+            hard_blocked: false,
+            replayable: true,
+        });
+    }
+
+    if selected_strategy == Some(MainChatAgentStrategy::BlockedConfirmation)
+        || is_external_write_intent(&lower)
+    {
+        return Some(MainChatKernelWriteOutcome {
+            kind: MainChatKernelWriteOutcomeKind::ExternalConfirmationBlocker,
+            action_type: external_write_action_type(&lower).into(),
+            target: "external_side_effect".into(),
+            reason: "external side effect requires explicit confirmation and provider support"
+                .into(),
+            payload_summary: bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
+            governed_input: serde_json::json!({
+                "rawUserTextPreview": bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
+                "governedInputSource": "kernel_external_write_confirmation_blocker",
+                "externalWritesExecuted": false,
+                "directWritesExecuted": false,
+                "modelArgumentsIgnored": model_arguments_ignored,
+            }),
+            proposal_type: None,
+            blocker_code: Some("external_write_requires_confirmation".into()),
+            requires_confirmation: true,
+            hard_blocked: false,
+            replayable: true,
+        });
+    }
+
+    None
+}
+
+fn kernel_followup_memory_proposal_outcome(user_text: &str) -> MainChatKernelWriteOutcome {
+    MainChatKernelWriteOutcome {
+        kind: MainChatKernelWriteOutcomeKind::MemoryProposal,
+        action_type: "proposal.create".into(),
+        target: "memory.pending.chat_conversation".into(),
+        reason: "memory proposal requested after a governed read".into(),
+        payload_summary: bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
+        governed_input: serde_json::json!({
+            "content": bounded_text(user_text, MAX_TOOL_OBSERVATION_PREVIEW_CHARS),
+            "governedInputSource": "kernel_read_followup_memory_proposal",
+            "directMemoryWrite": false,
+            "directWritesExecuted": false,
+            "modelArgumentsIgnored": false,
+        }),
+        proposal_type: Some("memory_write".into()),
+        blocker_code: Some("proposal_review_required".into()),
+        requires_confirmation: false,
+        hard_blocked: false,
+        replayable: true,
+    }
+}
+
+fn user_text_requests_memory_proposal_after_read(user_text: &str) -> bool {
+    let lower = user_text.to_ascii_lowercase();
+    (lower.contains("memory proposal") || lower.contains("create a memory proposal"))
+        && (lower.contains("read") || lower.contains("file"))
+}
+
+fn is_memory_write_intent(lower: &str) -> bool {
+    if contains_any(lower, &["memory.search", "memory search", "search memory"]) {
+        return false;
+    }
+    contains_any(
+        lower,
+        &[
+            "remember",
+            "记住",
+            "加入记忆",
+            "long-term memory",
+            "memory write",
+            "archive memory",
+            "forget this memory",
+            "prefer short",
+            "i prefer",
+        ],
+    )
+}
+
+fn is_lifemodel_write_intent(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "knowledge asset edit",
+            "edit a knowledge asset",
+            "edit agents.md",
+            "edit soul.md",
+            "edit user.md",
+            "edit memory.md",
+            "propose an edit to agents.md",
+            "propose an edit to soul.md",
+            "propose an edit to user.md",
+            "propose an edit to memory.md",
+            "lifemodel",
+            "life model",
+            "life_model",
+            "switching careers",
+            "update my life",
+            "update my identity",
+            "design lead",
+        ],
+    )
+}
+
+fn is_file_write_intent(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "file.write",
+            "file write",
+            "write file",
+            "write to file",
+            "create file",
+            "save file",
+            "patch file",
+            "edit file",
+        ],
+    ) && !contains_any(lower, &["read file", "file.read"])
+}
+
+fn is_external_write_intent(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "send email",
+            "email.send",
+            "email ",
+            "calendar",
+            "external write",
+            "provider write",
+            "send this to",
+            "post to",
+            "publish to",
+        ],
+    )
+}
+
+fn is_dangerous_shell_write_intent(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "rm -rf",
+            "shell.destructive",
+            "delete project files",
+            "drop database",
+            "format disk",
+            "dangerous shell",
+            "destructive shell",
+        ],
+    ) || (lower.contains("shell") && contains_any(lower, &["delete", "destroy", "destructive"]))
+}
+
+fn external_write_action_type(lower: &str) -> &'static str {
+    if lower.contains("email") {
+        "email.send"
+    } else if lower.contains("calendar") {
+        "calendar.real_write"
+    } else {
+        "external.write"
+    }
+}
+
+fn main_chat_lifemodel_write_target(user_text: &str) -> String {
+    let lower = user_text.to_ascii_lowercase();
+    if lower.contains("agents.md") {
+        "knowledge_asset.AGENTS.md".into()
+    } else if lower.contains("soul.md") {
+        "knowledge_asset.SOUL.md".into()
+    } else if lower.contains("user.md") {
+        "knowledge_asset.USER.md".into()
+    } else if lower.contains("memory.md") {
+        "knowledge_asset.MEMORY.md".into()
+    } else {
+        "lifemodel.pending.chat_conversation".into()
+    }
+}
+
+fn extract_backtick_value(value: &str) -> Option<&str> {
+    value
+        .split('`')
+        .nth(1)
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+}
+
+fn extract_second_backtick_value(value: &str) -> Option<&str> {
+    value
+        .split('`')
+        .nth(3)
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+}
+
 fn latest_user_text(messages: &[ChatMessage]) -> Option<&str> {
     messages
         .iter()
@@ -2005,6 +3051,28 @@ fn synthesize_read_tool_answer(execution: &MainChatKernelReadToolExecution) -> S
                 .as_deref()
                 .unwrap_or("read_tool_failed")
         ),
+    }
+}
+
+fn synthesize_write_outcome_answer(outcome: &MainChatKernelWriteOutcome) -> String {
+    match outcome.kind {
+        MainChatKernelWriteOutcomeKind::MemoryProposal => {
+            "I created a Memory proposal for review. I did not write it into long-term memory."
+                .into()
+        }
+        MainChatKernelWriteOutcomeKind::LifeModelProposal => {
+            "I created a LifeModel proposal for review. I did not update accepted LifeModel truth."
+                .into()
+        }
+        MainChatKernelWriteOutcomeKind::FileWriteProposal => {
+            "I created a file-write proposal for review. I did not write the file.".into()
+        }
+        MainChatKernelWriteOutcomeKind::ExternalConfirmationBlocker => {
+            "I cannot perform that external write directly. It requires explicit confirmation and a governed provider path; no external side effect was executed.".into()
+        }
+        MainChatKernelWriteOutcomeKind::DangerousHardBlock => {
+            "I blocked that dangerous shell request. It was not executed and cannot be replayed through ordinary approval.".into()
+        }
     }
 }
 
@@ -2360,6 +3428,7 @@ mod tests {
                     session_id: "session-1".into(),
                     messages: vec![user_message("Say hello from the kernel.")],
                     selected_skill_id: None,
+                    selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
                 },
                 &mut events,
@@ -2403,6 +3472,7 @@ mod tests {
                     session_id: "session-1".into(),
                     messages: vec![user_message("   ")],
                     selected_skill_id: None,
+                    selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
                 },
                 &mut events,
@@ -2432,6 +3502,7 @@ mod tests {
                     session_id: "   ".into(),
                     messages: vec![user_message("Hello")],
                     selected_skill_id: None,
+                    selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
                 },
                 &mut events,
@@ -2466,6 +3537,7 @@ mod tests {
                     session_id: "session-1".into(),
                     messages: vec![user_message("Summarize this.")],
                     selected_skill_id: Some(" summarize ".into()),
+                    selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
                 },
                 &mut events,
@@ -2529,6 +3601,7 @@ mod tests {
                     session_id: "session-1".into(),
                     messages: vec![user_message("Route metadata please.")],
                     selected_skill_id: None,
+                    selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
                 },
                 &mut events,
@@ -2572,6 +3645,7 @@ mod tests {
                     session_id: "session-1".into(),
                     messages: vec![user_message("Please read file `AGENTS.md`.")],
                     selected_skill_id: None,
+                    selected_strategy: Some(MainChatAgentStrategy::ReActToolExecution),
                     model_supplied_tool_arguments: Some(serde_json::json!({
                         "path": "../outside-secret.txt"
                     })),
@@ -2604,6 +3678,83 @@ mod tests {
                 }
             )
         }));
+    }
+
+    #[tokio::test]
+    async fn main_chat_kernel_memory_write_intent_returns_proposal_outcome_without_model_call() {
+        let model = ScriptedModelClient::ok("model should not be called");
+        let kernel = test_kernel(model.clone(), Vec::new());
+        let mut events = BufferedMainChatEventSink::default();
+
+        let result = kernel
+            .run_turn(
+                MainChatTurnInput {
+                    session_id: "session-1".into(),
+                    messages: vec![user_message("Remember this: I prefer short summaries.")],
+                    selected_skill_id: None,
+                    selected_strategy: Some(MainChatAgentStrategy::MemoryProposal),
+                    model_supplied_tool_arguments: None,
+                },
+                &mut events,
+            )
+            .await;
+
+        assert_eq!(model.call_count(), 0);
+        let outcome = result.write_outcome.as_ref().expect("write outcome");
+        assert_eq!(outcome.kind, MainChatKernelWriteOutcomeKind::MemoryProposal);
+        assert_eq!(outcome.proposal_type.as_deref(), Some("memory_write"));
+        assert_eq!(
+            outcome.blocker_code.as_deref(),
+            Some("proposal_review_required")
+        );
+        assert!(!outcome.hard_blocked);
+        assert!(!result.direct_writes_executed);
+        assert!(events.events().iter().any(|event| {
+            matches!(
+                event,
+                MainChatKernelEvent::WriteIntentDecision {
+                    outcome_kind: MainChatKernelWriteOutcomeKind::MemoryProposal,
+                    ..
+                }
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn main_chat_kernel_dangerous_shell_intent_hard_blocks_without_proposal() {
+        let model = ScriptedModelClient::ok("model should not be called");
+        let kernel = test_kernel(model.clone(), Vec::new());
+        let mut events = BufferedMainChatEventSink::default();
+
+        let result = kernel
+            .run_turn(
+                MainChatTurnInput {
+                    session_id: "session-1".into(),
+                    messages: vec![user_message(
+                        "Run shell.destructive rm -rf to delete project files.",
+                    )],
+                    selected_skill_id: None,
+                    selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
+                    model_supplied_tool_arguments: None,
+                },
+                &mut events,
+            )
+            .await;
+
+        assert_eq!(model.call_count(), 0);
+        let outcome = result.write_outcome.as_ref().expect("write outcome");
+        assert_eq!(
+            outcome.kind,
+            MainChatKernelWriteOutcomeKind::DangerousHardBlock
+        );
+        assert!(outcome.proposal_type.is_none());
+        assert_eq!(
+            outcome.blocker_code.as_deref(),
+            Some("dangerous_action_hard_block")
+        );
+        assert!(outcome.hard_blocked);
+        assert!(!outcome.replayable);
+        assert!(!result.direct_writes_executed);
     }
 
     #[test]

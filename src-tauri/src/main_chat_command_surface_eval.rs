@@ -315,6 +315,8 @@ async fn run_main_chat_command_surface_state_eval_case(
             (response_value, task_session_id, legacy_fallback_used)
         }
     };
+    wait_for_main_chat_command_surface_eval_case_artifacts(&state, scenario, &task_session_id)
+        .await?;
     let store_arc = state
         .main_chat_agent_session_store
         .as_ref()
@@ -411,6 +413,66 @@ async fn run_main_chat_command_surface_state_eval_case(
         knowledge_asset_edit_evidence.proposed_diff_present,
         knowledge_asset_edit_evidence.direct_write_detected,
     ))
+}
+
+async fn wait_for_main_chat_command_surface_eval_case_artifacts(
+    state: &Arc<AppState>,
+    scenario: MainChatCommandSurfaceEvalScenario,
+    task_session_id: &str,
+) -> Result<(), String> {
+    if scenario != MainChatCommandSurfaceEvalScenario::WebPolicyBlocker {
+        return Ok(());
+    }
+
+    for _ in 0..80 {
+        if main_chat_command_surface_eval_web_policy_blocker_ready(state, task_session_id).await? {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    Ok(())
+}
+
+async fn main_chat_command_surface_eval_web_policy_blocker_ready(
+    state: &Arc<AppState>,
+    task_session_id: &str,
+) -> Result<bool, String> {
+    let session_ready = {
+        let store_arc = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .ok_or_else(|| "command-surface eval missing main chat session store".to_string())?;
+        let store = store_arc.lock().await;
+        store
+            .load_session(task_session_id)
+            .map_err(|error| format!("load command-surface eval task session failed: {error}"))?
+            .is_some_and(|session| {
+                session
+                    .pending_blockers
+                    .iter()
+                    .any(|blocker| blocker.contains("network_policy_blocked"))
+            })
+    };
+    if !session_ready {
+        return Ok(false);
+    }
+
+    let action_ready = if let Some(ref queue_arc) = state.main_chat_action_queue_store {
+        let queue = queue_arc.lock().await;
+        queue
+            .list_for_session(task_session_id)
+            .map_err(|error| format!("list command-surface eval actions failed: {error}"))?
+            .iter()
+            .any(|action| {
+                action.action.action_type == "web.search"
+                    && action.status
+                        == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed
+            })
+    } else {
+        false
+    };
+
+    Ok(action_ready)
 }
 
 pub(crate) async fn configure_main_chat_command_surface_eval_state(
@@ -1917,11 +1979,20 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
             }
             let edit_action = actions
                 .iter()
-                .find(|action| action.action.action_type == "knowledge.propose_edit")
-                .ok_or_else(|| "missing knowledge.propose_edit action".to_string())?;
+                .find(|action| {
+                    action.action.action_type == "knowledge.propose_edit"
+                        || (action.action.action_type == "proposal.create"
+                            && action
+                                .observation_metadata
+                                .as_ref()
+                                .and_then(|metadata| metadata.get("writeOutcomeKind"))
+                                .and_then(serde_json::Value::as_str)
+                                == Some("lifemodel_proposal"))
+                })
+                .ok_or_else(|| "missing knowledge proposal action".to_string())?;
             if edit_action.status != ExecutionQueueStatus::Completed {
                 return Err(format!(
-                    "knowledge.propose_edit action status {:?}",
+                    "knowledge proposal action status {:?}",
                     edit_action.status
                 ));
             }
@@ -1929,10 +2000,12 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                 .iter()
                 .find(|proposal| {
                     proposal.source == openlife_core::agent::ProposalSource::ChatConversation
-                        && proposal.source_detail.as_deref()
-                            == Some(
-                                format!("main_chat_agent_task_session:{task_session_id}").as_str(),
-                            )
+                        && matches!(
+                            proposal.source_detail.as_deref(),
+                            Some(detail)
+                                if detail == task_session_id
+                                    || detail == format!("main_chat_agent_task_session:{task_session_id}")
+                        )
                         && proposal.affected_path == "knowledge_asset.AGENTS.md"
                 })
                 .ok_or_else(|| "knowledge asset edit proposal not linked to task".to_string())?;
@@ -1986,8 +2059,12 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
             }
             if !proposals.iter().any(|proposal| {
                 proposal.source == openlife_core::agent::ProposalSource::ChatConversation
-                    && proposal.source_detail.as_deref()
-                        == Some(format!("main_chat_agent_task_session:{task_session_id}").as_str())
+                    && matches!(
+                        proposal.source_detail.as_deref(),
+                        Some(detail)
+                            if detail == task_session_id
+                                || detail == format!("main_chat_agent_task_session:{task_session_id}")
+                    )
             }) {
                 return Err("pending Review Center proposal not linked to task".into());
             }

@@ -188,6 +188,62 @@ async fn list_command_surface_actions(
         .expect("list task actions")
 }
 
+async fn wait_command_surface_session_blocker(
+    state: &std::sync::Arc<crate::AppState>,
+    task_session_id: &str,
+    blocker_substring: &str,
+) -> openlife_core::agent::main_chat_agent_v1::AgentTaskSession {
+    for _ in 0..80 {
+        let session = load_command_surface_session(state, task_session_id).await;
+        if session
+            .pending_blockers
+            .iter()
+            .any(|blocker| blocker.contains(blocker_substring))
+        {
+            return session;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    load_command_surface_session(state, task_session_id).await
+}
+
+async fn list_command_surface_proposals(
+    state: &std::sync::Arc<crate::AppState>,
+) -> Vec<openlife_core::agent::AgentProposal> {
+    let proposal_arc = state.proposal_store.as_ref().expect("proposal store");
+    let store = proposal_arc.lock().await;
+    store
+        .list_all_proposals(100, 0)
+        .expect("list command-surface proposals")
+}
+
+async fn find_command_surface_proposal_for_task(
+    state: &std::sync::Arc<crate::AppState>,
+    task_session_id: &str,
+    proposal_type: openlife_core::agent::ProposalType,
+) -> openlife_core::agent::AgentProposal {
+    list_command_surface_proposals(state)
+        .await
+        .into_iter()
+        .find(|proposal| {
+            proposal.source_detail.as_deref() == Some(task_session_id)
+                && proposal.proposal_type == proposal_type
+        })
+        .expect("find task-linked proposal")
+}
+
+async fn active_memory_record_count(state: &std::sync::Arc<crate::AppState>) -> usize {
+    let lifecycle_store = state
+        .memory_lifecycle_store
+        .as_ref()
+        .expect("memory lifecycle store");
+    let store = lifecycle_store.lock().await;
+    store
+        .list_active_records(None, 100)
+        .expect("list active memory records")
+        .len()
+}
+
 async fn seed_command_surface_message(
     state: &std::sync::Arc<crate::AppState>,
     session_id: &str,
@@ -616,6 +672,543 @@ async fn main_chat_kernel_goal_3_memory_search_send_stream_is_read_only() {
 }
 
 #[tokio::test]
+async fn main_chat_kernel_goal_4_remember_this_send_stream_creates_memory_proposal_only() {
+    let user_text = "Remember this: I prefer short planning summaries.";
+
+    let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let memory_records_before = active_memory_record_count(&send_state).await;
+    let send_response = invoke_send_message_for_kernel_goal_3(
+        send_state.clone(),
+        "k4-send-memory-proposal",
+        user_text,
+    )
+    .await;
+    assert_eq!(send_response["legacy_fallback_used"], false);
+    assert_eq!(
+        send_response["agent_ingress"]["selectedStrategy"],
+        "memory_proposal"
+    );
+    let generation = &send_response["reasoning_trace"]["generation_result"];
+    assert_eq!(generation["kernelBackedProposalOnlyWrite"], true);
+    assert_eq!(generation["writeOutcomeKind"], "memory_proposal");
+    assert_eq!(generation["directWritesExecuted"], false);
+    let send_task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
+        .as_str()
+        .expect("send memory proposal task session id");
+    let send_session = load_command_surface_session(&send_state, send_task_session_id).await;
+    assert_eq!(
+        send_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+    );
+    assert!(send_session
+        .pending_blockers
+        .iter()
+        .any(|blocker| blocker.starts_with("proposal:")));
+    let proposal = find_command_surface_proposal_for_task(
+        &send_state,
+        send_task_session_id,
+        openlife_core::agent::ProposalType::MemoryWrite,
+    )
+    .await;
+    assert_eq!(
+        proposal.status,
+        openlife_core::agent::ProposalStatus::Pending
+    );
+    assert_eq!(
+        proposal
+            .after
+            .get("directMemoryWrite")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        proposal
+            .after
+            .get("acceptedDurableTruthWritten")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        active_memory_record_count(&send_state).await,
+        memory_records_before
+    );
+    let send_actions = list_command_surface_actions(&send_state, send_task_session_id).await;
+    assert!(send_actions.iter().any(|action| {
+        action.action.action_type == "proposal.create"
+            && action.status
+                == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Completed
+            && action
+                .observation_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("proposalId"))
+                .and_then(serde_json::Value::as_str)
+                == Some(proposal.id.as_str())
+    }));
+
+    let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let stream_memory_records_before = active_memory_record_count(&stream_state).await;
+    invoke_start_stream_message_for_kernel_goal_3(
+        stream_state.clone(),
+        "k4-stream-memory-proposal",
+        user_text,
+    )
+    .await;
+    let stream_task_session_id = expected_task_session_id("k4-stream-memory-proposal", user_text);
+    let stream_session = load_command_surface_session(&stream_state, &stream_task_session_id).await;
+    assert_eq!(
+        stream_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+    );
+    let stream_proposal = find_command_surface_proposal_for_task(
+        &stream_state,
+        &stream_task_session_id,
+        openlife_core::agent::ProposalType::MemoryWrite,
+    )
+    .await;
+    assert_eq!(
+        stream_proposal.status,
+        openlife_core::agent::ProposalStatus::Pending
+    );
+    assert_eq!(
+        active_memory_record_count(&stream_state).await,
+        stream_memory_records_before
+    );
+}
+
+#[tokio::test]
+async fn main_chat_kernel_goal_4_lifemodel_update_send_stream_creates_proposal_only() {
+    let user_text = "Update my life model: I am switching careers toward design lead.";
+
+    let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let model_before = {
+        let manager = send_state.life_model_manager.lock().await;
+        manager.load().expect("load life model before")
+    };
+    let send_response = invoke_send_message_for_kernel_goal_3(
+        send_state.clone(),
+        "k4-send-lifemodel-proposal",
+        user_text,
+    )
+    .await;
+    assert_eq!(send_response["legacy_fallback_used"], false);
+    assert_eq!(
+        send_response["agent_ingress"]["selectedStrategy"],
+        "life_model_proposal"
+    );
+    assert_eq!(
+        send_response["reasoning_trace"]["generation_result"]["writeOutcomeKind"],
+        "lifemodel_proposal"
+    );
+    let send_task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
+        .as_str()
+        .expect("send lifemodel proposal task session id");
+    let proposal = find_command_surface_proposal_for_task(
+        &send_state,
+        send_task_session_id,
+        openlife_core::agent::ProposalType::LifeModelUpdate,
+    )
+    .await;
+    assert_eq!(
+        proposal.status,
+        openlife_core::agent::ProposalStatus::Pending
+    );
+    assert_eq!(
+        proposal
+            .after
+            .get("directLifeModelWrite")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        proposal
+            .after
+            .get("acceptedDurableTruthWritten")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    let model_after = {
+        let manager = send_state.life_model_manager.lock().await;
+        manager.load().expect("load life model after")
+    };
+    assert_eq!(
+        serde_json::to_value(&model_after).expect("serialize after"),
+        serde_json::to_value(&model_before).expect("serialize before")
+    );
+
+    let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    invoke_start_stream_message_for_kernel_goal_3(
+        stream_state.clone(),
+        "k4-stream-lifemodel-proposal",
+        user_text,
+    )
+    .await;
+    let stream_task_session_id =
+        expected_task_session_id("k4-stream-lifemodel-proposal", user_text);
+    let stream_session = load_command_surface_session(&stream_state, &stream_task_session_id).await;
+    assert_eq!(
+        stream_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+    );
+    let stream_proposal = find_command_surface_proposal_for_task(
+        &stream_state,
+        &stream_task_session_id,
+        openlife_core::agent::ProposalType::LifeModelUpdate,
+    )
+    .await;
+    assert_eq!(
+        stream_proposal.status,
+        openlife_core::agent::ProposalStatus::Pending
+    );
+}
+
+#[tokio::test]
+async fn main_chat_kernel_goal_4_file_write_send_stream_creates_proposal_without_writing_file() {
+    let proposed_path = std::env::temp_dir().join(format!(
+        "openlife-k4-file-write-{}.txt",
+        uuid::Uuid::new_v4()
+    ));
+    let proposed_path_text = proposed_path.display().to_string();
+    let user_text = format!(
+        "Write file `{}` with content `hello from k4`.",
+        proposed_path_text
+    );
+
+    let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let send_response = invoke_send_message_for_kernel_goal_3(
+        send_state.clone(),
+        "k4-send-file-write-proposal",
+        &user_text,
+    )
+    .await;
+    assert_eq!(send_response["legacy_fallback_used"], false);
+    assert_eq!(
+        send_response["reasoning_trace"]["generation_result"]["writeOutcomeKind"],
+        "file_write_proposal"
+    );
+    assert!(
+        !proposed_path.exists(),
+        "kernel must not write proposed file"
+    );
+    let send_task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
+        .as_str()
+        .expect("send file write task session id");
+    let proposal = find_command_surface_proposal_for_task(
+        &send_state,
+        send_task_session_id,
+        openlife_core::agent::ProposalType::ExternalWriteAction,
+    )
+    .await;
+    assert_eq!(
+        proposal.status,
+        openlife_core::agent::ProposalStatus::Pending
+    );
+    assert_eq!(
+        proposal
+            .after
+            .get("path")
+            .and_then(serde_json::Value::as_str),
+        Some(proposed_path_text.as_str())
+    );
+    assert_eq!(
+        proposal
+            .after
+            .get("fileWritten")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        proposal
+            .after
+            .get("directWritesExecuted")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+
+    let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    invoke_start_stream_message_for_kernel_goal_3(
+        stream_state.clone(),
+        "k4-stream-file-write-proposal",
+        &user_text,
+    )
+    .await;
+    let stream_task_session_id =
+        expected_task_session_id("k4-stream-file-write-proposal", &user_text);
+    let stream_proposal = find_command_surface_proposal_for_task(
+        &stream_state,
+        &stream_task_session_id,
+        openlife_core::agent::ProposalType::ExternalWriteAction,
+    )
+    .await;
+    assert_eq!(
+        stream_proposal.status,
+        openlife_core::agent::ProposalStatus::Pending
+    );
+    assert!(
+        !proposed_path.exists(),
+        "stream kernel must not write proposed file"
+    );
+}
+
+#[tokio::test]
+async fn main_chat_kernel_goal_4_external_write_send_stream_requires_confirmation_only() {
+    let user_text = "Send email to my coworker with this private update.";
+
+    let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let send_response = invoke_send_message_for_kernel_goal_3(
+        send_state.clone(),
+        "k4-send-external-confirmation",
+        user_text,
+    )
+    .await;
+    assert_eq!(send_response["legacy_fallback_used"], false);
+    assert_eq!(
+        send_response["reasoning_trace"]["generation_result"]["writeOutcomeKind"],
+        "external_confirmation_blocker"
+    );
+    let send_task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
+        .as_str()
+        .expect("send external task session id");
+    let send_session = load_command_surface_session(&send_state, send_task_session_id).await;
+    assert_eq!(
+        send_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+    );
+    assert!(send_session
+        .pending_blockers
+        .contains(&"external_write_requires_confirmation".to_string()));
+    assert!(list_command_surface_proposals(&send_state).await.is_empty());
+    let send_actions = list_command_surface_actions(&send_state, send_task_session_id).await;
+    let email_action = send_actions
+        .iter()
+        .find(|action| action.action.action_type == "email.send")
+        .expect("email confirmation action");
+    assert_eq!(
+        email_action.status,
+        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::PendingPermission
+    );
+    assert!(email_action.policy.requires_confirmation);
+    assert!(!email_action.policy.silent_write_allowed);
+
+    let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    invoke_start_stream_message_for_kernel_goal_3(
+        stream_state.clone(),
+        "k4-stream-external-confirmation",
+        user_text,
+    )
+    .await;
+    let stream_task_session_id =
+        expected_task_session_id("k4-stream-external-confirmation", user_text);
+    let stream_session = load_command_surface_session(&stream_state, &stream_task_session_id).await;
+    assert_eq!(
+        stream_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+    );
+    assert!(list_command_surface_proposals(&stream_state)
+        .await
+        .is_empty());
+}
+
+#[tokio::test]
+async fn main_chat_kernel_goal_4_calendar_and_generic_external_write_send_stream_require_confirmation_only(
+) {
+    for (suffix, user_text, expected_action_type) in [
+        (
+            "calendar",
+            "Add calendar event for tomorrow with private planning notes.",
+            "calendar.real_write",
+        ),
+        (
+            "generic",
+            "Post to provider workspace with this private update.",
+            "external.write",
+        ),
+    ] {
+        let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let send_session_id = format!("k4-send-{suffix}-confirmation");
+        let send_response =
+            invoke_send_message_for_kernel_goal_3(send_state.clone(), &send_session_id, user_text)
+                .await;
+        assert_eq!(send_response["legacy_fallback_used"], false);
+        assert_eq!(
+            send_response["reasoning_trace"]["generation_result"]["writeOutcomeKind"],
+            "external_confirmation_blocker"
+        );
+        let send_task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
+            .as_str()
+            .expect("send external task session id");
+        let send_session = load_command_surface_session(&send_state, send_task_session_id).await;
+        assert_eq!(
+            send_session.status,
+            openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+        );
+        assert!(send_session
+            .pending_blockers
+            .contains(&"external_write_requires_confirmation".to_string()));
+        assert!(list_command_surface_proposals(&send_state).await.is_empty());
+        let send_actions = list_command_surface_actions(&send_state, send_task_session_id).await;
+        let external_action = send_actions
+            .iter()
+            .find(|action| action.action.action_type == expected_action_type)
+            .expect("external confirmation action");
+        assert_eq!(
+            external_action.status,
+            openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::PendingPermission
+        );
+        assert!(external_action.policy.requires_confirmation);
+        assert!(!external_action.policy.silent_write_allowed);
+
+        let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let stream_session_id = format!("k4-stream-{suffix}-confirmation");
+        invoke_start_stream_message_for_kernel_goal_3(
+            stream_state.clone(),
+            &stream_session_id,
+            user_text,
+        )
+        .await;
+        let stream_task_session_id = expected_task_session_id(&stream_session_id, user_text);
+        let stream_session =
+            load_command_surface_session(&stream_state, &stream_task_session_id).await;
+        assert_eq!(
+            stream_session.status,
+            openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+        );
+        assert!(stream_session
+            .pending_blockers
+            .contains(&"external_write_requires_confirmation".to_string()));
+        assert!(list_command_surface_proposals(&stream_state)
+            .await
+            .is_empty());
+        let stream_actions =
+            list_command_surface_actions(&stream_state, &stream_task_session_id).await;
+        assert!(stream_actions
+            .iter()
+            .any(|action| action.action.action_type == expected_action_type
+                && action.status
+                    == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::PendingPermission));
+    }
+}
+
+#[tokio::test]
+async fn main_chat_kernel_goal_4_dangerous_shell_send_stream_hard_blocks_without_proposal() {
+    let user_text = "Run shell.destructive rm -rf to delete project files.";
+
+    let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let send_response = invoke_send_message_for_kernel_goal_3(
+        send_state.clone(),
+        "k4-send-dangerous-shell",
+        user_text,
+    )
+    .await;
+    assert_eq!(send_response["legacy_fallback_used"], false);
+    assert_eq!(
+        send_response["reasoning_trace"]["generation_result"]["writeOutcomeKind"],
+        "dangerous_hard_block"
+    );
+    let send_task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
+        .as_str()
+        .expect("send dangerous task session id");
+    let send_session = load_command_surface_session(&send_state, send_task_session_id).await;
+    assert_eq!(
+        send_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
+    );
+    assert!(send_session
+        .pending_blockers
+        .contains(&"dangerous_action_hard_block".to_string()));
+    assert!(list_command_surface_proposals(&send_state).await.is_empty());
+    let send_actions = list_command_surface_actions(&send_state, send_task_session_id).await;
+    let shell_action = send_actions
+        .iter()
+        .find(|action| action.action.action_type == "shell.destructive")
+        .expect("dangerous shell action");
+    assert_eq!(
+        shell_action.status,
+        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed
+    );
+    let metadata = shell_action
+        .observation_metadata
+        .as_ref()
+        .expect("hard block metadata");
+    assert_eq!(
+        metadata
+            .get("replayable")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        metadata
+            .get("proposalCreated")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+
+    let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    invoke_start_stream_message_for_kernel_goal_3(
+        stream_state.clone(),
+        "k4-stream-dangerous-shell",
+        user_text,
+    )
+    .await;
+    let stream_task_session_id = expected_task_session_id("k4-stream-dangerous-shell", user_text);
+    let stream_session = load_command_surface_session(&stream_state, &stream_task_session_id).await;
+    assert_eq!(
+        stream_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
+    );
+    assert!(list_command_surface_proposals(&stream_state)
+        .await
+        .is_empty());
+}
+
+#[tokio::test]
+async fn main_chat_kernel_goal_4_ordinary_auto_checkin_does_not_materialize_truth() {
+    let user_text = "我今天完成了写周报";
+
+    let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    set_command_surface_scripted_generation_response(
+        &send_state,
+        "k4-direct-answer-model",
+        serde_json::json!("已收到。"),
+    )
+    .await;
+    {
+        let mut model = openlife_core::life_model::LifeModel::default_model();
+        model
+            .goals
+            .daily
+            .push(openlife_core::life_model::DailyGoal {
+                name: "写周报".into(),
+                done: false,
+                time_block: None,
+            });
+        let manager = send_state.life_model_manager.lock().await;
+        manager.save(&model).expect("seed daily goal");
+    }
+    let response = invoke_send_message_for_kernel_goal_3(
+        send_state.clone(),
+        "k4-send-auto-checkin-isolation",
+        user_text,
+    )
+    .await;
+    assert_eq!(response["legacy_fallback_used"], false);
+    assert_eq!(
+        response["agent_ingress"]["selectedStrategy"],
+        "direct_answer"
+    );
+    assert_eq!(
+        response["reasoning_trace"]["generation_result"]["kernelBackedDirectAnswer"],
+        true
+    );
+    let model_after = {
+        let manager = send_state.life_model_manager.lock().await;
+        manager.load().expect("load daily goal after")
+    };
+    assert_eq!(model_after.goals.daily.len(), 1);
+    assert!(!model_after.goals.daily[0].done);
+    assert!(list_command_surface_proposals(&send_state).await.is_empty());
+}
+
+#[tokio::test]
 async fn main_chat_kernel_goal_3_web_read_unavailable_send_stream_blocks_without_fake_success() {
     let user_text = "Please run web.read unavailable for OpenLife release notes.";
 
@@ -962,8 +1555,12 @@ async fn send_message_command_surface_runs_governed_proposal_path() {
     };
     assert!(proposals.iter().any(|proposal| {
         proposal.source == openlife_core::agent::ProposalSource::ChatConversation
-            && proposal.source_detail.as_deref()
-                == Some(format!("main_chat_agent_task_session:{task_session_id}").as_str())
+            && matches!(
+                proposal.source_detail.as_deref(),
+                Some(detail)
+                    if detail == task_session_id
+                        || detail == format!("main_chat_agent_task_session:{task_session_id}")
+            )
     }));
 }
 
@@ -1067,8 +1664,12 @@ async fn start_stream_message_command_surface_runs_governed_proposal_path() {
     };
     assert!(proposals.iter().any(|proposal| {
         proposal.source == openlife_core::agent::ProposalSource::ChatConversation
-            && proposal.source_detail.as_deref()
-                == Some(format!("main_chat_agent_task_session:{task_session_id}").as_str())
+            && matches!(
+                proposal.source_detail.as_deref(),
+                Some(detail)
+                    if detail == task_session_id
+                        || detail == format!("main_chat_agent_task_session:{task_session_id}")
+            )
     }));
 }
 
@@ -2057,17 +2658,9 @@ async fn start_stream_message_command_surface_preserves_web_policy_blocker() {
         .as_deref()
         .expect("expected stream web blocker task session id");
 
-    let session = {
-        let store_arc = state
-            .main_chat_agent_session_store
-            .as_ref()
-            .expect("main chat session store");
-        let store = store_arc.lock().await;
-        store
-            .load_session(task_session_id)
-            .expect("load stream web blocker task session")
-            .expect("stream web blocker task session exists")
-    };
+    let session =
+        wait_command_surface_session_blocker(&state, task_session_id, "network_policy_blocked")
+            .await;
     assert_eq!(
         session.status,
         openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
