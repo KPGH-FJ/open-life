@@ -308,6 +308,202 @@ fn assert_kernel_goal_3_read_action_metadata(
     );
 }
 
+fn assert_kernel_read_loop_final_metadata(metadata: &serde_json::Value) {
+    assert_eq!(
+        metadata
+            .get("kernelBackedReadOnlyToolLoop")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        metadata
+            .get("toolCallCount")
+            .and_then(serde_json::Value::as_u64),
+        Some(1)
+    );
+    assert_eq!(
+        metadata
+            .get("directWritesExecuted")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+}
+
+fn assert_kernel_mcp_read_selection_metadata(
+    metadata: &serde_json::Value,
+    min_candidate_count: usize,
+) {
+    assert_eq!(
+        metadata
+            .get("kernelBackedReadOnlyToolLoop")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        metadata
+            .get("mcpReadTargetResolved")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        metadata
+            .get("strictManifestIdentity")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        metadata
+            .get("fuzzyNameMatchingUsed")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        metadata
+            .get("toolSelectionModelRanked")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        metadata
+            .get("toolSelectionRankingSource")
+            .and_then(serde_json::Value::as_str),
+        Some("deterministic_local")
+    );
+    assert_eq!(
+        metadata
+            .get("toolSelectionDeterministicFallbackReady")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        metadata
+            .get("toolSelectionProviderRankingRequiredForLocalCompletion")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        metadata
+            .get("selectedCandidateId")
+            .and_then(serde_json::Value::as_str),
+        Some("builtin_echo")
+    );
+    assert_eq!(
+        metadata
+            .get("selectedCandidateTarget")
+            .and_then(serde_json::Value::as_str),
+        Some("builtin_echo")
+    );
+    assert_eq!(
+        metadata
+            .get("selectedCandidateActionType")
+            .and_then(serde_json::Value::as_str),
+        Some("mcp_tool")
+    );
+    assert_eq!(
+        metadata
+            .get("manifestId")
+            .and_then(serde_json::Value::as_str),
+        Some("builtin_echo")
+    );
+    assert_eq!(
+        metadata
+            .get("target")
+            .and_then(serde_json::Value::as_str),
+        Some("builtin_echo")
+    );
+    assert_eq!(
+        metadata
+            .get("directWritesExecuted")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+
+    let candidate_count = metadata
+        .get("toolSelectionCandidateCount")
+        .and_then(serde_json::Value::as_u64)
+        .expect("kernel MCP candidate count") as usize;
+    assert!(
+        candidate_count >= min_candidate_count,
+        "expected at least {min_candidate_count} candidates, got {candidate_count}"
+    );
+    let candidate_ids = metadata
+        .get("boundedCandidateIds")
+        .and_then(serde_json::Value::as_array)
+        .expect("kernel MCP bounded candidate ids");
+    assert_eq!(candidate_ids.len(), candidate_count);
+    let selected_index = candidate_ids
+        .iter()
+        .position(|candidate| candidate == "builtin_echo")
+        .expect("bounded candidates include builtin_echo");
+    assert_eq!(
+        metadata
+            .get("selectedCandidateRank")
+            .and_then(serde_json::Value::as_u64),
+        Some((selected_index + 1) as u64)
+    );
+    let target_allowlist = metadata
+        .get("targetAllowlist")
+        .and_then(serde_json::Value::as_array)
+        .expect("kernel MCP target allowlist");
+    assert_eq!(target_allowlist.len(), candidate_count);
+    assert!(target_allowlist.iter().any(|target| target == "builtin_echo"));
+    let action_target_allowlist = metadata
+        .get("actionTargetAllowlist")
+        .and_then(serde_json::Value::as_array)
+        .expect("kernel MCP action-target allowlist");
+    assert_eq!(action_target_allowlist.len(), candidate_count);
+    assert!(action_target_allowlist.iter().all(|entry| {
+        entry
+            .as_object()
+            .is_some_and(|object| object.len() == 2)
+            && entry
+                .get("actionType")
+                .and_then(serde_json::Value::as_str)
+                == Some("mcp_tool")
+            && entry
+                .get("target")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+    }));
+    assert!(action_target_allowlist.iter().any(|entry| {
+        entry
+            .get("actionType")
+            .and_then(serde_json::Value::as_str)
+            == Some("mcp_tool")
+            && entry
+                .get("target")
+                .and_then(serde_json::Value::as_str)
+                == Some("builtin_echo")
+    }));
+}
+
+fn assert_kernel_web_network_blocker_metadata(metadata: &serde_json::Value) {
+    assert_eq!(
+        metadata
+            .get("kernelBackedReadOnlyToolLoop")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        metadata
+            .get("executorStatus")
+            .and_then(serde_json::Value::as_str),
+        Some("blocked")
+    );
+    assert_eq!(
+        metadata
+            .get("blockerReason")
+            .and_then(serde_json::Value::as_str),
+        Some("network_policy_blocked")
+    );
+    assert_eq!(
+        metadata
+            .get("directWritesExecuted")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+}
+
 #[tokio::test]
 async fn main_chat_command_surface_eval_gate_covers_send_stream_runtime_matrix() {
     let report = run_main_chat_command_surface_eval_gate().await;
@@ -1224,7 +1420,7 @@ async fn main_chat_kernel_goal_3_web_read_unavailable_send_stream_blocks_without
     )
     .await;
     assert_eq!(send_response["legacy_fallback_used"], false);
-    assert_eq!(send_response["tool_calls"][0]["name"], "web.read");
+    assert_eq!(send_response["tool_calls"][0]["name"], "web.search");
     assert_eq!(send_response["tool_calls"][0]["status"], "blocked");
     assert_eq!(
         send_response["tool_calls"][0]["error"],
@@ -1244,12 +1440,12 @@ async fn main_chat_kernel_goal_3_web_read_unavailable_send_stream_blocks_without
     let send_actions = list_command_surface_actions(&send_state, send_task_session_id).await;
     let send_web_action = send_actions
         .iter()
-        .find(|action| action.action.action_type == "web.read")
-        .expect("send web.read action");
+        .find(|action| action.action.action_type == "web.search")
+        .expect("send web.search action");
     assert_kernel_goal_3_read_action_metadata(
         send_web_action,
         "web",
-        "governed_read",
+        "web_search_network",
         openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed,
     );
 
@@ -1276,7 +1472,7 @@ async fn main_chat_kernel_goal_3_web_read_unavailable_send_stream_blocks_without
     let stream_actions = list_command_surface_actions(&stream_state, &stream_task_session_id).await;
     assert!(stream_actions
         .iter()
-        .any(|action| action.action.action_type == "web.read"
+        .any(|action| action.action.action_type == "web.search"
             && action.status
                 == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed));
 }
@@ -3226,43 +3422,57 @@ async fn send_message_registered_mcp_read_completes_through_agent_loop_not_fallb
     };
     let completed_entry = transcript
         .iter()
-        .find(|entry| entry.summary.contains("Governed ReAct AgentLoop completed"))
+        .find(|entry| {
+            entry.summary.contains("Governed ReAct AgentLoop completed")
+                || entry
+                    .summary
+                    .contains("MainChatKernel read-only tool loop completed")
+        })
         .expect("mcp AgentLoop completion transcript entry");
-    assert_eq!(
-        completed_entry
-            .metadata
-            .get("agentLoopSucceeded")
-            .and_then(serde_json::Value::as_bool),
-        Some(true)
-    );
-    assert_eq!(
-        completed_entry
-            .metadata
-            .get("singleStepFallbackUsed")
-            .and_then(serde_json::Value::as_bool),
-        Some(false)
-    );
-    assert_eq!(
-        completed_entry
-            .metadata
-            .get("plannedActionObserved")
-            .and_then(serde_json::Value::as_bool),
-        Some(true)
-    );
-    assert_eq!(
-        completed_entry
-            .metadata
-            .get("mcpReadTargetResolved")
-            .and_then(serde_json::Value::as_bool),
-        Some(true)
-    );
-    assert_eq!(
-        completed_entry
-            .metadata
-            .get("resolvedTarget")
-            .and_then(serde_json::Value::as_str),
-        Some("builtin_echo")
-    );
+    if completed_entry
+        .metadata
+        .get("kernelBackedReadOnlyToolLoop")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        assert_kernel_read_loop_final_metadata(&completed_entry.metadata);
+    } else {
+        assert_eq!(
+            completed_entry
+                .metadata
+                .get("agentLoopSucceeded")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            completed_entry
+                .metadata
+                .get("singleStepFallbackUsed")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            completed_entry
+                .metadata
+                .get("plannedActionObserved")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            completed_entry
+                .metadata
+                .get("mcpReadTargetResolved")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            completed_entry
+                .metadata
+                .get("resolvedTarget")
+                .and_then(serde_json::Value::as_str),
+            Some("builtin_echo")
+        );
+    }
 
     let actions = {
         let queue_arc = state
@@ -3286,19 +3496,28 @@ async fn send_message_registered_mcp_read_completes_through_agent_loop_not_fallb
         .observation_metadata
         .as_ref()
         .expect("mcp AgentLoop observation metadata");
-    assert_eq!(observation["agentLoopSucceeded"], serde_json::json!(true));
-    assert_eq!(
-        observation["singleStepFallbackUsed"],
-        serde_json::json!(false)
-    );
-    assert_eq!(
-        observation["mcpReadTargetResolved"],
-        serde_json::json!(true)
-    );
-    assert_eq!(
-        observation["resolvedTarget"],
-        serde_json::json!("builtin_echo")
-    );
+    if observation
+        .get("kernelBackedReadOnlyToolLoop")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        assert_eq!(observation["executorStatus"], serde_json::json!("succeeded"));
+        assert_kernel_mcp_read_selection_metadata(observation, 1);
+    } else {
+        assert_eq!(observation["agentLoopSucceeded"], serde_json::json!(true));
+        assert_eq!(
+            observation["singleStepFallbackUsed"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            observation["mcpReadTargetResolved"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            observation["resolvedTarget"],
+            serde_json::json!("builtin_echo")
+        );
+    }
     assert_eq!(
         observation["directWritesExecuted"],
         serde_json::json!(false)
@@ -3404,36 +3623,50 @@ async fn start_stream_message_registered_mcp_read_completes_through_agent_loop_n
     };
     let completed_entry = transcript
         .iter()
-        .find(|entry| entry.summary.contains("Governed ReAct AgentLoop completed"))
+        .find(|entry| {
+            entry.summary.contains("Governed ReAct AgentLoop completed")
+                || entry
+                    .summary
+                    .contains("MainChatKernel read-only tool loop completed")
+        })
         .expect("stream mcp AgentLoop completion transcript entry");
-    assert_eq!(
-        completed_entry
-            .metadata
-            .get("agentLoopSucceeded")
-            .and_then(serde_json::Value::as_bool),
-        Some(true)
-    );
-    assert_eq!(
-        completed_entry
-            .metadata
-            .get("singleStepFallbackUsed")
-            .and_then(serde_json::Value::as_bool),
-        Some(false)
-    );
-    assert_eq!(
-        completed_entry
-            .metadata
-            .get("mcpReadTargetResolved")
-            .and_then(serde_json::Value::as_bool),
-        Some(true)
-    );
-    assert_eq!(
-        completed_entry
-            .metadata
-            .get("resolvedTarget")
-            .and_then(serde_json::Value::as_str),
-        Some("builtin_echo")
-    );
+    if completed_entry
+        .metadata
+        .get("kernelBackedReadOnlyToolLoop")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        assert_kernel_read_loop_final_metadata(&completed_entry.metadata);
+    } else {
+        assert_eq!(
+            completed_entry
+                .metadata
+                .get("agentLoopSucceeded")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            completed_entry
+                .metadata
+                .get("singleStepFallbackUsed")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            completed_entry
+                .metadata
+                .get("mcpReadTargetResolved")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            completed_entry
+                .metadata
+                .get("resolvedTarget")
+                .and_then(serde_json::Value::as_str),
+            Some("builtin_echo")
+        );
+    }
 
     let actions = {
         let queue_arc = state
@@ -3457,19 +3690,28 @@ async fn start_stream_message_registered_mcp_read_completes_through_agent_loop_n
         .observation_metadata
         .as_ref()
         .expect("stream mcp AgentLoop observation metadata");
-    assert_eq!(observation["agentLoopSucceeded"], serde_json::json!(true));
-    assert_eq!(
-        observation["singleStepFallbackUsed"],
-        serde_json::json!(false)
-    );
-    assert_eq!(
-        observation["mcpReadTargetResolved"],
-        serde_json::json!(true)
-    );
-    assert_eq!(
-        observation["resolvedTarget"],
-        serde_json::json!("builtin_echo")
-    );
+    if observation
+        .get("kernelBackedReadOnlyToolLoop")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        assert_eq!(observation["executorStatus"], serde_json::json!("succeeded"));
+        assert_kernel_mcp_read_selection_metadata(observation, 1);
+    } else {
+        assert_eq!(observation["agentLoopSucceeded"], serde_json::json!(true));
+        assert_eq!(
+            observation["singleStepFallbackUsed"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            observation["mcpReadTargetResolved"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            observation["resolvedTarget"],
+            serde_json::json!("builtin_echo")
+        );
+    }
     assert_eq!(
         observation["directWritesExecuted"],
         serde_json::json!(false)
@@ -3565,55 +3807,68 @@ async fn send_message_registered_mcp_multi_candidate_agent_loop_selects_allowed_
             .list_transcript_entries(task_session_id)
             .expect("list mcp multi-candidate AgentLoop transcript")
             .into_iter()
-            .find(|entry| entry.summary.contains("Governed ReAct AgentLoop completed"))
+            .find(|entry| {
+                entry.summary.contains("Governed ReAct AgentLoop completed")
+                    || entry
+                        .summary
+                        .contains("MainChatKernel read-only tool loop completed")
+            })
             .expect("mcp multi-candidate AgentLoop completion transcript entry")
     };
     let metadata = completed_entry.metadata;
-    let candidate_count = metadata
-        .get("toolSelectionCandidateCount")
-        .and_then(serde_json::Value::as_u64)
-        .expect("candidate count metadata");
-    assert!(
-        candidate_count >= 2,
-        "AgentLoop completion metadata must preserve the multi-candidate contract"
-    );
-    let candidate_ids = metadata
-        .get("toolSelectionCandidateIds")
-        .and_then(serde_json::Value::as_array)
-        .expect("candidate ids metadata");
-    assert!(candidate_ids
-        .iter()
-        .any(|candidate| candidate == "builtin_echo"));
-    assert_eq!(
-        metadata
-            .get("toolSelectionCandidateId")
-            .and_then(serde_json::Value::as_str),
-        Some("builtin_echo")
-    );
-    assert_eq!(
-        metadata
-            .get("toolSelectionCandidateTarget")
-            .and_then(serde_json::Value::as_str),
-        Some("builtin_echo")
-    );
-    assert_eq!(
-        metadata
-            .get("modelSelectedAllowedTool")
-            .and_then(serde_json::Value::as_bool),
-        Some(true)
-    );
-    assert_eq!(
-        metadata
-            .get("singleStepFallbackUsed")
-            .and_then(serde_json::Value::as_bool),
-        Some(false)
-    );
-    assert_eq!(
-        metadata
-            .get("directWritesExecuted")
-            .and_then(serde_json::Value::as_bool),
-        Some(false)
-    );
+    if metadata
+        .get("kernelBackedReadOnlyToolLoop")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        assert_kernel_read_loop_final_metadata(&metadata);
+    } else {
+        let candidate_count = metadata
+            .get("toolSelectionCandidateCount")
+            .and_then(serde_json::Value::as_u64)
+            .expect("candidate count metadata");
+        assert!(
+            candidate_count >= 2,
+            "AgentLoop completion metadata must preserve the multi-candidate contract"
+        );
+        let candidate_ids = metadata
+            .get("toolSelectionCandidateIds")
+            .and_then(serde_json::Value::as_array)
+            .expect("candidate ids metadata");
+        assert!(candidate_ids
+            .iter()
+            .any(|candidate| candidate == "builtin_echo"));
+        assert_eq!(
+            metadata
+                .get("toolSelectionCandidateId")
+                .and_then(serde_json::Value::as_str),
+            Some("builtin_echo")
+        );
+        assert_eq!(
+            metadata
+                .get("toolSelectionCandidateTarget")
+                .and_then(serde_json::Value::as_str),
+            Some("builtin_echo")
+        );
+        assert_eq!(
+            metadata
+                .get("modelSelectedAllowedTool")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            metadata
+                .get("singleStepFallbackUsed")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            metadata
+                .get("directWritesExecuted")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+    }
 
     let actions = {
         let queue_arc = state
@@ -3637,19 +3892,28 @@ async fn send_message_registered_mcp_multi_candidate_agent_loop_selects_allowed_
         .observation_metadata
         .as_ref()
         .expect("mcp multi-candidate AgentLoop observation metadata");
-    assert_eq!(observation["agentLoopSucceeded"], serde_json::json!(true));
-    assert_eq!(
-        observation["toolSelectionCandidateId"],
-        serde_json::json!("builtin_echo")
-    );
-    assert_eq!(
-        observation["toolSelectionCandidateTarget"],
-        serde_json::json!("builtin_echo")
-    );
-    assert_eq!(
-        observation["singleStepFallbackUsed"],
-        serde_json::json!(false)
-    );
+    if observation
+        .get("kernelBackedReadOnlyToolLoop")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        assert_eq!(observation["executorStatus"], serde_json::json!("succeeded"));
+        assert_kernel_mcp_read_selection_metadata(observation, 2);
+    } else {
+        assert_eq!(observation["agentLoopSucceeded"], serde_json::json!(true));
+        assert_eq!(
+            observation["toolSelectionCandidateId"],
+            serde_json::json!("builtin_echo")
+        );
+        assert_eq!(
+            observation["toolSelectionCandidateTarget"],
+            serde_json::json!("builtin_echo")
+        );
+        assert_eq!(
+            observation["singleStepFallbackUsed"],
+            serde_json::json!(false)
+        );
+    }
     assert_eq!(
         observation["directWritesExecuted"],
         serde_json::json!(false)
@@ -3739,36 +4003,50 @@ async fn send_message_web_policy_blocker_completes_through_agent_loop_not_fallba
     };
     let completed_entry = transcript
         .iter()
-        .find(|entry| entry.summary.contains("Governed ReAct AgentLoop completed"))
+        .find(|entry| {
+            entry.summary.contains("Governed ReAct AgentLoop completed")
+                || entry
+                    .summary
+                    .contains("MainChatKernel read-only tool loop returned a blocker")
+        })
         .expect("web AgentLoop completion transcript entry");
-    assert_eq!(
-        completed_entry
-            .metadata
-            .get("agentLoopSucceeded")
-            .and_then(serde_json::Value::as_bool),
-        Some(true)
-    );
-    assert_eq!(
-        completed_entry
-            .metadata
-            .get("singleStepFallbackUsed")
-            .and_then(serde_json::Value::as_bool),
-        Some(false)
-    );
-    assert_eq!(
-        completed_entry
-            .metadata
-            .get("agentLoopActionStatus")
-            .and_then(serde_json::Value::as_str),
-        Some("blocked")
-    );
-    assert_eq!(
-        completed_entry
-            .metadata
-            .get("permissionDecision")
-            .and_then(serde_json::Value::as_str),
-        Some("network_policy_blocked")
-    );
+    if completed_entry
+        .metadata
+        .get("kernelBackedReadOnlyToolLoop")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        assert_kernel_read_loop_final_metadata(&completed_entry.metadata);
+    } else {
+        assert_eq!(
+            completed_entry
+                .metadata
+                .get("agentLoopSucceeded")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            completed_entry
+                .metadata
+                .get("singleStepFallbackUsed")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            completed_entry
+                .metadata
+                .get("agentLoopActionStatus")
+                .and_then(serde_json::Value::as_str),
+            Some("blocked")
+        );
+        assert_eq!(
+            completed_entry
+                .metadata
+                .get("permissionDecision")
+                .and_then(serde_json::Value::as_str),
+            Some("network_policy_blocked")
+        );
+    }
 
     let session = {
         let store_arc = state
@@ -3812,19 +4090,27 @@ async fn send_message_web_policy_blocker_completes_through_agent_loop_not_fallba
         .observation_metadata
         .as_ref()
         .expect("web AgentLoop observation metadata");
-    assert_eq!(observation["agentLoopSucceeded"], serde_json::json!(true));
-    assert_eq!(
-        observation["singleStepFallbackUsed"],
-        serde_json::json!(false)
-    );
-    assert_eq!(
-        observation["agentLoopActionStatus"],
-        serde_json::json!("blocked")
-    );
-    assert_eq!(
-        observation["permissionDecision"],
-        serde_json::json!("network_policy_blocked")
-    );
+    if observation
+        .get("kernelBackedReadOnlyToolLoop")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        assert_kernel_web_network_blocker_metadata(observation);
+    } else {
+        assert_eq!(observation["agentLoopSucceeded"], serde_json::json!(true));
+        assert_eq!(
+            observation["singleStepFallbackUsed"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            observation["agentLoopActionStatus"],
+            serde_json::json!("blocked")
+        );
+        assert_eq!(
+            observation["permissionDecision"],
+            serde_json::json!("network_policy_blocked")
+        );
+    }
     assert_eq!(
         observation["directWritesExecuted"],
         serde_json::json!(false)
@@ -3924,36 +4210,50 @@ async fn start_stream_message_web_policy_blocker_completes_through_agent_loop_no
     };
     let completed_entry = transcript
         .iter()
-        .find(|entry| entry.summary.contains("Governed ReAct AgentLoop completed"))
+        .find(|entry| {
+            entry.summary.contains("Governed ReAct AgentLoop completed")
+                || entry
+                    .summary
+                    .contains("MainChatKernel read-only tool loop returned a blocker")
+        })
         .expect("stream web AgentLoop completion transcript entry");
-    assert_eq!(
-        completed_entry
-            .metadata
-            .get("agentLoopSucceeded")
-            .and_then(serde_json::Value::as_bool),
-        Some(true)
-    );
-    assert_eq!(
-        completed_entry
-            .metadata
-            .get("singleStepFallbackUsed")
-            .and_then(serde_json::Value::as_bool),
-        Some(false)
-    );
-    assert_eq!(
-        completed_entry
-            .metadata
-            .get("agentLoopActionStatus")
-            .and_then(serde_json::Value::as_str),
-        Some("blocked")
-    );
-    assert_eq!(
-        completed_entry
-            .metadata
-            .get("permissionDecision")
-            .and_then(serde_json::Value::as_str),
-        Some("network_policy_blocked")
-    );
+    if completed_entry
+        .metadata
+        .get("kernelBackedReadOnlyToolLoop")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        assert_kernel_read_loop_final_metadata(&completed_entry.metadata);
+    } else {
+        assert_eq!(
+            completed_entry
+                .metadata
+                .get("agentLoopSucceeded")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            completed_entry
+                .metadata
+                .get("singleStepFallbackUsed")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            completed_entry
+                .metadata
+                .get("agentLoopActionStatus")
+                .and_then(serde_json::Value::as_str),
+            Some("blocked")
+        );
+        assert_eq!(
+            completed_entry
+                .metadata
+                .get("permissionDecision")
+                .and_then(serde_json::Value::as_str),
+            Some("network_policy_blocked")
+        );
+    }
 
     let session = {
         let store_arc = state
@@ -3997,19 +4297,27 @@ async fn start_stream_message_web_policy_blocker_completes_through_agent_loop_no
         .observation_metadata
         .as_ref()
         .expect("stream web AgentLoop observation metadata");
-    assert_eq!(observation["agentLoopSucceeded"], serde_json::json!(true));
-    assert_eq!(
-        observation["singleStepFallbackUsed"],
-        serde_json::json!(false)
-    );
-    assert_eq!(
-        observation["agentLoopActionStatus"],
-        serde_json::json!("blocked")
-    );
-    assert_eq!(
-        observation["permissionDecision"],
-        serde_json::json!("network_policy_blocked")
-    );
+    if observation
+        .get("kernelBackedReadOnlyToolLoop")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        assert_kernel_web_network_blocker_metadata(observation);
+    } else {
+        assert_eq!(observation["agentLoopSucceeded"], serde_json::json!(true));
+        assert_eq!(
+            observation["singleStepFallbackUsed"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            observation["agentLoopActionStatus"],
+            serde_json::json!("blocked")
+        );
+        assert_eq!(
+            observation["permissionDecision"],
+            serde_json::json!("network_policy_blocked")
+        );
+    }
     assert_eq!(
         observation["directWritesExecuted"],
         serde_json::json!(false)

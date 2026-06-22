@@ -14,6 +14,7 @@ use openlife_core::agent::{
 use openlife_core::layer_router::Layer;
 use openlife_core::life_model::LifeModel;
 use openlife_core::llm::ChatMessage;
+use openlife_core::mcp::McpRegistry;
 use openlife_core::scheduler::InferenceScheduler;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -32,6 +33,10 @@ use crate::main_chat_generation_support::{
     persist_vector_memory_for_message, preview_text,
 };
 use crate::main_chat_hs_runtime::{build_chat_runtime_hs_packet, included_life_model_sections};
+use crate::main_chat_react_tool_selection::{
+    main_chat_manifest_has_write_like_surface, main_chat_manifest_is_governed_read_candidate,
+    MainChatReactToolCandidate,
+};
 use crate::main_chat_react_runtime::{
     attach_main_chat_read_observation_metadata, bind_main_chat_observation_metadata_to_queue_action,
 };
@@ -50,6 +55,7 @@ const MAX_SYSTEM_PROMPT_CHARS: usize = 4_000;
 const MAX_ASSISTANT_PREVIEW_CHARS: usize = 180;
 const MAX_TOOL_OBSERVATION_PREVIEW_CHARS: usize = 700;
 const MAX_TOOL_QUERY_CHARS: usize = 180;
+const KERNEL_MCP_CANDIDATE_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -343,10 +349,13 @@ struct MainChatKernelReadToolDecision {
     tool_name: String,
     queue_action_type: String,
     executor_action_type: String,
+    requested_target: String,
     target: String,
     governed_input: Value,
     reason: String,
     model_arguments_ignored: bool,
+    fixture_backed_read: bool,
+    selection_metadata: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -384,27 +393,6 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
         &self,
         mut decision: MainChatKernelReadToolDecision,
     ) -> MainChatKernelReadToolExecution {
-        if decision.tool_name == "web.read" {
-            let network_enabled = {
-                let config = self.state.config.lock().await;
-                config.system.network_policy.enabled
-            };
-            let blocker = if network_enabled {
-                "web_read_unavailable"
-            } else {
-                "network_policy_blocked"
-            };
-            return blocked_kernel_read_tool_execution(
-                decision,
-                blocker,
-                "Governed web read is unavailable in the minimal kernel read-only tool set.",
-                Some(serde_json::json!({
-                    "networkPolicyEnabled": network_enabled,
-                    "governedWebReadAvailable": false,
-                })),
-            );
-        }
-
         if decision.tool_name == "file.read" {
             match crate::workspace_file_resolver::resolve_main_chat_workspace_file_target(
                 decision
@@ -441,6 +429,23 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
             }
         }
 
+        if decision.tool_name == "mcp.read_only" {
+            let registry = self.state.mcp_registry.lock().await;
+            match resolve_kernel_mcp_read_decision(&registry, decision) {
+                Ok(resolved) => {
+                    decision = resolved;
+                }
+                Err(blocker) => {
+                    return blocked_kernel_read_tool_execution(
+                        blocker.decision,
+                        &blocker.reason_code,
+                        &blocker.message,
+                        Some(blocker.metadata),
+                    );
+                }
+            }
+        }
+
         let (safe_paths, calendar_ics_paths, network_policy) = {
             let config = self.state.config.lock().await;
             let mut safe_paths = config.system.safe_paths.clone();
@@ -456,6 +461,11 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
                 config.system.network_policy.clone(),
             )
         };
+
+        let web_search_fixture_output = self.state.web_search_fixture_output.lock().await.clone();
+        if decision.queue_action_type == "web.search" && web_search_fixture_output.is_some() {
+            decision.fixture_backed_read = true;
+        }
 
         let local_file_permission_store = if decision.tool_name == "file.read" {
             match openlife_core::tool_permissions::ToolPermissionStore::new_in_memory() {
@@ -512,6 +522,11 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
         let audit_store = self.state.mcp_audit_store.lock().await;
         let privacy_engine = self.state.privacy_engine.lock().await;
         let memory_store = self.state.memory_store.lock().await;
+        let proposal_store_guard = if let Some(ref proposal_store) = self.state.proposal_store {
+            Some(proposal_store.lock().await)
+        } else {
+            None
+        };
         let mut action_ctx = ActionExecutionContext::new(
             &registry,
             permission_store_ref,
@@ -522,7 +537,9 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
         .with_memory_store(&memory_store)
         .with_network_policy(&network_policy)
         .with_calendar_ics_paths(&calendar_ics_paths);
-        let web_search_fixture_output = self.state.web_search_fixture_output.lock().await.clone();
+        if let Some(ref proposal_store) = proposal_store_guard {
+            action_ctx = action_ctx.with_proposal_store(proposal_store);
+        }
         if let Some(ref fixture_output) = web_search_fixture_output {
             action_ctx = action_ctx.with_web_search_fixture_output(fixture_output);
         }
@@ -536,7 +553,12 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
             action_type: decision.executor_action_type.clone(),
             target: decision.target.clone(),
             input: request_input,
-            source_run_id: None,
+            source_run_id: decision
+                .selection_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("sourceRunId"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
             step_index: 0,
         };
         match ActionExecutor::new(ActionExecutorConfig {
@@ -555,6 +577,495 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
             ),
         }
     }
+}
+
+#[derive(Clone)]
+struct KernelMcpReadCandidate {
+    candidate_id: String,
+    manifest_id: String,
+    manifest_name: String,
+    manifest_source: String,
+    target: String,
+    arguments: Value,
+    capabilities: Vec<String>,
+    selection_rank: usize,
+    match_reason: String,
+}
+
+impl KernelMcpReadCandidate {
+    fn react_candidate(&self) -> MainChatReactToolCandidate {
+        MainChatReactToolCandidate {
+            candidate_id: self.candidate_id.clone(),
+            executor_action_type: "mcp_tool".into(),
+            target: self.target.clone(),
+            arguments: self.arguments.clone(),
+            manifest_source: self.manifest_source.clone(),
+            capabilities: self.capabilities.clone(),
+            selection_rank: self.selection_rank,
+            match_reason: self.match_reason.clone(),
+        }
+    }
+}
+
+struct KernelMcpResolutionBlocker {
+    decision: MainChatKernelReadToolDecision,
+    reason_code: String,
+    message: String,
+    metadata: Value,
+}
+
+fn resolve_kernel_mcp_read_decision(
+    registry: &McpRegistry,
+    mut decision: MainChatKernelReadToolDecision,
+) -> Result<MainChatKernelReadToolDecision, KernelMcpResolutionBlocker> {
+    let requested_tool_name = decision
+        .governed_input
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let selection_query = decision
+        .governed_input
+        .get("selection_query")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let supplied_arguments = decision
+        .governed_input
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let candidates = if requested_tool_name.is_empty() {
+        kernel_mcp_read_candidates(registry, &selection_query, KERNEL_MCP_CANDIDATE_LIMIT)
+    } else {
+        match kernel_find_explicit_mcp_manifest(registry, &requested_tool_name) {
+            Ok(manifest) if kernel_manifest_is_explicit_read_target_candidate(&manifest) => {
+                vec![kernel_mcp_candidate_from_manifest(
+                    manifest,
+                    supplied_arguments,
+                    1,
+                    "explicit_manifest_identity",
+                )]
+            }
+            Ok(manifest) => {
+                return Err(kernel_mcp_resolution_blocker(
+                    decision,
+                    "mcp_read_tool_not_governed_read_only",
+                    format!(
+                        "Registered MCP target '{}' is not a governed read-only candidate.",
+                        manifest.id
+                    ),
+                    serde_json::json!({
+                        "requestedTarget": "mcp.call_tool",
+                        "requestedToolName": requested_tool_name,
+                        "manifestId": manifest.id,
+                        "manifestName": manifest.name,
+                        "manifestSource": manifest.source.to_string(),
+                        "strictManifestIdentity": true,
+                    }),
+                ));
+            }
+            Err(reason_code) => {
+                return Err(kernel_mcp_resolution_blocker(
+                    decision,
+                    &reason_code,
+                    format!(
+                        "No unambiguous governed MCP read target matched '{}'.",
+                        requested_tool_name
+                    ),
+                    serde_json::json!({
+                        "requestedTarget": "mcp.call_tool",
+                        "requestedToolName": requested_tool_name,
+                        "strictManifestIdentity": true,
+                        "fuzzyNameMatchingUsed": false,
+                    }),
+                ));
+            }
+        }
+    };
+
+    let Some(selected) = candidates.first().cloned() else {
+        return Err(kernel_mcp_resolution_blocker(
+            decision,
+            "mcp_read_tool_not_registered",
+            "No registered governed MCP read candidate was available for this request.",
+            serde_json::json!({
+                "requestedTarget": "mcp.call_tool",
+                "requestedToolName": requested_tool_name,
+                "strictManifestIdentity": true,
+                "fuzzyNameMatchingUsed": false,
+            }),
+        ));
+    };
+
+    decision.target = selected.target.clone();
+    decision.governed_input = selected.arguments.clone();
+    decision.selection_metadata = Some(kernel_mcp_selection_metadata(
+        &candidates,
+        &selected,
+        &requested_tool_name,
+        &selection_query,
+    ));
+    Ok(decision)
+}
+
+fn kernel_mcp_resolution_blocker(
+    decision: MainChatKernelReadToolDecision,
+    reason_code: &str,
+    message: impl Into<String>,
+    metadata: Value,
+) -> KernelMcpResolutionBlocker {
+    KernelMcpResolutionBlocker {
+        decision,
+        reason_code: reason_code.into(),
+        message: message.into(),
+        metadata,
+    }
+}
+
+fn kernel_find_explicit_mcp_manifest(
+    registry: &McpRegistry,
+    requested_tool_name: &str,
+) -> Result<openlife_core::tool_manifest::ToolManifest, String> {
+    let manifests = registry.list_manifests();
+    let exact_id_matches = manifests
+        .iter()
+        .filter(|manifest| manifest.id == requested_tool_name)
+        .cloned()
+        .collect::<Vec<_>>();
+    if exact_id_matches.len() == 1 {
+        return Ok(exact_id_matches[0].clone());
+    }
+    if exact_id_matches.len() > 1 {
+        return Err("mcp_read_tool_ambiguous_manifest_id".into());
+    }
+
+    let exact_name_matches = manifests
+        .into_iter()
+        .filter(|manifest| manifest.name == requested_tool_name)
+        .collect::<Vec<_>>();
+    match exact_name_matches.len() {
+        1 => Ok(exact_name_matches[0].clone()),
+        0 => Err("mcp_read_tool_not_registered".into()),
+        _ => Err("mcp_read_tool_ambiguous_name".into()),
+    }
+}
+
+fn kernel_mcp_read_candidates(
+    registry: &McpRegistry,
+    selection_query: &str,
+    limit: usize,
+) -> Vec<KernelMcpReadCandidate> {
+    let terms = kernel_selection_terms(selection_query);
+    let mut manifests = registry
+        .list_manifests()
+        .into_iter()
+        .filter(main_chat_manifest_is_governed_read_candidate)
+        .collect::<Vec<_>>();
+    manifests.sort_by(|left, right| {
+        let left_score = kernel_manifest_selection_score(left, &terms);
+        let right_score = kernel_manifest_selection_score(right, &terms);
+        right_score
+            .cmp(&left_score)
+            .then_with(|| left.source.to_string().cmp(&right.source.to_string()))
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    let mut seen_manifest_ids = std::collections::BTreeSet::new();
+    manifests
+        .into_iter()
+        .filter(|manifest| seen_manifest_ids.insert(manifest.id.clone()))
+        .take(limit)
+        .enumerate()
+        .map(|(index, manifest)| {
+            let score = kernel_manifest_selection_score(&manifest, &terms);
+            kernel_mcp_candidate_from_manifest(
+                manifest,
+                serde_json::json!({}),
+                index + 1,
+                if score > 0 {
+                    "capability_name_source_or_tag_match"
+                } else {
+                    "deterministic_manifest_order"
+                },
+            )
+        })
+        .collect()
+}
+
+fn kernel_mcp_candidate_from_manifest(
+    manifest: openlife_core::tool_manifest::ToolManifest,
+    supplied_arguments: Value,
+    selection_rank: usize,
+    match_reason: &str,
+) -> KernelMcpReadCandidate {
+    let arguments = if manifest.name == "builtin_echo"
+        && supplied_arguments
+            .as_object()
+            .is_some_and(serde_json::Map::is_empty)
+    {
+        serde_json::json!({ "text": "kernel registered MCP read" })
+    } else {
+        supplied_arguments
+    };
+    let mut capabilities = manifest.capabilities.clone();
+    if manifest.action_type.eq_ignore_ascii_case("read")
+        && !capabilities
+            .iter()
+            .any(|capability| capability.eq_ignore_ascii_case("read"))
+    {
+        capabilities.insert(0, "read".into());
+    }
+    KernelMcpReadCandidate {
+        candidate_id: manifest.id.clone(),
+        manifest_id: manifest.id.clone(),
+        manifest_name: manifest.name.clone(),
+        manifest_source: manifest.source.to_string(),
+        target: manifest.id,
+        arguments,
+        capabilities,
+        selection_rank,
+        match_reason: match_reason.into(),
+    }
+}
+
+fn kernel_manifest_is_explicit_read_target_candidate(
+    manifest: &openlife_core::tool_manifest::ToolManifest,
+) -> bool {
+    if manifest.name == "mcp.call_tool" || !manifest.enabled || manifest.declarative_only {
+        return false;
+    }
+    if matches!(
+        manifest.risk_level.to_ascii_lowercase().as_str(),
+        "high" | "critical"
+    ) || matches!(
+        manifest.permission_level.to_ascii_lowercase().as_str(),
+        "high" | "critical"
+    ) || matches!(
+        manifest.action_type.to_ascii_lowercase().as_str(),
+        "write" | "external_side_effect"
+    ) || manifest.capabilities.iter().any(|capability| {
+        matches!(
+            capability.to_ascii_lowercase().as_str(),
+            "write" | "external_side_effect"
+        )
+    }) || main_chat_manifest_has_write_like_surface(manifest)
+    {
+        return false;
+    }
+    (manifest.action_type.eq_ignore_ascii_case("read")
+        || manifest
+            .capabilities
+            .iter()
+            .any(|capability| capability.eq_ignore_ascii_case("read")))
+        && kernel_contract_safe_label(&manifest.id, true)
+        && kernel_contract_safe_label(&manifest.name, false)
+        && kernel_contract_safe_label(&manifest.source.to_string(), true)
+}
+
+fn kernel_mcp_selection_metadata(
+    candidates: &[KernelMcpReadCandidate],
+    selected: &KernelMcpReadCandidate,
+    requested_tool_name: &str,
+    selection_query: &str,
+) -> Value {
+    let candidate_ids = candidates
+        .iter()
+        .map(|candidate| candidate.candidate_id.clone())
+        .collect::<Vec<_>>();
+    let target_allowlist = candidates
+        .iter()
+        .map(|candidate| candidate.target.clone())
+        .collect::<Vec<_>>();
+    let action_target_allowlist = candidates
+        .iter()
+        .map(|candidate| {
+            serde_json::json!({
+                "actionType": "mcp_tool",
+                "target": candidate.target,
+            })
+        })
+        .collect::<Vec<_>>();
+    let selected_react_candidate = selected.react_candidate();
+    let arguments_digest =
+        openlife_core::agent::react_beta::metadata_safe_value_digest(&selected.arguments);
+    serde_json::json!({
+        "kernelToolSelection": true,
+        "toolSelectionCandidateCount": candidates.len(),
+        "boundedCandidateIds": candidate_ids,
+        "targetAllowlist": target_allowlist,
+        "actionTargetAllowlist": action_target_allowlist,
+        "toolSelectionModelRanked": false,
+        "toolSelectionRankingSource": "deterministic_local",
+        "toolSelectionDeterministicFallbackReady": true,
+        "toolSelectionProviderRankingAttempted": false,
+        "toolSelectionProviderRankingDeferred": true,
+        "toolSelectionProviderRankingRequiredForLocalCompletion": false,
+        "toolSelectionRankingIgnored": false,
+        "selectedCandidateId": selected.candidate_id,
+        "selectedCandidateTarget": selected.target,
+        "selectedCandidateActionType": "mcp_tool",
+        "selectedCandidateRank": selected.selection_rank,
+        "selectedCandidateSource": selected_react_candidate.manifest_source_label(),
+        "selectedCandidateCapabilityDigest": selected_react_candidate.capabilities_digest_label(),
+        "selectedCandidateCapabilityLabels": selected_react_candidate.capability_labels_label(),
+        "selectedCandidateMatchReason": selected_react_candidate.match_reason_label(),
+        "manifestId": selected.manifest_id,
+        "manifestName": selected.manifest_name,
+        "manifestSource": selected.manifest_source,
+        "strictManifestIdentity": true,
+        "fuzzyNameMatchingUsed": false,
+        "requestedTarget": "mcp.call_tool",
+        "requestedToolName": if requested_tool_name.is_empty() {
+            Value::Null
+        } else {
+            Value::String(requested_tool_name.to_string())
+        },
+        "selectionQueryDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(
+            &serde_json::json!({ "selectionQuery": selection_query })
+        ),
+        "governedArgumentsSource": "kernel_manifest_candidate_contract",
+        "governedArgumentsDigest": format!(
+            "bytes:{} hash:{}",
+            arguments_digest.0, arguments_digest.1
+        ),
+        "boundedArguments": true,
+        "mcpReadTargetResolved": true,
+    })
+}
+
+fn kernel_manifest_selection_score(
+    manifest: &openlife_core::tool_manifest::ToolManifest,
+    terms: &[String],
+) -> usize {
+    if terms.is_empty() {
+        return 0;
+    }
+    let mut searchable = vec![
+        kernel_normalize_selection_text(&manifest.name),
+        kernel_normalize_selection_text(&manifest.source.to_string()),
+    ];
+    searchable.extend(
+        manifest
+            .capabilities
+            .iter()
+            .map(|capability| kernel_normalize_selection_text(capability)),
+    );
+    searchable.extend(
+        manifest
+            .tags
+            .iter()
+            .map(|tag| kernel_normalize_selection_text(tag)),
+    );
+    terms
+        .iter()
+        .filter(|term| searchable.iter().any(|value| value.contains(term.as_str())))
+        .count()
+}
+
+fn kernel_selection_terms(selection_query: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    for raw_token in selection_query.split_whitespace() {
+        let term = kernel_normalize_selection_text(trim_main_chat_tool_token(raw_token));
+        if term.len() < 3 || kernel_generic_selection_term(&term) {
+            continue;
+        }
+        if !terms.iter().any(|existing| existing == &term) {
+            terms.push(term);
+        }
+    }
+    terms
+}
+
+fn trim_main_chat_tool_token(token: &str) -> &str {
+    let trimmed = token.trim_matches(|ch: char| {
+        matches!(
+            ch,
+            '"' | '\'' | '`' | ',' | ':' | ';' | ')' | '(' | '[' | ']' | '{' | '}'
+        )
+    });
+    trimmed.strip_suffix('.').unwrap_or(trimmed)
+}
+
+fn infer_kernel_mcp_tool_name(user_text: &str) -> Option<String> {
+    let tokens = user_text
+        .split_whitespace()
+        .map(trim_main_chat_tool_token)
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    let mcp_index = tokens
+        .iter()
+        .position(|token| token.eq_ignore_ascii_case("mcp"))?;
+    tokens
+        .iter()
+        .skip(mcp_index + 1)
+        .copied()
+        .find(|token| kernel_specific_mcp_tool_token(token))
+        .map(str::to_string)
+}
+
+fn kernel_specific_mcp_tool_token(token: &str) -> bool {
+    let lower = token.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "read"
+            | "read-only"
+            | "readonly"
+            | "tool"
+            | "tools"
+            | "utility"
+            | "now"
+            | "please"
+            | "json"
+            | "schema"
+            | "action"
+            | "actions"
+            | "action_type"
+            | "arguments"
+            | "guidance"
+    ) {
+        return false;
+    }
+    token.contains('.') || token.contains('_') || token.contains('-') || token.contains(':')
+}
+
+fn kernel_normalize_selection_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn kernel_generic_selection_term(term: &str) -> bool {
+    matches!(
+        term,
+        "mcp"
+            | "read"
+            | "readonly"
+            | "tool"
+            | "tools"
+            | "use"
+            | "now"
+            | "please"
+            | "with"
+            | "for"
+            | "and"
+            | "the"
+    )
+}
+
+fn kernel_contract_safe_label(value: &str, allow_colon: bool) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_ROUTE_LABEL_CHARS
+        && value.chars().all(|ch| {
+            ch.is_ascii_alphanumeric()
+                || matches!(ch, '.' | '_' | '-' | '/')
+                || (allow_colon && ch == ':')
+        })
 }
 
 fn kernel_read_tool_execution_from_action_result(
@@ -586,6 +1097,7 @@ fn kernel_read_tool_execution_from_action_result(
         "toolName": decision.tool_name.clone(),
         "queueActionType": decision.queue_action_type.clone(),
         "executorActionType": decision.executor_action_type.clone(),
+        "requestedTarget": decision.requested_target.clone(),
         "target": decision.target.clone(),
         "governedInput": governed_input.clone(),
         "governedInputDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(&governed_input),
@@ -598,11 +1110,13 @@ fn kernel_read_tool_execution_from_action_result(
         "executorStatus": status_label,
         "actionId": result.action.id,
         "observationId": result.observation.id,
+        "blockerReason": blocker_reason.clone(),
         "stopReason": result.stop_reason,
         "structuredResult": result.observation.structured_result,
         "directWritesExecuted": false,
         "legacyFallbackUsed": false,
     });
+    merge_kernel_read_selection_metadata(&mut metadata, decision.selection_metadata.clone());
     attach_main_chat_read_observation_metadata(
         &mut metadata,
         &decision.queue_action_type,
@@ -610,7 +1124,7 @@ fn kernel_read_tool_execution_from_action_result(
         &governed_input,
         &output_preview,
         result.observation.structured_result.clone(),
-        false,
+        decision.fixture_backed_read,
         result.status == ActionExecutionStatus::Succeeded,
     );
 
@@ -648,6 +1162,7 @@ fn blocked_kernel_read_tool_execution(
         "toolName": decision.tool_name.clone(),
         "queueActionType": decision.queue_action_type.clone(),
         "executorActionType": decision.executor_action_type.clone(),
+        "requestedTarget": decision.requested_target.clone(),
         "target": decision.target.clone(),
         "governedInput": governed_input.clone(),
         "governedInputDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(&governed_input),
@@ -658,11 +1173,13 @@ fn blocked_kernel_read_tool_execution(
             .unwrap_or("kernel_read_tool_decision"),
         "modelArgumentsIgnored": decision.model_arguments_ignored,
         "executorStatus": "blocked",
+        "blockerReason": blocker,
         "stopReason": blocker,
         "structuredResult": structured,
         "directWritesExecuted": false,
         "legacyFallbackUsed": false,
     });
+    merge_kernel_read_selection_metadata(&mut metadata, decision.selection_metadata.clone());
     attach_main_chat_read_observation_metadata(
         &mut metadata,
         &decision.queue_action_type,
@@ -670,7 +1187,7 @@ fn blocked_kernel_read_tool_execution(
         &governed_input,
         &output_preview,
         Some(structured),
-        false,
+        decision.fixture_backed_read,
         false,
     );
 
@@ -681,6 +1198,18 @@ fn blocked_kernel_read_tool_execution(
         observation_metadata: metadata,
         output_preview,
         blocker_reason: Some(blocker.to_string()),
+    }
+}
+
+fn merge_kernel_read_selection_metadata(metadata: &mut Value, selection_metadata: Option<Value>) {
+    let Some(Value::Object(selection)) = selection_metadata else {
+        return;
+    };
+    let Some(object) = metadata.as_object_mut() else {
+        return;
+    };
+    for (key, value) in selection {
+        object.insert(key, value);
     }
 }
 
@@ -1377,13 +1906,14 @@ where
             observation_metadata: Some(execution.observation_metadata.clone()),
             model_arguments_ignored: execution.decision.model_arguments_ignored,
         };
-        let blockers = if execution.status == ActionExecutionStatus::Succeeded {
-            Vec::new()
-        } else {
-            vec![execution
+        let blockers = match execution.status {
+            ActionExecutionStatus::Succeeded | ActionExecutionStatus::NeedsConfirmation => {
+                Vec::new()
+            }
+            ActionExecutionStatus::Blocked | ActionExecutionStatus::Failed => vec![execution
                 .blocker_reason
                 .clone()
-                .unwrap_or_else(|| "read_tool_failed".into())]
+                .unwrap_or_else(|| "read_tool_failed".into())],
         };
 
         MainChatTurnResult {
@@ -1776,7 +2306,33 @@ async fn build_successful_kernel_command_surface_result(
     .await?;
     let mut tool_calls = tool_calls;
     tool_calls.extend(proposal_tool_calls);
-    if pending_proposal_ids.is_empty() {
+    let pending_permission_blockers = tool_calls
+        .iter()
+        .filter(|tool_call| matches!(tool_call.status, ToolCallStatus::NeedsConfirmation))
+        .map(|tool_call| {
+            tool_call
+                .permission_decision
+                .clone()
+                .or_else(|| tool_call.error.clone())
+                .unwrap_or_else(|| "tool_permission_required".into())
+        })
+        .collect::<Vec<_>>();
+    if !pending_permission_blockers.is_empty() {
+        if let Some(ref store_arc) = state.main_chat_agent_session_store {
+            let store = store_arc.lock().await;
+            if let Err(err) =
+                store.set_pending_blockers(task_session_id, pending_permission_blockers.clone())
+            {
+                log::warn!(
+                    "[MainChatKernel] set read permission blockers failed: {}",
+                    err
+                );
+            }
+            if let Err(err) = store.mark_waiting_permission(task_session_id) {
+                log::warn!("[MainChatKernel] mark read permission waiting failed: {}", err);
+            }
+        }
+    } else if pending_proposal_ids.is_empty() {
         complete_main_chat_agent_turn_session(
             state,
             main_chat_agent_turn,
@@ -1828,7 +2384,9 @@ async fn build_successful_kernel_command_surface_result(
                 "toolCallCount": tool_calls.len(),
                 "proposalIds": pending_proposal_ids.clone(),
                 "directWritesExecuted": false,
-                "pendingBlockerCount": pending_proposal_ids.len(),
+                "pendingPermissionBlockers": pending_permission_blockers.clone(),
+                "pendingBlockerCount": pending_proposal_ids.len()
+                    + pending_permission_blockers.len(),
             }),
         )
         .await,
@@ -2562,6 +3120,15 @@ async fn record_kernel_tool_call_evidence(
             .clone()
             .unwrap_or_else(|| serde_json::json!({}));
         bind_main_chat_observation_metadata_to_queue_action(&mut metadata, &queued.id);
+        metadata = attach_kernel_tool_permission_proposal_identity(
+            state,
+            task_session_id,
+            run_id,
+            &queued.id,
+            call,
+            metadata,
+        )
+        .await?;
 
         let status = tool_call_status_from_kernel_status(&call.status);
         let succeeded = matches!(&status, ToolCallStatus::Success);
@@ -2584,6 +3151,21 @@ async fn record_kernel_tool_call_evidence(
                 state,
                 &queued.id,
                 ExecutionQueueStatus::Completed,
+                Some(metadata.clone()),
+            )
+            .await?;
+        } else if matches!(&status, ToolCallStatus::NeedsConfirmation) {
+            transition_main_chat_action(
+                state,
+                &queued.id,
+                ExecutionQueueStatus::Executing,
+                Some(metadata.clone()),
+            )
+            .await?;
+            transition_main_chat_action(
+                state,
+                &queued.id,
+                ExecutionQueueStatus::PendingPermission,
                 Some(metadata.clone()),
             )
             .await?;
@@ -2629,11 +3211,15 @@ async fn record_kernel_tool_call_evidence(
                 Some(task_session_id),
                 if succeeded {
                     ExecutionTranscriptEntryKind::Observation
+                } else if matches!(&status, ToolCallStatus::NeedsConfirmation) {
+                    ExecutionTranscriptEntryKind::PermissionRequest
                 } else {
                     ExecutionTranscriptEntryKind::Error
                 },
                 if succeeded {
                     "MainChatKernel read-only tool observation recorded."
+                } else if matches!(&status, ToolCallStatus::NeedsConfirmation) {
+                    "MainChatKernel read-only tool permission request recorded."
                 } else {
                     "MainChatKernel read-only tool blocker recorded."
                 },
@@ -2651,7 +3237,10 @@ async fn record_kernel_tool_call_evidence(
             error: call.blocker.clone(),
             permission_level: "read".into(),
             status,
-            requires_confirmation: false,
+            requires_confirmation: matches!(
+                tool_call_status_from_kernel_status(&call.status),
+                ToolCallStatus::NeedsConfirmation
+            ),
             pii_found: false,
             privacy_warnings: Vec::new(),
             action_id: Some(queued.id),
@@ -2666,6 +3255,113 @@ async fn record_kernel_tool_call_evidence(
         });
     }
     Ok(tool_calls)
+}
+
+async fn attach_kernel_tool_permission_proposal_identity(
+    state: &Arc<AppState>,
+    task_session_id: &str,
+    run_id: &str,
+    queued_action_id: &str,
+    call: &MainChatKernelToolCall,
+    mut metadata: Value,
+) -> Result<Value, String> {
+    if call.action_type != "mcp.read_only" || call.status != "needs_confirmation" {
+        return Ok(metadata);
+    }
+    let proposal_id = metadata
+        .get("structuredResult")
+        .and_then(|structured| structured.get("proposalId"))
+        .or_else(|| metadata.get("proposalId"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let Some(proposal_id) = proposal_id else {
+        return Ok(metadata);
+    };
+
+    let (input_length_bytes, input_hash) =
+        openlife_core::agent::react_beta::metadata_safe_value_digest(&call.governed_input);
+    let blocked_action = serde_json::json!({
+        "action_type": call.action_type,
+        "target": metadata
+            .get("requestedTarget")
+            .and_then(Value::as_str)
+            .unwrap_or("mcp.call_tool"),
+        "resolved_target": call.target,
+        "queue_action_id": queued_action_id,
+        "executor_action_id": metadata
+            .get("actionId")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        "source_run_id": run_id,
+        "source_task_session_id": task_session_id,
+        "step_index": 0,
+        "input_hash": input_hash,
+        "input_length_bytes": input_length_bytes,
+        "directWritesExecuted": false,
+    });
+    let pending_action_identity = serde_json::json!({
+        "taskSessionId": task_session_id,
+        "runId": run_id,
+        "queueActionId": queued_action_id,
+        "executorActionId": metadata
+            .get("actionId")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+        "queueActionType": call.action_type,
+        "requestedTarget": metadata
+            .get("requestedTarget")
+            .and_then(Value::as_str)
+            .unwrap_or("mcp.call_tool"),
+        "resolvedTarget": call.target,
+        "manifestId": metadata.get("manifestId").cloned().unwrap_or(Value::Null),
+        "manifestName": metadata.get("manifestName").cloned().unwrap_or(Value::Null),
+        "manifestSource": metadata.get("manifestSource").cloned().unwrap_or(Value::Null),
+        "governedArgumentsDigest": format!("bytes:{} hash:{}", input_length_bytes, input_hash),
+        "directWritesExecuted": false,
+    });
+
+    if let Some(ref proposal_store_arc) = state.proposal_store {
+        let proposal_store = proposal_store_arc.lock().await;
+        if let Some(mut proposal) = proposal_store
+            .get_proposal(&proposal_id)
+            .map_err(|err| format!("load kernel ToolPermission proposal failed: {err}"))?
+        {
+            if proposal.proposal_type == openlife_core::agent::ProposalType::ToolPermission {
+                proposal.run_id = Some(run_id.to_string());
+                proposal.source = openlife_core::agent::ProposalSource::ChatConversation;
+                proposal.source_detail =
+                    Some(format!("main_chat_agent_task_session:{task_session_id}"));
+                if let Some(after) = proposal.after.as_object_mut() {
+                    after.insert("blocked_action".into(), blocked_action.clone());
+                    after.insert("pending_action_identity".into(), pending_action_identity.clone());
+                    after.insert("directWritesExecuted".into(), serde_json::json!(false));
+                    after.insert("strictManifestIdentity".into(), serde_json::json!(true));
+                    after.insert("fuzzyNameMatchingUsed".into(), serde_json::json!(false));
+                }
+                proposal_store
+                    .update_proposal(&proposal)
+                    .map_err(|err| format!("update kernel ToolPermission proposal failed: {err}"))?;
+            }
+        }
+    }
+
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert("proposalId".into(), serde_json::json!(proposal_id));
+        object.insert("blockedAction".into(), blocked_action);
+        object.insert("pendingActionIdentity".into(), pending_action_identity);
+        object.insert("resumeReplayable".into(), serde_json::json!(true));
+        object.insert(
+            "permissionProposalLinkedToPendingAction".into(),
+            serde_json::json!(true),
+        );
+        object.insert("sourceRunId".into(), serde_json::json!(run_id));
+        object.insert(
+            "sourceTaskSessionId".into(),
+            serde_json::json!(task_session_id),
+        );
+    }
+
+    Ok(metadata)
 }
 
 fn tool_call_status_from_kernel_status(status: &str) -> ToolCallStatus {
@@ -3048,6 +3744,7 @@ fn plan_kernel_read_tool(
             tool_name: "unsupported.tool".into(),
             queue_action_type: "unsupported.tool".into(),
             executor_action_type: "unsupported_tool".into(),
+            requested_target: "unsupported.tool".into(),
             target: "unsupported.tool".into(),
             governed_input: serde_json::json!({
                 "query": bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
@@ -3055,6 +3752,8 @@ fn plan_kernel_read_tool(
             }),
             reason: "unknown tool target must fail closed".into(),
             model_arguments_ignored,
+            fixture_backed_read: false,
+            selection_metadata: None,
         });
     }
 
@@ -3062,27 +3761,102 @@ fn plan_kernel_read_tool(
         &lower,
         &[
             "web.read",
+            "web search",
+            "web.search",
+            "search web",
             "web read unavailable",
             "web/read unavailable",
             "network unavailable",
         ],
     ) {
         return Some(MainChatKernelReadToolDecision {
-            tool_name: "web.read".into(),
-            queue_action_type: "web.read".into(),
-            executor_action_type: "unsupported_web_read".into(),
-            target: "web.read".into(),
+            tool_name: "web.search".into(),
+            queue_action_type: "web.search".into(),
+            executor_action_type: "mcp_tool".into(),
+            requested_target: "web.search".into(),
+            target: "web.search".into(),
             governed_input: serde_json::json!({
                 "query": bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
-                "governedInputSource": "kernel_web_unavailable_blocker",
+                "max_results": 5,
+                "governedInputSource": "kernel_web_search_query_from_user_text",
             }),
-            reason: "minimal kernel does not execute broad web reads".into(),
+            reason: "governed web search requested".into(),
             model_arguments_ignored,
+            fixture_backed_read: false,
+            selection_metadata: Some(serde_json::json!({
+                "kernelToolSelection": true,
+                "toolSelectionCandidateCount": 1,
+                "boundedCandidateIds": ["web.search"],
+                "targetAllowlist": ["web.search"],
+                "actionTargetAllowlist": [{ "actionType": "mcp_tool", "target": "web.search" }],
+                "toolSelectionModelRanked": false,
+                "toolSelectionRankingSource": "deterministic_local",
+                "toolSelectionDeterministicFallbackReady": true,
+                "toolSelectionProviderRankingRequiredForLocalCompletion": false,
+                "selectedCandidateId": "web.search",
+                "selectedCandidateTarget": "web.search",
+                "selectedCandidateActionType": "mcp_tool",
+                "selectedCandidateRank": 1,
+            })),
+        });
+    }
+
+    if lower.contains("http://") || lower.contains("https://") || lower.contains("web.fetch") {
+        let url = user_text
+            .split_whitespace()
+            .map(trim_main_chat_tool_token)
+            .find(|token| token.starts_with("http://") || token.starts_with("https://"))
+            .unwrap_or("");
+        return Some(MainChatKernelReadToolDecision {
+            tool_name: "web.fetch".into(),
+            queue_action_type: "web.fetch".into(),
+            executor_action_type: "mcp_tool".into(),
+            requested_target: "web.fetch".into(),
+            target: "web.fetch".into(),
+            governed_input: serde_json::json!({
+                "url": url,
+                "summarize": true,
+                "governedInputSource": "kernel_web_fetch_url_from_user_text",
+            }),
+            reason: "governed web fetch requested".into(),
+            model_arguments_ignored,
+            fixture_backed_read: false,
+            selection_metadata: Some(serde_json::json!({
+                "kernelToolSelection": true,
+                "toolSelectionCandidateCount": 1,
+                "boundedCandidateIds": ["web.fetch"],
+                "targetAllowlist": ["web.fetch"],
+                "actionTargetAllowlist": [{ "actionType": "mcp_tool", "target": "web.fetch" }],
+                "toolSelectionModelRanked": false,
+                "toolSelectionRankingSource": "deterministic_local",
+                "toolSelectionDeterministicFallbackReady": true,
+                "toolSelectionProviderRankingRequiredForLocalCompletion": false,
+                "selectedCandidateId": "web.fetch",
+                "selectedCandidateTarget": "web.fetch",
+                "selectedCandidateActionType": "mcp_tool",
+                "selectedCandidateRank": 1,
+            })),
         });
     }
 
     if lower.contains("mcp") {
-        return None;
+        return Some(MainChatKernelReadToolDecision {
+            tool_name: "mcp.read_only".into(),
+            queue_action_type: "mcp.read_only".into(),
+            executor_action_type: "mcp_tool".into(),
+            requested_target: "mcp.call_tool".into(),
+            target: "mcp.call_tool".into(),
+            governed_input: serde_json::json!({
+                "tool_name": infer_kernel_mcp_tool_name(user_text).unwrap_or_default(),
+                "arguments": {},
+                "selection_query": bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
+                "governedInputSource": "kernel_mcp_read_manifest_selection",
+            }),
+            reason: "registered MCP read requested".into(),
+            model_arguments_ignored,
+            fixture_backed_read: false,
+            selection_metadata: None,
+        });
     }
 
     if contains_any(
@@ -3100,6 +3874,7 @@ fn plan_kernel_read_tool(
             tool_name: "file.read".into(),
             queue_action_type: "file.read".into(),
             executor_action_type: "mcp_tool".into(),
+            requested_target: "file.read".into(),
             target: "file.read".into(),
             governed_input: serde_json::json!({
                 "rawUserText": user_text,
@@ -3107,6 +3882,8 @@ fn plan_kernel_read_tool(
             }),
             reason: "workspace file read requested".into(),
             model_arguments_ignored,
+            fixture_backed_read: false,
+            selection_metadata: None,
         });
     }
 
@@ -3125,6 +3902,7 @@ fn plan_kernel_read_tool(
             tool_name: "session.search".into(),
             queue_action_type: "session.search".into(),
             executor_action_type: "session_search".into(),
+            requested_target: "session.search".into(),
             target: "session.search".into(),
             governed_input: serde_json::json!({
                 "query": bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
@@ -3133,6 +3911,8 @@ fn plan_kernel_read_tool(
             }),
             reason: "bounded prior session search requested".into(),
             model_arguments_ignored,
+            fixture_backed_read: false,
+            selection_metadata: None,
         });
     }
 
@@ -3150,6 +3930,7 @@ fn plan_kernel_read_tool(
             tool_name: "memory.search".into(),
             queue_action_type: "memory.search".into(),
             executor_action_type: "memory_search".into(),
+            requested_target: "memory.search".into(),
             target: "memory.search".into(),
             governed_input: serde_json::json!({
                 "query": bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
@@ -3158,6 +3939,8 @@ fn plan_kernel_read_tool(
             }),
             reason: "bounded memory search requested".into(),
             model_arguments_ignored,
+            fixture_backed_read: false,
+            selection_metadata: None,
         });
     }
 
@@ -3831,6 +4614,7 @@ mod tests {
                 "toolName": decision.tool_name.clone(),
                 "queueActionType": decision.queue_action_type.clone(),
                 "executorActionType": decision.executor_action_type.clone(),
+                "requestedTarget": decision.requested_target.clone(),
                 "target": decision.target.clone(),
                 "governedInput": governed_input.clone(),
                 "modelArgumentsIgnored": decision.model_arguments_ignored,
@@ -3849,7 +4633,7 @@ mod tests {
                 &governed_input,
                 "fake governed read observation",
                 None,
-                false,
+                decision.fixture_backed_read,
                 true,
             );
             MainChatKernelReadToolExecution {

@@ -680,7 +680,11 @@ pub(crate) fn main_chat_live_provider_report_blockers(
     if claims_live_completion && !report.model_invoked {
         push_live_provider_blocker(&mut blockers, "live_provider_model_not_invoked");
     }
-    if (claims_live_completion || report.model_invoked)
+    if (claims_live_completion
+        || report.model_invoked
+        || (report.live_provider_invocation_allowed
+            && report.main_chat_invoked
+            && report.provider_model.is_some()))
         && !live_provider_model_identity_trace_present(report)
     {
         push_live_provider_blocker(&mut blockers, "live_provider_model_identity_missing");
