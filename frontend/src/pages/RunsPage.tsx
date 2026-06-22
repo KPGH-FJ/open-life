@@ -20,6 +20,8 @@ import {
 } from "../utils/planExecuteProduct";
 import { getMultiStrategyPreviewAudit, previewWarningLabel } from "../utils/previewAudit";
 import { buildRunDisplaySummary } from "../utils/runDisplaySummary";
+import { buildRuntimeDisclosure } from "../utils/runtimeDisclosure";
+import RuntimeDisclosureStrip from "../components/RuntimeDisclosureStrip";
 import {
   Activity,
   Clock,
@@ -52,8 +54,8 @@ function statusIcon(status: string) {
 
 function kindLabel(kind: string): string {
   const labels: Record<string, string> = {
-    conversation: "Chat",
-    builder: "Life Model Building",
+    conversation: "对话任务",
+    builder: "Life Model 构建",
     calibration: "Calibration",
     evolution: "Evolution",
     tool_execution: "Tool",
@@ -67,8 +69,8 @@ function kindLabel(kind: string): string {
 }
 
 function runKindLabel(run: AgentRun): string {
-  if (getPlanExecuteProductTrace(run)) return "Plan-Execute Weekly Plan";
-  return getMultiStrategyPreviewAudit(run) ? "Multi-Strategy Preview" : kindLabel(run.kind);
+  if (getPlanExecuteProductTrace(run)) return "计划执行";
+  return getMultiStrategyPreviewAudit(run) ? "策略预览" : kindLabel(run.kind);
 }
 
 function runSubtitle(run: AgentRun): string {
@@ -81,6 +83,30 @@ function runSubtitle(run: AgentRun): string {
     return [audit.strategyKind, audit.payloadKind, audit.reasonCode].filter(Boolean).join(" · ");
   }
   return run.userInput ? safePreviewText(run.userInput, 96) : "No user input";
+}
+
+function taskStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    running: "运行中",
+    waiting_permission: "等待确认",
+    blocked: "已阻断",
+    completed: "已完成",
+    failed: "失败",
+    cancelled: "已取消",
+  };
+  return labels[status] ?? status.replace(/_/g, " ");
+}
+
+function nextControlLabel(control: string): string {
+  const labels: Record<string, string> = {
+    cancel: "取消",
+    resume: "继续",
+    retry: "重试",
+    refresh_context: "刷新上下文",
+    open_trace: "查看记录",
+    review_permission: "处理权限",
+  };
+  return labels[control] ?? control.replace(/_/g, " ");
 }
 
 function reactTraceSearchText(run: AgentRun): string {
@@ -265,32 +291,17 @@ export default function RunsPage() {
     { value: "planning", label: "Planning" },
   ];
 
-  if (loading) {
-    return (
-      <div className="h-full flex items-center justify-center">
-        <div className="text-stone-500">加载中...</div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="h-full flex items-center justify-center">
-        <div className="text-red-500">{error}</div>
-      </div>
-    );
-  }
-
   return (
     <div className="h-full overflow-auto p-6">
       <div className="max-w-5xl mx-auto">
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
           <div>
-            <h1 className="text-2xl font-bold text-stone-900">{showTrash ? "已删除" : "Runs"}</h1>
+            <h1 className="text-2xl font-bold text-stone-900">
+              {showTrash ? "已删除记录" : "Activity"}
+            </h1>
             <div className="text-sm text-stone-500">
-              共 {filteredRuns.length} 条记录
-              {showTrash && " (当前版本不可恢复)"}
+              运行记录 · 共 {filteredRuns.length} 条{showTrash && " (当前版本不可恢复)"}
             </div>
           </div>
           <div className="flex gap-2">
@@ -331,7 +342,7 @@ export default function RunsPage() {
                 />
                 <input
                   type="text"
-                  placeholder="搜索工具、来源或状态..."
+                  placeholder="搜索任务、模型、工具、状态..."
                   value={searchQuery}
                   onChange={e => {
                     setSearchQuery(e.target.value);
@@ -403,8 +414,24 @@ export default function RunsPage() {
           )}
         </div>
 
-        {/* Runs List */}
-        {paginatedRuns.length === 0 ? (
+        {/* Activity List */}
+        {loading ? (
+          <div className="rounded-xl border border-stone-200 bg-white px-4 py-12 text-center text-stone-500">
+            正在加载 Activity...
+          </div>
+        ) : error ? (
+          <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-6 text-rose-900">
+            <div className="text-sm font-semibold">Activity 暂不可用</div>
+            <div className="mt-1 text-xs leading-5 text-rose-800">{error}</div>
+            <button
+              onClick={loadRuns}
+              className="mt-4 inline-flex items-center gap-2 rounded-lg border border-rose-200 bg-white px-3 py-1.5 text-sm font-medium text-rose-800 hover:bg-rose-50"
+            >
+              <RefreshCw size={14} />
+              重新加载
+            </button>
+          </div>
+        ) : paginatedRuns.length === 0 ? (
           <div className="text-center py-12 text-stone-400">
             <Activity size={48} className="mx-auto mb-4 opacity-30" />
             <p>{showTrash ? "暂无已删除记录" : "暂无运行记录"}</p>
@@ -465,9 +492,9 @@ export default function RunsPage() {
                             <div>
                               <div className="font-medium text-stone-900">{runKindLabel(run)}</div>
                               <div className="text-xs text-stone-500 mt-0.5">{subtitle}</div>
-	                            </div>
-	                          </div>
-	                          <div className="text-right">
+                            </div>
+                          </div>
+                          <div className="text-right">
                             <div className="text-xs text-stone-400 flex items-center gap-1">
                               <Clock size={12} />
                               {new Date(run.startedAt).toLocaleString()}
@@ -477,28 +504,23 @@ export default function RunsPage() {
                                 {safePreviewText(run.outputPreview, 96)}
                               </div>
                             )}
-	                          </div>
-	                        </div>
-                        <div className="mt-3 grid gap-2 text-xs text-stone-600 sm:grid-cols-2 lg:grid-cols-4">
-                          <span className="rounded-lg border border-stone-200 bg-stone-50 px-2.5 py-2">
-                            {displaySummary.outcome}
-                          </span>
-                          <span className="rounded-lg border border-stone-200 bg-stone-50 px-2.5 py-2">
-                            {displaySummary.route}
-                          </span>
-                          <span className="rounded-lg border border-stone-200 bg-stone-50 px-2.5 py-2">
-                            {displaySummary.tools}
-                          </span>
-                          <span className="rounded-lg border border-stone-200 bg-stone-50 px-2.5 py-2">
-                            {displaySummary.proposals}
-                          </span>
+                          </div>
+                        </div>
+                        <div className="mt-3">
+                          <RuntimeDisclosureStrip
+                            view={buildRuntimeDisclosure(run, { taskSummary })}
+                            runId={run.id}
+                            compact
+                          />
                         </div>
                         {taskSummary && (
                           <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs text-stone-600">
                             <span className="font-semibold text-stone-800">
-                              Task {taskSummary.status.replace(/_/g, " ")}
+                              任务{taskStatusLabel(taskSummary.status)}
                             </span>
-                            <span>{taskSummary.nextRecommendedControl}</span>
+                            <span>
+                              下一步：{nextControlLabel(taskSummary.nextRecommendedControl)}
+                            </span>
                             {stale && (
                               <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 font-medium text-amber-800">
                                 可能已卡住
@@ -514,7 +536,7 @@ export default function RunsPage() {
                                 disabled={taskActionBusy !== null}
                                 className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700 disabled:opacity-50"
                               >
-                                Resume
+                                继续
                               </button>
                               <button
                                 type="button"
@@ -525,7 +547,7 @@ export default function RunsPage() {
                                 disabled={taskActionBusy !== null}
                                 className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700 disabled:opacity-50"
                               >
-                                Retry
+                                重试
                               </button>
                               <button
                                 type="button"
@@ -536,7 +558,7 @@ export default function RunsPage() {
                                 disabled={taskActionBusy !== null}
                                 className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700 disabled:opacity-50"
                               >
-                                Cancel
+                                取消
                               </button>
                             </div>
                           </div>
@@ -546,24 +568,24 @@ export default function RunsPage() {
                             旧 run 或缺少 task session，当前无法直接控制。
                           </div>
                         )}
-	                        {previewAudit && (
+                        {previewAudit && (
                           <div className="mt-2 flex flex-wrap gap-2 text-xs">
                             <span className="rounded bg-stone-100 px-2 py-1 text-stone-700">
-                              Preview
+                              策略预览
                             </span>
                             {previewAudit.strategyKind && (
                               <span className="rounded bg-blue-50 px-2 py-1 text-blue-700">
-                                Strategy: {previewAudit.strategyKind}
+                                策略：{previewAudit.strategyKind}
                               </span>
                             )}
                             {previewAudit.payloadKind && (
                               <span className="rounded bg-teal-50 px-2 py-1 text-teal-700">
-                                Payload: {previewAudit.payloadKind}
+                                载荷：{previewAudit.payloadKind}
                               </span>
                             )}
                             {previewAudit.governanceDecisionKind && (
                               <span className="rounded bg-amber-50 px-2 py-1 text-amber-700">
-                                Governance: {previewAudit.governanceDecisionKind}
+                                治理：{previewAudit.governanceDecisionKind}
                               </span>
                             )}
                             {warningCount > 0 && (
@@ -576,21 +598,21 @@ export default function RunsPage() {
                         {productTrace && (
                           <div className="mt-2 flex flex-wrap gap-2 text-xs">
                             <span className="rounded bg-stone-100 px-2 py-1 text-stone-700">
-                              Plan-Execute
+                              计划执行
                             </span>
                             {productTrace.status && (
                               <span className="rounded bg-teal-50 px-2 py-1 text-teal-700">
-                                Status: {productTrace.status}
+                                状态：{productTrace.status}
                               </span>
                             )}
                             {productTrace.stepCount !== undefined && (
                               <span className="rounded bg-blue-50 px-2 py-1 text-blue-700">
-                                Steps: {productTrace.stepCount}
+                                步骤：{productTrace.stepCount}
                               </span>
                             )}
                             {productTrace.generatedProposalCount !== undefined && (
                               <span className="rounded bg-amber-50 px-2 py-1 text-amber-700">
-                                Proposals: {productTrace.generatedProposalCount}
+                                待确认：{productTrace.generatedProposalCount}
                               </span>
                             )}
                             {productTrace.metadataSafe && (
@@ -613,7 +635,7 @@ export default function RunsPage() {
                         )}
                         {!productTrace && run.generatedProposals.length > 0 && (
                           <div className="mt-2 text-xs text-blue-600 bg-blue-50 rounded px-2 py-1">
-                            {run.generatedProposals.length} 个提案
+                            待确认 {run.generatedProposals.length}
                           </div>
                         )}
                       </div>

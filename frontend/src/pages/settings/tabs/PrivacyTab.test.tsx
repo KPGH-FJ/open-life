@@ -50,21 +50,22 @@ describe("PrivacyTab", () => {
 
   it("renders security governance section", () => {
     render(<PrivacyTab {...baseProps} />);
-    expect(screen.getByText(/安全治理与长期记忆/)).toBeInTheDocument();
+    expect(screen.getByText(/隐私与长期记忆/)).toBeInTheDocument();
   });
 
-  it("renders network access policy section", () => {
+  it("renders local audit and PII policy sections", () => {
     render(<PrivacyTab {...baseProps} />);
-    expect(screen.getByText(/网络访问策略/)).toBeInTheDocument();
+    expect(screen.getAllByText(/本地审计/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/PII 与隐私策略/)).toBeInTheDocument();
   });
 
-  it("renders agent execution permissions section", () => {
+  it("does not render tool permissions in the privacy tab", () => {
     render(<PrivacyTab {...baseProps} />);
-    expect(screen.getByText(/Agent 执行权限/)).toBeInTheDocument();
+    expect(screen.queryByText(/工具权限与确认/)).not.toBeInTheDocument();
   });
 
-  it("renders tool registry section", () => {
+  it("does not render tool registry in the privacy tab", () => {
     render(<PrivacyTab {...baseProps} />);
-    expect(screen.getByText(/Tool Registry/)).toBeInTheDocument();
+    expect(screen.queryByText(/工具能力清单（高级）/)).not.toBeInTheDocument();
   });
 });

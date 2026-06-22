@@ -160,7 +160,7 @@ describe("TodayPage", () => {
     renderPage();
 
     expect(await screen.findByText("待确认 1")).toBeInTheDocument();
-    expect(screen.getAllByRole("link", { name: "查看邮箱" })[0]).toHaveAttribute(
+    expect(screen.getAllByRole("link", { name: "查看 Review" })[0]).toHaveAttribute(
       "href",
       "/mailbox"
     );

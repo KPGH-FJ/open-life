@@ -242,7 +242,7 @@ describe("DashboardPage", () => {
       </BrowserRouter>
     );
 
-    expect(await screen.findByText(/Safe Mode：建议先修复数据环境再深度试用/)).toBeInTheDocument();
+    expect(await screen.findByText(/Safe Mode：建议先修复数据环境再深入使用/)).toBeInTheDocument();
     expect(screen.getByText("去恢复控制台")).toBeInTheDocument();
   });
 
@@ -253,7 +253,7 @@ describe("DashboardPage", () => {
       </BrowserRouter>
     );
 
-    expect(await screen.findByText("推荐试用路线")).toBeInTheDocument();
+    expect(await screen.findByText("推荐启动路线")).toBeInTheDocument();
     expect(await screen.findByText("开始一次个性化对话")).toBeInTheDocument();
   });
 
@@ -482,14 +482,14 @@ describe("DashboardPage", () => {
       </BrowserRouter>
     );
 
-    expect(await screen.findByText("推荐试用路线")).toBeInTheDocument();
-    expect(screen.queryByText(/Safe Mode：建议先修复数据环境再深度试用/)).not.toBeInTheDocument();
+    expect(await screen.findByText("推荐启动路线")).toBeInTheDocument();
+    expect(screen.queryByText(/Safe Mode：建议先修复数据环境再深入使用/)).not.toBeInTheDocument();
 
     degraded = true;
     fireEvent(window, new Event("focus"));
 
     await waitFor(() => {
-      expect(screen.getByText(/Safe Mode：建议先修复数据环境再深度试用/)).toBeInTheDocument();
+      expect(screen.getByText(/Safe Mode：建议先修复数据环境再深入使用/)).toBeInTheDocument();
     });
   });
 });

@@ -827,7 +827,7 @@ export default function BuilderPage() {
                     duration: "5-10 分钟",
                     icon: <RefreshCw size={18} />,
                     tone: "from-stone-900 to-stone-700 text-amber-50",
-                    detail: "少量高密度问题，先生成一个能用的人生模型。适合首次试用。",
+                    detail: "少量高密度问题，先生成一个能用的人生模型。适合首次使用。",
                     bullets: ["建立四维轮廓", "低风险字段默认确认", "结束后进入 Review"],
                     action: () => start("quick", crypto.randomUUID()),
                   },

@@ -206,8 +206,8 @@ describe("App onboarding", () => {
       </MemoryRouter>
     );
 
-    expect(await screen.findByText(/Beta 试用准备中/)).toBeInTheDocument();
-    expect(screen.getByText("查看试用完成度")).toBeInTheDocument();
+    expect(await screen.findByText(/Beta 使用准备中/)).toBeInTheDocument();
+    expect(screen.getByText("查看准备状态")).toBeInTheDocument();
   });
 
   it("does not show onboarding over no-backend product route errors", async () => {
@@ -241,8 +241,8 @@ describe("App onboarding", () => {
     expect(PRIMARY_PRODUCT_ROUTES).toEqual([
       { label: "陪伴", path: "/companion", legacyAlias: "/chat" },
       { label: "今日", path: "/today", legacyAlias: "/" },
+      { label: "Review", path: "/mailbox", legacyAlias: "/review" },
       { label: "Life Model", path: "/life-model", legacyAlias: "/builder" },
-      { label: "邮箱", path: "/mailbox", legacyAlias: "/review" },
     ]);
     expect(RETAINED_LEGACY_ROUTES).toEqual([
       "/chat",
@@ -283,15 +283,15 @@ describe("App onboarding", () => {
     }
 
     expect(screen.getByRole("link", { name: "陪伴" })).toHaveAttribute("aria-current", "page");
-    expect(screen.queryByRole("link", { name: "Runs" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Activity" })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "能力与设置" }));
+    fireEvent.click(screen.getByRole("button", { name: "更多" }));
 
     for (const [label, path] of [
-      ["设置总览", "/settings"],
+      ["Settings", "/settings"],
+      ["Activity", "/runs"],
       ["MCP 工具", "/mcp"],
       ["A2A 连接", "/a2a"],
-      ["Runs", "/runs"],
       ["版本", "/versions"],
       ["Metrics", "/metrics"],
       ["Calibration", "/calibration"],
@@ -314,7 +314,7 @@ describe("App onboarding", () => {
     );
 
     await screen.findByRole("link", { name: "陪伴" });
-    const menuButton = screen.getByRole("button", { name: "能力与设置" });
+    const menuButton = screen.getByRole("button", { name: "更多" });
     menuButton.focus();
     expect(menuButton).toHaveFocus();
 
@@ -341,7 +341,7 @@ describe("App onboarding", () => {
     );
 
     await screen.findByRole("link", { name: "陪伴" });
-    fireEvent.click(screen.getByRole("button", { name: "能力与设置" }));
+    fireEvent.click(screen.getByRole("button", { name: "更多" }));
     expect(screen.getByRole("link", { name: "MCP 工具" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("link", { name: "今日" }));
@@ -418,7 +418,7 @@ describe("App onboarding", () => {
     ["/companion", "陪伴", "companion-page"],
     ["/today", "今日", "today-page"],
     ["/life-model", "Life Model", "life-model-page"],
-    ["/mailbox", "邮箱", "mailbox-page"],
+    ["/mailbox", "Review", "mailbox-page"],
   ])("renders the %s product entry for %s", async (path, _label, expectedText) => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "has_completed_onboarding") return Promise.resolve(true);
@@ -535,10 +535,10 @@ describe("App onboarding", () => {
       </MemoryRouter>
     );
 
-    expect(await screen.findByText("能力与设置")).toBeInTheDocument();
+    expect(await screen.findByText("Settings")).toBeInTheDocument();
   });
 
-  it("keeps Runs reachable as a secondary route", async () => {
+  it("keeps Activity reachable as a secondary route", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "has_completed_onboarding") return Promise.resolve(true);
       return mockInvoke(cmd, args);
@@ -550,6 +550,6 @@ describe("App onboarding", () => {
       </MemoryRouter>
     );
 
-    expect(await screen.findByRole("heading", { name: "Runs" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Activity" })).toBeInTheDocument();
   });
 });

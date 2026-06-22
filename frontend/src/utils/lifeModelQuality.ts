@@ -43,7 +43,7 @@ function collectGoalIssues(goals: DailyGoal[]): LifeModelQualityIssue[] {
       dimension: "goals" as const,
       label: "目标里混入了状态或系统回执",
       detail: `「${item.goal.name}」${item.guard.reason ?? "不像一个可执行目标"}`,
-      actionLabel: "去邮箱修正",
+      actionLabel: "去 Review 修正",
       route: "/mailbox",
     }));
 }
@@ -97,7 +97,7 @@ export function getLifeModelQualityIssues(model: LifeModel | null): LifeModelQua
       dimension: "capabilities",
       label: "能力字段像碎片句",
       detail: `例如「${capabilityFragments[0]}」缺少明确能力名或上下文。`,
-      actionLabel: "去邮箱确认",
+      actionLabel: "去 Review 确认",
       route: "/mailbox",
     });
   }
@@ -109,7 +109,7 @@ export function getLifeModelQualityIssues(model: LifeModel | null): LifeModelQua
       dimension: "state",
       label: "状态标签重复",
       detail: `「${duplicateFocusAreas[0]}」出现了重复，建议合并后再作为画像依据。`,
-      actionLabel: "去邮箱整理",
+      actionLabel: "去 Review 整理",
       route: "/mailbox",
     });
   }

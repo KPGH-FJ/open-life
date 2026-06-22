@@ -791,7 +791,7 @@ export default function DashboardPage() {
           label: "运行环境",
           tone: "amber",
           title: "模型后端还没完全就绪",
-          detail: diagnostics.readiness_issues[0] ?? "先修复配置，再做对话和深度试用会更顺畅。",
+          detail: diagnostics.readiness_issues[0] ?? "先修复配置，再做对话和深入使用会更顺畅。",
         }
       : null,
     getModelEmptyState(model, diagnostics)
@@ -856,7 +856,7 @@ export default function DashboardPage() {
             : "今天可以做一次深度对话";
   const compassDetail =
     diagnostics && !diagnostics.chat_ready
-      ? "模型后端还没有就绪，先去设置页完成试用检查，会比继续点功能更省时间。"
+      ? "模型后端还没有就绪，先去设置页完成启动检查，会比继续点功能更省时间。"
       : getModelEmptyState(model, diagnostics)
         ? "人生模型还是空的。先完成一次快速构建，OpenLife 的建议才会真正围绕你展开。"
         : stateAlerts.length > 0
@@ -1007,7 +1007,7 @@ export default function DashboardPage() {
           <div className="rounded-2xl border border-stone-200 bg-white/90 p-5">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <div className="text-sm font-semibold text-gray-900">推荐试用路线</div>
+                <div className="text-sm font-semibold text-gray-900">推荐启动路线</div>
                 <div className="mt-1 text-xs text-gray-500">
                   如果你今天只想顺着一条最省力的路径往前走，按这个顺序即可。
                 </div>
@@ -1066,14 +1066,13 @@ export default function DashboardPage() {
             <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
               <div>
                 <div className="text-sm font-semibold text-amber-900">
-                  Safe Mode：建议先修复数据环境再深度试用
+                  Safe Mode：建议先修复数据环境再深入使用
                 </div>
                 <div className="mt-1 text-xs leading-5 text-amber-800">
                   {getSafeModeReason(diagnostics)}
                 </div>
                 <div className="mt-1 text-xs text-amber-700">
-                  可以继续查看仪表盘，但若要进行
-                  Builder、长期记忆或高频聊天试用，建议先去恢复控制台。
+                  可以继续查看仪表盘，但若要进行 Builder、长期记忆或高频聊天，建议先去恢复控制台。
                 </div>
               </div>
               <Link
@@ -1132,7 +1131,7 @@ export default function DashboardPage() {
               ))}
             </ul>
             <div className="mt-2 text-xs text-amber-700">
-              你仍可继续使用已加载的功能；如聊天或模型不可用，请到设置页查看“试用就绪检查”。
+              你仍可继续使用已加载的功能；如聊天或模型不可用，请到设置页查看“启动检查”。
             </div>
           </div>
         )}
@@ -1221,7 +1220,7 @@ export default function DashboardPage() {
           >
             <div className="flex items-center justify-between">
               <div className="font-semibold text-gray-800 text-sm">最近运行</div>
-              <div className="text-xs text-gray-500">Runs</div>
+              <div className="text-xs text-gray-500">Activity</div>
             </div>
             <div className="mt-2 flex items-baseline gap-1">
               <span className="text-2xl font-bold text-emerald-600">{recentRuns.length}</span>

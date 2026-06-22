@@ -52,23 +52,31 @@ describe("SettingsPage", () => {
       </MemoryRouter>
     );
 
+  const TAB_ALIASES: Record<string, string> = {
+    数据与恢复: "Privacy & Data",
+    隐私与权限: "Privacy & Data",
+    模型路由: "Models",
+    高级扩展: "Advanced",
+    实验: "Advanced",
+  };
+
   const clickTab = async (tabName: string) => {
-    const tab = await screen.findByRole("button", { name: tabName });
+    const tab = await screen.findByRole("button", { name: TAB_ALIASES[tabName] ?? tabName });
     fireEvent.click(tab);
   };
 
-  it("renders trial console title and checklist", async () => {
+  it("renders settings title and checklist", async () => {
     renderSettings();
 
     await waitFor(() => {
-      expect(screen.getByText("能力与设置")).toBeInTheDocument();
+      expect(screen.getByText("Settings")).toBeInTheDocument();
     });
 
-    expect(screen.getByText(/试用路径 Checklist/)).toBeInTheDocument();
-    expect(screen.getByText(/试用闭环定义/)).toBeInTheDocument();
+    expect(screen.getByText(/启动检查清单/)).toBeInTheDocument();
+    expect(screen.getByText(/使用闭环定义/)).toBeInTheDocument();
     expect(screen.getByText(/核心链路已就绪/)).toBeInTheDocument();
 
-    await clickTab("数据");
+    await clickTab("数据与恢复");
     expect(screen.getByText(/导出全部数据/)).toBeInTheDocument();
   });
 
@@ -77,7 +85,7 @@ describe("SettingsPage", () => {
     renderSettings();
 
     await waitFor(() => {
-      expect(screen.getByText("能力与设置")).toBeInTheDocument();
+      expect(screen.getByText("Settings")).toBeInTheDocument();
     });
 
     expect(screen.queryByRole("button", { name: "实验" })).not.toBeInTheDocument();
@@ -123,7 +131,7 @@ describe("SettingsPage", () => {
           chat_session_count: 0,
           onboarding_completed: true,
           beta_ready: false,
-          beta_readiness_issues: ["核心聊天链路未就绪，请先修复试用就绪检查中的问题。"],
+          beta_readiness_issues: ["核心聊天链路未就绪，请先修复启动检查中的问题。"],
           builder_completion: {
             identity: 0,
             goals: 0,
@@ -151,7 +159,7 @@ describe("SettingsPage", () => {
 
     renderSettings();
 
-    expect(await screen.findByText(/试用路径 Checklist/)).toBeInTheDocument();
+    expect(await screen.findByText(/启动检查清单/)).toBeInTheDocument();
     expect(screen.getByText(/聊天不可用/)).toBeInTheDocument();
   });
 
@@ -161,7 +169,7 @@ describe("SettingsPage", () => {
 
     renderSettings();
 
-    await clickTab("数据");
+    await clickTab("数据与恢复");
     const exportButton = await screen.findByText("导出全部数据");
     fireEvent.click(exportButton);
 
@@ -184,8 +192,8 @@ describe("SettingsPage", () => {
 
     renderSettings();
 
-    await clickTab("数据");
-    fireEvent.click(await screen.findByRole("button", { name: "导入全部数据" }));
+    await clickTab("数据与恢复");
+    fireEvent.click(await screen.findByRole("button", { name: "导入覆盖备份" }));
 
     expect(await screen.findByRole("dialog", { name: "确认覆盖导入全部数据" })).toBeInTheDocument();
     expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "import_all_data")).toBe(false);
@@ -208,7 +216,7 @@ describe("SettingsPage", () => {
   it("shows feedback evolution report as read-only candidates, not applied rules", async () => {
     renderSettings();
 
-    await clickTab("数据");
+    await clickTab("数据与恢复");
     fireEvent.click(await screen.findByRole("button", { name: "生成进化报告" }));
 
     expect(await screen.findByText(/只读进化报告：候选 3 条，已应用 0 条/)).toBeInTheDocument();
@@ -219,7 +227,7 @@ describe("SettingsPage", () => {
   it("tests the current DeepSeek form config instead of only saved config", async () => {
     renderSettings();
 
-    await clickTab("模型");
+    await clickTab("模型路由");
     const keyInput = await screen.findByPlaceholderText("sk-...");
     fireEvent.change(keyInput, { target: { value: "sk-deepseek-form" } });
     fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
@@ -261,7 +269,7 @@ describe("SettingsPage", () => {
 
     renderSettings();
 
-    await clickTab("模型");
+    await clickTab("模型路由");
     expect(await screen.findByText(/当前选择的是 DeepSeek 推理模型/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "一键改为 deepseek-chat" }));
     expect(screen.getByDisplayValue("deepseek-chat")).toBeInTheDocument();
@@ -270,7 +278,7 @@ describe("SettingsPage", () => {
   it("explains DeepSeek embedding fallback in settings", async () => {
     renderSettings();
 
-    await clickTab("模型");
+    await clickTab("模型路由");
     expect(await screen.findByText(/DeepSeek 主要用于聊天/)).toBeInTheDocument();
     expect(screen.getByText(/请先保存当前设置，再去恢复控制台重建向量索引/)).toBeInTheDocument();
   });
@@ -318,7 +326,7 @@ describe("SettingsPage", () => {
           onboarding_completed: true,
           beta_ready: false,
           beta_readiness_issues: [
-            "数据存储曾在启动时降级：请先确认数据目录和数据库状态，再继续深度试用。",
+            "数据存储曾在启动时降级：请先确认数据目录和数据库状态，再继续深度使用。",
           ],
           builder_completion: {
             identity: 80,
@@ -357,7 +365,7 @@ describe("SettingsPage", () => {
   it("shows beta flow steps and follow-up actions", async () => {
     renderSettings();
 
-    expect(await screen.findByText("试用闭环定义")).toBeInTheDocument();
+    expect(await screen.findByText("使用闭环定义")).toBeInTheDocument();
     expect(screen.getByText("1. 完成设置与诊断")).toBeInTheDocument();
     expect(screen.getByText("2. 完成人生模型构建")).toBeInTheDocument();
     expect(screen.getByText("3. 跑通第一次对话")).toBeInTheDocument();
@@ -4159,8 +4167,8 @@ describe("SettingsPage", () => {
 
     renderSettings();
 
-    await clickTab("数据");
-    const importButton = await screen.findByRole("button", { name: "导入全部数据" });
+    await clickTab("数据与恢复");
+    const importButton = await screen.findByRole("button", { name: "导入覆盖备份" });
     expect(importButton).toBeDisabled();
   });
 });

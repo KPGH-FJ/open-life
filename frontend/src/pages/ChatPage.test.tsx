@@ -1035,7 +1035,7 @@ describe("ChatPage", () => {
     fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
 
     expect(await screen.findByText(/DeepSeek 鉴权失败/)).toBeInTheDocument();
-    expect(screen.getByText(/去设置页查看“试用就绪检查”/)).toBeInTheDocument();
+    expect(screen.getByText(/去设置页查看“启动检查”/)).toBeInTheDocument();
   });
 
   it("does not hide DeepSeek runtime errors behind non-blocking readiness warnings", async () => {
@@ -3123,21 +3123,19 @@ describe("ChatPage", () => {
     );
 
     expect(await screen.findByText("对话就绪，工具受治理控制")).toBeInTheDocument();
-    expect(screen.getAllByText(/最近实际路线 · 本地 · Ollama · llama3:latest/).length).toBeGreaterThan(
-      0
-    );
+    expect(
+      screen.getAllByText(/最近实际路线 · 本地 · Ollama · llama3:latest/).length
+    ).toBeGreaterThan(0);
     expect(screen.getByText("Life Model 已加载")).toBeInTheDocument();
     expect(screen.getByText("工具候选 2")).toBeInTheDocument();
-    expect(screen.getByText("待确认 1")).toBeInTheDocument();
+    expect(screen.getAllByText("待确认 1").length).toBeGreaterThan(0);
     expect(await screen.findByText("先做最小的一步。")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "查看依据" }));
-
-    expect(screen.getByText("使用 Life Model：是")).toBeInTheDocument();
-    expect(screen.getByText("参考记忆：3 条")).toBeInTheDocument();
-    expect(screen.getByText("本次实际路线：本地 / Ollama / llama3:latest")).toBeInTheDocument();
-    expect(screen.getByText("产生待确认：是")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "查看完整记录" })).toHaveAttribute(
+    expect(screen.getByText("留在本机")).toBeInTheDocument();
+    expect(screen.getByText("本地路线 · Ollama")).toBeInTheDocument();
+    expect(screen.getByText("参考记忆 3 条")).toBeInTheDocument();
+    expect(screen.getByText("运行技术详情")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "查看 Activity 详情" })).toHaveAttribute(
       "href",
       "/runs/run-chat-1"
     );
@@ -3771,7 +3769,9 @@ describe("ChatPage", () => {
     });
     fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
 
-    expect(await screen.findByText(/没有添加今日目标：这看起来像系统或治理阻断说明/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/没有添加今日目标：这看起来像系统或治理阻断说明/)
+    ).toBeInTheDocument();
     expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "add_daily_goal")).toBe(false);
   });
 
@@ -3799,7 +3799,9 @@ describe("ChatPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "设为今日目标" }));
 
-    expect(await screen.findByText(/没有保存为今日目标：这看起来像系统反馈文本/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/没有保存为今日目标：这看起来像系统反馈文本/)
+    ).toBeInTheDocument();
     expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "add_daily_goal")).toBe(false);
   });
 

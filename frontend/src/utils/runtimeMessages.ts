@@ -6,7 +6,7 @@ export type RuntimeIssueKind = "configuration" | "data" | "model" | "review";
 function issueTail(kind: RuntimeIssueKind): string {
   switch (kind) {
     case "configuration":
-      return "建议先去设置页完成“试用就绪检查”，再继续当前操作。";
+      return "建议先去设置页完成“启动检查”，再继续当前操作。";
     case "data":
       return "建议先去 Settings 的恢复控制台处理数据风险，再继续当前操作。";
     case "model":

@@ -62,7 +62,7 @@ export default function OnboardingWizard({ onComplete }: Props) {
             持续对话，你会获得越来越贴合个人语境的建议。
           </p>
           <div className="rounded-lg bg-indigo-50 border border-indigo-100 p-4 text-sm text-indigo-800">
-            <p className="font-medium mb-1">Beta 试用提示</p>
+            <p className="font-medium mb-1">Beta 使用提示</p>
             <p>当前为 Beta 版本，建议先完成基础配置和人生模型初始化，以获得最佳体验。</p>
           </div>
         </div>
@@ -119,12 +119,12 @@ export default function OnboardingWizard({ onComplete }: Props) {
       ),
     },
     {
-      title: "准备开始试用",
+      title: "准备开始使用",
       icon: <ShieldCheck size={32} className="text-indigo-600" />,
       content: (
         <div className="space-y-4">
           <p className="text-gray-700 leading-relaxed">
-            你的隐私对我们至关重要，同时现在也可以顺着一条最省力的路径开始试用：
+            你的隐私对我们至关重要，同时现在也可以顺着一条最省力的路径开始使用：
           </p>
           <ul className="list-disc list-inside text-sm text-gray-700 space-y-2">
             <li>所有对话记录、人生模型快照和记忆向量均保存在本地 SQLite 数据库中。</li>
@@ -136,7 +136,7 @@ export default function OnboardingWizard({ onComplete }: Props) {
             <li>你可以在「设置 → 隐私策略」中自定义检测规则。</li>
           </ul>
           <div className="rounded-xl border border-indigo-100 bg-indigo-50/60 p-4">
-            <div className="text-sm font-semibold text-indigo-900">推荐试用路线</div>
+            <div className="text-sm font-semibold text-indigo-900">推荐启动路线</div>
             <div className="mt-1 text-xs text-indigo-700">
               先完成设置和构建，再进入对话与仪表盘，会更容易体会 OpenLife 的价值。
             </div>
@@ -146,7 +146,7 @@ export default function OnboardingWizard({ onComplete }: Props) {
                 className="rounded-lg border border-indigo-200 bg-white px-3 py-3 text-left text-sm text-indigo-700 hover:bg-indigo-50"
               >
                 <div className="font-medium">1. 去构建人生模型</div>
-                <div className="mt-1 text-xs text-indigo-500">推荐首次试用先完成快速构建。</div>
+                <div className="mt-1 text-xs text-indigo-500">推荐首次使用前先完成快速构建。</div>
               </button>
               <button
                 onClick={goChat}
@@ -162,7 +162,7 @@ export default function OnboardingWizard({ onComplete }: Props) {
                 className="rounded-lg border border-indigo-200 bg-white px-3 py-3 text-left text-sm text-indigo-700 hover:bg-indigo-50"
               >
                 <div className="font-medium">3. 去仪表盘看下一步</div>
-                <div className="mt-1 text-xs text-indigo-500">查看完成度、状态和推荐试用路线。</div>
+                <div className="mt-1 text-xs text-indigo-500">查看完成度、状态和推荐启动路线。</div>
               </button>
             </div>
           </div>

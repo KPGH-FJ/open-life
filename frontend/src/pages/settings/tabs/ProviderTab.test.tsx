@@ -37,7 +37,7 @@ describe("ProviderTab", () => {
     resolved_local_model: "llama3",
   } as any;
 
-  it("renders model router status notice", async () => {
+  it("renders local, auto, and cloud model route choices", async () => {
     await act(async () => {
       render(
         <MemoryRouter>
@@ -51,10 +51,13 @@ describe("ProviderTab", () => {
         </MemoryRouter>
       );
     });
-    expect(screen.getAllByText(/ModelRouter/).length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: /Local only/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Auto/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Cloud/ })).toBeInTheDocument();
+    expect(screen.getByText(/LocalOnly 时不会调用云端/)).toBeInTheDocument();
   });
 
-  it("renders layer 1 router status section", async () => {
+  it("summarizes router state without exposing internals", async () => {
     await act(async () => {
       render(
         <MemoryRouter>
@@ -75,7 +78,9 @@ describe("ProviderTab", () => {
         </MemoryRouter>
       );
     });
-    expect(screen.getByText(/Layer 1 路由状态/)).toBeInTheDocument();
+    expect(screen.getByText(/自动路由/)).toBeInTheDocument();
+    expect(screen.getByText(/regex/)).toBeInTheDocument();
+    expect(screen.queryByText(/路由诊断（高级）/)).not.toBeInTheDocument();
   });
 
   it("shows llama 3.1 as a local preset when Ollama resolved that installed tag", async () => {
@@ -162,7 +167,7 @@ describe("ProviderTab", () => {
     });
   });
 
-  it("hides AgentLoop and ContextAssembler debug toggles by default", async () => {
+  it("keeps tools and debug controls out of the model tab", async () => {
     await act(async () => {
       render(
         <MemoryRouter>
@@ -179,10 +184,11 @@ describe("ProviderTab", () => {
 
     expect(screen.queryByText(/启用 AgentLoop/)).not.toBeInTheDocument();
     expect(screen.queryByText(/ContextAssembler V2/)).not.toBeInTheDocument();
-    expect(screen.getByText(/Safe Paths/)).toBeInTheDocument();
+    expect(screen.queryByText(/文件访问（Safe Paths）/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/工具权限与确认/)).not.toBeInTheDocument();
   });
 
-  it("shows internal debug toggles only when explicitly enabled", async () => {
+  it("does not show internal debug toggles even when Advanced is enabled elsewhere", async () => {
     await act(async () => {
       render(
         <MemoryRouter>
@@ -198,7 +204,7 @@ describe("ProviderTab", () => {
       );
     });
 
-    expect(screen.getByText(/启用 AgentLoop/)).toBeInTheDocument();
-    expect(screen.getByText(/ContextAssembler V2/)).toBeInTheDocument();
+    expect(screen.queryByText(/启用 AgentLoop/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/ContextAssembler V2/)).not.toBeInTheDocument();
   });
 });

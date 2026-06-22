@@ -140,16 +140,16 @@ export function getPlanExecuteProductTrace(run?: AgentRun | null): PlanExecutePr
   };
 }
 
-function plural(count: number | undefined, noun: string): string | null {
+function countLabel(count: number | undefined, label: string): string | null {
   if (count === undefined) return null;
-  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+  return `${count} ${label}`;
 }
 
 export function planExecuteProductSubtitle(trace: PlanExecuteProductTrace): string {
   return [
     trace.scenarioId,
-    plural(trace.stepCount, "step"),
-    plural(trace.generatedProposalCount, "proposal"),
+    countLabel(trace.stepCount, "步"),
+    trace.generatedProposalCount === undefined ? null : `待确认 ${trace.generatedProposalCount}`,
   ]
     .filter(Boolean)
     .join(" · ");

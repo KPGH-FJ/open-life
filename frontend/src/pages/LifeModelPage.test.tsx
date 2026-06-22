@@ -198,14 +198,16 @@ describe("LifeModelPage", () => {
 
     fireEvent.click(screen.getByRole("tab", { name: "依据" }));
     expect(screen.getByRole("link", { name: "查看记忆" })).toHaveAttribute("href", "/memory");
-    expect(screen.getByRole("link", { name: "打开邮箱" })).toHaveAttribute("href", "/mailbox");
+    expect(screen.getByRole("link", { name: "打开 Review" })).toHaveAttribute("href", "/mailbox");
   });
 
   it("uses product language instead of engineering readiness/proposal labels in the build tab", async () => {
     renderPage();
 
     expect((await screen.findAllByText("构建状态")).length).toBeGreaterThan(0);
-    expect(screen.getByText("构建产生候选，邮箱确认后才会更新 Life Model。")).toBeInTheDocument();
+    expect(
+      screen.getByText("构建产生候选，Review 确认后才会更新 Life Model。")
+    ).toBeInTheDocument();
     expect(screen.queryByText("Builder readiness")).not.toBeInTheDocument();
     expect(screen.queryByText(/Builder review/)).not.toBeInTheDocument();
     expect(screen.queryByText(/proposal/i)).not.toBeInTheDocument();
@@ -242,7 +244,9 @@ describe("LifeModelPage", () => {
     fireEvent.click(await screen.findByRole("tab", { name: "概览" }));
 
     expect(await screen.findByText("发现可能影响画像可信度的字段")).toBeInTheDocument();
-    expect(screen.getByText("本次视图处理，不会改写 Life Model；正式更新仍需邮箱确认。")).toBeInTheDocument();
+    expect(
+      screen.getByText("本次视图处理，不会改写 Life Model；正式更新仍需 Review 确认。")
+    ).toBeInTheDocument();
     expect(screen.getByText("身份摘要过短")).toBeInTheDocument();
     expect(screen.getByText("目标里混入了状态或系统回执")).toBeInTheDocument();
     expect(screen.getByText("能力字段像碎片句")).toBeInTheDocument();

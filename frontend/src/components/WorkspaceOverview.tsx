@@ -274,7 +274,7 @@ export default function WorkspaceOverview() {
         </div>
         {diagnostics && (
           <div className="text-xs opacity-75">
-            {diagnostics.beta_ready ? "Beta 就绪" : "试用准备中"}
+            {diagnostics.beta_ready ? "Beta 就绪" : "使用准备中"}
           </div>
         )}
       </div>

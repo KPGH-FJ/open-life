@@ -8,7 +8,6 @@ import {
   Inbox,
   MailOpen,
   RefreshCw,
-  ShieldCheck,
   X,
 } from "lucide-react";
 import {
@@ -23,14 +22,21 @@ import {
   type AppConfig,
   type ProposalStatus,
 } from "../tauri";
-import { buildProposalDisplayModel, proposalSubject } from "../utils/proposalDisplay";
+import ReviewDecisionCard from "../components/ReviewDecisionCard";
+import { proposalSubject } from "../utils/proposalDisplay";
+import {
+  buildReviewDecisionView,
+  reviewGroupLabel,
+  type ReviewDecisionGroup,
+} from "../utils/reviewDecision";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
 
 type FolderId = "pending" | "accepted" | "archived" | "needs_edit";
 type QuickAction = "accept" | "reject" | "postpone";
+type ReviewGroupFilter = "all" | ReviewDecisionGroup;
 
 const FOLDERS: Array<{ id: FolderId; label: string; icon: typeof Inbox }> = [
-  { id: "pending", label: "收件箱", icon: Inbox },
+  { id: "pending", label: "待确认", icon: Inbox },
   { id: "accepted", label: "已同意", icon: Check },
   { id: "archived", label: "已处理", icon: Archive },
   { id: "needs_edit", label: "草稿修改", icon: Edit2 },
@@ -130,13 +136,13 @@ function actionBlockedReason(
   safePaths: string[]
 ): string | null {
   if (safeModeActive) return "Safe Mode 下无法同意或编辑。";
-  if (proposal.status !== "pending") return "只有收件箱里的待回复内容可以同意。";
+  if (proposal.status !== "pending") return "只有待确认的 Review 项可以同意。";
   if (isUnsupportedType(proposal.proposalType)) {
     return "这类确认当前尚未接入应用器，不能同意。";
   }
   const path = externalWritePath(proposal);
   if (proposal.proposalType === "external_write_action" && !isPathInSafePaths(path, safePaths)) {
-    return "目标路径不在 Safe Paths 内，不能同意。";
+    return "目标路径不在文件访问范围内，不能同意。";
   }
   return null;
 }
@@ -175,6 +181,7 @@ function statusLabel(status: ProposalStatus): string {
 export default function MailboxPage() {
   const [proposals, setProposals] = useState<AgentProposal[]>([]);
   const [folder, setFolder] = useState<FolderId>("pending");
+  const [groupFilter, setGroupFilter] = useState<ReviewGroupFilter>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [actingId, setActingId] = useState<string | null>(null);
@@ -201,7 +208,7 @@ export default function MailboxPage() {
       setDiagnostics(diag);
       setSafePaths((config as AppConfig | null)?.system?.safe_paths ?? []);
     } catch (err) {
-      setError(`加载邮箱失败：${String(err)}`);
+      setError(`加载 Review 失败：${String(err)}`);
     } finally {
       setLoading(false);
     }
@@ -221,9 +228,35 @@ export default function MailboxPage() {
     );
   }, [proposals]);
 
-  const visibleProposals = useMemo(
+  const folderProposals = useMemo(
     () => proposals.filter(proposal => folderMatches(proposal, folder)),
     [folder, proposals]
+  );
+
+  const groupCounts = useMemo(() => {
+    const counts: Record<ReviewGroupFilter, number> = {
+      all: folderProposals.length,
+      memory: 0,
+      life_model: 0,
+      tool_permission: 0,
+      external_action: 0,
+      model_policy: 0,
+      other: 0,
+    };
+    folderProposals.forEach(proposal => {
+      const group = buildReviewDecisionView(proposal).group;
+      counts[group] += 1;
+    });
+    return counts;
+  }, [folderProposals]);
+
+  const visibleProposals = useMemo(
+    () =>
+      folderProposals.filter(proposal => {
+        if (groupFilter === "all") return true;
+        return buildReviewDecisionView(proposal).group === groupFilter;
+      }),
+    [folderProposals, groupFilter]
   );
 
   useEffect(() => {
@@ -238,7 +271,7 @@ export default function MailboxPage() {
 
   const selectedProposal =
     visibleProposals.find(proposal => proposal.id === selectedId) ?? visibleProposals[0] ?? null;
-  const selectedDisplay = selectedProposal ? buildProposalDisplayModel(selectedProposal) : null;
+  const selectedDecision = selectedProposal ? buildReviewDecisionView(selectedProposal) : null;
 
   const runAction = async (proposal: AgentProposal, action: QuickAction) => {
     setActingId(proposal.id);
@@ -273,7 +306,7 @@ export default function MailboxPage() {
       } else if (message.includes("无法转换")) {
         setError(`应用失败：值类型与字段 "${proposal.affectedPath}" 不匹配。`);
       } else if (message.includes("尚未接入应用器") || message.includes("not supported")) {
-        setError("处理失败：这类确认在当前版本中尚未支持，会继续留在收件箱。");
+        setError("处理失败：这类确认在当前版本中尚未支持，会继续留在待确认列表。");
       } else {
         setError(`处理失败：${message}`);
       }
@@ -330,7 +363,7 @@ export default function MailboxPage() {
   return (
     <section
       data-testid="mailbox-page"
-      aria-label="邮箱"
+      aria-label="Review Inbox"
       className="h-full min-h-0 overflow-hidden overflow-x-hidden bg-[#f5f6f2] px-3 py-3 sm:px-4"
     >
       <div className="mx-auto flex h-full min-h-0 w-full max-w-[1500px] flex-col gap-3">
@@ -339,7 +372,12 @@ export default function MailboxPage() {
             <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-stone-950 text-white shadow-sm">
               <MailOpen size={18} aria-hidden="true" />
             </div>
-            <h2 className="text-xl font-bold tracking-normal text-stone-950">邮箱</h2>
+            <div>
+              <h2 className="text-xl font-bold tracking-normal text-stone-950">Review Inbox</h2>
+              <div className="text-xs text-stone-500">
+                记忆、权限与 Life Model 建议都需要你确认后才会生效。
+              </div>
+            </div>
             <span className="rounded-md border border-stone-200 bg-white px-2.5 py-1 text-xs text-stone-600">
               待回复 {folderCounts.pending}
             </span>
@@ -410,15 +448,45 @@ export default function MailboxPage() {
                   );
                 })}
               </div>
+              <div className="mt-2 flex flex-wrap gap-1">
+                {(
+                  [
+                    "all",
+                    "memory",
+                    "life_model",
+                    "tool_permission",
+                    "external_action",
+                    "model_policy",
+                  ] as ReviewGroupFilter[]
+                ).map(group => {
+                  const active = groupFilter === group;
+                  const label = group === "all" ? "全部" : reviewGroupLabel(group);
+                  return (
+                    <button
+                      key={group}
+                      type="button"
+                      onClick={() => setGroupFilter(group)}
+                      className={[
+                        "inline-flex h-7 items-center rounded-md border px-2 text-[11px] font-semibold",
+                        active
+                          ? "border-stone-900 bg-stone-900 text-white"
+                          : "border-stone-200 bg-white text-stone-600 hover:bg-stone-50",
+                      ].join(" ")}
+                    >
+                      {label} {groupCounts[group]}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
             <div className="min-h-0 flex-1 overflow-auto">
               {loading ? (
-                <div className="p-4 text-sm text-stone-500">正在加载邮件...</div>
+                <div className="p-4 text-sm text-stone-500">正在加载确认项...</div>
               ) : visibleProposals.length === 0 ? (
                 <div className="flex h-full min-h-[260px] flex-col items-center justify-center p-8 text-center">
                   <Inbox size={36} className="text-stone-300" aria-hidden="true" />
-                  <div className="mt-3 text-sm font-semibold text-stone-800">没有邮件</div>
+                  <div className="mt-3 text-sm font-semibold text-stone-800">没有确认项</div>
                   <div className="mt-1 text-xs text-stone-500">当前文件夹没有待确认内容。</div>
                 </div>
               ) : (
@@ -498,7 +566,7 @@ export default function MailboxPage() {
                     <span>{formatDate(selectedProposal.createdAt)}</span>
                   </div>
                   <h3 className="mt-2 text-lg font-bold tracking-normal text-stone-950">
-                    {selectedDisplay?.title}
+                    {selectedDecision?.title}
                   </h3>
                   <div className="mt-3 flex flex-wrap items-center gap-2">
                     <span
@@ -519,95 +587,21 @@ export default function MailboxPage() {
                       把握：{Math.round(selectedProposal.confidence * 100)}%
                     </span>
                     <span className="rounded-full bg-stone-100 px-2.5 py-1 text-[11px] text-stone-600">
-                      {selectedDisplay?.typeLabel}
+                      {selectedDecision?.groupLabel}
                     </span>
                   </div>
                 </header>
 
                 <div className="space-y-4 px-5 py-4">
-                  <section>
-                    <div className="text-xs font-semibold uppercase tracking-normal text-stone-400">
-                      OpenLife 想做什么
-                    </div>
-                    <p className="mt-2 text-sm leading-6 text-stone-800">
-                      {selectedDisplay?.intent}
-                    </p>
-                  </section>
-
-                  <section>
-                    <div className="text-xs font-semibold uppercase tracking-normal text-stone-400">
-                      为什么问你
-                    </div>
-                    <p className="mt-2 text-sm leading-6 text-stone-800">
-                      {selectedProposal.reason}
-                    </p>
-                  </section>
+                  {selectedDecision && <ReviewDecisionCard view={selectedDecision} />}
 
                   <section className="rounded-lg border border-stone-200 bg-stone-50 p-4">
-                    <div className="text-xs font-semibold uppercase tracking-normal text-stone-500">
-                      会影响哪里
-                    </div>
-                    <div className="mt-3 grid gap-3 text-sm text-stone-700 md:grid-cols-2">
-                      <div className="rounded-md bg-white px-3 py-2">
-                        <div className="text-xs font-medium text-stone-500">领域</div>
-                        <div className="mt-1 font-medium text-stone-900">
-                          {selectedDisplay?.domain}
-                        </div>
-                      </div>
-                      <div className="rounded-md bg-white px-3 py-2">
-                        <div className="text-xs font-medium text-stone-500">影响说明</div>
-                        <div className="mt-1 text-stone-800">{selectedDisplay?.plainImpact}</div>
-                      </div>
-                    </div>
-
-                    <div className="mt-3 overflow-hidden rounded-md border border-stone-200 bg-white">
-                      <div className="grid grid-cols-[minmax(90px,0.8fr)_minmax(0,1fr)_minmax(0,1fr)] border-b border-stone-100 bg-stone-50 px-3 py-2 text-xs font-semibold text-stone-500">
-                        <div>字段</div>
-                        <div>当前值</div>
-                        <div>将变为</div>
-                      </div>
-                      {selectedDisplay?.diffRows.map(row => (
-                        <div
-                          key={row.field}
-                          className="grid grid-cols-[minmax(90px,0.8fr)_minmax(0,1fr)_minmax(0,1fr)] gap-3 border-b border-stone-100 px-3 py-2 text-sm last:border-b-0"
-                        >
-                          <div className="font-medium text-stone-700">{row.field}</div>
-                          <div className="break-words text-stone-700">{row.before}</div>
-                          <div className="break-words text-stone-900">{row.after}</div>
-                          {row.redacted && (
-                            <div className="col-span-3 text-xs text-stone-500">
-                              该字段可能包含敏感或原始内容，主面板只显示摘要。
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-
-                    <details className="mt-3 rounded-md border border-stone-200 bg-white px-3 py-2">
-                      <summary className="cursor-pointer text-xs font-semibold text-stone-600">
-                        技术详情
-                      </summary>
-                      <div className="mt-3 grid gap-2 text-xs text-stone-600 md:grid-cols-2">
-                        {selectedDisplay?.technicalRows.map(row => (
-                          <div key={`${row.label}-${row.value}`} className="min-w-0">
-                            <span className="text-stone-400">{row.label}：</span>
-                            {row.href ? (
-                              <a className="break-all text-stone-900 underline" href={row.href}>
-                                {row.value}
-                              </a>
-                            ) : (
-                              <span className="break-all">{row.value}</span>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    </details>
-
                     {selectedProposal.proposalType === "external_write_action" && (
-                      <div className="mt-3 rounded-md border border-stone-200 bg-white p-3 text-xs text-stone-600">
+                      <div className="rounded-md border border-stone-200 bg-white p-3 text-xs text-stone-600">
                         <div className="font-semibold text-stone-700">外部操作边界</div>
                         <div className="mt-2 leading-5">
-                          这会请求外部写入；未同意前不会执行。路径、内容摘要和 Run 信息只放在技术详情中。
+                          这会请求外部写入；未同意前不会执行。路径、内容摘要和 Run
+                          信息只放在技术详情中。
                         </div>
                       </div>
                     )}
@@ -619,39 +613,8 @@ export default function MailboxPage() {
                       <div className="mt-3 flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
                         <AlertTriangle size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
                         <span>
-                          这封信仍必须由你确认；暂不支持的类型和 Safe Paths 之外的写入不会被同意。
+                          这个确认项仍必须由你确认；暂不支持的类型和文件访问范围之外的写入不会被同意。
                         </span>
-                      </div>
-                    )}
-                  </section>
-
-                  <section className="rounded-lg border border-sky-100 bg-sky-50 p-4">
-                    <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-normal text-sky-800">
-                      <ShieldCheck size={14} aria-hidden="true" />
-                      依据摘要
-                    </div>
-                    <p className="mt-2 text-sm leading-6 text-sky-950">
-                      {selectedDisplay?.evidenceSummary}
-                    </p>
-                    {(selectedProposal.evidenceSummaries?.length ?? 0) > 0 && (
-                      <div className="mt-3 space-y-2">
-                        {selectedProposal.evidenceSummaries?.map(summary => (
-                          <div key={summary.id} className="rounded-md bg-white/80 p-3 text-sm">
-                            <div className="font-medium text-stone-800">{summary.summary}</div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    {(selectedProposal.behaviorChecks?.length ?? 0) > 0 && (
-                      <div className="mt-3 space-y-2">
-                        {selectedProposal.behaviorChecks?.map(check => (
-                          <div key={check.id} className="rounded-md bg-white/80 p-3 text-sm">
-                            <div className="font-medium text-stone-800">{check.label}</div>
-                            {check.summary && (
-                              <div className="mt-1 text-xs text-stone-500">{check.summary}</div>
-                            )}
-                          </div>
-                        ))}
                       </div>
                     )}
                   </section>
@@ -753,8 +716,10 @@ export default function MailboxPage() {
             ) : (
               <div className="flex h-full min-h-[420px] flex-col items-center justify-center p-8 text-center">
                 <Inbox size={42} className="text-stone-300" aria-hidden="true" />
-                <div className="mt-4 text-base font-semibold text-stone-800">选择一封邮件</div>
-                <div className="mt-1 text-sm text-stone-500">左侧列表中没有可阅读的邮件。</div>
+                <div className="mt-4 text-base font-semibold text-stone-800">选择一个确认项</div>
+                <div className="mt-1 text-sm text-stone-500">
+                  左侧列表中没有可阅读的 Review 项。
+                </div>
               </div>
             )}
           </main>

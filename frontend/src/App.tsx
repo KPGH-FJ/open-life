@@ -189,7 +189,7 @@ function App() {
               <Route path={productRoutePath("陪伴")} element={<CompanionPage />} />
               <Route path={productRoutePath("今日")} element={<TodayPage />} />
               <Route path={productRoutePath("Life Model")} element={<LifeModelPage />} />
-              <Route path={productRoutePath("邮箱")} element={<MailboxPage />} />
+              <Route path={productRoutePath("Review")} element={<MailboxPage />} />
               <Route path="/" element={<DashboardPage />} />
               <Route path="/workspace" element={<DashboardPage />} />
               {/* Agent: Chat + Runs */}

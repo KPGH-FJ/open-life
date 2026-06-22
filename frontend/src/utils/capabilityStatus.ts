@@ -99,8 +99,7 @@ function toolAccess(diagnostics: SystemDiagnostics | null): {
   if (diagnostics.mcp_tool_count > 0) {
     return {
       label: `工具候选 ${diagnostics.mcp_tool_count}`,
-      detail:
-        "已发现 MCP 工具；每次调用仍要经过候选 allowlist、隐私策略和必要的确认流程。",
+      detail: "已发现 MCP 工具；每次调用仍要经过候选 allowlist、隐私策略和必要的确认流程。",
       tone: "ready",
     };
   }
@@ -214,7 +213,7 @@ export function explainGovernanceBlocker(
   if (reason === "web_network_policy_blocked") {
     return [
       "这次没有读取网页：当前网络或网页读取策略阻止了请求。",
-      "请在“能力与设置”里检查网络策略和安全 read-only 工具。",
+      "请在 Settings 的“Tools & Permissions”里检查网络策略和安全只读工具。",
     ].join("\n");
   }
   if (reason === "mcp_missing_read_target") {
@@ -227,13 +226,13 @@ export function explainGovernanceBlocker(
   if (reason === "tool_permission_required") {
     return [
       "这次操作需要你先确认权限。",
-      "请到邮箱或任务控制里处理待确认项；确认前不会执行外部操作。",
+      "请到 Review 或任务控制里处理待确认项；确认前不会执行外部操作。",
     ].join("\n");
   }
 
   return [
     "治理策略阻止了这次操作，未执行外部工具或写入。",
-    "可以查看任务详情，或在“能力与设置”中检查模型、工具和隐私策略。",
+    "可以查看任务详情，或在 Settings 中检查模型、工具和隐私策略。",
   ].join("\n");
 }
 

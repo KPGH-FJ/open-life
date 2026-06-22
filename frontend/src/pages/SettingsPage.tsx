@@ -28,7 +28,7 @@ import {
   type PluginRecord,
   type ToolManifest,
 } from "../tauri";
-import { LayoutDashboard, Cpu, Shield, Database, Puzzle, FlaskConical } from "lucide-react";
+import { LayoutDashboard, Cpu, Shield, Wrench, Inbox, SlidersHorizontal } from "lucide-react";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, readTextFile } from "@tauri-apps/plugin-fs";
 import LoadingSpinner from "../components/LoadingSpinner";
@@ -40,6 +40,9 @@ import OverviewTab from "./settings/tabs/OverviewTab";
 import ProviderTab from "./settings/tabs/ProviderTab";
 import PrivacyTab from "./settings/tabs/PrivacyTab";
 import DataTab from "./settings/tabs/DataTab";
+import ToolsPermissionsTab from "./settings/tabs/ToolsPermissionsTab";
+import ReviewMemoryTab from "./settings/tabs/ReviewMemoryTab";
+import AdvancedTab from "./settings/tabs/AdvancedTab";
 import MultiStrategyPreviewSection from "./settings/MultiStrategyPreviewSection";
 import ConfirmDangerDialog from "../components/ConfirmDangerDialog";
 
@@ -130,7 +133,7 @@ export default function SettingsPage() {
 
   useEffect(() => {
     if (!showInternalDebug && activeTab === "experimental") {
-      setActiveTab("overview");
+      setActiveTab("advanced");
     }
   }, [activeTab, showInternalDebug]);
 
@@ -384,12 +387,12 @@ export default function SettingsPage() {
         onConfirm={() => void confirmImport()}
         onCancel={() => setPendingImport(null)}
       />
-      <div className="max-w-2xl mx-auto bg-white rounded-xl shadow p-6 space-y-6">
+      <div className="max-w-5xl mx-auto bg-white rounded-xl shadow p-6 space-y-6">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <h2 className="text-lg font-semibold text-gray-800">能力与设置</h2>
+            <h2 className="text-lg font-semibold text-gray-800">Settings</h2>
             <p className="mt-1 text-xs leading-5 text-gray-500">
-              这里汇总模型、工具、Life Model、数据和恢复状态；Chat 的能力说明应与这里保持一致。
+              管理模型路线、隐私边界、工具权限和本地数据。诊断和连接细节默认放在高级区。
             </p>
           </div>
           <button
@@ -414,14 +417,12 @@ export default function SettingsPage() {
         {/* Tab Navigation */}
         <div className="flex gap-1 border-b border-gray-200 pb-1 overflow-x-auto">
           {[
-            { id: "overview", label: "概览", icon: LayoutDashboard },
-            { id: "provider", label: "模型", icon: Cpu },
-            { id: "privacy", label: "隐私安全", icon: Shield },
-            { id: "data", label: "数据", icon: Database },
-            { id: "plugins", label: "插件", icon: Puzzle },
-            ...(showInternalDebug
-              ? [{ id: "experimental", label: "实验", icon: FlaskConical }]
-              : []),
+            { id: "overview", label: "General", icon: LayoutDashboard },
+            { id: "provider", label: "Models", icon: Cpu },
+            { id: "privacy_data", label: "Privacy & Data", icon: Shield },
+            { id: "tools", label: "Tools & Permissions", icon: Wrench },
+            { id: "review_memory", label: "Review & Memory", icon: Inbox },
+            { id: "advanced", label: "Advanced", icon: SlidersHorizontal },
           ].map(tab => (
             <button
               key={tab.id}
@@ -469,62 +470,84 @@ export default function SettingsPage() {
           />
         )}
 
-        {/* Privacy & Security Tab */}
-        {activeTab === "privacy" && (
-          <PrivacyTab
+        {/* Privacy & Data Tab */}
+        {activeTab === "privacy_data" && (
+          <div className="space-y-6">
+            <PrivacyTab
+              diagnostics={diagnostics}
+              hotCache={hotCache}
+              privacyPolicy={privacyPolicy}
+              setPrivacyPolicyState={setPrivacyPolicyState}
+              securityLoading={securityLoading}
+              securityMessage={securityMessage}
+              handleExportAudit={handleExportAudit}
+              handleCleanupAudit={handleCleanupAudit}
+              handleRotateAuditKey={handleRotateAuditKey}
+              toolPermissions={toolPermissions}
+              revokeToolPermission={revokeToolPermission}
+              refreshAllDiagnostics={refreshAllDiagnostics}
+              config={config}
+              setConfig={setConfig}
+              refreshSecurityState={refreshSecurityState}
+              toolManifests={toolManifests}
+              safeMode={safeMode}
+              handleSavePrivacyPolicy={handleSavePrivacyPolicy}
+            />
+            <DataTab
+              handleExport={handleExport}
+              handleImport={handleImport}
+              exportLoading={exportLoading}
+              importLoading={importLoading}
+              safeMode={safeMode}
+              diagnostics={diagnostics}
+              evolutionLoading={evolutionLoading}
+              evolutionResult={evolutionResult}
+              setEvolutionLoading={setEvolutionLoading}
+              setEvolutionResult={setEvolutionResult}
+              tierLoading={tierLoading}
+              tierResult={tierResult}
+              setTierLoading={setTierLoading}
+              setTierResult={setTierResult}
+              handleExportDiagnostics={handleExportDiagnostics}
+            />
+          </div>
+        )}
+
+        {activeTab === "tools" && (
+          <ToolsPermissionsTab
             diagnostics={diagnostics}
-            hotCache={hotCache}
-            privacyPolicy={privacyPolicy}
-            setPrivacyPolicyState={setPrivacyPolicyState}
-            securityLoading={securityLoading}
-            securityMessage={securityMessage}
-            handleExportAudit={handleExportAudit}
-            handleCleanupAudit={handleCleanupAudit}
-            handleRotateAuditKey={handleRotateAuditKey}
+            config={config}
+            setConfig={setConfig}
             toolPermissions={toolPermissions}
             revokeToolPermission={revokeToolPermission}
             refreshAllDiagnostics={refreshAllDiagnostics}
-            config={config}
-            setConfig={setConfig}
             refreshSecurityState={refreshSecurityState}
             toolManifests={toolManifests}
-            safeMode={safeMode}
-            handleSavePrivacyPolicy={handleSavePrivacyPolicy}
           />
         )}
 
-        {/* Data Tab */}
-        {activeTab === "data" && (
-          <DataTab
-            handleExport={handleExport}
-            handleImport={handleImport}
-            exportLoading={exportLoading}
-            importLoading={importLoading}
-            safeMode={safeMode}
+        {activeTab === "review_memory" && (
+          <ReviewMemoryTab config={config} setConfig={setConfig} diagnostics={diagnostics} />
+        )}
+
+        {activeTab === "advanced" && (
+          <AdvancedTab
+            config={config}
+            setConfig={setConfig}
             diagnostics={diagnostics}
-            evolutionLoading={evolutionLoading}
-            evolutionResult={evolutionResult}
-            setEvolutionLoading={setEvolutionLoading}
-            setEvolutionResult={setEvolutionResult}
-            tierLoading={tierLoading}
-            tierResult={tierResult}
-            setTierLoading={setTierLoading}
-            setTierResult={setTierResult}
-            handleExportDiagnostics={handleExportDiagnostics}
+            routerStatus={routerStatus}
+            modelRouterStatus={modelRouterStatus}
+            showInternalDebug={showInternalDebug}
+            pluginSection={
+              <PluginSection
+                plugins={plugins}
+                onPluginsChange={setPlugins}
+                onRefreshDiagnostics={refreshAllDiagnostics}
+              />
+            }
+            experimentalSection={showInternalDebug ? <MultiStrategyPreviewSection /> : undefined}
           />
         )}
-
-        {/* Plugins Tab */}
-        {activeTab === "plugins" && (
-          <PluginSection
-            plugins={plugins}
-            onPluginsChange={setPlugins}
-            onRefreshDiagnostics={refreshAllDiagnostics}
-          />
-        )}
-
-        {/* Experimental Tab */}
-        {showInternalDebug && activeTab === "experimental" && <MultiStrategyPreviewSection />}
 
         {/* Save button - always visible */}
         <div className="flex justify-end pt-4 border-t">

@@ -137,7 +137,7 @@ export default function TodayPage() {
               to="/mailbox"
               className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-stone-300 bg-white px-3 text-sm font-semibold text-stone-800 hover:bg-stone-50"
             >
-              查看邮箱
+              查看 Review
               <Inbox size={15} aria-hidden="true" />
             </Link>
           </div>
@@ -208,7 +208,8 @@ export default function TodayPage() {
               已从今日建议中忽略 {goalQuality.suspicious.length} 条异常目标
             </div>
             <div className="mt-1 text-sm text-amber-800">
-              这些内容看起来像状态记录或系统反馈，仍保留在原始数据中，但不会生成“先做 10 分钟”的行动建议。
+              这些内容看起来像状态记录或系统反馈，仍保留在原始数据中，但不会生成“先做 10
+              分钟”的行动建议。
             </div>
             <div className="mt-3 grid gap-2">
               {goalQuality.suspicious.slice(0, 3).map(({ goal, guard, originalIndex }) => (
@@ -253,7 +254,7 @@ export default function TodayPage() {
               to="/mailbox"
               className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-stone-300 bg-white px-3 text-sm font-semibold text-stone-800 hover:bg-stone-50"
             >
-              查看邮箱
+              查看 Review
               <Inbox size={15} aria-hidden="true" />
             </Link>
           </div>
