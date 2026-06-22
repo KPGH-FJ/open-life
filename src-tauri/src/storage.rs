@@ -2,10 +2,53 @@ use crate::errors::AppError;
 use openlife_core::mcp_audit::AuditKeyConfig;
 use openlife_core::privacy::PrivacyPolicy;
 
-pub(crate) fn app_data_dir() -> std::path::PathBuf {
+const RELEASE_APP_DIR_NAME: &str = "ai.openlife.app";
+const DEV_APP_DIR_NAME: &str = "ai.openlife.app.dev";
+const QA_APP_DIR_NAME: &str = "ai.openlife.app.qa";
+
+pub fn openlife_profile() -> String {
+    normalize_openlife_profile(std::env::var("OPENLIFE_PROFILE").ok().as_deref()).to_string()
+}
+
+pub fn normalize_openlife_profile(value: Option<&str>) -> &'static str {
+    match value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("release")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "dev" => "dev",
+        "qa" => "qa",
+        _ => "release",
+    }
+}
+
+pub fn app_dir_name_for_profile(profile: &str) -> &'static str {
+    match normalize_openlife_profile(Some(profile)) {
+        "dev" => DEV_APP_DIR_NAME,
+        "qa" => QA_APP_DIR_NAME,
+        _ => RELEASE_APP_DIR_NAME,
+    }
+}
+
+pub fn app_data_dir() -> std::path::PathBuf {
+    if let Ok(path) = std::env::var("OPENLIFE_DATA_DIR") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return std::path::PathBuf::from(trimmed);
+        }
+    }
+
+    let profile = openlife_profile();
+    let app_dir_name = app_dir_name_for_profile(&profile);
     dirs::data_dir()
-        .map(|d| d.join("ai.openlife.app"))
-        .unwrap_or_else(|| std::env::current_dir().unwrap().join(".openlife"))
+        .map(|d| d.join(app_dir_name))
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap()
+                .join(format!(".{}", app_dir_name))
+        })
 }
 
 pub(crate) fn privacy_policy_path() -> std::path::PathBuf {

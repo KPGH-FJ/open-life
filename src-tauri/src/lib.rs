@@ -64,6 +64,7 @@ pub(crate) mod main_chat_streaming;
 #[allow(dead_code)]
 pub(crate) mod main_chat_task_continuity_eval;
 pub(crate) mod main_chat_task_controls;
+pub mod runtime_build_info;
 pub mod scheduler_runner;
 pub mod state;
 pub mod storage;
@@ -202,8 +203,8 @@ use commands::chat::{
     rename_chat_session, save_chat_message,
 };
 use commands::diagnostics::{
-    check_ollama_status, get_router_status, get_scheduler_config, get_system_diagnostics,
-    set_scheduler_config,
+    check_ollama_status, get_router_status, get_runtime_build_info, get_scheduler_config,
+    get_system_diagnostics, set_scheduler_config,
 };
 use commands::execution::{
     check_tool_permission, disable_plugin, enable_plugin, get_skill_run_status,
@@ -369,6 +370,7 @@ pub struct SystemDiagnostics {
     pub pending_proposal_count: usize,
     pub high_risk_pending_proposal_count: usize,
     pub proposal_store_status: String,
+    pub runtime_build_info: runtime_build_info::RuntimeBuildInfo,
 }
 
 pub(crate) async fn persist_life_model(
@@ -802,6 +804,7 @@ pub fn run() {
             list_mcp_audit_logs,
             clear_mcp_audit_logs,
             get_system_diagnostics,
+            get_runtime_build_info,
             check_ollama_status,
             get_router_status,
             get_model_router_status,

@@ -312,7 +312,7 @@ mod tests {
                 ),
             )),
             a2a_sidecar: Arc::new(tokio::sync::Mutex::new(
-                crate::a2a_sidecar::A2ASidecar::new(8765),
+                crate::a2a_sidecar::A2ASidecar::new(crate::a2a_server::configured_a2a_port()),
             )),
             last_snapshot_date: Arc::new(tokio::sync::Mutex::new(None)),
             mcp_audit_store: Arc::new(tokio::sync::Mutex::new(

@@ -31,7 +31,10 @@ pub async fn a2a_local_agent_card(state: State<'_, Arc<AppState>>) -> Result<Age
         let manager = state.life_model_manager.lock().await;
         manager.load().map_err(AppError::from)?
     };
-    Ok(A2AServerHandler::default_agent_card(8765, &model))
+    Ok(A2AServerHandler::default_agent_card(
+        crate::a2a_server::configured_a2a_port(),
+        &model,
+    ))
 }
 
 #[tauri::command]

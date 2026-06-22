@@ -385,11 +385,34 @@ impl McpAuditStore {
 
 impl Default for McpAuditStore {
     fn default() -> Self {
-        let data_dir = dirs::data_dir()
-            .map(|d| d.join("ai.openlife.app"))
-            .unwrap_or_else(|| std::env::current_dir().unwrap().join(".openlife"));
+        let data_dir = openlife_default_data_dir();
         Self::new(data_dir.join("mcp_audit.db"))
     }
+}
+
+fn openlife_default_data_dir() -> std::path::PathBuf {
+    if let Ok(path) = std::env::var("OPENLIFE_DATA_DIR") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return std::path::PathBuf::from(trimmed);
+        }
+    }
+    let profile = std::env::var("OPENLIFE_PROFILE")
+        .ok()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| "release".to_string());
+    let app_dir_name = match profile.as_str() {
+        "dev" => "ai.openlife.app.dev",
+        "qa" => "ai.openlife.app.qa",
+        _ => "ai.openlife.app",
+    };
+    dirs::data_dir()
+        .map(|d| d.join(app_dir_name))
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap()
+                .join(format!(".{}", app_dir_name))
+        })
 }
 
 #[cfg(test)]

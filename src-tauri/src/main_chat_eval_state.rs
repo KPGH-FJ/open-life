@@ -47,7 +47,9 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
         builder_session_store: Arc::new(Mutex::new(
             openlife_core::builder::BuilderSessionStore::new(base.join("builder_sessions.json")),
         )),
-        a2a_sidecar: Arc::new(Mutex::new(crate::a2a_sidecar::A2ASidecar::new(8765))),
+        a2a_sidecar: Arc::new(Mutex::new(crate::a2a_sidecar::A2ASidecar::new(
+            crate::a2a_server::configured_a2a_port(),
+        ))),
         last_snapshot_date: Arc::new(Mutex::new(None)),
         mcp_audit_store: Arc::new(Mutex::new(openlife_core::mcp_audit::McpAuditStore::new(
             base.join("mcp_audit.db"),

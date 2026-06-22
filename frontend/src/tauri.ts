@@ -2264,6 +2264,22 @@ export interface OllamaModelInfo {
   size_mb: number;
 }
 
+export interface RuntimeBuildInfo {
+  profile: "dev" | "qa" | "release" | string;
+  gitSha: string;
+  buildTime: string;
+  currentExe: string;
+  binaryKind: "debug_binary" | "debug_bundle" | "release_bundle" | "unknown" | string;
+  frontendMode: "dev_server" | "bundled_dist" | "unknown" | string;
+  devUrl: string;
+  frontendDist: string;
+  dataDir: string;
+  a2aPort: number;
+  a2aStatus: string;
+  bundleIdentifier: string;
+  productName: string;
+}
+
 export interface SystemDiagnostics {
   router: RouterStatus;
   mcp_server_count: number;
@@ -2307,10 +2323,15 @@ export interface SystemDiagnostics {
   pending_proposal_count: number;
   high_risk_pending_proposal_count: number;
   proposal_store_status: string;
+  runtime_build_info?: RuntimeBuildInfo;
 }
 
 export async function getSystemDiagnostics(): Promise<SystemDiagnostics> {
   return safeInvoke<SystemDiagnostics>("get_system_diagnostics");
+}
+
+export async function getRuntimeBuildInfo(): Promise<RuntimeBuildInfo> {
+  return safeInvoke<RuntimeBuildInfo>("get_runtime_build_info");
 }
 
 export async function getSchedulerConfig(): Promise<{ localModel: string; preferLocal: boolean }> {

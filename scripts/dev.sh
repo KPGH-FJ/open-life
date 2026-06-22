@@ -37,7 +37,6 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FRONTEND_DIR="$REPO_ROOT/frontend"
-VITE_PORT="${PORT:-5173}"
 
 # 加载 .env
 ENV_FILE="$REPO_ROOT/.env"
@@ -51,6 +50,39 @@ if [ -f "$ENV_FILE" ]; then
     done < "$ENV_FILE"
     set +a
 fi
+
+OPENLIFE_PROFILE="${OPENLIFE_PROFILE:-dev}"
+export OPENLIFE_PROFILE
+if [ -z "${A2A_PORT:-}" ]; then
+    if [ "$OPENLIFE_PROFILE" = "dev" ]; then
+        A2A_PORT="8766"
+    else
+        A2A_PORT="8765"
+    fi
+    export A2A_PORT
+fi
+VITE_PORT="${PORT:-5173}"
+OPENLIFE_DEV_URL="http://127.0.0.1:$VITE_PORT"
+OPENLIFE_FRONTEND_DIST="$FRONTEND_DIR/dist"
+export OPENLIFE_DEV_URL OPENLIFE_FRONTEND_DIST OPENLIFE_FRONTEND_MODE="dev_server"
+
+json_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+FRONTEND_DIR_JSON="$(json_escape "$FRONTEND_DIR")"
+DEV_URL_JSON="$(json_escape "$OPENLIFE_DEV_URL")"
+FRONTEND_DIST_JSON="$(json_escape "$OPENLIFE_FRONTEND_DIST")"
+TAURI_CONFIG_OVERRIDE=$(cat <<JSON
+{
+  "build": {
+    "beforeDevCommand": "cd \"$FRONTEND_DIR_JSON\" && corepack pnpm dev --host 127.0.0.1 --port $VITE_PORT",
+    "devUrl": "$DEV_URL_JSON",
+    "frontendDist": "$FRONTEND_DIST_JSON"
+  }
+}
+JSON
+)
 
 # 检查端口
 if lsof -Pi ":$VITE_PORT" -sTCP:LISTEN -t >/dev/null 2>&1 || \
@@ -75,6 +107,9 @@ echo "\____/ .___/\___/\__,_/     |__/|__/\____/_/  /_/ /_/ \____/"
 echo "    /_/"
 echo -e "${NC}"
 echo -e "${BLUE}OpenLife - 开发模式启动${NC}"
+echo -e "${BLUE}[INFO]${NC} Profile: $OPENLIFE_PROFILE"
+echo -e "${BLUE}[INFO]${NC} Vite: $OPENLIFE_DEV_URL"
+echo -e "${BLUE}[INFO]${NC} A2A: 127.0.0.1:$A2A_PORT"
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║  🚀 正在启动 OpenLife 开发服务器...                           ║${NC}"
@@ -94,13 +129,21 @@ if ! command -v corepack &>/dev/null || ! corepack pnpm --version &>/dev/null; t
     exit 1
 fi
 
+if ! command -v cargo &>/dev/null; then
+    echo -e "${YELLOW}[ERROR]${NC} cargo 不可用"
+    exit 1
+fi
+
+echo -e "${BLUE}[INFO]${NC} 构建 A2A sidecar..."
+cargo build --bin openlife-a2a-server
+
 # 自动检测 Tauri CLI 启动方式
 if [ -f "$FRONTEND_DIR/node_modules/.bin/tauri" ]; then
     echo -e "${BLUE}[INFO]${NC} 使用本地 Tauri CLI 启动..."
-    "$FRONTEND_DIR/node_modules/.bin/tauri" dev
+    "$FRONTEND_DIR/node_modules/.bin/tauri" dev --config "$TAURI_CONFIG_OVERRIDE"
 elif command -v tauri &>/dev/null; then
     echo -e "${BLUE}[INFO]${NC} 使用全局 Tauri CLI 启动..."
-    tauri dev
+    tauri dev --config "$TAURI_CONFIG_OVERRIDE"
 else
     echo -e "${YELLOW}[ERROR]${NC} Tauri CLI 不可用"
     echo "       请先运行: corepack pnpm --dir \"$FRONTEND_DIR\" install"

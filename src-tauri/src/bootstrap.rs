@@ -748,7 +748,9 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
         builder_session_store: Arc::new(Mutex::new(BuilderSessionStore::new(
             data_dir.join("builder_sessions.json"),
         ))),
-        a2a_sidecar: Arc::new(Mutex::new(a2a_sidecar::A2ASidecar::new(8765))),
+        a2a_sidecar: Arc::new(Mutex::new(a2a_sidecar::A2ASidecar::new(
+            crate::a2a_server::configured_a2a_port(),
+        ))),
         last_snapshot_date: Arc::new(Mutex::new(None)),
         mcp_audit_store: Arc::new(Mutex::new(mcp_audit_store)),
         agent_run_store: Some(Arc::new(Mutex::new(agent_run_store))),

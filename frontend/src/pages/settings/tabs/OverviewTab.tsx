@@ -48,6 +48,7 @@ export default function OverviewTab({
   rebuildResult,
   setRebuildResult,
 }: OverviewTabProps) {
+  const runtime = diagnostics?.runtime_build_info;
   // ---- Data file health ----
   const df = diagnostics?.data_files;
   const dataFileItems = df
@@ -548,6 +549,33 @@ export default function OverviewTab({
           数据目录：{diagnostics?.active_data_dir ?? diagnostics?.data_dir ?? "-"}
         </p>
       </section>
+
+      {runtime && (
+        <section id="runtime-build-info" className="space-y-4">
+          <h3 className="text-sm font-medium text-gray-700">运行来源</h3>
+          <div className="grid gap-3 md:grid-cols-2">
+            {[
+              ["Profile", runtime.profile],
+              ["Frontend", runtime.frontendMode],
+              ["Binary", runtime.binaryKind],
+              ["Git", runtime.gitSha],
+              ["Build", runtime.buildTime],
+              ["Dev URL", runtime.devUrl || "-"],
+              ["Frontend dist", runtime.frontendDist],
+              ["Executable", runtime.currentExe],
+              ["Data dir", runtime.dataDir],
+              ["A2A", `${runtime.a2aStatus} · ${runtime.a2aPort}`],
+              ["Bundle", runtime.bundleIdentifier],
+              ["Product", runtime.productName],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded-lg border border-stone-200 bg-stone-50 p-3">
+                <div className="text-xs font-medium text-stone-500">{label}</div>
+                <div className="mt-1 break-all text-xs text-stone-800">{value}</div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
     </>
   );
 }

@@ -15,7 +15,7 @@
 #   ./scripts/start.sh linux - 构建 Linux 应用
 #
 # 构建产物：
-#   src-tauri/target/release/bundle/
+#   由 cargo metadata 的 target_directory 决定，通常是 repo-root/target/.../release/bundle/
 #
 # 预期时间：
 #   首次构建约 5-15 分钟（取决于机器性能）
@@ -26,7 +26,7 @@
 #      Linux: sudo apt-get install libwebkit2gtk-4.0-dev libssl-dev
 #
 #   Q: 构建产物在哪里？
-#   A: 查看 src-tauri/target/release/bundle/ 目录
+#   A: 脚本会打印 cargo metadata 解析出的实际 bundle 目录
 # =============================================================================
 
 set -euo pipefail
@@ -135,7 +135,7 @@ echo -e "${GREEN}╔════════════════════
 echo -e "${GREEN}║  📦 正在构建 $BUILD_NAME 版本...${NC}"
 echo -e "${GREEN}║                                                              ║${NC}"
 echo -e "${GREEN}║  首次构建可能需要 5-15 分钟，请耐心等待                     ║${NC}"
-echo -e "${GREEN}║  产物将输出到 src-tauri/target/release/bundle/              ║${NC}"
+echo -e "${GREEN}║  产物目录将由 cargo metadata target_directory 决定          ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
@@ -147,6 +147,14 @@ if ! command -v corepack &>/dev/null || ! corepack pnpm --version &>/dev/null; t
     log_info "请运行: corepack prepare pnpm@9.1.0 --activate"
     exit 1
 fi
+
+# 解析 Cargo workspace target 目录，避免误查 src-tauri/target
+if ! command -v python3 &>/dev/null; then
+    log_error "python3 不可用，无法解析 cargo metadata target_directory"
+    exit 1
+fi
+TARGET_DIR="$(cargo metadata --format-version=1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+log_info "Cargo target directory: $TARGET_DIR"
 
 # 检查使用哪种方式调用 Tauri
 if [ -f "$FRONTEND_DIR/node_modules/.bin/tauri" ]; then
@@ -162,7 +170,11 @@ else
 fi
 
 # 检查构建结果
-BUNDLE_DIR="$TAURI_DIR/target/release/bundle"
+if [ -d "$TARGET_DIR/$BUILD_TARGET/release/bundle" ]; then
+    BUNDLE_DIR="$TARGET_DIR/$BUILD_TARGET/release/bundle"
+else
+    BUNDLE_DIR="$TARGET_DIR/release/bundle"
+fi
 if [ -d "$BUNDLE_DIR" ]; then
     log_step "构建完成！"
     echo ""
