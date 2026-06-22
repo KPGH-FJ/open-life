@@ -1,7 +1,7 @@
 # OpenLife Plans Document Governance
 
-> Last updated: 2026-06-19
-> Status: authoritative document index for Agents; Stage 2 Internal Trial Readiness preparation is the current entry point
+> Last updated: 2026-06-22
+> Status: authoritative document index for Agents; Main Chat kernel rescue preparation is the current entry point on `rescue/main-chat-kernel-prep`
 
 This file prevents old planning documents from steering new Agent work. If two
 documents disagree, use the precedence below and treat lower-priority stale text
@@ -13,7 +13,23 @@ as reference only.
    - Project-wide Agent instructions, current constraints, and Tool Taxonomy.
 2. `plans/README.md`
    - This authority map and current entry point.
-3. `plans/main_chat_stage2_preparation_index.md` and
+3. `plans/main_chat_agent_kernel_rescue_goal_mode_index.md`,
+   `plans/main_chat_agent_kernel_rescue_preparation.md`, and
+   `plans/main_chat_agent_kernel_rescue_acceptance_matrix.md`
+   - Current rescue preparation entry point. This pass narrows Main Chat back
+     to a small shared agent kernel before adding or restoring broader
+     OpenLife product loops. It freezes final/live/readiness/productization
+     expansion, treats HS as bounded read-only context plus proposal policy for
+     the first rescue phase, and defines eight goal-mode delivery passes with
+     send/stream parity, no silent writes, and proposal/blocker behavior as the
+     near-term acceptance target. The supporting preparation scope, industry
+     practice digest, and spec-coding contract live in
+     `plans/main_chat_agent_kernel_rescue_preparation_scope.md`,
+     `plans/main_chat_agent_kernel_rescue_industry_practices.md`, and
+     `plans/main_chat_agent_kernel_rescue_spec_coding_contract.md`. Goal
+     completion reporting must use
+     `plans/main_chat_agent_kernel_rescue_goal_completion_template.md`.
+4. `plans/main_chat_stage2_preparation_index.md` and
    `plans/main_chat_agent_stage2_internal_trial_goal_spec.md`
    - Current Stage 2 planning and Goal-mode entry point. Stage 2 targets
      limited internal trial readiness, not public beta and not another
@@ -22,7 +38,7 @@ as reference only.
      evidence, AgentControlPlane product states, memory
      proposal trial flow, failure recovery coverage, and a fail-closed
      `ready_for_limited_internal_trial` readiness report.
-4. `plans/main_chat_stage1_preparation_index.md` and
+5. `plans/main_chat_stage1_preparation_index.md` and
    `plans/main_chat_agent_stage1_dogfood_goal_spec.md`
    - Completed Stage 1 Real End-to-End Dogfood implementation and acceptance
      audit trail. Linux CI run `27807633105` produced real
@@ -30,7 +46,7 @@ as reference only.
      scenarios, 36 passed journeys, 0 failed journeys, and no blockers. Manual
      dogfood / internal-trial approval and external live-provider proof remain
      opt-in and separate from default deterministic readiness.
-5. `plans/main_chat_agent_v1_stabilization_goal_spec.md`
+6. `plans/main_chat_agent_v1_stabilization_goal_spec.md`
    - Previous Goal-mode entry for the stabilization / acceptance-blocker
      remediation pass after checkpoint `d8e415f`. This Goal does not restart
      the previous broad migration Goal and does not expand the product roadmap.
@@ -40,7 +56,7 @@ as reference only.
      knowledge-format context surfaces, and `src-tauri/src/lib.rs` module
      cleanup. It must fail closed and must not claim completion without real
      evidence.
-6. `plans/main_chat_agent_migration_v1_goal_spec.md`
+7. `plans/main_chat_agent_migration_v1_goal_spec.md`
    - Main Chat Agent Execution v1 remediation spec / audit trail and capability
      target.
      Ordinary Main Chat now enters AgentIngress and a governed task session,
