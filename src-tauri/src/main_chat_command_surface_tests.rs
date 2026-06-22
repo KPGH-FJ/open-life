@@ -61,6 +61,25 @@ fn main_chat_command_surface_test_context() -> tauri::Context<tauri::test::MockR
     context
 }
 
+async fn set_command_surface_scripted_generation_response(
+    state: &std::sync::Arc<crate::AppState>,
+    model: &str,
+    response: serde_json::Value,
+) {
+    let mut scheduler = state.scheduler.lock().await;
+    *scheduler = openlife_core::scheduler::InferenceScheduler::new(
+        "unused-local-model".into(),
+        false,
+        "openai".into(),
+        "https://example.invalid/v1".into(),
+        "test-key".into(),
+        model.into(),
+        "text-embedding-test".into(),
+        false,
+    )
+    .with_scripted_generation_response(response.to_string());
+}
+
 #[tokio::test]
 async fn main_chat_command_surface_eval_gate_covers_send_stream_runtime_matrix() {
     let report = run_main_chat_command_surface_eval_gate().await;
@@ -467,6 +486,34 @@ async fn send_message_direct_answer_records_main_chat_run_and_completes_task() {
 
     assert_eq!(response["legacy_fallback_used"], false);
     assert_eq!(response["tool_calls"].as_array().map(Vec::len), Some(0));
+    let generation = response["reasoning_trace"]["generation_result"]
+        .as_object()
+        .expect("direct answer generation result");
+    assert_eq!(
+        generation
+            .get("kernelBackedDirectAnswer")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        generation
+            .get("kernelEventSink")
+            .and_then(serde_json::Value::as_str),
+        Some("buffered")
+    );
+    assert!(
+        generation
+            .get("kernelEventCount")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default()
+            > 0
+    );
+    assert_eq!(
+        generation
+            .get("directWritesExecuted")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
     assert_eq!(
         response["agent_ingress"]["selectedStrategy"],
         "direct_answer"
@@ -608,6 +655,18 @@ async fn send_message_l2_direct_answer_records_scheduler_provider_generation_tra
             .get("providerGenerationPath")
             .and_then(serde_json::Value::as_str),
         Some("main_chat_direct_answer_scheduler")
+    );
+    assert_eq!(
+        generation
+            .get("kernelBackedDirectAnswer")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        generation
+            .get("kernelEventSink")
+            .and_then(serde_json::Value::as_str),
+        Some("buffered")
     );
     assert_eq!(
         generation
@@ -776,6 +835,37 @@ async fn start_stream_message_direct_answer_records_main_chat_run_and_completes_
         Some("direct")
     );
     assert_eq!(run.tool_call_count, 0);
+    let generation = run
+        .reasoning_trace
+        .as_ref()
+        .and_then(|trace| trace.generation_result.as_ref())
+        .and_then(serde_json::Value::as_object)
+        .expect("stream direct answer generation metadata");
+    assert_eq!(
+        generation
+            .get("kernelBackedDirectAnswer")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        generation
+            .get("kernelEventSink")
+            .and_then(serde_json::Value::as_str),
+        Some("streaming")
+    );
+    assert!(
+        generation
+            .get("kernelEventCount")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default()
+            > 0
+    );
+    assert_eq!(
+        generation
+            .get("directWritesExecuted")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
 
     let transcript = {
         let store_arc = state
@@ -898,6 +988,18 @@ async fn start_stream_message_l2_direct_answer_records_scheduler_provider_genera
     );
     assert_eq!(
         generation
+            .get("kernelBackedDirectAnswer")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        generation
+            .get("kernelEventSink")
+            .and_then(serde_json::Value::as_str),
+        Some("streaming")
+    );
+    assert_eq!(
+        generation
             .get("provider")
             .and_then(serde_json::Value::as_str),
         Some("openai")
@@ -972,6 +1074,230 @@ async fn start_stream_message_l2_direct_answer_records_scheduler_provider_genera
             .and_then(serde_json::Value::as_bool),
         Some(false)
     );
+}
+
+#[tokio::test]
+async fn main_chat_kernel_direct_answer_send_stream_success_metadata_parity() {
+    let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    for state in [&send_state, &stream_state] {
+        let mut scheduler = state.scheduler.lock().await;
+        *scheduler = openlife_core::scheduler::InferenceScheduler::new(
+            "unused-local-model".into(),
+            false,
+            "openai".into(),
+            "https://example.invalid/v1".into(),
+            "test-key".into(),
+            "gpt-kernel-parity".into(),
+            "text-embedding-test".into(),
+            false,
+        )
+        .with_scripted_generation_response("kernel parity direct answer");
+    }
+    let messages = vec![openlife_core::llm::ChatMessage {
+        role: "user".into(),
+        content: "Explain focused work in one concise paragraph for a teammate.".into(),
+    }];
+
+    let send_result = crate::main_chat_send::send_message_with_state(
+        "command-surface-kernel-parity-send".into(),
+        messages.clone(),
+        None,
+        &send_state,
+    )
+    .await
+    .expect("send kernel parity result");
+    let send_value = serde_json::to_value(&send_result).expect("serialize send parity result");
+
+    let mut emitted_events = Vec::<(String, serde_json::Value)>::new();
+    crate::main_chat_streaming::start_stream_message_with_state(
+        "command-surface-kernel-parity-stream".into(),
+        messages,
+        None,
+        &stream_state,
+        |event, payload| emitted_events.push((event.to_string(), payload)),
+    )
+    .await
+    .expect("stream kernel parity result");
+    let stream_done = emitted_events
+        .iter()
+        .rev()
+        .find(|(event, _)| event == "stream-message-done")
+        .map(|(_, payload)| payload)
+        .expect("stream parity done event");
+
+    assert_eq!(send_value["reply"], stream_done["reply"]);
+    assert_eq!(send_value["legacy_fallback_used"], false);
+    assert_eq!(stream_done["legacy_fallback_used"], false);
+    let send_generation = &send_value["reasoning_trace"]["generation_result"];
+    let stream_generation = &stream_done["reasoning_trace"]["generation_result"];
+    for key in [
+        "providerGenerationPath",
+        "provider",
+        "model",
+        "routeType",
+        "kernelBackedDirectAnswer",
+        "directWritesExecuted",
+        "legacyFallbackUsed",
+        "modelGenerated",
+        "schedulerGenerationCalled",
+    ] {
+        assert_eq!(
+            send_generation.get(key),
+            stream_generation.get(key),
+            "send/stream direct-answer metadata mismatch for {key}"
+        );
+    }
+    assert_eq!(send_generation["provider"], "openai");
+    assert_eq!(send_generation["model"], "gpt-kernel-parity");
+    assert_eq!(send_generation["routeType"], "cloud");
+    assert_eq!(send_generation["kernelBackedDirectAnswer"], true);
+    assert_eq!(send_generation["directWritesExecuted"], false);
+}
+
+#[tokio::test]
+async fn main_chat_kernel_direct_answer_invalid_input_blocks_send_and_stream_with_same_metadata() {
+    let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let send_result = crate::main_chat_send::send_message_with_state(
+        "   ".into(),
+        vec![openlife_core::llm::ChatMessage {
+            role: "user".into(),
+            content: "Hello from an invalid session.".into(),
+        }],
+        None,
+        &send_state,
+    )
+    .await
+    .expect("send invalid direct answer result");
+    let send_generation = send_result
+        .reasoning_trace
+        .generation_result
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .expect("send invalid generation metadata");
+    assert_eq!(
+        send_generation
+            .get("kernelBackedDirectAnswer")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        send_generation
+            .get("kernelEventSink")
+            .and_then(serde_json::Value::as_str),
+        Some("buffered")
+    );
+    assert_eq!(
+        send_generation
+            .get("modelGenerated")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        send_generation
+            .get("schedulerGenerationCalled")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        send_generation
+            .get("blockers")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|blockers| blockers.first())
+            .and_then(serde_json::Value::as_str),
+        Some("invalid_session_id")
+    );
+    assert_eq!(send_result.legacy_fallback_used, false);
+    let send_task_session_id = send_result
+        .agent_ingress
+        .as_ref()
+        .and_then(|decision| decision.agent_task_session_id.as_deref())
+        .expect("send invalid task session id");
+    let send_session = {
+        let store_arc = send_state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("send invalid session store");
+        let store = store_arc.lock().await;
+        store
+            .load_session(send_task_session_id)
+            .expect("load send invalid session")
+            .expect("send invalid session exists")
+    };
+    assert_eq!(
+        send_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
+    );
+    assert_eq!(send_session.pending_blockers, vec!["invalid_session_id"]);
+
+    let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let mut emitted_events = Vec::<(String, serde_json::Value)>::new();
+    crate::main_chat_streaming::start_stream_message_with_state(
+        "   ".into(),
+        vec![openlife_core::llm::ChatMessage {
+            role: "user".into(),
+            content: "Hello from an invalid session.".into(),
+        }],
+        None,
+        &stream_state,
+        |event, payload| emitted_events.push((event.to_string(), payload)),
+    )
+    .await
+    .expect("stream invalid direct answer result");
+    assert!(emitted_events.iter().any(|(event, payload)| {
+        event == "main-chat-kernel-event"
+            && payload["type"] == "blocker"
+            && payload["code"] == "invalid_session_id"
+    }));
+    let stream_done = emitted_events
+        .iter()
+        .rev()
+        .find(|(event, _)| event == "stream-message-done")
+        .map(|(_, payload)| payload)
+        .expect("stream invalid done event");
+    let stream_generation = stream_done["reasoning_trace"]["generation_result"]
+        .as_object()
+        .expect("stream invalid generation metadata");
+    assert_eq!(
+        stream_generation
+            .get("kernelBackedDirectAnswer")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        stream_generation
+            .get("kernelEventSink")
+            .and_then(serde_json::Value::as_str),
+        Some("streaming")
+    );
+    assert_eq!(
+        stream_generation
+            .get("blockers")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|blockers| blockers.first())
+            .and_then(serde_json::Value::as_str),
+        Some("invalid_session_id")
+    );
+    assert_eq!(stream_done["legacy_fallback_used"], false);
+    let stream_task_session_id = stream_done["agent_ingress"]["agentTaskSessionId"]
+        .as_str()
+        .expect("stream invalid task session id");
+    let stream_session = {
+        let store_arc = stream_state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("stream invalid session store");
+        let store = store_arc.lock().await;
+        store
+            .load_session(stream_task_session_id)
+            .expect("load stream invalid session")
+            .expect("stream invalid session exists")
+    };
+    assert_eq!(
+        stream_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
+    );
+    assert_eq!(stream_session.pending_blockers, vec!["invalid_session_id"]);
 }
 
 #[tokio::test]
@@ -1166,6 +1492,17 @@ async fn start_stream_message_command_surface_preserves_web_policy_blocker() {
 #[tokio::test]
 async fn send_message_command_surface_preserves_missing_mcp_blocker() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    set_command_surface_scripted_generation_response(
+        &state,
+        "gpt-command-surface-mcp-missing-fallback",
+        serde_json::json!({
+            "final": "I cannot complete the requested MCP read without a governed observation.",
+            "actions": [],
+            "thought_summary": "No governed observation was executed.",
+            "warnings": []
+        }),
+    )
+    .await;
     let app = tauri::test::mock_builder()
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![crate::send_message])
@@ -1252,6 +1589,17 @@ async fn send_message_command_surface_preserves_missing_mcp_blocker() {
 #[tokio::test]
 async fn start_stream_message_command_surface_preserves_missing_mcp_blocker() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    set_command_surface_scripted_generation_response(
+        &state,
+        "gpt-command-surface-stream-mcp-missing-fallback",
+        serde_json::json!({
+            "final": "I cannot complete the requested MCP read without a governed observation.",
+            "actions": [],
+            "thought_summary": "No governed observation was executed.",
+            "warnings": []
+        }),
+    )
+    .await;
     let app = tauri::test::mock_builder()
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![crate::start_stream_message])
@@ -1345,6 +1693,17 @@ async fn start_stream_message_command_surface_preserves_missing_mcp_blocker() {
 #[tokio::test]
 async fn send_message_command_surface_preserves_registered_mcp_read_success() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    set_command_surface_scripted_generation_response(
+        &state,
+        "gpt-command-surface-mcp-read-fallback",
+        serde_json::json!({
+            "final": "I can answer without a tool.",
+            "actions": [],
+            "thought_summary": "No governed observation yet.",
+            "warnings": []
+        }),
+    )
+    .await;
     {
         let store = state.tool_permission_store.lock().await;
         store
@@ -1449,6 +1808,17 @@ async fn send_message_command_surface_preserves_registered_mcp_read_success() {
 #[tokio::test]
 async fn start_stream_message_command_surface_preserves_registered_mcp_read_success() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    set_command_surface_scripted_generation_response(
+        &state,
+        "gpt-command-surface-stream-mcp-read-fallback",
+        serde_json::json!({
+            "final": "I can answer without a tool.",
+            "actions": [],
+            "thought_summary": "No governed observation yet.",
+            "warnings": []
+        }),
+    )
+    .await;
     {
         let store = state.tool_permission_store.lock().await;
         store

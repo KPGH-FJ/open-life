@@ -592,6 +592,19 @@ pub(crate) async fn configure_main_chat_command_surface_eval_state(
                 .to_string(),
             );
         }
+        MainChatCommandSurfaceEvalScenario::MissingMcpBlocker => {
+            let mut scheduler = state.scheduler.lock().await;
+            *scheduler = scripted_eval_scheduler(
+                "gpt-command-surface-eval-mcp-missing-fallback",
+                serde_json::json!({
+                    "final": "I cannot complete the requested MCP read without a governed observation.",
+                    "actions": [],
+                    "thought_summary": "No governed observation was executed.",
+                    "warnings": []
+                })
+                .to_string(),
+            );
+        }
         MainChatCommandSurfaceEvalScenario::RegisteredMcpReadSuccess => {
             grant_builtin_echo_read_once(state).await?;
             let mut scheduler = state.scheduler.lock().await;
@@ -714,8 +727,7 @@ pub(crate) async fn configure_main_chat_command_surface_eval_state(
                 .to_string(),
             );
         }
-        MainChatCommandSurfaceEvalScenario::ProposalPath
-        | MainChatCommandSurfaceEvalScenario::MissingMcpBlocker => {}
+        MainChatCommandSurfaceEvalScenario::ProposalPath => {}
     }
     Ok(())
 }
@@ -1096,6 +1108,20 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                 != Some("main_chat_direct_answer_scheduler")
             {
                 return Err("missing provider generation path metadata".into());
+            }
+            if generation_entry
+                .metadata
+                .get("kernelBackedDirectAnswer")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+                || generation_entry
+                    .metadata
+                    .get("kernelEventCount")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default()
+                    == 0
+            {
+                return Err("DirectAnswer command-surface evidence was not kernel-backed".into());
             }
             let run = runs
                 .iter()

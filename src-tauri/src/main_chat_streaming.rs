@@ -14,15 +14,16 @@ use crate::main_chat_conversation_updates::{
 };
 use crate::main_chat_event_stream::materialize_optional_main_chat_agent_events;
 use crate::main_chat_generation_support::{
-    finalize_chat_agent_run, generate_non_stream_fallback, persist_chat_message_if_needed,
-    persist_vector_memory_for_message, preview_text,
+    finalize_chat_agent_run, generate_non_stream_fallback, preview_text,
 };
 use crate::main_chat_hs_runtime::{build_chat_runtime_hs_packet, included_life_model_sections};
+use crate::main_chat_kernel::{
+    run_main_chat_kernel_direct_answer_with_state, StreamingMainChatEventSink,
+};
 use crate::main_chat_legacy_fallback::ordinary_stream_chat_execution_plan;
 use crate::main_chat_preprocess::{preprocess_chat_input, preprocess_chat_input_v2};
 use crate::main_chat_runtime_support::{
-    append_main_chat_agent_transcript, append_main_chat_direct_answer_contract_transcript,
-    complete_main_chat_agent_turn_session, start_main_chat_agent_turn,
+    append_main_chat_agent_transcript, start_main_chat_agent_turn,
 };
 use crate::main_chat_strategy::try_run_main_chat_agent_strategy;
 use crate::{persist_life_model, AppState, ToolCallResult};
@@ -38,6 +39,81 @@ pub(crate) async fn start_stream_message_with_state(
     mut emit_stream_event: impl FnMut(&str, serde_json::Value) + Send,
 ) -> Result<(), String> {
     let user_msg = messages.last().cloned();
+    let main_chat_agent_turn = start_main_chat_agent_turn(
+        &session_id,
+        user_msg.as_ref(),
+        openlife_core::agent::AgentTaskKind::Conversation,
+        state,
+    )
+    .await?;
+
+    if main_chat_agent_turn.decision.selected_strategy
+        == openlife_core::agent::main_chat_agent_v1::MainChatAgentStrategy::DirectAnswer
+    {
+        let result = {
+            let mut event_sink = StreamingMainChatEventSink::new(&mut emit_stream_event);
+            run_main_chat_kernel_direct_answer_with_state(
+                &session_id,
+                messages,
+                selected_skill_id,
+                state,
+                &main_chat_agent_turn,
+                &mut event_sink,
+                "streaming",
+            )
+            .await?
+        };
+        let run_id = result.run_id.clone().unwrap_or_default();
+        let agent_state = result.agent_state.clone();
+        let kernel_event_count = result.kernel_events.len();
+        emit_stream_event(
+            "stream-message-start",
+            serde_json::json!({
+                "session_id": &session_id,
+                "run_id": run_id,
+                "reasoning_trace": result.reasoning_trace.clone(),
+                "tool_calls": result.tool_calls.clone(),
+                "agent_ingress": result.agent_ingress.clone(),
+                "agent_state": agent_state.clone(),
+                "execution_transcript": result.execution_transcript.clone(),
+                "legacy_fallback_used": result.legacy_fallback_used,
+                "kernel_event_count": kernel_event_count,
+            }),
+        );
+        if !result.reply.is_empty() {
+            emit_stream_event(
+                "stream-message-chunk",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "run_id": run_id,
+                    "chunk": result.reply.clone(),
+                }),
+            );
+        }
+        emit_stream_event(
+            "stream-message-done",
+            serde_json::json!({
+                "session_id": &session_id,
+                "run_id": run_id,
+                "reply": result.reply,
+                "reasoning_trace": result.reasoning_trace,
+                "tool_calls": result.tool_calls,
+                "agent_ingress": result.agent_ingress,
+                "agent_state": agent_state,
+                "execution_transcript": result.execution_transcript,
+                "legacy_fallback_used": result.legacy_fallback_used,
+                "kernel_event_count": kernel_event_count,
+            }),
+        );
+        for event in result.durable_events {
+            emit_stream_event(
+                "main-chat-agent-event",
+                serde_json::to_value(event).map_err(|err| err.to_string())?,
+            );
+        }
+        return Ok(());
+    }
+
     let intent = if let Some(ref m) = user_msg {
         if m.role == "user" {
             let router = state.intent_router.lock().await;
@@ -55,15 +131,6 @@ pub(crate) async fn start_stream_message_with_state(
     } else {
         Layer::L2
     };
-    let main_chat_agent_turn = start_main_chat_agent_turn(
-        &session_id,
-        user_msg.as_ref(),
-        openlife_core::agent::AgentTaskKind::Conversation,
-        state,
-    )
-    .await?;
-
-    // L1 direct reflex: no AgentLoop needed.
     let user_input_text = messages
         .last()
         .map(|m| m.content.clone())
@@ -74,173 +141,6 @@ pub(crate) async fn start_stream_message_with_state(
         let store = store_arc.lock().await;
         if let Err(e) = store.create_run(&agent_run) {
             log::warn!("[AgentRun] 保存运行记录失败: {}", e);
-        }
-    }
-
-    // Layer 1: direct reflex response (non-streaming, emit as single chunk).
-    if layer == Layer::L1 {
-        if let Some(ref i) = intent {
-            if let Some(reply) = i.direct_response() {
-                let mut execution_transcript = main_chat_agent_turn.transcript_entries.clone();
-                execution_transcript.extend(
-                    append_main_chat_direct_answer_contract_transcript(
-                        state,
-                        &main_chat_agent_turn,
-                        &user_input_text,
-                        selected_skill_id.as_deref(),
-                    )
-                    .await,
-                );
-                if let Some(ref user) = user_msg {
-                    if user.role == "user" {
-                        let user_inserted =
-                            persist_chat_message_if_needed(&session_id, user, state).await?;
-                        if user_inserted {
-                            persist_vector_memory_for_message(&session_id, user, state).await;
-                        }
-                    }
-                }
-
-                let life_model = {
-                    let manager = state.life_model_manager.lock().await;
-                    manager.load().map_err(|e| e.to_string())?
-                };
-
-                let assistant_msg = ChatMessage {
-                    role: "assistant".into(),
-                    content: reply.clone(),
-                };
-
-                emit_stream_event(
-                    "stream-message-start",
-                    serde_json::json!({
-                        "session_id": &session_id,
-                        "run_id": agent_run.id,
-                        "reasoning_trace": ReasoningTrace::default(),
-                        "tool_calls": Vec::<ToolCallResult>::new(),
-                        "agent_ingress": main_chat_agent_turn.decision.clone(),
-                        "execution_transcript": execution_transcript.clone(),
-                        "legacy_fallback_used": false,
-                    }),
-                );
-                emit_stream_event(
-                    "stream-message-chunk",
-                    serde_json::json!({
-                        "session_id": &session_id,
-                        "run_id": agent_run.id,
-                        "chunk": reply.clone(),
-                    }),
-                );
-
-                let mut reasoning_trace = ReasoningTrace::default();
-                let model_route = openlife_core::agent::ModelRouteTrace {
-                    provider: "direct".to_string(),
-                    model: "L1_reflex".to_string(),
-                    route_type: "direct".to_string(),
-                    prefer_local: false,
-                    local_model: "".to_string(),
-                    reason: "layer_1_direct_response".to_string(),
-                    privacy_level: openlife_core::agent::types::RedactionLevel::None,
-                    latency_ms: None,
-                    retry_count: 0,
-                    fallback_reason: None,
-                    provider_health_is_estimated: Some(false),
-                };
-                let context_summary = openlife_core::agent::ContextSummary {
-                    life_model_empty: true,
-                    included_life_model_sections: vec![],
-                    memory_hit_count: 0,
-                    memory_sources: vec![],
-                    used_tools_prompt: false,
-                    redaction_applied: false,
-                    redaction_level: openlife_core::agent::types::RedactionLevel::None,
-                };
-                let preview = preview_text(&reply, 200);
-                agent_run.reasoning_strategy = Some("main_chat_agent_v1_direct_answer".into());
-                agent_run.complete(&preview, model_route, context_summary);
-
-                if let Err(e) = finalize_chat_agent_run(
-                    &session_id,
-                    &assistant_msg,
-                    &reply,
-                    &mut reasoning_trace,
-                    &mut agent_run,
-                    &life_model,
-                    state,
-                )
-                .await
-                {
-                    log::warn!("[L1 Stream] finalize_chat_agent_run failed: {}", e);
-                    emit_stream_event(
-                        "stream-message-error",
-                        serde_json::json!({
-                            "session_id": &session_id,
-                            "run_id": agent_run.id,
-                            "error": format!("AgentRun 持久化失败: {}", e),
-                        }),
-                    );
-                    return Err(e);
-                }
-                complete_main_chat_agent_turn_session(
-                    state,
-                    &main_chat_agent_turn,
-                    "DirectAnswer completed without tool execution.",
-                )
-                .await;
-                execution_transcript.extend(
-                    append_main_chat_agent_transcript(
-                        state,
-                        main_chat_agent_turn
-                            .decision
-                            .agent_task_session_id
-                            .as_deref(),
-                        openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::FinalResult,
-                        "DirectAnswer completed without tool execution.",
-                        serde_json::json!({
-                            "runId": agent_run.id,
-                            "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
-                            "legacyFallbackUsed": false,
-                        }),
-                    )
-                    .await,
-                );
-
-                let agent_state =
-                    crate::main_chat_agent_state_payload::assemble_main_chat_agent_state_for_turn(
-                        state,
-                        main_chat_agent_turn
-                            .decision
-                            .agent_task_session_id
-                            .as_deref(),
-                        Some(&agent_run.id),
-                    )
-                    .await;
-                let durable_events =
-                    materialize_optional_main_chat_agent_events(state, agent_state.as_ref())
-                        .await?;
-
-                emit_stream_event(
-                    "stream-message-done",
-                    serde_json::json!({
-                        "session_id": &session_id,
-                        "run_id": agent_run.id,
-                        "reply": reply,
-                        "reasoning_trace": ReasoningTrace::default(),
-                        "tool_calls": Vec::<ToolCallResult>::new(),
-                        "agent_ingress": main_chat_agent_turn.decision.clone(),
-                        "agent_state": agent_state,
-                        "execution_transcript": execution_transcript,
-                        "legacy_fallback_used": false,
-                    }),
-                );
-                for event in durable_events {
-                    emit_stream_event(
-                        "main-chat-agent-event",
-                        serde_json::to_value(event).map_err(|err| err.to_string())?,
-                    );
-                }
-                return Ok(());
-            }
         }
     }
 

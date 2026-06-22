@@ -1,17 +1,36 @@
 use async_trait::async_trait;
+use openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentStateSnapshot;
 use openlife_core::agent::main_chat_agent_v1::{
-    CompiledContext, ContextCompiler, ContextCompilerInput, ContextSourceCandidate,
-    ContextSourceKind, MainChatAgentStrategy, MainChatPrivacyRiskSummary,
+    AgentIngressDecision, AgentTaskSessionStatus, CompiledContext, ContextCompiler,
+    ContextCompilerInput, ContextSourceCandidate, ContextSourceKind, ExecutionTranscriptEntry,
+    ExecutionTranscriptEntryKind, MainChatAgentStrategy, MainChatPrivacyRiskSummary,
 };
-use openlife_core::agent::RedactionLevel;
+use openlife_core::agent::{
+    AgentRun, AgentRunError, ContextSummary, ModelRouteTrace, ReasoningTrace, RedactionLevel,
+};
 use openlife_core::life_model::LifeModel;
 use openlife_core::llm::ChatMessage;
 use openlife_core::scheduler::InferenceScheduler;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
+use crate::main_chat_agent_state_payload::assemble_main_chat_agent_state_for_turn;
 use crate::main_chat_context_loader::{
+    load_configured_knowledge_context_candidates,
     load_current_workspace_knowledge_context_candidates, sanitize_main_chat_selected_skill_id,
 };
+use crate::main_chat_event_stream::{
+    materialize_optional_main_chat_agent_events, MainChatAgentDurableEvent,
+};
+use crate::main_chat_generation_support::{
+    finalize_chat_agent_run, main_chat_provider_endpoint_kind, persist_chat_message_if_needed,
+    persist_vector_memory_for_message, preview_text,
+};
+use crate::main_chat_runtime_support::{
+    append_main_chat_agent_transcript, append_main_chat_direct_answer_contract_transcript,
+    complete_main_chat_agent_turn_session, MainChatAgentTurn,
+};
+use crate::{AppState, SendMessageResult, ToolCallResult};
 
 const KERNEL_CONTEXT_TOKEN_BUDGET: u32 = 120;
 const MAX_ROUTE_LABEL_CHARS: usize = 96;
@@ -122,6 +141,10 @@ pub enum MainChatKernelEvent {
 
 pub trait MainChatEventSink {
     fn emit(&mut self, event: MainChatKernelEvent);
+
+    fn events(&self) -> &[MainChatKernelEvent] {
+        &[]
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -142,6 +165,266 @@ impl BufferedMainChatEventSink {
 impl MainChatEventSink for BufferedMainChatEventSink {
     fn emit(&mut self, event: MainChatKernelEvent) {
         self.events.push(event);
+    }
+
+    fn events(&self) -> &[MainChatKernelEvent] {
+        &self.events
+    }
+}
+
+pub struct StreamingMainChatEventSink<'a> {
+    emit_stream_event: &'a mut (dyn FnMut(&str, serde_json::Value) + Send),
+    events: Vec<MainChatKernelEvent>,
+}
+
+impl<'a> StreamingMainChatEventSink<'a> {
+    pub fn new<F>(emit_stream_event: &'a mut F) -> Self
+    where
+        F: FnMut(&str, serde_json::Value) + Send + 'a,
+    {
+        Self {
+            emit_stream_event,
+            events: Vec::new(),
+        }
+    }
+
+    pub fn events(&self) -> &[MainChatKernelEvent] {
+        &self.events
+    }
+}
+
+impl MainChatEventSink for StreamingMainChatEventSink<'_> {
+    fn emit(&mut self, event: MainChatKernelEvent) {
+        let payload = serde_json::to_value(&event).unwrap_or_else(|_| {
+            serde_json::json!({
+                "type": "kernel_event_serialization_failed",
+            })
+        });
+        (self.emit_stream_event)("main-chat-kernel-event", payload);
+        self.events.push(event);
+    }
+
+    fn events(&self) -> &[MainChatKernelEvent] {
+        &self.events
+    }
+}
+
+pub(crate) struct MainChatKernelCommandSurfaceResult {
+    pub(crate) reply: String,
+    pub(crate) reasoning_trace: ReasoningTrace,
+    pub(crate) tool_calls: Vec<ToolCallResult>,
+    pub(crate) run_id: Option<String>,
+    pub(crate) agent_ingress: Option<AgentIngressDecision>,
+    pub(crate) agent_state: Option<MainChatAgentStateSnapshot>,
+    pub(crate) execution_transcript: Vec<ExecutionTranscriptEntry>,
+    pub(crate) legacy_fallback_used: bool,
+    pub(crate) durable_events: Vec<MainChatAgentDurableEvent>,
+    pub(crate) kernel_events: Vec<MainChatKernelEvent>,
+}
+
+impl MainChatKernelCommandSurfaceResult {
+    pub(crate) fn into_send_message_result(self) -> SendMessageResult {
+        SendMessageResult {
+            reply: self.reply,
+            reasoning_trace: self.reasoning_trace,
+            tool_calls: self.tool_calls,
+            run_id: self.run_id,
+            agent_ingress: self.agent_ingress,
+            agent_state: self.agent_state,
+            execution_transcript: self.execution_transcript,
+            legacy_fallback_used: self.legacy_fallback_used,
+        }
+    }
+}
+
+pub(crate) async fn run_main_chat_kernel_direct_answer_with_state<S>(
+    session_id: &str,
+    messages: Vec<ChatMessage>,
+    selected_skill_id: Option<String>,
+    state: &Arc<AppState>,
+    main_chat_agent_turn: &MainChatAgentTurn,
+    event_sink: &mut S,
+    event_sink_label: &'static str,
+) -> Result<MainChatKernelCommandSurfaceResult, String>
+where
+    S: MainChatEventSink + ?Sized,
+{
+    if main_chat_agent_turn.decision.selected_strategy != MainChatAgentStrategy::DirectAnswer {
+        return Err(format!(
+            "MainChatKernel direct-answer adapter received non-direct strategy {}",
+            main_chat_agent_turn.decision.selected_strategy.as_str()
+        ));
+    }
+
+    let requested_task_session_id = main_chat_agent_turn
+        .decision
+        .agent_task_session_id
+        .as_deref()
+        .ok_or_else(|| "Main Chat kernel task session missing".to_string())?;
+    let task_session_id = resolve_kernel_task_session_id(
+        state,
+        requested_task_session_id,
+        session_id,
+        main_chat_agent_turn.decision.selected_strategy,
+    )
+    .await;
+    let mut effective_main_chat_agent_turn = main_chat_agent_turn.clone();
+    if effective_main_chat_agent_turn
+        .decision
+        .agent_task_session_id
+        .as_deref()
+        != Some(task_session_id.as_str())
+    {
+        effective_main_chat_agent_turn
+            .decision
+            .agent_task_session_id = Some(task_session_id.clone());
+    }
+    let main_chat_agent_turn = &effective_main_chat_agent_turn;
+    let user_msg = messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")
+        .cloned();
+    let user_text = user_msg
+        .as_ref()
+        .map(|message| message.content.clone())
+        .unwrap_or_default();
+    let sanitized_selected_skill_id =
+        sanitize_main_chat_selected_skill_id(selected_skill_id.as_deref());
+    let mut execution_transcript = main_chat_agent_turn.transcript_entries.clone();
+    execution_transcript.extend(
+        append_main_chat_agent_transcript(
+            state,
+            Some(&task_session_id),
+            ExecutionTranscriptEntryKind::Plan,
+            "Main Chat Agent strategy execution started.",
+            serde_json::json!({
+                "selectedStrategy": MainChatAgentStrategy::DirectAnswer.as_str(),
+                "policyReasonCode": main_chat_agent_turn.decision.privacy_risk.policy_reason_code,
+                "silentWritesAllowed": false,
+                "kernelBackedDirectAnswer": true,
+                "kernelEventSink": event_sink_label,
+            }),
+        )
+        .await,
+    );
+    execution_transcript.extend(
+        append_main_chat_direct_answer_contract_transcript(
+            state,
+            main_chat_agent_turn,
+            &user_text,
+            sanitized_selected_skill_id.as_deref(),
+        )
+        .await,
+    );
+
+    let scheduler = state.scheduler.lock().await.clone();
+    let direct_reply = if user_text.trim().is_empty() {
+        None
+    } else {
+        let router = state.intent_router.lock().await;
+        router.classify(&user_text).direct_response()
+    };
+    let life_model = LifeModel::default();
+    let extra_candidates =
+        command_surface_kernel_context_candidates(state, sanitized_selected_skill_id.as_deref())
+            .await;
+    let kernel = MainChatKernel::new(CommandSurfaceDirectAnswerModelClient::new(
+        scheduler.clone(),
+        life_model.clone(),
+        direct_reply.clone(),
+    ))
+    .with_context_config(MainChatKernelContextConfig {
+        load_workspace_knowledge: true,
+        token_budget: 160,
+        extra_candidates,
+    });
+
+    let kernel_result = kernel
+        .run_turn(
+            MainChatTurnInput {
+                session_id: session_id.to_string(),
+                messages,
+                selected_skill_id: sanitized_selected_skill_id.clone(),
+            },
+            event_sink,
+        )
+        .await;
+
+    let kernel_events = event_sink.events().to_vec();
+
+    if !kernel_result.blockers.is_empty() {
+        return build_blocked_kernel_command_surface_result(
+            session_id,
+            &task_session_id,
+            state,
+            main_chat_agent_turn,
+            execution_transcript,
+            kernel_result,
+            event_sink_label,
+            kernel_events,
+        )
+        .await;
+    }
+
+    if let Some(user) = user_msg.as_ref() {
+        let inserted = persist_chat_message_if_needed(session_id, user, state).await?;
+        if inserted {
+            persist_vector_memory_for_message(session_id, user, state).await;
+        }
+    }
+
+    build_successful_kernel_command_surface_result(
+        session_id,
+        &user_text,
+        state,
+        main_chat_agent_turn,
+        execution_transcript,
+        kernel_result,
+        scheduler,
+        life_model,
+        direct_reply.is_some(),
+        event_sink_label,
+        kernel_events,
+    )
+    .await
+}
+
+async fn resolve_kernel_task_session_id(
+    state: &Arc<AppState>,
+    requested_task_session_id: &str,
+    chat_session_id: &str,
+    selected_strategy: MainChatAgentStrategy,
+) -> String {
+    let Some(ref store_arc) = state.main_chat_agent_session_store else {
+        return requested_task_session_id.to_string();
+    };
+    let store = store_arc.lock().await;
+    if matches!(store.load_session(requested_task_session_id), Ok(Some(_))) {
+        return requested_task_session_id.to_string();
+    }
+    match store.list_sessions(None, 50, 0) {
+        Ok(sessions) => sessions
+            .into_iter()
+            .find(|session| {
+                session.chat_session_id == chat_session_id
+                    && session.selected_strategy == selected_strategy
+                    && matches!(
+                        session.status,
+                        AgentTaskSessionStatus::Running
+                            | AgentTaskSessionStatus::WaitingPermission
+                            | AgentTaskSessionStatus::Blocked
+                    )
+            })
+            .map(|session| session.id)
+            .unwrap_or_else(|| requested_task_session_id.to_string()),
+        Err(err) => {
+            log::warn!(
+                "[MainChatKernel] resolve persisted task session failed: {}",
+                err
+            );
+            requested_task_session_id.to_string()
+        }
     }
 }
 
@@ -214,6 +497,64 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
 
     fn route_metadata(&self) -> MainChatRouteMetadata {
         route_metadata_from_scheduler(&self.scheduler)
+    }
+}
+
+#[derive(Clone)]
+struct CommandSurfaceDirectAnswerModelClient {
+    scheduler: InferenceScheduler,
+    life_model: LifeModel,
+    direct_reply: Option<String>,
+}
+
+impl CommandSurfaceDirectAnswerModelClient {
+    fn new(
+        scheduler: InferenceScheduler,
+        life_model: LifeModel,
+        direct_reply: Option<String>,
+    ) -> Self {
+        Self {
+            scheduler,
+            life_model,
+            direct_reply,
+        }
+    }
+}
+
+#[async_trait]
+impl MainChatModelClient for CommandSurfaceDirectAnswerModelClient {
+    async fn generate_direct_answer(
+        &self,
+        request: MainChatModelRequest,
+    ) -> Result<String, String> {
+        if let Some(reply) = self.direct_reply.as_ref() {
+            return Ok(reply.clone());
+        }
+
+        SchedulerMainChatModelClient::new(self.scheduler.clone(), self.life_model.clone())
+            .generate_direct_answer(request)
+            .await
+    }
+
+    fn route_metadata(&self) -> MainChatRouteMetadata {
+        if self.direct_reply.is_some() {
+            MainChatRouteMetadata {
+                provider: "direct".into(),
+                model: "L1_reflex".into(),
+                route_type: "direct".into(),
+                prefer_local: false,
+                local_model: "".into(),
+                reason: "main_chat_kernel_direct_reflex".into(),
+                privacy_level: RedactionLevel::None,
+                tools_enabled: false,
+                live_eval_required: false,
+                final_acceptance_gate_required: false,
+                readiness_gate_required: false,
+                scripted_response_configured: false,
+            }
+        } else {
+            route_metadata_from_scheduler(&self.scheduler)
+        }
     }
 }
 
@@ -373,6 +714,349 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn build_successful_kernel_command_surface_result(
+    session_id: &str,
+    user_text: &str,
+    state: &Arc<AppState>,
+    main_chat_agent_turn: &MainChatAgentTurn,
+    mut execution_transcript: Vec<ExecutionTranscriptEntry>,
+    kernel_result: MainChatTurnResult,
+    scheduler: InferenceScheduler,
+    life_model: LifeModel,
+    direct_reflex_used: bool,
+    event_sink_label: &'static str,
+    kernel_events: Vec<MainChatKernelEvent>,
+) -> Result<MainChatKernelCommandSurfaceResult, String> {
+    let task_session_id = main_chat_agent_turn
+        .decision
+        .agent_task_session_id
+        .as_deref()
+        .ok_or_else(|| "Main Chat kernel task session missing".to_string())?;
+    let assistant_message = kernel_result
+        .assistant_message
+        .clone()
+        .ok_or_else(|| "Main Chat kernel direct answer missing assistant message".to_string())?;
+    let reply = assistant_message.content.clone();
+    let route_metadata = kernel_result
+        .route_metadata
+        .clone()
+        .ok_or_else(|| "Main Chat kernel direct answer missing route metadata".to_string())?;
+    let model_route = model_route_from_kernel_route(&route_metadata);
+    let context_summary = context_summary_from_kernel_result(&kernel_result, &life_model);
+    let scripted_provider_response = route_metadata.scripted_response_configured;
+    let provider_endpoint_kind = if direct_reflex_used {
+        "direct_reflex"
+    } else {
+        main_chat_provider_endpoint_kind(&scheduler, scripted_provider_response)
+    };
+    let live_provider_invoked = !direct_reflex_used
+        && !scripted_provider_response
+        && route_metadata.provider != "none"
+        && route_metadata.route_type == "cloud";
+    let kernel_event_count = kernel_events.len();
+    let generation_metadata = serde_json::json!({
+        "hsPacketSelected": false,
+        "toolCallCount": 0,
+        "directWritesExecuted": false,
+        "legacyFallbackUsed": false,
+        "kernelBackedDirectAnswer": true,
+        "kernelEventSink": event_sink_label,
+        "kernelEventCount": kernel_event_count,
+        "kernelContextSnapshotRef": kernel_result
+            .context_metadata
+            .as_ref()
+            .map(|metadata| metadata.context_snapshot_ref.clone()),
+        "modelGenerated": !direct_reflex_used,
+        "schedulerGenerationCalled": !direct_reflex_used,
+        "providerGenerationPath": if direct_reflex_used {
+            "main_chat_kernel_direct_reflex"
+        } else {
+            "main_chat_direct_answer_scheduler"
+        },
+        "provider": route_metadata.provider,
+        "model": route_metadata.model,
+        "routeType": route_metadata.route_type,
+        "routeReason": route_metadata.reason,
+        "providerHealthEstimated": false,
+        "scriptedProviderResponse": scripted_provider_response,
+        "liveProviderInvoked": live_provider_invoked,
+        "providerEndpointKind": provider_endpoint_kind,
+        "localProviderHttpHarness": live_provider_invoked
+            && provider_endpoint_kind == "local_test_http",
+        "externalLiveProviderEvalPreflighted": false,
+    });
+    execution_transcript.extend(
+        append_main_chat_agent_transcript(
+            state,
+            Some(task_session_id),
+            ExecutionTranscriptEntryKind::Observation,
+            "DirectAnswer generated a model response without tools or writes.",
+            generation_metadata.clone(),
+        )
+        .await,
+    );
+
+    let mut agent_run = AgentRun::new_chat_run(session_id, user_text);
+    agent_run.reasoning_strategy = Some("main_chat_agent_v1_direct_answer".into());
+    agent_run.complete(&preview_text(&reply, 200), model_route, context_summary);
+    let mut reasoning_trace = ReasoningTrace {
+        generation_result: Some({
+            let mut generation = generation_metadata;
+            if let Some(object) = generation.as_object_mut() {
+                object.insert("text".into(), serde_json::Value::String(reply.clone()));
+                object.insert("mainChatAgentV1".into(), serde_json::Value::Bool(true));
+                object.insert(
+                    "selectedStrategy".into(),
+                    serde_json::Value::String(MainChatAgentStrategy::DirectAnswer.as_str().into()),
+                );
+            }
+            generation
+        }),
+        ..Default::default()
+    };
+    finalize_chat_agent_run(
+        session_id,
+        &assistant_message,
+        &reply,
+        &mut reasoning_trace,
+        &mut agent_run,
+        &life_model,
+        state,
+    )
+    .await?;
+    complete_main_chat_agent_turn_session(
+        state,
+        main_chat_agent_turn,
+        "DirectAnswer completed without tool execution.",
+    )
+    .await;
+    execution_transcript.extend(
+        append_main_chat_agent_transcript(
+            state,
+            Some(task_session_id),
+            ExecutionTranscriptEntryKind::FinalResult,
+            "DirectAnswer completed without tool execution.",
+            serde_json::json!({
+                "runId": agent_run.id,
+                "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
+                "legacyFallbackUsed": false,
+                "kernelBackedDirectAnswer": true,
+                "pendingBlockerCount": 0,
+            }),
+        )
+        .await,
+    );
+    let agent_state =
+        assemble_main_chat_agent_state_for_turn(state, Some(task_session_id), Some(&agent_run.id))
+            .await;
+    let durable_events =
+        materialize_optional_main_chat_agent_events(state, agent_state.as_ref()).await?;
+
+    Ok(MainChatKernelCommandSurfaceResult {
+        reply,
+        reasoning_trace,
+        tool_calls: Vec::new(),
+        run_id: Some(agent_run.id),
+        agent_ingress: Some(main_chat_agent_turn.decision.clone()),
+        agent_state,
+        execution_transcript,
+        legacy_fallback_used: false,
+        durable_events,
+        kernel_events,
+    })
+}
+
+async fn build_blocked_kernel_command_surface_result(
+    session_id: &str,
+    task_session_id: &str,
+    state: &Arc<AppState>,
+    main_chat_agent_turn: &MainChatAgentTurn,
+    mut execution_transcript: Vec<ExecutionTranscriptEntry>,
+    kernel_result: MainChatTurnResult,
+    event_sink_label: &'static str,
+    kernel_events: Vec<MainChatKernelEvent>,
+) -> Result<MainChatKernelCommandSurfaceResult, String> {
+    let blockers = kernel_result.blockers.clone();
+    let blocker_summary = blockers.join(",");
+    if let Some(ref store_arc) = state.main_chat_agent_session_store {
+        let store = store_arc.lock().await;
+        if let Err(err) = store.set_pending_blockers(task_session_id, blockers.clone()) {
+            log::warn!("[MainChatKernel] set blockers failed: {}", err);
+        }
+        if let Err(err) = store.block_session(
+            task_session_id,
+            "MainChatKernel direct answer blocked before model completion.",
+        ) {
+            log::warn!("[MainChatKernel] block session failed: {}", err);
+        }
+    }
+    execution_transcript.extend(
+        append_main_chat_agent_transcript(
+            state,
+            Some(task_session_id),
+            ExecutionTranscriptEntryKind::Error,
+            "DirectAnswer kernel returned a blocker.",
+            serde_json::json!({
+                "blockers": blockers,
+                "directWritesExecuted": false,
+                "legacyFallbackUsed": false,
+                "kernelBackedDirectAnswer": true,
+                "kernelEventSink": event_sink_label,
+                "kernelEventCount": kernel_events.len(),
+                "modelGenerated": false,
+                "schedulerGenerationCalled": false,
+            }),
+        )
+        .await,
+    );
+    let reply = format!(
+        "I could not run the direct answer because the request was blocked: {}.",
+        blocker_summary
+    );
+    let mut agent_run = AgentRun::new_chat_run(session_id, "");
+    agent_run.reasoning_strategy = Some("main_chat_agent_v1_direct_answer".into());
+    agent_run.fail(AgentRunError {
+        message: blocker_summary.clone(),
+        phase: "main_chat_kernel".into(),
+        recoverable: true,
+    });
+    let reasoning_trace = ReasoningTrace {
+        generation_result: Some(serde_json::json!({
+            "text": reply,
+            "mainChatAgentV1": true,
+            "selectedStrategy": MainChatAgentStrategy::DirectAnswer.as_str(),
+            "legacyFallbackUsed": false,
+            "directWritesExecuted": false,
+            "kernelBackedDirectAnswer": true,
+            "kernelEventSink": event_sink_label,
+            "kernelEventCount": kernel_events.len(),
+            "modelGenerated": false,
+            "schedulerGenerationCalled": false,
+            "blockers": kernel_result.blockers,
+        })),
+        ..Default::default()
+    };
+    agent_run.reasoning_trace = Some(reasoning_trace.clone());
+    if let Some(ref store_arc) = state.agent_run_store {
+        let store = store_arc.lock().await;
+        if let Err(err) = store.create_run(&agent_run) {
+            log::warn!("[MainChatKernel] create failed AgentRun failed: {}", err);
+        }
+    }
+    let agent_state =
+        assemble_main_chat_agent_state_for_turn(state, Some(task_session_id), Some(&agent_run.id))
+            .await;
+    let durable_events =
+        materialize_optional_main_chat_agent_events(state, agent_state.as_ref()).await?;
+
+    Ok(MainChatKernelCommandSurfaceResult {
+        reply,
+        reasoning_trace,
+        tool_calls: Vec::new(),
+        run_id: Some(agent_run.id),
+        agent_ingress: Some(main_chat_agent_turn.decision.clone()),
+        agent_state,
+        execution_transcript,
+        legacy_fallback_used: false,
+        durable_events,
+        kernel_events,
+    })
+}
+
+async fn command_surface_kernel_context_candidates(
+    state: &Arc<AppState>,
+    selected_skill_id: Option<&str>,
+) -> Vec<ContextSourceCandidate> {
+    let mut candidates = Vec::new();
+    let configured_knowledge_roots = {
+        let config = state.config.lock().await;
+        config.system.knowledge_roots.clone()
+    };
+    candidates.extend(load_configured_knowledge_context_candidates(
+        &configured_knowledge_roots,
+        selected_skill_id,
+    ));
+    if let Some(lifecycle_store) = state.memory_lifecycle_store.as_ref() {
+        let store = lifecycle_store.lock().await;
+        if let Ok(records) = store.list_active_records(None, 8) {
+            for record in records {
+                candidates.push(ContextSourceCandidate::new(
+                    ContextSourceKind::SelectedPersonalContext,
+                    &record.memory_id,
+                    format!(
+                        "Accepted memory [{}:{}]: {}",
+                        record.scope, record.category, record.content
+                    ),
+                    format!(
+                        "accepted memory lifecycle; materialized view {} version {}",
+                        record.materialized_view_id.as_deref().unwrap_or("unknown"),
+                        record.materialized_view_version.unwrap_or_default()
+                    ),
+                    "private",
+                    16,
+                ));
+            }
+        }
+    }
+    if let Ok(sessions) = {
+        let store = state.memory_store.lock().await;
+        store.list_sessions(5)
+    } {
+        candidates.push(ContextSourceCandidate::new(
+            ContextSourceKind::SelectedPersonalContext,
+            "chat_sessions.recent",
+            format!(
+                "Recent session count available for search: {}",
+                sessions.len()
+            ),
+            "bounded session search metadata",
+            "internal",
+            8,
+        ));
+    }
+    candidates
+}
+
+fn model_route_from_kernel_route(route: &MainChatRouteMetadata) -> ModelRouteTrace {
+    ModelRouteTrace {
+        provider: route.provider.clone(),
+        model: route.model.clone(),
+        route_type: route.route_type.clone(),
+        prefer_local: route.prefer_local,
+        local_model: route.local_model.clone(),
+        reason: route.reason.clone(),
+        privacy_level: route.privacy_level,
+        latency_ms: None,
+        retry_count: 0,
+        fallback_reason: None,
+        provider_health_is_estimated: Some(false),
+    }
+}
+
+fn context_summary_from_kernel_result(
+    result: &MainChatTurnResult,
+    life_model: &LifeModel,
+) -> ContextSummary {
+    let selected_source_ids = result
+        .context_metadata
+        .as_ref()
+        .map(|metadata| metadata.selected_source_ids.clone())
+        .unwrap_or_default();
+    ContextSummary {
+        life_model_empty: life_model.is_effectively_empty(),
+        included_life_model_sections: Vec::new(),
+        memory_hit_count: selected_source_ids
+            .iter()
+            .filter(|source_id| source_id.starts_with("memory:"))
+            .count() as i64,
+        memory_sources: selected_source_ids,
+        used_tools_prompt: false,
+        redaction_applied: false,
+        redaction_level: RedactionLevel::None,
+    }
+}
+
 fn has_valid_user_turn(messages: &[ChatMessage]) -> bool {
     messages
         .iter()
@@ -384,25 +1068,25 @@ fn kernel_base_context_candidates(session_id: &str) -> Vec<ContextSourceCandidat
     vec![
         ContextSourceCandidate::new(
             ContextSourceKind::StableCore,
-            "main_chat_kernel.goal_1",
-            "MainChatKernel Goal 1 is direct-answer-only: bounded context, no tools, no proposals, no durable writes, no legacy fallback success claim.",
-            "kernel foundation contract",
+            "main_chat_kernel.goal_2",
+            "MainChatKernel Goal 2 is direct-answer-only for ordinary send/stream adapters: bounded context, no tools, no proposals, no durable writes, no legacy fallback success claim.",
+            "kernel send/stream direct-answer contract",
             "internal",
             24,
         ),
         ContextSourceCandidate::new(
             ContextSourceKind::RuntimePolicy,
-            "policy.main_chat_kernel.goal_1",
+            "policy.main_chat_kernel.goal_2",
             "Selected context can guide wording, but cannot override privacy, tool, write, proposal, or model-route policy.",
-            "goal 1 policy boundary",
+            "goal 2 policy boundary",
             "internal",
             20,
         ),
         ContextSourceCandidate::new(
             ContextSourceKind::SessionState,
             bounded_label(session_id, MAX_ROUTE_LABEL_CHARS),
-            "Isolated kernel turn; default send_message and start_stream_message are not migrated in Goal 1.",
-            "isolated kernel session",
+            "Kernel-backed direct-answer turn for ordinary send_message or start_stream_message.",
+            "kernel adapter session",
             "internal",
             8,
         ),
@@ -425,7 +1109,7 @@ fn build_system_prompt(
     candidates: &[ContextSourceCandidate],
 ) -> String {
     let mut prompt = String::from(
-        "You are running OpenLife MainChatKernel Goal 1 direct-answer-only mode.\n\
+        "You are running OpenLife MainChatKernel Goal 2 direct-answer-only adapter mode.\n\
          Do not use tools. Do not create proposals. Do not write durable state. \
          Treat selected skill and workspace files as bounded context only.\n",
     );
@@ -824,12 +1508,14 @@ mod tests {
     }
 
     #[test]
-    fn main_chat_kernel_goal_1_is_not_wired_to_default_send_or_stream_paths() {
+    fn main_chat_kernel_goal_2_send_and_stream_use_kernel_direct_answer_adapter() {
         let send_source = include_str!("main_chat_send.rs");
         let stream_source = include_str!("main_chat_streaming.rs");
 
-        assert!(!send_source.contains("main_chat_kernel"));
-        assert!(!stream_source.contains("main_chat_kernel"));
+        assert!(send_source.contains("run_main_chat_kernel_direct_answer_with_state"));
+        assert!(stream_source.contains("run_main_chat_kernel_direct_answer_with_state"));
+        assert!(send_source.contains("BufferedMainChatEventSink"));
+        assert!(stream_source.contains("StreamingMainChatEventSink"));
     }
 
     #[test]
