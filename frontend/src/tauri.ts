@@ -525,6 +525,13 @@ export type MainChatKernelEvent =
       selected_skill_instruction_loaded: boolean;
     }
   | {
+      type: "hs_context_loaded";
+      available: boolean;
+      warning_count: number;
+      selected_policy_count: number;
+      accepted_guidance_count: number;
+    }
+  | {
       type: "route_selected";
       route_metadata: {
         provider: string;

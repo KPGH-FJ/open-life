@@ -140,6 +140,8 @@ pub enum ContextSourceKind {
     SkillMetadata,
     SkillInstruction,
     Observation,
+    HsSummary,
+    AcceptedGuidance,
     LifeModelYaml,
     RawMemorySnippet,
 }
@@ -158,6 +160,8 @@ impl ContextSourceKind {
             Self::SkillMetadata => "skill_metadata",
             Self::SkillInstruction => "skill_instruction",
             Self::Observation => "observation",
+            Self::HsSummary => "hs_summary",
+            Self::AcceptedGuidance => "accepted_guidance",
             Self::LifeModelYaml => "life_model_yaml",
             Self::RawMemorySnippet => "raw_memory_snippet",
         }
