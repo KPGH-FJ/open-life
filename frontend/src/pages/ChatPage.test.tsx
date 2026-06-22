@@ -1229,9 +1229,14 @@ describe("ChatPage", () => {
       await Promise.resolve();
     });
 
+    expect(await screen.findByText("Execution evidence")).toBeInTheDocument();
+    expect(screen.queryByText("Agent Control Plane")).not.toBeInTheDocument();
+    expect(screen.getByText("Tool observation")).toBeInTheDocument();
+    expect(screen.getByText("Final answer")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show Main Chat diagnostics" }));
     expect(await screen.findByText("Agent Control Plane")).toBeInTheDocument();
-    expect(screen.getByText("Workspace planning read")).toBeInTheDocument();
-    expect(screen.getByText("react_tool_execution")).toBeInTheDocument();
+    expect(screen.getAllByText("Workspace planning read").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("react_tool_execution").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("AGENTS.md bounded context")).toBeInTheDocument();
     expect(screen.getAllByText("Read workspace guidance").length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText("file.read").length).toBeGreaterThanOrEqual(1);
@@ -1243,6 +1248,387 @@ describe("ChatPage", () => {
     expect(
       screen.getByText("Use the bounded workspace guidance without creating durable writes.")
     ).toBeInTheDocument();
+  });
+
+  it("shows direct answer execution evidence without default diagnostics clutter", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+    const base = buildMainChatAgentStateSnapshot();
+    const directState = buildMainChatAgentStateSnapshot({
+      task: {
+        ...base.task,
+        taskId: "mainchat-task-direct-k5-1",
+        runId: "run-direct-k5-1",
+        title: "Simple direct answer",
+        strategy: "direct_answer",
+        status: "completed",
+        controls: [],
+        actionIds: [],
+        observationIds: [],
+        blockerIds: [],
+        proposalIds: [],
+        finalDeliveryId: "delivery-direct-k5-1",
+      },
+      route: { strategy: "direct_answer", reason: "ordinary_direct_answer", confidence: 0.94 },
+      context: [],
+      provider: undefined,
+      plan: undefined,
+      actions: [],
+      observations: [],
+      blockers: [],
+      proposals: [],
+      finalDelivery: {
+        ...base.finalDelivery!,
+        deliveryId: "delivery-direct-k5-1",
+        taskId: "mainchat-task-direct-k5-1",
+        runId: "run-direct-k5-1",
+        headline: "Direct answer delivered",
+        answer: "A direct answer with no tool work.",
+        completedActions: [],
+        observationsUsed: [],
+        proposalsCreated: [],
+        blockers: [],
+        pendingUserActions: [],
+        durableChanges: [],
+        nextSteps: [],
+      },
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Answer directly" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+    await waitFor(() => {
+      expect(listeners.get("stream-message-done")).toBeDefined();
+    });
+
+    await act(async () => {
+      await listeners.get("stream-message-done")?.({
+        payload: {
+          session_id: "session-1",
+          run_id: "run-direct-k5-1",
+          reply: "A direct answer with no tool work.",
+          reasoning_trace: null,
+          tool_calls: [],
+          agent_state: directState,
+          execution_transcript: [],
+          legacy_fallback_used: false,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText("A direct answer with no tool work.")).toBeInTheDocument();
+    expect(screen.getByText("Execution evidence")).toBeInTheDocument();
+    expect(screen.getByText("Final answer")).toBeInTheDocument();
+    expect(screen.queryByText("Agent Control Plane")).not.toBeInTheDocument();
+    expect(screen.queryByText("Reviewer trace")).not.toBeInTheDocument();
+  });
+
+  it("renders kernel-event thinking, tool running, and tool observation states", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Read AGENTS.md" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+    await waitFor(() => {
+      expect(listeners.get("main-chat-kernel-event")).toBeDefined();
+    });
+
+    await act(async () => {
+      await listeners.get("main-chat-kernel-event")?.({
+        payload: { type: "turn_started", session_id: "session-1", selected_skill_id: null },
+      });
+      await listeners.get("main-chat-kernel-event")?.({
+        payload: {
+          type: "context_loaded",
+          context_snapshot_ref: "context:k5",
+          selected_source_count: 2,
+          selected_skill_instruction_loaded: false,
+        },
+      });
+      await listeners.get("main-chat-kernel-event")?.({
+        payload: {
+          type: "tool_decision",
+          tool_name: "file.read",
+          action_type: "file.read",
+          target: "AGENTS.md",
+          reason: "read_workspace_context",
+          model_arguments_ignored: true,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText("Execution evidence")).toBeInTheDocument();
+    expect(screen.getByText("Thinking")).toBeInTheDocument();
+    expect(screen.getByText("Tool running")).toBeInTheDocument();
+    expect(screen.getByText("AGENTS.md")).toBeInTheDocument();
+
+    await act(async () => {
+      await listeners.get("main-chat-kernel-event")?.({
+        payload: {
+          type: "tool_observation",
+          tool_name: "file.read",
+          status: "succeeded",
+          output_preview: "Main Chat evidence mapping found in AGENTS.md.",
+          blocker: null,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("Tool observation")).toBeInTheDocument();
+    expect(screen.getByText("Main Chat evidence mapping found in AGENTS.md.")).toBeInTheDocument();
+  });
+
+  it("renders proposal, permission, and blocker evidence with review navigation", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+    const base = buildMainChatAgentStateSnapshot();
+    const permissionState = buildMainChatAgentStateSnapshot({
+      task: {
+        ...base.task,
+        taskId: "mainchat-task-permission-k5-1",
+        runId: "run-permission-k5-1",
+        title: "Permission needed",
+        strategy: "permission_request",
+        status: "waiting_permission",
+        controls: ["cancel_task", "open_review_center"],
+        actionIds: ["action-permission-k5-1"],
+        observationIds: [],
+        blockerIds: ["blocker-permission-k5-1"],
+        proposalIds: ["proposal-permission-k5-1"],
+        finalDeliveryId: undefined,
+      },
+      route: { strategy: "permission_request", reason: "permission required", confidence: 0.9 },
+      actions: [
+        {
+          ...base.actions[0],
+          actionId: "action-permission-k5-1",
+          actionType: "mcp_tool",
+          target: "registered.mcp.read",
+          label: "Read registered MCP target",
+          status: "pending_permission",
+          observationIds: [],
+        },
+      ],
+      observations: [],
+      blockers: [
+        {
+          blockerId: "blocker-permission-k5-1",
+          reasonCode: "tool_permission_required",
+          title: "Permission required",
+          detail: "This governed tool action needs user approval before it can continue.",
+          affectedActionId: "action-permission-k5-1",
+          recoverable: true,
+          controls: ["approve_once", "deny", "defer", "open_review_center"],
+        },
+      ],
+      proposals: [
+        {
+          proposalId: "proposal-permission-k5-1",
+          proposalType: "tool_permission",
+          status: "pending_review",
+          title: "Allow registered MCP read",
+          summary: "Approve one registered read-only MCP call.",
+          evidenceIds: ["evidence-permission-k5-1"],
+          actionIds: ["action-permission-k5-1"],
+          controls: ["approve_once", "deny", "defer", "open_review_center"],
+        },
+      ],
+      finalDelivery: undefined,
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Use the registered MCP target" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+    await waitFor(() => {
+      expect(listeners.get("stream-message-done")).toBeDefined();
+    });
+
+    await act(async () => {
+      await listeners.get("stream-message-done")?.({
+        payload: {
+          session_id: "session-1",
+          run_id: "run-permission-k5-1",
+          reply: "I need your approval before continuing.",
+          reasoning_trace: null,
+          tool_calls: [],
+          agent_state: permissionState,
+          execution_transcript: [],
+          legacy_fallback_used: false,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText("Proposal created")).toBeInTheDocument();
+    expect(screen.getAllByText("Permission needed").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("Blocked")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open proposal" })).toHaveAttribute("href", "/review");
+    expect(screen.getByRole("link", { name: "Open Review Center" })).toHaveAttribute(
+      "href",
+      "/review"
+    );
+    expect(screen.getByText(/Next:/)).toBeInTheDocument();
+  });
+
+  it("cancels an in-progress stream task and renders canceled state from task evidence", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+    const base = buildMainChatAgentStateSnapshot();
+    const runningState = buildMainChatAgentStateSnapshot({
+      task: {
+        ...base.task,
+        taskId: "mainchat-task-cancel-k5-1",
+        runId: "run-cancel-k5-1",
+        title: "Cancelable tool run",
+        strategy: "react_tool_execution",
+        status: "running",
+        controls: ["cancel_task"],
+        finalDeliveryId: undefined,
+      },
+      actions: [{ ...base.actions[0], status: "executing" }],
+      observations: [],
+      finalDelivery: undefined,
+    });
+    const runningTaskState = {
+      session: {
+        id: "mainchat-task-cancel-k5-1",
+        chatSessionId: "session-1",
+        userGoal: "Cancelable tool run",
+        selectedStrategy: "react_tool_execution",
+        status: "running",
+        currentPlanSummary: "Read with cancel support.",
+        actionQueueIds: ["action-product-ui-1"],
+        pendingBlockers: [],
+        contextSnapshotRefs: [],
+        createdAt: "2026-06-16T00:00:00.000Z",
+        updatedAt: "2026-06-16T00:00:01.000Z",
+      },
+      actions: [],
+      transcript: [],
+      pendingApprovalCount: 0,
+      activeToolCount: 1,
+      canResume: false,
+      canCancel: true,
+      canRetry: false,
+    };
+    const canceledTaskState = {
+      ...runningTaskState,
+      session: {
+        ...runningTaskState.session,
+        status: "cancelled",
+        finalSummary: "Cancelled from Main Chat controls.",
+      },
+      activeToolCount: 0,
+      canCancel: false,
+    };
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: any) => {
+      if (cmd === "get_main_chat_agent_task_state") {
+        return Promise.resolve(runningTaskState);
+      }
+      if (cmd === "cancel_main_chat_agent_task") {
+        return Promise.resolve(canceledTaskState);
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Read a slow workspace file" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+    await waitFor(() => {
+      expect(listeners.get("stream-message-start")).toBeDefined();
+    });
+
+    await act(async () => {
+      await listeners.get("stream-message-start")?.({
+        payload: {
+          session_id: "session-1",
+          run_id: "run-cancel-k5-1",
+          reasoning_trace: null,
+          tool_calls: [],
+          agent_ingress: {
+            requestId: "request-cancel-k5-1",
+            sourceSessionId: "session-1",
+            taskKind: "conversation",
+            selectedStrategy: "react_tool_execution",
+            confidence: 0.9,
+            reasonSummary: "read tool",
+            fallbackEligible: false,
+            privacyRisk: {
+              riskLevel: "low",
+              privacyClass: "standard",
+              policyReasonCode: "read_only",
+              localOnlyRequired: false,
+              writeLike: false,
+              externalWriteLike: false,
+            },
+            agentTaskSessionId: "mainchat-task-cancel-k5-1",
+          },
+          agent_state: runningState,
+          execution_transcript: [],
+          legacy_fallback_used: false,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel current Main Chat task" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "cancel_main_chat_agent_task",
+        expect.objectContaining({ taskSessionId: "mainchat-task-cancel-k5-1" })
+      );
+    });
+    expect(await screen.findByText("Canceled")).toBeInTheDocument();
+    expect(screen.getByText("Cancelled from Main Chat controls.")).toBeInTheDocument();
+    expect(screen.queryByText("Final answer")).not.toBeInTheDocument();
   });
 
   it("refreshes agent snapshot after accepting a memory proposal so rollback is visible", async () => {
@@ -1382,6 +1768,7 @@ describe("ChatPage", () => {
       await Promise.resolve();
     });
 
+    fireEvent.click(await screen.findByRole("button", { name: "Show Main Chat diagnostics" }));
     fireEvent.click(await screen.findByRole("button", { name: "Accept proposal" }));
 
     expect(await screen.findByRole("button", { name: "Rollback memory" })).toBeInTheDocument();
@@ -1480,6 +1867,7 @@ describe("ChatPage", () => {
       await Promise.resolve();
     });
 
+    fireEvent.click(await screen.findByRole("button", { name: "Show Main Chat diagnostics" }));
     expect(await screen.findByText("Event stream")).toBeInTheDocument();
     expect(screen.getByText("receiving_event")).toBeInTheDocument();
     expect(screen.getAllByText(/final_delivery\.created/).length).toBeGreaterThanOrEqual(1);
@@ -1603,6 +1991,7 @@ describe("ChatPage", () => {
       await Promise.resolve();
     });
 
+    fireEvent.click(await screen.findByRole("button", { name: "Show Main Chat diagnostics" }));
     fireEvent.click(await screen.findByRole("button", { name: "Confirm plan" }));
     fireEvent.click(await screen.findByRole("button", { name: "Edit step Review priorities" }));
     fireEvent.click(await screen.findByRole("button", { name: "Execute step Review priorities" }));
@@ -1749,6 +2138,7 @@ describe("ChatPage", () => {
       await Promise.resolve();
     });
 
+    fireEvent.click(await screen.findByRole("button", { name: "Show Main Chat diagnostics" }));
     await screen.findAllByText("Plan interaction");
     expect(screen.queryByRole("button", { name: "Confirm plan" })).not.toBeInTheDocument();
     expect(
@@ -1858,6 +2248,7 @@ describe("ChatPage", () => {
       await Promise.resolve();
     });
 
+    fireEvent.click(await screen.findByRole("button", { name: "Show Main Chat diagnostics" }));
     fireEvent.click(
       await screen.findByRole("button", { name: "Execute step Continue next read step" })
     );
@@ -2042,6 +2433,7 @@ describe("ChatPage", () => {
       await Promise.resolve();
     });
 
+    fireEvent.click(await screen.findByRole("button", { name: "Show Main Chat diagnostics" }));
     await screen.findAllByText("cancelled");
     expect(screen.getAllByText("cancelled").length).toBeGreaterThan(0);
     expect(screen.getByText("Review summary")).toBeInTheDocument();
@@ -2213,6 +2605,7 @@ describe("ChatPage", () => {
         })
       );
     });
+    fireEvent.click(await screen.findByRole("button", { name: "Show Main Chat diagnostics" }));
     expect(await screen.findByText("stream_recovered")).toBeInTheDocument();
     expect(screen.getByText("3 events")).toBeInTheDocument();
 
@@ -2247,7 +2640,7 @@ describe("ChatPage", () => {
     });
     expect(await screen.findByText("snapshot_refresh_required")).toBeInTheDocument();
     expect(screen.getAllByText("sequence 5").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText("Recovered from snapshot")).toBeInTheDocument();
+    expect(screen.getAllByText("Recovered from snapshot").length).toBeGreaterThanOrEqual(1);
   });
 
   it("approves an exact ToolPermission proposal inline and resumes the Main Chat task", async () => {
@@ -2449,6 +2842,7 @@ describe("ChatPage", () => {
       await Promise.resolve();
     });
 
+    fireEvent.click(await screen.findByRole("button", { name: "Show Main Chat diagnostics" }));
     fireEvent.click(await screen.findByRole("button", { name: "Approve once" }));
 
     await waitFor(() => {
@@ -2582,8 +2976,13 @@ describe("ChatPage", () => {
       await Promise.resolve();
     });
 
+    expect(await screen.findByText("Execution evidence")).toBeInTheDocument();
+    expect(screen.queryByText("Agent Control Plane")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show Main Chat diagnostics" }));
     expect(await screen.findByText("Agent Control Plane")).toBeInTheDocument();
-    expect(screen.getByText("Direct response with no tool evidence")).toBeInTheDocument();
+    expect(
+      screen.getAllByText("Direct response with no tool evidence").length
+    ).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText("Direct answer delivered").length).toBeGreaterThanOrEqual(1);
     expect(screen.queryByText("fake.file.read")).not.toBeInTheDocument();
     expect(screen.queryByText("Ghost observation")).not.toBeInTheDocument();
@@ -2745,6 +3144,9 @@ describe("ChatPage", () => {
       await Promise.resolve();
     });
 
+    expect(await screen.findByText("Execution evidence")).toBeInTheDocument();
+    expect(screen.queryByText("Diagnostic task shell")).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Show Main Chat diagnostics" }));
     expect(await screen.findByText("Diagnostic task shell")).toBeInTheDocument();
     expect(screen.getByTestId("agent-diagnostic-task-shell")).toHaveAttribute(
       "data-agent-state-source",
@@ -2756,7 +3158,9 @@ describe("ChatPage", () => {
       )
     ).toBeInTheDocument();
     expect(screen.getByText("Goal")).toBeInTheDocument();
-    expect(screen.getByText("Prepare a low energy weekly plan")).toBeInTheDocument();
+    expect(screen.getAllByText("Prepare a low energy weekly plan").length).toBeGreaterThanOrEqual(
+      1
+    );
     expect(screen.getByText("Current plan")).toBeInTheDocument();
     expect(
       screen.getByText("Search planning memory, then ask before creating tasks.")
@@ -2770,12 +3174,14 @@ describe("ChatPage", () => {
     expect(screen.getByText("Proposal store unavailable")).toBeInTheDocument();
     expect(screen.getByText("Proposal required")).toBeInTheDocument();
     expect(screen.getByText("Permission required")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Open Review Center" })).toHaveAttribute(
+    expect(screen.getAllByRole("link", { name: "Open Review Center" })[0]).toHaveAttribute(
       "href",
       "/review"
     );
     expect(screen.getByText("Pending blockers")).toBeInTheDocument();
-    expect(screen.getByText("resumeBlockedByPendingPermission")).toBeInTheDocument();
+    expect(screen.getAllByText("resumeBlockedByPendingPermission").length).toBeGreaterThanOrEqual(
+      1
+    );
     expect(screen.getByText(/Fallback notice/)).toBeInTheDocument();
     expect(screen.getByText(/visible legacy fallback/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Resume task" })).toBeEnabled();
@@ -2953,7 +3359,8 @@ describe("ChatPage", () => {
       await Promise.resolve();
     });
 
-    fireEvent.click(await screen.findByRole("link", { name: "Open Review Center" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Show Main Chat diagnostics" }));
+    fireEvent.click((await screen.findAllByRole("link", { name: "Open Review Center" }))[0]);
 
     expect(await screen.findByText("Review Center")).toBeInTheDocument();
     expect(await screen.findByText("tools.permissions.file.read")).toBeInTheDocument();

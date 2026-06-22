@@ -512,6 +512,69 @@ export interface StreamMessageDonePayload {
   legacy_fallback_used?: boolean;
 }
 
+export type MainChatKernelEvent =
+  | {
+      type: "turn_started";
+      session_id: string;
+      selected_skill_id?: string | null;
+    }
+  | {
+      type: "context_loaded";
+      context_snapshot_ref: string;
+      selected_source_count: number;
+      selected_skill_instruction_loaded: boolean;
+    }
+  | {
+      type: "route_selected";
+      route_metadata: {
+        provider: string;
+        model: string;
+        routeType: string;
+        preferLocal: boolean;
+        localModel: string;
+        reason: string;
+        privacyLevel: string;
+        toolsEnabled: boolean;
+        liveEvalRequired: boolean;
+        finalAcceptanceGateRequired: boolean;
+        readinessGateRequired: boolean;
+        scriptedResponseConfigured: boolean;
+      };
+    }
+  | {
+      type: "final_answer";
+      content_preview: string;
+      content_chars: number;
+    }
+  | {
+      type: "tool_decision";
+      tool_name: string;
+      action_type: string;
+      target: string;
+      reason: string;
+      model_arguments_ignored: boolean;
+    }
+  | {
+      type: "tool_observation";
+      tool_name: string;
+      status: string;
+      output_preview: string;
+      blocker?: string | null;
+    }
+  | {
+      type: "write_intent_decision";
+      outcome_kind: string;
+      action_type: string;
+      target: string;
+      reason: string;
+      requires_confirmation: boolean;
+      hard_blocked: boolean;
+    }
+  | {
+      type: "blocker";
+      code: string;
+    };
+
 export type MainChatAgentProductStrategyRoute =
   | "direct_answer"
   | "read_action"
