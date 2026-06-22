@@ -27,12 +27,24 @@ impl A2ASidecar {
             }
         }
 
-        if crate::a2a_server::has_reachable_local_server(self.port).await {
-            println!(
-                "[A2A Sidecar] detected existing OpenLife A2A server on port {} - a2a_sidecar.rs:26",
-                self.port
-            );
-            return Ok(());
+        match crate::a2a_server::classify_local_sidecar(self.port).await {
+            crate::a2a_server::LocalSidecarStatus::Current => {
+                println!(
+                    "[A2A Sidecar] reusing current OpenLife A2A sidecar on port {} - a2a_sidecar.rs:28",
+                    self.port
+                );
+                return Ok(());
+            }
+            crate::a2a_server::LocalSidecarStatus::NotRunning => {}
+            status => {
+                let detail = status
+                    .mismatch_detail()
+                    .unwrap_or_else(|| status.status_label());
+                return Err(AppError::internal(format!(
+                    "Refusing to reuse A2A sidecar on port {}: {}",
+                    self.port, detail
+                )));
+            }
         }
 
         let bin_path = resolve_a2a_server_binary()?;
@@ -43,6 +55,7 @@ impl A2ASidecar {
 
         let child = Command::new(&bin_path)
             .env("A2A_PORT", self.port.to_string())
+            .env("OPENLIFE_PROFILE", crate::storage::openlife_profile())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()

@@ -6,6 +6,12 @@ use openlife_core::router::RouterStatus;
 use std::sync::Arc;
 use tauri::State;
 
+#[tauri::command]
+pub async fn get_runtime_build_info(
+) -> Result<crate::runtime_build_info::RuntimeBuildInfo, AppError> {
+    Ok(crate::runtime_build_info::collect_runtime_build_info().await)
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SchedulerConfigResponse {
@@ -308,6 +314,8 @@ pub async fn get_system_diagnostics(
         && vector_corrupt_embedding_count == 0
         && !(chat_session_count > 0 && memory_chunk_count == 0);
 
+    let runtime_build_info = crate::runtime_build_info::collect_runtime_build_info().await;
+
     Ok(SystemDiagnostics {
         router,
         mcp_server_count,
@@ -353,6 +361,7 @@ pub async fn get_system_diagnostics(
         pending_proposal_count,
         high_risk_pending_proposal_count,
         proposal_store_status,
+        runtime_build_info,
     })
 }
 

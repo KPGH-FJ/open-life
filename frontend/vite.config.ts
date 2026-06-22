@@ -1,6 +1,8 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
+const vitePort = Number(process.env.PORT || process.env.VITE_PORT || 5173)
+
 export default defineConfig(async ({ command }) => ({
   base: command === 'build' ? './' : '/',
   plugins: [react()],
@@ -11,7 +13,7 @@ export default defineConfig(async ({ command }) => ({
   },
   clearScreen: false,
   server: {
-    port: 5173,
+    port: vitePort,
     strictPort: true,
     watch: {
       ignored: ["**/src-tauri/**"],

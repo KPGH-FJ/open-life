@@ -25,7 +25,6 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $RepoRoot = Resolve-Path (Join-Path $ScriptDir "..")
 $FrontendDir = Join-Path $RepoRoot "frontend"
-$VitePort = if ($env:PORT) { $env:PORT } else { "5173" }
 
 # 加载 .env
 $EnvFile = Join-Path $RepoRoot ".env"
@@ -42,6 +41,27 @@ if (Test-Path $EnvFile) {
         }
     }
 }
+
+$OpenLifeProfile = if ($env:OPENLIFE_PROFILE) { $env:OPENLIFE_PROFILE } else { "dev" }
+$env:OPENLIFE_PROFILE = $OpenLifeProfile
+if (-not $env:A2A_PORT) {
+    if ($OpenLifeProfile -eq "dev") {
+        $env:A2A_PORT = "8766"
+    } else {
+        $env:A2A_PORT = "8765"
+    }
+}
+$VitePort = if ($env:PORT) { $env:PORT } else { "5173" }
+$env:OPENLIFE_DEV_URL = "http://127.0.0.1:$VitePort"
+$env:OPENLIFE_FRONTEND_DIST = Join-Path $FrontendDir "dist"
+$env:OPENLIFE_FRONTEND_MODE = "dev_server"
+$TauriConfigOverride = @{
+    build = @{
+        beforeDevCommand = "cd `"$FrontendDir`" && corepack pnpm dev --host 127.0.0.1 --port $VitePort"
+        devUrl = $env:OPENLIFE_DEV_URL
+        frontendDist = $env:OPENLIFE_FRONTEND_DIST
+    }
+} | ConvertTo-Json -Compress -Depth 4
 
 # 检查端口
 $listener = $null
@@ -71,6 +91,9 @@ Write-Host "\____/ .___/\___/\__,_/     ^|__/^|__/\____/_/  /_/ /_/ \____/" -For
 Write-Host "    /_/" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "OpenLife - 开发模式启动" -ForegroundColor Blue
+Write-Host "[INFO] Profile: $OpenLifeProfile" -ForegroundColor Blue
+Write-Host "[INFO] Vite: $($env:OPENLIFE_DEV_URL)" -ForegroundColor Blue
+Write-Host "[INFO] A2A: 127.0.0.1:$($env:A2A_PORT)" -ForegroundColor Blue
 Write-Host ""
 Write-Host "╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Green
 Write-Host "║  🚀 正在启动 OpenLife 开发服务器...                           ║" -ForegroundColor Green
@@ -93,6 +116,12 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "       请运行: corepack prepare pnpm@9.1.0 --activate"
     exit 1
 }
+if (-not (Get-Command "cargo" -ErrorAction SilentlyContinue)) {
+    Write-Host "[ERROR] cargo 不可用" -ForegroundColor Red
+    exit 1
+}
+Write-Host "[INFO] 构建 A2A sidecar..." -ForegroundColor Blue
+cargo build --manifest-path (Join-Path $RepoRoot "Cargo.toml") --bin openlife-a2a-server
 
 Push-Location $RepoRoot
 $localTauri = Join-Path $FrontendDir "node_modules\.bin\tauri.cmd"
@@ -101,10 +130,10 @@ $globalTauri = Get-Command "tauri" -ErrorAction SilentlyContinue
 try {
     if (Test-Path $localTauri) {
         Write-Host "[INFO] 使用本地 Tauri CLI 启动..." -ForegroundColor Blue
-        & $localTauri dev
+        & $localTauri dev --config $TauriConfigOverride
     } elseif ($globalTauri) {
         Write-Host "[INFO] 使用全局 Tauri CLI 启动..." -ForegroundColor Blue
-        tauri dev
+        tauri dev --config $TauriConfigOverride
     } else {
         Write-Host "[ERROR] Tauri CLI 不可用" -ForegroundColor Red
         Write-Host "       请先运行: corepack pnpm --dir `"$FrontendDir`" install"

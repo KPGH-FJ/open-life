@@ -6,11 +6,14 @@ use axum::{
 use openlife_core::a2a::{A2AServerHandler, SendTaskRequest, SendTaskResponse};
 use openlife_core::life_model::LifeModelManager;
 use openlife_core::privacy::PrivacyEngine;
+use openlife_tauri_lib::a2a_server::{configured_a2a_port, A2AHealth};
+use openlife_tauri_lib::storage::app_data_dir;
 use std::sync::Arc;
 
 struct AppState {
     life_model_manager: LifeModelManager,
     privacy_engine: PrivacyEngine,
+    port: u16,
 }
 
 #[tokio::main]
@@ -18,11 +21,9 @@ async fn main() {
     let port: u16 = std::env::var("A2A_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
-        .unwrap_or(8765);
+        .unwrap_or_else(configured_a2a_port);
 
-    let data_dir = dirs::data_dir()
-        .map(|d| d.join("ai.openlife.app"))
-        .unwrap_or_else(|| std::env::current_dir().unwrap().join(".openlife"));
+    let data_dir = app_data_dir();
 
     let life_model_manager = LifeModelManager::new(data_dir.join("life-model").join("current"));
     let privacy_engine = PrivacyEngine::new();
@@ -34,6 +35,7 @@ async fn main() {
     let state = Arc::new(AppState {
         life_model_manager,
         privacy_engine,
+        port,
     });
 
     let card = A2AServerHandler::default_agent_card(port, &life_model);
@@ -42,6 +44,7 @@ async fn main() {
             "/agent.json",
             get(move || async move { Json(card.clone()) }),
         )
+        .route("/health", get(health))
         .route("/tasks/send", post(send_task))
         .with_state(state);
 
@@ -60,24 +63,12 @@ async fn main() {
         }
         Err(e) => {
             eprintln!("[A2A] Failed to bind server: {}", e);
-            // 尝试其他端口或优雅退出
-            for port in 8766..=8775 {
-                let bind_addr = format!("127.0.0.1:{}", port);
-                match tokio::net::TcpListener::bind(&bind_addr).await {
-                    Ok(listener) => {
-                        let addr = listener.local_addr().unwrap();
-                        println!("[A2A] HTTP server listening on http://{}", addr);
-                        if let Err(e) = axum::serve(listener, app).await {
-                            eprintln!("[A2A] Server error: {}", e);
-                        }
-                        return;
-                    }
-                    Err(_) => continue,
-                }
-            }
-            eprintln!("[A2A] Could not bind to any port in range 8765-8775");
         }
     }
+}
+
+async fn health(State(state): State<Arc<AppState>>) -> Json<A2AHealth> {
+    Json(A2AHealth::current(state.port))
 }
 
 async fn send_task(

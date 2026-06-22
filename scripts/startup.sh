@@ -53,8 +53,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FRONTEND_DIR="$REPO_ROOT/frontend"
 TAURI_DIR="$REPO_ROOT/src-tauri"
 ENV_FILE="$REPO_ROOT/.env"
-A2A_PORT="${A2A_PORT:-8765}"
-VITE_PORT="${PORT:-5173}"
+A2A_PORT="${A2A_PORT:-}"
+VITE_PORT="${PORT:-}"
 
 # =============================================================================
 # 工具函数
@@ -147,6 +147,58 @@ wait_for_port() {
         sleep 1
     done
     log_success "端口 $port 已就绪"
+}
+
+json_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+configure_runtime_profile() {
+    local command="${1:-dev}"
+    if [ -z "${OPENLIFE_PROFILE:-}" ] && [ "$command" = "dev" ]; then
+        OPENLIFE_PROFILE="dev"
+        export OPENLIFE_PROFILE
+    else
+        OPENLIFE_PROFILE="${OPENLIFE_PROFILE:-release}"
+        export OPENLIFE_PROFILE
+    fi
+
+    VITE_PORT="${PORT:-${VITE_PORT:-5173}}"
+    if [ -z "${A2A_PORT:-}" ]; then
+        if [ "$OPENLIFE_PROFILE" = "dev" ]; then
+            A2A_PORT="8766"
+        else
+            A2A_PORT="8765"
+        fi
+    fi
+    export A2A_PORT
+}
+
+tauri_config_override() {
+    local frontend_dir_json dev_url_json frontend_dist_json
+    OPENLIFE_DEV_URL="http://127.0.0.1:$VITE_PORT"
+    OPENLIFE_FRONTEND_DIST="$FRONTEND_DIR/dist"
+    export OPENLIFE_DEV_URL OPENLIFE_FRONTEND_DIST OPENLIFE_FRONTEND_MODE="dev_server"
+    frontend_dir_json="$(json_escape "$FRONTEND_DIR")"
+    dev_url_json="$(json_escape "$OPENLIFE_DEV_URL")"
+    frontend_dist_json="$(json_escape "$OPENLIFE_FRONTEND_DIST")"
+    cat <<JSON
+{
+  "build": {
+    "beforeDevCommand": "cd \"$frontend_dir_json\" && corepack pnpm dev --host 127.0.0.1 --port $VITE_PORT",
+    "devUrl": "$dev_url_json",
+    "frontendDist": "$frontend_dist_json"
+  }
+}
+JSON
+}
+
+openlife_app_dir_name() {
+    case "${OPENLIFE_PROFILE:-release}" in
+        dev) echo "ai.openlife.app.dev" ;;
+        qa) echo "ai.openlife.app.qa" ;;
+        *) echo "ai.openlife.app" ;;
+    esac
 }
 
 # =============================================================================
@@ -292,12 +344,14 @@ init_database() {
     log_step "初始化数据存储"
 
     local data_dir
-    if [ "$(uname)" = "Darwin" ]; then
-        data_dir="${HOME}/Library/Application Support/ai.openlife.app"
+    if [ -n "${OPENLIFE_DATA_DIR:-}" ]; then
+        data_dir="$OPENLIFE_DATA_DIR"
+    elif [ "$(uname)" = "Darwin" ]; then
+        data_dir="${HOME}/Library/Application Support/$(openlife_app_dir_name)"
     elif [ -n "${XDG_DATA_HOME:-}" ]; then
-        data_dir="${XDG_DATA_HOME}/ai.openlife.app"
+        data_dir="${XDG_DATA_HOME}/$(openlife_app_dir_name)"
     else
-        data_dir="${HOME}/.local/share/ai.openlife.app"
+        data_dir="${HOME}/.local/share/$(openlife_app_dir_name)"
     fi
 
     if [ ! -d "$data_dir" ]; then
@@ -316,6 +370,8 @@ init_database() {
 
 start_dev() {
     log_step "启动 OpenLife 开发模式"
+    local config_override
+    config_override="$(tauri_config_override)"
 
     # 检查端口
     check_port "$VITE_PORT" || {
@@ -331,6 +387,9 @@ start_dev() {
     echo -e "${GREEN}║  请耐心等待...                                               ║${NC}"
     echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
+    log_info "Profile: $OPENLIFE_PROFILE"
+    log_info "Vite: $OPENLIFE_DEV_URL"
+    log_info "A2A: 127.0.0.1:$A2A_PORT"
 
     cd "$REPO_ROOT"
 
@@ -341,13 +400,21 @@ start_dev() {
         exit 1
     fi
 
+    if ! command -v cargo &>/dev/null; then
+        log_error "cargo 不可用"
+        exit 1
+    fi
+
+    log_info "构建 A2A sidecar..."
+    cargo build --bin openlife-a2a-server
+
     # 检查使用哪种方式启动 Tauri
     if [ -f "$FRONTEND_DIR/node_modules/.bin/tauri" ]; then
         log_info "使用本地 Tauri CLI 启动..."
-        "$FRONTEND_DIR/node_modules/.bin/tauri" dev
+        "$FRONTEND_DIR/node_modules/.bin/tauri" dev --config "$config_override"
     elif command -v tauri &>/dev/null; then
         log_info "使用全局 Tauri CLI 启动..."
-        tauri dev
+        tauri dev --config "$config_override"
     else
         log_error "Tauri CLI 不可用"
         log_info "请先运行: corepack pnpm --dir \"$FRONTEND_DIR\" install"
@@ -396,12 +463,14 @@ main() {
         check)
             check_environment
             setup_env
+            configure_runtime_profile "$command"
             echo ""
             log_success "环境检查完成！可以运行 ./scripts/startup.sh dev 启动应用"
             ;;
         dev)
             check_environment
             setup_env
+            configure_runtime_profile "$command"
             install_dependencies
             init_database
             start_dev
@@ -409,6 +478,7 @@ main() {
         a2a)
             check_environment
             setup_env
+            configure_runtime_profile "$command"
             start_a2a
             ;;
         *)

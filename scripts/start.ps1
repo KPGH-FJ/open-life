@@ -8,7 +8,7 @@
 #   .\start.ps1
 #
 # 构建产物：
-#   src-tauri\target\release\bundle\
+#   由 cargo metadata 的 target_directory 决定
 #
 # 预期时间：
 #   首次构建约 5-15 分钟（取决于机器性能）
@@ -19,7 +19,7 @@
 #      详见 https://tauri.app/start/prerequisites/
 #
 #   Q: 构建产物在哪里？
-#   A: 查看 src-tauri\target\release\bundle\ 目录
+#   A: 脚本会打印 cargo metadata 解析出的实际 bundle 目录
 # =============================================================================
 
 $ErrorActionPreference = "Stop"
@@ -27,7 +27,6 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $RepoRoot = Resolve-Path (Join-Path $ScriptDir "..")
 $FrontendDir = Join-Path $RepoRoot "frontend"
-$TauriDir = Join-Path $RepoRoot "src-tauri"
 
 function Write-Info($msg)    { Write-Host "[INFO]  $msg" -ForegroundColor Blue }
 function Write-Success($msg) { Write-Host "[OK]    $msg" -ForegroundColor Green }
@@ -74,7 +73,7 @@ Write-Host "╔═════════════════════�
 Write-Host "║  📦 正在构建 Windows x86_64 版本...                           ║" -ForegroundColor Green
 Write-Host "║                                                              ║" -ForegroundColor Green
 Write-Host "║  首次构建可能需要 5-15 分钟，请耐心等待                     ║" -ForegroundColor Green
-Write-Host "║  产物将输出到 src-tauri\target\release\bundle\               ║" -ForegroundColor Green
+Write-Host "║  产物目录将由 cargo metadata target_directory 决定          ║" -ForegroundColor Green
 Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Green
 Write-Host ""
 
@@ -91,6 +90,10 @@ if ($LASTEXITCODE -ne 0) {
     Write-Info "请运行: corepack prepare pnpm@9.1.0 --activate"
     exit 1
 }
+
+$cargoMetadata = cargo metadata --format-version=1 --no-deps | ConvertFrom-Json
+$targetDir = $cargoMetadata.target_directory
+Write-Info "Cargo target directory: $targetDir"
 
 Push-Location $RepoRoot
 $localTauri = Join-Path $FrontendDir "node_modules\.bin\tauri.cmd"
@@ -113,7 +116,7 @@ try {
 }
 
 # 检查构建结果
-$bundleDir = Join-Path $TauriDir "target\release\bundle"
+$bundleDir = Join-Path $targetDir "release\bundle"
 if (Test-Path $bundleDir) {
     Write-Step "构建完成！"
     Write-Host ""

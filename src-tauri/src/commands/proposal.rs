@@ -2121,7 +2121,9 @@ mod tests {
             builder_session_store: Arc::new(Mutex::new(BuilderSessionStore::new(
                 temp_dir.path().join("builder_sessions.json"),
             ))),
-            a2a_sidecar: Arc::new(Mutex::new(A2ASidecar::new(8765))),
+            a2a_sidecar: Arc::new(Mutex::new(A2ASidecar::new(
+                crate::a2a_server::configured_a2a_port(),
+            ))),
             last_snapshot_date: Arc::new(Mutex::new(None)),
             mcp_audit_store: Arc::new(Mutex::new(McpAuditStore::new(
                 temp_dir.path().join("mcp_audit.db"),

@@ -50,6 +50,29 @@ function isProductRouteActive(label: ProductRouteLabel, pathname: string): boole
   return PRODUCT_ROUTE_ALIASES[label].some(routePath => matchesRoute(pathname, routePath));
 }
 
+function shortSha(sha?: string): string {
+  if (!sha || sha === "unknown") return "unknown";
+  return sha.slice(0, 7);
+}
+
+function runtimeBadgeLabel(diagnostics: SystemDiagnostics | null): string | null {
+  const info = diagnostics?.runtime_build_info;
+  if (!info) return null;
+  const shouldShow =
+    info.profile !== "release" ||
+    info.frontendMode === "dev_server" ||
+    info.binaryKind === "debug_binary" ||
+    info.binaryKind === "debug_bundle";
+  if (!shouldShow) return null;
+
+  const profileLabel =
+    info.profile === "dev" ? "Dev" : info.profile === "qa" ? "QA" : info.profile || "Runtime";
+  const source = info.frontendMode === "dev_server" ? info.devUrl || "" : "";
+  const port = source.match(/:(\d+)(?:\/)?$/)?.[1] ?? "";
+  const portLabel = port || (info.frontendMode === "dev_server" ? "dev server" : info.binaryKind);
+  return `OpenLife ${profileLabel} · ${portLabel} · ${shortSha(info.gitSha)}`;
+}
+
 export function MainTabs() {
   const location = useLocation();
 
@@ -158,14 +181,27 @@ export default function ProductShell({
   safeMode,
   safeModeReason,
 }: ProductShellProps) {
+  const badgeLabel = runtimeBadgeLabel(diagnostics);
+
   return (
     <div className="h-screen min-h-0 overflow-hidden bg-[#f5f6f2] text-stone-950">
       <div className="flex h-full min-h-0 flex-col">
         <header className="shrink-0 border-b border-stone-200 bg-[#fcfcf8]/95 px-4 py-2">
           <div className="mx-auto grid max-w-[1500px] grid-cols-[minmax(0,1fr)_auto] items-center gap-2 sm:grid-cols-[1fr_auto_1fr] sm:gap-3">
-            <div aria-hidden="true" className="hidden sm:block" />
+            <div className="hidden min-w-0 sm:block">
+              {badgeLabel && (
+                <div className="inline-flex max-w-full items-center rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-[11px] font-semibold text-emerald-800">
+                  <span className="truncate">{badgeLabel}</span>
+                </div>
+              )}
+            </div>
             <MainTabs />
-            <div className="flex justify-end">
+            <div className="flex min-w-0 justify-end gap-2">
+              {badgeLabel && (
+                <div className="inline-flex max-w-[160px] items-center rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-[11px] font-semibold text-emerald-800 sm:hidden">
+                  <span className="truncate">{badgeLabel}</span>
+                </div>
+              )}
               <SecondaryToolsMenu />
             </div>
           </div>

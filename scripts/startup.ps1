@@ -50,8 +50,8 @@ $RepoRoot = Resolve-Path (Join-Path $ScriptDir "..")
 $FrontendDir = Join-Path $RepoRoot "frontend"
 $TauriDir = Join-Path $RepoRoot "src-tauri"
 $EnvFile = Join-Path $RepoRoot ".env"
-$A2aPort = if ($env:A2A_PORT) { $env:A2A_PORT } else { "8765" }
-$VitePort = if ($env:PORT) { $env:PORT } else { "5173" }
+$A2aPort = if ($env:A2A_PORT) { $env:A2A_PORT } else { "" }
+$VitePort = if ($env:PORT) { $env:PORT } else { "" }
 
 # =============================================================================
 # 工具函数
@@ -149,6 +149,44 @@ function Wait-ForPort($port, $timeoutSeconds = 30) {
             Start-Sleep -Milliseconds 500
         }
     }
+}
+
+function Get-OpenLifeAppDirName {
+    switch ($env:OPENLIFE_PROFILE) {
+        "dev" { return "ai.openlife.app.dev" }
+        "qa" { return "ai.openlife.app.qa" }
+        default { return "ai.openlife.app" }
+    }
+}
+
+function Set-RuntimeProfile($commandName) {
+    if (-not $env:OPENLIFE_PROFILE -and $commandName -eq "dev") {
+        $env:OPENLIFE_PROFILE = "dev"
+    }
+    elseif (-not $env:OPENLIFE_PROFILE) {
+        $env:OPENLIFE_PROFILE = "release"
+    }
+
+    if (-not $script:VitePort) {
+        $script:VitePort = if ($env:PORT) { $env:PORT } else { "5173" }
+    }
+    if (-not $script:A2aPort) {
+        $script:A2aPort = if ($env:OPENLIFE_PROFILE -eq "dev") { "8766" } else { "8765" }
+    }
+    $env:A2A_PORT = $script:A2aPort
+}
+
+function New-TauriConfigOverride {
+    $env:OPENLIFE_DEV_URL = "http://127.0.0.1:$script:VitePort"
+    $env:OPENLIFE_FRONTEND_DIST = Join-Path $FrontendDir "dist"
+    $env:OPENLIFE_FRONTEND_MODE = "dev_server"
+    @{
+        build = @{
+            beforeDevCommand = "cd `"$FrontendDir`" && corepack pnpm dev --host 127.0.0.1 --port $script:VitePort"
+            devUrl = $env:OPENLIFE_DEV_URL
+            frontendDist = $env:OPENLIFE_FRONTEND_DIST
+        }
+    } | ConvertTo-Json -Compress -Depth 4
 }
 
 # =============================================================================
@@ -320,7 +358,11 @@ function Install-Dependencies {
 function Initialize-Database {
     Write-Step "初始化数据存储"
 
-    $dataDir = Join-Path $env:LOCALAPPDATA "ai.openlife.app"
+    $dataDir = if ($env:OPENLIFE_DATA_DIR) {
+        $env:OPENLIFE_DATA_DIR
+    } else {
+        Join-Path $env:LOCALAPPDATA (Get-OpenLifeAppDirName)
+    }
     if (-not (Test-Path $dataDir)) {
         New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
         Write-Success "创建数据目录: $dataDir"
@@ -338,6 +380,7 @@ function Initialize-Database {
 
 function Start-Dev {
     Write-Step "启动 OpenLife 开发模式"
+    $tauriConfigOverride = New-TauriConfigOverride
 
     # 检查端口
     if (-not (Test-Port $VitePort)) {
@@ -353,6 +396,9 @@ function Start-Dev {
     Write-Host "║  请耐心等待...                                               ║" -ForegroundColor Green
     Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Green
     Write-Host ""
+    Write-Info "Profile: $($env:OPENLIFE_PROFILE)"
+    Write-Info "Vite: $($env:OPENLIFE_DEV_URL)"
+    Write-Info "A2A: 127.0.0.1:$A2aPort"
 
     # 检查 pnpm
     $corepack = Get-Command "corepack" -ErrorAction SilentlyContinue
@@ -367,6 +413,12 @@ function Start-Dev {
         Write-Info "请运行: corepack prepare pnpm@9.1.0 --activate"
         exit 1
     }
+    if (-not (Get-Command "cargo" -ErrorAction SilentlyContinue)) {
+        Write-Error "cargo 不可用"
+        exit 1
+    }
+    Write-Info "构建 A2A sidecar..."
+    cargo build --manifest-path (Join-Path $RepoRoot "Cargo.toml") --bin openlife-a2a-server
 
     # 检查使用哪种方式启动 Tauri
     $localTauri = Join-Path $FrontendDir "node_modules\.bin\tauri.cmd"
@@ -376,11 +428,11 @@ function Start-Dev {
     try {
         if (Test-Path $localTauri) {
             Write-Info "使用本地 Tauri CLI 启动..."
-            & $localTauri dev
+            & $localTauri dev --config $tauriConfigOverride
         }
         elseif ($globalTauri) {
             Write-Info "使用全局 Tauri CLI 启动..."
-            tauri dev
+            tauri dev --config $tauriConfigOverride
         }
         else {
             Write-Error "Tauri CLI 不可用"
@@ -436,12 +488,14 @@ switch ($Command) {
     "check" {
         Test-Environment
         Set-Environment
+        Set-RuntimeProfile $Command
         Write-Host ""
         Write-Success "环境检查完成！可以运行 .\startup.ps1 dev 启动应用"
     }
     "dev" {
         Test-Environment
         Set-Environment
+        Set-RuntimeProfile $Command
         Install-Dependencies
         Initialize-Database
         Start-Dev
@@ -449,6 +503,7 @@ switch ($Command) {
     "a2a" {
         Test-Environment
         Set-Environment
+        Set-RuntimeProfile $Command
         Start-A2A
     }
 }
