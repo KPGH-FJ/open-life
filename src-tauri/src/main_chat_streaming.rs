@@ -18,7 +18,8 @@ use crate::main_chat_generation_support::{
 };
 use crate::main_chat_hs_runtime::{build_chat_runtime_hs_packet, included_life_model_sections};
 use crate::main_chat_kernel::{
-    run_main_chat_kernel_direct_answer_with_state, StreamingMainChatEventSink,
+    main_chat_kernel_supports_turn, run_main_chat_kernel_direct_answer_with_state,
+    StreamingMainChatEventSink,
 };
 use crate::main_chat_legacy_fallback::ordinary_stream_chat_execution_plan;
 use crate::main_chat_preprocess::{preprocess_chat_input, preprocess_chat_input_v2};
@@ -47,9 +48,7 @@ pub(crate) async fn start_stream_message_with_state(
     )
     .await?;
 
-    if main_chat_agent_turn.decision.selected_strategy
-        == openlife_core::agent::main_chat_agent_v1::MainChatAgentStrategy::DirectAnswer
-    {
+    if main_chat_kernel_supports_turn(&main_chat_agent_turn.decision.selected_strategy, &messages) {
         let result = {
             let mut event_sink = StreamingMainChatEventSink::new(&mut emit_stream_event);
             run_main_chat_kernel_direct_answer_with_state(

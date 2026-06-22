@@ -80,6 +80,178 @@ async fn set_command_surface_scripted_generation_response(
     .with_scripted_generation_response(response.to_string());
 }
 
+async fn invoke_send_message_for_kernel_goal_3(
+    state: std::sync::Arc<crate::AppState>,
+    session_id: &str,
+    user_text: &str,
+) -> serde_json::Value {
+    let app = tauri::test::mock_builder()
+        .manage(state)
+        .invoke_handler(tauri::generate_handler![crate::send_message])
+        .build(main_chat_command_surface_test_context())
+        .expect("build mock tauri app");
+    let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+        .build()
+        .expect("build mock webview");
+
+    tauri::test::get_ipc_response(
+        &webview,
+        main_chat_invoke_request(
+            "send_message",
+            serde_json::json!({
+                "sessionId": session_id,
+                "session_id": session_id,
+                "messages": [{ "role": "user", "content": user_text }]
+            }),
+        ),
+    )
+    .expect("send_message kernel Goal 3 response")
+    .deserialize::<serde_json::Value>()
+    .expect("deserialize kernel Goal 3 send response")
+}
+
+async fn invoke_start_stream_message_for_kernel_goal_3(
+    state: std::sync::Arc<crate::AppState>,
+    session_id: &str,
+    user_text: &str,
+) {
+    let app = tauri::test::mock_builder()
+        .manage(state)
+        .invoke_handler(tauri::generate_handler![crate::start_stream_message])
+        .build(main_chat_command_surface_test_context())
+        .expect("build mock tauri app");
+    let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+        .build()
+        .expect("build mock webview");
+    let messages = serde_json::json!([{ "role": "user", "content": user_text }]);
+
+    let response = tauri::test::get_ipc_response(
+        &webview,
+        main_chat_invoke_request(
+            "start_stream_message",
+            serde_json::json!({
+                "sessionId": session_id,
+                "session_id": session_id,
+                "messages": messages,
+                "args": {
+                    "sessionId": session_id,
+                    "session_id": session_id,
+                    "messages": messages
+                }
+            }),
+        ),
+    );
+    assert!(
+        response.is_ok(),
+        "start_stream_message kernel Goal 3 failed: {response:?}"
+    );
+}
+
+fn expected_task_session_id(session_id: &str, user_text: &str) -> String {
+    openlife_core::agent::main_chat_agent_v1::AgentIngress::default()
+        .decide(
+            session_id,
+            user_text,
+            None,
+            openlife_core::agent::AgentTaskKind::Conversation,
+        )
+        .agent_task_session_id
+        .expect("expected task session id")
+}
+
+async fn load_command_surface_session(
+    state: &std::sync::Arc<crate::AppState>,
+    task_session_id: &str,
+) -> openlife_core::agent::main_chat_agent_v1::AgentTaskSession {
+    let store_arc = state
+        .main_chat_agent_session_store
+        .as_ref()
+        .expect("main chat session store");
+    let store = store_arc.lock().await;
+    store
+        .load_session(task_session_id)
+        .expect("load task session")
+        .expect("task session exists")
+}
+
+async fn list_command_surface_actions(
+    state: &std::sync::Arc<crate::AppState>,
+    task_session_id: &str,
+) -> Vec<openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction> {
+    let queue_arc = state
+        .main_chat_action_queue_store
+        .as_ref()
+        .expect("main chat action queue store");
+    let queue = queue_arc.lock().await;
+    queue
+        .list_for_session(task_session_id)
+        .expect("list task actions")
+}
+
+async fn seed_command_surface_message(
+    state: &std::sync::Arc<crate::AppState>,
+    session_id: &str,
+    content: &str,
+) {
+    let memory_store = state.memory_store.lock().await;
+    memory_store
+        .save_message(
+            session_id,
+            &openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: content.into(),
+            },
+        )
+        .expect("seed command-surface message");
+}
+
+fn assert_kernel_goal_3_read_action_metadata(
+    action: &openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
+    expected_source_kind: &str,
+    expected_evidence_kind: &str,
+    expected_status: openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus,
+) {
+    assert_eq!(action.status, expected_status);
+    let metadata = action
+        .observation_metadata
+        .as_ref()
+        .expect("kernel Goal 3 observation metadata");
+    assert_eq!(
+        metadata
+            .get("kernelBackedReadOnlyToolLoop")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        metadata
+            .get("directWritesExecuted")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        metadata
+            .get("sourceKind")
+            .and_then(serde_json::Value::as_str),
+        Some(expected_source_kind)
+    );
+    let read_evidence = metadata
+        .get("structuredResult")
+        .and_then(|value| value.get("readExecutionEvidence"))
+        .expect("kernel Goal 3 read evidence");
+    assert_eq!(
+        read_evidence
+            .get("kind")
+            .and_then(serde_json::Value::as_str),
+        Some(expected_evidence_kind)
+    );
+    assert_eq!(
+        read_evidence
+            .get("directWritesExecuted")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+}
+
 #[tokio::test]
 async fn main_chat_command_surface_eval_gate_covers_send_stream_runtime_matrix() {
     let report = run_main_chat_command_surface_eval_gate().await;
@@ -124,6 +296,451 @@ async fn main_chat_command_surface_eval_gate_covers_send_stream_runtime_matrix()
         .contains(&"provider_live_proposal_permission_not_executed".to_string()));
     assert_eq!(report.legacy_fallback_count, 0);
     assert_eq!(report.silent_write_count, 0);
+}
+
+#[tokio::test]
+async fn main_chat_kernel_goal_3_workspace_file_read_send_stream_records_observation() {
+    let user_text = "Please read file `Cargo.toml`.";
+
+    let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let send_response =
+        invoke_send_message_for_kernel_goal_3(send_state.clone(), "k3-send-file-read", user_text)
+            .await;
+    assert_eq!(send_response["legacy_fallback_used"], false);
+    assert_eq!(
+        send_response["agent_ingress"]["selectedStrategy"],
+        "re_act_tool_execution"
+    );
+    assert_eq!(
+        send_response["tool_calls"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(send_response["tool_calls"][0]["name"], "file.read");
+    assert_eq!(send_response["tool_calls"][0]["success"], true);
+    assert!(send_response["reply"]
+        .as_str()
+        .is_some_and(|reply| reply.contains("openlife-core")));
+    let generation = &send_response["reasoning_trace"]["generation_result"];
+    assert_eq!(generation["selectedStrategy"], "react_tool_execution");
+    assert_eq!(generation["kernelBackedReadOnlyToolLoop"], true);
+    assert_eq!(generation["directWritesExecuted"], false);
+    assert_eq!(generation["legacyFallbackUsed"], false);
+
+    let send_task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
+        .as_str()
+        .expect("send file task session id");
+    let send_session = load_command_surface_session(&send_state, send_task_session_id).await;
+    assert_eq!(
+        send_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
+    );
+    assert!(send_session.pending_blockers.is_empty());
+    let send_actions = list_command_surface_actions(&send_state, send_task_session_id).await;
+    let send_file_action = send_actions
+        .iter()
+        .find(|action| action.action.action_type == "file.read")
+        .expect("send file.read action");
+    assert_kernel_goal_3_read_action_metadata(
+        send_file_action,
+        "file",
+        "file_system_read",
+        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Completed,
+    );
+
+    let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    invoke_start_stream_message_for_kernel_goal_3(
+        stream_state.clone(),
+        "k3-stream-file-read",
+        user_text,
+    )
+    .await;
+    let stream_task_session_id = expected_task_session_id("k3-stream-file-read", user_text);
+    let stream_session = load_command_surface_session(&stream_state, &stream_task_session_id).await;
+    assert_eq!(
+        stream_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
+    );
+    let stream_actions = list_command_surface_actions(&stream_state, &stream_task_session_id).await;
+    let stream_file_action = stream_actions
+        .iter()
+        .find(|action| action.action.action_type == "file.read")
+        .expect("stream file.read action");
+    assert_kernel_goal_3_read_action_metadata(
+        stream_file_action,
+        "file",
+        "file_system_read",
+        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Completed,
+    );
+}
+
+#[tokio::test]
+async fn main_chat_kernel_goal_3_path_traversal_send_stream_blocks_filesystem_read() {
+    let user_text = "Please read file `../AGENTS.md`.";
+
+    let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let send_response =
+        invoke_send_message_for_kernel_goal_3(send_state.clone(), "k3-send-traversal", user_text)
+            .await;
+    assert_eq!(send_response["legacy_fallback_used"], false);
+    assert_eq!(
+        send_response["tool_calls"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(send_response["tool_calls"][0]["name"], "file.read");
+    assert_eq!(send_response["tool_calls"][0]["status"], "blocked");
+    assert_eq!(
+        send_response["tool_calls"][0]["error"],
+        "filesystem_path_traversal_blocked"
+    );
+    let send_task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
+        .as_str()
+        .expect("send traversal task session id");
+    let send_session = load_command_surface_session(&send_state, send_task_session_id).await;
+    assert_eq!(
+        send_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
+    );
+    assert!(send_session
+        .pending_blockers
+        .contains(&"filesystem_path_traversal_blocked".to_string()));
+    let send_actions = list_command_surface_actions(&send_state, send_task_session_id).await;
+    let send_file_action = send_actions
+        .iter()
+        .find(|action| action.action.action_type == "file.read")
+        .expect("send traversal file.read action");
+    assert_kernel_goal_3_read_action_metadata(
+        send_file_action,
+        "file",
+        "file_system_read",
+        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed,
+    );
+    assert_eq!(
+        send_file_action
+            .observation_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("stopReason"))
+            .and_then(serde_json::Value::as_str),
+        Some("filesystem_path_traversal_blocked")
+    );
+
+    let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    invoke_start_stream_message_for_kernel_goal_3(
+        stream_state.clone(),
+        "k3-stream-traversal",
+        user_text,
+    )
+    .await;
+    let stream_task_session_id = expected_task_session_id("k3-stream-traversal", user_text);
+    let stream_session = load_command_surface_session(&stream_state, &stream_task_session_id).await;
+    assert_eq!(
+        stream_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
+    );
+    assert!(stream_session
+        .pending_blockers
+        .contains(&"filesystem_path_traversal_blocked".to_string()));
+    let stream_actions = list_command_surface_actions(&stream_state, &stream_task_session_id).await;
+    assert!(stream_actions
+        .iter()
+        .any(|action| action.action.action_type == "file.read"
+            && action.status
+                == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed));
+}
+
+#[tokio::test]
+async fn main_chat_kernel_goal_3_session_search_send_stream_uses_bounded_prior_context() {
+    let user_text = "Find what we discussed about Agent memory.";
+
+    let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    seed_command_surface_message(
+        &send_state,
+        "prior-k3-session",
+        "We discussed Agent memory needing source citations and bounded session search.",
+    )
+    .await;
+    let send_response = invoke_send_message_for_kernel_goal_3(
+        send_state.clone(),
+        "k3-send-session-search",
+        user_text,
+    )
+    .await;
+    assert_eq!(send_response["legacy_fallback_used"], false);
+    assert_eq!(send_response["tool_calls"][0]["name"], "session.search");
+    assert!(send_response["reply"]
+        .as_str()
+        .is_some_and(|reply| reply.contains("source citations")));
+    let send_task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
+        .as_str()
+        .expect("send session search task session id");
+    let send_session = load_command_surface_session(&send_state, send_task_session_id).await;
+    assert_eq!(
+        send_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
+    );
+    let send_actions = list_command_surface_actions(&send_state, send_task_session_id).await;
+    let send_session_action = send_actions
+        .iter()
+        .find(|action| action.action.action_type == "session.search")
+        .expect("send session.search action");
+    assert_kernel_goal_3_read_action_metadata(
+        send_session_action,
+        "session",
+        "session_read",
+        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Completed,
+    );
+    let structured = send_session_action
+        .observation_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("structuredResult"))
+        .expect("session structured result");
+    assert!(structured["hitCount"].as_u64().unwrap_or_default() > 0);
+    assert_eq!(structured["promotedToMemory"], false);
+
+    let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    seed_command_surface_message(
+        &stream_state,
+        "prior-k3-stream-session",
+        "We discussed Agent memory needing source citations and bounded session search.",
+    )
+    .await;
+    invoke_start_stream_message_for_kernel_goal_3(
+        stream_state.clone(),
+        "k3-stream-session-search",
+        user_text,
+    )
+    .await;
+    let stream_task_session_id = expected_task_session_id("k3-stream-session-search", user_text);
+    let stream_session = load_command_surface_session(&stream_state, &stream_task_session_id).await;
+    assert_eq!(
+        stream_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
+    );
+    let stream_actions = list_command_surface_actions(&stream_state, &stream_task_session_id).await;
+    let stream_session_action = stream_actions
+        .iter()
+        .find(|action| action.action.action_type == "session.search")
+        .expect("stream session.search action");
+    assert_kernel_goal_3_read_action_metadata(
+        stream_session_action,
+        "session",
+        "session_read",
+        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Completed,
+    );
+}
+
+#[tokio::test]
+async fn main_chat_kernel_goal_3_memory_search_send_stream_is_read_only() {
+    let user_text = "memory.search energy planning notes";
+
+    let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    seed_command_surface_message(
+        &send_state,
+        "prior-k3-memory-session",
+        "Energy planning works best when tasks are batched before lunch.",
+    )
+    .await;
+    let active_records_before = {
+        let lifecycle_store = send_state
+            .memory_lifecycle_store
+            .as_ref()
+            .expect("memory lifecycle store");
+        let store = lifecycle_store.lock().await;
+        store
+            .list_active_records(None, 20)
+            .expect("list active memory records")
+            .len()
+    };
+    let send_response = invoke_send_message_for_kernel_goal_3(
+        send_state.clone(),
+        "k3-send-memory-search",
+        user_text,
+    )
+    .await;
+    assert_eq!(send_response["legacy_fallback_used"], false);
+    assert_eq!(send_response["tool_calls"][0]["name"], "memory.search");
+    assert!(send_response["reply"]
+        .as_str()
+        .is_some_and(|reply| reply.contains("Energy planning")));
+    let active_records_after = {
+        let lifecycle_store = send_state
+            .memory_lifecycle_store
+            .as_ref()
+            .expect("memory lifecycle store");
+        let store = lifecycle_store.lock().await;
+        store
+            .list_active_records(None, 20)
+            .expect("list active memory records")
+            .len()
+    };
+    assert_eq!(active_records_before, active_records_after);
+    let send_task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
+        .as_str()
+        .expect("send memory search task session id");
+    let send_actions = list_command_surface_actions(&send_state, send_task_session_id).await;
+    let send_memory_action = send_actions
+        .iter()
+        .find(|action| action.action.action_type == "memory.search")
+        .expect("send memory.search action");
+    assert_kernel_goal_3_read_action_metadata(
+        send_memory_action,
+        "memory",
+        "memory_read",
+        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Completed,
+    );
+
+    let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    seed_command_surface_message(
+        &stream_state,
+        "prior-k3-stream-memory-session",
+        "Energy planning works best when tasks are batched before lunch.",
+    )
+    .await;
+    invoke_start_stream_message_for_kernel_goal_3(
+        stream_state.clone(),
+        "k3-stream-memory-search",
+        user_text,
+    )
+    .await;
+    let stream_task_session_id = expected_task_session_id("k3-stream-memory-search", user_text);
+    let stream_actions = list_command_surface_actions(&stream_state, &stream_task_session_id).await;
+    let stream_memory_action = stream_actions
+        .iter()
+        .find(|action| action.action.action_type == "memory.search")
+        .expect("stream memory.search action");
+    assert_kernel_goal_3_read_action_metadata(
+        stream_memory_action,
+        "memory",
+        "memory_read",
+        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Completed,
+    );
+}
+
+#[tokio::test]
+async fn main_chat_kernel_goal_3_web_read_unavailable_send_stream_blocks_without_fake_success() {
+    let user_text = "Please run web.read unavailable for OpenLife release notes.";
+
+    let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    {
+        let mut config = send_state.config.lock().await;
+        config.system.network_policy.enabled = false;
+    }
+    let send_response = invoke_send_message_for_kernel_goal_3(
+        send_state.clone(),
+        "k3-send-web-unavailable",
+        user_text,
+    )
+    .await;
+    assert_eq!(send_response["legacy_fallback_used"], false);
+    assert_eq!(send_response["tool_calls"][0]["name"], "web.read");
+    assert_eq!(send_response["tool_calls"][0]["status"], "blocked");
+    assert_eq!(
+        send_response["tool_calls"][0]["error"],
+        "network_policy_blocked"
+    );
+    assert!(send_response["reply"]
+        .as_str()
+        .is_some_and(|reply| reply.contains("network_policy_blocked")));
+    let send_task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
+        .as_str()
+        .expect("send web task session id");
+    let send_session = load_command_surface_session(&send_state, send_task_session_id).await;
+    assert_eq!(
+        send_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
+    );
+    let send_actions = list_command_surface_actions(&send_state, send_task_session_id).await;
+    let send_web_action = send_actions
+        .iter()
+        .find(|action| action.action.action_type == "web.read")
+        .expect("send web.read action");
+    assert_kernel_goal_3_read_action_metadata(
+        send_web_action,
+        "web",
+        "governed_read",
+        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed,
+    );
+
+    let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    {
+        let mut config = stream_state.config.lock().await;
+        config.system.network_policy.enabled = false;
+    }
+    invoke_start_stream_message_for_kernel_goal_3(
+        stream_state.clone(),
+        "k3-stream-web-unavailable",
+        user_text,
+    )
+    .await;
+    let stream_task_session_id = expected_task_session_id("k3-stream-web-unavailable", user_text);
+    let stream_session = load_command_surface_session(&stream_state, &stream_task_session_id).await;
+    assert_eq!(
+        stream_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
+    );
+    assert!(stream_session
+        .pending_blockers
+        .contains(&"network_policy_blocked".to_string()));
+    let stream_actions = list_command_surface_actions(&stream_state, &stream_task_session_id).await;
+    assert!(stream_actions
+        .iter()
+        .any(|action| action.action.action_type == "web.read"
+            && action.status
+                == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed));
+}
+
+#[tokio::test]
+async fn main_chat_kernel_goal_3_unknown_tool_send_stream_blocks_without_fallback() {
+    let user_text = "Please use unknown tool for this task.";
+
+    let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let send_response = invoke_send_message_for_kernel_goal_3(
+        send_state.clone(),
+        "k3-send-unknown-tool",
+        user_text,
+    )
+    .await;
+    assert_eq!(send_response["legacy_fallback_used"], false);
+    assert_eq!(
+        send_response["agent_ingress"]["selectedStrategy"],
+        "direct_answer"
+    );
+    assert_eq!(send_response["tool_calls"][0]["name"], "unsupported.tool");
+    assert_eq!(send_response["tool_calls"][0]["status"], "blocked");
+    assert_eq!(send_response["tool_calls"][0]["error"], "unsupported_tool");
+    let send_task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
+        .as_str()
+        .expect("send unknown task session id");
+    let send_session = load_command_surface_session(&send_state, send_task_session_id).await;
+    assert_eq!(
+        send_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
+    );
+    assert!(send_session
+        .pending_blockers
+        .contains(&"unsupported_tool".to_string()));
+
+    let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    invoke_start_stream_message_for_kernel_goal_3(
+        stream_state.clone(),
+        "k3-stream-unknown-tool",
+        user_text,
+    )
+    .await;
+    let stream_task_session_id = expected_task_session_id("k3-stream-unknown-tool", user_text);
+    let stream_session = load_command_surface_session(&stream_state, &stream_task_session_id).await;
+    assert_eq!(
+        stream_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
+    );
+    assert!(stream_session
+        .pending_blockers
+        .contains(&"unsupported_tool".to_string()));
+    let stream_actions = list_command_surface_actions(&stream_state, &stream_task_session_id).await;
+    assert!(stream_actions
+        .iter()
+        .any(|action| action.action.action_type == "unsupported.tool"
+            && action.status
+                == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed));
 }
 
 #[tokio::test]

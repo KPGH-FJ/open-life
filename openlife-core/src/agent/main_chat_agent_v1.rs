@@ -552,6 +552,7 @@ impl ExecutionPolicy {
                 "session.search",
                 "file.read",
                 "file search",
+                "web.read",
                 "web.search",
                 "web.fetch",
                 "mcp.read_only",

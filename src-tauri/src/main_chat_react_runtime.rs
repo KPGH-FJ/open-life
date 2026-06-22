@@ -58,7 +58,7 @@ pub(crate) fn attach_main_chat_read_observation_metadata(
 ) {
     let source_kind = match queue_action_type {
         "file.read" => "file",
-        "web.search" | "web.fetch" => "web",
+        "web.search" | "web.fetch" | "web.read" => "web",
         "mcp.read_only" => "mcp",
         "memory.search" => "memory",
         "session.search" => "session",
@@ -77,6 +77,7 @@ pub(crate) fn attach_main_chat_read_observation_metadata(
         "web.search" if fixture_backed => "web_search_fixture",
         "web.search" => "web_search_network",
         "web.fetch" => "web_fetch_network",
+        "web.read" => "governed_read",
         "mcp.read_only" => "registered_mcp_read",
         "memory.search" => "memory_read",
         "session.search" => "session_read",

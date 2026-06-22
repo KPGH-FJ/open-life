@@ -1,4 +1,3 @@
-use openlife_core::agent::main_chat_agent_v1::MainChatAgentStrategy;
 use openlife_core::layer_router::Layer;
 use openlife_core::llm::ChatMessage;
 use std::sync::Arc;
@@ -12,7 +11,8 @@ use crate::main_chat_conversation_updates::{
 };
 use crate::main_chat_event_stream::materialize_optional_main_chat_agent_events;
 use crate::main_chat_kernel::{
-    run_main_chat_kernel_direct_answer_with_state, BufferedMainChatEventSink,
+    main_chat_kernel_supports_turn, run_main_chat_kernel_direct_answer_with_state,
+    BufferedMainChatEventSink,
 };
 use crate::main_chat_legacy_fallback::{
     ordinary_send_chat_execution_plan, send_message_with_legacy_generation,
@@ -37,7 +37,7 @@ pub(crate) async fn send_message_with_state(
     )
     .await?;
 
-    if main_chat_agent_turn.decision.selected_strategy == MainChatAgentStrategy::DirectAnswer {
+    if main_chat_kernel_supports_turn(&main_chat_agent_turn.decision.selected_strategy, &messages) {
         let mut event_sink = BufferedMainChatEventSink::default();
         let result = run_main_chat_kernel_direct_answer_with_state(
             &session_id,

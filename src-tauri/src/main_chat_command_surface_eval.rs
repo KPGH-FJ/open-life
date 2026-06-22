@@ -1371,9 +1371,33 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
             }
             let completed_entry = transcript
                 .iter()
-                .find(|entry| entry.summary.contains("Governed ReAct AgentLoop completed"))
-                .ok_or_else(|| "missing file read AgentLoop completion transcript".to_string())?;
-            if completed_entry
+                .find(|entry| {
+                    entry.summary.contains("Governed ReAct AgentLoop completed")
+                        || entry
+                            .summary
+                            .contains("MainChatKernel read-only tool loop completed")
+                })
+                .ok_or_else(|| "missing file read completion transcript".to_string())?;
+            let kernel_read_loop = completed_entry
+                .metadata
+                .get("kernelBackedReadOnlyToolLoop")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+            if kernel_read_loop {
+                if completed_entry
+                    .metadata
+                    .get("toolCallCount")
+                    .and_then(serde_json::Value::as_u64)
+                    != Some(1)
+                    || completed_entry
+                        .metadata
+                        .get("directWritesExecuted")
+                        .and_then(serde_json::Value::as_bool)
+                        != Some(false)
+                {
+                    return Err("file read kernel metadata incomplete".into());
+                }
+            } else if completed_entry
                 .metadata
                 .get("agentLoopSucceeded")
                 .and_then(serde_json::Value::as_bool)
@@ -1449,7 +1473,19 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                 );
             }
             assert_response_agent_state_read_execution(response, "file_system_read", true, false)?;
-            if metadata
+            let kernel_action = metadata
+                .get("kernelBackedReadOnlyToolLoop")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+            if kernel_action {
+                if metadata
+                    .get("directWritesExecuted")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(false)
+                {
+                    return Err("file.read kernel action metadata incomplete".into());
+                }
+            } else if metadata
                 .get("agentLoopSucceeded")
                 .and_then(serde_json::Value::as_bool)
                 != Some(true)
@@ -1484,11 +1520,33 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
             }
             let completed_entry = transcript
                 .iter()
-                .find(|entry| entry.summary.contains("Governed ReAct AgentLoop completed"))
-                .ok_or_else(|| {
-                    "missing session search AgentLoop completion transcript".to_string()
-                })?;
-            if completed_entry
+                .find(|entry| {
+                    entry.summary.contains("Governed ReAct AgentLoop completed")
+                        || entry
+                            .summary
+                            .contains("MainChatKernel read-only tool loop completed")
+                })
+                .ok_or_else(|| "missing session search completion transcript".to_string())?;
+            let kernel_read_loop = completed_entry
+                .metadata
+                .get("kernelBackedReadOnlyToolLoop")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+            if kernel_read_loop {
+                if completed_entry
+                    .metadata
+                    .get("toolCallCount")
+                    .and_then(serde_json::Value::as_u64)
+                    != Some(1)
+                    || completed_entry
+                        .metadata
+                        .get("directWritesExecuted")
+                        .and_then(serde_json::Value::as_bool)
+                        != Some(false)
+                {
+                    return Err("session search kernel metadata incomplete".into());
+                }
+            } else if completed_entry
                 .metadata
                 .get("agentLoopSucceeded")
                 .and_then(serde_json::Value::as_bool)
@@ -1586,7 +1644,19 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                 );
             }
             assert_response_agent_state_read_execution(response, "session_read", true, false)?;
-            if metadata
+            let kernel_action = metadata
+                .get("kernelBackedReadOnlyToolLoop")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+            if kernel_action {
+                if metadata
+                    .get("directWritesExecuted")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(false)
+                {
+                    return Err("session.search kernel action metadata incomplete".into());
+                }
+            } else if metadata
                 .get("agentLoopSucceeded")
                 .and_then(serde_json::Value::as_bool)
                 != Some(true)

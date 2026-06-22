@@ -2,16 +2,20 @@ use async_trait::async_trait;
 use openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentStateSnapshot;
 use openlife_core::agent::main_chat_agent_v1::{
     AgentIngressDecision, AgentTaskSessionStatus, CompiledContext, ContextCompiler,
-    ContextCompilerInput, ContextSourceCandidate, ContextSourceKind, ExecutionTranscriptEntry,
-    ExecutionTranscriptEntryKind, MainChatAgentStrategy, MainChatPrivacyRiskSummary,
+    ContextCompilerInput, ContextSourceCandidate, ContextSourceKind, ExecutionQueueStatus,
+    ExecutionTranscriptEntry, ExecutionTranscriptEntryKind, MainChatAgentStrategy,
+    MainChatPrivacyRiskSummary,
 };
 use openlife_core::agent::{
-    AgentRun, AgentRunError, ContextSummary, ModelRouteTrace, ReasoningTrace, RedactionLevel,
+    ActionExecutionContext, ActionExecutionResult, ActionExecutionStatus, ActionExecutor,
+    ActionExecutorConfig, AgentActionRequest, AgentRun, AgentRunError, ContextSummary,
+    ModelRouteTrace, ReasoningTrace, RedactionLevel,
 };
 use openlife_core::life_model::LifeModel;
 use openlife_core::llm::ChatMessage;
 use openlife_core::scheduler::InferenceScheduler;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::Arc;
 
 use crate::main_chat_agent_state_payload::assemble_main_chat_agent_state_for_turn;
@@ -26,11 +30,15 @@ use crate::main_chat_generation_support::{
     finalize_chat_agent_run, main_chat_provider_endpoint_kind, persist_chat_message_if_needed,
     persist_vector_memory_for_message, preview_text,
 };
+use crate::main_chat_react_runtime::{
+    attach_main_chat_read_observation_metadata, bind_main_chat_observation_metadata_to_queue_action,
+};
 use crate::main_chat_runtime_support::{
     append_main_chat_agent_transcript, append_main_chat_direct_answer_contract_transcript,
-    complete_main_chat_agent_turn_session, MainChatAgentTurn,
+    complete_main_chat_agent_turn_session, enqueue_main_chat_agent_action, fail_main_chat_action,
+    transition_main_chat_action, MainChatAgentTurn,
 };
-use crate::{AppState, SendMessageResult, ToolCallResult};
+use crate::{AppState, SendMessageResult, ToolCallResult, ToolCallStatus};
 
 const KERNEL_CONTEXT_TOKEN_BUDGET: u32 = 120;
 const MAX_ROUTE_LABEL_CHARS: usize = 96;
@@ -38,6 +46,8 @@ const MAX_REASON_CHARS: usize = 180;
 const MAX_CONTEXT_CONTENT_CHARS: usize = 700;
 const MAX_SYSTEM_PROMPT_CHARS: usize = 4_000;
 const MAX_ASSISTANT_PREVIEW_CHARS: usize = 180;
+const MAX_TOOL_OBSERVATION_PREVIEW_CHARS: usize = 700;
+const MAX_TOOL_QUERY_CHARS: usize = 180;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,6 +56,8 @@ pub struct MainChatTurnInput {
     pub messages: Vec<ChatMessage>,
     #[serde(default)]
     pub selected_skill_id: Option<String>,
+    #[serde(default)]
+    pub model_supplied_tool_arguments: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,7 +93,19 @@ impl MainChatTurnResult {
 pub struct MainChatKernelToolCall {
     pub name: String,
     pub action_type: String,
+    #[serde(default)]
+    pub target: String,
+    #[serde(default)]
+    pub governed_input: Value,
     pub status: String,
+    #[serde(default)]
+    pub output_preview: Option<String>,
+    #[serde(default)]
+    pub blocker: Option<String>,
+    #[serde(default)]
+    pub observation_metadata: Option<Value>,
+    #[serde(default)]
+    pub model_arguments_ignored: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -133,6 +157,19 @@ pub enum MainChatKernelEvent {
     FinalAnswer {
         content_preview: String,
         content_chars: usize,
+    },
+    ToolDecision {
+        tool_name: String,
+        action_type: String,
+        target: String,
+        reason: String,
+        model_arguments_ignored: bool,
+    },
+    ToolObservation {
+        tool_name: String,
+        status: String,
+        output_preview: String,
+        blocker: Option<String>,
     },
     Blocker {
         code: String,
@@ -209,6 +246,352 @@ impl MainChatEventSink for StreamingMainChatEventSink<'_> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct MainChatKernelReadToolDecision {
+    tool_name: String,
+    queue_action_type: String,
+    executor_action_type: String,
+    target: String,
+    governed_input: Value,
+    reason: String,
+    model_arguments_ignored: bool,
+}
+
+#[derive(Debug, Clone)]
+struct MainChatKernelReadToolExecution {
+    decision: MainChatKernelReadToolDecision,
+    status: ActionExecutionStatus,
+    observation_content: String,
+    observation_metadata: Value,
+    output_preview: String,
+    blocker_reason: Option<String>,
+}
+
+#[async_trait]
+trait MainChatKernelReadToolExecutor: Send + Sync {
+    async fn execute_read_tool(
+        &self,
+        decision: MainChatKernelReadToolDecision,
+    ) -> MainChatKernelReadToolExecution;
+}
+
+#[derive(Clone)]
+struct AppStateMainChatReadToolExecutor {
+    state: Arc<AppState>,
+}
+
+impl AppStateMainChatReadToolExecutor {
+    fn new(state: Arc<AppState>) -> Self {
+        Self { state }
+    }
+}
+
+#[async_trait]
+impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
+    async fn execute_read_tool(
+        &self,
+        mut decision: MainChatKernelReadToolDecision,
+    ) -> MainChatKernelReadToolExecution {
+        if decision.tool_name == "web.read" {
+            let network_enabled = {
+                let config = self.state.config.lock().await;
+                config.system.network_policy.enabled
+            };
+            let blocker = if network_enabled {
+                "web_read_unavailable"
+            } else {
+                "network_policy_blocked"
+            };
+            return blocked_kernel_read_tool_execution(
+                decision,
+                blocker,
+                "Governed web read is unavailable in the minimal kernel read-only tool set.",
+                Some(serde_json::json!({
+                    "networkPolicyEnabled": network_enabled,
+                    "governedWebReadAvailable": false,
+                })),
+            );
+        }
+
+        if decision.tool_name == "file.read" {
+            match crate::workspace_file_resolver::resolve_main_chat_workspace_file_target(
+                decision
+                    .governed_input
+                    .get("rawUserText")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            ) {
+                Ok((label, canonical_path)) => {
+                    decision.target = "file.read".into();
+                    decision.governed_input = serde_json::json!({
+                        "path": canonical_path,
+                        "workspaceRelativePath": label,
+                        "governedInputSource": "workspace_scoped_resolver",
+                    });
+                }
+                Err(error) => {
+                    let blocker = if error.contains("traversal") {
+                        "filesystem_path_traversal_blocked"
+                    } else if error.contains("outside workspace") || error.contains("absolute") {
+                        "filesystem_outside_workspace_blocked"
+                    } else {
+                        "filesystem_read_blocked"
+                    };
+                    return blocked_kernel_read_tool_execution(
+                        decision,
+                        blocker,
+                        &error,
+                        Some(serde_json::json!({
+                            "resolverError": bounded_label(&error, MAX_REASON_CHARS),
+                        })),
+                    );
+                }
+            }
+        }
+
+        let (safe_paths, calendar_ics_paths, network_policy) = {
+            let config = self.state.config.lock().await;
+            let mut safe_paths = config.system.safe_paths.clone();
+            if let Ok(workspace) = crate::workspace_file_resolver::resolve_workspace_root() {
+                let workspace = workspace.to_string_lossy().to_string();
+                if !safe_paths.iter().any(|path| path == &workspace) {
+                    safe_paths.push(workspace);
+                }
+            }
+            (
+                safe_paths,
+                config.system.calendar_ics_paths.clone(),
+                config.system.network_policy.clone(),
+            )
+        };
+
+        let local_file_permission_store = if decision.tool_name == "file.read" {
+            match openlife_core::tool_permissions::ToolPermissionStore::new_in_memory() {
+                Ok(store) => {
+                    if let Err(error) = store.grant(
+                        "file.read",
+                        "builtin",
+                        "low",
+                        "read",
+                        openlife_core::tool_permissions::ToolPermissionPolicy::AllowOnce,
+                        None,
+                    ) {
+                        return blocked_kernel_read_tool_execution(
+                            decision,
+                            "file_read_permission_setup_failed",
+                            &format!("ephemeral file.read permission setup failed: {error}"),
+                            None,
+                        );
+                    }
+                    Some(store)
+                }
+                Err(error) => {
+                    return blocked_kernel_read_tool_execution(
+                        decision,
+                        "file_read_permission_store_failed",
+                        &format!("ephemeral file.read permission store failed: {error}"),
+                        None,
+                    );
+                }
+            }
+        } else {
+            None
+        };
+
+        let permission_store_guard = if local_file_permission_store.is_none() {
+            Some(self.state.tool_permission_store.lock().await)
+        } else {
+            None
+        };
+        let permission_store_ref = match (&local_file_permission_store, &permission_store_guard) {
+            (Some(store), _) => store,
+            (None, Some(store)) => &**store,
+            _ => {
+                return blocked_kernel_read_tool_execution(
+                    decision,
+                    "tool_permission_store_unavailable",
+                    "Tool permission store is unavailable.",
+                    None,
+                );
+            }
+        };
+
+        let registry = self.state.mcp_registry.lock().await;
+        let audit_store = self.state.mcp_audit_store.lock().await;
+        let privacy_engine = self.state.privacy_engine.lock().await;
+        let memory_store = self.state.memory_store.lock().await;
+        let mut action_ctx = ActionExecutionContext::new(
+            &registry,
+            permission_store_ref,
+            &audit_store,
+            &privacy_engine,
+            &safe_paths,
+        )
+        .with_memory_store(&memory_store)
+        .with_network_policy(&network_policy)
+        .with_calendar_ics_paths(&calendar_ics_paths);
+        let web_search_fixture_output = self.state.web_search_fixture_output.lock().await.clone();
+        if let Some(ref fixture_output) = web_search_fixture_output {
+            action_ctx = action_ctx.with_web_search_fixture_output(fixture_output);
+        }
+
+        let request_input = if decision.executor_action_type == "mcp_tool" {
+            serde_json::json!({ "arguments": decision.governed_input.clone() })
+        } else {
+            decision.governed_input.clone()
+        };
+        let request = AgentActionRequest {
+            action_type: decision.executor_action_type.clone(),
+            target: decision.target.clone(),
+            input: request_input,
+            source_run_id: None,
+            step_index: 0,
+        };
+        match ActionExecutor::new(ActionExecutorConfig {
+            allow_writes: false,
+            allow_cloud: false,
+            ..Default::default()
+        })
+        .execute(request, &action_ctx)
+        {
+            Ok(result) => kernel_read_tool_execution_from_action_result(decision, result),
+            Err(error) => blocked_kernel_read_tool_execution(
+                decision,
+                "read_tool_executor_failed",
+                &format!("ActionExecutor failed: {error}"),
+                None,
+            ),
+        }
+    }
+}
+
+fn kernel_read_tool_execution_from_action_result(
+    decision: MainChatKernelReadToolDecision,
+    result: ActionExecutionResult,
+) -> MainChatKernelReadToolExecution {
+    let status_label = action_execution_status_label(&result.status);
+    let output_preview = preview_text(
+        &result.observation.content,
+        MAX_TOOL_OBSERVATION_PREVIEW_CHARS,
+    );
+    let governed_input = decision.governed_input.clone();
+    let blocker_reason = result
+        .stop_reason
+        .clone()
+        .or_else(|| result.action.error.clone())
+        .or_else(|| {
+            result
+                .observation
+                .structured_result
+                .as_ref()
+                .and_then(|structured| structured.get("permission_decision"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+    let mut metadata = serde_json::json!({
+        "kernelBackedReadOnlyToolLoop": true,
+        "actionExecutorBacked": true,
+        "toolName": decision.tool_name.clone(),
+        "queueActionType": decision.queue_action_type.clone(),
+        "executorActionType": decision.executor_action_type.clone(),
+        "target": decision.target.clone(),
+        "governedInput": governed_input.clone(),
+        "governedInputDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(&governed_input),
+        "governedInputSource": decision
+            .governed_input
+            .get("governedInputSource")
+            .and_then(Value::as_str)
+            .unwrap_or("kernel_read_tool_decision"),
+        "modelArgumentsIgnored": decision.model_arguments_ignored,
+        "executorStatus": status_label,
+        "actionId": result.action.id,
+        "observationId": result.observation.id,
+        "stopReason": result.stop_reason,
+        "structuredResult": result.observation.structured_result,
+        "directWritesExecuted": false,
+        "legacyFallbackUsed": false,
+    });
+    attach_main_chat_read_observation_metadata(
+        &mut metadata,
+        &decision.queue_action_type,
+        &decision.target,
+        &governed_input,
+        &output_preview,
+        result.observation.structured_result.clone(),
+        false,
+        result.status == ActionExecutionStatus::Succeeded,
+    );
+
+    MainChatKernelReadToolExecution {
+        decision,
+        status: result.status,
+        observation_content: result.observation.content,
+        observation_metadata: metadata,
+        output_preview,
+        blocker_reason,
+    }
+}
+
+fn blocked_kernel_read_tool_execution(
+    decision: MainChatKernelReadToolDecision,
+    blocker: &str,
+    message: &str,
+    extra_metadata: Option<Value>,
+) -> MainChatKernelReadToolExecution {
+    let output_preview = bounded_text(message, MAX_TOOL_OBSERVATION_PREVIEW_CHARS);
+    let governed_input = decision.governed_input.clone();
+    let mut structured = serde_json::json!({
+        "success": false,
+        "status": "blocked",
+        "blockerReason": blocker,
+        "directWritesExecuted": false,
+        "promotedToMemory": false,
+    });
+    if let (Some(object), Some(extra)) = (structured.as_object_mut(), extra_metadata) {
+        object.insert("details".into(), extra);
+    }
+    let mut metadata = serde_json::json!({
+        "kernelBackedReadOnlyToolLoop": true,
+        "actionExecutorBacked": false,
+        "toolName": decision.tool_name.clone(),
+        "queueActionType": decision.queue_action_type.clone(),
+        "executorActionType": decision.executor_action_type.clone(),
+        "target": decision.target.clone(),
+        "governedInput": governed_input.clone(),
+        "governedInputDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(&governed_input),
+        "governedInputSource": decision
+            .governed_input
+            .get("governedInputSource")
+            .and_then(Value::as_str)
+            .unwrap_or("kernel_read_tool_decision"),
+        "modelArgumentsIgnored": decision.model_arguments_ignored,
+        "executorStatus": "blocked",
+        "stopReason": blocker,
+        "structuredResult": structured,
+        "directWritesExecuted": false,
+        "legacyFallbackUsed": false,
+    });
+    attach_main_chat_read_observation_metadata(
+        &mut metadata,
+        &decision.queue_action_type,
+        &decision.target,
+        &governed_input,
+        &output_preview,
+        Some(structured),
+        false,
+        false,
+    );
+
+    MainChatKernelReadToolExecution {
+        decision,
+        status: ActionExecutionStatus::Blocked,
+        observation_content: message.to_string(),
+        observation_metadata: metadata,
+        output_preview,
+        blocker_reason: Some(blocker.to_string()),
+    }
+}
+
 pub(crate) struct MainChatKernelCommandSurfaceResult {
     pub(crate) reply: String,
     pub(crate) reasoning_trace: ReasoningTrace,
@@ -249,9 +632,10 @@ pub(crate) async fn run_main_chat_kernel_direct_answer_with_state<S>(
 where
     S: MainChatEventSink + ?Sized,
 {
-    if main_chat_agent_turn.decision.selected_strategy != MainChatAgentStrategy::DirectAnswer {
+    if !main_chat_kernel_supports_turn(&main_chat_agent_turn.decision.selected_strategy, &messages)
+    {
         return Err(format!(
-            "MainChatKernel direct-answer adapter received non-direct strategy {}",
+            "MainChatKernel adapter received unsupported strategy {}",
             main_chat_agent_turn.decision.selected_strategy.as_str()
         ));
     }
@@ -299,24 +683,38 @@ where
             ExecutionTranscriptEntryKind::Plan,
             "Main Chat Agent strategy execution started.",
             serde_json::json!({
-                "selectedStrategy": MainChatAgentStrategy::DirectAnswer.as_str(),
+                "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
                 "policyReasonCode": main_chat_agent_turn.decision.privacy_risk.policy_reason_code,
                 "silentWritesAllowed": false,
-                "kernelBackedDirectAnswer": true,
+                "kernelBackedDirectAnswer": main_chat_agent_turn.decision.selected_strategy == MainChatAgentStrategy::DirectAnswer,
+                "kernelBackedReadOnlyToolLoop": main_chat_agent_turn.decision.selected_strategy == MainChatAgentStrategy::ReActToolExecution,
                 "kernelEventSink": event_sink_label,
             }),
         )
         .await,
     );
-    execution_transcript.extend(
-        append_main_chat_direct_answer_contract_transcript(
-            state,
-            main_chat_agent_turn,
-            &user_text,
-            sanitized_selected_skill_id.as_deref(),
-        )
-        .await,
-    );
+
+    if main_chat_agent_turn.decision.selected_strategy == MainChatAgentStrategy::DirectAnswer {
+        execution_transcript.extend(
+            append_main_chat_direct_answer_contract_transcript(
+                state,
+                main_chat_agent_turn,
+                &user_text,
+                sanitized_selected_skill_id.as_deref(),
+            )
+            .await,
+        );
+    } else {
+        execution_transcript.extend(
+            append_main_chat_kernel_read_tool_contract_transcript(
+                state,
+                main_chat_agent_turn,
+                &user_text,
+                sanitized_selected_skill_id.as_deref(),
+            )
+            .await,
+        );
+    }
 
     let scheduler = state.scheduler.lock().await.clone();
     let direct_reply = if user_text.trim().is_empty() {
@@ -338,7 +736,10 @@ where
         load_workspace_knowledge: true,
         token_budget: 160,
         extra_candidates,
-    });
+    })
+    .with_read_tool_executor(Arc::new(AppStateMainChatReadToolExecutor::new(Arc::clone(
+        state,
+    ))));
 
     let kernel_result = kernel
         .run_turn(
@@ -346,6 +747,7 @@ where
                 session_id: session_id.to_string(),
                 messages,
                 selected_skill_id: sanitized_selected_skill_id.clone(),
+                model_supplied_tool_arguments: None,
             },
             event_sink,
         )
@@ -390,6 +792,25 @@ where
     .await
 }
 
+pub(crate) fn main_chat_kernel_supports_turn(
+    selected_strategy: &MainChatAgentStrategy,
+    messages: &[ChatMessage],
+) -> bool {
+    match selected_strategy {
+        MainChatAgentStrategy::DirectAnswer => true,
+        MainChatAgentStrategy::ReActToolExecution => {
+            let input = MainChatTurnInput {
+                session_id: "kernel_support_probe".into(),
+                messages: messages.to_vec(),
+                selected_skill_id: None,
+                model_supplied_tool_arguments: None,
+            };
+            plan_kernel_read_tool(&input, false).is_some()
+        }
+        _ => false,
+    }
+}
+
 async fn resolve_kernel_task_session_id(
     state: &Arc<AppState>,
     requested_task_session_id: &str,
@@ -426,6 +847,59 @@ async fn resolve_kernel_task_session_id(
             requested_task_session_id.to_string()
         }
     }
+}
+
+async fn append_main_chat_kernel_read_tool_contract_transcript(
+    state: &Arc<AppState>,
+    main_chat_agent_turn: &MainChatAgentTurn,
+    user_text: &str,
+    selected_skill_id: Option<&str>,
+) -> Vec<ExecutionTranscriptEntry> {
+    let Some(task_session_id) = main_chat_agent_turn
+        .decision
+        .agent_task_session_id
+        .as_deref()
+    else {
+        return Vec::new();
+    };
+    let probe = MainChatTurnInput {
+        session_id: main_chat_agent_turn.decision.source_session_id.clone(),
+        messages: vec![ChatMessage {
+            role: "user".into(),
+            content: user_text.to_string(),
+        }],
+        selected_skill_id: selected_skill_id.map(str::to_string),
+        model_supplied_tool_arguments: None,
+    };
+    let decision = plan_kernel_read_tool(&probe, false);
+    append_main_chat_agent_transcript(
+        state,
+        Some(task_session_id),
+        ExecutionTranscriptEntryKind::Plan,
+        "MainChatKernel read-only tool contract was prepared.",
+        serde_json::json!({
+            "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
+            "promptContract": "minimal_read_only_tool_loop",
+            "toolExecutionAllowed": true,
+            "writeExecutionAllowed": false,
+            "silentWritesAllowed": false,
+            "legacyFallbackUsed": false,
+            "kernelBackedReadOnlyToolLoop": true,
+            "selectedTool": decision.as_ref().map(|decision| decision.tool_name.clone()),
+            "selectedActionType": decision.as_ref().map(|decision| decision.queue_action_type.clone()),
+            "governedInputSource": decision
+                .as_ref()
+                .and_then(|decision| {
+                    decision
+                        .governed_input
+                        .get("governedInputSource")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                }),
+            "selectedSkillId": selected_skill_id,
+        }),
+    )
+    .await
 }
 
 #[derive(Debug, Clone)]
@@ -558,10 +1032,10 @@ impl MainChatModelClient for CommandSurfaceDirectAnswerModelClient {
     }
 }
 
-#[derive(Debug, Clone)]
 pub struct MainChatKernel<C = SchedulerMainChatModelClient> {
     model_client: C,
     context_config: MainChatKernelContextConfig,
+    read_tool_executor: Option<Arc<dyn MainChatKernelReadToolExecutor>>,
 }
 
 impl MainChatKernel<SchedulerMainChatModelClient> {
@@ -578,11 +1052,20 @@ where
         Self {
             model_client,
             context_config: MainChatKernelContextConfig::default(),
+            read_tool_executor: None,
         }
     }
 
     pub fn with_context_config(mut self, context_config: MainChatKernelContextConfig) -> Self {
         self.context_config = context_config;
+        self
+    }
+
+    fn with_read_tool_executor(
+        mut self,
+        executor: Arc<dyn MainChatKernelReadToolExecutor>,
+    ) -> Self {
+        self.read_tool_executor = Some(executor);
         self
     }
 
@@ -619,10 +1102,27 @@ where
             selected_skill_instruction_loaded: context_metadata.selected_skill_instruction_loaded,
         });
 
-        let route_metadata = self.model_client.route_metadata();
+        let mut route_metadata = self.model_client.route_metadata();
+        let read_tool_decision =
+            plan_kernel_read_tool(&input, input.model_supplied_tool_arguments.is_some());
+        if read_tool_decision.is_some() {
+            route_metadata.tools_enabled = true;
+        }
         event_sink.emit(MainChatKernelEvent::RouteSelected {
             route_metadata: route_metadata.clone(),
         });
+
+        if let Some(decision) = read_tool_decision {
+            return self
+                .run_read_tool_turn(
+                    input,
+                    context_metadata,
+                    route_metadata,
+                    decision,
+                    event_sink,
+                )
+                .await;
+        }
 
         let request = MainChatModelRequest {
             messages: input.messages,
@@ -666,6 +1166,92 @@ where
     {
         event_sink.emit(MainChatKernelEvent::Blocker { code: code.into() });
         MainChatTurnResult::blocked(code)
+    }
+
+    async fn run_read_tool_turn<S>(
+        &self,
+        _input: MainChatTurnInput,
+        context_metadata: MainChatKernelContextMetadata,
+        route_metadata: MainChatRouteMetadata,
+        decision: MainChatKernelReadToolDecision,
+        event_sink: &mut S,
+    ) -> MainChatTurnResult
+    where
+        S: MainChatEventSink + ?Sized,
+    {
+        event_sink.emit(MainChatKernelEvent::ToolDecision {
+            tool_name: decision.tool_name.clone(),
+            action_type: decision.queue_action_type.clone(),
+            target: decision.target.clone(),
+            reason: decision.reason.clone(),
+            model_arguments_ignored: decision.model_arguments_ignored,
+        });
+
+        let execution = if decision.tool_name == "unsupported.tool" {
+            blocked_kernel_read_tool_execution(
+                decision,
+                "unsupported_tool",
+                "Unsupported tool request blocked by MainChatKernel read-only tool policy.",
+                None,
+            )
+        } else if let Some(executor) = self.read_tool_executor.as_ref() {
+            executor.execute_read_tool(decision).await
+        } else {
+            blocked_kernel_read_tool_execution(
+                decision,
+                "read_tool_executor_unavailable",
+                "Read-only tool executor is unavailable for this kernel turn.",
+                None,
+            )
+        };
+
+        event_sink.emit(MainChatKernelEvent::ToolObservation {
+            tool_name: execution.decision.tool_name.clone(),
+            status: action_execution_status_label(&execution.status).into(),
+            output_preview: execution.output_preview.clone(),
+            blocker: execution.blocker_reason.clone(),
+        });
+
+        let reply = synthesize_read_tool_answer(&execution);
+        let assistant_message = ChatMessage {
+            role: "assistant".into(),
+            content: reply.clone(),
+        };
+        event_sink.emit(MainChatKernelEvent::FinalAnswer {
+            content_preview: bounded_label(&reply, MAX_ASSISTANT_PREVIEW_CHARS),
+            content_chars: reply.chars().count(),
+        });
+
+        let tool_call = MainChatKernelToolCall {
+            name: execution.decision.tool_name.clone(),
+            action_type: execution.decision.queue_action_type.clone(),
+            target: execution.decision.target.clone(),
+            governed_input: execution.decision.governed_input.clone(),
+            status: action_execution_status_label(&execution.status).into(),
+            output_preview: Some(execution.output_preview.clone()),
+            blocker: execution.blocker_reason.clone(),
+            observation_metadata: Some(execution.observation_metadata.clone()),
+            model_arguments_ignored: execution.decision.model_arguments_ignored,
+        };
+        let blockers = if execution.status == ActionExecutionStatus::Succeeded {
+            Vec::new()
+        } else {
+            vec![execution
+                .blocker_reason
+                .clone()
+                .unwrap_or_else(|| "read_tool_failed".into())]
+        };
+
+        MainChatTurnResult {
+            assistant_message: Some(assistant_message),
+            blockers,
+            proposals: Vec::new(),
+            tool_calls: vec![tool_call],
+            route_metadata: Some(route_metadata),
+            context_metadata: Some(context_metadata),
+            direct_writes_executed: false,
+            legacy_fallback_used: false,
+        }
     }
 
     fn compile_context(
@@ -736,40 +1322,47 @@ async fn build_successful_kernel_command_surface_result(
     let assistant_message = kernel_result
         .assistant_message
         .clone()
-        .ok_or_else(|| "Main Chat kernel direct answer missing assistant message".to_string())?;
+        .ok_or_else(|| "Main Chat kernel result missing assistant message".to_string())?;
     let reply = assistant_message.content.clone();
     let route_metadata = kernel_result
         .route_metadata
         .clone()
-        .ok_or_else(|| "Main Chat kernel direct answer missing route metadata".to_string())?;
+        .ok_or_else(|| "Main Chat kernel result missing route metadata".to_string())?;
     let model_route = model_route_from_kernel_route(&route_metadata);
     let context_summary = context_summary_from_kernel_result(&kernel_result, &life_model);
+    let read_tool_loop_used = !kernel_result.tool_calls.is_empty();
     let scripted_provider_response = route_metadata.scripted_response_configured;
     let provider_endpoint_kind = if direct_reflex_used {
         "direct_reflex"
+    } else if read_tool_loop_used {
+        "kernel_read_tool_synthesis"
     } else {
         main_chat_provider_endpoint_kind(&scheduler, scripted_provider_response)
     };
-    let live_provider_invoked = !direct_reflex_used
+    let live_provider_invoked = !read_tool_loop_used
+        && !direct_reflex_used
         && !scripted_provider_response
         && route_metadata.provider != "none"
         && route_metadata.route_type == "cloud";
     let kernel_event_count = kernel_events.len();
     let generation_metadata = serde_json::json!({
         "hsPacketSelected": false,
-        "toolCallCount": 0,
+        "toolCallCount": kernel_result.tool_calls.len(),
         "directWritesExecuted": false,
         "legacyFallbackUsed": false,
-        "kernelBackedDirectAnswer": true,
+        "kernelBackedDirectAnswer": !read_tool_loop_used,
+        "kernelBackedReadOnlyToolLoop": read_tool_loop_used,
         "kernelEventSink": event_sink_label,
         "kernelEventCount": kernel_event_count,
         "kernelContextSnapshotRef": kernel_result
             .context_metadata
             .as_ref()
             .map(|metadata| metadata.context_snapshot_ref.clone()),
-        "modelGenerated": !direct_reflex_used,
-        "schedulerGenerationCalled": !direct_reflex_used,
-        "providerGenerationPath": if direct_reflex_used {
+        "modelGenerated": !direct_reflex_used && !read_tool_loop_used,
+        "schedulerGenerationCalled": !direct_reflex_used && !read_tool_loop_used,
+        "providerGenerationPath": if read_tool_loop_used {
+            "main_chat_kernel_read_tool_synthesis"
+        } else if direct_reflex_used {
             "main_chat_kernel_direct_reflex"
         } else {
             "main_chat_direct_answer_scheduler"
@@ -791,14 +1384,24 @@ async fn build_successful_kernel_command_surface_result(
             state,
             Some(task_session_id),
             ExecutionTranscriptEntryKind::Observation,
-            "DirectAnswer generated a model response without tools or writes.",
+            if read_tool_loop_used {
+                "MainChatKernel read-only tool loop synthesized an answer without writes."
+            } else {
+                "DirectAnswer generated a model response without tools or writes."
+            },
             generation_metadata.clone(),
         )
         .await,
     );
 
     let mut agent_run = AgentRun::new_chat_run(session_id, user_text);
-    agent_run.reasoning_strategy = Some("main_chat_agent_v1_direct_answer".into());
+    agent_run.reasoning_strategy = Some(if read_tool_loop_used {
+        "main_chat_agent_v1_read_only_tool_loop".into()
+    } else {
+        "main_chat_agent_v1_direct_answer".into()
+    });
+    agent_run.tool_call_count = kernel_result.tool_calls.len() as u32;
+    agent_run.step_count = if read_tool_loop_used { 1 } else { 0 };
     agent_run.complete(&preview_text(&reply, 200), model_route, context_summary);
     let mut reasoning_trace = ReasoningTrace {
         generation_result: Some({
@@ -808,7 +1411,13 @@ async fn build_successful_kernel_command_surface_result(
                 object.insert("mainChatAgentV1".into(), serde_json::Value::Bool(true));
                 object.insert(
                     "selectedStrategy".into(),
-                    serde_json::Value::String(MainChatAgentStrategy::DirectAnswer.as_str().into()),
+                    serde_json::Value::String(
+                        main_chat_agent_turn
+                            .decision
+                            .selected_strategy
+                            .as_str()
+                            .into(),
+                    ),
                 );
             }
             generation
@@ -825,10 +1434,22 @@ async fn build_successful_kernel_command_surface_result(
         state,
     )
     .await?;
+    let tool_calls = record_kernel_tool_call_evidence(
+        state,
+        task_session_id,
+        &kernel_result.tool_calls,
+        &agent_run.id,
+        &mut execution_transcript,
+    )
+    .await?;
     complete_main_chat_agent_turn_session(
         state,
         main_chat_agent_turn,
-        "DirectAnswer completed without tool execution.",
+        if read_tool_loop_used {
+            "MainChatKernel read-only tool loop completed without writes."
+        } else {
+            "DirectAnswer completed without tool execution."
+        },
     )
     .await;
     execution_transcript.extend(
@@ -836,12 +1457,19 @@ async fn build_successful_kernel_command_surface_result(
             state,
             Some(task_session_id),
             ExecutionTranscriptEntryKind::FinalResult,
-            "DirectAnswer completed without tool execution.",
+            if read_tool_loop_used {
+                "MainChatKernel read-only tool loop completed."
+            } else {
+                "DirectAnswer completed without tool execution."
+            },
             serde_json::json!({
                 "runId": agent_run.id,
                 "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
                 "legacyFallbackUsed": false,
-                "kernelBackedDirectAnswer": true,
+                "kernelBackedDirectAnswer": !read_tool_loop_used,
+                "kernelBackedReadOnlyToolLoop": read_tool_loop_used,
+                "toolCallCount": kernel_result.tool_calls.len(),
+                "directWritesExecuted": false,
                 "pendingBlockerCount": 0,
             }),
         )
@@ -856,7 +1484,7 @@ async fn build_successful_kernel_command_surface_result(
     Ok(MainChatKernelCommandSurfaceResult {
         reply,
         reasoning_trace,
-        tool_calls: Vec::new(),
+        tool_calls,
         run_id: Some(agent_run.id),
         agent_ingress: Some(main_chat_agent_turn.decision.clone()),
         agent_state,
@@ -879,6 +1507,7 @@ async fn build_blocked_kernel_command_surface_result(
 ) -> Result<MainChatKernelCommandSurfaceResult, String> {
     let blockers = kernel_result.blockers.clone();
     let blocker_summary = blockers.join(",");
+    let read_tool_loop_used = !kernel_result.tool_calls.is_empty();
     if let Some(ref store_arc) = state.main_chat_agent_session_store {
         let store = store_arc.lock().await;
         if let Err(err) = store.set_pending_blockers(task_session_id, blockers.clone()) {
@@ -886,7 +1515,11 @@ async fn build_blocked_kernel_command_surface_result(
         }
         if let Err(err) = store.block_session(
             task_session_id,
-            "MainChatKernel direct answer blocked before model completion.",
+            if read_tool_loop_used {
+                "MainChatKernel read-only tool loop blocked."
+            } else {
+                "MainChatKernel direct answer blocked before model completion."
+            },
         ) {
             log::warn!("[MainChatKernel] block session failed: {}", err);
         }
@@ -896,26 +1529,44 @@ async fn build_blocked_kernel_command_surface_result(
             state,
             Some(task_session_id),
             ExecutionTranscriptEntryKind::Error,
-            "DirectAnswer kernel returned a blocker.",
+            if read_tool_loop_used {
+                "MainChatKernel read-only tool loop returned a blocker."
+            } else {
+                "DirectAnswer kernel returned a blocker."
+            },
             serde_json::json!({
                 "blockers": blockers,
                 "directWritesExecuted": false,
                 "legacyFallbackUsed": false,
-                "kernelBackedDirectAnswer": true,
+                "kernelBackedDirectAnswer": !read_tool_loop_used,
+                "kernelBackedReadOnlyToolLoop": read_tool_loop_used,
                 "kernelEventSink": event_sink_label,
                 "kernelEventCount": kernel_events.len(),
                 "modelGenerated": false,
                 "schedulerGenerationCalled": false,
+                "toolCallCount": kernel_result.tool_calls.len(),
             }),
         )
         .await,
     );
-    let reply = format!(
-        "I could not run the direct answer because the request was blocked: {}.",
-        blocker_summary
-    );
+    let reply = kernel_result
+        .assistant_message
+        .as_ref()
+        .map(|message| message.content.clone())
+        .unwrap_or_else(|| {
+            format!(
+                "I could not run the kernel turn because the request was blocked: {}.",
+                blocker_summary
+            )
+        });
     let mut agent_run = AgentRun::new_chat_run(session_id, "");
-    agent_run.reasoning_strategy = Some("main_chat_agent_v1_direct_answer".into());
+    agent_run.reasoning_strategy = Some(if read_tool_loop_used {
+        "main_chat_agent_v1_read_only_tool_loop".into()
+    } else {
+        "main_chat_agent_v1_direct_answer".into()
+    });
+    agent_run.tool_call_count = kernel_result.tool_calls.len() as u32;
+    agent_run.step_count = if read_tool_loop_used { 1 } else { 0 };
     agent_run.fail(AgentRunError {
         message: blocker_summary.clone(),
         phase: "main_chat_kernel".into(),
@@ -925,14 +1576,16 @@ async fn build_blocked_kernel_command_surface_result(
         generation_result: Some(serde_json::json!({
             "text": reply,
             "mainChatAgentV1": true,
-            "selectedStrategy": MainChatAgentStrategy::DirectAnswer.as_str(),
+            "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
             "legacyFallbackUsed": false,
             "directWritesExecuted": false,
-            "kernelBackedDirectAnswer": true,
+            "kernelBackedDirectAnswer": !read_tool_loop_used,
+            "kernelBackedReadOnlyToolLoop": read_tool_loop_used,
             "kernelEventSink": event_sink_label,
             "kernelEventCount": kernel_events.len(),
             "modelGenerated": false,
             "schedulerGenerationCalled": false,
+            "toolCallCount": kernel_result.tool_calls.len(),
             "blockers": kernel_result.blockers,
         })),
         ..Default::default()
@@ -944,6 +1597,14 @@ async fn build_blocked_kernel_command_surface_result(
             log::warn!("[MainChatKernel] create failed AgentRun failed: {}", err);
         }
     }
+    let tool_calls = record_kernel_tool_call_evidence(
+        state,
+        task_session_id,
+        &kernel_result.tool_calls,
+        &agent_run.id,
+        &mut execution_transcript,
+    )
+    .await?;
     let agent_state =
         assemble_main_chat_agent_state_for_turn(state, Some(task_session_id), Some(&agent_run.id))
             .await;
@@ -953,7 +1614,7 @@ async fn build_blocked_kernel_command_surface_result(
     Ok(MainChatKernelCommandSurfaceResult {
         reply,
         reasoning_trace,
-        tool_calls: Vec::new(),
+        tool_calls,
         run_id: Some(agent_run.id),
         agent_ingress: Some(main_chat_agent_turn.decision.clone()),
         agent_state,
@@ -962,6 +1623,146 @@ async fn build_blocked_kernel_command_surface_result(
         durable_events,
         kernel_events,
     })
+}
+
+async fn record_kernel_tool_call_evidence(
+    state: &Arc<AppState>,
+    task_session_id: &str,
+    kernel_tool_calls: &[MainChatKernelToolCall],
+    run_id: &str,
+    execution_transcript: &mut Vec<ExecutionTranscriptEntry>,
+) -> Result<Vec<ToolCallResult>, String> {
+    let mut tool_calls = Vec::new();
+    for call in kernel_tool_calls {
+        let queued = enqueue_main_chat_agent_action(
+            state,
+            task_session_id,
+            &call.action_type,
+            &format!(
+                "MainChatKernel governed read-only tool execution for {}",
+                call.name
+            ),
+            execution_transcript,
+        )
+        .await?;
+        let mut metadata = call
+            .observation_metadata
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({}));
+        bind_main_chat_observation_metadata_to_queue_action(&mut metadata, &queued.id);
+
+        let status = tool_call_status_from_kernel_status(&call.status);
+        let succeeded = matches!(&status, ToolCallStatus::Success);
+        if succeeded {
+            transition_main_chat_action(
+                state,
+                &queued.id,
+                ExecutionQueueStatus::Executing,
+                Some(metadata.clone()),
+            )
+            .await?;
+            transition_main_chat_action(
+                state,
+                &queued.id,
+                ExecutionQueueStatus::Observed,
+                Some(metadata.clone()),
+            )
+            .await?;
+            transition_main_chat_action(
+                state,
+                &queued.id,
+                ExecutionQueueStatus::Completed,
+                Some(metadata.clone()),
+            )
+            .await?;
+        } else {
+            fail_main_chat_action(
+                state,
+                &queued.id,
+                call.blocker.as_deref().unwrap_or("read_tool_failed"),
+                metadata.clone(),
+            )
+            .await?;
+        }
+
+        let mut transcript_metadata = metadata.clone();
+        if let Some(object) = transcript_metadata.as_object_mut() {
+            object.insert("runId".into(), serde_json::json!(run_id));
+            object.insert("actionId".into(), serde_json::json!(queued.id.clone()));
+            object.insert("toolName".into(), serde_json::json!(call.name.clone()));
+            object.insert(
+                "actionType".into(),
+                serde_json::json!(call.action_type.clone()),
+            );
+            object.insert("target".into(), serde_json::json!(call.target.clone()));
+            object.insert("status".into(), serde_json::json!(call.status.clone()));
+            object.insert(
+                "blocker".into(),
+                call.blocker
+                    .as_ref()
+                    .map(|blocker| serde_json::Value::String(blocker.clone()))
+                    .unwrap_or(serde_json::Value::Null),
+            );
+            object.insert(
+                "kernelBackedReadOnlyToolLoop".into(),
+                serde_json::json!(true),
+            );
+            object.insert("directWritesExecuted".into(), serde_json::json!(false));
+            object.insert("legacyFallbackUsed".into(), serde_json::json!(false));
+        }
+
+        execution_transcript.extend(
+            append_main_chat_agent_transcript(
+                state,
+                Some(task_session_id),
+                if succeeded {
+                    ExecutionTranscriptEntryKind::Observation
+                } else {
+                    ExecutionTranscriptEntryKind::Error
+                },
+                if succeeded {
+                    "MainChatKernel read-only tool observation recorded."
+                } else {
+                    "MainChatKernel read-only tool blocker recorded."
+                },
+                transcript_metadata,
+            )
+            .await,
+        );
+
+        tool_calls.push(ToolCallResult {
+            name: call.name.clone(),
+            arguments: call.governed_input.clone(),
+            sanitized_arguments: Some(call.governed_input.clone()),
+            success: succeeded,
+            output: call.output_preview.clone(),
+            error: call.blocker.clone(),
+            permission_level: "read".into(),
+            status,
+            requires_confirmation: false,
+            pii_found: false,
+            privacy_warnings: Vec::new(),
+            action_id: Some(queued.id),
+            run_id: Some(run_id.to_string()),
+            permission_decision: metadata
+                .get("structuredResult")
+                .and_then(|value| value.get("permission_decision"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| call.blocker.clone()),
+            react_trace: None,
+        });
+    }
+    Ok(tool_calls)
+}
+
+fn tool_call_status_from_kernel_status(status: &str) -> ToolCallStatus {
+    match status {
+        "succeeded" => ToolCallStatus::Success,
+        "needs_confirmation" => ToolCallStatus::NeedsConfirmation,
+        "blocked" => ToolCallStatus::Blocked,
+        _ => ToolCallStatus::Error,
+    }
 }
 
 async fn command_surface_kernel_context_candidates(
@@ -1016,6 +1817,195 @@ async fn command_surface_kernel_context_candidates(
         ));
     }
     candidates
+}
+
+fn plan_kernel_read_tool(
+    input: &MainChatTurnInput,
+    model_arguments_ignored: bool,
+) -> Option<MainChatKernelReadToolDecision> {
+    let user_text = latest_user_text(&input.messages)?;
+    let lower = user_text.to_ascii_lowercase();
+
+    if contains_any(
+        &lower,
+        &[
+            "unknown tool",
+            "unknown.tool",
+            "unsupported tool",
+            "nonexistent tool",
+        ],
+    ) {
+        return Some(MainChatKernelReadToolDecision {
+            tool_name: "unsupported.tool".into(),
+            queue_action_type: "unsupported.tool".into(),
+            executor_action_type: "unsupported_tool".into(),
+            target: "unsupported.tool".into(),
+            governed_input: serde_json::json!({
+                "query": bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
+                "governedInputSource": "kernel_unsupported_tool_blocker",
+            }),
+            reason: "unknown tool target must fail closed".into(),
+            model_arguments_ignored,
+        });
+    }
+
+    if contains_any(
+        &lower,
+        &[
+            "web.read",
+            "web read unavailable",
+            "web/read unavailable",
+            "network unavailable",
+        ],
+    ) {
+        return Some(MainChatKernelReadToolDecision {
+            tool_name: "web.read".into(),
+            queue_action_type: "web.read".into(),
+            executor_action_type: "unsupported_web_read".into(),
+            target: "web.read".into(),
+            governed_input: serde_json::json!({
+                "query": bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
+                "governedInputSource": "kernel_web_unavailable_blocker",
+            }),
+            reason: "minimal kernel does not execute broad web reads".into(),
+            model_arguments_ignored,
+        });
+    }
+
+    if lower.contains("mcp") {
+        return None;
+    }
+
+    if contains_any(
+        &lower,
+        &[
+            "file.read",
+            "read file",
+            "read `",
+            "read agents",
+            "agents.md",
+            "cargo.toml",
+        ],
+    ) {
+        return Some(MainChatKernelReadToolDecision {
+            tool_name: "file.read".into(),
+            queue_action_type: "file.read".into(),
+            executor_action_type: "mcp_tool".into(),
+            target: "file.read".into(),
+            governed_input: serde_json::json!({
+                "rawUserText": user_text,
+                "governedInputSource": "workspace_scoped_resolver_pending",
+            }),
+            reason: "workspace file read requested".into(),
+            model_arguments_ignored,
+        });
+    }
+
+    if contains_any(
+        &lower,
+        &[
+            "session.search",
+            "session search",
+            "past sessions",
+            "prior session",
+            "what we discussed",
+            "what did i ask",
+        ],
+    ) {
+        return Some(MainChatKernelReadToolDecision {
+            tool_name: "session.search".into(),
+            queue_action_type: "session.search".into(),
+            executor_action_type: "session_search".into(),
+            target: "session.search".into(),
+            governed_input: serde_json::json!({
+                "query": bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
+                "limit": 5,
+                "governedInputSource": "kernel_session_query_from_user_text",
+            }),
+            reason: "bounded prior session search requested".into(),
+            model_arguments_ignored,
+        });
+    }
+
+    if contains_any(
+        &lower,
+        &[
+            "memory.search",
+            "memory search",
+            "search memory",
+            "my memory",
+            "memory context",
+        ],
+    ) {
+        return Some(MainChatKernelReadToolDecision {
+            tool_name: "memory.search".into(),
+            queue_action_type: "memory.search".into(),
+            executor_action_type: "memory_search".into(),
+            target: "memory.search".into(),
+            governed_input: serde_json::json!({
+                "query": bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
+                "limit": 5,
+                "governedInputSource": "kernel_memory_query_from_user_text",
+            }),
+            reason: "bounded memory search requested".into(),
+            model_arguments_ignored,
+        });
+    }
+
+    None
+}
+
+fn latest_user_text(messages: &[ChatMessage]) -> Option<&str> {
+    messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "user" && !message.content.trim().is_empty())
+        .map(|message| message.content.as_str())
+}
+
+fn contains_any(value: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| value.contains(needle))
+}
+
+fn action_execution_status_label(status: &ActionExecutionStatus) -> &'static str {
+    match status {
+        ActionExecutionStatus::Succeeded => "succeeded",
+        ActionExecutionStatus::Failed => "failed",
+        ActionExecutionStatus::Blocked => "blocked",
+        ActionExecutionStatus::NeedsConfirmation => "needs_confirmation",
+    }
+}
+
+fn synthesize_read_tool_answer(execution: &MainChatKernelReadToolExecution) -> String {
+    match execution.status {
+        ActionExecutionStatus::Succeeded => {
+            format!(
+            "I ran {} through the governed read-only tool loop and used this observation:\n\n{}",
+            execution.decision.tool_name,
+            bounded_text(&execution.observation_content, MAX_TOOL_OBSERVATION_PREVIEW_CHARS)
+        )
+        }
+        ActionExecutionStatus::Blocked => format!(
+            "I could not run {} because it was blocked by governance: {}.",
+            execution.decision.tool_name,
+            execution
+                .blocker_reason
+                .as_deref()
+                .unwrap_or("read_tool_blocked")
+        ),
+        ActionExecutionStatus::NeedsConfirmation => format!(
+            "I could not run {} because it needs explicit permission first.",
+            execution.decision.tool_name
+        ),
+        ActionExecutionStatus::Failed => format!(
+            "I could not complete {}. Blocker: {}.",
+            execution.decision.tool_name,
+            execution
+                .blocker_reason
+                .as_deref()
+                .unwrap_or("read_tool_failed")
+        ),
+    }
 }
 
 fn model_route_from_kernel_route(route: &MainChatRouteMetadata) -> ModelRouteTrace {
@@ -1287,6 +2277,59 @@ mod tests {
         }
     }
 
+    struct RecordingReadToolExecutor {
+        decisions: Arc<Mutex<Vec<MainChatKernelReadToolDecision>>>,
+    }
+
+    #[async_trait]
+    impl MainChatKernelReadToolExecutor for RecordingReadToolExecutor {
+        async fn execute_read_tool(
+            &self,
+            decision: MainChatKernelReadToolDecision,
+        ) -> MainChatKernelReadToolExecution {
+            self.decisions
+                .lock()
+                .expect("decisions lock")
+                .push(decision.clone());
+            let governed_input = decision.governed_input.clone();
+            let mut metadata = serde_json::json!({
+                "kernelBackedReadOnlyToolLoop": true,
+                "actionExecutorBacked": false,
+                "toolName": decision.tool_name.clone(),
+                "queueActionType": decision.queue_action_type.clone(),
+                "executorActionType": decision.executor_action_type.clone(),
+                "target": decision.target.clone(),
+                "governedInput": governed_input.clone(),
+                "modelArgumentsIgnored": decision.model_arguments_ignored,
+                "structuredResult": {
+                    "success": true,
+                    "status": "succeeded",
+                    "directWritesExecuted": false,
+                    "promotedToMemory": false
+                },
+                "directWritesExecuted": false,
+            });
+            attach_main_chat_read_observation_metadata(
+                &mut metadata,
+                &decision.queue_action_type,
+                &decision.target,
+                &governed_input,
+                "fake governed read observation",
+                None,
+                false,
+                true,
+            );
+            MainChatKernelReadToolExecution {
+                decision,
+                status: ActionExecutionStatus::Succeeded,
+                observation_content: "fake governed read observation".into(),
+                observation_metadata: metadata,
+                output_preview: "fake governed read observation".into(),
+                blocker_reason: None,
+            }
+        }
+    }
+
     fn user_message(content: &str) -> ChatMessage {
         ChatMessage {
             role: "user".into(),
@@ -1317,6 +2360,7 @@ mod tests {
                     session_id: "session-1".into(),
                     messages: vec![user_message("Say hello from the kernel.")],
                     selected_skill_id: None,
+                    model_supplied_tool_arguments: None,
                 },
                 &mut events,
             )
@@ -1359,6 +2403,7 @@ mod tests {
                     session_id: "session-1".into(),
                     messages: vec![user_message("   ")],
                     selected_skill_id: None,
+                    model_supplied_tool_arguments: None,
                 },
                 &mut events,
             )
@@ -1387,6 +2432,7 @@ mod tests {
                     session_id: "   ".into(),
                     messages: vec![user_message("Hello")],
                     selected_skill_id: None,
+                    model_supplied_tool_arguments: None,
                 },
                 &mut events,
             )
@@ -1420,6 +2466,7 @@ mod tests {
                     session_id: "session-1".into(),
                     messages: vec![user_message("Summarize this.")],
                     selected_skill_id: Some(" summarize ".into()),
+                    model_supplied_tool_arguments: None,
                 },
                 &mut events,
             )
@@ -1482,6 +2529,7 @@ mod tests {
                     session_id: "session-1".into(),
                     messages: vec![user_message("Route metadata please.")],
                     selected_skill_id: None,
+                    model_supplied_tool_arguments: None,
                 },
                 &mut events,
             )
@@ -1507,6 +2555,57 @@ mod tests {
         }));
     }
 
+    #[tokio::test]
+    async fn main_chat_kernel_read_tool_ignores_model_supplied_arguments() {
+        let model = ScriptedModelClient::ok("model answer should not choose tool args");
+        let decisions = Arc::new(Mutex::new(Vec::new()));
+        let kernel = test_kernel(model.clone(), Vec::new()).with_read_tool_executor(Arc::new(
+            RecordingReadToolExecutor {
+                decisions: decisions.clone(),
+            },
+        ));
+        let mut events = BufferedMainChatEventSink::default();
+
+        let result = kernel
+            .run_turn(
+                MainChatTurnInput {
+                    session_id: "session-1".into(),
+                    messages: vec![user_message("Please read file `AGENTS.md`.")],
+                    selected_skill_id: None,
+                    model_supplied_tool_arguments: Some(serde_json::json!({
+                        "path": "../outside-secret.txt"
+                    })),
+                },
+                &mut events,
+            )
+            .await;
+
+        assert_eq!(model.call_count(), 0);
+        assert!(result.blockers.is_empty());
+        assert_eq!(result.tool_calls.len(), 1);
+        assert!(result.tool_calls[0].model_arguments_ignored);
+        assert_eq!(
+            result.tool_calls[0].governed_input["governedInputSource"],
+            serde_json::json!("workspace_scoped_resolver_pending")
+        );
+        assert_ne!(
+            result.tool_calls[0].governed_input.get("path"),
+            Some(&serde_json::json!("../outside-secret.txt"))
+        );
+        let recorded = decisions.lock().expect("decisions lock");
+        assert_eq!(recorded.len(), 1);
+        assert!(recorded[0].model_arguments_ignored);
+        assert!(events.events().iter().any(|event| {
+            matches!(
+                event,
+                MainChatKernelEvent::ToolDecision {
+                    model_arguments_ignored: true,
+                    ..
+                }
+            )
+        }));
+    }
+
     #[test]
     fn main_chat_kernel_goal_2_send_and_stream_use_kernel_direct_answer_adapter() {
         let send_source = include_str!("main_chat_send.rs");
@@ -1519,14 +2618,14 @@ mod tests {
     }
 
     #[test]
-    fn main_chat_kernel_goal_1_has_no_final_live_or_tool_runtime_dependency() {
+    fn main_chat_kernel_goal_3_has_no_final_live_or_broad_react_dependency() {
         let source = include_str!("main_chat_kernel.rs");
         let final_gate = ["main_chat_", "final_gate"].concat();
         let live_provider = ["main_chat_", "live_provider"].concat();
-        let action_executor = ["Action", "Executor"].concat();
+        let react_agent_loop = ["Agent", "Loop"].concat();
 
         assert!(!source.contains(&final_gate));
         assert!(!source.contains(&live_provider));
-        assert!(!source.contains(&action_executor));
+        assert!(!source.contains(&react_agent_loop));
     }
 }
