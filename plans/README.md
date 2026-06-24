@@ -1,7 +1,7 @@
 # OpenLife Plans Document Governance
 
-> Last updated: 2026-06-22
-> Status: authoritative document index for Agents; Main Chat kernel rescue Goal 8 cleanup/final-gate realignment is the current entry point
+> Last updated: 2026-06-25
+> Status: authoritative document index for Agents; Main Chat kernel rescue Goal 8 remains the current runtime entry point, and Runtime Facts / Agent Self-State is the current post-Goal-8 preparation track
 
 This file prevents old planning documents from steering new Agent work. If two
 documents disagree, use the precedence below and treat lower-priority stale text
@@ -26,6 +26,13 @@ as reference only.
      `plans/main_chat_agent_kernel_rescue_spec_coding_contract.md`. Goal
      completion reporting must use
      `plans/main_chat_agent_kernel_rescue_goal_completion_template.md`.
+   - Post-Goal-8 Runtime Facts / Agent Self-State preparation is governed by
+     `plans/main_chat_runtime_facts_source_registry.md`,
+     `plans/main_chat_runtime_facts_ui_contract.md`, and
+     `plans/main_chat_runtime_facts_eval_matrix.md`. These documents define
+     fact source authority, UI visibility, and eval gates for deterministic
+     runtime facts. They are preparation artifacts only and must not be read as
+     implementation completion or product readiness.
 4. `plans/main_chat_stage2_preparation_index.md` and
    `plans/main_chat_agent_stage2_internal_trial_goal_spec.md`
    - Current Stage 2 planning and Goal-mode entry point. Stage 2 targets

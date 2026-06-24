@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use chrono::{Datelike, Offset};
 use openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentStateSnapshot;
 use openlife_core::agent::main_chat_agent_v1::{
     AgentIngressDecision, AgentTaskSessionStatus, CompiledContext, ContextCompiler,
@@ -1367,6 +1368,8 @@ where
     let scheduler = state.scheduler.lock().await.clone();
     let direct_reply = if user_text.trim().is_empty() {
         None
+    } else if let Some(reply) = main_chat_runtime_clock_direct_reply(&user_text) {
+        Some(reply)
     } else {
         let router = state.intent_router.lock().await;
         router.classify(&user_text).direct_response()
@@ -2339,6 +2342,8 @@ async fn build_successful_kernel_command_surface_result(
             ExecutionTranscriptEntryKind::Observation,
             if read_tool_loop_used {
                 "MainChatKernel read-only tool loop synthesized an answer without writes."
+            } else if direct_reflex_used {
+                "DirectAnswer returned a local deterministic response without provider generation."
             } else {
                 "DirectAnswer generated a model response without tools or writes."
             },
@@ -5086,6 +5091,111 @@ fn route_metadata_from_scheduler(scheduler: &InferenceScheduler) -> MainChatRout
     }
 }
 
+fn main_chat_runtime_clock_direct_reply(user_text: &str) -> Option<String> {
+    let now = chrono::Local::now();
+    let fixed_offset = now.offset().fix();
+    main_chat_runtime_clock_direct_reply_at(user_text, now.with_timezone(&fixed_offset))
+}
+
+fn main_chat_runtime_clock_direct_reply_at(
+    user_text: &str,
+    now: chrono::DateTime<chrono::FixedOffset>,
+) -> Option<String> {
+    let normalized = user_text.trim().to_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    let compact = normalized
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    let english_phrase = normalized
+        .trim_matches(|ch: char| ch.is_ascii_punctuation())
+        .trim();
+
+    let asks_weekday = compact.contains("星期几")
+        || compact.contains("周几")
+        || compact.contains("礼拜几")
+        || matches_exact_clock_phrase(
+            english_phrase,
+            &[
+                "what day is it",
+                "what day is today",
+                "what day of the week is it",
+                "what weekday is it",
+                "what is today's weekday",
+                "today's weekday",
+                "day of week today",
+            ],
+        );
+    let asks_date = compact.contains("今天几号")
+        || compact.contains("今天日期")
+        || compact.contains("今天是哪天")
+        || compact.contains("今天哪一天")
+        || compact.contains("当前日期")
+        || compact.contains("现在日期")
+        || matches_exact_clock_phrase(
+            english_phrase,
+            &[
+                "today's date",
+                "date today",
+                "what is today's date",
+                "what's today's date",
+                "what is the date today",
+                "what date is it",
+            ],
+        );
+    let asks_time = compact.contains("现在几点")
+        || compact.contains("几点了")
+        || compact.contains("当前时间")
+        || compact.contains("现在时间")
+        || matches_exact_clock_phrase(
+            english_phrase,
+            &[
+                "current time",
+                "time now",
+                "what time is it",
+                "what's the time",
+                "what is the time",
+                "what is the current time",
+            ],
+        );
+
+    if !(asks_weekday || asks_date || asks_time) {
+        return None;
+    }
+
+    let date = now.format("%Y-%m-%d").to_string();
+    let weekday = chinese_weekday(now.weekday());
+    if asks_time {
+        return Some(format!(
+            "根据本机运行时钟，现在是 {} {}，{}（UTC{}）。",
+            date,
+            now.format("%H:%M"),
+            weekday,
+            now.format("%:z")
+        ));
+    }
+
+    Some(format!("根据本机运行时钟，今天是 {}，{}。", date, weekday))
+}
+
+fn matches_exact_clock_phrase(value: &str, phrases: &[&str]) -> bool {
+    phrases.iter().any(|phrase| value == *phrase)
+}
+
+fn chinese_weekday(weekday: chrono::Weekday) -> &'static str {
+    match weekday {
+        chrono::Weekday::Mon => "星期一",
+        chrono::Weekday::Tue => "星期二",
+        chrono::Weekday::Wed => "星期三",
+        chrono::Weekday::Thu => "星期四",
+        chrono::Weekday::Fri => "星期五",
+        chrono::Weekday::Sat => "星期六",
+        chrono::Weekday::Sun => "星期日",
+    }
+}
+
 fn bounded_label(value: &str, max_chars: usize) -> String {
     let mut output = String::new();
     let mut last_was_space = false;
@@ -5126,6 +5236,7 @@ fn bounded_text(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use openlife_core::agent::model_router::{ModelRouter, ProviderAvailability};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -5407,6 +5518,41 @@ mod tests {
         assert!(events.events().iter().any(|event| {
             matches!(event, MainChatKernelEvent::FinalAnswer { content_chars, .. } if *content_chars > 0)
         }));
+    }
+
+    #[test]
+    fn main_chat_kernel_runtime_clock_reply_answers_weekday_from_local_runtime() {
+        let clock = chrono::FixedOffset::east_opt(8 * 60 * 60)
+            .expect("fixed offset")
+            .with_ymd_and_hms(2026, 6, 23, 11, 32, 59)
+            .single()
+            .expect("fixed clock");
+
+        let reply =
+            main_chat_runtime_clock_direct_reply_at("今天星期几", clock).expect("clock reply");
+
+        assert!(reply.contains("2026-06-23"));
+        assert!(reply.contains("星期二"));
+    }
+
+    #[test]
+    fn main_chat_kernel_runtime_clock_reply_does_not_capture_planning_questions() {
+        let clock = chrono::FixedOffset::east_opt(8 * 60 * 60)
+            .expect("fixed offset")
+            .with_ymd_and_hms(2026, 6, 23, 11, 32, 59)
+            .single()
+            .expect("fixed clock");
+
+        assert!(main_chat_runtime_clock_direct_reply_at(
+            "What time should I leave tomorrow?",
+            clock
+        )
+        .is_none());
+        assert!(main_chat_runtime_clock_direct_reply_at(
+            "What date should we pick for the launch?",
+            clock
+        )
+        .is_none());
     }
 
     #[tokio::test]

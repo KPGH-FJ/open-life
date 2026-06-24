@@ -10,6 +10,8 @@ fn main_chat_command_surface_ipc_tests_are_not_concentrated_in_lib_rs() {
         "start_stream_message_command_surface_runs_governed_proposal_path",
         "send_message_direct_answer_records_main_chat_run_and_completes_task",
         "send_message_l2_direct_answer_records_scheduler_provider_generation_trace",
+        "send_message_runtime_clock_weekday_uses_kernel_direct_reply_without_provider",
+        "send_message_runtime_clock_does_not_capture_planning_question",
         "start_stream_message_direct_answer_records_main_chat_run_and_completes_task",
         "start_stream_message_l2_direct_answer_records_scheduler_provider_generation_trace",
         "send_message_command_surface_preserves_web_policy_blocker",
@@ -2180,6 +2182,116 @@ async fn send_message_l2_direct_answer_records_scheduler_provider_generation_tra
     assert_eq!(
         generation_entry["metadata"]["directWritesExecuted"].as_bool(),
         Some(false)
+    );
+}
+
+#[tokio::test]
+async fn send_message_runtime_clock_weekday_uses_kernel_direct_reply_without_provider() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    set_command_surface_scripted_generation_response(
+        &state,
+        "provider-should-not-answer-clock",
+        serde_json::json!("provider should not be used for runtime clock"),
+    )
+    .await;
+
+    let response = invoke_send_message_for_kernel_goal_3(
+        state,
+        "command-surface-runtime-clock-weekday",
+        "今天星期几",
+    )
+    .await;
+
+    let reply = response["reply"].as_str().expect("runtime clock reply");
+    assert!(reply.contains("根据本机运行时钟"));
+    assert!(reply.contains("星期"));
+    assert_ne!(reply, "provider should not be used for runtime clock");
+    assert_eq!(response["legacy_fallback_used"], false);
+    assert_eq!(
+        response["agent_ingress"]["selectedStrategy"],
+        "direct_answer"
+    );
+
+    let generation = response["reasoning_trace"]["generation_result"]
+        .as_object()
+        .expect("runtime clock generation metadata");
+    assert_eq!(
+        generation
+            .get("kernelBackedDirectAnswer")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        generation
+            .get("modelGenerated")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        generation
+            .get("schedulerGenerationCalled")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        generation
+            .get("providerGenerationPath")
+            .and_then(serde_json::Value::as_str),
+        Some("main_chat_kernel_direct_reflex")
+    );
+
+    let transcript = response["execution_transcript"]
+        .as_array()
+        .expect("runtime clock transcript");
+    assert!(transcript.iter().any(|entry| {
+        entry["summary"].as_str().is_some_and(|summary| {
+            summary.contains("local deterministic response without provider generation")
+        })
+    }));
+}
+
+#[tokio::test]
+async fn send_message_runtime_clock_does_not_capture_planning_question() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    set_command_surface_scripted_generation_response(
+        &state,
+        "provider-should-answer-planning",
+        serde_json::json!("provider handled the planning question"),
+    )
+    .await;
+
+    let response = invoke_send_message_for_kernel_goal_3(
+        state,
+        "command-surface-runtime-clock-negative-planning",
+        "What time should I leave tomorrow?",
+    )
+    .await;
+
+    let reply = response["reply"].as_str().expect("planning reply");
+    assert!(reply.contains("provider handled the planning question"));
+    assert!(!reply.contains("根据本机运行时钟"));
+    assert_eq!(response["legacy_fallback_used"], false);
+
+    let generation = response["reasoning_trace"]["generation_result"]
+        .as_object()
+        .expect("planning generation metadata");
+    assert_eq!(
+        generation
+            .get("modelGenerated")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        generation
+            .get("schedulerGenerationCalled")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        generation
+            .get("providerGenerationPath")
+            .and_then(serde_json::Value::as_str),
+        Some("main_chat_direct_answer_scheduler")
     );
 }
 
