@@ -3,13 +3,15 @@ use openlife_core::agent::{
     model_router::{ModelRouter, ProviderAvailability},
     AgentRunStatus, ModelRouteTrace,
 };
-use openlife_core::config::AppConfig;
+use openlife_core::config::{AppConfig, NetworkPolicy};
 use openlife_core::llm::ChatMessage;
 use openlife_core::scheduler::InferenceScheduler;
+use openlife_core::tool_manifest::{ToolManifest, ToolSource};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
+use crate::main_chat_react_tool_selection::main_chat_manifest_is_governed_read_candidate;
 use crate::AppState;
 
 pub(crate) const RUNTIME_FACT_SOURCE_TYPE: &str = "runtime_fact";
@@ -46,9 +48,25 @@ pub(crate) const RUNTIME_FACT_KEY_PROVIDER_PLANNED_MODEL: &str =
 pub(crate) const RUNTIME_FACT_KEY_PROVIDER_PLANNED_ROUTE_TYPE: &str =
     "provider.planned_route_if_model_needed.route_type";
 pub(crate) const RUNTIME_FACT_KEY_PROVIDER_PREFLIGHT_STATUS: &str = "provider.preflight.status";
+pub(crate) const RUNTIME_FACT_TOOL_AVAILABILITY_GENERATION_PATH: &str =
+    "main_chat_tool_availability_runtime_fact";
+pub(crate) const RUNTIME_FACT_KEY_TOOL_WEB_CONFIG_ENABLED: &str = "tool.web.config_enabled";
+pub(crate) const RUNTIME_FACT_KEY_TOOL_WEB_CREDENTIAL_AVAILABLE: &str =
+    "tool.web.credential_available";
+pub(crate) const RUNTIME_FACT_KEY_TOOL_WEB_POLICY_ALLOWED: &str = "tool.web.policy_allowed";
+pub(crate) const RUNTIME_FACT_KEY_TOOL_WEB_REACHABLE: &str = "tool.web.reachable";
+pub(crate) const RUNTIME_FACT_KEY_TOOL_WEB_AVAILABLE: &str = "tool.web.available";
+pub(crate) const RUNTIME_FACT_KEY_TOOL_MCP_REGISTERED_COUNT: &str = "tool.mcp.registered_count";
+pub(crate) const RUNTIME_FACT_KEY_TOOL_MCP_SAFE_READ_CANDIDATE_COUNT: &str =
+    "tool.mcp.read_only_allowed_count";
+pub(crate) const RUNTIME_FACT_KEY_TOOL_MCP_SERVER_STATUS: &str = "tool.mcp.server_status";
+pub(crate) const RUNTIME_FACT_KEY_TOOL_WRITE_AVAILABLE: &str = "tool.write.available";
+pub(crate) const RUNTIME_FACT_KEY_TOOL_WRITE_REQUIRES_PERMISSION: &str =
+    "tool.write.requires_permission";
 
 const SLICE_A_SCENARIOS: [&str; 6] = ["RF-01", "RF-02", "RF-03", "RF-04", "RF-05", "RF-06"];
 const SLICE_B_SCENARIOS: [&str; 4] = ["RF-07", "RF-08", "RF-09", "RF-10"];
+const SLICE_C_SCENARIOS: [&str; 5] = ["RF-11", "RF-12", "RF-13", "RF-14", "RF-15"];
 const FIXED_CLOCK_RFC3339: &str = "2026-06-23T09:15:00+08:00";
 
 #[derive(Debug, Clone)]
@@ -260,6 +278,41 @@ impl MainChatProviderRouteIntent {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MainChatToolAvailabilityIntent {
+    AskToolAvailability,
+    AskWriteCapability,
+}
+
+impl MainChatToolAvailabilityIntent {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::AskToolAvailability => "ask_tool_availability",
+            Self::AskWriteCapability => "ask_write_capability",
+        }
+    }
+
+    fn fact_keys(self) -> Vec<&'static str> {
+        match self {
+            Self::AskToolAvailability => vec![
+                RUNTIME_FACT_KEY_TOOL_WEB_CONFIG_ENABLED,
+                RUNTIME_FACT_KEY_TOOL_WEB_CREDENTIAL_AVAILABLE,
+                RUNTIME_FACT_KEY_TOOL_WEB_POLICY_ALLOWED,
+                RUNTIME_FACT_KEY_TOOL_WEB_REACHABLE,
+                RUNTIME_FACT_KEY_TOOL_WEB_AVAILABLE,
+                RUNTIME_FACT_KEY_TOOL_MCP_REGISTERED_COUNT,
+                RUNTIME_FACT_KEY_TOOL_MCP_SAFE_READ_CANDIDATE_COUNT,
+                RUNTIME_FACT_KEY_TOOL_MCP_SERVER_STATUS,
+            ],
+            Self::AskWriteCapability => vec![
+                RUNTIME_FACT_KEY_TOOL_WRITE_AVAILABLE,
+                RUNTIME_FACT_KEY_TOOL_WRITE_REQUIRES_PERMISSION,
+            ],
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ProviderRouteFactSnapshot {
     provider: Option<String>,
@@ -414,6 +467,550 @@ pub(crate) async fn resolve_provider_route_fact_answer(
         trace_gap: false,
         extra_metadata,
     })
+}
+
+#[derive(Debug, Clone)]
+struct WebAvailabilityFactSnapshot {
+    config_enabled: bool,
+    credential_available: bool,
+    credential_status: String,
+    policy_allowed: bool,
+    policy_blockers: Vec<String>,
+    reachability_status: String,
+    reachability_ttl_status: String,
+    cached_or_preflight_known_reachability: bool,
+    active_reachability_probe: bool,
+    available_status: String,
+}
+
+#[derive(Debug, Clone)]
+struct McpAvailabilityFactSnapshot {
+    registered_count: usize,
+    safe_read_candidate_count: usize,
+    server_status: String,
+    available_status: String,
+    raw_manifest_exposed: bool,
+}
+
+#[derive(Debug, Clone)]
+struct WriteAvailabilityFactSnapshot {
+    available_status: String,
+    requires_permission: bool,
+    silent_write_available: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ToolAvailabilityFactSnapshot {
+    web: WebAvailabilityFactSnapshot,
+    mcp: McpAvailabilityFactSnapshot,
+    write: WriteAvailabilityFactSnapshot,
+}
+
+pub(crate) async fn resolve_tool_availability_fact_answer(
+    user_text: &str,
+    state: &Arc<AppState>,
+) -> Option<MainChatRuntimeFactAnswer> {
+    let intent = classify_tool_availability_query(user_text)?;
+    let config = state.config.lock().await.clone();
+    let manifests = {
+        let registry = state.mcp_registry.lock().await;
+        registry.list_cached_manifest_snapshots()
+    };
+    let snapshot = tool_availability_snapshot(&config, &manifests);
+    let facts = tool_availability_fact_bindings(intent, &snapshot);
+    let fact_keys = intent.fact_keys();
+    let labels = tool_availability_labels(&snapshot);
+    let reply = tool_availability_reply(intent, &snapshot);
+    let ui_status = tool_availability_ui_status(intent, &snapshot);
+    let mut extra_metadata = serde_json::json!({
+        "providerGenerationPath": RUNTIME_FACT_TOOL_AVAILABILITY_GENERATION_PATH,
+        "modelGenerated": false,
+        "schedulerGenerationCalled": false,
+        "toolCalled": false,
+        "directWritesExecuted": false,
+        "legacyFallbackUsed": false,
+        "toolWebConfigEnabled": snapshot.web.config_enabled,
+        "toolWebCredentialAvailable": snapshot.web.credential_available,
+        "toolWebCredentialStatus": snapshot.web.credential_status,
+        "toolWebPolicyAllowed": snapshot.web.policy_allowed,
+        "toolWebPolicyBlockers": snapshot.web.policy_blockers,
+        "toolWebReachabilityStatus": snapshot.web.reachability_status,
+        "toolWebReachabilityTtlStatus": snapshot.web.reachability_ttl_status,
+        "toolWebReachabilityTtlPolicy": "explicit",
+        "toolWebReachabilityObservedAt": null,
+        "toolWebCachedOrPreflightKnownReachability": snapshot.web.cached_or_preflight_known_reachability,
+        "toolWebActiveReachabilityProbe": snapshot.web.active_reachability_probe,
+        "toolWebAvailable": snapshot.web.available_status,
+        "toolMcpRegisteredCount": snapshot.mcp.registered_count,
+        "toolMcpSafeReadCandidateCount": snapshot.mcp.safe_read_candidate_count,
+        "toolMcpServerStatus": snapshot.mcp.server_status,
+        "toolMcpAvailable": snapshot.mcp.available_status,
+        "toolMcpRawManifestExposed": snapshot.mcp.raw_manifest_exposed,
+        "toolWriteAvailable": snapshot.write.available_status,
+        "toolWriteRequiresPermission": snapshot.write.requires_permission,
+        "toolWriteSilentWriteAvailable": snapshot.write.silent_write_available,
+        "toolAvailabilityLabels": labels,
+        "uiPrimarySourceChip": "工具可用性",
+        "uiStatus": ui_status,
+        "uiSecondaryChips": tool_availability_secondary_chips(intent, &snapshot),
+        "runtimeFactTtl": "turn",
+        "runtimeFactTtlStatus": "fresh",
+        "runtimeFactMissingBehavior": if intent == MainChatToolAvailabilityIntent::AskWriteCapability {
+            "blocker"
+        } else {
+            "answer_unknown"
+        },
+    });
+    if intent == MainChatToolAvailabilityIntent::AskToolAvailability {
+        merge_json_object(
+            &mut extra_metadata,
+            serde_json::json!({
+                "runtimeFactObservation": {
+                    "tool.web.reachable": {
+                        "observedAt": null,
+                        "ttlStatus": snapshot.web.reachability_ttl_status,
+                        "ttlPolicy": "explicit"
+                    },
+                    "tool.mcp.server_status": {
+                        "observedAt": null,
+                        "ttlStatus": "not_observed",
+                        "ttlPolicy": "explicit"
+                    }
+                }
+            }),
+        );
+    }
+
+    Some(MainChatRuntimeFactAnswer {
+        reply,
+        intent: intent.as_str().into(),
+        fact_keys,
+        facts,
+        observed_at: Some(chrono::Utc::now().to_rfc3339()),
+        source: match intent {
+            MainChatToolAvailabilityIntent::AskToolAvailability => {
+                vec!["config", "tool_policy", "tool_preflight", "tool_registry"]
+            }
+            MainChatToolAvailabilityIntent::AskWriteCapability => vec!["tool_policy"],
+        },
+        authority: "policy",
+        freshness: "turn_snapshot",
+        visibility: vec!["answer", "ui_badge", "trace_only"],
+        privacy: vec!["public", "internal"],
+        timezone: None,
+        trace_gap: false,
+        extra_metadata,
+    })
+}
+
+fn tool_availability_snapshot(
+    config: &AppConfig,
+    manifests: &[ToolManifest],
+) -> ToolAvailabilityFactSnapshot {
+    let web_search_configured = manifests
+        .iter()
+        .any(|manifest| manifest.enabled && manifest.name == "web.search");
+    let web_fetch_configured = manifests
+        .iter()
+        .any(|manifest| manifest.enabled && manifest.name == "web.fetch");
+    let web_config_enabled = web_search_configured || web_fetch_configured;
+    let (web_credential_available, web_credential_status) =
+        web_credential_snapshot(config, web_search_configured, web_fetch_configured);
+    let (web_policy_allowed, web_policy_blockers) =
+        web_policy_snapshot(&config.system.network_policy);
+    let reachability_status = "unknown".to_string();
+    let cached_or_preflight_known_reachability = false;
+    let available_status = if !web_config_enabled {
+        "unconfigured".to_string()
+    } else if !web_credential_available {
+        "missing_credential".to_string()
+    } else if !web_policy_allowed {
+        "blocked".to_string()
+    } else if cached_or_preflight_known_reachability {
+        "available".to_string()
+    } else {
+        reachability_status.clone()
+    };
+
+    let mcp_manifests = manifests
+        .iter()
+        .filter(|manifest| matches!(manifest.source, ToolSource::Mcp { .. }))
+        .collect::<Vec<_>>();
+    let mcp_registered_count = mcp_manifests.len();
+    let mcp_safe_read_candidate_count = mcp_manifests
+        .iter()
+        .filter(|manifest| main_chat_manifest_is_governed_read_candidate(manifest))
+        .count();
+    let mcp_server_status = "unknown".to_string();
+    let mcp_available_status = if mcp_registered_count == 0 {
+        "not_registered".to_string()
+    } else if mcp_safe_read_candidate_count == 0 {
+        "no_safe_read_candidate".to_string()
+    } else {
+        "unknown_server_status".to_string()
+    };
+
+    ToolAvailabilityFactSnapshot {
+        web: WebAvailabilityFactSnapshot {
+            config_enabled: web_config_enabled,
+            credential_available: web_credential_available,
+            credential_status: web_credential_status,
+            policy_allowed: web_policy_allowed,
+            policy_blockers: web_policy_blockers,
+            reachability_status,
+            reachability_ttl_status: "not_observed".into(),
+            cached_or_preflight_known_reachability,
+            active_reachability_probe: false,
+            available_status,
+        },
+        mcp: McpAvailabilityFactSnapshot {
+            registered_count: mcp_registered_count,
+            safe_read_candidate_count: mcp_safe_read_candidate_count,
+            server_status: mcp_server_status,
+            available_status: mcp_available_status,
+            raw_manifest_exposed: false,
+        },
+        write: WriteAvailabilityFactSnapshot {
+            available_status: "proposal_permission_or_blocker".into(),
+            requires_permission: true,
+            silent_write_available: false,
+        },
+    }
+}
+
+fn web_credential_snapshot(
+    config: &AppConfig,
+    web_search_configured: bool,
+    web_fetch_configured: bool,
+) -> (bool, String) {
+    if !web_search_configured && !web_fetch_configured {
+        return (false, "unconfigured".into());
+    }
+    if web_fetch_configured {
+        return (true, "not_required".into());
+    }
+
+    match config
+        .system
+        .search_provider
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "brave" => {
+            let available = !config.system.search_provider_key.trim().is_empty();
+            (
+                available,
+                if available {
+                    "configured"
+                } else {
+                    "missing_search_provider_key"
+                }
+                .into(),
+            )
+        }
+        "searxng" => {
+            let available = !config.system.searxng_url.trim().is_empty();
+            (
+                available,
+                if available {
+                    "configured"
+                } else {
+                    "missing_searxng_url"
+                }
+                .into(),
+            )
+        }
+        _ => (true, "not_required".into()),
+    }
+}
+
+fn web_policy_snapshot(policy: &NetworkPolicy) -> (bool, Vec<String>) {
+    let mut blockers = Vec::new();
+    if !policy.enabled {
+        blockers.push("network_policy_disabled".into());
+    }
+    for tool_name in ["web.search", "web.fetch"] {
+        if policy
+            .tool_overrides
+            .get(tool_name)
+            .is_some_and(|decision| decision == "deny")
+        {
+            blockers.push(format!("{tool_name}_policy_denied"));
+        }
+    }
+    blockers.sort();
+    blockers.dedup();
+    (blockers.is_empty(), blockers)
+}
+
+fn tool_availability_fact_bindings(
+    intent: MainChatToolAvailabilityIntent,
+    snapshot: &ToolAvailabilityFactSnapshot,
+) -> Vec<MainChatRuntimeFactBinding> {
+    match intent {
+        MainChatToolAvailabilityIntent::AskToolAvailability => vec![
+            tool_fact_binding(
+                RUNTIME_FACT_KEY_TOOL_WEB_CONFIG_ENABLED,
+                "boolean",
+                Some(snapshot.web.config_enabled.to_string()),
+                vec!["config", "tool_registry"],
+                "config",
+                "turn_snapshot",
+                "trace_only",
+                "internal",
+                false,
+            ),
+            tool_fact_binding(
+                RUNTIME_FACT_KEY_TOOL_WEB_CREDENTIAL_AVAILABLE,
+                "boolean",
+                Some(snapshot.web.credential_available.to_string()),
+                vec!["config"],
+                "config",
+                "turn_snapshot",
+                "trace_only",
+                "internal",
+                false,
+            ),
+            tool_fact_binding(
+                RUNTIME_FACT_KEY_TOOL_WEB_POLICY_ALLOWED,
+                "boolean_or_blocker",
+                Some(snapshot.web.policy_allowed.to_string()),
+                vec!["tool_policy"],
+                "policy",
+                "turn_snapshot",
+                "ui_badge",
+                "public",
+                false,
+            ),
+            tool_fact_binding(
+                RUNTIME_FACT_KEY_TOOL_WEB_REACHABLE,
+                "reachable_unreachable_unknown_or_stale",
+                Some(snapshot.web.reachability_status.clone()),
+                vec!["tool_preflight"],
+                "policy",
+                "store_snapshot",
+                "trace_only",
+                "internal",
+                snapshot.web.reachability_status == "unknown",
+            ),
+            tool_fact_binding(
+                RUNTIME_FACT_KEY_TOOL_WEB_AVAILABLE,
+                "derived_status",
+                Some(snapshot.web.available_status.clone()),
+                vec!["config", "tool_policy", "tool_preflight"],
+                "policy",
+                "turn_snapshot",
+                "answer",
+                "public",
+                false,
+            ),
+            tool_fact_binding(
+                RUNTIME_FACT_KEY_TOOL_MCP_REGISTERED_COUNT,
+                "integer",
+                Some(snapshot.mcp.registered_count.to_string()),
+                vec!["tool_registry"],
+                "config",
+                "turn_snapshot",
+                "trace_only",
+                "internal",
+                false,
+            ),
+            tool_fact_binding(
+                RUNTIME_FACT_KEY_TOOL_MCP_SAFE_READ_CANDIDATE_COUNT,
+                "integer",
+                Some(snapshot.mcp.safe_read_candidate_count.to_string()),
+                vec!["tool_registry", "tool_policy"],
+                "policy",
+                "turn_snapshot",
+                "answer",
+                "internal",
+                false,
+            ),
+            tool_fact_binding(
+                RUNTIME_FACT_KEY_TOOL_MCP_SERVER_STATUS,
+                "online_offline_or_unknown",
+                Some(snapshot.mcp.server_status.clone()),
+                vec!["tool_preflight"],
+                "policy",
+                "turn_snapshot",
+                "trace_only",
+                "internal",
+                snapshot.mcp.server_status == "unknown",
+            ),
+        ],
+        MainChatToolAvailabilityIntent::AskWriteCapability => vec![
+            tool_fact_binding(
+                RUNTIME_FACT_KEY_TOOL_WRITE_AVAILABLE,
+                "proposal_permission_or_blocker",
+                Some(snapshot.write.available_status.clone()),
+                vec!["tool_policy"],
+                "policy",
+                "turn_snapshot",
+                "ui_badge",
+                "public",
+                false,
+            ),
+            tool_fact_binding(
+                RUNTIME_FACT_KEY_TOOL_WRITE_REQUIRES_PERMISSION,
+                "boolean",
+                Some(snapshot.write.requires_permission.to_string()),
+                vec!["tool_policy"],
+                "policy",
+                "turn_snapshot",
+                "trace_only",
+                "public",
+                false,
+            ),
+        ],
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tool_fact_binding(
+    key: &'static str,
+    value_shape: &'static str,
+    value: Option<String>,
+    source: Vec<&'static str>,
+    authority: &'static str,
+    freshness: &'static str,
+    visibility: &'static str,
+    privacy: &'static str,
+    missing: bool,
+) -> MainChatRuntimeFactBinding {
+    MainChatRuntimeFactBinding {
+        key,
+        value_shape,
+        value,
+        source,
+        authority,
+        freshness,
+        visibility,
+        privacy,
+        missing,
+    }
+}
+
+fn tool_availability_labels(snapshot: &ToolAvailabilityFactSnapshot) -> Vec<String> {
+    vec![
+        format!(
+            "web: config_enabled={} credential_available={} policy_allowed={} reachability={} available={}",
+            snapshot.web.config_enabled,
+            snapshot.web.credential_available,
+            snapshot.web.policy_allowed,
+            snapshot.web.reachability_status,
+            snapshot.web.available_status
+        ),
+        format!(
+            "mcp: registered_count={} safe_read_candidate_count={} server_status={} available={}",
+            snapshot.mcp.registered_count,
+            snapshot.mcp.safe_read_candidate_count,
+            snapshot.mcp.server_status,
+            snapshot.mcp.available_status
+        ),
+        format!(
+            "write: available={} requires_permission={} silent_write_available={}",
+            snapshot.write.available_status,
+            snapshot.write.requires_permission,
+            snapshot.write.silent_write_available
+        ),
+    ]
+}
+
+fn tool_availability_secondary_chips(
+    intent: MainChatToolAvailabilityIntent,
+    snapshot: &ToolAvailabilityFactSnapshot,
+) -> Vec<&'static str> {
+    match intent {
+        MainChatToolAvailabilityIntent::AskToolAvailability => {
+            let mut chips = vec!["无外部调用"];
+            if snapshot.web.available_status != "available" {
+                chips.push("外部读取未接入");
+            }
+            if snapshot.mcp.available_status != "available" {
+                chips.push("上下文有限");
+            }
+            chips
+        }
+        MainChatToolAvailabilityIntent::AskWriteCapability => {
+            vec!["无写入", "需要用户确认"]
+        }
+    }
+}
+
+fn tool_availability_ui_status(
+    intent: MainChatToolAvailabilityIntent,
+    snapshot: &ToolAvailabilityFactSnapshot,
+) -> &'static str {
+    match intent {
+        MainChatToolAvailabilityIntent::AskWriteCapability => "waiting_for_user",
+        MainChatToolAvailabilityIntent::AskToolAvailability
+            if snapshot.web.available_status == "blocked"
+                || snapshot.mcp.available_status == "no_safe_read_candidate" =>
+        {
+            "restricted"
+        }
+        MainChatToolAvailabilityIntent::AskToolAvailability
+            if snapshot.web.available_status == "unknown"
+                || snapshot.mcp.available_status == "unknown_server_status" =>
+        {
+            "unknown"
+        }
+        MainChatToolAvailabilityIntent::AskToolAvailability => "completed",
+    }
+}
+
+fn tool_availability_reply(
+    intent: MainChatToolAvailabilityIntent,
+    snapshot: &ToolAvailabilityFactSnapshot,
+) -> String {
+    match intent {
+        MainChatToolAvailabilityIntent::AskToolAvailability => {
+            let web_policy = if snapshot.web.policy_allowed {
+                "策略允许外部读取".to_string()
+            } else {
+                format!(
+                    "策略阻止外部读取（{}）",
+                    snapshot.web.policy_blockers.join(", ")
+                )
+            };
+            let web_status = match snapshot.web.available_status.as_str() {
+                "blocked" => "因此当前不能把联网能力标为可用。",
+                "unknown" => {
+                    "但没有缓存或显式 preflight 可达性记录，本轮不会主动探测网络，所以可达性是 unknown。"
+                }
+                "unconfigured" => "web 工具表面未配置，因此不可用。",
+                "available" => "已有缓存/显式 preflight 证明可达，可作为可用能力。",
+                _ => "当前可用性有限。",
+            };
+            let mcp_status = if snapshot.mcp.registered_count == 0 {
+                "MCP：没有已注册 MCP manifest。".to_string()
+            } else if snapshot.mcp.safe_read_candidate_count == 0 {
+                format!(
+                    "MCP：registry 中有 {} 个 manifest，但 policy-allowed read-only candidate 为 0，因此不能声称 MCP 可用。",
+                    snapshot.mcp.registered_count
+                )
+            } else {
+                format!(
+                    "MCP：registry 中有 {} 个 manifest，policy-allowed read-only candidate 为 {}；server_status=unknown，所以只能标为 unknown，不能标为 available。",
+                    snapshot.mcp.registered_count, snapshot.mcp.safe_read_candidate_count
+                )
+            };
+            format!(
+                "联网/工具可用性来自 runtime facts：web config_enabled={}，credential_available={}（{}），{}，reachability={}。{} {}",
+                snapshot.web.config_enabled,
+                snapshot.web.credential_available,
+                snapshot.web.credential_status,
+                web_policy,
+                snapshot.web.reachability_status,
+                web_status,
+                mcp_status
+            )
+        }
+        MainChatToolAvailabilityIntent::AskWriteCapability => {
+            "写入能力来自 runtime facts：不能静默写入。当前写能力只允许走 proposal / permission / blocker 路径；write_requires_permission=true，directWritesExecuted=false。".into()
+        }
+    }
 }
 
 fn runtime_clock_fact_bindings(
@@ -1178,6 +1775,77 @@ pub(crate) fn classify_runtime_clock_query(user_text: &str) -> Option<MainChatRu
     None
 }
 
+pub(crate) fn classify_tool_availability_query(
+    user_text: &str,
+) -> Option<MainChatToolAvailabilityIntent> {
+    let normalized = user_text.trim().to_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    let compact = normalized
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    let compact = trim_outer_punctuation(&compact);
+    let english_phrase = trim_outer_punctuation(&normalized);
+
+    if matches_exact_clock_phrase(
+        compact,
+        &[
+            "你有写入能力吗",
+            "你支持写入吗",
+            "你能直接写入吗",
+            "你会静默写入吗",
+            "写入能力是什么",
+            "你能做写操作吗",
+        ],
+    ) || matches_exact_clock_phrase(
+        english_phrase,
+        &[
+            "can you write",
+            "can you write files",
+            "do you have write capability",
+            "what write capability do you have",
+            "can you silently write",
+        ],
+    ) {
+        return Some(MainChatToolAvailabilityIntent::AskWriteCapability);
+    }
+
+    if matches_exact_clock_phrase(
+        compact,
+        &[
+            "你能联网吗",
+            "你可以联网吗",
+            "你现在能联网吗",
+            "能联网吗",
+            "可以联网吗",
+            "你能上网吗",
+            "你可以上网吗",
+            "你能访问网页吗",
+            "你能用工具吗",
+            "你现在有哪些工具能力",
+            "你能调用mcp吗",
+            "你可以调用mcp吗",
+            "mcp可用吗",
+        ],
+    ) || matches_exact_clock_phrase(
+        english_phrase,
+        &[
+            "can you access the internet",
+            "can you browse the web",
+            "do you have internet access",
+            "can you use tools",
+            "can you use mcp",
+            "is mcp available",
+        ],
+    ) {
+        return Some(MainChatToolAvailabilityIntent::AskToolAvailability);
+    }
+
+    None
+}
+
 fn matches_exact_clock_phrase(value: &str, phrases: &[&str]) -> bool {
     phrases.iter().any(|phrase| value == *phrase)
 }
@@ -1271,6 +1939,25 @@ pub(crate) struct MainChatRuntimeFactsScenarioEvidence {
     pub(crate) provider_preflight_status: Option<String>,
     pub(crate) provider_preflight_blockers: Vec<String>,
     pub(crate) route_labels: Vec<String>,
+    pub(crate) tool_web_config_enabled: Option<bool>,
+    pub(crate) tool_web_credential_available: Option<bool>,
+    pub(crate) tool_web_credential_status: Option<String>,
+    pub(crate) tool_web_policy_allowed: Option<bool>,
+    pub(crate) tool_web_policy_blockers: Vec<String>,
+    pub(crate) tool_web_reachability_status: Option<String>,
+    pub(crate) tool_web_reachability_ttl_status: Option<String>,
+    pub(crate) tool_web_cached_or_preflight_known_reachability: Option<bool>,
+    pub(crate) tool_web_active_reachability_probe: Option<bool>,
+    pub(crate) tool_web_available: Option<String>,
+    pub(crate) tool_mcp_registered_count: Option<usize>,
+    pub(crate) tool_mcp_safe_read_candidate_count: Option<usize>,
+    pub(crate) tool_mcp_server_status: Option<String>,
+    pub(crate) tool_mcp_available: Option<String>,
+    pub(crate) tool_mcp_raw_manifest_exposed: Option<bool>,
+    pub(crate) tool_write_available: Option<String>,
+    pub(crate) tool_write_requires_permission: Option<bool>,
+    pub(crate) tool_write_silent_write_available: Option<bool>,
+    pub(crate) tool_availability_labels: Vec<String>,
     pub(crate) ui_primary_source_chip: Option<String>,
     pub(crate) ui_status: Option<String>,
     pub(crate) task_session_id: Option<String>,
@@ -1310,6 +1997,18 @@ pub(crate) struct MainChatRuntimeFactsNegativeAssertionSummary {
     pub(crate) last_completed_route_not_current_turn: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) provider_preflight_blocker_not_fake_readiness: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) no_active_reachability_probe_for_tool_availability: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) web_policy_blocker_not_fake_availability: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mcp_registry_not_availability_without_safe_read: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mcp_unknown_server_status_not_available: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) write_capability_requires_permission: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) no_raw_mcp_manifest_exposure: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -1319,6 +2018,11 @@ pub(crate) struct MainChatRuntimeFactsCommandSurfaceProof {
     pub(crate) stream_runtime_clock_path: bool,
     pub(crate) send_provider_route_path: bool,
     pub(crate) send_provider_route_preflight_blocker_path: bool,
+    pub(crate) send_tool_availability_path: bool,
+    pub(crate) send_web_policy_blocked_path: bool,
+    pub(crate) send_mcp_no_safe_read_candidate_path: bool,
+    pub(crate) send_mcp_unknown_server_status_path: bool,
+    pub(crate) send_write_permission_path: bool,
     pub(crate) stream_deferred_blocker: Option<String>,
 }
 
@@ -1386,6 +2090,12 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_a_backend_report(
         planned_route_not_invocation_proof: None,
         last_completed_route_not_current_turn: None,
         provider_preflight_blocker_not_fake_readiness: None,
+        no_active_reachability_probe_for_tool_availability: None,
+        web_policy_blocker_not_fake_availability: None,
+        mcp_registry_not_availability_without_safe_read: None,
+        mcp_unknown_server_status_not_available: None,
+        write_capability_requires_permission: None,
+        no_raw_mcp_manifest_exposure: None,
     };
 
     let passed_scenario_count = evidence.iter().filter(|row| row.passed).count();
@@ -1406,6 +2116,11 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_a_backend_report(
             .any(|row| row.entry_point == "stream" && row.passed && !row.trace_gap),
         send_provider_route_path: false,
         send_provider_route_preflight_blocker_path: false,
+        send_tool_availability_path: false,
+        send_web_policy_blocked_path: false,
+        send_mcp_no_safe_read_candidate_path: false,
+        send_mcp_unknown_server_status_path: false,
+        send_write_permission_path: false,
         stream_deferred_blocker: None,
     };
     let no_silent_write_proof = evidence.iter().all(|row| !row.silent_write_detected);
@@ -1539,6 +2254,11 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_b_provider_route_report(
         send_provider_route_preflight_blocker_path: evidence
             .iter()
             .any(|row| row.scenario_id == "RF-10" && row.entry_point == "send" && row.passed),
+        send_tool_availability_path: false,
+        send_web_policy_blocked_path: false,
+        send_mcp_no_safe_read_candidate_path: false,
+        send_mcp_unknown_server_status_path: false,
+        send_write_permission_path: false,
         stream_deferred_blocker: Some("slice_b_provider_route_stream_out_of_scope".into()),
     };
     let negative_assertion_summary = MainChatRuntimeFactsNegativeAssertionSummary {
@@ -1569,6 +2289,12 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_b_provider_route_report(
         provider_preflight_blocker_not_fake_readiness: Some(
             provider_preflight_blocker_not_fake_readiness,
         ),
+        no_active_reachability_probe_for_tool_availability: None,
+        web_policy_blocker_not_fake_availability: None,
+        mcp_registry_not_availability_without_safe_read: None,
+        mcp_unknown_server_status_not_available: None,
+        write_capability_requires_permission: None,
+        no_raw_mcp_manifest_exposure: None,
     };
     let runtime_facts_slice_ready = passed_scenario_count == SLICE_B_SCENARIOS.len()
         && current_route_requires_current_generation_evidence
@@ -1596,6 +2322,167 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_b_provider_route_report(
         out_of_scope_scenario_ids: Vec::new(),
         blocked_scenario_ids: Vec::new(),
         scenario_count: SLICE_B_SCENARIOS.len(),
+        passed_scenario_count,
+        blocked_scenario_count: 0,
+        runtime_facts_slice_ready,
+        runtime_facts_ready: false,
+        ui_included: true,
+        source_registry_version: "2026-06-25",
+        ui_contract_version: "2026-06-25",
+        scenario_evidence: evidence,
+        negative_assertion_summary,
+        focused_test_commands: vec![
+            "cargo test -p openlife-tauri main_chat_runtime_facts -- --nocapture",
+            "cargo test -p openlife-tauri main_chat_command_surface_eval_gate_covers_send_stream_runtime_matrix -- --nocapture",
+            "pnpm --dir frontend test -- src/components/ReasoningTracePanel.test.tsx",
+        ],
+        command_surface_proof,
+        no_silent_write_proof,
+        blockers,
+    }
+}
+
+pub(crate) async fn run_main_chat_runtime_facts_slice_c_tool_availability_report(
+) -> MainChatRuntimeFactsSliceReport {
+    let evidence = vec![
+        run_slice_c_rf11_case().await,
+        run_slice_c_rf12_case().await,
+        run_slice_c_rf13_case().await,
+        run_slice_c_rf14_case().await,
+        run_slice_c_rf15_case().await,
+    ];
+
+    let no_provider_call_for_runtime_facts = evidence.iter().all(|row| {
+        row.model_generated == Some(false) && row.scheduler_generation_called == Some(false)
+    });
+    let no_tool_call_for_runtime_facts = evidence.iter().all(|row| row.tool_called == Some(false));
+    let no_direct_write_for_runtime_facts = evidence
+        .iter()
+        .all(|row| row.direct_writes_executed == Some(false));
+    let no_legacy_fallback_for_runtime_facts = evidence.iter().all(|row| !row.legacy_fallback_used);
+    let no_active_reachability_probe_for_tool_availability = evidence
+        .iter()
+        .all(|row| row.tool_web_active_reachability_probe.unwrap_or(false) == false);
+    let web_policy_blocker_not_fake_availability = evidence.iter().any(|row| {
+        row.scenario_id == "RF-12"
+            && row.passed
+            && row.tool_web_config_enabled == Some(true)
+            && row.tool_web_policy_allowed == Some(false)
+            && row.tool_web_available.as_deref() == Some("blocked")
+            && row.ui_status.as_deref() == Some("restricted")
+    });
+    let mcp_registry_not_availability_without_safe_read = evidence.iter().any(|row| {
+        row.scenario_id == "RF-13"
+            && row.passed
+            && row.tool_mcp_registered_count.unwrap_or_default() > 0
+            && row.tool_mcp_safe_read_candidate_count == Some(0)
+            && row.tool_mcp_available.as_deref() == Some("no_safe_read_candidate")
+    });
+    let mcp_unknown_server_status_not_available = evidence.iter().any(|row| {
+        row.scenario_id == "RF-14"
+            && row.passed
+            && row.tool_mcp_safe_read_candidate_count.unwrap_or_default() > 0
+            && row.tool_mcp_server_status.as_deref() == Some("unknown")
+            && row.tool_mcp_available.as_deref() == Some("unknown_server_status")
+    });
+    let write_capability_requires_permission = evidence.iter().any(|row| {
+        row.scenario_id == "RF-15"
+            && row.passed
+            && row.tool_write_available.as_deref() == Some("proposal_permission_or_blocker")
+            && row.tool_write_requires_permission == Some(true)
+            && row.tool_write_silent_write_available == Some(false)
+            && row.ui_status.as_deref() == Some("waiting_for_user")
+    });
+    let no_raw_mcp_manifest_exposure = evidence
+        .iter()
+        .all(|row| row.tool_mcp_raw_manifest_exposed != Some(true));
+    let no_silent_write_proof = evidence.iter().all(|row| !row.silent_write_detected);
+    let passed_scenario_count = evidence.iter().filter(|row| row.passed).count();
+    let blockers = evidence
+        .iter()
+        .filter_map(|row| {
+            row.failure
+                .as_ref()
+                .map(|failure| format!("{}:{failure}", row.scenario_id))
+        })
+        .collect::<Vec<_>>();
+    let command_surface_proof = MainChatRuntimeFactsCommandSurfaceProof {
+        send_runtime_clock_path: false,
+        stream_runtime_clock_path: false,
+        send_provider_route_path: false,
+        send_provider_route_preflight_blocker_path: false,
+        send_tool_availability_path: evidence
+            .iter()
+            .any(|row| row.scenario_id == "RF-11" && row.entry_point == "send" && row.passed),
+        send_web_policy_blocked_path: evidence
+            .iter()
+            .any(|row| row.scenario_id == "RF-12" && row.entry_point == "send" && row.passed),
+        send_mcp_no_safe_read_candidate_path: evidence
+            .iter()
+            .any(|row| row.scenario_id == "RF-13" && row.entry_point == "send" && row.passed),
+        send_mcp_unknown_server_status_path: evidence
+            .iter()
+            .any(|row| row.scenario_id == "RF-14" && row.entry_point == "send" && row.passed),
+        send_write_permission_path: evidence
+            .iter()
+            .any(|row| row.scenario_id == "RF-15" && row.entry_point == "send" && row.passed),
+        stream_deferred_blocker: Some("slice_c_tool_availability_stream_out_of_scope".into()),
+    };
+    let negative_assertion_summary = MainChatRuntimeFactsNegativeAssertionSummary {
+        planning_question_not_captured: None,
+        no_provider_call_for_runtime_facts: Some(no_provider_call_for_runtime_facts),
+        no_tool_call_for_runtime_facts: Some(no_tool_call_for_runtime_facts),
+        no_direct_write_for_runtime_facts: Some(no_direct_write_for_runtime_facts),
+        no_legacy_fallback_for_runtime_facts: Some(no_legacy_fallback_for_runtime_facts),
+        context_cannot_override_runtime_clock: None,
+        missing_clock_does_not_use_model: None,
+        current_route_requires_current_generation_evidence: None,
+        no_current_route_for_model_generated_false: None,
+        configured_route_not_invocation_proof: None,
+        planned_route_not_invocation_proof: None,
+        last_completed_route_not_current_turn: None,
+        provider_preflight_blocker_not_fake_readiness: None,
+        no_active_reachability_probe_for_tool_availability: Some(
+            no_active_reachability_probe_for_tool_availability,
+        ),
+        web_policy_blocker_not_fake_availability: Some(web_policy_blocker_not_fake_availability),
+        mcp_registry_not_availability_without_safe_read: Some(
+            mcp_registry_not_availability_without_safe_read,
+        ),
+        mcp_unknown_server_status_not_available: Some(mcp_unknown_server_status_not_available),
+        write_capability_requires_permission: Some(write_capability_requires_permission),
+        no_raw_mcp_manifest_exposure: Some(no_raw_mcp_manifest_exposure),
+    };
+    let runtime_facts_slice_ready = passed_scenario_count == SLICE_C_SCENARIOS.len()
+        && no_provider_call_for_runtime_facts
+        && no_tool_call_for_runtime_facts
+        && no_direct_write_for_runtime_facts
+        && no_legacy_fallback_for_runtime_facts
+        && no_active_reachability_probe_for_tool_availability
+        && web_policy_blocker_not_fake_availability
+        && mcp_registry_not_availability_without_safe_read
+        && mcp_unknown_server_status_not_available
+        && write_capability_requires_permission
+        && no_raw_mcp_manifest_exposure
+        && no_silent_write_proof
+        && command_surface_proof.send_tool_availability_path
+        && command_surface_proof.send_web_policy_blocked_path
+        && command_surface_proof.send_mcp_no_safe_read_candidate_path
+        && command_surface_proof.send_mcp_unknown_server_status_path
+        && command_surface_proof.send_write_permission_path;
+
+    MainChatRuntimeFactsSliceReport {
+        report_kind: "main_chat_runtime_facts_slice",
+        schema_version: 1,
+        slice_id: "slice_c_tool_mcp_availability",
+        slice_name: "Tool And MCP Availability",
+        covered_scenario_ids: SLICE_C_SCENARIOS
+            .iter()
+            .map(|id| (*id).to_string())
+            .collect(),
+        out_of_scope_scenario_ids: Vec::new(),
+        blocked_scenario_ids: Vec::new(),
+        scenario_count: SLICE_C_SCENARIOS.len(),
         passed_scenario_count,
         blocked_scenario_count: 0,
         runtime_facts_slice_ready,
@@ -1802,6 +2689,140 @@ async fn configure_provider_route_state(
         } else {
             next_scheduler
         };
+    }
+}
+
+async fn run_slice_c_rf11_case() -> MainChatRuntimeFactsScenarioEvidence {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    configure_tool_availability_state(&state, true).await;
+    run_slice_c_send_case("RF-11", "runtime-facts-slice-c-rf11", "你能联网吗", state).await
+}
+
+async fn run_slice_c_rf12_case() -> MainChatRuntimeFactsScenarioEvidence {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    configure_tool_availability_state(&state, false).await;
+    run_slice_c_send_case("RF-12", "runtime-facts-slice-c-rf12", "你能联网吗", state).await
+}
+
+async fn run_slice_c_rf13_case() -> MainChatRuntimeFactsScenarioEvidence {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    configure_tool_availability_state(&state, true).await;
+    seed_mcp_manifest_snapshot(
+        &state,
+        mcp_manifest_snapshot(
+            "raw_rf13_hidden_write_manifest",
+            "calendar.update",
+            "RAW_MCP_DESCRIPTION_SHOULD_NOT_RENDER",
+            "read",
+            vec!["read", "write"],
+            "low",
+            "low",
+            false,
+            "rf13_server",
+        ),
+    )
+    .await;
+    run_slice_c_send_case("RF-13", "runtime-facts-slice-c-rf13", "MCP 可用吗", state).await
+}
+
+async fn run_slice_c_rf14_case() -> MainChatRuntimeFactsScenarioEvidence {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    configure_tool_availability_state(&state, true).await;
+    seed_mcp_manifest_snapshot(
+        &state,
+        mcp_manifest_snapshot(
+            "safe_rf14_read_manifest",
+            "knowledge.read",
+            "SAFE_DESCRIPTION_SHOULD_NOT_RENDER",
+            "read",
+            vec!["read"],
+            "low",
+            "low",
+            false,
+            "rf14_unknown_server",
+        ),
+    )
+    .await;
+    run_slice_c_send_case("RF-14", "runtime-facts-slice-c-rf14", "MCP 可用吗", state).await
+}
+
+async fn run_slice_c_rf15_case() -> MainChatRuntimeFactsScenarioEvidence {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    configure_tool_availability_state(&state, true).await;
+    run_slice_c_send_case(
+        "RF-15",
+        "runtime-facts-slice-c-rf15",
+        "你有写入能力吗",
+        state,
+    )
+    .await
+}
+
+async fn configure_tool_availability_state(state: &Arc<AppState>, network_enabled: bool) {
+    {
+        let mut config = state.config.lock().await;
+        config.system.network_policy.enabled = network_enabled;
+        config.system.network_policy.tool_overrides.clear();
+        config.llm.provider = "openai".into();
+        config.llm.chat_model = "provider-should-not-answer-tool-availability".into();
+        config.llm.openai_key = "tool-availability-test-key".into();
+    }
+    {
+        let mut scheduler = state.scheduler.lock().await;
+        *scheduler = InferenceScheduler::new(
+            "unused-local-model".into(),
+            false,
+            "openai".into(),
+            "https://example.invalid/v1".into(),
+            "tool-availability-test-key".into(),
+            "provider-should-not-answer-tool-availability".into(),
+            "text-embedding-test".into(),
+            false,
+        )
+        .with_scripted_generation_response("provider should not answer tool availability");
+    }
+}
+
+async fn seed_mcp_manifest_snapshot(state: &Arc<AppState>, manifest: ToolManifest) {
+    let mut registry = state.mcp_registry.lock().await;
+    registry.register_builtin(
+        manifest,
+        Box::new(|_args| Ok("MCP snapshot stub should not execute".into())),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mcp_manifest_snapshot(
+    id: &str,
+    name: &str,
+    description: &str,
+    action_type: &str,
+    capabilities: Vec<&str>,
+    risk_level: &str,
+    permission_level: &str,
+    requires_confirmation: bool,
+    server_name: &str,
+) -> ToolManifest {
+    ToolManifest {
+        id: id.into(),
+        name: name.into(),
+        description: description.into(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {}
+        }),
+        permission_level: permission_level.into(),
+        risk_level: risk_level.into(),
+        version: "1.0.0".into(),
+        source: ToolSource::Mcp {
+            server_name: server_name.into(),
+        },
+        capabilities: capabilities.into_iter().map(str::to_string).collect(),
+        requires_confirmation,
+        enabled: true,
+        declarative_only: false,
+        action_type: action_type.into(),
+        tags: vec!["runtime_facts_eval".into()],
     }
 }
 
@@ -2039,7 +3060,7 @@ fn evidence_from_provider_route_response(
         entry_point,
         user_text,
         passed,
-        answer_preview: reply.chars().take(240).collect(),
+        answer_preview: reply.chars().take(480).collect(),
         source_type: generation
             .get("sourceType")
             .and_then(Value::as_str)
@@ -2081,6 +3102,25 @@ fn evidence_from_provider_route_response(
         provider_preflight_status,
         provider_preflight_blockers,
         route_labels,
+        tool_web_config_enabled: None,
+        tool_web_credential_available: None,
+        tool_web_credential_status: None,
+        tool_web_policy_allowed: None,
+        tool_web_policy_blockers: Vec::new(),
+        tool_web_reachability_status: None,
+        tool_web_reachability_ttl_status: None,
+        tool_web_cached_or_preflight_known_reachability: None,
+        tool_web_active_reachability_probe: None,
+        tool_web_available: None,
+        tool_mcp_registered_count: None,
+        tool_mcp_safe_read_candidate_count: None,
+        tool_mcp_server_status: None,
+        tool_mcp_available: None,
+        tool_mcp_raw_manifest_exposed: None,
+        tool_write_available: None,
+        tool_write_requires_permission: None,
+        tool_write_silent_write_available: None,
+        tool_availability_labels: Vec::new(),
         ui_primary_source_chip,
         ui_status,
         task_session_id: response
@@ -2100,6 +3140,289 @@ fn evidence_from_provider_route_response(
         context_conflict_ignored: true,
         silent_write_detected,
         failure: (!passed).then(|| "provider route runtime fact evidence incomplete".into()),
+    }
+}
+
+async fn run_slice_c_send_case(
+    scenario_id: &'static str,
+    session_id: &'static str,
+    user_text: &'static str,
+    state: Arc<AppState>,
+) -> MainChatRuntimeFactsScenarioEvidence {
+    let result = crate::main_chat_send::send_message_with_state(
+        session_id.into(),
+        vec![ChatMessage {
+            role: "user".into(),
+            content: user_text.into(),
+        }],
+        None,
+        &state,
+    )
+    .await;
+    match result {
+        Ok(result) => match serde_json::to_value(result) {
+            Ok(response) => {
+                evidence_from_tool_availability_response(scenario_id, "send", user_text, response)
+            }
+            Err(error) => MainChatRuntimeFactsScenarioEvidence::failed(
+                scenario_id,
+                "send",
+                user_text,
+                format!("serialize tool availability response failed: {error}"),
+            ),
+        },
+        Err(error) => {
+            MainChatRuntimeFactsScenarioEvidence::failed(scenario_id, "send", user_text, error)
+        }
+    }
+}
+
+fn evidence_from_tool_availability_response(
+    scenario_id: &'static str,
+    entry_point: &'static str,
+    user_text: &'static str,
+    response: Value,
+) -> MainChatRuntimeFactsScenarioEvidence {
+    let generation = response
+        .get("reasoning_trace")
+        .and_then(|trace| trace.get("generation_result"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let reply = response
+        .get("reply")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let runtime_fact_keys = string_array(&generation, "runtimeFactKeys");
+    let runtime_fact_source = string_array(&generation, "runtimeFactSource");
+    let runtime_fact_visibility = string_array(&generation, "runtimeFactVisibility");
+    let runtime_fact_privacy = string_array(&generation, "runtimeFactPrivacy");
+    let runtime_fact_binding_count = generation
+        .get("runtimeFacts")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or_default();
+    let model_generated = generation.get("modelGenerated").and_then(Value::as_bool);
+    let scheduler_generation_called = generation
+        .get("schedulerGenerationCalled")
+        .and_then(Value::as_bool);
+    let tool_called = generation.get("toolCalled").and_then(Value::as_bool);
+    let direct_writes_executed = generation
+        .get("directWritesExecuted")
+        .and_then(Value::as_bool);
+    let legacy_fallback_used = response
+        .get("legacy_fallback_used")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let tool_web_config_enabled = bool_field(&generation, "toolWebConfigEnabled");
+    let tool_web_credential_available = bool_field(&generation, "toolWebCredentialAvailable");
+    let tool_web_credential_status = string_field(&generation, "toolWebCredentialStatus");
+    let tool_web_policy_allowed = bool_field(&generation, "toolWebPolicyAllowed");
+    let tool_web_policy_blockers = string_array(&generation, "toolWebPolicyBlockers");
+    let tool_web_reachability_status = string_field(&generation, "toolWebReachabilityStatus");
+    let tool_web_reachability_ttl_status =
+        string_field(&generation, "toolWebReachabilityTtlStatus");
+    let tool_web_cached_or_preflight_known_reachability =
+        bool_field(&generation, "toolWebCachedOrPreflightKnownReachability");
+    let tool_web_active_reachability_probe =
+        bool_field(&generation, "toolWebActiveReachabilityProbe");
+    let tool_web_available = string_field(&generation, "toolWebAvailable");
+    let tool_mcp_registered_count = usize_field(&generation, "toolMcpRegisteredCount");
+    let tool_mcp_safe_read_candidate_count =
+        usize_field(&generation, "toolMcpSafeReadCandidateCount");
+    let tool_mcp_server_status = string_field(&generation, "toolMcpServerStatus");
+    let tool_mcp_available = string_field(&generation, "toolMcpAvailable");
+    let tool_mcp_raw_manifest_exposed = bool_field(&generation, "toolMcpRawManifestExposed");
+    let tool_write_available = string_field(&generation, "toolWriteAvailable");
+    let tool_write_requires_permission = bool_field(&generation, "toolWriteRequiresPermission");
+    let tool_write_silent_write_available =
+        bool_field(&generation, "toolWriteSilentWriteAvailable");
+    let tool_availability_labels = string_array(&generation, "toolAvailabilityLabels");
+    let ui_primary_source_chip = string_field(&generation, "uiPrimarySourceChip");
+    let ui_status = string_field(&generation, "uiStatus");
+    let raw_mcp_manifest_exposed = tool_mcp_raw_manifest_exposed == Some(true)
+        || reply.contains("raw_rf13_hidden_write_manifest")
+        || reply.contains("RAW_MCP_DESCRIPTION_SHOULD_NOT_RENDER")
+        || reply.contains("safe_rf14_read_manifest")
+        || reply.contains("SAFE_DESCRIPTION_SHOULD_NOT_RENDER")
+        || tool_availability_labels.iter().any(|label| {
+            label.contains("raw_rf13_hidden_write_manifest")
+                || label.contains("RAW_MCP_DESCRIPTION_SHOULD_NOT_RENDER")
+                || label.contains("safe_rf14_read_manifest")
+                || label.contains("SAFE_DESCRIPTION_SHOULD_NOT_RENDER")
+        });
+    let silent_write_detected = direct_writes_executed.unwrap_or(true)
+        || tool_write_silent_write_available.unwrap_or(true)
+        || response
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .is_some_and(|calls| !calls.is_empty());
+    let common_passed = generation.get("sourceType").and_then(Value::as_str)
+        == Some(RUNTIME_FACT_SOURCE_TYPE)
+        && generation
+            .get("providerGenerationPath")
+            .and_then(Value::as_str)
+            == Some(RUNTIME_FACT_TOOL_AVAILABILITY_GENERATION_PATH)
+        && runtime_fact_binding_count > 0
+        && runtime_fact_source
+            .iter()
+            .any(|source| source == "tool_policy")
+        && runtime_fact_visibility
+            .iter()
+            .any(|value| value == "answer")
+        && runtime_fact_privacy.iter().any(|value| value == "public")
+        && model_generated == Some(false)
+        && scheduler_generation_called == Some(false)
+        && tool_called == Some(false)
+        && direct_writes_executed == Some(false)
+        && !legacy_fallback_used
+        && tool_web_active_reachability_probe == Some(false)
+        && ui_primary_source_chip.as_deref() == Some("工具可用性")
+        && !raw_mcp_manifest_exposed
+        && !silent_write_detected;
+    let scenario_passed = match scenario_id {
+        "RF-11" => {
+            runtime_fact_keys
+                .iter()
+                .any(|key| key == RUNTIME_FACT_KEY_TOOL_WEB_AVAILABLE)
+                && tool_web_config_enabled == Some(true)
+                && tool_web_credential_available == Some(true)
+                && tool_web_credential_status.as_deref() == Some("not_required")
+                && tool_web_policy_allowed == Some(true)
+                && tool_web_reachability_status.as_deref() == Some("unknown")
+                && tool_web_reachability_ttl_status.as_deref() == Some("not_observed")
+                && tool_web_cached_or_preflight_known_reachability == Some(false)
+                && tool_web_available.as_deref() == Some("unknown")
+                && reply.contains("不会主动探测网络")
+        }
+        "RF-12" => {
+            tool_web_config_enabled == Some(true)
+                && tool_web_policy_allowed == Some(false)
+                && tool_web_policy_blockers
+                    .iter()
+                    .any(|blocker| blocker == "network_policy_disabled")
+                && tool_web_available.as_deref() == Some("blocked")
+                && ui_status.as_deref() == Some("restricted")
+                && reply.contains("策略阻止外部读取")
+                && !reply.contains("已联网")
+        }
+        "RF-13" => {
+            runtime_fact_keys
+                .iter()
+                .any(|key| key == RUNTIME_FACT_KEY_TOOL_MCP_SAFE_READ_CANDIDATE_COUNT)
+                && tool_mcp_registered_count.unwrap_or_default() > 0
+                && tool_mcp_safe_read_candidate_count == Some(0)
+                && tool_mcp_available.as_deref() == Some("no_safe_read_candidate")
+                && reply.contains("policy-allowed read-only candidate 为 0")
+        }
+        "RF-14" => {
+            tool_mcp_registered_count.unwrap_or_default() > 0
+                && tool_mcp_safe_read_candidate_count.unwrap_or_default() > 0
+                && tool_mcp_server_status.as_deref() == Some("unknown")
+                && tool_mcp_available.as_deref() == Some("unknown_server_status")
+                && reply.contains("server_status=unknown")
+                && reply.contains("不能标为 available")
+        }
+        "RF-15" => {
+            runtime_fact_keys
+                .iter()
+                .any(|key| key == RUNTIME_FACT_KEY_TOOL_WRITE_AVAILABLE)
+                && tool_write_available.as_deref() == Some("proposal_permission_or_blocker")
+                && tool_write_requires_permission == Some(true)
+                && tool_write_silent_write_available == Some(false)
+                && ui_status.as_deref() == Some("waiting_for_user")
+                && reply.contains("proposal / permission / blocker")
+                && reply.contains("directWritesExecuted=false")
+        }
+        _ => false,
+    };
+    let passed = common_passed && scenario_passed;
+
+    MainChatRuntimeFactsScenarioEvidence {
+        scenario_id,
+        entry_point,
+        user_text,
+        passed,
+        answer_preview: reply.chars().take(480).collect(),
+        source_type: generation
+            .get("sourceType")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        runtime_fact_keys,
+        runtime_fact_source,
+        runtime_fact_binding_count,
+        runtime_fact_authority: generation
+            .get("runtimeFactAuthority")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        runtime_fact_freshness: generation
+            .get("runtimeFactFreshness")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        runtime_fact_visibility,
+        runtime_fact_privacy,
+        model_generated,
+        scheduler_generation_called,
+        tool_called,
+        direct_writes_executed,
+        legacy_fallback_used,
+        provider_generation_path: generation
+            .get("providerGenerationPath")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        configured_provider: None,
+        configured_model: None,
+        current_turn_generation_provider: None,
+        current_turn_generation_model: None,
+        current_turn_generation_route_type: None,
+        current_turn_generation_model_generated: None,
+        last_completed_generation_provider: None,
+        last_completed_generation_model: None,
+        last_completed_generation_run_id: None,
+        planned_route_if_model_needed_provider: None,
+        planned_route_if_model_needed_model: None,
+        planned_route_if_model_needed_route_type: None,
+        provider_preflight_status: None,
+        provider_preflight_blockers: Vec::new(),
+        route_labels: Vec::new(),
+        tool_web_config_enabled,
+        tool_web_credential_available,
+        tool_web_credential_status,
+        tool_web_policy_allowed,
+        tool_web_policy_blockers,
+        tool_web_reachability_status,
+        tool_web_reachability_ttl_status,
+        tool_web_cached_or_preflight_known_reachability,
+        tool_web_active_reachability_probe,
+        tool_web_available,
+        tool_mcp_registered_count,
+        tool_mcp_safe_read_candidate_count,
+        tool_mcp_server_status,
+        tool_mcp_available,
+        tool_mcp_raw_manifest_exposed: Some(raw_mcp_manifest_exposed),
+        tool_write_available,
+        tool_write_requires_permission,
+        tool_write_silent_write_available,
+        tool_availability_labels,
+        ui_primary_source_chip,
+        ui_status,
+        task_session_id: response
+            .get("agent_ingress")
+            .and_then(|ingress| ingress.get("agentTaskSessionId"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        run_id: response
+            .get("run_id")
+            .or_else(|| response.get("runId"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        trace_gap: generation
+            .get("runtimeFactTraceGap")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        context_conflict_ignored: true,
+        silent_write_detected,
+        failure: (!passed).then(|| "tool availability runtime fact evidence incomplete".into()),
     }
 }
 
@@ -2241,6 +3564,25 @@ impl MainChatRuntimeFactsScenarioEvidence {
             provider_preflight_status: None,
             provider_preflight_blockers: Vec::new(),
             route_labels: Vec::new(),
+            tool_web_config_enabled: None,
+            tool_web_credential_available: None,
+            tool_web_credential_status: None,
+            tool_web_policy_allowed: None,
+            tool_web_policy_blockers: Vec::new(),
+            tool_web_reachability_status: None,
+            tool_web_reachability_ttl_status: None,
+            tool_web_cached_or_preflight_known_reachability: None,
+            tool_web_active_reachability_probe: None,
+            tool_web_available: None,
+            tool_mcp_registered_count: None,
+            tool_mcp_safe_read_candidate_count: None,
+            tool_mcp_server_status: None,
+            tool_mcp_available: None,
+            tool_mcp_raw_manifest_exposed: None,
+            tool_write_available: None,
+            tool_write_requires_permission: None,
+            tool_write_silent_write_available: None,
+            tool_availability_labels: Vec::new(),
             ui_primary_source_chip: None,
             ui_status: None,
             task_session_id: None,
@@ -2428,6 +3770,25 @@ fn evidence_from_runtime_fact_response(
             .map(str::to_string),
         provider_preflight_blockers: string_array(&generation, "providerPreflightBlockers"),
         route_labels: string_array(&generation, "routeLabels"),
+        tool_web_config_enabled: None,
+        tool_web_credential_available: None,
+        tool_web_credential_status: None,
+        tool_web_policy_allowed: None,
+        tool_web_policy_blockers: Vec::new(),
+        tool_web_reachability_status: None,
+        tool_web_reachability_ttl_status: None,
+        tool_web_cached_or_preflight_known_reachability: None,
+        tool_web_active_reachability_probe: None,
+        tool_web_available: None,
+        tool_mcp_registered_count: None,
+        tool_mcp_safe_read_candidate_count: None,
+        tool_mcp_server_status: None,
+        tool_mcp_available: None,
+        tool_mcp_raw_manifest_exposed: None,
+        tool_write_available: None,
+        tool_write_requires_permission: None,
+        tool_write_silent_write_available: None,
+        tool_availability_labels: Vec::new(),
         ui_primary_source_chip: generation
             .get("uiPrimarySourceChip")
             .and_then(Value::as_str)
@@ -2552,4 +3913,15 @@ fn string_array(value: &Value, key: &str) -> Vec<String> {
 
 fn string_field(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+fn bool_field(value: &Value, key: &str) -> Option<bool> {
+    value.get(key).and_then(Value::as_bool)
+}
+
+fn usize_field(value: &Value, key: &str) -> Option<usize> {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
 }

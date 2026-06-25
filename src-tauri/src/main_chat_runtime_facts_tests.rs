@@ -1,12 +1,16 @@
 use crate::main_chat_runtime_facts::{
-    classify_provider_route_query, classify_runtime_clock_query,
+    classify_provider_route_query, classify_runtime_clock_query, classify_tool_availability_query,
     run_main_chat_runtime_facts_slice_a_backend_report,
-    run_main_chat_runtime_facts_slice_b_provider_route_report, MainChatProviderRouteIntent,
-    MainChatRuntimeClockIntent, RUNTIME_FACT_KEY_DATE,
+    run_main_chat_runtime_facts_slice_b_provider_route_report,
+    run_main_chat_runtime_facts_slice_c_tool_availability_report, MainChatProviderRouteIntent,
+    MainChatRuntimeClockIntent, MainChatToolAvailabilityIntent, RUNTIME_FACT_KEY_DATE,
     RUNTIME_FACT_KEY_PROVIDER_CONFIGURED_DEFAULT_PROVIDER,
     RUNTIME_FACT_KEY_PROVIDER_CURRENT_MODEL_GENERATED, RUNTIME_FACT_KEY_PROVIDER_PLANNED_PROVIDER,
-    RUNTIME_FACT_KEY_TIME, RUNTIME_FACT_KEY_TIMEZONE, RUNTIME_FACT_KEY_TRACE_GAP,
-    RUNTIME_FACT_KEY_WEEKDAY, RUNTIME_FACT_PROVIDER_GENERATION_PATH, RUNTIME_FACT_SOURCE_TYPE,
+    RUNTIME_FACT_KEY_TIME, RUNTIME_FACT_KEY_TIMEZONE,
+    RUNTIME_FACT_KEY_TOOL_MCP_SAFE_READ_CANDIDATE_COUNT, RUNTIME_FACT_KEY_TOOL_WEB_AVAILABLE,
+    RUNTIME_FACT_KEY_TOOL_WRITE_AVAILABLE, RUNTIME_FACT_KEY_TRACE_GAP, RUNTIME_FACT_KEY_WEEKDAY,
+    RUNTIME_FACT_PROVIDER_GENERATION_PATH, RUNTIME_FACT_SOURCE_TYPE,
+    RUNTIME_FACT_TOOL_AVAILABILITY_GENERATION_PATH,
 };
 
 #[tokio::test]
@@ -345,6 +349,213 @@ async fn main_chat_runtime_facts_provider_route_slice_b_covers_rf_07_to_rf_10() 
     );
 }
 
+#[tokio::test]
+async fn main_chat_runtime_facts_tool_availability_slice_c_covers_rf_11_to_rf_15() {
+    let report = run_main_chat_runtime_facts_slice_c_tool_availability_report().await;
+
+    assert_eq!(report.report_kind, "main_chat_runtime_facts_slice");
+    assert_eq!(report.slice_id, "slice_c_tool_mcp_availability");
+    assert!(report.runtime_facts_slice_ready, "{report:#?}");
+    assert!(
+        !report.runtime_facts_ready,
+        "Slice C must not claim full Runtime Facts readiness"
+    );
+    assert!(report.ui_included);
+    assert_eq!(report.scenario_count, 5);
+    assert_eq!(report.passed_scenario_count, 5);
+    assert!(report.blockers.is_empty(), "{:?}", report.blockers);
+    assert!(report.command_surface_proof.send_tool_availability_path);
+    assert!(report.command_surface_proof.send_web_policy_blocked_path);
+    assert!(
+        report
+            .command_surface_proof
+            .send_mcp_no_safe_read_candidate_path
+    );
+    assert!(
+        report
+            .command_surface_proof
+            .send_mcp_unknown_server_status_path
+    );
+    assert!(report.command_surface_proof.send_write_permission_path);
+    assert!(report.no_silent_write_proof);
+
+    for scenario_id in ["RF-11", "RF-12", "RF-13", "RF-14", "RF-15"] {
+        let row = report
+            .scenario_evidence
+            .iter()
+            .find(|row| row.scenario_id == scenario_id)
+            .unwrap_or_else(|| panic!("missing scenario evidence {scenario_id}"));
+        assert!(row.passed, "{row:#?}");
+        assert_eq!(row.source_type.as_deref(), Some(RUNTIME_FACT_SOURCE_TYPE));
+        assert_eq!(
+            row.provider_generation_path.as_deref(),
+            Some(RUNTIME_FACT_TOOL_AVAILABILITY_GENERATION_PATH)
+        );
+        assert_eq!(row.model_generated, Some(false));
+        assert_eq!(row.scheduler_generation_called, Some(false));
+        assert_eq!(row.tool_called, Some(false));
+        assert_eq!(row.direct_writes_executed, Some(false));
+        assert!(!row.legacy_fallback_used);
+        assert_eq!(row.tool_web_active_reachability_probe, Some(false));
+        assert_eq!(row.tool_mcp_raw_manifest_exposed, Some(false));
+        assert_eq!(row.tool_write_silent_write_available, Some(false));
+        assert_eq!(row.ui_primary_source_chip.as_deref(), Some("工具可用性"));
+        assert!(row
+            .runtime_fact_source
+            .iter()
+            .any(|source| source == "tool_policy"));
+    }
+
+    let web_unknown = report
+        .scenario_evidence
+        .iter()
+        .find(|row| row.scenario_id == "RF-11")
+        .expect("RF-11 evidence");
+    assert!(web_unknown
+        .runtime_fact_keys
+        .iter()
+        .any(|key| key == RUNTIME_FACT_KEY_TOOL_WEB_AVAILABLE));
+    assert_eq!(web_unknown.tool_web_config_enabled, Some(true));
+    assert_eq!(web_unknown.tool_web_policy_allowed, Some(true));
+    assert_eq!(
+        web_unknown.tool_web_credential_status.as_deref(),
+        Some("not_required")
+    );
+    assert_eq!(
+        web_unknown.tool_web_reachability_status.as_deref(),
+        Some("unknown")
+    );
+    assert_eq!(
+        web_unknown.tool_web_reachability_ttl_status.as_deref(),
+        Some("not_observed")
+    );
+    assert_eq!(
+        web_unknown.tool_web_cached_or_preflight_known_reachability,
+        Some(false)
+    );
+    assert_eq!(web_unknown.tool_web_available.as_deref(), Some("unknown"));
+    assert!(web_unknown.answer_preview.contains("不会主动探测网络"));
+
+    let web_blocked = report
+        .scenario_evidence
+        .iter()
+        .find(|row| row.scenario_id == "RF-12")
+        .expect("RF-12 evidence");
+    assert_eq!(web_blocked.tool_web_config_enabled, Some(true));
+    assert_eq!(web_blocked.tool_web_policy_allowed, Some(false));
+    assert!(web_blocked
+        .tool_web_policy_blockers
+        .contains(&"network_policy_disabled".to_string()));
+    assert_eq!(web_blocked.tool_web_available.as_deref(), Some("blocked"));
+    assert_eq!(web_blocked.ui_status.as_deref(), Some("restricted"));
+    assert!(!web_blocked.answer_preview.contains("已联网"));
+
+    let no_safe_mcp = report
+        .scenario_evidence
+        .iter()
+        .find(|row| row.scenario_id == "RF-13")
+        .expect("RF-13 evidence");
+    assert!(no_safe_mcp
+        .runtime_fact_keys
+        .iter()
+        .any(|key| key == RUNTIME_FACT_KEY_TOOL_MCP_SAFE_READ_CANDIDATE_COUNT));
+    assert!(no_safe_mcp.tool_mcp_registered_count.unwrap_or_default() > 0);
+    assert_eq!(no_safe_mcp.tool_mcp_safe_read_candidate_count, Some(0));
+    assert_eq!(
+        no_safe_mcp.tool_mcp_available.as_deref(),
+        Some("no_safe_read_candidate")
+    );
+    assert!(!no_safe_mcp
+        .answer_preview
+        .contains("raw_rf13_hidden_write_manifest"));
+    assert!(!no_safe_mcp
+        .answer_preview
+        .contains("RAW_MCP_DESCRIPTION_SHOULD_NOT_RENDER"));
+
+    let unknown_mcp = report
+        .scenario_evidence
+        .iter()
+        .find(|row| row.scenario_id == "RF-14")
+        .expect("RF-14 evidence");
+    assert!(
+        unknown_mcp
+            .tool_mcp_safe_read_candidate_count
+            .unwrap_or_default()
+            > 0
+    );
+    assert_eq!(
+        unknown_mcp.tool_mcp_server_status.as_deref(),
+        Some("unknown")
+    );
+    assert_eq!(
+        unknown_mcp.tool_mcp_available.as_deref(),
+        Some("unknown_server_status")
+    );
+    assert!(unknown_mcp.answer_preview.contains("不能标为 available"));
+    assert!(!unknown_mcp
+        .answer_preview
+        .contains("safe_rf14_read_manifest"));
+    assert!(!unknown_mcp
+        .answer_preview
+        .contains("SAFE_DESCRIPTION_SHOULD_NOT_RENDER"));
+
+    let write = report
+        .scenario_evidence
+        .iter()
+        .find(|row| row.scenario_id == "RF-15")
+        .expect("RF-15 evidence");
+    assert!(write
+        .runtime_fact_keys
+        .iter()
+        .any(|key| key == RUNTIME_FACT_KEY_TOOL_WRITE_AVAILABLE));
+    assert_eq!(
+        write.tool_write_available.as_deref(),
+        Some("proposal_permission_or_blocker")
+    );
+    assert_eq!(write.tool_write_requires_permission, Some(true));
+    assert_eq!(write.ui_status.as_deref(), Some("waiting_for_user"));
+    assert!(write
+        .answer_preview
+        .contains("proposal / permission / blocker"));
+
+    assert_eq!(
+        report
+            .negative_assertion_summary
+            .no_active_reachability_probe_for_tool_availability,
+        Some(true)
+    );
+    assert_eq!(
+        report
+            .negative_assertion_summary
+            .web_policy_blocker_not_fake_availability,
+        Some(true)
+    );
+    assert_eq!(
+        report
+            .negative_assertion_summary
+            .mcp_registry_not_availability_without_safe_read,
+        Some(true)
+    );
+    assert_eq!(
+        report
+            .negative_assertion_summary
+            .mcp_unknown_server_status_not_available,
+        Some(true)
+    );
+    assert_eq!(
+        report
+            .negative_assertion_summary
+            .write_capability_requires_permission,
+        Some(true)
+    );
+    assert_eq!(
+        report
+            .negative_assertion_summary
+            .no_raw_mcp_manifest_exposure,
+        Some(true)
+    );
+}
+
 #[test]
 fn main_chat_runtime_clock_classifier_is_bounded_and_keeps_planning_question_out() {
     assert_eq!(
@@ -385,4 +596,28 @@ fn main_chat_provider_route_classifier_is_bounded_and_separates_previous_turn() 
         Some(MainChatProviderRouteIntent::AskPreviousTurnModelRoute)
     );
     assert_eq!(classify_provider_route_query("我想比较几个模型"), None);
+}
+
+#[test]
+fn main_chat_tool_availability_classifier_is_bounded_and_separates_capability_from_execution() {
+    assert_eq!(
+        classify_tool_availability_query("你能联网吗"),
+        Some(MainChatToolAvailabilityIntent::AskToolAvailability)
+    );
+    assert_eq!(
+        classify_tool_availability_query("can you use mcp"),
+        Some(MainChatToolAvailabilityIntent::AskToolAvailability)
+    );
+    assert_eq!(
+        classify_tool_availability_query("你有写入能力吗"),
+        Some(MainChatToolAvailabilityIntent::AskWriteCapability)
+    );
+    assert_eq!(
+        classify_tool_availability_query("Please web.search OpenLife news"),
+        None
+    );
+    assert_eq!(
+        classify_tool_availability_query("请读取网页 https://example.com"),
+        None
+    );
 }

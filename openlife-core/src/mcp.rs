@@ -766,6 +766,39 @@ impl McpRegistry {
         out
     }
 
+    /// Return manifest snapshots already held by the registry without asking
+    /// registered MCP servers to refresh their tool lists.
+    pub fn list_cached_manifest_snapshots(&self) -> Vec<ToolManifest> {
+        let mut out: Vec<ToolManifest> = self
+            .builtin_manifests
+            .clone()
+            .into_iter()
+            .map(ToolManifest::normalized)
+            .collect();
+        out.extend(self.tools_cache.iter().map(|tool| {
+            ToolManifest {
+                id: format!("mcp:cached_registry_snapshot:{}", tool.name),
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                parameters: tool.parameters.clone(),
+                permission_level: ToolManifest::infer_permission_level(&tool.name),
+                risk_level: ToolManifest::infer_permission_level(&tool.name),
+                version: "1.0.0".into(),
+                source: ToolSource::Mcp {
+                    server_name: "cached_registry_snapshot".into(),
+                },
+                capabilities: ToolManifest::infer_capabilities(&tool.name),
+                requires_confirmation: ToolManifest::infer_permission_level(&tool.name) == "high",
+                enabled: true,
+                declarative_only: false,
+                action_type: ToolManifest::infer_action_type(&tool.name),
+                tags: Vec::new(),
+            }
+            .normalized()
+        }));
+        out
+    }
+
     /// Execute a manifest by its source.
     pub fn execute_manifest(&self, manifest: &ToolManifest, arguments: Value) -> Result<String> {
         match &manifest.source {

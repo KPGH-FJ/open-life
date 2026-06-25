@@ -14,8 +14,10 @@ function formatTimingMs(ms?: number): string {
 }
 
 function boundedTraceString(value: unknown): string {
-  if (typeof value !== "string") return "";
-  return value
+  if (typeof value !== "string" && typeof value !== "boolean" && typeof value !== "number") {
+    return "";
+  }
+  return String(value)
     .replace(/[\u0000-\u001f\u007f]/g, "")
     .trim()
     .slice(0, 140);
@@ -45,6 +47,61 @@ function runtimeRouteRows(generation: any): Array<{ label: string; value: string
     });
   }
   return rows.slice(0, 6);
+}
+
+function runtimeToolRows(generation: any): Array<{ label: string; value: string }> {
+  if (!generation || typeof generation !== "object") return [];
+  const rows = traceStringArray(generation.toolAvailabilityLabels).map(label => {
+    const [prefix, ...rest] = label.split(":");
+    return {
+      label: prefix ? prefix.replace(/_/g, " ") : "tool evidence",
+      value: rest.join(":").trim() || label,
+    };
+  });
+  const webPolicy = boundedTraceString(generation.toolWebPolicyAllowed);
+  const webReachability = boundedTraceString(generation.toolWebReachabilityStatus);
+  const webAvailable = boundedTraceString(generation.toolWebAvailable);
+  if (webPolicy || webReachability || webAvailable) {
+    rows.push({
+      label: "web availability",
+      value: [
+        webPolicy ? `policy=${webPolicy}` : "",
+        webReachability ? `reachability=${webReachability}` : "",
+        webAvailable ? `available=${webAvailable}` : "",
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    });
+  }
+  const mcpSafeReadCount = boundedTraceString(generation.toolMcpSafeReadCandidateCount);
+  const mcpServerStatus = boundedTraceString(generation.toolMcpServerStatus);
+  const mcpAvailable = boundedTraceString(generation.toolMcpAvailable);
+  if (mcpSafeReadCount || mcpServerStatus || mcpAvailable) {
+    rows.push({
+      label: "mcp availability",
+      value: [
+        mcpSafeReadCount ? `safeRead=${mcpSafeReadCount}` : "",
+        mcpServerStatus ? `server=${mcpServerStatus}` : "",
+        mcpAvailable ? `available=${mcpAvailable}` : "",
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    });
+  }
+  const writeAvailable = boundedTraceString(generation.toolWriteAvailable);
+  const writeRequiresPermission = boundedTraceString(generation.toolWriteRequiresPermission);
+  if (writeAvailable || writeRequiresPermission) {
+    rows.push({
+      label: "write policy",
+      value: [
+        writeAvailable ? `available=${writeAvailable}` : "",
+        writeRequiresPermission ? `requiresPermission=${writeRequiresPermission}` : "",
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    });
+  }
+  return rows.slice(0, 8);
 }
 
 function LayerBlock({
@@ -101,6 +158,7 @@ export default function ReasoningTracePanel({ trace, show, onToggle }: Props) {
   const toolPlan = trace.tool_plan ?? trace.strategy_result?.suggested_tools ?? [];
   const safetyCheckWarnings = trace.safety_check_result?.warnings ?? [];
   const runtimeRouteEvidenceRows = runtimeRouteRows(trace.generation_result);
+  const runtimeToolEvidenceRows = runtimeToolRows(trace.generation_result);
   const sourceChip = boundedTraceString(trace.generation_result?.uiPrimarySourceChip);
   const uiStatus = boundedTraceString(trace.generation_result?.uiStatus);
   const hasContent =
@@ -109,6 +167,7 @@ export default function ReasoningTracePanel({ trace, show, onToggle }: Props) {
     strategyText ||
     generationText ||
     runtimeRouteEvidenceRows.length > 0 ||
+    runtimeToolEvidenceRows.length > 0 ||
     trace.output ||
     toolPlan.length > 0 ||
     safetyCheckWarnings.length > 0 ||
@@ -288,6 +347,22 @@ export default function ReasoningTracePanel({ trace, show, onToggle }: Props) {
                         className="grid gap-1 text-xs text-gray-700 sm:grid-cols-[150px_1fr]"
                       >
                         <dt className="font-medium text-cyan-700">{row.label}</dt>
+                        <dd className="break-words">{row.value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </div>
+              )}
+              {runtimeToolEvidenceRows.length > 0 && (
+                <div className="rounded-lg border border-sky-100 bg-white/70 p-3">
+                  <div className="text-[11px] font-medium text-sky-800">工具可用性证据</div>
+                  <dl className="mt-2 space-y-1.5">
+                    {runtimeToolEvidenceRows.map(row => (
+                      <div
+                        key={`${row.label}-${row.value}`}
+                        className="grid gap-1 text-xs text-gray-700 sm:grid-cols-[150px_1fr]"
+                      >
+                        <dt className="font-medium text-sky-700">{row.label}</dt>
                         <dd className="break-words">{row.value}</dd>
                       </div>
                     ))}

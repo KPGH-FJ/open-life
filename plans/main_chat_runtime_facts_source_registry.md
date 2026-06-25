@@ -242,10 +242,11 @@ Rules:
 
 | Key | Value shape | Source | Authority | Freshness | TTL | Visibility | Privacy | Missing behavior | Model fallback |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `tool.web.config_enabled` | boolean | config | config | turn_snapshot | turn | trace_only | internal | answer_unknown | no |
+| `tool.web.config_enabled` | boolean | config, tool_registry | config | turn_snapshot | turn | trace_only | internal | answer_unknown | no |
+| `tool.web.credential_available` | boolean | config | config | turn_snapshot | turn | trace_only | internal | answer_unknown | no |
 | `tool.web.policy_allowed` | boolean/blocker | tool_policy | policy | turn_snapshot | turn | ui_badge | public | blocker | no |
 | `tool.web.reachable` | reachable/unreachable/unknown/stale | provider_preflight, tool_preflight | policy | store_snapshot | explicit | trace_only | internal | answer_unknown | no |
-| `tool.web.available` | derived status | config, tool_policy, provider_preflight, tool_preflight | policy | turn_snapshot | turn | answer | public | answer_unknown | no |
+| `tool.web.available` | derived status | config, tool_registry, tool_policy, provider_preflight, tool_preflight | policy | turn_snapshot | turn | answer | public | answer_unknown | no |
 | `tool.mcp.registered_count` | integer | tool_registry | config | turn_snapshot | turn | trace_only | internal | omit | no |
 | `tool.mcp.read_only_allowed_count` | integer | tool_registry, tool_policy | policy | turn_snapshot | turn | answer | internal | answer_unknown | no |
 | `tool.mcp.server_status` | online/offline/unknown | tool_preflight | policy | turn_snapshot | turn | trace_only | internal | answer_unknown | no |
@@ -260,6 +261,9 @@ Rules:
   stale, or unknown. A normal chat turn may consume an existing preflight
   record, but it must not perform a new external reachability probe only to
   answer an availability question.
+- `tool.web.credential_available` must be derived from configured web/search
+  provider credential requirements. A provider that requires a key or endpoint
+  cannot be treated as credential-ready when the configured value is missing.
 - The table row for `tool.web.reachable` uses only registry enum values. Its
   `RuntimeFact.observation` payload must carry `observedAt`, `ttlStatus`, and
   `ttlPolicy=explicit` when a preflight record exists.
@@ -382,6 +386,7 @@ Scope:
 Scope:
 
 - `tool.web.config_enabled`;
+- `tool.web.credential_available`;
 - `tool.web.policy_allowed`;
 - `tool.web.reachable` reachability status and freshness from cached or
   explicit preflight only;

@@ -73,4 +73,50 @@ describe("ReasoningTracePanel", () => {
       screen.getByText("blocked (network_disabled, provider_api_key_missing)")
     ).toBeInTheDocument();
   });
+
+  it("renders tool availability runtime facts as bounded evidence rows", () => {
+    renderTrace({
+      generation_result: {
+        sourceType: "runtime_fact",
+        uiPrimarySourceChip: "工具可用性",
+        uiStatus: "restricted",
+        toolWebConfigEnabled: true,
+        toolWebPolicyAllowed: false,
+        toolWebReachabilityStatus: "unknown",
+        toolWebAvailable: "blocked",
+        toolMcpRegisteredCount: 1,
+        toolMcpSafeReadCandidateCount: 0,
+        toolMcpServerStatus: "unknown",
+        toolMcpAvailable: "no_safe_read_candidate",
+        toolWriteAvailable: "proposal_permission_or_blocker",
+        toolWriteRequiresPermission: true,
+        toolAvailabilityLabels: [
+          "web: config_enabled=true credential_available=true policy_allowed=false reachability=unknown available=blocked",
+          "mcp: registered_count=1 safe_read_candidate_count=0 server_status=unknown available=no_safe_read_candidate",
+          "write: available=proposal_permission_or_blocker requires_permission=true silent_write_available=false",
+        ],
+      },
+    });
+
+    expect(screen.getByText("来源：工具可用性")).toBeInTheDocument();
+    expect(screen.getByText("状态：restricted")).toBeInTheDocument();
+    expect(screen.getByText("工具可用性证据")).toBeInTheDocument();
+    expect(screen.getByText("web")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "config_enabled=true credential_available=true policy_allowed=false reachability=unknown available=blocked"
+      )
+    ).toBeInTheDocument();
+    expect(screen.getByText("mcp")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "registered_count=1 safe_read_candidate_count=0 server_status=unknown available=no_safe_read_candidate"
+      )
+    ).toBeInTheDocument();
+    expect(screen.getByText("web availability")).toBeInTheDocument();
+    expect(
+      screen.getByText("policy=false · reachability=unknown · available=blocked")
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/RAW_MCP_DESCRIPTION_SHOULD_NOT_RENDER/)).not.toBeInTheDocument();
+  });
 });

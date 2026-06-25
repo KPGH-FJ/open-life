@@ -1,8 +1,9 @@
 use crate::main_chat_runtime_facts::{
     classify_provider_route_query, provider_route_fact_should_block_before_model,
     resolve_provider_route_fact_answer, resolve_runtime_clock_fact_answer,
-    MainChatProviderRouteIntent, MainChatRuntimeClockSource, MainChatRuntimeFactAnswer,
-    RUNTIME_FACT_PROVIDER_GENERATION_PATH, RUNTIME_FACT_PROVIDER_ROUTE_GENERATION_PATH,
+    resolve_tool_availability_fact_answer, MainChatProviderRouteIntent, MainChatRuntimeClockSource,
+    MainChatRuntimeFactAnswer, RUNTIME_FACT_PROVIDER_GENERATION_PATH,
+    RUNTIME_FACT_PROVIDER_ROUTE_GENERATION_PATH,
 };
 use async_trait::async_trait;
 use openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentStateSnapshot;
@@ -74,6 +75,8 @@ pub struct MainChatTurnInput {
     pub selected_strategy: Option<MainChatAgentStrategy>,
     #[serde(default)]
     pub model_supplied_tool_arguments: Option<Value>,
+    #[serde(default)]
+    pub runtime_fact_direct_answer: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1426,7 +1429,17 @@ where
         } else {
             None
         };
-    let runtime_fact_answer = runtime_clock_fact_answer.or(provider_route_pre_model_fact_answer);
+    let tool_availability_fact_answer = if runtime_clock_fact_answer.is_none()
+        && provider_route_pre_model_fact_answer.is_none()
+        && user_text.trim().len() > 0
+    {
+        resolve_tool_availability_fact_answer(&user_text, state).await
+    } else {
+        None
+    };
+    let runtime_fact_answer = runtime_clock_fact_answer
+        .or(provider_route_pre_model_fact_answer)
+        .or(tool_availability_fact_answer);
     let direct_reply = if let Some(answer) = runtime_fact_answer.as_ref() {
         Some(CommandSurfaceDirectReply::runtime_fact(answer))
     } else if user_text.trim().is_empty() {
@@ -1488,6 +1501,7 @@ where
                 selected_skill_id: sanitized_selected_skill_id.clone(),
                 selected_strategy: Some(main_chat_agent_turn.decision.selected_strategy),
                 model_supplied_tool_arguments: None,
+                runtime_fact_direct_answer: runtime_fact_answer.is_some(),
             },
             event_sink,
         )
@@ -1562,6 +1576,7 @@ pub(crate) fn main_chat_kernel_supports_turn(
                 selected_skill_id: None,
                 selected_strategy: Some(*selected_strategy),
                 model_supplied_tool_arguments: None,
+                runtime_fact_direct_answer: false,
             };
             !plan_kernel_read_tools(&input, false).is_empty()
                 || plan_kernel_write_outcome(&input, false).is_some()
@@ -1634,6 +1649,7 @@ async fn append_main_chat_kernel_read_tool_contract_transcript(
         selected_skill_id: selected_skill_id.map(str::to_string),
         selected_strategy: Some(main_chat_agent_turn.decision.selected_strategy),
         model_supplied_tool_arguments: None,
+        runtime_fact_direct_answer: false,
     };
     let decisions = plan_kernel_read_tools(&probe, false);
     let planned_tools = decisions
@@ -2014,10 +2030,16 @@ where
         }
 
         let mut route_metadata = self.model_client.route_metadata();
-        let write_outcome =
-            plan_kernel_write_outcome(&input, input.model_supplied_tool_arguments.is_some());
-        let read_tool_decisions =
-            plan_kernel_read_tools(&input, input.model_supplied_tool_arguments.is_some());
+        let write_outcome = if input.runtime_fact_direct_answer {
+            None
+        } else {
+            plan_kernel_write_outcome(&input, input.model_supplied_tool_arguments.is_some())
+        };
+        let read_tool_decisions = if input.runtime_fact_direct_answer {
+            Vec::new()
+        } else {
+            plan_kernel_read_tools(&input, input.model_supplied_tool_arguments.is_some())
+        };
         if !read_tool_decisions.is_empty() || write_outcome.is_some() {
             route_metadata.tools_enabled = true;
         }
@@ -5541,6 +5563,7 @@ mod tests {
                     selected_skill_id: None,
                     selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
                 },
                 &mut events,
             )
@@ -5620,6 +5643,7 @@ mod tests {
                     selected_skill_id: None,
                     selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
                 },
                 &mut events,
             )
@@ -5650,6 +5674,7 @@ mod tests {
                     selected_skill_id: None,
                     selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
                 },
                 &mut events,
             )
@@ -5685,6 +5710,7 @@ mod tests {
                     selected_skill_id: Some(" summarize ".into()),
                     selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
                 },
                 &mut events,
             )
@@ -5750,6 +5776,7 @@ mod tests {
                     selected_skill_id: None,
                     selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
                 },
                 &mut events,
             )
@@ -5796,6 +5823,7 @@ mod tests {
                     model_supplied_tool_arguments: Some(serde_json::json!({
                         "path": "../outside-secret.txt"
                     })),
+                    runtime_fact_direct_answer: false,
                 },
                 &mut events,
             )
@@ -5841,6 +5869,7 @@ mod tests {
                     selected_skill_id: None,
                     selected_strategy: Some(MainChatAgentStrategy::MemoryProposal),
                     model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
                 },
                 &mut events,
             )
@@ -5883,6 +5912,7 @@ mod tests {
                     selected_skill_id: None,
                     selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
                 },
                 &mut events,
             )
@@ -5921,6 +5951,7 @@ mod tests {
                     selected_skill_id: None,
                     selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
                 },
                 &mut events,
             )
@@ -5979,6 +6010,7 @@ mod tests {
                     selected_skill_id: None,
                     selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
                 },
                 &mut events,
             )
@@ -6020,6 +6052,7 @@ mod tests {
                     selected_skill_id: None,
                     selected_strategy: Some(MainChatAgentStrategy::MemoryProposal),
                     model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
                 },
                 &mut events,
             )
@@ -6052,6 +6085,7 @@ mod tests {
                     selected_skill_id: None,
                     selected_strategy: Some(MainChatAgentStrategy::LifeModelProposal),
                     model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
                 },
                 &mut life_model_events,
             )
@@ -6094,6 +6128,7 @@ mod tests {
                     selected_skill_id: None,
                     selected_strategy: Some(MainChatAgentStrategy::BlockedConfirmation),
                     model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
                 },
                 &mut events,
             )
@@ -6147,6 +6182,7 @@ mod tests {
                     selected_skill_id: None,
                     selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
                 },
                 &mut events,
             )
@@ -6208,6 +6244,7 @@ mod tests {
                     selected_skill_id: None,
                     selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
                 },
                 &mut events,
             )
