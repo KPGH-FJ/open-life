@@ -785,6 +785,9 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
         startup_warnings: startup_warnings.into_inner(),
         provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
         scheduled_task_mutex: Arc::new(tokio::sync::Mutex::new(())),
+        runtime_clock_source: Arc::new(tokio::sync::Mutex::new(
+            crate::main_chat_runtime_facts::MainChatRuntimeClockSource::default(),
+        )),
         web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
     });

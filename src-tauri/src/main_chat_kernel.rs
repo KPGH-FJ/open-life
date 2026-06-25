@@ -1,5 +1,8 @@
+use crate::main_chat_runtime_facts::{
+    resolve_runtime_clock_fact_answer, MainChatRuntimeClockSource, MainChatRuntimeFactAnswer,
+    RUNTIME_FACT_PROVIDER_GENERATION_PATH,
+};
 use async_trait::async_trait;
-use chrono::{Datelike, Offset};
 use openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentStateSnapshot;
 use openlife_core::agent::main_chat_agent_v1::{
     AgentIngressDecision, AgentTaskSessionStatus, CompiledContext, ContextCompiler,
@@ -1214,6 +1217,18 @@ fn merge_kernel_read_selection_metadata(metadata: &mut Value, selection_metadata
     }
 }
 
+fn merge_runtime_fact_generation_metadata(metadata: &mut Value, runtime_fact_metadata: Value) {
+    let Value::Object(runtime_fact_metadata) = runtime_fact_metadata else {
+        return;
+    };
+    let Some(object) = metadata.as_object_mut() else {
+        return;
+    };
+    for (key, value) in runtime_fact_metadata {
+        object.insert(key, value);
+    }
+}
+
 pub(crate) struct MainChatKernelCommandSurfaceResult {
     pub(crate) reply: String,
     pub(crate) reasoning_trace: ReasoningTrace,
@@ -1366,13 +1381,22 @@ where
     }
 
     let scheduler = state.scheduler.lock().await.clone();
-    let direct_reply = if user_text.trim().is_empty() {
+    let runtime_fact_answer = if user_text.trim().is_empty() {
         None
-    } else if let Some(reply) = main_chat_runtime_clock_direct_reply(&user_text) {
-        Some(reply)
+    } else {
+        let clock_source = state.runtime_clock_source.lock().await.clone();
+        resolve_runtime_clock_fact_answer(&user_text, &clock_source)
+    };
+    let direct_reply = if let Some(answer) = runtime_fact_answer.as_ref() {
+        Some(CommandSurfaceDirectReply::runtime_fact(answer))
+    } else if user_text.trim().is_empty() {
+        None
     } else {
         let router = state.intent_router.lock().await;
-        router.classify(&user_text).direct_response()
+        router
+            .classify(&user_text)
+            .direct_response()
+            .map(CommandSurfaceDirectReply::direct_reflex)
     };
     let (life_model, hs_context) = command_surface_kernel_hs_context(
         state,
@@ -1478,6 +1502,7 @@ where
         scheduler,
         life_model,
         direct_reply.is_some(),
+        runtime_fact_answer,
         event_sink_label,
         kernel_events,
     )
@@ -1787,17 +1812,42 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
 }
 
 #[derive(Clone)]
+struct CommandSurfaceDirectReply {
+    content: String,
+    route_model: String,
+    route_reason: String,
+}
+
+impl CommandSurfaceDirectReply {
+    fn runtime_fact(answer: &MainChatRuntimeFactAnswer) -> Self {
+        Self {
+            content: answer.reply.clone(),
+            route_model: "runtime_fact".into(),
+            route_reason: RUNTIME_FACT_PROVIDER_GENERATION_PATH.into(),
+        }
+    }
+
+    fn direct_reflex(content: String) -> Self {
+        Self {
+            content,
+            route_model: "L1_reflex".into(),
+            route_reason: "main_chat_kernel_direct_reflex".into(),
+        }
+    }
+}
+
+#[derive(Clone)]
 struct CommandSurfaceDirectAnswerModelClient {
     scheduler: InferenceScheduler,
     life_model: LifeModel,
-    direct_reply: Option<String>,
+    direct_reply: Option<CommandSurfaceDirectReply>,
 }
 
 impl CommandSurfaceDirectAnswerModelClient {
     fn new(
         scheduler: InferenceScheduler,
         life_model: LifeModel,
-        direct_reply: Option<String>,
+        direct_reply: Option<CommandSurfaceDirectReply>,
     ) -> Self {
         Self {
             scheduler,
@@ -1814,7 +1864,7 @@ impl MainChatModelClient for CommandSurfaceDirectAnswerModelClient {
         request: MainChatModelRequest,
     ) -> Result<String, String> {
         if let Some(reply) = self.direct_reply.as_ref() {
-            return Ok(reply.clone());
+            return Ok(reply.content.clone());
         }
 
         SchedulerMainChatModelClient::new(self.scheduler.clone(), self.life_model.clone())
@@ -1824,13 +1874,14 @@ impl MainChatModelClient for CommandSurfaceDirectAnswerModelClient {
 
     fn route_metadata(&self) -> MainChatRouteMetadata {
         if self.direct_reply.is_some() {
+            let direct_reply = self.direct_reply.as_ref().expect("direct reply metadata");
             MainChatRouteMetadata {
                 provider: "direct".into(),
-                model: "L1_reflex".into(),
+                model: direct_reply.route_model.clone(),
                 route_type: "direct".into(),
                 prefer_local: false,
                 local_model: "".into(),
-                reason: "main_chat_kernel_direct_reflex".into(),
+                reason: direct_reply.route_reason.clone(),
                 privacy_level: RedactionLevel::None,
                 tools_enabled: false,
                 live_eval_required: false,
@@ -2241,6 +2292,7 @@ async fn build_successful_kernel_command_surface_result(
     scheduler: InferenceScheduler,
     life_model: LifeModel,
     direct_reflex_used: bool,
+    runtime_fact_answer: Option<MainChatRuntimeFactAnswer>,
     event_sink_label: &'static str,
     kernel_events: Vec<MainChatKernelEvent>,
 ) -> Result<MainChatKernelCommandSurfaceResult, String> {
@@ -2262,7 +2314,9 @@ async fn build_successful_kernel_command_surface_result(
     let context_summary = context_summary_from_kernel_result(&kernel_result, &life_model);
     let read_tool_loop_used = !kernel_result.tool_calls.is_empty();
     let scripted_provider_response = route_metadata.scripted_response_configured;
-    let provider_endpoint_kind = if direct_reflex_used {
+    let provider_endpoint_kind = if runtime_fact_answer.is_some() {
+        "runtime_fact"
+    } else if direct_reflex_used {
         "direct_reflex"
     } else if read_tool_loop_used {
         "kernel_read_tool_synthesis"
@@ -2279,7 +2333,7 @@ async fn build_successful_kernel_command_surface_result(
         .context_metadata
         .as_ref()
         .and_then(|metadata| metadata.hs_context.clone());
-    let generation_metadata = serde_json::json!({
+    let mut generation_metadata = serde_json::json!({
         "hsPacketSelected": hs_metadata
             .as_ref()
             .is_some_and(|metadata| !metadata.selected_policy_ids.is_empty()
@@ -2304,6 +2358,7 @@ async fn build_successful_kernel_command_surface_result(
             .as_ref()
             .is_some_and(|metadata| metadata.raw_life_model_yaml_included),
         "toolCallCount": kernel_result.tool_calls.len(),
+        "toolCalled": read_tool_loop_used,
         "directWritesExecuted": false,
         "legacyFallbackUsed": false,
         "kernelBackedDirectAnswer": !read_tool_loop_used,
@@ -2318,6 +2373,8 @@ async fn build_successful_kernel_command_surface_result(
         "schedulerGenerationCalled": !direct_reflex_used && !read_tool_loop_used,
         "providerGenerationPath": if read_tool_loop_used {
             "main_chat_kernel_read_tool_synthesis"
+        } else if runtime_fact_answer.is_some() {
+            RUNTIME_FACT_PROVIDER_GENERATION_PATH
         } else if direct_reflex_used {
             "main_chat_kernel_direct_reflex"
         } else {
@@ -2335,6 +2392,12 @@ async fn build_successful_kernel_command_surface_result(
             && provider_endpoint_kind == "local_test_http",
         "externalLiveProviderEvalPreflighted": false,
     });
+    if let Some(answer) = runtime_fact_answer.as_ref() {
+        merge_runtime_fact_generation_metadata(
+            &mut generation_metadata,
+            answer.generation_metadata(),
+        );
+    }
     execution_transcript.extend(
         append_main_chat_agent_transcript(
             state,
@@ -5092,108 +5155,16 @@ fn route_metadata_from_scheduler(scheduler: &InferenceScheduler) -> MainChatRout
 }
 
 fn main_chat_runtime_clock_direct_reply(user_text: &str) -> Option<String> {
-    let now = chrono::Local::now();
-    let fixed_offset = now.offset().fix();
-    main_chat_runtime_clock_direct_reply_at(user_text, now.with_timezone(&fixed_offset))
+    resolve_runtime_clock_fact_answer(user_text, &MainChatRuntimeClockSource::LocalSystem)
+        .map(|answer| answer.reply)
 }
 
 fn main_chat_runtime_clock_direct_reply_at(
     user_text: &str,
     now: chrono::DateTime<chrono::FixedOffset>,
 ) -> Option<String> {
-    let normalized = user_text.trim().to_lowercase();
-    if normalized.is_empty() {
-        return None;
-    }
-    let compact = normalized
-        .chars()
-        .filter(|ch| !ch.is_whitespace())
-        .collect::<String>();
-    let english_phrase = normalized
-        .trim_matches(|ch: char| ch.is_ascii_punctuation())
-        .trim();
-
-    let asks_weekday = compact.contains("星期几")
-        || compact.contains("周几")
-        || compact.contains("礼拜几")
-        || matches_exact_clock_phrase(
-            english_phrase,
-            &[
-                "what day is it",
-                "what day is today",
-                "what day of the week is it",
-                "what weekday is it",
-                "what is today's weekday",
-                "today's weekday",
-                "day of week today",
-            ],
-        );
-    let asks_date = compact.contains("今天几号")
-        || compact.contains("今天日期")
-        || compact.contains("今天是哪天")
-        || compact.contains("今天哪一天")
-        || compact.contains("当前日期")
-        || compact.contains("现在日期")
-        || matches_exact_clock_phrase(
-            english_phrase,
-            &[
-                "today's date",
-                "date today",
-                "what is today's date",
-                "what's today's date",
-                "what is the date today",
-                "what date is it",
-            ],
-        );
-    let asks_time = compact.contains("现在几点")
-        || compact.contains("几点了")
-        || compact.contains("当前时间")
-        || compact.contains("现在时间")
-        || matches_exact_clock_phrase(
-            english_phrase,
-            &[
-                "current time",
-                "time now",
-                "what time is it",
-                "what's the time",
-                "what is the time",
-                "what is the current time",
-            ],
-        );
-
-    if !(asks_weekday || asks_date || asks_time) {
-        return None;
-    }
-
-    let date = now.format("%Y-%m-%d").to_string();
-    let weekday = chinese_weekday(now.weekday());
-    if asks_time {
-        return Some(format!(
-            "根据本机运行时钟，现在是 {} {}，{}（UTC{}）。",
-            date,
-            now.format("%H:%M"),
-            weekday,
-            now.format("%:z")
-        ));
-    }
-
-    Some(format!("根据本机运行时钟，今天是 {}，{}。", date, weekday))
-}
-
-fn matches_exact_clock_phrase(value: &str, phrases: &[&str]) -> bool {
-    phrases.iter().any(|phrase| value == *phrase)
-}
-
-fn chinese_weekday(weekday: chrono::Weekday) -> &'static str {
-    match weekday {
-        chrono::Weekday::Mon => "星期一",
-        chrono::Weekday::Tue => "星期二",
-        chrono::Weekday::Wed => "星期三",
-        chrono::Weekday::Thu => "星期四",
-        chrono::Weekday::Fri => "星期五",
-        chrono::Weekday::Sat => "星期六",
-        chrono::Weekday::Sun => "星期日",
-    }
+    resolve_runtime_clock_fact_answer(user_text, &MainChatRuntimeClockSource::Fixed(now))
+        .map(|answer| answer.reply)
 }
 
 fn bounded_label(value: &str, max_chars: usize) -> String {

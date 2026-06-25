@@ -2237,7 +2237,32 @@ async fn send_message_runtime_clock_weekday_uses_kernel_direct_reply_without_pro
         generation
             .get("providerGenerationPath")
             .and_then(serde_json::Value::as_str),
-        Some("main_chat_kernel_direct_reflex")
+        Some(crate::main_chat_runtime_facts::RUNTIME_FACT_PROVIDER_GENERATION_PATH)
+    );
+    assert_eq!(
+        generation
+            .get("sourceType")
+            .and_then(serde_json::Value::as_str),
+        Some(crate::main_chat_runtime_facts::RUNTIME_FACT_SOURCE_TYPE)
+    );
+    assert!(generation
+        .get("runtimeFactKeys")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|keys| keys
+            .iter()
+            .any(|key| key.as_str()
+                == Some(crate::main_chat_runtime_facts::RUNTIME_FACT_KEY_WEEKDAY))));
+    assert_eq!(
+        generation
+            .get("runtimeFactAuthority")
+            .and_then(serde_json::Value::as_str),
+        Some("runtime")
+    );
+    assert_eq!(
+        generation
+            .get("toolCalled")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
     );
 
     let transcript = response["execution_transcript"]

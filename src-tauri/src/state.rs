@@ -83,6 +83,8 @@ pub struct AppState {
     pub startup_warnings: Vec<String>,
     pub provider_health_cache: Arc<tokio::sync::Mutex<Option<ProviderHealthCache>>>,
     pub scheduled_task_mutex: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) runtime_clock_source:
+        Arc<tokio::sync::Mutex<crate::main_chat_runtime_facts::MainChatRuntimeClockSource>>,
     pub web_search_fixture_output: Arc<tokio::sync::Mutex<Option<String>>>,
     pub shutdown_notify: Arc<tokio::sync::Notify>,
 }
