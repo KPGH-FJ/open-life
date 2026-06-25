@@ -1,5 +1,11 @@
 use chrono::{Datelike, Offset};
+use openlife_core::agent::{
+    model_router::{ModelRouter, ProviderAvailability},
+    AgentRunStatus, ModelRouteTrace,
+};
+use openlife_core::config::AppConfig;
 use openlife_core::llm::ChatMessage;
+use openlife_core::scheduler::InferenceScheduler;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
@@ -13,8 +19,36 @@ pub(crate) const RUNTIME_FACT_KEY_WEEKDAY: &str = "runtime.current_time.weekday"
 pub(crate) const RUNTIME_FACT_KEY_TIMEZONE: &str = "runtime.current_time.timezone";
 pub(crate) const RUNTIME_FACT_KEY_TRACE_GAP: &str = "runtime.current_time.trace_gap";
 pub(crate) const RUNTIME_FACT_PROVIDER_GENERATION_PATH: &str = "main_chat_runtime_fact";
+pub(crate) const RUNTIME_FACT_PROVIDER_ROUTE_GENERATION_PATH: &str =
+    "main_chat_provider_route_runtime_fact";
+pub(crate) const RUNTIME_FACT_KEY_PROVIDER_CONFIGURED_DEFAULT_PROVIDER: &str =
+    "provider.configured.default_provider";
+pub(crate) const RUNTIME_FACT_KEY_PROVIDER_CONFIGURED_DEFAULT_MODEL: &str =
+    "provider.configured.default_model";
+pub(crate) const RUNTIME_FACT_KEY_PROVIDER_CURRENT_PROVIDER: &str =
+    "provider.current_turn_generation.provider";
+pub(crate) const RUNTIME_FACT_KEY_PROVIDER_CURRENT_MODEL: &str =
+    "provider.current_turn_generation.model";
+pub(crate) const RUNTIME_FACT_KEY_PROVIDER_CURRENT_ROUTE_TYPE: &str =
+    "provider.current_turn_generation.route_type";
+pub(crate) const RUNTIME_FACT_KEY_PROVIDER_CURRENT_MODEL_GENERATED: &str =
+    "provider.current_turn_generation.model_generated";
+pub(crate) const RUNTIME_FACT_KEY_PROVIDER_LAST_COMPLETED_PROVIDER: &str =
+    "provider.last_completed_generation.provider";
+pub(crate) const RUNTIME_FACT_KEY_PROVIDER_LAST_COMPLETED_MODEL: &str =
+    "provider.last_completed_generation.model";
+pub(crate) const RUNTIME_FACT_KEY_PROVIDER_LAST_COMPLETED_RUN_ID: &str =
+    "provider.last_completed_generation.run_id";
+pub(crate) const RUNTIME_FACT_KEY_PROVIDER_PLANNED_PROVIDER: &str =
+    "provider.planned_route_if_model_needed.provider";
+pub(crate) const RUNTIME_FACT_KEY_PROVIDER_PLANNED_MODEL: &str =
+    "provider.planned_route_if_model_needed.model";
+pub(crate) const RUNTIME_FACT_KEY_PROVIDER_PLANNED_ROUTE_TYPE: &str =
+    "provider.planned_route_if_model_needed.route_type";
+pub(crate) const RUNTIME_FACT_KEY_PROVIDER_PREFLIGHT_STATUS: &str = "provider.preflight.status";
 
 const SLICE_A_SCENARIOS: [&str; 6] = ["RF-01", "RF-02", "RF-03", "RF-04", "RF-05", "RF-06"];
+const SLICE_B_SCENARIOS: [&str; 4] = ["RF-07", "RF-08", "RF-09", "RF-10"];
 const FIXED_CLOCK_RFC3339: &str = "2026-06-23T09:15:00+08:00";
 
 #[derive(Debug, Clone)]
@@ -86,7 +120,7 @@ impl MainChatRuntimeClockIntent {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MainChatRuntimeFactAnswer {
     pub(crate) reply: String,
-    pub(crate) intent: MainChatRuntimeClockIntent,
+    pub(crate) intent: String,
     pub(crate) fact_keys: Vec<&'static str>,
     pub(crate) facts: Vec<MainChatRuntimeFactBinding>,
     pub(crate) observed_at: Option<String>,
@@ -97,6 +131,8 @@ pub(crate) struct MainChatRuntimeFactAnswer {
     pub(crate) privacy: Vec<&'static str>,
     pub(crate) timezone: Option<String>,
     pub(crate) trace_gap: bool,
+    #[serde(skip_serializing_if = "Value::is_null")]
+    pub(crate) extra_metadata: Value,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -115,7 +151,7 @@ pub(crate) struct MainChatRuntimeFactBinding {
 
 impl MainChatRuntimeFactAnswer {
     pub(crate) fn generation_metadata(&self) -> Value {
-        serde_json::json!({
+        let mut metadata = serde_json::json!({
             "sourceType": RUNTIME_FACT_SOURCE_TYPE,
             "runtimeFactKeys": self.fact_keys,
             "runtimeFacts": self.facts,
@@ -138,7 +174,13 @@ impl MainChatRuntimeFactAnswer {
             "directWritesExecuted": false,
             "legacyFallbackUsed": false,
             "providerGenerationPath": RUNTIME_FACT_PROVIDER_GENERATION_PATH,
-        })
+            "currentTurnGenerationProvider": null,
+            "currentTurnGenerationModel": null,
+            "currentTurnGenerationRouteType": "none",
+            "currentTurnGenerationModelGenerated": false,
+        });
+        merge_json_object(&mut metadata, self.extra_metadata.clone());
+        metadata
     }
 }
 
@@ -153,7 +195,7 @@ pub(crate) fn resolve_runtime_clock_fact_answer(
         trace_gap_keys.push(RUNTIME_FACT_KEY_TRACE_GAP);
         return Some(MainChatRuntimeFactAnswer {
             reply: "当前时间未知：本机运行时钟不可用，无法回答当前日期或时间。".into(),
-            intent,
+            intent: intent.as_str().into(),
             facts: missing_clock_fact_bindings(&fact_keys),
             fact_keys: trace_gap_keys,
             observed_at: None,
@@ -164,6 +206,7 @@ pub(crate) fn resolve_runtime_clock_fact_answer(
             privacy: vec!["public", "internal"],
             timezone: None,
             trace_gap: true,
+            extra_metadata: Value::Null,
         });
     };
 
@@ -186,7 +229,7 @@ pub(crate) fn resolve_runtime_clock_fact_answer(
 
     Some(MainChatRuntimeFactAnswer {
         reply,
-        intent,
+        intent: intent.as_str().into(),
         fact_keys,
         facts,
         observed_at: Some(now.to_rfc3339()),
@@ -197,6 +240,179 @@ pub(crate) fn resolve_runtime_clock_fact_answer(
         privacy: vec!["public", "internal"],
         timezone: Some(timezone),
         trace_gap: false,
+        extra_metadata: Value::Null,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MainChatProviderRouteIntent {
+    AskCurrentModelRoute,
+    AskPreviousTurnModelRoute,
+}
+
+impl MainChatProviderRouteIntent {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::AskCurrentModelRoute => "ask_model_route",
+            Self::AskPreviousTurnModelRoute => "ask_previous_turn_model_route",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ProviderRouteFactSnapshot {
+    provider: Option<String>,
+    model: Option<String>,
+    route_type: Option<String>,
+    run_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ProviderPreflightFactSnapshot {
+    status: String,
+    blockers: Vec<String>,
+}
+
+pub(crate) async fn provider_route_fact_should_block_before_model(
+    state: &Arc<AppState>,
+    scheduler: &InferenceScheduler,
+) -> bool {
+    let config = state.config.lock().await.clone();
+    let planned = planned_route_without_probe(scheduler);
+    let preflight = provider_preflight_snapshot(&config, scheduler, &planned);
+    preflight.status == "blocked"
+}
+
+pub(crate) async fn resolve_provider_route_fact_answer(
+    user_text: &str,
+    state: &Arc<AppState>,
+    scheduler: &InferenceScheduler,
+    session_id: &str,
+    current_route: Option<ModelRouteTrace>,
+    current_model_generated: bool,
+    scheduler_generation_called: bool,
+    provider_generation_path: &str,
+) -> Option<MainChatRuntimeFactAnswer> {
+    let intent = classify_provider_route_query(user_text)?;
+    let config = state.config.lock().await.clone();
+    let planned_route = planned_route_without_probe(scheduler);
+    let preflight = provider_preflight_snapshot(&config, scheduler, &planned_route);
+    let configured = ProviderRouteFactSnapshot {
+        provider: Some(bounded_runtime_fact_label(&config.llm.provider)),
+        model: Some(bounded_runtime_fact_label(&config.llm.chat_model)),
+        route_type: None,
+        run_id: None,
+    };
+    let planned = route_snapshot_from_trace(&planned_route, None);
+    let current = if current_model_generated {
+        current_route
+            .as_ref()
+            .map(|route| route_snapshot_from_trace(route, None))
+            .unwrap_or_else(no_current_generation_snapshot)
+    } else {
+        no_current_generation_snapshot()
+    };
+    let last_completed_generation = last_completed_generation_snapshot(state, session_id).await;
+    let last_turn = last_turn_snapshot(state, session_id).await;
+    let facts = provider_route_fact_bindings(
+        &configured,
+        &current,
+        &last_completed_generation,
+        &planned,
+        current_model_generated,
+        &preflight,
+    );
+    let fact_keys = provider_route_fact_keys();
+    let route_labels = provider_route_labels(
+        &configured,
+        &current,
+        &last_completed_generation,
+        &planned,
+        current_model_generated,
+        &preflight,
+    );
+    let reply = provider_route_reply(
+        intent,
+        &configured,
+        &current,
+        &last_completed_generation,
+        &planned,
+        &last_turn,
+        current_model_generated,
+        &preflight,
+    );
+    let mut extra_metadata = serde_json::json!({
+        "providerGenerationPath": provider_generation_path,
+        "modelGenerated": current_model_generated,
+        "schedulerGenerationCalled": scheduler_generation_called,
+        "toolCalled": false,
+        "directWritesExecuted": false,
+        "legacyFallbackUsed": false,
+        "configuredProvider": configured.provider.clone(),
+        "configuredModel": configured.model.clone(),
+        "configuredDefaultRouteLabel": route_labels.configured.clone(),
+        "currentTurnGenerationProvider": current.provider.clone(),
+        "currentTurnGenerationModel": current.model.clone(),
+        "currentTurnGenerationRouteType": current.route_type.clone().unwrap_or_else(|| "none".into()),
+        "currentTurnGenerationModelGenerated": current_model_generated,
+        "currentTurnGenerationRouteLabel": route_labels.current.clone(),
+        "lastCompletedGenerationProvider": last_completed_generation.as_ref().and_then(|route| route.provider.clone()),
+        "lastCompletedGenerationModel": last_completed_generation.as_ref().and_then(|route| route.model.clone()),
+        "lastCompletedGenerationRunId": last_completed_generation.as_ref().and_then(|route| route.run_id.clone()),
+        "lastCompletedGenerationRouteLabel": route_labels.last_completed.clone(),
+        "plannedRouteIfModelNeededProvider": planned.provider.clone(),
+        "plannedRouteIfModelNeededModel": planned.model.clone(),
+        "plannedRouteIfModelNeededRouteType": planned.route_type.clone(),
+        "plannedRouteIfModelNeededLabel": route_labels.planned.clone(),
+        "providerPreflightStatus": preflight.status.clone(),
+        "providerPreflightBlockers": preflight.blockers.clone(),
+        "providerPreflightIsInvocationProof": false,
+        "routeLabels": [
+            route_labels.current.clone(),
+            route_labels.last_completed.clone(),
+            route_labels.configured.clone(),
+            route_labels.planned.clone(),
+        ],
+        "uiPrimarySourceChip": "运行时路线",
+        "uiStatus": if preflight.status == "blocked" { "restricted" } else { "completed" },
+    });
+    if let Some(last_turn) = last_turn {
+        merge_json_object(
+            &mut extra_metadata,
+            serde_json::json!({
+                "lastTurnProvider": last_turn.provider,
+                "lastTurnModel": last_turn.model,
+                "lastTurnRouteType": last_turn.route_type,
+                "lastTurnModelGenerated": route_snapshot_is_model_generation(&last_turn),
+            }),
+        );
+    }
+
+    Some(MainChatRuntimeFactAnswer {
+        reply,
+        intent: intent.as_str().into(),
+        fact_keys,
+        facts,
+        observed_at: Some(chrono::Utc::now().to_rfc3339()),
+        source: vec![
+            "provider_route",
+            "agent_run",
+            "config",
+            "model_router",
+            "provider_preflight",
+        ],
+        authority: if preflight.status == "blocked" {
+            "policy"
+        } else {
+            "run_trace"
+        },
+        freshness: "run_trace",
+        visibility: vec!["answer", "ui_badge", "trace_only"],
+        privacy: vec!["internal"],
+        timezone: None,
+        trace_gap: false,
+        extra_metadata,
     })
 }
 
@@ -296,6 +512,589 @@ fn clock_fact_binding(
         visibility,
         privacy,
         missing,
+    }
+}
+
+pub(crate) fn classify_provider_route_query(
+    user_text: &str,
+) -> Option<MainChatProviderRouteIntent> {
+    let normalized = user_text.trim().to_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    let compact = normalized
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    let compact = trim_outer_punctuation(&compact);
+    let english_phrase = trim_outer_punctuation(&normalized);
+
+    if matches_exact_clock_phrase(
+        compact,
+        &[
+            "刚才回答今天星期几用了什么模型",
+            "刚才回答今天星期几时用了什么模型",
+            "上一轮用了什么模型",
+            "上次回答用了什么模型",
+            "刚刚用了什么模型",
+        ],
+    ) || matches_exact_clock_phrase(
+        english_phrase,
+        &[
+            "what model did you use last turn",
+            "what model did you use for the last answer",
+            "which model answered the previous turn",
+        ],
+    ) {
+        return Some(MainChatProviderRouteIntent::AskPreviousTurnModelRoute);
+    }
+
+    if matches_exact_clock_phrase(
+        compact,
+        &[
+            "你现在用什么模型",
+            "你当前用什么模型",
+            "当前用什么模型",
+            "现在用什么模型",
+            "你现在用哪个模型",
+            "你当前用哪个模型",
+            "你现在走什么模型路线",
+            "当前模型路线是什么",
+        ],
+    ) || matches_exact_clock_phrase(
+        english_phrase,
+        &[
+            "what model are you using",
+            "what model are you using now",
+            "which model are you using",
+            "which provider are you using",
+            "what provider are you using",
+            "what is your current model route",
+        ],
+    ) {
+        return Some(MainChatProviderRouteIntent::AskCurrentModelRoute);
+    }
+
+    None
+}
+
+fn provider_route_fact_keys() -> Vec<&'static str> {
+    vec![
+        RUNTIME_FACT_KEY_PROVIDER_CURRENT_PROVIDER,
+        RUNTIME_FACT_KEY_PROVIDER_CURRENT_MODEL,
+        RUNTIME_FACT_KEY_PROVIDER_CURRENT_ROUTE_TYPE,
+        RUNTIME_FACT_KEY_PROVIDER_CURRENT_MODEL_GENERATED,
+        RUNTIME_FACT_KEY_PROVIDER_LAST_COMPLETED_PROVIDER,
+        RUNTIME_FACT_KEY_PROVIDER_LAST_COMPLETED_MODEL,
+        RUNTIME_FACT_KEY_PROVIDER_LAST_COMPLETED_RUN_ID,
+        RUNTIME_FACT_KEY_PROVIDER_CONFIGURED_DEFAULT_PROVIDER,
+        RUNTIME_FACT_KEY_PROVIDER_CONFIGURED_DEFAULT_MODEL,
+        RUNTIME_FACT_KEY_PROVIDER_PLANNED_PROVIDER,
+        RUNTIME_FACT_KEY_PROVIDER_PLANNED_MODEL,
+        RUNTIME_FACT_KEY_PROVIDER_PLANNED_ROUTE_TYPE,
+        RUNTIME_FACT_KEY_PROVIDER_PREFLIGHT_STATUS,
+    ]
+}
+
+fn provider_route_fact_bindings(
+    configured: &ProviderRouteFactSnapshot,
+    current: &ProviderRouteFactSnapshot,
+    last_completed: &Option<ProviderRouteFactSnapshot>,
+    planned: &ProviderRouteFactSnapshot,
+    current_model_generated: bool,
+    preflight: &ProviderPreflightFactSnapshot,
+) -> Vec<MainChatRuntimeFactBinding> {
+    let mut facts = Vec::new();
+    facts.push(provider_fact_binding(
+        RUNTIME_FACT_KEY_PROVIDER_CURRENT_PROVIDER,
+        "bounded_label_or_none",
+        current.provider.as_deref(),
+        vec!["provider_route", "agent_run"],
+        "run_trace",
+        "run_trace",
+        "ui_badge",
+        current.provider.is_none(),
+    ));
+    facts.push(provider_fact_binding(
+        RUNTIME_FACT_KEY_PROVIDER_CURRENT_MODEL,
+        "bounded_label_or_none",
+        current.model.as_deref(),
+        vec!["provider_route", "agent_run"],
+        "run_trace",
+        "run_trace",
+        "ui_badge",
+        current.model.is_none(),
+    ));
+    facts.push(provider_fact_binding(
+        RUNTIME_FACT_KEY_PROVIDER_CURRENT_ROUTE_TYPE,
+        "local_cloud_direct_or_none",
+        current.route_type.as_deref().or(Some("none")),
+        vec!["provider_route"],
+        "run_trace",
+        "run_trace",
+        "ui_badge",
+        false,
+    ));
+    facts.push(provider_fact_binding(
+        RUNTIME_FACT_KEY_PROVIDER_CURRENT_MODEL_GENERATED,
+        "boolean",
+        Some(if current_model_generated {
+            "true"
+        } else {
+            "false"
+        }),
+        vec!["generation_metadata"],
+        "run_trace",
+        "run_trace",
+        "trace_only",
+        false,
+    ));
+    facts.push(provider_fact_binding(
+        RUNTIME_FACT_KEY_PROVIDER_LAST_COMPLETED_PROVIDER,
+        "bounded_label",
+        last_completed
+            .as_ref()
+            .and_then(|route| route.provider.as_deref()),
+        vec!["agent_run"],
+        "run_trace",
+        "store_snapshot",
+        "trace_only",
+        last_completed.is_none(),
+    ));
+    facts.push(provider_fact_binding(
+        RUNTIME_FACT_KEY_PROVIDER_LAST_COMPLETED_MODEL,
+        "bounded_label",
+        last_completed
+            .as_ref()
+            .and_then(|route| route.model.as_deref()),
+        vec!["agent_run"],
+        "run_trace",
+        "store_snapshot",
+        "trace_only",
+        last_completed.is_none(),
+    ));
+    facts.push(provider_fact_binding(
+        RUNTIME_FACT_KEY_PROVIDER_LAST_COMPLETED_RUN_ID,
+        "bounded_id",
+        last_completed
+            .as_ref()
+            .and_then(|route| route.run_id.as_deref()),
+        vec!["agent_run"],
+        "run_trace",
+        "store_snapshot",
+        "trace_only",
+        last_completed.is_none(),
+    ));
+    facts.push(provider_fact_binding(
+        RUNTIME_FACT_KEY_PROVIDER_CONFIGURED_DEFAULT_PROVIDER,
+        "bounded_label",
+        configured.provider.as_deref(),
+        vec!["config"],
+        "config",
+        "turn_snapshot",
+        "trace_only",
+        configured.provider.is_none(),
+    ));
+    facts.push(provider_fact_binding(
+        RUNTIME_FACT_KEY_PROVIDER_CONFIGURED_DEFAULT_MODEL,
+        "bounded_label",
+        configured.model.as_deref(),
+        vec!["config"],
+        "config",
+        "turn_snapshot",
+        "trace_only",
+        configured.model.is_none(),
+    ));
+    facts.push(provider_fact_binding(
+        RUNTIME_FACT_KEY_PROVIDER_PLANNED_PROVIDER,
+        "bounded_label",
+        planned.provider.as_deref(),
+        vec!["provider_route", "model_router"],
+        "config",
+        "turn_snapshot",
+        "trace_only",
+        planned.provider.is_none(),
+    ));
+    facts.push(provider_fact_binding(
+        RUNTIME_FACT_KEY_PROVIDER_PLANNED_MODEL,
+        "bounded_label",
+        planned.model.as_deref(),
+        vec!["provider_route", "model_router"],
+        "config",
+        "turn_snapshot",
+        "trace_only",
+        planned.model.is_none(),
+    ));
+    facts.push(provider_fact_binding(
+        RUNTIME_FACT_KEY_PROVIDER_PLANNED_ROUTE_TYPE,
+        "local_cloud_or_unknown",
+        planned.route_type.as_deref().or(Some("unknown")),
+        vec!["provider_route", "model_router"],
+        "config",
+        "turn_snapshot",
+        "trace_only",
+        false,
+    ));
+    facts.push(provider_fact_binding(
+        RUNTIME_FACT_KEY_PROVIDER_PREFLIGHT_STATUS,
+        "ready_or_blocker_labels",
+        Some(preflight.status.as_str()),
+        vec!["provider_preflight"],
+        "policy",
+        "turn_snapshot",
+        "trace_only",
+        false,
+    ));
+    facts
+}
+
+fn provider_fact_binding(
+    key: &'static str,
+    value_shape: &'static str,
+    value: Option<&str>,
+    source: Vec<&'static str>,
+    authority: &'static str,
+    freshness: &'static str,
+    visibility: &'static str,
+    missing: bool,
+) -> MainChatRuntimeFactBinding {
+    MainChatRuntimeFactBinding {
+        key,
+        value_shape,
+        value: value.map(str::to_string),
+        source,
+        authority,
+        freshness,
+        visibility,
+        privacy: "internal",
+        missing,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ProviderRouteLabels {
+    current: String,
+    last_completed: String,
+    configured: String,
+    planned: String,
+}
+
+fn provider_route_labels(
+    configured: &ProviderRouteFactSnapshot,
+    current: &ProviderRouteFactSnapshot,
+    last_completed: &Option<ProviderRouteFactSnapshot>,
+    planned: &ProviderRouteFactSnapshot,
+    current_model_generated: bool,
+    preflight: &ProviderPreflightFactSnapshot,
+) -> ProviderRouteLabels {
+    let current_label = if current_model_generated {
+        format!(
+            "current_turn_generation: actual {} / {} ({})",
+            label_or_unknown(current.provider.as_deref()),
+            label_or_unknown(current.model.as_deref()),
+            label_or_unknown(current.route_type.as_deref())
+        )
+    } else {
+        "current_turn_generation: no model generated in this turn".into()
+    };
+    let last_label = last_completed
+        .as_ref()
+        .map(|route| {
+            format!(
+                "last_completed_generation: {} / {} ({}) run {}",
+                label_or_unknown(route.provider.as_deref()),
+                label_or_unknown(route.model.as_deref()),
+                label_or_unknown(route.route_type.as_deref()),
+                label_or_unknown(route.run_id.as_deref())
+            )
+        })
+        .unwrap_or_else(|| "last_completed_generation: unknown".into());
+    let configured_label = format!(
+        "configured_default_route: {} / {}",
+        label_or_unknown(configured.provider.as_deref()),
+        label_or_unknown(configured.model.as_deref())
+    );
+    let planned_label = format!(
+        "planned_route_if_model_needed: {} / {} ({}) preflight={}",
+        label_or_unknown(planned.provider.as_deref()),
+        label_or_unknown(planned.model.as_deref()),
+        label_or_unknown(planned.route_type.as_deref()),
+        preflight.status
+    );
+
+    ProviderRouteLabels {
+        current: current_label,
+        last_completed: last_label,
+        configured: configured_label,
+        planned: planned_label,
+    }
+}
+
+fn provider_route_reply(
+    intent: MainChatProviderRouteIntent,
+    configured: &ProviderRouteFactSnapshot,
+    current: &ProviderRouteFactSnapshot,
+    last_completed: &Option<ProviderRouteFactSnapshot>,
+    planned: &ProviderRouteFactSnapshot,
+    last_turn: &Option<ProviderRouteFactSnapshot>,
+    current_model_generated: bool,
+    preflight: &ProviderPreflightFactSnapshot,
+) -> String {
+    let configured_label = format!(
+        "{} / {}",
+        label_or_unknown(configured.provider.as_deref()),
+        label_or_unknown(configured.model.as_deref())
+    );
+    let planned_label = format!(
+        "{} / {} ({})",
+        label_or_unknown(planned.provider.as_deref()),
+        label_or_unknown(planned.model.as_deref()),
+        label_or_unknown(planned.route_type.as_deref())
+    );
+    let last_completed_label = last_completed
+        .as_ref()
+        .map(|route| {
+            format!(
+                "{} / {} ({})，run {}",
+                label_or_unknown(route.provider.as_deref()),
+                label_or_unknown(route.model.as_deref()),
+                label_or_unknown(route.route_type.as_deref()),
+                label_or_unknown(route.run_id.as_deref())
+            )
+        })
+        .unwrap_or_else(|| "未知：本会话还没有已完成的模型生成记录".into());
+    let preflight_label = if preflight.blockers.is_empty() {
+        "provider.preflight.status=ready（这只是路由前置状态，不是实际调用证明）".into()
+    } else {
+        format!(
+            "provider.preflight.status=blocked（{}）；这不是 readiness，也不会当作实际模型调用证明",
+            preflight.blockers.join(", ")
+        )
+    };
+    let last_turn_label = last_turn
+        .as_ref()
+        .map(|route| {
+            if route_snapshot_is_model_generation(route) {
+                format!(
+                    "上一轮记录为模型生成：{} / {} ({})。",
+                    label_or_unknown(route.provider.as_deref()),
+                    label_or_unknown(route.model.as_deref()),
+                    label_or_unknown(route.route_type.as_deref())
+                )
+            } else {
+                "上一轮是确定性 runtime fact/direct 路径，没有调用模型。".into()
+            }
+        })
+        .unwrap_or_else(|| "上一轮没有可用运行记录。".into());
+
+    match intent {
+        MainChatProviderRouteIntent::AskCurrentModelRoute if current_model_generated => format!(
+            "current_turn_generation：本轮实际调用的是 {} / {}（{}）。configured_default_route：{}。planned_route_if_model_needed：{}。last_completed_generation：{}。{}",
+            label_or_unknown(current.provider.as_deref()),
+            label_or_unknown(current.model.as_deref()),
+            label_or_unknown(current.route_type.as_deref()),
+            configured_label,
+            planned_label,
+            last_completed_label,
+            preflight_label
+        ),
+        MainChatProviderRouteIntent::AskCurrentModelRoute => format!(
+            "current_turn_generation：本轮没有调用模型，因此没有 current-turn provider/model。configured_default_route：{}。planned_route_if_model_needed：{}。last_completed_generation：{}。{}",
+            configured_label, planned_label, last_completed_label, preflight_label
+        ),
+        MainChatProviderRouteIntent::AskPreviousTurnModelRoute => format!(
+            "{} current_turn_generation：本轮为了回答这个 runtime fact 问题没有调用模型，因此没有 current-turn provider/model。configured_default_route：{}。planned_route_if_model_needed：{}。last_completed_generation：{}。{}",
+            last_turn_label, configured_label, planned_label, last_completed_label, preflight_label
+        ),
+    }
+}
+
+async fn last_turn_snapshot(
+    state: &Arc<AppState>,
+    session_id: &str,
+) -> Option<ProviderRouteFactSnapshot> {
+    let store_arc = state.agent_run_store.as_ref()?;
+    let store = store_arc.lock().await;
+    let runs = store.list_runs_for_session(session_id, 5).ok()?;
+    runs.into_iter()
+        .find(|run| run.status == AgentRunStatus::Completed)
+        .and_then(|run| {
+            run.model_route
+                .as_ref()
+                .map(|route| route_snapshot_from_trace(route, Some(run.id.as_str())))
+        })
+}
+
+async fn last_completed_generation_snapshot(
+    state: &Arc<AppState>,
+    session_id: &str,
+) -> Option<ProviderRouteFactSnapshot> {
+    let store_arc = state.agent_run_store.as_ref()?;
+    let store = store_arc.lock().await;
+    let runs = store.list_runs_for_session(session_id, 20).ok()?;
+    runs.into_iter()
+        .filter(|run| run.status == AgentRunStatus::Completed)
+        .find_map(|run| {
+            let route = run.model_route.as_ref()?;
+            let snapshot = route_snapshot_from_trace(route, Some(run.id.as_str()));
+            route_snapshot_is_model_generation(&snapshot).then_some(snapshot)
+        })
+}
+
+fn route_snapshot_from_trace(
+    route: &ModelRouteTrace,
+    run_id: Option<&str>,
+) -> ProviderRouteFactSnapshot {
+    ProviderRouteFactSnapshot {
+        provider: Some(bounded_runtime_fact_label(&route.provider)),
+        model: Some(bounded_runtime_fact_label(&route.model)),
+        route_type: Some(bounded_runtime_fact_label(&route.route_type)),
+        run_id: run_id.map(bounded_runtime_fact_label),
+    }
+}
+
+fn no_current_generation_snapshot() -> ProviderRouteFactSnapshot {
+    ProviderRouteFactSnapshot {
+        provider: None,
+        model: None,
+        route_type: Some("none".into()),
+        run_id: None,
+    }
+}
+
+fn route_snapshot_is_model_generation(route: &ProviderRouteFactSnapshot) -> bool {
+    let provider = route.provider.as_deref().unwrap_or_default();
+    let model = route.model.as_deref().unwrap_or_default();
+    let route_type = route.route_type.as_deref().unwrap_or_default();
+    !provider.is_empty()
+        && provider != "direct"
+        && !matches!(model, "runtime_fact" | "L1_reflex")
+        && !matches!(route_type, "direct" | "none")
+}
+
+fn provider_preflight_snapshot(
+    config: &AppConfig,
+    scheduler: &InferenceScheduler,
+    planned: &ModelRouteTrace,
+) -> ProviderPreflightFactSnapshot {
+    let mut blockers = Vec::new();
+    let planned_route_type = planned.route_type.trim().to_ascii_lowercase();
+    let planned_provider = planned.provider.trim().to_ascii_lowercase();
+    let configured_provider = config.llm.provider.trim().to_ascii_lowercase();
+    if configured_provider.is_empty() || configured_provider == "none" {
+        blockers.push("configured_provider_missing".into());
+    }
+    let configured_cloud_provider = is_cloud_route_provider(&configured_provider);
+    let planned_cloud_route = planned_route_type == "cloud";
+    let cloud_route_needs_preflight = configured_cloud_provider || planned_cloud_route;
+    if cloud_route_needs_preflight && !config.system.network_policy.enabled {
+        blockers.push("network_disabled".into());
+    }
+    if ((configured_cloud_provider && config.effective_cloud_api_key().trim().is_empty())
+        || (planned_cloud_route && scheduler.effective_api_key().trim().is_empty()))
+        && scheduler.scripted_generation_response.is_none()
+    {
+        blockers.push("provider_api_key_missing".into());
+    }
+    if planned_provider.is_empty() || planned_provider == "none" || planned_route_type == "fallback"
+    {
+        blockers.push("provider_route_unavailable".into());
+    }
+    blockers.sort();
+    blockers.dedup();
+    ProviderPreflightFactSnapshot {
+        status: if blockers.is_empty() {
+            "ready".into()
+        } else {
+            "blocked".into()
+        },
+        blockers,
+    }
+}
+
+fn is_cloud_route_provider(provider: &str) -> bool {
+    let provider = provider.trim().to_ascii_lowercase();
+    !matches!(
+        provider.as_str(),
+        "" | "none" | "ollama" | "local" | "direct" | "runtime_fact"
+    )
+}
+
+fn planned_route_without_probe(scheduler: &InferenceScheduler) -> ModelRouteTrace {
+    if let Some(router) = scheduler.model_router.as_ref() {
+        if let Ok(decision) = router.route_chat(None, scheduler.prefer_local) {
+            return decision.to_trace();
+        }
+    }
+
+    let has_remote_key = !scheduler.effective_api_key().trim().is_empty();
+    let use_configured_local = scheduler.prefer_local && !has_remote_key;
+    let (provider, model, route_type, reason) = if use_configured_local {
+        (
+            "ollama".to_string(),
+            scheduler.local_model.clone(),
+            "local".to_string(),
+            "configured_local_preference_without_probe".to_string(),
+        )
+    } else if scheduler.provider.trim().is_empty() || scheduler.provider == "none" {
+        (
+            "none".to_string(),
+            scheduler.chat_model.clone(),
+            "unknown".to_string(),
+            "configured_provider_missing_without_probe".to_string(),
+        )
+    } else {
+        (
+            scheduler.provider.clone(),
+            scheduler.chat_model.clone(),
+            "cloud".to_string(),
+            "configured_cloud_route_without_probe".to_string(),
+        )
+    };
+
+    ModelRouteTrace {
+        provider,
+        model,
+        route_type,
+        prefer_local: scheduler.prefer_local,
+        local_model: scheduler.local_model.clone(),
+        reason,
+        privacy_level: openlife_core::agent::RedactionLevel::None,
+        latency_ms: None,
+        retry_count: 0,
+        fallback_reason: None,
+        provider_health_is_estimated: Some(true),
+    }
+}
+
+fn bounded_runtime_fact_label(value: &str) -> String {
+    let mut label = value
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(96)
+        .collect::<String>();
+    if label.is_empty() {
+        label = "unknown".into();
+    }
+    label
+}
+
+fn label_or_unknown(value: Option<&str>) -> &str {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("unknown")
+}
+
+fn merge_json_object(target: &mut Value, extra: Value) {
+    let Value::Object(extra) = extra else {
+        return;
+    };
+    let Some(target) = target.as_object_mut() else {
+        return;
+    };
+    for (key, value) in extra {
+        target.insert(key, value);
     }
 }
 
@@ -457,6 +1256,23 @@ pub(crate) struct MainChatRuntimeFactsScenarioEvidence {
     pub(crate) direct_writes_executed: Option<bool>,
     pub(crate) legacy_fallback_used: bool,
     pub(crate) provider_generation_path: Option<String>,
+    pub(crate) configured_provider: Option<String>,
+    pub(crate) configured_model: Option<String>,
+    pub(crate) current_turn_generation_provider: Option<String>,
+    pub(crate) current_turn_generation_model: Option<String>,
+    pub(crate) current_turn_generation_route_type: Option<String>,
+    pub(crate) current_turn_generation_model_generated: Option<bool>,
+    pub(crate) last_completed_generation_provider: Option<String>,
+    pub(crate) last_completed_generation_model: Option<String>,
+    pub(crate) last_completed_generation_run_id: Option<String>,
+    pub(crate) planned_route_if_model_needed_provider: Option<String>,
+    pub(crate) planned_route_if_model_needed_model: Option<String>,
+    pub(crate) planned_route_if_model_needed_route_type: Option<String>,
+    pub(crate) provider_preflight_status: Option<String>,
+    pub(crate) provider_preflight_blockers: Vec<String>,
+    pub(crate) route_labels: Vec<String>,
+    pub(crate) ui_primary_source_chip: Option<String>,
+    pub(crate) ui_status: Option<String>,
     pub(crate) task_session_id: Option<String>,
     pub(crate) run_id: Option<String>,
     pub(crate) trace_gap: bool,
@@ -468,13 +1284,32 @@ pub(crate) struct MainChatRuntimeFactsScenarioEvidence {
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MainChatRuntimeFactsNegativeAssertionSummary {
-    pub(crate) planning_question_not_captured: bool,
-    pub(crate) no_provider_call_for_runtime_facts: bool,
-    pub(crate) no_tool_call_for_runtime_facts: bool,
-    pub(crate) no_direct_write_for_runtime_facts: bool,
-    pub(crate) no_legacy_fallback_for_runtime_facts: bool,
-    pub(crate) context_cannot_override_runtime_clock: bool,
-    pub(crate) missing_clock_does_not_use_model: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) planning_question_not_captured: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) no_provider_call_for_runtime_facts: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) no_tool_call_for_runtime_facts: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) no_direct_write_for_runtime_facts: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) no_legacy_fallback_for_runtime_facts: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) context_cannot_override_runtime_clock: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) missing_clock_does_not_use_model: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) current_route_requires_current_generation_evidence: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) no_current_route_for_model_generated_false: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) configured_route_not_invocation_proof: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) planned_route_not_invocation_proof: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) last_completed_route_not_current_turn: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) provider_preflight_blocker_not_fake_readiness: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -482,6 +1317,8 @@ pub(crate) struct MainChatRuntimeFactsNegativeAssertionSummary {
 pub(crate) struct MainChatRuntimeFactsCommandSurfaceProof {
     pub(crate) send_runtime_clock_path: bool,
     pub(crate) stream_runtime_clock_path: bool,
+    pub(crate) send_provider_route_path: bool,
+    pub(crate) send_provider_route_preflight_blocker_path: bool,
     pub(crate) stream_deferred_blocker: Option<String>,
 }
 
@@ -536,13 +1373,19 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_a_backend_report(
             && row.scheduler_generation_called == Some(false)
     });
     let negative_assertion_summary = MainChatRuntimeFactsNegativeAssertionSummary {
-        planning_question_not_captured,
-        no_provider_call_for_runtime_facts,
-        no_tool_call_for_runtime_facts,
-        no_direct_write_for_runtime_facts,
-        no_legacy_fallback_for_runtime_facts,
-        context_cannot_override_runtime_clock,
-        missing_clock_does_not_use_model,
+        planning_question_not_captured: Some(planning_question_not_captured),
+        no_provider_call_for_runtime_facts: Some(no_provider_call_for_runtime_facts),
+        no_tool_call_for_runtime_facts: Some(no_tool_call_for_runtime_facts),
+        no_direct_write_for_runtime_facts: Some(no_direct_write_for_runtime_facts),
+        no_legacy_fallback_for_runtime_facts: Some(no_legacy_fallback_for_runtime_facts),
+        context_cannot_override_runtime_clock: Some(context_cannot_override_runtime_clock),
+        missing_clock_does_not_use_model: Some(missing_clock_does_not_use_model),
+        current_route_requires_current_generation_evidence: None,
+        no_current_route_for_model_generated_false: None,
+        configured_route_not_invocation_proof: None,
+        planned_route_not_invocation_proof: None,
+        last_completed_route_not_current_turn: None,
+        provider_preflight_blocker_not_fake_readiness: None,
     };
 
     let passed_scenario_count = evidence.iter().filter(|row| row.passed).count();
@@ -561,6 +1404,8 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_a_backend_report(
         stream_runtime_clock_path: evidence
             .iter()
             .any(|row| row.entry_point == "stream" && row.passed && !row.trace_gap),
+        send_provider_route_path: false,
+        send_provider_route_preflight_blocker_path: false,
         stream_deferred_blocker: None,
     };
     let no_silent_write_proof = evidence.iter().all(|row| !row.silent_write_detected);
@@ -604,6 +1449,657 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_a_backend_report(
         command_surface_proof,
         no_silent_write_proof,
         blockers,
+    }
+}
+
+pub(crate) async fn run_main_chat_runtime_facts_slice_b_provider_route_report(
+) -> MainChatRuntimeFactsSliceReport {
+    let evidence = vec![
+        run_slice_b_rf07_case().await,
+        run_slice_b_rf08_case().await,
+        run_slice_b_rf09_case().await,
+        run_slice_b_rf10_case().await,
+    ];
+
+    let current_route_requires_current_generation_evidence = evidence.iter().any(|row| {
+        row.scenario_id == "RF-07"
+            && row.passed
+            && row.model_generated == Some(true)
+            && row.scheduler_generation_called == Some(true)
+            && row.current_turn_generation_provider.is_some()
+            && row.current_turn_generation_model.is_some()
+    });
+    let no_current_route_for_model_generated_false = evidence
+        .iter()
+        .filter(|row| matches!(row.scenario_id, "RF-08" | "RF-10"))
+        .all(|row| {
+            row.passed
+                && row.model_generated == Some(false)
+                && row.current_turn_generation_provider.is_none()
+                && row.current_turn_generation_model.is_none()
+                && row.current_turn_generation_route_type.as_deref() == Some("none")
+        });
+    let configured_route_not_invocation_proof = evidence.iter().any(|row| {
+        row.scenario_id == "RF-09"
+            && row.passed
+            && row.configured_provider.as_deref() == Some("deepseek")
+            && row.current_turn_generation_provider.as_deref() == Some("openai")
+            && row
+                .route_labels
+                .iter()
+                .any(|label| label.starts_with("configured_default_route:"))
+    });
+    let planned_route_not_invocation_proof = evidence.iter().any(|row| {
+        row.scenario_id == "RF-09"
+            && row.passed
+            && row
+                .route_labels
+                .iter()
+                .any(|label| label.starts_with("planned_route_if_model_needed:"))
+            && row
+                .route_labels
+                .iter()
+                .any(|label| label.starts_with("current_turn_generation: actual"))
+    });
+    let last_completed_route_not_current_turn = evidence.iter().any(|row| {
+        row.scenario_id == "RF-09"
+            && row.passed
+            && row.last_completed_generation_provider.as_deref() == Some("anthropic")
+            && row.current_turn_generation_provider.as_deref() == Some("openai")
+    });
+    let provider_preflight_blocker_not_fake_readiness = evidence.iter().any(|row| {
+        row.scenario_id == "RF-10"
+            && row.passed
+            && row.provider_preflight_status.as_deref() == Some("blocked")
+            && !row.provider_preflight_blockers.is_empty()
+            && row.ui_status.as_deref() == Some("restricted")
+            && !row.answer_preview.contains("已就绪")
+    });
+    let no_tool_call_for_runtime_facts = evidence.iter().all(|row| row.tool_called == Some(false));
+    let no_direct_write_for_runtime_facts = evidence
+        .iter()
+        .all(|row| row.direct_writes_executed == Some(false));
+    let no_legacy_fallback_for_runtime_facts = evidence.iter().all(|row| !row.legacy_fallback_used);
+    let no_silent_write_proof = evidence.iter().all(|row| !row.silent_write_detected);
+    let passed_scenario_count = evidence.iter().filter(|row| row.passed).count();
+    let blockers = evidence
+        .iter()
+        .filter_map(|row| {
+            row.failure
+                .as_ref()
+                .map(|failure| format!("{}:{failure}", row.scenario_id))
+        })
+        .collect::<Vec<_>>();
+    let command_surface_proof = MainChatRuntimeFactsCommandSurfaceProof {
+        send_runtime_clock_path: false,
+        stream_runtime_clock_path: false,
+        send_provider_route_path: evidence
+            .iter()
+            .any(|row| row.scenario_id == "RF-07" && row.entry_point == "send" && row.passed),
+        send_provider_route_preflight_blocker_path: evidence
+            .iter()
+            .any(|row| row.scenario_id == "RF-10" && row.entry_point == "send" && row.passed),
+        stream_deferred_blocker: Some("slice_b_provider_route_stream_out_of_scope".into()),
+    };
+    let negative_assertion_summary = MainChatRuntimeFactsNegativeAssertionSummary {
+        planning_question_not_captured: None,
+        no_provider_call_for_runtime_facts: Some(
+            evidence
+                .iter()
+                .filter(|row| matches!(row.scenario_id, "RF-08" | "RF-10"))
+                .all(|row| {
+                    row.model_generated == Some(false)
+                        && row.scheduler_generation_called == Some(false)
+                }),
+        ),
+        no_tool_call_for_runtime_facts: Some(no_tool_call_for_runtime_facts),
+        no_direct_write_for_runtime_facts: Some(no_direct_write_for_runtime_facts),
+        no_legacy_fallback_for_runtime_facts: Some(no_legacy_fallback_for_runtime_facts),
+        context_cannot_override_runtime_clock: None,
+        missing_clock_does_not_use_model: None,
+        current_route_requires_current_generation_evidence: Some(
+            current_route_requires_current_generation_evidence,
+        ),
+        no_current_route_for_model_generated_false: Some(
+            no_current_route_for_model_generated_false,
+        ),
+        configured_route_not_invocation_proof: Some(configured_route_not_invocation_proof),
+        planned_route_not_invocation_proof: Some(planned_route_not_invocation_proof),
+        last_completed_route_not_current_turn: Some(last_completed_route_not_current_turn),
+        provider_preflight_blocker_not_fake_readiness: Some(
+            provider_preflight_blocker_not_fake_readiness,
+        ),
+    };
+    let runtime_facts_slice_ready = passed_scenario_count == SLICE_B_SCENARIOS.len()
+        && current_route_requires_current_generation_evidence
+        && no_current_route_for_model_generated_false
+        && configured_route_not_invocation_proof
+        && planned_route_not_invocation_proof
+        && last_completed_route_not_current_turn
+        && provider_preflight_blocker_not_fake_readiness
+        && no_tool_call_for_runtime_facts
+        && no_direct_write_for_runtime_facts
+        && no_legacy_fallback_for_runtime_facts
+        && no_silent_write_proof
+        && command_surface_proof.send_provider_route_path
+        && command_surface_proof.send_provider_route_preflight_blocker_path;
+
+    MainChatRuntimeFactsSliceReport {
+        report_kind: "main_chat_runtime_facts_slice",
+        schema_version: 1,
+        slice_id: "slice_b_provider_route_semantics",
+        slice_name: "Provider Route Semantics",
+        covered_scenario_ids: SLICE_B_SCENARIOS
+            .iter()
+            .map(|id| (*id).to_string())
+            .collect(),
+        out_of_scope_scenario_ids: Vec::new(),
+        blocked_scenario_ids: Vec::new(),
+        scenario_count: SLICE_B_SCENARIOS.len(),
+        passed_scenario_count,
+        blocked_scenario_count: 0,
+        runtime_facts_slice_ready,
+        runtime_facts_ready: false,
+        ui_included: true,
+        source_registry_version: "2026-06-25",
+        ui_contract_version: "2026-06-25",
+        scenario_evidence: evidence,
+        negative_assertion_summary,
+        focused_test_commands: vec![
+            "cargo test -p openlife-tauri main_chat_runtime_facts -- --nocapture",
+            "cargo test -p openlife-tauri main_chat_command_surface_eval_gate_covers_send_stream_runtime_matrix -- --nocapture",
+            "pnpm --dir frontend test -- src/components/ReasoningTracePanel.test.tsx",
+        ],
+        command_surface_proof,
+        no_silent_write_proof,
+        blockers,
+    }
+}
+
+async fn run_slice_b_rf07_case() -> MainChatRuntimeFactsScenarioEvidence {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    configure_provider_route_state(
+        &state,
+        ProviderRouteStateConfig {
+            configured_provider: "openai",
+            configured_model: "gpt-configured-default",
+            scheduler_provider: "openai",
+            scheduler_model: "gpt-slice-b-current",
+            api_key: "slice-b-current-test-key",
+            network_enabled: true,
+            scripted_response: Some("model output should be replaced by provider route facts"),
+        },
+    )
+    .await;
+    run_slice_b_send_case(
+        "RF-07",
+        "runtime-facts-slice-b-rf07",
+        "你现在用什么模型",
+        state,
+    )
+    .await
+}
+
+async fn run_slice_b_rf08_case() -> MainChatRuntimeFactsScenarioEvidence {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    configure_provider_route_state(
+        &state,
+        ProviderRouteStateConfig {
+            configured_provider: "openai",
+            configured_model: "gpt-configured-default",
+            scheduler_provider: "openai",
+            scheduler_model: "gpt-slice-b-planned",
+            api_key: "slice-b-planned-test-key",
+            network_enabled: true,
+            scripted_response: Some("model should not answer previous runtime fact route"),
+        },
+    )
+    .await;
+    {
+        let mut source = state.runtime_clock_source.lock().await;
+        *source = fixed_clock_source();
+    }
+    let session_id = "runtime-facts-slice-b-rf08";
+    let _ = crate::main_chat_send::send_message_with_state(
+        session_id.into(),
+        vec![ChatMessage {
+            role: "user".into(),
+            content: "今天星期几".into(),
+        }],
+        None,
+        &state,
+    )
+    .await;
+    run_slice_b_send_case(
+        "RF-08",
+        session_id,
+        "刚才回答今天星期几时用了什么模型",
+        state,
+    )
+    .await
+}
+
+async fn run_slice_b_rf09_case() -> MainChatRuntimeFactsScenarioEvidence {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    configure_provider_route_state(
+        &state,
+        ProviderRouteStateConfig {
+            configured_provider: "deepseek",
+            configured_model: "deepseek-chat",
+            scheduler_provider: "openai",
+            scheduler_model: "gpt-slice-b-current",
+            api_key: "slice-b-route-differs-test-key",
+            network_enabled: true,
+            scripted_response: Some("model output should be replaced by separated route facts"),
+        },
+    )
+    .await;
+    seed_completed_model_generation(
+        &state,
+        "runtime-facts-slice-b-rf09",
+        "anthropic",
+        "claude-last",
+        "cloud",
+    )
+    .await;
+    run_slice_b_send_case(
+        "RF-09",
+        "runtime-facts-slice-b-rf09",
+        "你现在用什么模型",
+        state,
+    )
+    .await
+}
+
+async fn run_slice_b_rf10_case() -> MainChatRuntimeFactsScenarioEvidence {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    configure_provider_route_state(
+        &state,
+        ProviderRouteStateConfig {
+            configured_provider: "openai",
+            configured_model: "gpt-blocked",
+            scheduler_provider: "openai",
+            scheduler_model: "gpt-blocked",
+            api_key: "",
+            network_enabled: false,
+            scripted_response: None,
+        },
+    )
+    .await;
+    {
+        let mut scheduler = state.scheduler.lock().await;
+        let mut router = ModelRouter::new();
+        router.providers.insert(
+            "ollama".into(),
+            ProviderAvailability {
+                provider: "ollama".into(),
+                available: true,
+                latency_ms: Some(25),
+                models: vec!["llama3-local-route".into()],
+                last_checked: chrono::Utc::now(),
+                last_error: None,
+                health_is_estimated: true,
+            },
+        );
+        *scheduler = InferenceScheduler::new(
+            "llama3-local-route".into(),
+            true,
+            "openai".into(),
+            "https://example.invalid/v1".into(),
+            "".into(),
+            "gpt-blocked".into(),
+            "text-embedding-test".into(),
+            false,
+        )
+        .with_model_router(router);
+    }
+    run_slice_b_send_case(
+        "RF-10",
+        "runtime-facts-slice-b-rf10",
+        "你现在用什么模型",
+        state,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+struct ProviderRouteStateConfig {
+    configured_provider: &'static str,
+    configured_model: &'static str,
+    scheduler_provider: &'static str,
+    scheduler_model: &'static str,
+    api_key: &'static str,
+    network_enabled: bool,
+    scripted_response: Option<&'static str>,
+}
+
+async fn configure_provider_route_state(
+    state: &Arc<AppState>,
+    route_config: ProviderRouteStateConfig,
+) {
+    {
+        let mut config = state.config.lock().await;
+        config.prefer_local_model = false;
+        config.llm.provider = route_config.configured_provider.into();
+        config.llm.chat_model = route_config.configured_model.into();
+        config.llm.openai_key = route_config.api_key.into();
+        config.system.network_policy.enabled = route_config.network_enabled;
+    }
+    {
+        let mut scheduler = state.scheduler.lock().await;
+        let next_scheduler = InferenceScheduler::new(
+            "unused-local-model".into(),
+            false,
+            route_config.scheduler_provider.into(),
+            "https://example.invalid/v1".into(),
+            route_config.api_key.into(),
+            route_config.scheduler_model.into(),
+            "text-embedding-test".into(),
+            false,
+        );
+        *scheduler = if let Some(response) = route_config.scripted_response {
+            next_scheduler.with_scripted_generation_response(response)
+        } else {
+            next_scheduler
+        };
+    }
+}
+
+async fn seed_completed_model_generation(
+    state: &Arc<AppState>,
+    session_id: &str,
+    provider: &str,
+    model: &str,
+    route_type: &str,
+) {
+    let Some(store_arc) = state.agent_run_store.as_ref() else {
+        return;
+    };
+    let mut run =
+        openlife_core::agent::AgentRun::new_chat_run(session_id, "seed previous model generation");
+    let route = ModelRouteTrace {
+        provider: provider.into(),
+        model: model.into(),
+        route_type: route_type.into(),
+        prefer_local: false,
+        local_model: "unused-local-model".into(),
+        reason: "seeded_last_completed_generation".into(),
+        privacy_level: openlife_core::agent::RedactionLevel::None,
+        latency_ms: None,
+        retry_count: 0,
+        fallback_reason: None,
+        provider_health_is_estimated: Some(false),
+    };
+    let context_summary = openlife_core::agent::ContextSummary {
+        life_model_empty: true,
+        included_life_model_sections: Vec::new(),
+        memory_hit_count: 0,
+        memory_sources: Vec::new(),
+        used_tools_prompt: false,
+        redaction_applied: false,
+        redaction_level: openlife_core::agent::RedactionLevel::None,
+    };
+    run.complete("seeded previous model generation", route, context_summary);
+    let store = store_arc.lock().await;
+    let _ = store.create_run(&run);
+}
+
+async fn run_slice_b_send_case(
+    scenario_id: &'static str,
+    session_id: &'static str,
+    user_text: &'static str,
+    state: Arc<AppState>,
+) -> MainChatRuntimeFactsScenarioEvidence {
+    let result = crate::main_chat_send::send_message_with_state(
+        session_id.into(),
+        vec![ChatMessage {
+            role: "user".into(),
+            content: user_text.into(),
+        }],
+        None,
+        &state,
+    )
+    .await;
+    match result {
+        Ok(result) => match serde_json::to_value(result) {
+            Ok(response) => {
+                evidence_from_provider_route_response(scenario_id, "send", user_text, response)
+            }
+            Err(error) => MainChatRuntimeFactsScenarioEvidence::failed(
+                scenario_id,
+                "send",
+                user_text,
+                format!("serialize provider route response failed: {error}"),
+            ),
+        },
+        Err(error) => {
+            MainChatRuntimeFactsScenarioEvidence::failed(scenario_id, "send", user_text, error)
+        }
+    }
+}
+
+fn evidence_from_provider_route_response(
+    scenario_id: &'static str,
+    entry_point: &'static str,
+    user_text: &'static str,
+    response: Value,
+) -> MainChatRuntimeFactsScenarioEvidence {
+    let generation = response
+        .get("reasoning_trace")
+        .and_then(|trace| trace.get("generation_result"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let reply = response
+        .get("reply")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let runtime_fact_keys = string_array(&generation, "runtimeFactKeys");
+    let runtime_fact_source = string_array(&generation, "runtimeFactSource");
+    let runtime_fact_visibility = string_array(&generation, "runtimeFactVisibility");
+    let runtime_fact_privacy = string_array(&generation, "runtimeFactPrivacy");
+    let runtime_fact_binding_count = generation
+        .get("runtimeFacts")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or_default();
+    let model_generated = generation.get("modelGenerated").and_then(Value::as_bool);
+    let scheduler_generation_called = generation
+        .get("schedulerGenerationCalled")
+        .and_then(Value::as_bool);
+    let tool_called = generation.get("toolCalled").and_then(Value::as_bool);
+    let direct_writes_executed = generation
+        .get("directWritesExecuted")
+        .and_then(Value::as_bool);
+    let legacy_fallback_used = response
+        .get("legacy_fallback_used")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let current_turn_generation_provider =
+        string_field(&generation, "currentTurnGenerationProvider");
+    let current_turn_generation_model = string_field(&generation, "currentTurnGenerationModel");
+    let current_turn_generation_route_type =
+        string_field(&generation, "currentTurnGenerationRouteType");
+    let current_turn_generation_model_generated = generation
+        .get("currentTurnGenerationModelGenerated")
+        .and_then(Value::as_bool);
+    let configured_provider = string_field(&generation, "configuredProvider");
+    let configured_model = string_field(&generation, "configuredModel");
+    let last_completed_generation_provider =
+        string_field(&generation, "lastCompletedGenerationProvider");
+    let last_completed_generation_model = string_field(&generation, "lastCompletedGenerationModel");
+    let last_completed_generation_run_id =
+        string_field(&generation, "lastCompletedGenerationRunId");
+    let planned_route_if_model_needed_provider =
+        string_field(&generation, "plannedRouteIfModelNeededProvider");
+    let planned_route_if_model_needed_model =
+        string_field(&generation, "plannedRouteIfModelNeededModel");
+    let planned_route_if_model_needed_route_type =
+        string_field(&generation, "plannedRouteIfModelNeededRouteType");
+    let provider_preflight_status = string_field(&generation, "providerPreflightStatus");
+    let provider_preflight_blockers = string_array(&generation, "providerPreflightBlockers");
+    let route_labels = string_array(&generation, "routeLabels");
+    let ui_primary_source_chip = string_field(&generation, "uiPrimarySourceChip");
+    let ui_status = string_field(&generation, "uiStatus");
+    let silent_write_detected = direct_writes_executed.unwrap_or(true)
+        || response
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .is_some_and(|calls| !calls.is_empty());
+    let common_passed = generation.get("sourceType").and_then(Value::as_str)
+        == Some(RUNTIME_FACT_SOURCE_TYPE)
+        && runtime_fact_keys
+            .iter()
+            .any(|key| key == RUNTIME_FACT_KEY_PROVIDER_CURRENT_MODEL_GENERATED)
+        && runtime_fact_keys
+            .iter()
+            .any(|key| key == RUNTIME_FACT_KEY_PROVIDER_CONFIGURED_DEFAULT_PROVIDER)
+        && runtime_fact_keys
+            .iter()
+            .any(|key| key == RUNTIME_FACT_KEY_PROVIDER_PLANNED_PROVIDER)
+        && runtime_fact_binding_count >= provider_route_fact_keys().len()
+        && runtime_fact_source
+            .iter()
+            .any(|source| source == "provider_route")
+        && runtime_fact_source.iter().any(|source| source == "config")
+        && runtime_fact_visibility
+            .iter()
+            .any(|value| value == "answer")
+        && runtime_fact_privacy.iter().any(|value| value == "internal")
+        && tool_called == Some(false)
+        && direct_writes_executed == Some(false)
+        && !legacy_fallback_used
+        && ui_primary_source_chip.as_deref() == Some("运行时路线")
+        && !silent_write_detected
+        && reply.contains("current_turn_generation")
+        && reply.contains("configured_default_route")
+        && reply.contains("planned_route_if_model_needed")
+        && reply.contains("last_completed_generation");
+    let scenario_passed = match scenario_id {
+        "RF-07" => {
+            model_generated == Some(true)
+                && scheduler_generation_called == Some(true)
+                && current_turn_generation_model_generated == Some(true)
+                && current_turn_generation_provider.as_deref() == Some("openai")
+                && current_turn_generation_model.as_deref() == Some("gpt-slice-b-current")
+                && current_turn_generation_route_type.as_deref() == Some("cloud")
+                && configured_model.as_deref() == Some("gpt-configured-default")
+                && route_labels
+                    .iter()
+                    .any(|label| label.starts_with("current_turn_generation: actual"))
+        }
+        "RF-08" => {
+            model_generated == Some(false)
+                && scheduler_generation_called == Some(false)
+                && current_turn_generation_model_generated == Some(false)
+                && current_turn_generation_provider.is_none()
+                && current_turn_generation_model.is_none()
+                && current_turn_generation_route_type.as_deref() == Some("none")
+                && reply.contains("上一轮是确定性 runtime fact/direct 路径，没有调用模型")
+        }
+        "RF-09" => {
+            model_generated == Some(true)
+                && current_turn_generation_provider.as_deref() == Some("openai")
+                && current_turn_generation_model.as_deref() == Some("gpt-slice-b-current")
+                && configured_provider.as_deref() == Some("deepseek")
+                && configured_model.as_deref() == Some("deepseek-chat")
+                && last_completed_generation_provider.as_deref() == Some("anthropic")
+                && last_completed_generation_model.as_deref() == Some("claude-last")
+                && planned_route_if_model_needed_provider.as_deref() == Some("openai")
+                && planned_route_if_model_needed_model.as_deref() == Some("gpt-slice-b-current")
+                && route_labels
+                    .iter()
+                    .any(|label| label.starts_with("configured_default_route:"))
+                && route_labels
+                    .iter()
+                    .any(|label| label.starts_with("planned_route_if_model_needed:"))
+                && route_labels
+                    .iter()
+                    .any(|label| label.starts_with("last_completed_generation: anthropic"))
+        }
+        "RF-10" => {
+            model_generated == Some(false)
+                && scheduler_generation_called == Some(false)
+                && current_turn_generation_provider.is_none()
+                && current_turn_generation_model.is_none()
+                && planned_route_if_model_needed_provider.as_deref() == Some("ollama")
+                && planned_route_if_model_needed_route_type.as_deref() == Some("local")
+                && provider_preflight_status.as_deref() == Some("blocked")
+                && !provider_preflight_blockers.is_empty()
+                && ui_status.as_deref() == Some("restricted")
+                && reply.contains("provider.preflight.status=blocked")
+                && !reply.contains("provider.preflight.status=ready")
+        }
+        _ => false,
+    };
+    let passed = common_passed && scenario_passed;
+
+    MainChatRuntimeFactsScenarioEvidence {
+        scenario_id,
+        entry_point,
+        user_text,
+        passed,
+        answer_preview: reply.chars().take(240).collect(),
+        source_type: generation
+            .get("sourceType")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        runtime_fact_keys,
+        runtime_fact_source,
+        runtime_fact_binding_count,
+        runtime_fact_authority: generation
+            .get("runtimeFactAuthority")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        runtime_fact_freshness: generation
+            .get("runtimeFactFreshness")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        runtime_fact_visibility,
+        runtime_fact_privacy,
+        model_generated,
+        scheduler_generation_called,
+        tool_called,
+        direct_writes_executed,
+        legacy_fallback_used,
+        provider_generation_path: generation
+            .get("providerGenerationPath")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        configured_provider,
+        configured_model,
+        current_turn_generation_provider,
+        current_turn_generation_model,
+        current_turn_generation_route_type,
+        current_turn_generation_model_generated,
+        last_completed_generation_provider,
+        last_completed_generation_model,
+        last_completed_generation_run_id,
+        planned_route_if_model_needed_provider,
+        planned_route_if_model_needed_model,
+        planned_route_if_model_needed_route_type,
+        provider_preflight_status,
+        provider_preflight_blockers,
+        route_labels,
+        ui_primary_source_chip,
+        ui_status,
+        task_session_id: response
+            .get("agent_ingress")
+            .and_then(|ingress| ingress.get("agentTaskSessionId"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        run_id: response
+            .get("run_id")
+            .or_else(|| response.get("runId"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        trace_gap: generation
+            .get("runtimeFactTraceGap")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        context_conflict_ignored: true,
+        silent_write_detected,
+        failure: (!passed).then(|| "provider route runtime fact evidence incomplete".into()),
     }
 }
 
@@ -730,6 +2226,23 @@ impl MainChatRuntimeFactsScenarioEvidence {
             direct_writes_executed: None,
             legacy_fallback_used: false,
             provider_generation_path: None,
+            configured_provider: None,
+            configured_model: None,
+            current_turn_generation_provider: None,
+            current_turn_generation_model: None,
+            current_turn_generation_route_type: None,
+            current_turn_generation_model_generated: None,
+            last_completed_generation_provider: None,
+            last_completed_generation_model: None,
+            last_completed_generation_run_id: None,
+            planned_route_if_model_needed_provider: None,
+            planned_route_if_model_needed_model: None,
+            planned_route_if_model_needed_route_type: None,
+            provider_preflight_status: None,
+            provider_preflight_blockers: Vec::new(),
+            route_labels: Vec::new(),
+            ui_primary_source_chip: None,
+            ui_status: None,
             task_session_id: None,
             run_id: None,
             trace_gap: false,
@@ -862,6 +2375,67 @@ fn evidence_from_runtime_fact_response(
             .get("providerGenerationPath")
             .and_then(Value::as_str)
             .map(str::to_string),
+        configured_provider: generation
+            .get("configuredProvider")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        configured_model: generation
+            .get("configuredModel")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        current_turn_generation_provider: generation
+            .get("currentTurnGenerationProvider")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        current_turn_generation_model: generation
+            .get("currentTurnGenerationModel")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        current_turn_generation_route_type: generation
+            .get("currentTurnGenerationRouteType")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        current_turn_generation_model_generated: generation
+            .get("currentTurnGenerationModelGenerated")
+            .and_then(Value::as_bool),
+        last_completed_generation_provider: generation
+            .get("lastCompletedGenerationProvider")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        last_completed_generation_model: generation
+            .get("lastCompletedGenerationModel")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        last_completed_generation_run_id: generation
+            .get("lastCompletedGenerationRunId")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        planned_route_if_model_needed_provider: generation
+            .get("plannedRouteIfModelNeededProvider")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        planned_route_if_model_needed_model: generation
+            .get("plannedRouteIfModelNeededModel")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        planned_route_if_model_needed_route_type: generation
+            .get("plannedRouteIfModelNeededRouteType")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        provider_preflight_status: generation
+            .get("providerPreflightStatus")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        provider_preflight_blockers: string_array(&generation, "providerPreflightBlockers"),
+        route_labels: string_array(&generation, "routeLabels"),
+        ui_primary_source_chip: generation
+            .get("uiPrimarySourceChip")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        ui_status: generation
+            .get("uiStatus")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         task_session_id: response
             .get("agent_ingress")
             .and_then(|ingress| ingress.get("agentTaskSessionId"))
@@ -974,4 +2548,8 @@ fn string_array(value: &Value, key: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn string_field(value: &Value, key: &str) -> Option<String> {
+    value.get(key).and_then(Value::as_str).map(str::to_string)
 }

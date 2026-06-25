@@ -13,6 +13,40 @@ function formatTimingMs(ms?: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
+function boundedTraceString(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return value
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim()
+    .slice(0, 140);
+}
+
+function traceStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(boundedTraceString).filter(Boolean).slice(0, 8);
+}
+
+function runtimeRouteRows(generation: any): Array<{ label: string; value: string }> {
+  if (!generation || typeof generation !== "object") return [];
+  const routeLabels = traceStringArray(generation.routeLabels);
+  const rows = routeLabels.map(label => {
+    const [prefix, ...rest] = label.split(":");
+    return {
+      label: prefix ? prefix.replace(/_/g, " ") : "route evidence",
+      value: rest.join(":").trim() || label,
+    };
+  });
+  const preflightStatus = boundedTraceString(generation.providerPreflightStatus);
+  if (preflightStatus) {
+    const blockers = traceStringArray(generation.providerPreflightBlockers).join(", ");
+    rows.push({
+      label: "provider preflight",
+      value: blockers ? `${preflightStatus} (${blockers})` : preflightStatus,
+    });
+  }
+  return rows.slice(0, 6);
+}
+
 function LayerBlock({
   icon: Icon,
   label,
@@ -66,11 +100,15 @@ export default function ReasoningTracePanel({ trace, show, onToggle }: Props) {
   const needsTools = trace.strategy_result?.needs_tools;
   const toolPlan = trace.tool_plan ?? trace.strategy_result?.suggested_tools ?? [];
   const safetyCheckWarnings = trace.safety_check_result?.warnings ?? [];
+  const runtimeRouteEvidenceRows = runtimeRouteRows(trace.generation_result);
+  const sourceChip = boundedTraceString(trace.generation_result?.uiPrimarySourceChip);
+  const uiStatus = boundedTraceString(trace.generation_result?.uiStatus);
   const hasContent =
     trace.input ||
     meaningText ||
     strategyText ||
     generationText ||
+    runtimeRouteEvidenceRows.length > 0 ||
     trace.output ||
     toolPlan.length > 0 ||
     safetyCheckWarnings.length > 0 ||
@@ -89,6 +127,8 @@ export default function ReasoningTracePanel({ trace, show, onToggle }: Props) {
     Array.isArray(toolPlan) && toolPlan.length > 0
       ? `计划工具：${toolPlan.slice(0, 2).join("、")}`
       : "无需外部工具",
+    sourceChip ? `来源：${sourceChip}` : "",
+    uiStatus ? `状态：${uiStatus}` : "",
   ].filter(Boolean);
 
   return (
@@ -236,6 +276,22 @@ export default function ReasoningTracePanel({ trace, show, onToggle }: Props) {
                       </span>
                     ))}
                   </div>
+                </div>
+              )}
+              {runtimeRouteEvidenceRows.length > 0 && (
+                <div className="rounded-lg border border-cyan-100 bg-white/70 p-3">
+                  <div className="text-[11px] font-medium text-cyan-800">模型路线证据</div>
+                  <dl className="mt-2 space-y-1.5">
+                    {runtimeRouteEvidenceRows.map(row => (
+                      <div
+                        key={`${row.label}-${row.value}`}
+                        className="grid gap-1 text-xs text-gray-700 sm:grid-cols-[150px_1fr]"
+                      >
+                        <dt className="font-medium text-cyan-700">{row.label}</dt>
+                        <dd className="break-words">{row.value}</dd>
+                      </div>
+                    ))}
+                  </dl>
                 </div>
               )}
               <LayerBlock

@@ -1,6 +1,8 @@
 use crate::main_chat_runtime_facts::{
-    resolve_runtime_clock_fact_answer, MainChatRuntimeClockSource, MainChatRuntimeFactAnswer,
-    RUNTIME_FACT_PROVIDER_GENERATION_PATH,
+    classify_provider_route_query, provider_route_fact_should_block_before_model,
+    resolve_provider_route_fact_answer, resolve_runtime_clock_fact_answer,
+    MainChatProviderRouteIntent, MainChatRuntimeClockSource, MainChatRuntimeFactAnswer,
+    RUNTIME_FACT_PROVIDER_GENERATION_PATH, RUNTIME_FACT_PROVIDER_ROUTE_GENERATION_PATH,
 };
 use async_trait::async_trait;
 use openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentStateSnapshot;
@@ -1381,12 +1383,50 @@ where
     }
 
     let scheduler = state.scheduler.lock().await.clone();
-    let runtime_fact_answer = if user_text.trim().is_empty() {
+    let provider_route_intent = classify_provider_route_query(&user_text);
+    let runtime_clock_fact_answer = if user_text.trim().is_empty() {
         None
     } else {
         let clock_source = state.runtime_clock_source.lock().await.clone();
         resolve_runtime_clock_fact_answer(&user_text, &clock_source)
     };
+    let provider_route_pre_model_fact_answer =
+        if runtime_clock_fact_answer.is_none() && user_text.trim().len() > 0 {
+            match provider_route_intent {
+                Some(MainChatProviderRouteIntent::AskPreviousTurnModelRoute) => {
+                    resolve_provider_route_fact_answer(
+                        &user_text,
+                        state,
+                        &scheduler,
+                        &session_id,
+                        None,
+                        false,
+                        false,
+                        RUNTIME_FACT_PROVIDER_ROUTE_GENERATION_PATH,
+                    )
+                    .await
+                }
+                Some(MainChatProviderRouteIntent::AskCurrentModelRoute)
+                    if provider_route_fact_should_block_before_model(state, &scheduler).await =>
+                {
+                    resolve_provider_route_fact_answer(
+                        &user_text,
+                        state,
+                        &scheduler,
+                        &session_id,
+                        None,
+                        false,
+                        false,
+                        RUNTIME_FACT_PROVIDER_ROUTE_GENERATION_PATH,
+                    )
+                    .await
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+    let runtime_fact_answer = runtime_clock_fact_answer.or(provider_route_pre_model_fact_answer);
     let direct_reply = if let Some(answer) = runtime_fact_answer.as_ref() {
         Some(CommandSurfaceDirectReply::runtime_fact(answer))
     } else if user_text.trim().is_empty() {
@@ -2294,18 +2334,18 @@ async fn build_successful_kernel_command_surface_result(
     direct_reflex_used: bool,
     runtime_fact_answer: Option<MainChatRuntimeFactAnswer>,
     event_sink_label: &'static str,
-    kernel_events: Vec<MainChatKernelEvent>,
+    mut kernel_events: Vec<MainChatKernelEvent>,
 ) -> Result<MainChatKernelCommandSurfaceResult, String> {
     let task_session_id = main_chat_agent_turn
         .decision
         .agent_task_session_id
         .as_deref()
         .ok_or_else(|| "Main Chat kernel task session missing".to_string())?;
-    let assistant_message = kernel_result
+    let mut assistant_message = kernel_result
         .assistant_message
         .clone()
         .ok_or_else(|| "Main Chat kernel result missing assistant message".to_string())?;
-    let reply = assistant_message.content.clone();
+    let mut reply = assistant_message.content.clone();
     let route_metadata = kernel_result
         .route_metadata
         .clone()
@@ -2328,6 +2368,40 @@ async fn build_successful_kernel_command_surface_result(
         && !scripted_provider_response
         && route_metadata.provider != "none"
         && route_metadata.route_type == "cloud";
+    let current_turn_model_generated = !direct_reflex_used && !read_tool_loop_used;
+    let provider_route_fact_answer = if runtime_fact_answer.is_none()
+        && classify_provider_route_query(user_text)
+            == Some(MainChatProviderRouteIntent::AskCurrentModelRoute)
+    {
+        resolve_provider_route_fact_answer(
+            user_text,
+            state,
+            &scheduler,
+            session_id,
+            Some(model_route.clone()),
+            current_turn_model_generated,
+            current_turn_model_generated,
+            "main_chat_direct_answer_scheduler",
+        )
+        .await
+    } else {
+        None
+    };
+    if let Some(answer) = provider_route_fact_answer.as_ref() {
+        reply = answer.reply.clone();
+        assistant_message.content = reply.clone();
+        if let Some(MainChatKernelEvent::FinalAnswer {
+            content_preview,
+            content_chars,
+        }) = kernel_events
+            .iter_mut()
+            .rev()
+            .find(|event| matches!(event, MainChatKernelEvent::FinalAnswer { .. }))
+        {
+            *content_preview = bounded_label(&reply, MAX_ASSISTANT_PREVIEW_CHARS);
+            *content_chars = reply.chars().count();
+        }
+    }
     let kernel_event_count = kernel_events.len();
     let hs_metadata = kernel_result
         .context_metadata
@@ -2369,8 +2443,8 @@ async fn build_successful_kernel_command_surface_result(
             .context_metadata
             .as_ref()
             .map(|metadata| metadata.context_snapshot_ref.clone()),
-        "modelGenerated": !direct_reflex_used && !read_tool_loop_used,
-        "schedulerGenerationCalled": !direct_reflex_used && !read_tool_loop_used,
+        "modelGenerated": current_turn_model_generated,
+        "schedulerGenerationCalled": current_turn_model_generated,
         "providerGenerationPath": if read_tool_loop_used {
             "main_chat_kernel_read_tool_synthesis"
         } else if runtime_fact_answer.is_some() {
@@ -2393,6 +2467,12 @@ async fn build_successful_kernel_command_surface_result(
         "externalLiveProviderEvalPreflighted": false,
     });
     if let Some(answer) = runtime_fact_answer.as_ref() {
+        merge_runtime_fact_generation_metadata(
+            &mut generation_metadata,
+            answer.generation_metadata(),
+        );
+    }
+    if let Some(answer) = provider_route_fact_answer.as_ref() {
         merge_runtime_fact_generation_metadata(
             &mut generation_metadata,
             answer.generation_metadata(),
