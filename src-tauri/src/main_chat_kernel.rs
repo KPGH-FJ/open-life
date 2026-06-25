@@ -1,9 +1,9 @@
 use crate::main_chat_runtime_facts::{
     classify_provider_route_query, provider_route_fact_should_block_before_model,
-    resolve_provider_route_fact_answer, resolve_runtime_clock_fact_answer,
-    resolve_tool_availability_fact_answer, MainChatProviderRouteIntent, MainChatRuntimeClockSource,
-    MainChatRuntimeFactAnswer, RUNTIME_FACT_PROVIDER_GENERATION_PATH,
-    RUNTIME_FACT_PROVIDER_ROUTE_GENERATION_PATH,
+    resolve_agent_self_state_fact_answer, resolve_provider_route_fact_answer,
+    resolve_runtime_clock_fact_answer, resolve_tool_availability_fact_answer,
+    MainChatProviderRouteIntent, MainChatRuntimeClockSource, MainChatRuntimeFactAnswer,
+    RUNTIME_FACT_PROVIDER_GENERATION_PATH, RUNTIME_FACT_PROVIDER_ROUTE_GENERATION_PATH,
 };
 use async_trait::async_trait;
 use openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentStateSnapshot;
@@ -1437,9 +1437,25 @@ where
     } else {
         None
     };
+    let agent_self_state_fact_answer = if runtime_clock_fact_answer.is_none()
+        && provider_route_pre_model_fact_answer.is_none()
+        && tool_availability_fact_answer.is_none()
+        && user_text.trim().len() > 0
+    {
+        resolve_agent_self_state_fact_answer(
+            &user_text,
+            state,
+            session_id,
+            Some(task_session_id.as_str()),
+        )
+        .await
+    } else {
+        None
+    };
     let runtime_fact_answer = runtime_clock_fact_answer
         .or(provider_route_pre_model_fact_answer)
-        .or(tool_availability_fact_answer);
+        .or(tool_availability_fact_answer)
+        .or(agent_self_state_fact_answer);
     let direct_reply = if let Some(answer) = runtime_fact_answer.as_ref() {
         Some(CommandSurfaceDirectReply::runtime_fact(answer))
     } else if user_text.trim().is_empty() {
@@ -1876,10 +1892,15 @@ struct CommandSurfaceDirectReply {
 
 impl CommandSurfaceDirectReply {
     fn runtime_fact(answer: &MainChatRuntimeFactAnswer) -> Self {
+        let route_reason = answer
+            .extra_metadata
+            .get("providerGenerationPath")
+            .and_then(Value::as_str)
+            .unwrap_or(RUNTIME_FACT_PROVIDER_GENERATION_PATH);
         Self {
             content: answer.reply.clone(),
             route_model: "runtime_fact".into(),
-            route_reason: RUNTIME_FACT_PROVIDER_GENERATION_PATH.into(),
+            route_reason: route_reason.into(),
         }
     }
 

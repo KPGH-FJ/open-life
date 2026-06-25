@@ -1,7 +1,11 @@
 use chrono::{Datelike, Offset};
 use openlife_core::agent::{
+    main_chat_agent_v1::{
+        AgentTaskSession, AgentTaskSessionStatus, ExecutionQueueStatus, ExecutionTranscriptEntry,
+        ExecutionTranscriptEntryKind, QueuedExecutionAction,
+    },
     model_router::{ModelRouter, ProviderAvailability},
-    AgentRunStatus, ModelRouteTrace,
+    AgentProposal, AgentRun, AgentRunStatus, ModelRouteTrace, ProposalStatus,
 };
 use openlife_core::config::{AppConfig, NetworkPolicy};
 use openlife_core::llm::ChatMessage;
@@ -63,10 +67,26 @@ pub(crate) const RUNTIME_FACT_KEY_TOOL_MCP_SERVER_STATUS: &str = "tool.mcp.serve
 pub(crate) const RUNTIME_FACT_KEY_TOOL_WRITE_AVAILABLE: &str = "tool.write.available";
 pub(crate) const RUNTIME_FACT_KEY_TOOL_WRITE_REQUIRES_PERMISSION: &str =
     "tool.write.requires_permission";
+pub(crate) const RUNTIME_FACT_AGENT_SELF_STATE_GENERATION_PATH: &str =
+    "main_chat_agent_self_state_runtime_fact";
+pub(crate) const RUNTIME_FACT_KEY_AGENT_CHAT_SESSION_ID: &str = "agent.chat_session_id";
+pub(crate) const RUNTIME_FACT_KEY_AGENT_TASK_SESSION_ID: &str = "agent.task_session_id";
+pub(crate) const RUNTIME_FACT_KEY_AGENT_RUN_ID: &str = "agent.run_id";
+pub(crate) const RUNTIME_FACT_KEY_AGENT_TASK_STATUS: &str = "agent.task_status";
+pub(crate) const RUNTIME_FACT_KEY_AGENT_DELIVERY_STATUS: &str = "agent.delivery_status";
+pub(crate) const RUNTIME_FACT_KEY_AGENT_LAST_ACTION_SUMMARY: &str = "agent.last_action.summary";
+pub(crate) const RUNTIME_FACT_KEY_AGENT_PENDING_PERMISSION_COUNT: &str =
+    "agent.pending_permission.count";
+pub(crate) const RUNTIME_FACT_KEY_AGENT_BLOCKER_CODES: &str = "agent.blocker.codes";
+pub(crate) const RUNTIME_FACT_KEY_AGENT_PENDING_PROPOSAL_COUNT: &str =
+    "agent.pending_proposal.count";
+pub(crate) const RUNTIME_FACT_KEY_AGENT_DURABLE_CHANGE_STATUS: &str = "agent.durable_change.status";
+pub(crate) const RUNTIME_FACT_KEY_AGENT_TRACE_GAP: &str = "agent.self_state.trace_gap";
 
 const SLICE_A_SCENARIOS: [&str; 6] = ["RF-01", "RF-02", "RF-03", "RF-04", "RF-05", "RF-06"];
 const SLICE_B_SCENARIOS: [&str; 4] = ["RF-07", "RF-08", "RF-09", "RF-10"];
 const SLICE_C_SCENARIOS: [&str; 5] = ["RF-11", "RF-12", "RF-13", "RF-14", "RF-15"];
+const SLICE_D_SCENARIOS: [&str; 4] = ["RF-16", "RF-17", "RF-18", "RF-19"];
 const FIXED_CLOCK_RFC3339: &str = "2026-06-23T09:15:00+08:00";
 
 #[derive(Debug, Clone)]
@@ -308,6 +328,46 @@ impl MainChatToolAvailabilityIntent {
             Self::AskWriteCapability => vec![
                 RUNTIME_FACT_KEY_TOOL_WRITE_AVAILABLE,
                 RUNTIME_FACT_KEY_TOOL_WRITE_REQUIRES_PERMISSION,
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MainChatAgentSelfStateIntent {
+    AskTaskCompletion,
+    AskLastActionSummary,
+}
+
+impl MainChatAgentSelfStateIntent {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::AskTaskCompletion => "ask_task_completion",
+            Self::AskLastActionSummary => "ask_last_action_summary",
+        }
+    }
+
+    fn fact_keys(self) -> Vec<&'static str> {
+        match self {
+            Self::AskTaskCompletion => vec![
+                RUNTIME_FACT_KEY_AGENT_CHAT_SESSION_ID,
+                RUNTIME_FACT_KEY_AGENT_TASK_SESSION_ID,
+                RUNTIME_FACT_KEY_AGENT_RUN_ID,
+                RUNTIME_FACT_KEY_AGENT_TASK_STATUS,
+                RUNTIME_FACT_KEY_AGENT_DELIVERY_STATUS,
+                RUNTIME_FACT_KEY_AGENT_PENDING_PERMISSION_COUNT,
+                RUNTIME_FACT_KEY_AGENT_BLOCKER_CODES,
+                RUNTIME_FACT_KEY_AGENT_PENDING_PROPOSAL_COUNT,
+                RUNTIME_FACT_KEY_AGENT_DURABLE_CHANGE_STATUS,
+            ],
+            Self::AskLastActionSummary => vec![
+                RUNTIME_FACT_KEY_AGENT_CHAT_SESSION_ID,
+                RUNTIME_FACT_KEY_AGENT_TASK_SESSION_ID,
+                RUNTIME_FACT_KEY_AGENT_RUN_ID,
+                RUNTIME_FACT_KEY_AGENT_TASK_STATUS,
+                RUNTIME_FACT_KEY_AGENT_DELIVERY_STATUS,
+                RUNTIME_FACT_KEY_AGENT_LAST_ACTION_SUMMARY,
             ],
         }
     }
@@ -601,6 +661,695 @@ pub(crate) async fn resolve_tool_availability_fact_answer(
         trace_gap: false,
         extra_metadata,
     })
+}
+
+#[derive(Debug, Clone)]
+struct AgentSelfStateFactSnapshot {
+    chat_session_id: String,
+    task_session_id: Option<String>,
+    run_id: Option<String>,
+    task_status: Option<String>,
+    run_status: Option<String>,
+    delivery_status: String,
+    final_delivery_evidence: bool,
+    completed_response: bool,
+    pending_permission_count: usize,
+    pending_proposal_count: usize,
+    durable_change_status: String,
+    durable_change_completed: bool,
+    blocker_codes: Vec<String>,
+    action_count: usize,
+    completed_action_count: usize,
+    observation_count: usize,
+    transcript_observation_count: usize,
+    final_result_count: usize,
+    last_action_type: Option<String>,
+    last_action_status: Option<String>,
+    last_observation_source: Option<String>,
+    last_action_summary: Option<String>,
+    evidence_labels: Vec<String>,
+    trace_gap: bool,
+    trace_gap_code: Option<String>,
+}
+
+pub(crate) async fn resolve_agent_self_state_fact_answer(
+    user_text: &str,
+    state: &Arc<AppState>,
+    chat_session_id: &str,
+    current_task_session_id: Option<&str>,
+) -> Option<MainChatRuntimeFactAnswer> {
+    let intent = classify_agent_self_state_query(user_text)?;
+    let snapshot = agent_self_state_snapshot(state, chat_session_id, current_task_session_id).await;
+    let mut fact_keys = intent.fact_keys();
+    if snapshot.trace_gap {
+        fact_keys.push(RUNTIME_FACT_KEY_AGENT_TRACE_GAP);
+    }
+    let facts = agent_self_state_fact_bindings(&snapshot, &fact_keys);
+    let reply = agent_self_state_reply(intent, &snapshot);
+    let ui_primary_source_chip = if snapshot.trace_gap {
+        "任务状态未知"
+    } else if intent == MainChatAgentSelfStateIntent::AskLastActionSummary
+        && snapshot.observation_count > 0
+    {
+        "工具观察"
+    } else if snapshot.pending_proposal_count > 0 {
+        "提案待审"
+    } else {
+        "任务状态"
+    };
+    let ui_status = if snapshot.trace_gap {
+        "unknown"
+    } else if snapshot.pending_permission_count > 0 || snapshot.pending_proposal_count > 0 {
+        "waiting_for_user"
+    } else if snapshot.task_status.as_deref() == Some("blocked") {
+        "restricted"
+    } else if snapshot.completed_response {
+        "completed"
+    } else {
+        "unknown"
+    };
+    let source = if snapshot.trace_gap {
+        vec!["task_session", "agent_run", "transcript"]
+    } else if intent == MainChatAgentSelfStateIntent::AskLastActionSummary {
+        vec!["task_session", "action_queue", "transcript"]
+    } else {
+        vec!["task_session", "agent_run", "final_delivery", "transcript"]
+    };
+    let mut extra_metadata = serde_json::json!({
+        "providerGenerationPath": RUNTIME_FACT_AGENT_SELF_STATE_GENERATION_PATH,
+        "modelGenerated": false,
+        "schedulerGenerationCalled": false,
+        "toolCalled": false,
+        "directWritesExecuted": false,
+        "legacyFallbackUsed": false,
+        "taskSessionId": snapshot.task_session_id.clone(),
+        "runId": snapshot.run_id.clone(),
+        "taskStatus": snapshot.task_status.clone(),
+        "runStatus": snapshot.run_status.clone(),
+        "deliveryStatus": snapshot.delivery_status.clone(),
+        "finalDeliveryEvidence": snapshot.final_delivery_evidence,
+        "completedResponse": snapshot.completed_response,
+        "pendingPermissionCount": snapshot.pending_permission_count,
+        "pendingProposalCount": snapshot.pending_proposal_count,
+        "durableChangeStatus": snapshot.durable_change_status.clone(),
+        "durableChangeCompleted": snapshot.durable_change_completed,
+        "blockerCodes": snapshot.blocker_codes.clone(),
+        "actionCount": snapshot.action_count,
+        "completedActionCount": snapshot.completed_action_count,
+        "observationCount": snapshot.observation_count,
+        "transcriptObservationCount": snapshot.transcript_observation_count,
+        "finalResultCount": snapshot.final_result_count,
+        "lastActionType": snapshot.last_action_type.clone(),
+        "lastActionStatus": snapshot.last_action_status.clone(),
+        "lastObservationSource": snapshot.last_observation_source.clone(),
+        "lastActionSummary": snapshot.last_action_summary.clone(),
+        "selfStateEvidenceLabels": snapshot.evidence_labels.clone(),
+        "assistantProseUsedForTaskStatus": false,
+        "memoryOrHsOverrideAllowed": false,
+        "uiPrimarySourceChip": ui_primary_source_chip,
+        "uiStatus": ui_status,
+        "runtimeFactTtl": "turn",
+        "runtimeFactTtlStatus": if snapshot.trace_gap { "not_observed" } else { "fresh" },
+        "runtimeFactMissingBehavior": if snapshot.trace_gap { "trace_gap" } else { "answer_unknown" },
+        "runtimeFactModelFallbackAllowed": false,
+        "runtimeFactTraceGap": snapshot.trace_gap,
+    });
+    if let Some(trace_gap_code) = snapshot.trace_gap_code.as_ref() {
+        merge_json_object(
+            &mut extra_metadata,
+            serde_json::json!({ "traceGapCode": trace_gap_code }),
+        );
+    }
+
+    Some(MainChatRuntimeFactAnswer {
+        reply,
+        intent: intent.as_str().into(),
+        fact_keys,
+        facts,
+        observed_at: Some(chrono::Utc::now().to_rfc3339()),
+        source,
+        authority: if snapshot.trace_gap {
+            "task_state"
+        } else if snapshot.pending_permission_count > 0 || snapshot.pending_proposal_count > 0 {
+            "policy"
+        } else {
+            "task_state"
+        },
+        freshness: if snapshot.trace_gap {
+            "unknown"
+        } else {
+            "turn_snapshot"
+        },
+        visibility: vec!["answer", "ui_badge", "trace_only"],
+        privacy: vec!["public", "internal"],
+        timezone: None,
+        trace_gap: snapshot.trace_gap,
+        extra_metadata,
+    })
+}
+
+async fn agent_self_state_snapshot(
+    state: &Arc<AppState>,
+    chat_session_id: &str,
+    current_task_session_id: Option<&str>,
+) -> AgentSelfStateFactSnapshot {
+    let Some(session_store_arc) = state.main_chat_agent_session_store.as_ref() else {
+        return missing_agent_self_state_snapshot(chat_session_id, "task_session_store_missing");
+    };
+
+    let (target_session, transcript) = {
+        let store = session_store_arc.lock().await;
+        let sessions = match store.list_sessions(None, 100, 0) {
+            Ok(sessions) => sessions,
+            Err(_) => {
+                return missing_agent_self_state_snapshot(
+                    chat_session_id,
+                    "task_session_list_failed",
+                );
+            }
+        };
+        let target_session = sessions.into_iter().find(|session| {
+            session.chat_session_id == chat_session_id
+                && current_task_session_id != Some(session.id.as_str())
+                && classify_agent_self_state_query(&session.user_goal).is_none()
+        });
+        let Some(target_session) = target_session else {
+            return missing_agent_self_state_snapshot(chat_session_id, "task_session_missing");
+        };
+        let transcript = match store.list_transcript_entries(&target_session.id) {
+            Ok(entries) => entries,
+            Err(_) => {
+                return missing_agent_self_state_snapshot(
+                    chat_session_id,
+                    "transcript_load_failed",
+                );
+            }
+        };
+        (target_session, transcript)
+    };
+
+    let actions = if let Some(queue_arc) = state.main_chat_action_queue_store.as_ref() {
+        let queue = queue_arc.lock().await;
+        queue
+            .list_for_session(&target_session.id)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let run_id = match transcript_run_id(&transcript) {
+        Some(run_id) => Some(run_id),
+        None => latest_matching_run_id_from_store(state, chat_session_id, &target_session).await,
+    };
+    let run = if let (Some(run_store_arc), Some(run_id)) =
+        (state.agent_run_store.as_ref(), run_id.as_deref())
+    {
+        let run_store = run_store_arc.lock().await;
+        run_store.get_run(run_id).ok().flatten()
+    } else {
+        None
+    };
+    let proposals = load_self_state_proposals(
+        state,
+        &target_session.id,
+        run.as_ref().map(|run| run.id.as_str()),
+        &target_session.pending_blockers,
+    )
+    .await;
+
+    agent_self_state_snapshot_from_evidence(
+        chat_session_id,
+        target_session,
+        transcript,
+        actions,
+        run,
+        proposals,
+    )
+}
+
+fn missing_agent_self_state_snapshot(
+    chat_session_id: &str,
+    trace_gap_code: &str,
+) -> AgentSelfStateFactSnapshot {
+    AgentSelfStateFactSnapshot {
+        chat_session_id: bounded_runtime_fact_label(chat_session_id),
+        task_session_id: None,
+        run_id: None,
+        task_status: None,
+        run_status: None,
+        delivery_status: "unknown".into(),
+        final_delivery_evidence: false,
+        completed_response: false,
+        pending_permission_count: 0,
+        pending_proposal_count: 0,
+        durable_change_status: "unknown".into(),
+        durable_change_completed: false,
+        blocker_codes: Vec::new(),
+        action_count: 0,
+        completed_action_count: 0,
+        observation_count: 0,
+        transcript_observation_count: 0,
+        final_result_count: 0,
+        last_action_type: None,
+        last_action_status: None,
+        last_observation_source: None,
+        last_action_summary: None,
+        evidence_labels: vec![bounded_runtime_fact_label(trace_gap_code)],
+        trace_gap: true,
+        trace_gap_code: Some(trace_gap_code.into()),
+    }
+}
+
+fn agent_self_state_snapshot_from_evidence(
+    chat_session_id: &str,
+    session: AgentTaskSession,
+    transcript: Vec<ExecutionTranscriptEntry>,
+    actions: Vec<QueuedExecutionAction>,
+    run: Option<AgentRun>,
+    proposals: Vec<AgentProposal>,
+) -> AgentSelfStateFactSnapshot {
+    let final_result_count = transcript
+        .iter()
+        .filter(|entry| entry.kind == ExecutionTranscriptEntryKind::FinalResult)
+        .count();
+    let transcript_observation_count = transcript
+        .iter()
+        .filter(|entry| entry.kind == ExecutionTranscriptEntryKind::Observation)
+        .count();
+    let observation_count = actions
+        .iter()
+        .filter(|action| action.observation_metadata.is_some())
+        .count()
+        .max(transcript_observation_count);
+    let completed_action_count = actions
+        .iter()
+        .filter(|action| action.status == ExecutionQueueStatus::Completed)
+        .count();
+    let pending_permission_count = actions
+        .iter()
+        .filter(|action| action.status == ExecutionQueueStatus::PendingPermission)
+        .count();
+    let pending_proposal_count = proposals
+        .iter()
+        .filter(|proposal| proposal.status == ProposalStatus::Pending)
+        .count();
+    let run_status = run.as_ref().map(|run| run.status.to_string());
+    let final_delivery_evidence = final_result_count > 0
+        && run.as_ref().is_some_and(|run| {
+            run.status == AgentRunStatus::Completed && run.output_preview.is_some()
+        });
+    let completed_response = final_delivery_evidence
+        && matches!(
+            session.status,
+            AgentTaskSessionStatus::Completed | AgentTaskSessionStatus::WaitingPermission
+        );
+    let delivery_status = if final_delivery_evidence && pending_proposal_count > 0 {
+        "response_delivered_pending_review"
+    } else if final_delivery_evidence {
+        "delivered"
+    } else if run.is_some() || final_result_count > 0 {
+        "trace_gap"
+    } else {
+        "unknown"
+    }
+    .to_string();
+    let durable_change_status = if pending_proposal_count > 0 {
+        "pending_review"
+    } else if !proposals.is_empty() {
+        "review_resolved_or_not_pending"
+    } else {
+        "none"
+    }
+    .to_string();
+    let durable_change_completed = !proposals.is_empty()
+        && proposals
+            .iter()
+            .all(|proposal| proposal.status == ProposalStatus::Accepted);
+    let blocker_codes = session
+        .pending_blockers
+        .iter()
+        .map(|blocker| {
+            if blocker.starts_with("proposal:") {
+                "proposal_pending".to_string()
+            } else {
+                bounded_runtime_fact_label(blocker)
+            }
+        })
+        .collect::<Vec<_>>();
+    let last_action = actions.last();
+    let last_action_type =
+        last_action.map(|action| bounded_runtime_fact_label(&action.action.action_type));
+    let last_action_status = last_action.map(|action| action.status.as_str().to_string());
+    let last_observation_source = last_action
+        .and_then(|action| action.observation_metadata.as_ref())
+        .and_then(|metadata| {
+            metadata
+                .get("sourceKind")
+                .or_else(|| metadata.get("sourceLabel"))
+                .or_else(|| metadata.get("toolName"))
+                .and_then(Value::as_str)
+        })
+        .map(bounded_runtime_fact_label)
+        .or_else(|| {
+            transcript
+                .iter()
+                .rev()
+                .find(|entry| entry.kind == ExecutionTranscriptEntryKind::Observation)
+                .map(|_| "transcript_observation".to_string())
+        });
+    let last_action_summary = last_action.map(|action| {
+        let action_type = bounded_runtime_fact_label(&action.action.action_type);
+        let status = action.status.as_str();
+        let source = last_observation_source
+            .as_deref()
+            .unwrap_or("observation_metadata");
+        format!("action={action_type} status={status} observation_source={source}")
+    });
+    let mut evidence_labels = vec![
+        "task_session".to_string(),
+        "execution_transcript".to_string(),
+    ];
+    if run.is_some() {
+        evidence_labels.push("agent_run".to_string());
+    }
+    if !actions.is_empty() {
+        evidence_labels.push("action_queue".to_string());
+    }
+    if !proposals.is_empty() {
+        evidence_labels.push("proposal_store".to_string());
+    }
+    evidence_labels.sort();
+    evidence_labels.dedup();
+
+    AgentSelfStateFactSnapshot {
+        chat_session_id: bounded_runtime_fact_label(chat_session_id),
+        task_session_id: Some(bounded_runtime_fact_label(&session.id)),
+        run_id: run.as_ref().map(|run| bounded_runtime_fact_label(&run.id)),
+        task_status: Some(session.status.as_str().into()),
+        run_status,
+        delivery_status,
+        final_delivery_evidence,
+        completed_response,
+        pending_permission_count,
+        pending_proposal_count,
+        durable_change_status,
+        durable_change_completed,
+        blocker_codes,
+        action_count: actions.len(),
+        completed_action_count,
+        observation_count,
+        transcript_observation_count,
+        final_result_count,
+        last_action_type,
+        last_action_status,
+        last_observation_source,
+        last_action_summary,
+        evidence_labels,
+        trace_gap: false,
+        trace_gap_code: None,
+    }
+}
+
+async fn latest_matching_run_id_from_store(
+    state: &Arc<AppState>,
+    chat_session_id: &str,
+    session: &AgentTaskSession,
+) -> Option<String> {
+    let run_store_arc = state.agent_run_store.as_ref()?;
+    let run_store = run_store_arc.lock().await;
+    run_store
+        .list_runs_for_session(chat_session_id, 20)
+        .ok()?
+        .into_iter()
+        .find(|run| {
+            run.user_input.as_deref() == Some(session.user_goal.as_str())
+                && classify_agent_self_state_query(run.user_input.as_deref().unwrap_or_default())
+                    .is_none()
+        })
+        .map(|run| run.id)
+}
+
+async fn load_self_state_proposals(
+    state: &Arc<AppState>,
+    task_session_id: &str,
+    run_id: Option<&str>,
+    pending_blockers: &[String],
+) -> Vec<AgentProposal> {
+    let Some(proposal_store_arc) = state.proposal_store.as_ref() else {
+        return Vec::new();
+    };
+    let proposal_ids = pending_blockers
+        .iter()
+        .filter_map(|blocker| blocker.strip_prefix("proposal:"))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let proposal_store = proposal_store_arc.lock().await;
+    proposal_store
+        .list_all_proposals(100, 0)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|proposal| {
+            proposal
+                .source_detail
+                .as_deref()
+                .is_some_and(|source_detail| {
+                    source_detail == task_session_id
+                        || source_detail
+                            == format!("main_chat_agent_task_session:{task_session_id}")
+                })
+                || run_id
+                    .map(|run_id| proposal.run_id.as_deref() == Some(run_id))
+                    .unwrap_or(false)
+                || proposal_ids
+                    .iter()
+                    .any(|proposal_id| proposal_id == &proposal.id)
+        })
+        .collect()
+}
+
+fn transcript_run_id(transcript: &[ExecutionTranscriptEntry]) -> Option<String> {
+    transcript.iter().rev().find_map(|entry| {
+        if entry.kind != ExecutionTranscriptEntryKind::FinalResult {
+            return None;
+        }
+        entry
+            .metadata
+            .get("runId")
+            .or_else(|| entry.metadata.get("run_id"))
+            .and_then(Value::as_str)
+            .map(bounded_runtime_fact_label)
+    })
+}
+
+fn agent_self_state_fact_bindings(
+    snapshot: &AgentSelfStateFactSnapshot,
+    fact_keys: &[&'static str],
+) -> Vec<MainChatRuntimeFactBinding> {
+    fact_keys
+        .iter()
+        .copied()
+        .map(|key| {
+            let value = match key {
+                RUNTIME_FACT_KEY_AGENT_CHAT_SESSION_ID => Some(snapshot.chat_session_id.clone()),
+                RUNTIME_FACT_KEY_AGENT_TASK_SESSION_ID => snapshot.task_session_id.clone(),
+                RUNTIME_FACT_KEY_AGENT_RUN_ID => snapshot.run_id.clone(),
+                RUNTIME_FACT_KEY_AGENT_TASK_STATUS => snapshot.task_status.clone(),
+                RUNTIME_FACT_KEY_AGENT_DELIVERY_STATUS => Some(snapshot.delivery_status.clone()),
+                RUNTIME_FACT_KEY_AGENT_LAST_ACTION_SUMMARY => snapshot.last_action_summary.clone(),
+                RUNTIME_FACT_KEY_AGENT_PENDING_PERMISSION_COUNT => {
+                    Some(snapshot.pending_permission_count.to_string())
+                }
+                RUNTIME_FACT_KEY_AGENT_BLOCKER_CODES => {
+                    Some(snapshot.blocker_codes.join(",")).filter(|value| !value.is_empty())
+                }
+                RUNTIME_FACT_KEY_AGENT_PENDING_PROPOSAL_COUNT => {
+                    Some(snapshot.pending_proposal_count.to_string())
+                }
+                RUNTIME_FACT_KEY_AGENT_DURABLE_CHANGE_STATUS => {
+                    Some(snapshot.durable_change_status.clone())
+                }
+                RUNTIME_FACT_KEY_AGENT_TRACE_GAP => snapshot.trace_gap_code.clone(),
+                _ => None,
+            };
+            let missing = value.is_none()
+                || (key == RUNTIME_FACT_KEY_AGENT_TRACE_GAP && !snapshot.trace_gap)
+                || snapshot.trace_gap;
+            let (value_shape, source, authority, freshness, visibility, privacy) = match key {
+                RUNTIME_FACT_KEY_AGENT_CHAT_SESSION_ID => (
+                    "bounded_id",
+                    vec!["task_session"],
+                    "task_state",
+                    "turn_snapshot",
+                    "trace_only",
+                    "internal",
+                ),
+                RUNTIME_FACT_KEY_AGENT_TASK_SESSION_ID => (
+                    "bounded_id",
+                    vec!["task_session"],
+                    "task_state",
+                    "turn_snapshot",
+                    "trace_only",
+                    "internal",
+                ),
+                RUNTIME_FACT_KEY_AGENT_RUN_ID => (
+                    "bounded_id",
+                    vec!["agent_run", "transcript"],
+                    "run_trace",
+                    "run_trace",
+                    "trace_only",
+                    "internal",
+                ),
+                RUNTIME_FACT_KEY_AGENT_TASK_STATUS => (
+                    "canonical_task_status",
+                    vec!["task_session", "action_queue"],
+                    "task_state",
+                    "turn_snapshot",
+                    "ui_badge",
+                    "public",
+                ),
+                RUNTIME_FACT_KEY_AGENT_DELIVERY_STATUS => (
+                    "canonical_delivery_status",
+                    vec!["agent_run", "final_delivery", "transcript"],
+                    "run_trace",
+                    "run_trace",
+                    "ui_badge",
+                    "public",
+                ),
+                RUNTIME_FACT_KEY_AGENT_LAST_ACTION_SUMMARY => (
+                    "bounded_summary",
+                    vec!["action_queue", "transcript"],
+                    "task_state",
+                    "turn_snapshot",
+                    "answer",
+                    "internal",
+                ),
+                RUNTIME_FACT_KEY_AGENT_PENDING_PERMISSION_COUNT => (
+                    "integer",
+                    vec!["task_session", "action_queue"],
+                    "policy",
+                    "turn_snapshot",
+                    "ui_badge",
+                    "public",
+                ),
+                RUNTIME_FACT_KEY_AGENT_BLOCKER_CODES => (
+                    "bounded_labels",
+                    vec!["task_session", "transcript"],
+                    "task_state",
+                    "turn_snapshot",
+                    "ui_badge",
+                    "internal",
+                ),
+                RUNTIME_FACT_KEY_AGENT_PENDING_PROPOSAL_COUNT => (
+                    "integer",
+                    vec!["task_session", "proposal_store"],
+                    "policy",
+                    "turn_snapshot",
+                    "ui_badge",
+                    "public",
+                ),
+                RUNTIME_FACT_KEY_AGENT_DURABLE_CHANGE_STATUS => (
+                    "none_pending_review_or_resolved",
+                    vec!["proposal_store", "task_session"],
+                    "policy",
+                    "turn_snapshot",
+                    "answer",
+                    "public",
+                ),
+                RUNTIME_FACT_KEY_AGENT_TRACE_GAP => (
+                    "trace_gap_code",
+                    vec!["task_session", "agent_run", "transcript"],
+                    "task_state",
+                    "unknown",
+                    "answer",
+                    "public",
+                ),
+                _ => (
+                    "unknown",
+                    vec!["task_session"],
+                    "task_state",
+                    "unknown",
+                    "trace_only",
+                    "internal",
+                ),
+            };
+            MainChatRuntimeFactBinding {
+                key,
+                value_shape,
+                value,
+                source,
+                authority,
+                freshness: if snapshot.trace_gap {
+                    "unknown"
+                } else {
+                    freshness
+                },
+                visibility,
+                privacy,
+                missing,
+            }
+        })
+        .collect()
+}
+
+fn agent_self_state_reply(
+    intent: MainChatAgentSelfStateIntent,
+    snapshot: &AgentSelfStateFactSnapshot,
+) -> String {
+    if snapshot.trace_gap {
+        let code = snapshot
+            .trace_gap_code
+            .as_deref()
+            .unwrap_or("self_state_trace_gap");
+        return format!(
+            "我不能确认上一项任务状态：缺少 task session / run / transcript 证据（trace_gap={code}）。我不会根据助手文字臆造历史。"
+        );
+    }
+
+    match intent {
+        MainChatAgentSelfStateIntent::AskTaskCompletion => {
+            if snapshot.pending_proposal_count > 0 {
+                format!(
+                    "这次回答已经交付：task_status={}，run_status={}，delivery_status={}。但还有 {} 个提案处于 pending review，durable_change_status=pending_review；我没有把待审变更当作已完成的持久写入。",
+                    label_or_unknown(snapshot.task_status.as_deref()),
+                    label_or_unknown(snapshot.run_status.as_deref()),
+                    snapshot.delivery_status,
+                    snapshot.pending_proposal_count
+                )
+            } else if snapshot.completed_response {
+                format!(
+                    "这个任务的回答已完成：task_status={}，run_status={}，delivery_status={}，final_delivery_evidence=true。没有待审提案或待确认权限。",
+                    label_or_unknown(snapshot.task_status.as_deref()),
+                    label_or_unknown(snapshot.run_status.as_deref()),
+                    snapshot.delivery_status
+                )
+            } else {
+                format!(
+                    "这个任务还不能标为完成：task_status={}，run_status={}，delivery_status={}，blockers={}。",
+                    label_or_unknown(snapshot.task_status.as_deref()),
+                    label_or_unknown(snapshot.run_status.as_deref()),
+                    snapshot.delivery_status,
+                    if snapshot.blocker_codes.is_empty() {
+                        "none".into()
+                    } else {
+                        snapshot.blocker_codes.join(",")
+                    }
+                )
+            }
+        }
+        MainChatAgentSelfStateIntent::AskLastActionSummary => {
+            if snapshot.action_count == 0 && snapshot.transcript_observation_count == 0 {
+                return "上一项任务没有记录到工具/action observation；我只能确认它有任务/运行证据，不能编造工具历史。".into();
+            }
+            format!(
+                "我刚刚做的是受治理的运行步骤：{}。证据来自 action_queue/transcript；observation_count={}，final_delivery_evidence={}，directWritesExecuted=false。",
+                snapshot
+                    .last_action_summary
+                    .as_deref()
+                    .unwrap_or("transcript observation recorded"),
+                snapshot.observation_count,
+                snapshot.final_delivery_evidence
+            )
+        }
+    }
 }
 
 fn tool_availability_snapshot(
@@ -1846,6 +2595,72 @@ pub(crate) fn classify_tool_availability_query(
     None
 }
 
+pub(crate) fn classify_agent_self_state_query(
+    user_text: &str,
+) -> Option<MainChatAgentSelfStateIntent> {
+    let normalized = user_text.trim().to_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    let compact = normalized
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    let compact = trim_outer_punctuation(&compact);
+    let english_phrase = trim_outer_punctuation(&normalized);
+
+    if matches_exact_clock_phrase(
+        compact,
+        &[
+            "你刚刚做了什么",
+            "刚刚做了什么",
+            "你刚才做了什么",
+            "刚才做了什么",
+            "上一轮做了什么",
+            "你上一步做了什么",
+            "刚刚执行了什么",
+            "刚刚用了什么工具",
+        ],
+    ) || matches_exact_clock_phrase(
+        english_phrase,
+        &[
+            "what did you just do",
+            "what was your last action",
+            "what did you do last turn",
+            "what tool did you just use",
+            "what happened in the previous turn",
+        ],
+    ) {
+        return Some(MainChatAgentSelfStateIntent::AskLastActionSummary);
+    }
+
+    if matches_exact_clock_phrase(
+        compact,
+        &[
+            "这个任务完成了吗",
+            "任务完成了吗",
+            "刚刚的任务完成了吗",
+            "上一项任务完成了吗",
+            "你完成了吗",
+            "完成了吗",
+            "这个请求完成了吗",
+        ],
+    ) || matches_exact_clock_phrase(
+        english_phrase,
+        &[
+            "is this task done",
+            "is this task complete",
+            "did you complete the task",
+            "did you finish the task",
+            "is the previous task complete",
+        ],
+    ) {
+        return Some(MainChatAgentSelfStateIntent::AskTaskCompletion);
+    }
+
+    None
+}
+
 fn matches_exact_clock_phrase(value: &str, phrases: &[&str]) -> bool {
     phrases.iter().any(|phrase| value == *phrase)
 }
@@ -1962,6 +2777,28 @@ pub(crate) struct MainChatRuntimeFactsScenarioEvidence {
     pub(crate) ui_status: Option<String>,
     pub(crate) task_session_id: Option<String>,
     pub(crate) run_id: Option<String>,
+    pub(crate) task_status: Option<String>,
+    pub(crate) run_status: Option<String>,
+    pub(crate) delivery_status: Option<String>,
+    pub(crate) blocker_codes: Vec<String>,
+    pub(crate) pending_permission_count: Option<usize>,
+    pub(crate) pending_proposal_count: Option<usize>,
+    pub(crate) durable_change_status: Option<String>,
+    pub(crate) durable_change_completed: Option<bool>,
+    pub(crate) completed_response: Option<bool>,
+    pub(crate) final_delivery_evidence: Option<bool>,
+    pub(crate) action_count: Option<usize>,
+    pub(crate) completed_action_count: Option<usize>,
+    pub(crate) observation_count: Option<usize>,
+    pub(crate) transcript_observation_count: Option<usize>,
+    pub(crate) final_result_count: Option<usize>,
+    pub(crate) last_action_type: Option<String>,
+    pub(crate) last_action_status: Option<String>,
+    pub(crate) last_observation_source: Option<String>,
+    pub(crate) last_action_summary: Option<String>,
+    pub(crate) self_state_evidence_labels: Vec<String>,
+    pub(crate) assistant_prose_used_for_task_status: Option<bool>,
+    pub(crate) memory_or_hs_override_allowed: Option<bool>,
     pub(crate) trace_gap: bool,
     pub(crate) context_conflict_ignored: bool,
     pub(crate) silent_write_detected: bool,
@@ -2009,6 +2846,14 @@ pub(crate) struct MainChatRuntimeFactsNegativeAssertionSummary {
     pub(crate) write_capability_requires_permission: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) no_raw_mcp_manifest_exposure: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) no_assistant_prose_used_for_task_status: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) context_cannot_override_task_runtime_state: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) proposal_pending_not_completed_durable_change: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) no_history_invention_without_trace: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -2023,6 +2868,10 @@ pub(crate) struct MainChatRuntimeFactsCommandSurfaceProof {
     pub(crate) send_mcp_no_safe_read_candidate_path: bool,
     pub(crate) send_mcp_unknown_server_status_path: bool,
     pub(crate) send_write_permission_path: bool,
+    pub(crate) send_self_state_completion_path: bool,
+    pub(crate) send_self_state_pending_proposal_path: bool,
+    pub(crate) send_self_state_observation_path: bool,
+    pub(crate) send_self_state_trace_gap_path: bool,
     pub(crate) stream_deferred_blocker: Option<String>,
 }
 
@@ -2096,6 +2945,10 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_a_backend_report(
         mcp_unknown_server_status_not_available: None,
         write_capability_requires_permission: None,
         no_raw_mcp_manifest_exposure: None,
+        no_assistant_prose_used_for_task_status: None,
+        context_cannot_override_task_runtime_state: None,
+        proposal_pending_not_completed_durable_change: None,
+        no_history_invention_without_trace: None,
     };
 
     let passed_scenario_count = evidence.iter().filter(|row| row.passed).count();
@@ -2121,6 +2974,10 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_a_backend_report(
         send_mcp_no_safe_read_candidate_path: false,
         send_mcp_unknown_server_status_path: false,
         send_write_permission_path: false,
+        send_self_state_completion_path: false,
+        send_self_state_pending_proposal_path: false,
+        send_self_state_observation_path: false,
+        send_self_state_trace_gap_path: false,
         stream_deferred_blocker: None,
     };
     let no_silent_write_proof = evidence.iter().all(|row| !row.silent_write_detected);
@@ -2259,6 +3116,10 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_b_provider_route_report(
         send_mcp_no_safe_read_candidate_path: false,
         send_mcp_unknown_server_status_path: false,
         send_write_permission_path: false,
+        send_self_state_completion_path: false,
+        send_self_state_pending_proposal_path: false,
+        send_self_state_observation_path: false,
+        send_self_state_trace_gap_path: false,
         stream_deferred_blocker: Some("slice_b_provider_route_stream_out_of_scope".into()),
     };
     let negative_assertion_summary = MainChatRuntimeFactsNegativeAssertionSummary {
@@ -2295,6 +3156,10 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_b_provider_route_report(
         mcp_unknown_server_status_not_available: None,
         write_capability_requires_permission: None,
         no_raw_mcp_manifest_exposure: None,
+        no_assistant_prose_used_for_task_status: None,
+        context_cannot_override_task_runtime_state: None,
+        proposal_pending_not_completed_durable_change: None,
+        no_history_invention_without_trace: None,
     };
     let runtime_facts_slice_ready = passed_scenario_count == SLICE_B_SCENARIOS.len()
         && current_route_requires_current_generation_evidence
@@ -2426,6 +3291,10 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_c_tool_availability_report
         send_write_permission_path: evidence
             .iter()
             .any(|row| row.scenario_id == "RF-15" && row.entry_point == "send" && row.passed),
+        send_self_state_completion_path: false,
+        send_self_state_pending_proposal_path: false,
+        send_self_state_observation_path: false,
+        send_self_state_trace_gap_path: false,
         stream_deferred_blocker: Some("slice_c_tool_availability_stream_out_of_scope".into()),
     };
     let negative_assertion_summary = MainChatRuntimeFactsNegativeAssertionSummary {
@@ -2452,6 +3321,10 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_c_tool_availability_report
         mcp_unknown_server_status_not_available: Some(mcp_unknown_server_status_not_available),
         write_capability_requires_permission: Some(write_capability_requires_permission),
         no_raw_mcp_manifest_exposure: Some(no_raw_mcp_manifest_exposure),
+        no_assistant_prose_used_for_task_status: None,
+        context_cannot_override_task_runtime_state: None,
+        proposal_pending_not_completed_durable_change: None,
+        no_history_invention_without_trace: None,
     };
     let runtime_facts_slice_ready = passed_scenario_count == SLICE_C_SCENARIOS.len()
         && no_provider_call_for_runtime_facts
@@ -2500,6 +3373,523 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_c_tool_availability_report
         command_surface_proof,
         no_silent_write_proof,
         blockers,
+    }
+}
+
+pub(crate) async fn run_main_chat_runtime_facts_slice_d_agent_self_state_report(
+) -> MainChatRuntimeFactsSliceReport {
+    let evidence = vec![
+        run_slice_d_rf16_case().await,
+        run_slice_d_rf17_case().await,
+        run_slice_d_rf18_case().await,
+        run_slice_d_rf19_case().await,
+    ];
+
+    let no_provider_call_for_runtime_facts = evidence.iter().all(|row| {
+        row.model_generated == Some(false) && row.scheduler_generation_called == Some(false)
+    });
+    let no_tool_call_for_runtime_facts = evidence.iter().all(|row| row.tool_called == Some(false));
+    let no_direct_write_for_runtime_facts = evidence
+        .iter()
+        .all(|row| row.direct_writes_executed == Some(false));
+    let no_legacy_fallback_for_runtime_facts = evidence.iter().all(|row| !row.legacy_fallback_used);
+    let no_assistant_prose_used_for_task_status = evidence
+        .iter()
+        .all(|row| row.assistant_prose_used_for_task_status == Some(false));
+    let context_cannot_override_task_runtime_state = evidence
+        .iter()
+        .all(|row| row.memory_or_hs_override_allowed == Some(false));
+    let proposal_pending_not_completed_durable_change = evidence.iter().any(|row| {
+        row.scenario_id == "RF-17"
+            && row.passed
+            && row.pending_proposal_count.unwrap_or_default() > 0
+            && row.durable_change_status.as_deref() == Some("pending_review")
+            && row.durable_change_completed == Some(false)
+            && row.completed_response == Some(true)
+    });
+    let no_history_invention_without_trace = evidence.iter().any(|row| {
+        row.scenario_id == "RF-19"
+            && row.passed
+            && row.trace_gap
+            && row.task_session_id.is_none()
+            && row.run_id.is_none()
+    });
+    let no_silent_write_proof = evidence.iter().all(|row| !row.silent_write_detected);
+    let passed_scenario_count = evidence.iter().filter(|row| row.passed).count();
+    let blockers = evidence
+        .iter()
+        .filter_map(|row| {
+            row.failure
+                .as_ref()
+                .map(|failure| format!("{}:{failure}", row.scenario_id))
+        })
+        .collect::<Vec<_>>();
+    let command_surface_proof = MainChatRuntimeFactsCommandSurfaceProof {
+        send_runtime_clock_path: false,
+        stream_runtime_clock_path: false,
+        send_provider_route_path: false,
+        send_provider_route_preflight_blocker_path: false,
+        send_tool_availability_path: false,
+        send_web_policy_blocked_path: false,
+        send_mcp_no_safe_read_candidate_path: false,
+        send_mcp_unknown_server_status_path: false,
+        send_write_permission_path: false,
+        send_self_state_completion_path: evidence
+            .iter()
+            .any(|row| row.scenario_id == "RF-16" && row.entry_point == "send" && row.passed),
+        send_self_state_pending_proposal_path: evidence
+            .iter()
+            .any(|row| row.scenario_id == "RF-17" && row.entry_point == "send" && row.passed),
+        send_self_state_observation_path: evidence
+            .iter()
+            .any(|row| row.scenario_id == "RF-18" && row.entry_point == "send" && row.passed),
+        send_self_state_trace_gap_path: evidence
+            .iter()
+            .any(|row| row.scenario_id == "RF-19" && row.entry_point == "send" && row.passed),
+        stream_deferred_blocker: Some("slice_d_agent_self_state_stream_out_of_scope".into()),
+    };
+    let negative_assertion_summary = MainChatRuntimeFactsNegativeAssertionSummary {
+        planning_question_not_captured: None,
+        no_provider_call_for_runtime_facts: Some(no_provider_call_for_runtime_facts),
+        no_tool_call_for_runtime_facts: Some(no_tool_call_for_runtime_facts),
+        no_direct_write_for_runtime_facts: Some(no_direct_write_for_runtime_facts),
+        no_legacy_fallback_for_runtime_facts: Some(no_legacy_fallback_for_runtime_facts),
+        context_cannot_override_runtime_clock: None,
+        missing_clock_does_not_use_model: None,
+        current_route_requires_current_generation_evidence: None,
+        no_current_route_for_model_generated_false: None,
+        configured_route_not_invocation_proof: None,
+        planned_route_not_invocation_proof: None,
+        last_completed_route_not_current_turn: None,
+        provider_preflight_blocker_not_fake_readiness: None,
+        no_active_reachability_probe_for_tool_availability: None,
+        web_policy_blocker_not_fake_availability: None,
+        mcp_registry_not_availability_without_safe_read: None,
+        mcp_unknown_server_status_not_available: None,
+        write_capability_requires_permission: None,
+        no_raw_mcp_manifest_exposure: None,
+        no_assistant_prose_used_for_task_status: Some(no_assistant_prose_used_for_task_status),
+        context_cannot_override_task_runtime_state: Some(
+            context_cannot_override_task_runtime_state,
+        ),
+        proposal_pending_not_completed_durable_change: Some(
+            proposal_pending_not_completed_durable_change,
+        ),
+        no_history_invention_without_trace: Some(no_history_invention_without_trace),
+    };
+    let runtime_facts_slice_ready = passed_scenario_count == SLICE_D_SCENARIOS.len()
+        && no_provider_call_for_runtime_facts
+        && no_tool_call_for_runtime_facts
+        && no_direct_write_for_runtime_facts
+        && no_legacy_fallback_for_runtime_facts
+        && no_assistant_prose_used_for_task_status
+        && context_cannot_override_task_runtime_state
+        && proposal_pending_not_completed_durable_change
+        && no_history_invention_without_trace
+        && no_silent_write_proof
+        && command_surface_proof.send_self_state_completion_path
+        && command_surface_proof.send_self_state_pending_proposal_path
+        && command_surface_proof.send_self_state_observation_path
+        && command_surface_proof.send_self_state_trace_gap_path;
+
+    MainChatRuntimeFactsSliceReport {
+        report_kind: "main_chat_runtime_facts_slice",
+        schema_version: 1,
+        slice_id: "slice_d_agent_self_state",
+        slice_name: "Agent Self-State",
+        covered_scenario_ids: SLICE_D_SCENARIOS
+            .iter()
+            .map(|id| (*id).to_string())
+            .collect(),
+        out_of_scope_scenario_ids: vec!["RF-20".into(), "RF-21".into()],
+        blocked_scenario_ids: Vec::new(),
+        scenario_count: SLICE_D_SCENARIOS.len(),
+        passed_scenario_count,
+        blocked_scenario_count: 0,
+        runtime_facts_slice_ready,
+        runtime_facts_ready: false,
+        ui_included: true,
+        source_registry_version: "2026-06-25",
+        ui_contract_version: "2026-06-25",
+        scenario_evidence: evidence,
+        negative_assertion_summary,
+        focused_test_commands: vec![
+            "cargo test -p openlife-tauri main_chat_runtime_facts -- --nocapture",
+            "cargo test -p openlife-tauri main_chat_command_surface_eval_gate_covers_send_stream_runtime_matrix -- --nocapture",
+            "pnpm --dir frontend test -- src/components/ReasoningTracePanel.test.tsx",
+        ],
+        command_surface_proof,
+        no_silent_write_proof,
+        blockers,
+    }
+}
+
+async fn run_slice_d_rf16_case() -> MainChatRuntimeFactsScenarioEvidence {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    configure_agent_self_state_direct_answer_state(&state).await;
+    let session_id = "runtime-facts-slice-d-rf16";
+    let _ = crate::main_chat_send::send_message_with_state(
+        session_id.into(),
+        vec![ChatMessage {
+            role: "user".into(),
+            content: "Please answer directly: DIRECT_PROSE_SHOULD_NOT_BE_STATUS".into(),
+        }],
+        None,
+        &state,
+    )
+    .await;
+    run_slice_d_send_case("RF-16", session_id, "这个任务完成了吗", state).await
+}
+
+async fn run_slice_d_rf17_case() -> MainChatRuntimeFactsScenarioEvidence {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    configure_agent_self_state_direct_answer_state(&state).await;
+    let session_id = "runtime-facts-slice-d-rf17";
+    let _ = crate::main_chat_send::send_message_with_state(
+        session_id.into(),
+        vec![ChatMessage {
+            role: "user".into(),
+            content: "Remember that I prefer concise but rigorous reviews.".into(),
+        }],
+        None,
+        &state,
+    )
+    .await;
+    run_slice_d_send_case("RF-17", session_id, "这个任务完成了吗", state).await
+}
+
+async fn run_slice_d_rf18_case() -> MainChatRuntimeFactsScenarioEvidence {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    configure_agent_self_state_direct_answer_state(&state).await;
+    let session_id = "runtime-facts-slice-d-rf18";
+    let _ = crate::main_chat_send::send_message_with_state(
+        session_id.into(),
+        vec![ChatMessage {
+            role: "user".into(),
+            content: "Please read file `Cargo.toml`.".into(),
+        }],
+        None,
+        &state,
+    )
+    .await;
+    run_slice_d_send_case("RF-18", session_id, "你刚刚做了什么", state).await
+}
+
+async fn run_slice_d_rf19_case() -> MainChatRuntimeFactsScenarioEvidence {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    configure_agent_self_state_direct_answer_state(&state).await;
+    run_slice_d_send_case(
+        "RF-19",
+        "runtime-facts-slice-d-rf19",
+        "你刚刚做了什么",
+        state,
+    )
+    .await
+}
+
+async fn configure_agent_self_state_direct_answer_state(state: &Arc<AppState>) {
+    let mut scheduler = state.scheduler.lock().await;
+    *scheduler = InferenceScheduler::new(
+        "unused-local-model".into(),
+        false,
+        "openai".into(),
+        "https://example.invalid/v1".into(),
+        "self-state-test-key".into(),
+        "gpt-runtime-facts-self-state".into(),
+        "text-embedding-test".into(),
+        false,
+    )
+    .with_scripted_generation_response("DIRECT_PROSE_SHOULD_NOT_BE_STATUS");
+}
+
+async fn run_slice_d_send_case(
+    scenario_id: &'static str,
+    session_id: &'static str,
+    user_text: &'static str,
+    state: Arc<AppState>,
+) -> MainChatRuntimeFactsScenarioEvidence {
+    let result = crate::main_chat_send::send_message_with_state(
+        session_id.into(),
+        vec![ChatMessage {
+            role: "user".into(),
+            content: user_text.into(),
+        }],
+        None,
+        &state,
+    )
+    .await;
+    match result {
+        Ok(result) => match serde_json::to_value(result) {
+            Ok(response) => {
+                evidence_from_agent_self_state_response(scenario_id, "send", user_text, response)
+            }
+            Err(error) => MainChatRuntimeFactsScenarioEvidence::failed(
+                scenario_id,
+                "send",
+                user_text,
+                format!("serialize agent self-state response failed: {error}"),
+            ),
+        },
+        Err(error) => {
+            MainChatRuntimeFactsScenarioEvidence::failed(scenario_id, "send", user_text, error)
+        }
+    }
+}
+
+fn evidence_from_agent_self_state_response(
+    scenario_id: &'static str,
+    entry_point: &'static str,
+    user_text: &'static str,
+    response: Value,
+) -> MainChatRuntimeFactsScenarioEvidence {
+    let generation = response
+        .get("reasoning_trace")
+        .and_then(|trace| trace.get("generation_result"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let reply = response
+        .get("reply")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let runtime_fact_keys = string_array(&generation, "runtimeFactKeys");
+    let runtime_fact_source = string_array(&generation, "runtimeFactSource");
+    let runtime_fact_visibility = string_array(&generation, "runtimeFactVisibility");
+    let runtime_fact_privacy = string_array(&generation, "runtimeFactPrivacy");
+    let runtime_fact_binding_count = generation
+        .get("runtimeFacts")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or_default();
+    let model_generated = bool_field(&generation, "modelGenerated");
+    let scheduler_generation_called = bool_field(&generation, "schedulerGenerationCalled");
+    let tool_called = bool_field(&generation, "toolCalled");
+    let direct_writes_executed = bool_field(&generation, "directWritesExecuted");
+    let legacy_fallback_used = response
+        .get("legacy_fallback_used")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let task_session_id = string_field(&generation, "taskSessionId");
+    let run_id = string_field(&generation, "runId");
+    let task_status = string_field(&generation, "taskStatus");
+    let run_status = string_field(&generation, "runStatus");
+    let delivery_status = string_field(&generation, "deliveryStatus");
+    let blocker_codes = string_array(&generation, "blockerCodes");
+    let pending_permission_count = usize_field(&generation, "pendingPermissionCount");
+    let pending_proposal_count = usize_field(&generation, "pendingProposalCount");
+    let durable_change_status = string_field(&generation, "durableChangeStatus");
+    let durable_change_completed = bool_field(&generation, "durableChangeCompleted");
+    let completed_response = bool_field(&generation, "completedResponse");
+    let final_delivery_evidence = bool_field(&generation, "finalDeliveryEvidence");
+    let action_count = usize_field(&generation, "actionCount");
+    let completed_action_count = usize_field(&generation, "completedActionCount");
+    let observation_count = usize_field(&generation, "observationCount");
+    let transcript_observation_count = usize_field(&generation, "transcriptObservationCount");
+    let final_result_count = usize_field(&generation, "finalResultCount");
+    let last_action_type = string_field(&generation, "lastActionType");
+    let last_action_status = string_field(&generation, "lastActionStatus");
+    let last_observation_source = string_field(&generation, "lastObservationSource");
+    let last_action_summary = string_field(&generation, "lastActionSummary");
+    let self_state_evidence_labels = string_array(&generation, "selfStateEvidenceLabels");
+    let assistant_prose_used_for_task_status =
+        bool_field(&generation, "assistantProseUsedForTaskStatus");
+    let memory_or_hs_override_allowed = bool_field(&generation, "memoryOrHsOverrideAllowed");
+    let trace_gap = bool_field(&generation, "runtimeFactTraceGap").unwrap_or(false);
+    let ui_primary_source_chip = string_field(&generation, "uiPrimarySourceChip");
+    let ui_status = string_field(&generation, "uiStatus");
+    let silent_write_detected = direct_writes_executed.unwrap_or(true)
+        || response
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .is_some_and(|calls| !calls.is_empty());
+    let common_passed = generation.get("sourceType").and_then(Value::as_str)
+        == Some(RUNTIME_FACT_SOURCE_TYPE)
+        && generation
+            .get("providerGenerationPath")
+            .and_then(Value::as_str)
+            == Some(RUNTIME_FACT_AGENT_SELF_STATE_GENERATION_PATH)
+        && runtime_fact_binding_count > 0
+        && runtime_fact_source
+            .iter()
+            .any(|source| source == "task_session")
+        && runtime_fact_visibility
+            .iter()
+            .any(|value| value == "answer" || value == "ui_badge")
+        && runtime_fact_privacy.iter().any(|value| value == "public")
+        && model_generated == Some(false)
+        && scheduler_generation_called == Some(false)
+        && tool_called == Some(false)
+        && direct_writes_executed == Some(false)
+        && !legacy_fallback_used
+        && assistant_prose_used_for_task_status == Some(false)
+        && memory_or_hs_override_allowed == Some(false)
+        && !silent_write_detected
+        && !reply.contains("DIRECT_PROSE_SHOULD_NOT_BE_STATUS");
+    let scenario_passed = match scenario_id {
+        "RF-16" => {
+            runtime_fact_keys
+                .iter()
+                .any(|key| key == RUNTIME_FACT_KEY_AGENT_TASK_STATUS)
+                && task_session_id.is_some()
+                && run_id.is_some()
+                && task_status.as_deref() == Some("completed")
+                && run_status.as_deref() == Some("completed")
+                && delivery_status.as_deref() == Some("delivered")
+                && completed_response == Some(true)
+                && final_delivery_evidence == Some(true)
+                && pending_proposal_count == Some(0)
+                && ui_status.as_deref() == Some("completed")
+                && reply.contains("final_delivery_evidence=true")
+        }
+        "RF-17" => {
+            runtime_fact_keys
+                .iter()
+                .any(|key| key == RUNTIME_FACT_KEY_AGENT_DURABLE_CHANGE_STATUS)
+                && task_session_id.is_some()
+                && run_id.is_some()
+                && task_status.as_deref() == Some("waiting_permission")
+                && run_status.as_deref() == Some("completed")
+                && delivery_status.as_deref() == Some("response_delivered_pending_review")
+                && completed_response == Some(true)
+                && pending_proposal_count.unwrap_or_default() > 0
+                && durable_change_status.as_deref() == Some("pending_review")
+                && durable_change_completed == Some(false)
+                && blocker_codes.iter().any(|code| code == "proposal_pending")
+                && ui_primary_source_chip.as_deref() == Some("提案待审")
+                && ui_status.as_deref() == Some("waiting_for_user")
+                && reply.contains("没有把待审变更当作已完成的持久写入")
+        }
+        "RF-18" => {
+            runtime_fact_keys
+                .iter()
+                .any(|key| key == RUNTIME_FACT_KEY_AGENT_LAST_ACTION_SUMMARY)
+                && task_session_id.is_some()
+                && run_id.is_some()
+                && task_status.as_deref() == Some("completed")
+                && action_count.unwrap_or_default() > 0
+                && completed_action_count.unwrap_or_default() > 0
+                && observation_count.unwrap_or_default() > 0
+                && transcript_observation_count.unwrap_or_default() > 0
+                && last_action_type.as_deref() == Some("file.read")
+                && last_action_status.as_deref() == Some("completed")
+                && last_action_summary
+                    .as_deref()
+                    .is_some_and(|summary| summary.contains("action=file.read"))
+                && ui_primary_source_chip.as_deref() == Some("工具观察")
+                && reply.contains("action_queue/transcript")
+        }
+        "RF-19" => {
+            trace_gap
+                && runtime_fact_keys
+                    .iter()
+                    .any(|key| key == RUNTIME_FACT_KEY_AGENT_TRACE_GAP)
+                && task_session_id.is_none()
+                && run_id.is_none()
+                && delivery_status.as_deref() == Some("unknown")
+                && ui_status.as_deref() == Some("unknown")
+                && reply.contains("trace_gap=task_session_missing")
+                && reply.contains("不会根据助手文字臆造历史")
+        }
+        _ => false,
+    };
+    let passed = common_passed && scenario_passed;
+
+    MainChatRuntimeFactsScenarioEvidence {
+        scenario_id,
+        entry_point,
+        user_text,
+        passed,
+        answer_preview: reply.chars().take(480).collect(),
+        source_type: generation
+            .get("sourceType")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        runtime_fact_keys,
+        runtime_fact_source,
+        runtime_fact_binding_count,
+        runtime_fact_authority: generation
+            .get("runtimeFactAuthority")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        runtime_fact_freshness: generation
+            .get("runtimeFactFreshness")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        runtime_fact_visibility,
+        runtime_fact_privacy,
+        model_generated,
+        scheduler_generation_called,
+        tool_called,
+        direct_writes_executed,
+        legacy_fallback_used,
+        provider_generation_path: generation
+            .get("providerGenerationPath")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        configured_provider: None,
+        configured_model: None,
+        current_turn_generation_provider: None,
+        current_turn_generation_model: None,
+        current_turn_generation_route_type: None,
+        current_turn_generation_model_generated: None,
+        last_completed_generation_provider: None,
+        last_completed_generation_model: None,
+        last_completed_generation_run_id: None,
+        planned_route_if_model_needed_provider: None,
+        planned_route_if_model_needed_model: None,
+        planned_route_if_model_needed_route_type: None,
+        provider_preflight_status: None,
+        provider_preflight_blockers: Vec::new(),
+        route_labels: Vec::new(),
+        tool_web_config_enabled: None,
+        tool_web_credential_available: None,
+        tool_web_credential_status: None,
+        tool_web_policy_allowed: None,
+        tool_web_policy_blockers: Vec::new(),
+        tool_web_reachability_status: None,
+        tool_web_reachability_ttl_status: None,
+        tool_web_cached_or_preflight_known_reachability: None,
+        tool_web_active_reachability_probe: None,
+        tool_web_available: None,
+        tool_mcp_registered_count: None,
+        tool_mcp_safe_read_candidate_count: None,
+        tool_mcp_server_status: None,
+        tool_mcp_available: None,
+        tool_mcp_raw_manifest_exposed: None,
+        tool_write_available: None,
+        tool_write_requires_permission: None,
+        tool_write_silent_write_available: None,
+        tool_availability_labels: Vec::new(),
+        ui_primary_source_chip,
+        ui_status,
+        task_session_id,
+        run_id,
+        task_status,
+        run_status,
+        delivery_status,
+        blocker_codes,
+        pending_permission_count,
+        pending_proposal_count,
+        durable_change_status,
+        durable_change_completed,
+        completed_response,
+        final_delivery_evidence,
+        action_count,
+        completed_action_count,
+        observation_count,
+        transcript_observation_count,
+        final_result_count,
+        last_action_type,
+        last_action_status,
+        last_observation_source,
+        last_action_summary,
+        self_state_evidence_labels,
+        assistant_prose_used_for_task_status,
+        memory_or_hs_override_allowed,
+        trace_gap,
+        context_conflict_ignored: true,
+        silent_write_detected,
+        failure: (!passed).then(|| "agent self-state runtime fact evidence incomplete".into()),
     }
 }
 
@@ -3133,6 +4523,28 @@ fn evidence_from_provider_route_response(
             .or_else(|| response.get("runId"))
             .and_then(Value::as_str)
             .map(str::to_string),
+        task_status: None,
+        run_status: None,
+        delivery_status: None,
+        blocker_codes: Vec::new(),
+        pending_permission_count: None,
+        pending_proposal_count: None,
+        durable_change_status: None,
+        durable_change_completed: None,
+        completed_response: None,
+        final_delivery_evidence: None,
+        action_count: None,
+        completed_action_count: None,
+        observation_count: None,
+        transcript_observation_count: None,
+        final_result_count: None,
+        last_action_type: None,
+        last_action_status: None,
+        last_observation_source: None,
+        last_action_summary: None,
+        self_state_evidence_labels: Vec::new(),
+        assistant_prose_used_for_task_status: None,
+        memory_or_hs_override_allowed: None,
         trace_gap: generation
             .get("runtimeFactTraceGap")
             .and_then(Value::as_bool)
@@ -3416,6 +4828,28 @@ fn evidence_from_tool_availability_response(
             .or_else(|| response.get("runId"))
             .and_then(Value::as_str)
             .map(str::to_string),
+        task_status: None,
+        run_status: None,
+        delivery_status: None,
+        blocker_codes: Vec::new(),
+        pending_permission_count: None,
+        pending_proposal_count: None,
+        durable_change_status: None,
+        durable_change_completed: None,
+        completed_response: None,
+        final_delivery_evidence: None,
+        action_count: None,
+        completed_action_count: None,
+        observation_count: None,
+        transcript_observation_count: None,
+        final_result_count: None,
+        last_action_type: None,
+        last_action_status: None,
+        last_observation_source: None,
+        last_action_summary: None,
+        self_state_evidence_labels: Vec::new(),
+        assistant_prose_used_for_task_status: None,
+        memory_or_hs_override_allowed: None,
         trace_gap: generation
             .get("runtimeFactTraceGap")
             .and_then(Value::as_bool)
@@ -3587,6 +5021,28 @@ impl MainChatRuntimeFactsScenarioEvidence {
             ui_status: None,
             task_session_id: None,
             run_id: None,
+            task_status: None,
+            run_status: None,
+            delivery_status: None,
+            blocker_codes: Vec::new(),
+            pending_permission_count: None,
+            pending_proposal_count: None,
+            durable_change_status: None,
+            durable_change_completed: None,
+            completed_response: None,
+            final_delivery_evidence: None,
+            action_count: None,
+            completed_action_count: None,
+            observation_count: None,
+            transcript_observation_count: None,
+            final_result_count: None,
+            last_action_type: None,
+            last_action_status: None,
+            last_observation_source: None,
+            last_action_summary: None,
+            self_state_evidence_labels: Vec::new(),
+            assistant_prose_used_for_task_status: None,
+            memory_or_hs_override_allowed: None,
             trace_gap: false,
             context_conflict_ignored: false,
             silent_write_detected: false,
@@ -3807,6 +5263,28 @@ fn evidence_from_runtime_fact_response(
             .or_else(|| response.get("runId"))
             .and_then(Value::as_str)
             .map(str::to_string),
+        task_status: None,
+        run_status: None,
+        delivery_status: None,
+        blocker_codes: Vec::new(),
+        pending_permission_count: None,
+        pending_proposal_count: None,
+        durable_change_status: None,
+        durable_change_completed: None,
+        completed_response: None,
+        final_delivery_evidence: None,
+        action_count: None,
+        completed_action_count: None,
+        observation_count: None,
+        transcript_observation_count: None,
+        final_result_count: None,
+        last_action_type: None,
+        last_action_status: None,
+        last_observation_source: None,
+        last_action_summary: None,
+        self_state_evidence_labels: Vec::new(),
+        assistant_prose_used_for_task_status: None,
+        memory_or_hs_override_allowed: None,
         trace_gap,
         context_conflict_ignored,
         silent_write_detected,

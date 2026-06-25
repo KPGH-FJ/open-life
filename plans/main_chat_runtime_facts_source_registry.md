@@ -190,15 +190,20 @@ Rules:
 | `agent.task_session_id` | bounded id | task_session | task_state | turn_snapshot | run | trace_only | internal | trace_gap | no |
 | `agent.run_id` | bounded id | agent_run | run_trace | run_trace | run | trace_only | internal | trace_gap | no |
 | `agent.task_status` | canonical task status | task_session, action_queue | task_state | turn_snapshot | turn | ui_badge | public | answer_unknown | no |
-| `agent.delivery_status` | canonical delivery status | agent_run, final_delivery | run_trace | run_trace | run | ui_badge | public | trace_gap | no |
+| `agent.delivery_status` | canonical delivery status | agent_run, final_delivery, transcript | run_trace | run_trace | run | ui_badge | public | trace_gap | no |
 | `agent.last_action.summary` | bounded summary | action_queue, transcript | task_state | turn_snapshot | turn | answer | internal | answer_unknown | no |
-| `agent.pending_permission.count` | integer | task_session, tool_permission_store | policy | turn_snapshot | turn | ui_badge | public | trace_gap | no |
+| `agent.pending_permission.count` | integer | task_session, action_queue | policy | turn_snapshot | turn | ui_badge | public | trace_gap | no |
 | `agent.blocker.codes` | bounded labels | transcript, task_session | task_state | turn_snapshot | turn | ui_badge | internal | trace_gap | no |
+| `agent.pending_proposal.count` | integer | task_session, proposal_store | policy | turn_snapshot | turn | ui_badge | public | trace_gap | no |
+| `agent.durable_change.status` | `none`, `pending_review`, or resolved status | proposal_store, task_session | policy | turn_snapshot | turn | answer | public | trace_gap | no |
+| `agent.self_state.trace_gap` | trace gap code | task_session, agent_run, transcript | task_state | unknown | turn | answer | public | trace_gap | no |
 
 Rules:
 
 - Assistant prose is not self-state evidence.
 - A task is not complete unless task/session/run evidence says so.
+- A delivered answer with a pending proposal is completed response delivery,
+  not a completed durable change.
 - If state stores are missing, answer conservatively with unknown and expose a
   trace gap, not a confident model summary.
 
@@ -410,6 +415,9 @@ Scope:
 - `agent.last_action.summary`;
 - `agent.pending_permission.count`;
 - `agent.blocker.codes`;
+- `agent.pending_proposal.count`;
+- `agent.durable_change.status`;
+- `agent.self_state.trace_gap`;
 - task/session/run provenance for self-state answers.
 
 ## 9. Stop Conditions

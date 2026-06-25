@@ -104,6 +104,66 @@ function runtimeToolRows(generation: any): Array<{ label: string; value: string 
   return rows.slice(0, 8);
 }
 
+function runtimeSelfStateRows(generation: any): Array<{ label: string; value: string }> {
+  if (!generation || typeof generation !== "object") return [];
+  const rows: Array<{ label: string; value: string }> = [];
+  const taskStatus = boundedTraceString(generation.taskStatus);
+  const runStatus = boundedTraceString(generation.runStatus);
+  const deliveryStatus = boundedTraceString(generation.deliveryStatus);
+  if (taskStatus || runStatus || deliveryStatus) {
+    rows.push({
+      label: "task status",
+      value: [
+        taskStatus ? `task=${taskStatus}` : "",
+        runStatus ? `run=${runStatus}` : "",
+        deliveryStatus ? `delivery=${deliveryStatus}` : "",
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    });
+  }
+  const pendingPermissionCount = boundedTraceString(generation.pendingPermissionCount);
+  const pendingProposalCount = boundedTraceString(generation.pendingProposalCount);
+  const durableChangeStatus = boundedTraceString(generation.durableChangeStatus);
+  if (pendingPermissionCount || pendingProposalCount || durableChangeStatus) {
+    rows.push({
+      label: "pending state",
+      value: [
+        pendingPermissionCount ? `permission=${pendingPermissionCount}` : "",
+        pendingProposalCount ? `proposal=${pendingProposalCount}` : "",
+        durableChangeStatus ? `durable=${durableChangeStatus}` : "",
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    });
+  }
+  const lastActionSummary = boundedTraceString(generation.lastActionSummary);
+  const observationCount = boundedTraceString(generation.observationCount);
+  if (lastActionSummary || observationCount) {
+    rows.push({
+      label: "last action",
+      value: [lastActionSummary, observationCount ? `observations=${observationCount}` : ""]
+        .filter(Boolean)
+        .join(" · "),
+    });
+  }
+  const traceGapCode = boundedTraceString(generation.traceGapCode);
+  if (generation.runtimeFactTraceGap === true || traceGapCode) {
+    rows.push({
+      label: "trace gap",
+      value: traceGapCode || "true",
+    });
+  }
+  const evidenceLabels = traceStringArray(generation.selfStateEvidenceLabels);
+  if (evidenceLabels.length > 0) {
+    rows.push({
+      label: "evidence",
+      value: evidenceLabels.join(", "),
+    });
+  }
+  return rows.slice(0, 8);
+}
+
 function LayerBlock({
   icon: Icon,
   label,
@@ -159,6 +219,7 @@ export default function ReasoningTracePanel({ trace, show, onToggle }: Props) {
   const safetyCheckWarnings = trace.safety_check_result?.warnings ?? [];
   const runtimeRouteEvidenceRows = runtimeRouteRows(trace.generation_result);
   const runtimeToolEvidenceRows = runtimeToolRows(trace.generation_result);
+  const runtimeSelfStateEvidenceRows = runtimeSelfStateRows(trace.generation_result);
   const sourceChip = boundedTraceString(trace.generation_result?.uiPrimarySourceChip);
   const uiStatus = boundedTraceString(trace.generation_result?.uiStatus);
   const hasContent =
@@ -168,6 +229,7 @@ export default function ReasoningTracePanel({ trace, show, onToggle }: Props) {
     generationText ||
     runtimeRouteEvidenceRows.length > 0 ||
     runtimeToolEvidenceRows.length > 0 ||
+    runtimeSelfStateEvidenceRows.length > 0 ||
     trace.output ||
     toolPlan.length > 0 ||
     safetyCheckWarnings.length > 0 ||
@@ -363,6 +425,22 @@ export default function ReasoningTracePanel({ trace, show, onToggle }: Props) {
                         className="grid gap-1 text-xs text-gray-700 sm:grid-cols-[150px_1fr]"
                       >
                         <dt className="font-medium text-sky-700">{row.label}</dt>
+                        <dd className="break-words">{row.value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </div>
+              )}
+              {runtimeSelfStateEvidenceRows.length > 0 && (
+                <div className="rounded-lg border border-teal-100 bg-white/70 p-3">
+                  <div className="text-[11px] font-medium text-teal-800">任务状态证据</div>
+                  <dl className="mt-2 space-y-1.5">
+                    {runtimeSelfStateEvidenceRows.map(row => (
+                      <div
+                        key={`${row.label}-${row.value}`}
+                        className="grid gap-1 text-xs text-gray-700 sm:grid-cols-[150px_1fr]"
+                      >
+                        <dt className="font-medium text-teal-700">{row.label}</dt>
                         <dd className="break-words">{row.value}</dd>
                       </div>
                     ))}

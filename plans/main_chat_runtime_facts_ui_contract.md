@@ -137,6 +137,7 @@ Expanded trace may show bounded metadata:
 | `toolObservationSummary` | expanded trace | Bounded summary. |
 | `blockers` | expanded trace | Bounded labels and user action hints. |
 | `pendingPermission` | expanded trace | Target label and action, no unsafe raw manifest details. |
+| `taskSelfStateEvidence` | expanded trace | Task/run/delivery status, pending counts, action/observation summaries from structured `generation_result` fields only. |
 | `contextSourceSummary` | expanded trace | Source kinds and counts. |
 | `configuredProviderModel` | expanded trace | Must be labeled configured, not actual. |
 | `currentTurnGenerationRoute` | expanded trace | Only when current run evidence exists; may explicitly say no model was generated. |

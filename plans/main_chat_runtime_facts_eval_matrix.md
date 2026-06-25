@@ -259,9 +259,12 @@ Slice C can pass only when:
 
 ### 7.4 Slice D: Agent Self-State
 
-Slice D can pass only when:
+The first Slice D backend pass covers RF-16 through RF-19 only. RF-20 and RF-21
+remain out of scope until the blocker and pending-permission self-state pass.
 
-- RF-16 through RF-21 pass;
+Slice D RF-16 through RF-19 can pass only when:
+
+- RF-16 through RF-19 pass;
 - answers about task status use task/session/run/action evidence;
 - assistant prose is not accepted as state evidence;
 - pending permission/proposal/blocker states are not rendered as completed work.
