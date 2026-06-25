@@ -33,6 +33,18 @@ as reference only.
      fact source authority, UI visibility, and eval gates for deterministic
      runtime facts. They are preparation artifacts only and must not be read as
      implementation completion or product readiness.
+   - The next post-Slice-D development cycle is governed by
+     `plans/main_chat_next_6_steps_master_spec.md`,
+     `plans/main_chat_next_6_steps_acceptance_matrix.md`,
+     `plans/main_chat_live_provider_eval_setup.md`,
+     `plans/main_chat_runtime_facts_refactor_boundary.md`, and
+     `plans/main_chat_agent_status_ui_contract.md`. These documents define the
+     six-step order, acceptance rows, live-provider setup, Runtime Facts
+     refactor boundary, and default Agent status UI contract. They are
+     development preparation artifacts only and must not be read as evidence
+     that RF-20/RF-21, external live-provider credit, legacy fallback
+     containment, Runtime Facts refactor, product UI, or E2E product acceptance
+     has completed.
 4. `plans/main_chat_stage2_preparation_index.md` and
    `plans/main_chat_agent_stage2_internal_trial_goal_spec.md`
    - Current Stage 2 planning and Goal-mode entry point. Stage 2 targets
