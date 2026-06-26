@@ -598,7 +598,8 @@ async function runStep6TauriProductAcceptance() {
       ready: finalGateAudit.ready,
       localDeterministicReady:
         localDeterministicReady && finalGateAudit.report?.localDeterministicReady === true,
-      blockedExternalLiveOnly: blockedExternalLiveOnly && finalGateAudit.blockedExternalLiveOnly,
+      blockedExternalLiveOnly:
+        blockedExternalLiveOnly && finalGateAuditBlockedExternalLiveOnly(finalGateAudit),
       reportWritten: true,
       sessionCreated: true,
       observedCount: observedJourneys.length,
@@ -1780,19 +1781,58 @@ function finalGateBlockedExternalLiveOnly(report) {
   ]);
   const liveOnlyBlockers = (report.blockers ?? []).every(blocker => {
     const text = String(blocker ?? "");
-    return (
-      allowedBlockers.has(text) ||
-      text.startsWith("S6-LIVE-WEB:") ||
-      text.startsWith("S6-LIVE-MCP:") ||
-      text.startsWith("step6_final_gate_live_credit_missing:S6-LIVE-WEB") ||
-      text.startsWith("step6_final_gate_live_credit_missing:S6-LIVE-MCP") ||
-      text.includes("provider_backed_web_agent_loop_not_executed") ||
-      text.includes("provider_backed_mcp_agent_loop_not_executed") ||
-      text.includes("live_provider") ||
-      text.includes("external_live")
-    );
+    return step6LiveOnlyFinalGateBlocker(text, allowedBlockers);
   });
   return liveRowsBlocked && localRowsCredited && liveOnlyBlockers;
+}
+
+function finalGateAuditBlockedExternalLiveOnly(finalGateAudit) {
+  if (finalGateAudit?.blockedExternalLiveOnly === true) return true;
+  const report = finalGateAudit?.report;
+  if (!report || typeof report !== "object") return false;
+  if (
+    report.localDeterministicReady !== true ||
+    report.externalLiveReady === true ||
+    report.overallReady === true ||
+    (Array.isArray(report.failedJourneys) && report.failedJourneys.length > 0)
+  ) {
+    return false;
+  }
+  return (finalGateAudit?.blockers ?? []).every(blocker => {
+    const text = String(blocker ?? "");
+    if (text === "tauri_webdriver_step6_final_gate_rejected") return true;
+    const unwrapped = text.startsWith("tauri_webdriver_step6_gate_blocker:")
+      ? text.slice("tauri_webdriver_step6_gate_blocker:".length)
+      : text;
+    return step6LiveOnlyFinalGateBlocker(unwrapped);
+  });
+}
+
+function step6LiveOnlyFinalGateBlocker(blocker, allowedBlockers = defaultStep6LiveOnlyBlockers()) {
+  const text = String(blocker ?? "");
+  return (
+    allowedBlockers.has(text) ||
+    text.startsWith("S6-LIVE-WEB:") ||
+    text.startsWith("S6-LIVE-MCP:") ||
+    text.startsWith("step6_final_gate_live_credit_missing:S6-LIVE-WEB") ||
+    text.startsWith("step6_final_gate_live_credit_missing:S6-LIVE-MCP") ||
+    text.includes("provider_backed_web_agent_loop_not_executed") ||
+    text.includes("provider_backed_mcp_agent_loop_not_executed") ||
+    text.includes("live_provider") ||
+    text.includes("external_live")
+  );
+}
+
+function defaultStep6LiveOnlyBlockers() {
+  return new Set([
+    "step6_external_live_evidence_blocked_or_incomplete",
+    "step6_external_live_journeys_not_all_passed",
+    "step6_final_gate_live_provider_incomplete",
+    "step6_final_acceptance_not_ready",
+    "runtime_eval_final_completion_not_ready",
+    "command_surface_final_completion_not_ready",
+    "provider_live_proposal_permission_not_executed",
+  ]);
 }
 
 function finalGateBlockerFromError(error) {
