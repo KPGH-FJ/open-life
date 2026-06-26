@@ -56,6 +56,26 @@ S6 blocked live rows still must satisfy every per-row safety invariant. A blocke
 
 S6 WebDriver `--validate-journeys-only` must validate and emit the full static journey contract, including id/order, kind, execution mode, prompts, answer/runtime/UI/final-delivery evidence labels, seeded prep task ids, and control labels; frontend tests compare that emitted contract against the TypeScript Step6 matrix.
 
+S6 current evidence on 2026-06-26: GitHub Actions Linux PR run
+`28238179717` at commit `81377453e679ad3f8b34e84eff240fa867706f4f`
+completed the local-only Step 6 path. The uploaded report artifact
+`7905498562` (`sha256:22beab7f52acc63f004eed46eefda428da7b81ddcb0d5b99a53edbec5165678e`)
+proves `e2eEnvironmentReady=true`, `localDeterministicReady=true`,
+`externalLiveReady=false`, `acceptanceReady=false`, all 9 deterministic
+local journeys passed, `S6-LIVE-WEB` and `S6-LIVE-MCP` were explicit
+blocked-live rows, and all safety summary claims were true. Manual
+workflow_dispatch run `28238183117` with dedicated `OPENLIFE_LIVE_EVAL_*`
+configuration reached real Tauri WebDriver and observed 11 browser journeys,
+including browser-level credited external live web/MCP rows in artifact
+`7905565043`
+(`sha256:f33b9dc32bca2de6c79d2b988c91a81abd2e7e70ddcb0cf376981cc1729233c8`),
+but the strict run still failed because the nested Rust final gate emitted
+`step6_final_gate_live_credit_missing:S6-LIVE-WEB` and
+`step6_final_gate_live_credit_missing:S6-LIVE-MCP`. Therefore Step 6 remains
+`partial`: Linux real Tauri local evidence is complete, external live final
+gate credit is still blocked, and Main Chat Agent Execution v1 must not be
+declared complete.
+
 ## 4. Baseline Commands
 
 These commands should be run before starting Step 1 and after each step unless a
