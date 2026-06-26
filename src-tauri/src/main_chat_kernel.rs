@@ -1,9 +1,8 @@
 use crate::main_chat_runtime_facts::{
-    classify_provider_route_query, provider_route_fact_should_block_before_model,
-    resolve_agent_self_state_fact_answer, resolve_provider_route_fact_answer,
-    resolve_runtime_clock_fact_answer, resolve_tool_availability_fact_answer,
-    MainChatProviderRouteIntent, MainChatRuntimeClockSource, MainChatRuntimeFactAnswer,
-    RUNTIME_FACT_PROVIDER_GENERATION_PATH, RUNTIME_FACT_PROVIDER_ROUTE_GENERATION_PATH,
+    resolve_post_model_runtime_fact_answer, resolve_pre_model_runtime_fact_answer,
+    MainChatRuntimeFactAnswer, MainChatRuntimeFactPostModelRequest,
+    MainChatRuntimeFactPreModelRequest, RUNTIME_FACT_PROVIDER_GENERATION_PATH,
+    RUNTIME_FACT_PROVIDER_ROUTE_GENERATION_PATH,
 };
 use async_trait::async_trait;
 use openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentStateSnapshot;
@@ -1419,76 +1418,18 @@ where
     }
 
     let scheduler = state.scheduler.lock().await.clone();
-    let provider_route_intent = classify_provider_route_query(&user_text);
-    let runtime_clock_fact_answer = if user_text.trim().is_empty() {
-        None
-    } else {
-        let clock_source = state.runtime_clock_source.lock().await.clone();
-        resolve_runtime_clock_fact_answer(&user_text, &clock_source)
-    };
-    let provider_route_pre_model_fact_answer =
-        if runtime_clock_fact_answer.is_none() && user_text.trim().len() > 0 {
-            match provider_route_intent {
-                Some(MainChatProviderRouteIntent::AskPreviousTurnModelRoute) => {
-                    resolve_provider_route_fact_answer(
-                        &user_text,
-                        state,
-                        &scheduler,
-                        &session_id,
-                        None,
-                        false,
-                        false,
-                        RUNTIME_FACT_PROVIDER_ROUTE_GENERATION_PATH,
-                    )
-                    .await
-                }
-                Some(MainChatProviderRouteIntent::AskCurrentModelRoute)
-                    if provider_route_fact_should_block_before_model(state, &scheduler).await =>
-                {
-                    resolve_provider_route_fact_answer(
-                        &user_text,
-                        state,
-                        &scheduler,
-                        &session_id,
-                        None,
-                        false,
-                        false,
-                        RUNTIME_FACT_PROVIDER_ROUTE_GENERATION_PATH,
-                    )
-                    .await
-                }
-                _ => None,
-            }
-        } else {
-            None
-        };
-    let tool_availability_fact_answer = if runtime_clock_fact_answer.is_none()
-        && provider_route_pre_model_fact_answer.is_none()
-        && user_text.trim().len() > 0
-    {
-        resolve_tool_availability_fact_answer(&user_text, state).await
-    } else {
-        None
-    };
-    let agent_self_state_fact_answer = if runtime_clock_fact_answer.is_none()
-        && provider_route_pre_model_fact_answer.is_none()
-        && tool_availability_fact_answer.is_none()
-        && user_text.trim().len() > 0
-    {
-        resolve_agent_self_state_fact_answer(
-            &user_text,
+    let clock_source = state.runtime_clock_source.lock().await.clone();
+    let runtime_fact_answer =
+        resolve_pre_model_runtime_fact_answer(MainChatRuntimeFactPreModelRequest {
+            user_text: &user_text,
             state,
+            scheduler: &scheduler,
             session_id,
-            Some(task_session_id.as_str()),
-        )
-        .await
-    } else {
-        None
-    };
-    let runtime_fact_answer = runtime_clock_fact_answer
-        .or(provider_route_pre_model_fact_answer)
-        .or(tool_availability_fact_answer)
-        .or(agent_self_state_fact_answer);
+            current_task_session_id: Some(task_session_id.as_str()),
+            clock_source,
+            provider_generation_path: RUNTIME_FACT_PROVIDER_ROUTE_GENERATION_PATH,
+        })
+        .await;
     let direct_reply = if let Some(answer) = runtime_fact_answer.as_ref() {
         Some(CommandSurfaceDirectReply::runtime_fact(answer))
     } else if user_text.trim().is_empty() {
@@ -2558,20 +2499,17 @@ async fn build_successful_kernel_command_surface_result(
         && route_metadata.provider != "none"
         && route_metadata.route_type == "cloud";
     let current_turn_model_generated = !direct_reflex_used && !read_tool_loop_used;
-    let provider_route_fact_answer = if runtime_fact_answer.is_none()
-        && classify_provider_route_query(user_text)
-            == Some(MainChatProviderRouteIntent::AskCurrentModelRoute)
-    {
-        resolve_provider_route_fact_answer(
+    let provider_route_fact_answer = if runtime_fact_answer.is_none() {
+        resolve_post_model_runtime_fact_answer(MainChatRuntimeFactPostModelRequest {
             user_text,
             state,
-            &scheduler,
+            scheduler: &scheduler,
             session_id,
-            Some(model_route.clone()),
-            current_turn_model_generated,
-            current_turn_model_generated,
-            "main_chat_direct_answer_scheduler",
-        )
+            current_route: model_route.clone(),
+            current_model_generated: current_turn_model_generated,
+            scheduler_generation_called: current_turn_model_generated,
+            provider_generation_path: "main_chat_direct_answer_scheduler",
+        })
         .await
     } else {
         None
@@ -5457,19 +5395,6 @@ fn route_metadata_from_scheduler(scheduler: &InferenceScheduler) -> MainChatRout
     }
 }
 
-fn main_chat_runtime_clock_direct_reply(user_text: &str) -> Option<String> {
-    resolve_runtime_clock_fact_answer(user_text, &MainChatRuntimeClockSource::LocalSystem)
-        .map(|answer| answer.reply)
-}
-
-fn main_chat_runtime_clock_direct_reply_at(
-    user_text: &str,
-    now: chrono::DateTime<chrono::FixedOffset>,
-) -> Option<String> {
-    resolve_runtime_clock_fact_answer(user_text, &MainChatRuntimeClockSource::Fixed(now))
-        .map(|answer| answer.reply)
-}
-
 fn bounded_label(value: &str, max_chars: usize) -> String {
     let mut output = String::new();
     let mut last_was_space = false;
@@ -5510,7 +5435,6 @@ fn bounded_text(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
     use openlife_core::agent::model_router::{ModelRouter, ProviderAvailability};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -5948,41 +5872,6 @@ mod tests {
         assert!(events.events().iter().any(|event| {
             matches!(event, MainChatKernelEvent::FinalAnswer { content_chars, .. } if *content_chars > 0)
         }));
-    }
-
-    #[test]
-    fn main_chat_kernel_runtime_clock_reply_answers_weekday_from_local_runtime() {
-        let clock = chrono::FixedOffset::east_opt(8 * 60 * 60)
-            .expect("fixed offset")
-            .with_ymd_and_hms(2026, 6, 23, 11, 32, 59)
-            .single()
-            .expect("fixed clock");
-
-        let reply =
-            main_chat_runtime_clock_direct_reply_at("今天星期几", clock).expect("clock reply");
-
-        assert!(reply.contains("2026-06-23"));
-        assert!(reply.contains("星期二"));
-    }
-
-    #[test]
-    fn main_chat_kernel_runtime_clock_reply_does_not_capture_planning_questions() {
-        let clock = chrono::FixedOffset::east_opt(8 * 60 * 60)
-            .expect("fixed offset")
-            .with_ymd_and_hms(2026, 6, 23, 11, 32, 59)
-            .single()
-            .expect("fixed clock");
-
-        assert!(main_chat_runtime_clock_direct_reply_at(
-            "What time should I leave tomorrow?",
-            clock
-        )
-        .is_none());
-        assert!(main_chat_runtime_clock_direct_reply_at(
-            "What date should we pick for the launch?",
-            clock
-        )
-        .is_none());
     }
 
     #[tokio::test]

@@ -18,6 +18,154 @@ use crate::main_chat_runtime_facts::{
     RUNTIME_FACT_TOOL_AVAILABILITY_GENERATION_PATH,
 };
 
+#[test]
+fn main_chat_runtime_facts_responsibilities_are_split_into_focused_modules() {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let facade =
+        std::fs::read_to_string(src.join("main_chat_runtime_facts.rs")).expect("read facade");
+    let module_dir = src.join("main_chat_runtime_facts");
+
+    for module in [
+        "contract.rs",
+        "registry.rs",
+        "resolver.rs",
+        "clock.rs",
+        "provider_route.rs",
+        "tool_availability.rs",
+        "agent_self_state.rs",
+        "eval.rs",
+    ] {
+        assert!(
+            module_dir.join(module).exists(),
+            "Runtime Facts focused module {module} must exist"
+        );
+    }
+
+    assert!(facade.contains("mod contract;"));
+    assert!(facade.contains("mod registry;"));
+    assert!(facade.contains("mod resolver;"));
+    assert!(
+        !facade.contains("pub(crate) async fn run_main_chat_runtime_facts_slice"),
+        "facade must not re-concentrate eval runner implementation"
+    );
+
+    let contract =
+        std::fs::read_to_string(module_dir.join("contract.rs")).expect("read contract module");
+    assert!(contract.contains("pub(crate) struct MainChatRuntimeFactAnswer"));
+    assert!(contract.contains("pub(crate) struct MainChatRuntimeFactBinding"));
+    assert!(contract.contains("pub(crate) const RUNTIME_FACT_SOURCE_TYPE"));
+    assert!(
+        !contract.contains("run_main_chat_runtime_facts_slice"),
+        "contract module must not own scenario runners"
+    );
+
+    let registry =
+        std::fs::read_to_string(module_dir.join("registry.rs")).expect("read registry module");
+    assert!(registry.contains("pub(crate) fn provider_route_fact_keys("));
+    assert!(registry.contains("pub(crate) const SOURCE_REGISTRY_VERSION"));
+    assert!(
+        !registry.contains("fn classify_"),
+        "registry module must not become a natural-language resolver"
+    );
+    assert!(
+        !registry.contains("SLICE_A_SCENARIOS") && !registry.contains("FIXED_CLOCK_RFC3339"),
+        "registry module must not own eval scenario ids or fixtures"
+    );
+
+    let resolver =
+        std::fs::read_to_string(module_dir.join("resolver.rs")).expect("read resolver module");
+    assert!(resolver.contains("pub(crate) struct MainChatRuntimeFactPreModelRequest"));
+    assert!(resolver.contains("pub(crate) struct MainChatRuntimeFactPostModelRequest"));
+    assert!(resolver.contains("pub(crate) async fn resolve_pre_model_runtime_fact_answer("));
+    assert!(resolver.contains("pub(crate) async fn resolve_post_model_runtime_fact_answer("));
+    assert!(
+        !resolver.contains("MainChatRuntimeFactsSliceReport"),
+        "production resolver must not import eval report types"
+    );
+
+    let clock = std::fs::read_to_string(module_dir.join("clock.rs")).expect("read clock module");
+    assert!(clock.contains("pub(crate) fn resolve_runtime_clock_fact_answer("));
+    assert!(clock.contains("pub(crate) fn classify_runtime_clock_query("));
+    assert!(!clock.contains("ProviderRouteFactSnapshot"));
+    assert!(!clock.contains("ToolAvailabilityFactSnapshot"));
+    assert!(!clock.contains("AgentSelfStateFactSnapshot"));
+
+    let provider_route = std::fs::read_to_string(module_dir.join("provider_route.rs"))
+        .expect("read provider module");
+    assert!(provider_route.contains("struct ProviderRouteFactSnapshot"));
+    assert!(provider_route.contains("pub(crate) async fn resolve_provider_route_fact_answer("));
+    assert!(!provider_route.contains("ToolAvailabilityFactSnapshot"));
+    assert!(!provider_route.contains("AgentSelfStateFactSnapshot"));
+
+    let tool_availability =
+        std::fs::read_to_string(module_dir.join("tool_availability.rs")).expect("read tool module");
+    assert!(tool_availability.contains("struct ToolAvailabilityFactSnapshot"));
+    assert!(
+        tool_availability.contains("pub(crate) async fn resolve_tool_availability_fact_answer(")
+    );
+    assert!(
+        !tool_availability.contains("reqwest::"),
+        "tool availability runtime facts must not run active network probes"
+    );
+
+    let agent_self_state = std::fs::read_to_string(module_dir.join("agent_self_state.rs"))
+        .expect("read self-state module");
+    assert!(agent_self_state.contains("struct AgentSelfStateFactSnapshot"));
+    assert!(agent_self_state.contains("pub(crate) async fn resolve_agent_self_state_fact_answer("));
+    assert!(!agent_self_state.contains("MainChatRuntimeFactsSliceReport"));
+
+    let eval = std::fs::read_to_string(module_dir.join("eval.rs")).expect("read eval module");
+    assert!(eval.contains("const SLICE_A_SCENARIOS"));
+    assert!(eval.contains("const FIXED_CLOCK_RFC3339"));
+    assert!(eval.contains("pub(crate) struct MainChatRuntimeFactsSliceReport"));
+    assert!(eval.contains("pub(crate) struct MainChatRuntimeFactsScenarioEvidence"));
+    assert!(
+        eval.contains("pub(crate) async fn run_main_chat_runtime_facts_slice_a_backend_report(")
+    );
+    assert!(
+        !eval.contains("pub(crate) async fn resolve_pre_model_runtime_fact_answer("),
+        "eval module must not own production resolver logic"
+    );
+}
+
+#[test]
+fn main_chat_kernel_consumes_runtime_facts_through_typed_boundary_only() {
+    let kernel_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_kernel.rs");
+    let source = std::fs::read_to_string(kernel_path).expect("read main_chat_kernel.rs");
+
+    for required in [
+        "resolve_pre_model_runtime_fact_answer",
+        "resolve_post_model_runtime_fact_answer",
+        "MainChatRuntimeFactPreModelRequest",
+        "MainChatRuntimeFactPostModelRequest",
+        "MainChatRuntimeFactAnswer",
+    ] {
+        assert!(
+            source.contains(required),
+            "kernel must use typed Runtime Facts boundary item {required}"
+        );
+    }
+
+    for forbidden in [
+        "classify_provider_route_query",
+        "provider_route_fact_should_block_before_model",
+        "resolve_runtime_clock_fact_answer",
+        "resolve_provider_route_fact_answer",
+        "resolve_tool_availability_fact_answer",
+        "resolve_agent_self_state_fact_answer",
+        "MainChatProviderRouteIntent",
+        "MainChatRuntimeFactsSliceReport",
+        "MainChatRuntimeFactsScenarioEvidence",
+        "run_main_chat_runtime_facts_slice",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "kernel must not import Runtime Facts fact-specific or eval internal {forbidden}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn main_chat_runtime_facts_runtime_clock_slice_a_backend_report_covers_rf_01_to_rf_06() {
     let report = run_main_chat_runtime_facts_slice_a_backend_report().await;
