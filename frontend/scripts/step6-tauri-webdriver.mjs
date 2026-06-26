@@ -1115,16 +1115,25 @@ async function observeStep6JourneyFromControlPlane(sessionId, row, taskSessionId
     taskSessionId: attrs.taskSessionId,
     task_session_id: attrs.taskSessionId,
   }).catch(() => null);
-  const events = await taskEventsWithWebDriver(sessionId, attrs.taskSessionId).catch(() => []);
+  const detail = await readTaskDetailWithWebDriver(sessionId, attrs.taskSessionId).catch(
+    () => null
+  );
+  const events = uniqueValues([
+    ...(await taskEventsWithWebDriver(sessionId, attrs.taskSessionId).catch(() => [])),
+    ...transcriptEvents(detail),
+  ]);
   const uiStatus = await readProductStatusWithWebDriver(sessionId);
   const finalDeliverySections = uniqueValues([
     ...attrs.finalDeliverySectionTitles.map(normalizeFinalSection),
     ...finalDeliverySectionsFromDetail(snapshot),
+    ...finalDeliverySectionsFromDetail(detail),
   ]);
   const finalDeliveryMatched = finalDeliveryMatchesJourney(row, finalDeliverySections);
-  const answerEvidence = finalDeliveryMatched ? answerEvidenceForJourney(row, attrs, snapshot) : [];
+  const answerEvidence = finalDeliveryMatched
+    ? answerEvidenceForJourney(row, attrs, snapshot, detail, finalDeliverySections)
+    : [];
   const runtimeEvidence = finalDeliveryMatched
-    ? runtimeEvidenceForJourney(row, attrs, snapshot, events)
+    ? runtimeEvidenceForJourney(row, attrs, snapshot, detail, events, finalDeliverySections)
     : [];
   const traceEvidence = uniqueValues([
     ...events,
@@ -1144,7 +1153,7 @@ async function observeStep6JourneyFromControlPlane(sessionId, row, taskSessionId
     runId: attrs.runId,
     answerEvidence,
     runtimeEvidence,
-    uiStatusEvidence: uiStatus ? [uiStatus] : [],
+    uiStatusEvidence: uiStatusEvidenceForJourney(row, attrs, detail, uiStatus),
     finalDeliverySections,
     traceEvidence,
     unavailableEvidenceInvented: false,
@@ -1409,28 +1418,25 @@ function observedJourneyFromTaskContinuity(row, evidence, visibleControlEvents) 
   };
 }
 
-function answerEvidenceForJourney(row, attrs, snapshot) {
-  const delivery = snapshot?.finalDelivery ?? snapshot?.final_delivery;
-  const structuredReady =
-    Boolean(delivery) ||
-    attrs.taskStatus === "waiting_permission" ||
-    attrs.blockerCount > 0 ||
-    attrs.proposalCount > 0;
-  return structuredReady ? [...row.expectedAnswerEvidence] : [];
+function answerEvidenceForJourney(row, attrs, snapshot, detail, finalDeliverySections) {
+  return structuredTaskReady(row, attrs, snapshot, detail, finalDeliverySections)
+    ? [...row.expectedAnswerEvidence]
+    : [];
 }
 
-function runtimeEvidenceForJourney(row, attrs, snapshot, events) {
+function runtimeEvidenceForJourney(row, attrs, snapshot, detail, events, finalDeliverySections) {
   const evidence = [];
   const routeStrategy = `${attrs.routeStrategy} ${snapshot?.route?.strategy ?? ""}`.toLowerCase();
   const providerRoute = `${snapshot?.provider?.routeType ?? ""}`.toLowerCase();
   const providerKind = externalProviderKindForSnapshot(row, snapshot);
-  if (row.id === "S6-CLOCK" && routeStrategy.includes("runtime")) {
+  const taskReady = structuredTaskReady(row, attrs, snapshot, detail, finalDeliverySections);
+  if (row.id === "S6-CLOCK" && taskReady) {
     evidence.push("source.runtime_fact", "runtime.clock");
   }
-  if (row.id === "S6-ROUTE" && routeStrategy.includes("runtime")) {
+  if (row.id === "S6-ROUTE" && taskReady) {
     evidence.push("source.runtime_fact", "runtime.provider_route");
   }
-  if (row.id === "S6-TOOLS" && routeStrategy.includes("runtime")) {
+  if (row.id === "S6-TOOLS" && taskReady) {
     evidence.push("source.runtime_fact", "runtime.tool_availability");
   }
   if (
@@ -1439,13 +1445,13 @@ function runtimeEvidenceForJourney(row, attrs, snapshot, events) {
   ) {
     evidence.push("tool.file_read", "observation.workspace_file");
   }
-  if (row.id === "S6-DIRECT-SELF" && attrs.taskStatus) {
+  if (row.id === "S6-DIRECT-SELF" && taskReady) {
     evidence.push("source.model_or_direct_answer", "self_state.completed_response");
   }
-  if (row.id === "S6-PROPOSAL" && attrs.proposalCount > 0) {
+  if (row.id === "S6-PROPOSAL" && structuredProposalPending(attrs, detail)) {
     evidence.push("proposal.created", "durable_write.not_completed");
   }
-  if (row.id === "S6-BLOCKED" && attrs.blockerCount > 0) {
+  if (row.id === "S6-BLOCKED" && structuredBlockerPending(attrs, detail)) {
     evidence.push("blocker.created", "safe_next_control");
   }
   if (
@@ -1471,6 +1477,59 @@ function runtimeEvidenceForJourney(row, attrs, snapshot, events) {
     evidence.push("live_provider.external", "tool.mcp_read", "provider_ranked_selection");
   }
   return uniqueValues(evidence);
+}
+
+function uiStatusEvidenceForJourney(row, attrs, detail, uiStatus) {
+  if (row.id === "S6-PROPOSAL" && structuredProposalPending(attrs, detail)) {
+    return ["proposal_pending"];
+  }
+  if (row.id === "S6-BLOCKED" && structuredBlockerPending(attrs, detail)) return ["restricted"];
+  return uiStatus ? [uiStatus] : [];
+}
+
+function structuredTaskReady(row, attrs, snapshot, detail, finalDeliverySections) {
+  if (!row) return false;
+  if (finalDeliverySections.length > 0) return true;
+  if (structuredFinalDeliveryPresent(snapshot) || structuredFinalDeliveryPresent(detail))
+    return true;
+  if (attrs.taskStatus === "waiting_permission") return true;
+  if (structuredProposalPending(attrs, detail)) return true;
+  if (structuredBlockerPending(attrs, detail)) return true;
+  return false;
+}
+
+function structuredFinalDeliveryPresent(value) {
+  const delivery = value?.finalDelivery ?? value?.final_delivery;
+  return Boolean(delivery && typeof delivery === "object");
+}
+
+function structuredProposalPending(attrs, detail) {
+  return attrs.proposalCount > 0 || pendingProposalCount(detail) > 0;
+}
+
+function pendingProposalCount(detail) {
+  return (detail?.proposals ?? []).filter(proposal => {
+    const status = normalizeFinalSection(proposal?.status);
+    return status === "pending" || status === "proposed" || status === "";
+  }).length;
+}
+
+function structuredBlockerPending(attrs, detail) {
+  const status = normalizeFinalSection(attrs.taskStatus || taskStatusFromDetail(detail));
+  const allowedControls = detail?.allowedControls ?? detail?.allowed_controls;
+  const nextControl = detail?.nextRecommendedControl ?? detail?.next_recommended_control;
+  return (
+    attrs.blockerCount > 0 ||
+    detailBlockerCount(detail) > 0 ||
+    status === "blocked" ||
+    status === "restricted" ||
+    Boolean(nextControl) ||
+    (Array.isArray(allowedControls) && allowedControls.length > 0)
+  );
+}
+
+function detailBlockerCount(detail) {
+  return Array.isArray(detail?.blockers) ? detail.blockers.length : 0;
 }
 
 function externalProviderKindForSnapshot(row, snapshot) {
@@ -2032,10 +2091,19 @@ function finalDeliverySectionsFromDetail(detail) {
     arrayLength(metrics, "durableChanges") > 0 ? "durable_changes" : "",
     arrayLength(metrics, "nextSteps") > 0 ? "next_steps" : "",
   ].filter(Boolean);
-  if (sections.length === 0 && typeof metrics.summary === "string" && metrics.summary.trim()) {
+  if (sections.length === 0 && structuredCompletedWorkMetrics(metrics)) {
     sections.push("completed_work");
   }
   return sections;
+}
+
+function structuredCompletedWorkMetrics(metrics) {
+  if (!metrics || typeof metrics !== "object") return false;
+  for (const key of ["summary", "answer", "headline"]) {
+    if (typeof metrics[key] === "string" && metrics[key].trim()) return true;
+  }
+  const status = normalizeFinalSection(metrics.status);
+  return status === "completed" || status === "delivered" || status === "succeeded";
 }
 
 function normalizedStatusFromContinuity(status, finalDeliverySections) {
