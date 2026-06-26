@@ -2681,6 +2681,41 @@ export default function ChatPage({
     ]
   );
 
+  const handleAcceptTaskContinuityProposal = useCallback(
+    async (proposalId: string) => {
+      const taskSessionId = taskContinuityDetail?.taskSession.id;
+      const proposal = taskContinuityDetail?.proposals.find(item => item.id === proposalId);
+      if (!taskSessionId || taskContinuityBusy) return;
+      if (proposal?.proposalType !== "tool_permission") {
+        setTaskContinuityError("Accept proposal is only available for ToolPermission task resume.");
+        return;
+      }
+      setTaskContinuityBusy(true);
+      setTaskContinuityError(null);
+      try {
+        await acceptProposal(proposalId);
+        const state = await resumeMainChatAgentTask(taskSessionId);
+        setCurrentAgentTaskState(state);
+        setCurrentExecutionTranscript(state.transcript ?? []);
+        await loadTaskContinuityDetail(taskSessionId);
+        await loadTaskContinuityList();
+        await refreshPendingProposals();
+      } catch (e) {
+        setTaskContinuityError(`Accept proposal failed: ${readablePreviewError(e)}`);
+      } finally {
+        setTaskContinuityBusy(false);
+      }
+    },
+    [
+      loadTaskContinuityDetail,
+      loadTaskContinuityList,
+      refreshPendingProposals,
+      taskContinuityBusy,
+      taskContinuityDetail?.proposals,
+      taskContinuityDetail?.taskSession.id,
+    ]
+  );
+
   const handleDeferTaskContinuityProposal = useCallback(
     async (proposalId: string) => {
       const taskSessionId = taskContinuityDetail?.taskSession.id;
@@ -5304,6 +5339,18 @@ export default function ChatPage({
                               <div className="truncate text-stone-600">{proposal.reason}</div>
                               {proposal.status === "pending" && (
                                 <div className="flex flex-wrap gap-1">
+                                  {proposal.proposalType === "tool_permission" && (
+                                    <button
+                                      type="button"
+                                      disabled={taskContinuityBusy}
+                                      onClick={() =>
+                                        handleAcceptTaskContinuityProposal(proposal.id)
+                                      }
+                                      className="inline-flex min-h-6 items-center rounded-md border border-stone-200 bg-white px-2 font-medium text-stone-800 hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-40"
+                                    >
+                                      Accept proposal
+                                    </button>
+                                  )}
                                   <button
                                     type="button"
                                     disabled={taskContinuityBusy}

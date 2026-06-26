@@ -8,6 +8,10 @@ use crate::main_chat_final_gate::{
 use crate::main_chat_live_provider_harness::{
     run_main_chat_live_provider_eval_harness, MainChatLiveProviderEvalHarnessInput,
 };
+use crate::main_chat_step6_product_acceptance::{
+    build_step6_product_acceptance_report_for_tests, clean_step6_final_gate_summary_for_tests,
+    step6_browser_report_for_tests, step6_observed_journey_for_tests,
+};
 use std::sync::Arc;
 
 #[test]
@@ -503,6 +507,98 @@ fn main_chat_final_acceptance_gate_accepts_complete_live_evidence_overlaying_loc
     assert!(report.command_surface_gate_ready);
     assert!(report.live_provider_gate_ready);
     assert!(!report.direct_writes_executed);
+}
+
+#[test]
+fn main_chat_final_acceptance_step6_report_accepts_full_structured_product_evidence() {
+    let observed = [
+        "S6-CLOCK",
+        "S6-ROUTE",
+        "S6-TOOLS",
+        "S6-FILE",
+        "S6-DIRECT-SELF",
+        "S6-PROPOSAL",
+        "S6-BLOCKED",
+        "S6-PERMISSION",
+        "S6-LIVE-WEB",
+        "S6-LIVE-MCP",
+        "S6-RECOVERY",
+    ]
+    .into_iter()
+    .map(step6_observed_journey_for_tests)
+    .collect::<Vec<_>>();
+    let report = build_step6_product_acceptance_report_for_tests(
+        Some(step6_browser_report_for_tests(observed)),
+        clean_step6_final_gate_summary_for_tests(),
+    );
+
+    assert!(report.overall_ready, "{:?}", report.blockers);
+    assert!(report.local_deterministic_ready);
+    assert!(report.external_live_ready);
+    assert_eq!(report.passed_journey_count, 11);
+    assert_eq!(report.blocked_live_journey_count, 0);
+    assert!(report.no_silent_durable_write);
+    assert!(report.no_hidden_legacy_fallback);
+    assert!(report.no_local_evidence_credited_as_external_live);
+    assert!(report.no_invented_unavailable_evidence);
+    assert!(report.ui_status_from_structured_evidence);
+}
+
+#[test]
+fn main_chat_final_acceptance_step6_report_rejects_blocked_or_fake_live_credit() {
+    let mut observed = [
+        "S6-CLOCK",
+        "S6-ROUTE",
+        "S6-TOOLS",
+        "S6-FILE",
+        "S6-DIRECT-SELF",
+        "S6-PROPOSAL",
+        "S6-BLOCKED",
+        "S6-PERMISSION",
+        "S6-LIVE-WEB",
+        "S6-LIVE-MCP",
+        "S6-RECOVERY",
+    ]
+    .into_iter()
+    .map(step6_observed_journey_for_tests)
+    .collect::<Vec<_>>();
+    let live_web = observed
+        .iter_mut()
+        .find(|row| row.journey_id == "S6-LIVE-WEB")
+        .expect("S6-LIVE-WEB");
+    live_web.external_live_status = "blocked_live_evidence".into();
+    live_web.external_live_provider_kind = None;
+    live_web.observed_via = "blocked_live_evidence_report".into();
+    live_web.task_session_id.clear();
+    live_web.run_id.clear();
+    live_web.blockers = vec!["explicit_live_eval_required".into()];
+
+    let live_mcp = observed
+        .iter_mut()
+        .find(|row| row.journey_id == "S6-LIVE-MCP")
+        .expect("S6-LIVE-MCP");
+    live_mcp.external_live_provider_kind = Some("local_test_http".into());
+    live_mcp.local_fixture_credited_as_external_live = true;
+
+    let report = build_step6_product_acceptance_report_for_tests(
+        Some(step6_browser_report_for_tests(observed)),
+        clean_step6_final_gate_summary_for_tests(),
+    );
+
+    assert!(!report.overall_ready);
+    assert!(report.local_deterministic_ready);
+    assert!(!report.external_live_ready);
+    assert_eq!(report.blocked_live_journey_count, 1);
+    assert!(!report.no_local_evidence_credited_as_external_live);
+    assert!(report
+        .blockers
+        .contains(&"step6_external_live_journeys_not_all_passed".to_string()));
+    assert!(report
+        .blockers
+        .contains(&"step6_local_fixture_credited_as_live:S6-LIVE-MCP".to_string()));
+    assert!(report
+        .blockers
+        .contains(&"step6_external_provider_missing:S6-LIVE-MCP".to_string()));
 }
 
 #[test]

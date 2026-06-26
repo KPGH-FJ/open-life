@@ -1638,6 +1638,77 @@ export interface MainChatAgentStage1DogfoodReport {
   acceptedResidualRisks: string[];
 }
 
+export interface MainChatStep6JourneyReport {
+  journeyId: string;
+  status: string;
+  credited: boolean;
+  blockedLiveEvidenceReport: boolean;
+  evidenceSource: string;
+  answerEvidenceCount: number;
+  runtimeEvidenceCount: number;
+  uiStateCount: number;
+  finalDeliverySectionCount: number;
+  blockers: string[];
+}
+
+export interface MainChatStep6FinalGateSummary {
+  collected: boolean;
+  finalAcceptanceReady: boolean;
+  finalAcceptanceBlockers: string[];
+  commandSurfaceLegacyFallbackCount: number;
+  commandSurfaceSilentWriteCount: number;
+  liveProviderAttempted: boolean;
+  liveProviderReadyCount: number;
+  liveProviderWebCredit: boolean;
+  liveProviderMcpCredit: boolean;
+  liveProviderBlockers: string[];
+  blockers: string[];
+}
+
+export interface MainChatStep6ProductAcceptanceReport {
+  reportKind: "main_chat_step6_product_acceptance_gate";
+  schemaVersion: "step6-product-acceptance-v1";
+  overallReady: boolean;
+  localDeterministicReady: boolean;
+  externalLiveReady: boolean;
+  browserE2eEnvironmentReady: boolean;
+  browserE2eReportPath?: string | null;
+  requiredJourneyCount: number;
+  localJourneyCount: number;
+  externalLiveJourneyCount: number;
+  passedJourneyCount: number;
+  blockedLiveJourneyCount: number;
+  failedJourneys: string[];
+  noSilentDurableWrite: boolean;
+  noHiddenLegacyFallback: boolean;
+  noLocalFixtureMarkedExternalLive: boolean;
+  noLocalEvidenceCreditedAsExternalLive: boolean;
+  noInventedUnavailableEvidence: boolean;
+  uiStatusFromStructuredEvidence: boolean;
+  finalGateSummary: MainChatStep6FinalGateSummary;
+  journeys: MainChatStep6JourneyReport[];
+  blockers: string[];
+}
+
+export interface MainChatStep6LiveProviderEvalStatePrepReport {
+  reportKind: "main_chat_step6_live_provider_eval_state_prep";
+  configured: boolean;
+  ready: boolean;
+  debugBuild: boolean;
+  explicitLiveEvalRequested: boolean;
+  provider: string;
+  model: string;
+  baseConfigured: boolean;
+  apiKeyPresent: boolean;
+  networkEnabled: boolean;
+  providerEndpointKind: string;
+  preflightReady: boolean;
+  preflightBlockers: string[];
+  appConfigPersisted: boolean;
+  directWritesExecuted: boolean;
+  blockers: string[];
+}
+
 export async function listMainChatSkills(sessionId?: string): Promise<MainChatSkillSummary[]> {
   return safeInvoke<MainChatSkillSummary[]>("list_main_chat_skills", {
     ...optionalDualArg("sessionId", "session_id", sessionId),
@@ -1862,6 +1933,18 @@ export async function validateMainChatAgentStage2ManualDogfoodArtifact(): Promis
 
 export async function runMainChatAgentStage1DogfoodGate(): Promise<MainChatAgentStage1DogfoodReport> {
   return safeInvoke<MainChatAgentStage1DogfoodReport>("run_main_chat_agent_stage1_dogfood_gate");
+}
+
+export async function runMainChatAgentStep6ProductAcceptanceGate(): Promise<MainChatStep6ProductAcceptanceReport> {
+  return safeInvoke<MainChatStep6ProductAcceptanceReport>(
+    "run_main_chat_agent_step6_product_acceptance_gate"
+  );
+}
+
+export async function prepareMainChatStep6LiveProviderEvalState(): Promise<MainChatStep6LiveProviderEvalStatePrepReport> {
+  return safeInvoke<MainChatStep6LiveProviderEvalStatePrepReport>(
+    "prepare_main_chat_step6_live_provider_eval_state"
+  );
 }
 
 export async function createPlanExecuteSession(

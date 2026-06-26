@@ -2002,6 +2002,41 @@ pub async fn validate_main_chat_agent_stage2_manual_dogfood_artifact(
 }
 
 #[tauri::command]
+pub async fn run_main_chat_agent_step6_product_acceptance_gate(
+    state: State<'_, Arc<AppState>>,
+) -> Result<crate::main_chat_step6_product_acceptance::MainChatStep6ProductAcceptanceReport, String>
+{
+    let state = state.inner().clone();
+    let runtime_handle = tokio::runtime::Handle::current();
+    std::thread::Builder::new()
+        .name("step6-product-acceptance-gate".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            runtime_handle.block_on(
+                crate::main_chat_step6_product_acceptance::run_main_chat_step6_product_acceptance_report(
+                    &state,
+                ),
+            )
+        })
+        .map_err(|err| format!("spawn step6 product acceptance gate worker: {err}"))?
+        .join()
+        .map_err(|_| "step6 product acceptance gate worker panicked".to_string())?
+}
+
+#[tauri::command]
+pub async fn prepare_main_chat_step6_live_provider_eval_state(
+    state: State<'_, Arc<AppState>>,
+) -> Result<
+    crate::main_chat_step6_product_acceptance::MainChatStep6LiveProviderEvalStatePrepReport,
+    String,
+> {
+    crate::main_chat_step6_product_acceptance::prepare_main_chat_step6_live_provider_eval_state_with_state(
+        &state.inner().clone(),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn run_main_chat_agent_stage1_dogfood_gate(
     _state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {
