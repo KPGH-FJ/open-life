@@ -13,14 +13,31 @@ function formatTimingMs(ms?: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
+function sanitizeTraceText(value: string, maxLength: number): string {
+  const cleaned = value
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .replace(/\/Users\/[^\s]+/g, "[workspace path]")
+    .replace(/[A-Za-z]:\\[^\s]+/g, "[workspace path]")
+    .trim()
+    .slice(0, maxLength);
+  if (cleaned.startsWith("/") || /^[A-Za-z]:[\\/]/.test(cleaned)) {
+    return "workspace item";
+  }
+  return cleaned;
+}
+
 function boundedTraceString(value: unknown): string {
   if (typeof value !== "string" && typeof value !== "boolean" && typeof value !== "number") {
     return "";
   }
-  return String(value)
-    .replace(/[\u0000-\u001f\u007f]/g, "")
-    .trim()
-    .slice(0, 140);
+  return sanitizeTraceText(String(value), 140);
+}
+
+function boundedTraceText(value: unknown): string {
+  if (typeof value !== "string" && typeof value !== "boolean" && typeof value !== "number") {
+    return "";
+  }
+  return sanitizeTraceText(String(value), 900);
 }
 
 function traceStringArray(value: unknown): string[] {
@@ -201,39 +218,45 @@ function LayerBlock({
 }
 
 export default function ReasoningTracePanel({ trace, show, onToggle }: Props) {
-  const meaningText =
+  const meaningText = boundedTraceText(
     trace.meaning_result?.text ??
-    (typeof trace.meaning_result === "string" ? trace.meaning_result : "");
-  const strategyText =
+      (typeof trace.meaning_result === "string" ? trace.meaning_result : "")
+  );
+  const strategyText = boundedTraceText(
     trace.strategy_result?.text ??
-    (typeof trace.strategy_result === "string" ? trace.strategy_result : "");
-  const generationText =
+      (typeof trace.strategy_result === "string" ? trace.strategy_result : "")
+  );
+  const generationText = boundedTraceText(
     trace.generation_result?.text ??
-    (typeof trace.generation_result === "string" ? trace.generation_result : "");
-  const alignedValues = trace.meaning_result?.aligned_values ?? [];
-  const alignedGoals = trace.strategy_result?.aligned_goals ?? [];
-  const planSteps = trace.strategy_result?.plan_steps ?? [];
-  const stableSteps = trace.stable_steps ?? [];
+      (typeof trace.generation_result === "string" ? trace.generation_result : "")
+  );
+  const outputText = boundedTraceText(trace.output);
+  const alignedValues = traceStringArray(trace.meaning_result?.aligned_values);
+  const alignedGoals = traceStringArray(trace.strategy_result?.aligned_goals);
+  const planSteps = traceStringArray(trace.strategy_result?.plan_steps);
+  const stableSteps = traceStringArray(trace.stable_steps);
   const needsTools = trace.strategy_result?.needs_tools;
-  const toolPlan = trace.tool_plan ?? trace.strategy_result?.suggested_tools ?? [];
-  const safetyCheckWarnings = trace.safety_check_result?.warnings ?? [];
+  const toolPlan = traceStringArray(trace.tool_plan ?? trace.strategy_result?.suggested_tools);
+  const safetyCheckWarnings = traceStringArray(trace.safety_check_result?.warnings);
+  const errorLabels = traceStringArray(trace.errors);
   const runtimeRouteEvidenceRows = runtimeRouteRows(trace.generation_result);
   const runtimeToolEvidenceRows = runtimeToolRows(trace.generation_result);
   const runtimeSelfStateEvidenceRows = runtimeSelfStateRows(trace.generation_result);
   const sourceChip = boundedTraceString(trace.generation_result?.uiPrimarySourceChip);
   const uiStatus = boundedTraceString(trace.generation_result?.uiStatus);
+  const hasHiddenInput = typeof trace.input === "string" && trace.input.trim().length > 0;
   const hasContent =
-    trace.input ||
+    hasHiddenInput ||
     meaningText ||
     strategyText ||
     generationText ||
     runtimeRouteEvidenceRows.length > 0 ||
     runtimeToolEvidenceRows.length > 0 ||
     runtimeSelfStateEvidenceRows.length > 0 ||
-    trace.output ||
+    outputText ||
     toolPlan.length > 0 ||
     safetyCheckWarnings.length > 0 ||
-    (trace.errors && trace.errors.length > 0);
+    errorLabels.length > 0;
 
   const totalMs = trace.layer_timings_ms
     ? Object.values(trace.layer_timings_ms).reduce((a, b) => a + (b || 0), 0)
@@ -283,9 +306,9 @@ export default function ReasoningTracePanel({ trace, show, onToggle }: Props) {
             有 {safetyCheckWarnings.length} 条不确定性提醒
           </span>
         )}
-        {trace.errors && trace.errors.length > 0 && (
+        {errorLabels.length > 0 && (
           <span className="rounded-full bg-red-50 px-2.5 py-1 text-[10px] font-medium text-red-700 border border-red-100">
-            有 {trace.errors.length} 条错误
+            有 {errorLabels.length} 条错误
           </span>
         )}
       </div>
@@ -300,14 +323,14 @@ export default function ReasoningTracePanel({ trace, show, onToggle }: Props) {
                   思考你问题的过程。它不代表绝对判断，而是让你知道回答从哪里来、有哪些不确定性。
                 </p>
               </div>
-              {trace.input && (
+              {hasHiddenInput && (
                 <div className="rounded-lg border border-gray-200 bg-white/70 p-3">
                   <div className="flex items-center gap-2 font-medium text-gray-700">
                     <Terminal size={14} />
-                    输入
+                    输入已隐藏
                   </div>
                   <div className="mt-2 whitespace-pre-wrap text-xs leading-relaxed text-gray-800">
-                    {trace.input}
+                    原始输入不在 trace 中展示；请以结构化状态和证据字段为准。
                   </div>
                 </div>
               )}
@@ -455,14 +478,14 @@ export default function ReasoningTracePanel({ trace, show, onToggle }: Props) {
                 timingKey="Execution"
                 timings={trace.layer_timings_ms}
               />
-              {trace.output && (
+              {outputText && (
                 <div className="rounded-lg border border-emerald-200 bg-emerald-50/60 p-3">
                   <div className="flex items-center gap-2 font-medium text-emerald-800">
                     <Terminal size={14} />
                     最终输出
                   </div>
                   <div className="mt-2 whitespace-pre-wrap text-xs leading-relaxed text-emerald-900">
-                    {trace.output}
+                    {outputText}
                   </div>
                 </div>
               )}
@@ -479,14 +502,14 @@ export default function ReasoningTracePanel({ trace, show, onToggle }: Props) {
                   </ul>
                 </div>
               )}
-              {trace.errors && trace.errors.length > 0 && (
+              {errorLabels.length > 0 && (
                 <div className="rounded-lg border border-red-200 bg-red-50/70 p-3">
                   <div className="flex items-center gap-2 font-semibold text-red-700">
                     <AlertCircle size={14} />
                     错误
                   </div>
                   <ul className="mt-2 list-disc pl-4 text-red-700">
-                    {trace.errors.map((e, i) => (
+                    {errorLabels.map((e, i) => (
                       <li key={i}>{e}</li>
                     ))}
                   </ul>

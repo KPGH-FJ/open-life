@@ -8,6 +8,33 @@ function renderTrace(trace: ReasoningTrace, show = true) {
 }
 
 describe("ReasoningTracePanel", () => {
+  it("keeps expanded trace bounded by hiding raw input and workspace paths", () => {
+    renderTrace({
+      input: "RAW_PROMPT_SHOULD_NOT_RENDER /Users/tw/Desktop/open-life/AGENTS.md",
+      generation_result: {
+        sourceType: "runtime_fact",
+        uiPrimarySourceChip: "任务\n状态",
+        uiStatus: "blocked\t",
+        taskStatus: "blocked",
+        lastActionSummary: "read /Users/tw/Desktop/open-life/private.txt\u0000 completed",
+        observationCount: 1,
+        runtimeFactTraceGap: true,
+        traceGapCode: "task_session_missing\n",
+      },
+      errors: ["failed /Users/tw/Desktop/open-life/secrets.json\u0000"],
+    });
+
+    expect(screen.getByText("输入已隐藏")).toBeInTheDocument();
+    expect(screen.getByText(/原始输入不在 trace 中展示/)).toBeInTheDocument();
+    expect(screen.queryByText(/RAW_PROMPT_SHOULD_NOT_RENDER/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\/Users\/tw\/Desktop\/open-life/)).not.toBeInTheDocument();
+    expect(screen.getByText("来源：任务状态")).toBeInTheDocument();
+    expect(screen.getByText("状态：blocked")).toBeInTheDocument();
+    expect(screen.getByText(/read \[workspace path\] completed/)).toBeInTheDocument();
+    expect(screen.getByText(/failed \[workspace path\]/)).toBeInTheDocument();
+    expect(screen.getByText("task_session_missing")).toBeInTheDocument();
+  });
+
   it("renders provider route runtime fact labels without inferring from prose", () => {
     renderTrace({
       generation_result: {

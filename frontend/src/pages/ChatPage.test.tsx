@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, fireEvent, act } from "@testing-library/react";
 import { BrowserRouter, MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
-import ChatPage from "./ChatPage";
+import ChatPage, { buildMainChatAgentStatusView } from "./ChatPage";
 import ProposalReviewPage from "./ProposalReviewPage";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -149,6 +149,35 @@ describe("ChatPage", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.clearAllMocks();
+  });
+
+  it("maps structured agent evidence to the default product status vocabulary", () => {
+    const viewFor = (
+      generation: Record<string, unknown>,
+      overrides: Partial<Parameters<typeof buildMainChatAgentStatusView>[0]> = {}
+    ) =>
+      buildMainChatAgentStatusView({
+        reasoningTrace: { generation_result: generation },
+        taskState: null,
+        agentState: null,
+        pendingProposals: [],
+        sending: false,
+        canCancel: false,
+        ...overrides,
+      });
+
+    expect(viewFor({ completedResponse: true })?.status).toBe("completed");
+    expect(viewFor({}, { reasoningTrace: null, sending: true })?.status).toBe("running");
+    expect(viewFor({ taskStatus: "waiting_permission" })?.status).toBe("waiting_for_user");
+    expect(viewFor({ uiStatus: "restricted" })?.status).toBe("restricted");
+    expect(viewFor({ taskStatus: "blocked", blockerCodes: ["safe_read_failed"] })?.status).toBe(
+      "blocked"
+    );
+    expect(
+      viewFor({ runtimeFactTraceGap: true, traceGapCode: "task_session_missing" })?.status
+    ).toBe("trace_gap");
+    expect(viewFor({ pendingProposalCount: 1 })?.status).toBe("proposal_pending");
+    expect(viewFor({ pendingPermissionCount: 1 })?.status).toBe("permission_pending");
   });
 
   it("renders chat page with session list", async () => {
@@ -3187,6 +3216,343 @@ describe("ChatPage", () => {
     expect(screen.getByRole("button", { name: "Resume task" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Retry failed action" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Cancel task" })).toBeEnabled();
+  });
+
+  it("shows default agent status and opens the bounded structured trace without diagnostics", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Did that finish?" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+
+    const streamCall = await waitFor(() =>
+      vi.mocked(invoke).mock.calls.find(([cmd]) => cmd === "start_stream_message")
+    );
+    const eventSessionId = (streamCall?.[1] as any)?.sessionId ?? "session-1";
+    const doneHandler = listeners.get("stream-message-done");
+    expect(doneHandler).toBeDefined();
+
+    await act(async () => {
+      await doneHandler?.({
+        payload: {
+          session_id: eventSessionId,
+          run_id: "run-default-status-complete",
+          reply: "PROSE_PERMISSION_PENDING_SHOULD_NOT_CONTROL_STATUS",
+          reasoning_trace: {
+            generation_result: {
+              text: "Trace text is not the task-state source.",
+              sourceType: "runtime_fact",
+              uiPrimarySourceChip: "Local runtime",
+              uiStatus: "completed",
+              completedResponse: true,
+              finalDeliveryEvidence: true,
+              taskStatus: "completed",
+              safeNextControls: [],
+            },
+          },
+          tool_calls: [],
+          agent_ingress: {
+            requestId: "req-default-status-complete",
+            sourceSessionId: "session-1",
+            taskKind: "conversation",
+            selectedStrategy: "direct_answer",
+            confidence: 0.95,
+            reasonSummary: "Structured completion evidence.",
+            fallbackEligible: false,
+            privacyRisk: {
+              riskLevel: "low",
+              privacyClass: "conversation",
+              policyReasonCode: "direct_answer",
+              localOnlyRequired: false,
+              writeLike: false,
+              externalWriteLike: false,
+            },
+            agentTaskSessionId: "task-default-status-complete",
+          },
+          execution_transcript: [],
+          legacy_fallback_used: false,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    const status = await screen.findByTestId("main-chat-agent-status");
+    expect(status).toHaveAttribute("data-agent-product-status", "completed");
+    expect(screen.getByText("Completed")).toBeInTheDocument();
+    expect(screen.getByText("Local runtime")).toBeInTheDocument();
+    expect(screen.queryByText("Diagnostic task shell")).not.toBeInTheDocument();
+    expect(screen.queryByText("为什么这样回答")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show structured trace" }));
+    expect(await screen.findByText("为什么这样回答")).toBeInTheDocument();
+    expect(screen.getByText("状态：completed")).toBeInTheDocument();
+    expect(screen.getByText("任务状态证据")).toBeInTheDocument();
+  });
+
+  it("shows only backend-allowed default status actions for pending proposal and permission", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    const taskState = {
+      session: {
+        id: "task-default-actions",
+        chatSessionId: "session-1",
+        userGoal: "Review permission before continuing",
+        selectedStrategy: "react_tool_execution",
+        status: "waiting_permission",
+        currentPlanSummary: "Wait for review, then continue the safe read.",
+        actionQueueIds: ["action-default-failed", "action-default-permission"],
+        pendingBlockers: ["tool_permission_required"],
+        contextSnapshotRefs: ["ctx-default-actions"],
+        createdAt: "2026-06-26T00:00:00.000Z",
+        updatedAt: "2026-06-26T00:00:01.000Z",
+      },
+      actions: [
+        {
+          id: "action-default-failed",
+          sessionId: "task-default-actions",
+          action: { actionType: "file.read", description: "Retryable governed read." },
+          policy: {
+            level: "low",
+            reasonCode: "read_only_action_allowed",
+            executionAllowed: true,
+            requiresConfirmation: false,
+            requiresProposal: false,
+            requiresBlocker: false,
+            silentWriteAllowed: false,
+          },
+          status: "failed",
+          attempts: 1,
+          createdAt: "2026-06-26T00:00:00.000Z",
+          updatedAt: "2026-06-26T00:00:01.000Z",
+        },
+        {
+          id: "action-default-permission",
+          sessionId: "task-default-actions",
+          action: { actionType: "mcp_tool", description: "Permission-gated read." },
+          policy: {
+            level: "medium",
+            reasonCode: "tool_permission_required",
+            executionAllowed: false,
+            requiresConfirmation: true,
+            requiresProposal: true,
+            requiresBlocker: true,
+            silentWriteAllowed: false,
+          },
+          status: "pending_permission",
+          attempts: 0,
+          createdAt: "2026-06-26T00:00:00.000Z",
+          updatedAt: "2026-06-26T00:00:01.000Z",
+        },
+      ],
+      transcript: [],
+      pendingApprovalCount: 1,
+      activeToolCount: 0,
+      canResume: true,
+      canCancel: true,
+      canRetry: true,
+    };
+    const taskDetail = {
+      taskSession: taskState.session,
+      actions: taskState.actions,
+      transcript: [],
+      proposals: [],
+      blockers: ["tool_permission_required"],
+      finalDelivery: null,
+      continuityDiagnostics: {
+        staleContext: true,
+        missingActionEvidence: false,
+        permissionScopeMismatch: false,
+        terminalNoResume: false,
+        providerUnavailable: false,
+        toolUnavailable: false,
+        requiresUserDecision: true,
+        selectedSkillContextDigestMismatch: false,
+        planRevisionMismatch: false,
+        reasonCodes: ["stale_context", "requires_user_decision"],
+        automaticReplayAllowed: false,
+      },
+      allowedControls: ["refresh_context"],
+      nextRecommendedControl: "refresh_context",
+      lastSafeResumePoint: null,
+      contextDigest: "bytes:12 hash:sha256:context",
+      selectedSkillDigest: null,
+      toolManifestDigest: "bytes:12 hash:sha256:tools",
+    };
+
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (
+        cmd === "get_main_chat_agent_task_state" ||
+        cmd === "resume_main_chat_agent_task" ||
+        cmd === "retry_main_chat_agent_action" ||
+        cmd === "cancel_main_chat_agent_task"
+      ) {
+        return Promise.resolve(taskState);
+      }
+      if (cmd === "refresh_main_chat_agent_task_context") {
+        return Promise.resolve(taskDetail);
+      }
+      if (cmd === "get_pending_proposals" || cmd === "list_proposals") {
+        return Promise.resolve([
+          {
+            id: "proposal-default-tool",
+            runId: "run-default-actions",
+            proposalType: "tool_permission",
+            source: "chat_conversation",
+            sourceDetail: "task-default-actions",
+            affectedPath: "tools.permissions.file.read",
+            before: "",
+            after: { permission: "allow_once" },
+            reason: "Review the read permission.",
+            confidence: 0.9,
+            riskLevel: "medium",
+            status: "pending",
+            createdAt: "2026-06-26T00:00:00.000Z",
+          },
+          {
+            id: "proposal-default-memory",
+            runId: "run-default-actions",
+            proposalType: "memory_write",
+            source: "chat_conversation",
+            sourceDetail: "task-default-actions",
+            affectedPath: "memory.reviewed.preference",
+            before: "",
+            after: { preference: "quiet planning" },
+            reason: "Review the memory proposal.",
+            confidence: 0.8,
+            riskLevel: "low",
+            status: "pending",
+            createdAt: "2026-06-26T00:00:00.000Z",
+          },
+        ]);
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Continue after approval" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+
+    const streamCall = await waitFor(() =>
+      vi.mocked(invoke).mock.calls.find(([cmd]) => cmd === "start_stream_message")
+    );
+    const eventSessionId = (streamCall?.[1] as any)?.sessionId ?? "session-1";
+    const doneHandler = listeners.get("stream-message-done");
+    expect(doneHandler).toBeDefined();
+
+    await act(async () => {
+      await doneHandler?.({
+        payload: {
+          session_id: eventSessionId,
+          run_id: "run-default-actions",
+          reply: "Waiting for review.",
+          reasoning_trace: {
+            generation_result: {
+              sourceType: "runtime_fact",
+              uiPrimarySourceChip: "任务状态",
+              uiStatus: "waiting_for_user",
+              taskStatus: "waiting_permission",
+              pendingPermissionCount: 1,
+              pendingProposalCount: 2,
+              safeNextControls: ["refresh_context"],
+              blockerCodes: ["tool_permission_required"],
+            },
+          },
+          tool_calls: [],
+          agent_ingress: {
+            requestId: "req-default-actions",
+            sourceSessionId: "session-1",
+            taskKind: "conversation",
+            selectedStrategy: "react_tool_execution",
+            confidence: 0.9,
+            reasonSummary: "Permission and proposal review required.",
+            fallbackEligible: false,
+            privacyRisk: {
+              riskLevel: "medium",
+              privacyClass: "user_state",
+              policyReasonCode: "tool_permission_required",
+              localOnlyRequired: true,
+              writeLike: false,
+              externalWriteLike: false,
+            },
+            agentTaskSessionId: "task-default-actions",
+          },
+          execution_transcript: [],
+          legacy_fallback_used: false,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    const status = await screen.findByTestId("main-chat-agent-status");
+    expect(status).toHaveAttribute("data-agent-product-status", "permission_pending");
+    expect(screen.getByText("Permission pending")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Review proposal" })).toHaveAttribute(
+      "href",
+      "/review"
+    );
+    expect(screen.getByRole("link", { name: "Review permission" })).toHaveAttribute(
+      "href",
+      "/review"
+    );
+    expect(screen.getByRole("button", { name: "Resume current task" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Retry current action" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Cancel current task" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Refresh current task context" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh current task context" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "refresh_main_chat_agent_task_context",
+        expect.objectContaining({ taskSessionId: "task-default-actions" })
+      );
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Retry current action" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "retry_main_chat_agent_action",
+        expect.objectContaining({
+          taskSessionId: "task-default-actions",
+          actionId: "action-default-failed",
+        })
+      );
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Resume current task" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "resume_main_chat_agent_task",
+        expect.objectContaining({ taskSessionId: "task-default-actions" })
+      );
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel current task" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "cancel_main_chat_agent_task",
+        expect.objectContaining({ taskSessionId: "task-default-actions" })
+      );
+    });
   });
 
   it("carries proposal review approval back to the blocked main chat task", async () => {
