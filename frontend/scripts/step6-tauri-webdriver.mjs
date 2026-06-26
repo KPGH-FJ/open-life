@@ -1774,6 +1774,9 @@ function finalGateBlockedExternalLiveOnly(report) {
     "step6_external_live_journeys_not_all_passed",
     "step6_final_gate_live_provider_incomplete",
     "step6_final_acceptance_not_ready",
+    "runtime_eval_final_completion_not_ready",
+    "command_surface_final_completion_not_ready",
+    "provider_live_proposal_permission_not_executed",
   ]);
   const liveOnlyBlockers = (report.blockers ?? []).every(blocker => {
     const text = String(blocker ?? "");
