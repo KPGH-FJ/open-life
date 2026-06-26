@@ -5,8 +5,9 @@ use crate::main_chat_runtime_facts::{
     run_main_chat_runtime_facts_slice_c_tool_availability_report,
     run_main_chat_runtime_facts_slice_d_agent_self_state_report, MainChatAgentSelfStateIntent,
     MainChatProviderRouteIntent, MainChatRuntimeClockIntent, MainChatToolAvailabilityIntent,
-    RUNTIME_FACT_AGENT_SELF_STATE_GENERATION_PATH, RUNTIME_FACT_KEY_AGENT_DURABLE_CHANGE_STATUS,
-    RUNTIME_FACT_KEY_AGENT_LAST_ACTION_SUMMARY, RUNTIME_FACT_KEY_AGENT_TASK_STATUS,
+    RUNTIME_FACT_AGENT_SELF_STATE_GENERATION_PATH, RUNTIME_FACT_KEY_AGENT_BLOCKER_CODES,
+    RUNTIME_FACT_KEY_AGENT_DURABLE_CHANGE_STATUS, RUNTIME_FACT_KEY_AGENT_LAST_ACTION_SUMMARY,
+    RUNTIME_FACT_KEY_AGENT_PENDING_PERMISSION_COUNT, RUNTIME_FACT_KEY_AGENT_TASK_STATUS,
     RUNTIME_FACT_KEY_AGENT_TRACE_GAP, RUNTIME_FACT_KEY_DATE,
     RUNTIME_FACT_KEY_PROVIDER_CONFIGURED_DEFAULT_PROVIDER,
     RUNTIME_FACT_KEY_PROVIDER_CURRENT_MODEL_GENERATED, RUNTIME_FACT_KEY_PROVIDER_PLANNED_PROVIDER,
@@ -190,9 +191,30 @@ async fn main_chat_runtime_facts_provider_route_slice_b_covers_rf_07_to_rf_10() 
             .command_surface_proof
             .send_provider_route_preflight_blocker_path
     );
+    assert!(report.command_surface_proof.stream_provider_route_path);
+    assert!(
+        report
+            .command_surface_proof
+            .stream_provider_route_preflight_blocker_path
+    );
+    assert!(report
+        .command_surface_proof
+        .stream_deferred_blocker
+        .is_none());
     assert!(report.no_silent_write_proof);
 
     for scenario_id in ["RF-07", "RF-08", "RF-09", "RF-10"] {
+        for entry_point in ["send", "stream"] {
+            assert!(
+                report
+                    .scenario_evidence
+                    .iter()
+                    .any(|row| row.scenario_id == scenario_id
+                        && row.entry_point == entry_point
+                        && row.passed),
+                "missing {entry_point} evidence for {scenario_id}: {report:#?}"
+            );
+        }
         let row = report
             .scenario_evidence
             .iter()
@@ -381,9 +403,37 @@ async fn main_chat_runtime_facts_tool_availability_slice_c_covers_rf_11_to_rf_15
             .send_mcp_unknown_server_status_path
     );
     assert!(report.command_surface_proof.send_write_permission_path);
+    assert!(report.command_surface_proof.stream_tool_availability_path);
+    assert!(report.command_surface_proof.stream_web_policy_blocked_path);
+    assert!(
+        report
+            .command_surface_proof
+            .stream_mcp_no_safe_read_candidate_path
+    );
+    assert!(
+        report
+            .command_surface_proof
+            .stream_mcp_unknown_server_status_path
+    );
+    assert!(report.command_surface_proof.stream_write_permission_path);
+    assert!(report
+        .command_surface_proof
+        .stream_deferred_blocker
+        .is_none());
     assert!(report.no_silent_write_proof);
 
     for scenario_id in ["RF-11", "RF-12", "RF-13", "RF-14", "RF-15"] {
+        for entry_point in ["send", "stream"] {
+            assert!(
+                report
+                    .scenario_evidence
+                    .iter()
+                    .any(|row| row.scenario_id == scenario_id
+                        && row.entry_point == entry_point
+                        && row.passed),
+                "missing {entry_point} evidence for {scenario_id}: {report:#?}"
+            );
+        }
         let row = report
             .scenario_evidence
             .iter()
@@ -561,7 +611,7 @@ async fn main_chat_runtime_facts_tool_availability_slice_c_covers_rf_11_to_rf_15
 }
 
 #[tokio::test]
-async fn main_chat_runtime_facts_agent_self_state_slice_d_covers_rf_16_to_rf_19() {
+async fn main_chat_runtime_facts_agent_self_state_slice_d_covers_rf_16_to_rf_21() {
     let report = run_main_chat_runtime_facts_slice_d_agent_self_state_report().await;
 
     assert_eq!(report.report_kind, "main_chat_runtime_facts_slice");
@@ -572,8 +622,8 @@ async fn main_chat_runtime_facts_agent_self_state_slice_d_covers_rf_16_to_rf_19(
         "Slice D must not claim full Runtime Facts readiness"
     );
     assert!(report.ui_included);
-    assert_eq!(report.scenario_count, 4);
-    assert_eq!(report.passed_scenario_count, 4);
+    assert_eq!(report.scenario_count, 6);
+    assert_eq!(report.passed_scenario_count, 6);
     assert!(report.blockers.is_empty(), "{:?}", report.blockers);
     assert!(report.command_surface_proof.send_self_state_completion_path);
     assert!(
@@ -587,17 +637,57 @@ async fn main_chat_runtime_facts_agent_self_state_slice_d_covers_rf_16_to_rf_19(
             .send_self_state_observation_path
     );
     assert!(report.command_surface_proof.send_self_state_trace_gap_path);
+    assert!(report.command_surface_proof.send_self_state_blocked_path);
+    assert!(
+        report
+            .command_surface_proof
+            .send_self_state_pending_permission_path
+    );
+    assert!(
+        report
+            .command_surface_proof
+            .stream_self_state_completion_path
+    );
+    assert!(
+        report
+            .command_surface_proof
+            .stream_self_state_pending_proposal_path
+    );
+    assert!(
+        report
+            .command_surface_proof
+            .stream_self_state_observation_path
+    );
+    assert!(
+        report
+            .command_surface_proof
+            .stream_self_state_trace_gap_path
+    );
+    assert!(report.command_surface_proof.stream_self_state_blocked_path);
+    assert!(
+        report
+            .command_surface_proof
+            .stream_self_state_pending_permission_path
+    );
     assert!(report
-        .out_of_scope_scenario_ids
-        .iter()
-        .any(|id| id == "RF-20"));
-    assert!(report
-        .out_of_scope_scenario_ids
-        .iter()
-        .any(|id| id == "RF-21"));
+        .command_surface_proof
+        .stream_deferred_blocker
+        .is_none());
+    assert!(report.out_of_scope_scenario_ids.is_empty());
     assert!(report.no_silent_write_proof);
 
-    for scenario_id in ["RF-16", "RF-17", "RF-18", "RF-19"] {
+    for scenario_id in ["RF-16", "RF-17", "RF-18", "RF-19", "RF-20", "RF-21"] {
+        for entry_point in ["send", "stream"] {
+            assert!(
+                report
+                    .scenario_evidence
+                    .iter()
+                    .any(|row| row.scenario_id == scenario_id
+                        && row.entry_point == entry_point
+                        && row.passed),
+                "missing {entry_point} evidence for {scenario_id}: {report:#?}"
+            );
+        }
         let row = report
             .scenario_evidence
             .iter()
@@ -715,6 +805,83 @@ async fn main_chat_runtime_facts_agent_self_state_slice_d_covers_rf_16_to_rf_19(
     assert!(trace_gap
         .answer_preview
         .contains("trace_gap=task_session_missing"));
+
+    let blocked = report
+        .scenario_evidence
+        .iter()
+        .find(|row| row.scenario_id == "RF-20")
+        .expect("RF-20 evidence");
+    assert!(blocked
+        .runtime_fact_keys
+        .iter()
+        .any(|key| key == RUNTIME_FACT_KEY_AGENT_BLOCKER_CODES));
+    assert_eq!(blocked.task_status.as_deref(), Some("blocked"));
+    assert_eq!(blocked.delivery_status.as_deref(), Some("blocked"));
+    assert_eq!(blocked.completed_response, Some(false));
+    assert_eq!(blocked.final_delivery_evidence, Some(false));
+    assert!(blocked
+        .blocker_codes
+        .iter()
+        .any(|code| code == "workspace_file_blocked_for_runtime_facts"));
+    assert!(blocked
+        .safe_next_controls
+        .iter()
+        .any(|control| control == "retry_failed_action"));
+    assert_eq!(blocked.safe_automatic_control_available, Some(true));
+    assert_eq!(blocked.ui_primary_source_chip.as_deref(), Some("已阻塞"));
+    assert_eq!(blocked.ui_status.as_deref(), Some("restricted"));
+    assert!(blocked.answer_preview.contains("这个任务没有完成"));
+    assert!(!blocked.answer_preview.contains("这个任务的回答已完成"));
+
+    let pending_permission = report
+        .scenario_evidence
+        .iter()
+        .find(|row| row.scenario_id == "RF-21")
+        .expect("RF-21 evidence");
+    assert!(pending_permission
+        .runtime_fact_keys
+        .iter()
+        .any(|key| key == RUNTIME_FACT_KEY_AGENT_PENDING_PERMISSION_COUNT));
+    assert_eq!(
+        pending_permission.task_status.as_deref(),
+        Some("waiting_permission")
+    );
+    assert_eq!(
+        pending_permission.delivery_status.as_deref(),
+        Some("waiting_permission")
+    );
+    assert_eq!(pending_permission.completed_response, Some(false));
+    assert!(
+        pending_permission
+            .pending_permission_count
+            .unwrap_or_default()
+            > 0
+    );
+    assert_eq!(
+        pending_permission
+            .pending_permission_target_label
+            .as_deref(),
+        Some("mcp.read_only")
+    );
+    assert!(pending_permission
+        .pending_permission_target_labels
+        .iter()
+        .any(|label| label == "mcp.read_only"));
+    assert_eq!(pending_permission.completed_action_count, Some(0));
+    assert_eq!(
+        pending_permission.ui_primary_source_chip.as_deref(),
+        Some("等待确认")
+    );
+    assert_eq!(
+        pending_permission.ui_status.as_deref(),
+        Some("waiting_for_user")
+    );
+    assert!(!pending_permission
+        .answer_preview
+        .contains("RAW_UNSAFE_MCP_MANIFEST_SHOULD_NOT_RENDER"));
+    assert!(pending_permission
+        .answer_preview
+        .contains("我没有执行 pending action"));
 
     assert_eq!(
         report

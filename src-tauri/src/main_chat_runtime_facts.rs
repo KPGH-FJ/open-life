@@ -1,8 +1,10 @@
 use chrono::{Datelike, Offset};
 use openlife_core::agent::{
     main_chat_agent_v1::{
-        AgentTaskSession, AgentTaskSessionStatus, ExecutionQueueStatus, ExecutionTranscriptEntry,
-        ExecutionTranscriptEntryKind, QueuedExecutionAction,
+        main_chat_action_type_supports_automatic_retry, AgentTaskSession, AgentTaskSessionDraft,
+        AgentTaskSessionStatus, ExecutionAction, ExecutionPolicyDecision, ExecutionQueueStatus,
+        ExecutionTranscriptEntry, ExecutionTranscriptEntryDraft, ExecutionTranscriptEntryKind,
+        MainChatAgentStrategy, MainChatPolicyLevel, QueuedExecutionAction,
     },
     model_router::{ModelRouter, ProviderAvailability},
     AgentProposal, AgentRun, AgentRunStatus, ModelRouteTrace, ProposalStatus,
@@ -86,7 +88,7 @@ pub(crate) const RUNTIME_FACT_KEY_AGENT_TRACE_GAP: &str = "agent.self_state.trac
 const SLICE_A_SCENARIOS: [&str; 6] = ["RF-01", "RF-02", "RF-03", "RF-04", "RF-05", "RF-06"];
 const SLICE_B_SCENARIOS: [&str; 4] = ["RF-07", "RF-08", "RF-09", "RF-10"];
 const SLICE_C_SCENARIOS: [&str; 5] = ["RF-11", "RF-12", "RF-13", "RF-14", "RF-15"];
-const SLICE_D_SCENARIOS: [&str; 4] = ["RF-16", "RF-17", "RF-18", "RF-19"];
+const SLICE_D_SCENARIOS: [&str; 6] = ["RF-16", "RF-17", "RF-18", "RF-19", "RF-20", "RF-21"];
 const FIXED_CLOCK_RFC3339: &str = "2026-06-23T09:15:00+08:00";
 
 #[derive(Debug, Clone)]
@@ -674,10 +676,13 @@ struct AgentSelfStateFactSnapshot {
     final_delivery_evidence: bool,
     completed_response: bool,
     pending_permission_count: usize,
+    pending_permission_target_labels: Vec<String>,
     pending_proposal_count: usize,
     durable_change_status: String,
     durable_change_completed: bool,
     blocker_codes: Vec<String>,
+    safe_next_controls: Vec<String>,
+    safe_automatic_control_available: bool,
     action_count: usize,
     completed_action_count: usize,
     observation_count: usize,
@@ -708,12 +713,18 @@ pub(crate) async fn resolve_agent_self_state_fact_answer(
     let reply = agent_self_state_reply(intent, &snapshot);
     let ui_primary_source_chip = if snapshot.trace_gap {
         "任务状态未知"
+    } else if snapshot.pending_permission_count > 0 {
+        "等待确认"
     } else if intent == MainChatAgentSelfStateIntent::AskLastActionSummary
         && snapshot.observation_count > 0
     {
         "工具观察"
     } else if snapshot.pending_proposal_count > 0 {
         "提案待审"
+    } else if snapshot.task_status.as_deref() == Some("blocked")
+        || !snapshot.blocker_codes.is_empty()
+    {
+        "已阻塞"
     } else {
         "任务状态"
     };
@@ -731,6 +742,10 @@ pub(crate) async fn resolve_agent_self_state_fact_answer(
     let source = if snapshot.trace_gap {
         vec!["task_session", "agent_run", "transcript"]
     } else if intent == MainChatAgentSelfStateIntent::AskLastActionSummary {
+        vec!["task_session", "action_queue", "transcript"]
+    } else if snapshot.pending_permission_count > 0 {
+        vec!["task_session", "action_queue", "tool_permission_store"]
+    } else if !snapshot.blocker_codes.is_empty() {
         vec!["task_session", "action_queue", "transcript"]
     } else {
         vec!["task_session", "agent_run", "final_delivery", "transcript"]
@@ -750,10 +765,14 @@ pub(crate) async fn resolve_agent_self_state_fact_answer(
         "finalDeliveryEvidence": snapshot.final_delivery_evidence,
         "completedResponse": snapshot.completed_response,
         "pendingPermissionCount": snapshot.pending_permission_count,
+        "pendingPermissionTargetLabels": snapshot.pending_permission_target_labels.clone(),
+        "pendingPermissionTargetLabel": snapshot.pending_permission_target_labels.first().cloned(),
         "pendingProposalCount": snapshot.pending_proposal_count,
         "durableChangeStatus": snapshot.durable_change_status.clone(),
         "durableChangeCompleted": snapshot.durable_change_completed,
         "blockerCodes": snapshot.blocker_codes.clone(),
+        "safeNextControls": snapshot.safe_next_controls.clone(),
+        "safeAutomaticControlAvailable": snapshot.safe_automatic_control_available,
         "actionCount": snapshot.action_count,
         "completedActionCount": snapshot.completed_action_count,
         "observationCount": snapshot.observation_count,
@@ -900,10 +919,13 @@ fn missing_agent_self_state_snapshot(
         final_delivery_evidence: false,
         completed_response: false,
         pending_permission_count: 0,
+        pending_permission_target_labels: Vec::new(),
         pending_proposal_count: 0,
         durable_change_status: "unknown".into(),
         durable_change_completed: false,
         blocker_codes: Vec::new(),
+        safe_next_controls: vec!["no_safe_automatic_control".into()],
+        safe_automatic_control_available: false,
         action_count: 0,
         completed_action_count: 0,
         observation_count: 0,
@@ -944,10 +966,17 @@ fn agent_self_state_snapshot_from_evidence(
         .iter()
         .filter(|action| action.status == ExecutionQueueStatus::Completed)
         .count();
-    let pending_permission_count = actions
+    let pending_permission_actions = actions
         .iter()
         .filter(|action| action.status == ExecutionQueueStatus::PendingPermission)
-        .count();
+        .collect::<Vec<_>>();
+    let pending_permission_count = pending_permission_actions.len();
+    let mut pending_permission_target_labels = pending_permission_actions
+        .iter()
+        .map(|action| pending_permission_target_label(action))
+        .collect::<Vec<_>>();
+    pending_permission_target_labels.sort();
+    pending_permission_target_labels.dedup();
     let pending_proposal_count = proposals
         .iter()
         .filter(|proposal| proposal.status == ProposalStatus::Pending)
@@ -966,6 +995,12 @@ fn agent_self_state_snapshot_from_evidence(
         "response_delivered_pending_review"
     } else if final_delivery_evidence {
         "delivered"
+    } else if session.status == AgentTaskSessionStatus::Blocked {
+        "blocked"
+    } else if pending_permission_count > 0
+        || session.status == AgentTaskSessionStatus::WaitingPermission
+    {
+        "waiting_permission"
     } else if run.is_some() || final_result_count > 0 {
         "trace_gap"
     } else {
@@ -995,6 +1030,11 @@ fn agent_self_state_snapshot_from_evidence(
             }
         })
         .collect::<Vec<_>>();
+    let safe_next_controls =
+        agent_self_state_safe_next_controls(&session, &actions, pending_proposal_count);
+    let safe_automatic_control_available = safe_next_controls
+        .iter()
+        .any(|control| control == "retry_failed_action");
     let last_action = actions.last();
     let last_action_type =
         last_action.map(|action| bounded_runtime_fact_label(&action.action.action_type));
@@ -1050,10 +1090,13 @@ fn agent_self_state_snapshot_from_evidence(
         final_delivery_evidence,
         completed_response,
         pending_permission_count,
+        pending_permission_target_labels,
         pending_proposal_count,
         durable_change_status,
         durable_change_completed,
         blocker_codes,
+        safe_next_controls,
+        safe_automatic_control_available,
         action_count: actions.len(),
         completed_action_count,
         observation_count,
@@ -1067,6 +1110,55 @@ fn agent_self_state_snapshot_from_evidence(
         trace_gap: false,
         trace_gap_code: None,
     }
+}
+
+fn pending_permission_target_label(action: &QueuedExecutionAction) -> String {
+    match action.action.action_type.as_str() {
+        "mcp.read_only" | "mcp_tool" | "mcp.call_tool" => "mcp.read_only".into(),
+        "web.search" | "web.fetch" => "web.read".into(),
+        "file.read" => "workspace.file_read".into(),
+        other => bounded_runtime_fact_label(other),
+    }
+}
+
+fn agent_self_state_safe_next_controls(
+    session: &AgentTaskSession,
+    actions: &[QueuedExecutionAction],
+    pending_proposal_count: usize,
+) -> Vec<String> {
+    let mut controls = Vec::new();
+
+    if actions
+        .iter()
+        .any(|action| action.status == ExecutionQueueStatus::PendingPermission)
+    {
+        controls.push("review_permission".to_string());
+    }
+    if pending_proposal_count > 0 {
+        controls.push("review_proposal".to_string());
+    }
+    if actions.iter().any(|action| {
+        action.status == ExecutionQueueStatus::Failed
+            && main_chat_action_type_supports_automatic_retry(&action.action.action_type)
+    }) {
+        controls.push("retry_failed_action".to_string());
+    }
+    if matches!(
+        session.status,
+        AgentTaskSessionStatus::Running
+            | AgentTaskSessionStatus::WaitingPermission
+            | AgentTaskSessionStatus::Blocked
+            | AgentTaskSessionStatus::Failed
+    ) {
+        controls.push("cancel_task".to_string());
+    }
+    if controls.is_empty() && !session.pending_blockers.is_empty() {
+        controls.push("no_safe_automatic_control".to_string());
+    }
+
+    controls.sort();
+    controls.dedup();
+    controls
 }
 
 async fn latest_matching_run_id_from_store(
@@ -1306,13 +1398,44 @@ fn agent_self_state_reply(
 
     match intent {
         MainChatAgentSelfStateIntent::AskTaskCompletion => {
-            if snapshot.pending_proposal_count > 0 {
+            if snapshot.pending_permission_count > 0 {
+                let target_labels = if snapshot.pending_permission_target_labels.is_empty() {
+                    "unknown".to_string()
+                } else {
+                    snapshot.pending_permission_target_labels.join(",")
+                };
+                format!(
+                    "这个任务正在等待用户确认，不能标为完成：task_status={}，delivery_status={}，pendingPermissionCount={}，pendingPermissionTargetLabel={}。我没有执行 pending action；需要用户先 review_permission。",
+                    label_or_unknown(snapshot.task_status.as_deref()),
+                    snapshot.delivery_status,
+                    snapshot.pending_permission_count,
+                    target_labels
+                )
+            } else if snapshot.pending_proposal_count > 0 {
                 format!(
                     "这次回答已经交付：task_status={}，run_status={}，delivery_status={}。但还有 {} 个提案处于 pending review，durable_change_status=pending_review；我没有把待审变更当作已完成的持久写入。",
                     label_or_unknown(snapshot.task_status.as_deref()),
                     label_or_unknown(snapshot.run_status.as_deref()),
                     snapshot.delivery_status,
                     snapshot.pending_proposal_count
+                )
+            } else if snapshot.task_status.as_deref() == Some("blocked") {
+                let controls = if snapshot.safe_next_controls.is_empty() {
+                    "no_safe_automatic_control".to_string()
+                } else {
+                    snapshot.safe_next_controls.join(",")
+                };
+                format!(
+                    "这个任务没有完成：task_status={}，delivery_status={}，blockerCodes={}，safeNextControls={}，safeAutomaticControlAvailable={}.",
+                    label_or_unknown(snapshot.task_status.as_deref()),
+                    snapshot.delivery_status,
+                    if snapshot.blocker_codes.is_empty() {
+                        "none".into()
+                    } else {
+                        snapshot.blocker_codes.join(",")
+                    },
+                    controls,
+                    snapshot.safe_automatic_control_available
                 )
             } else if snapshot.completed_response {
                 format!(
@@ -2782,9 +2905,13 @@ pub(crate) struct MainChatRuntimeFactsScenarioEvidence {
     pub(crate) delivery_status: Option<String>,
     pub(crate) blocker_codes: Vec<String>,
     pub(crate) pending_permission_count: Option<usize>,
+    pub(crate) pending_permission_target_label: Option<String>,
+    pub(crate) pending_permission_target_labels: Vec<String>,
     pub(crate) pending_proposal_count: Option<usize>,
     pub(crate) durable_change_status: Option<String>,
     pub(crate) durable_change_completed: Option<bool>,
+    pub(crate) safe_next_controls: Vec<String>,
+    pub(crate) safe_automatic_control_available: Option<bool>,
     pub(crate) completed_response: Option<bool>,
     pub(crate) final_delivery_evidence: Option<bool>,
     pub(crate) action_count: Option<usize>,
@@ -2863,16 +2990,45 @@ pub(crate) struct MainChatRuntimeFactsCommandSurfaceProof {
     pub(crate) stream_runtime_clock_path: bool,
     pub(crate) send_provider_route_path: bool,
     pub(crate) send_provider_route_preflight_blocker_path: bool,
+    pub(crate) stream_provider_route_path: bool,
+    pub(crate) stream_provider_route_preflight_blocker_path: bool,
     pub(crate) send_tool_availability_path: bool,
     pub(crate) send_web_policy_blocked_path: bool,
     pub(crate) send_mcp_no_safe_read_candidate_path: bool,
     pub(crate) send_mcp_unknown_server_status_path: bool,
     pub(crate) send_write_permission_path: bool,
+    pub(crate) stream_tool_availability_path: bool,
+    pub(crate) stream_web_policy_blocked_path: bool,
+    pub(crate) stream_mcp_no_safe_read_candidate_path: bool,
+    pub(crate) stream_mcp_unknown_server_status_path: bool,
+    pub(crate) stream_write_permission_path: bool,
     pub(crate) send_self_state_completion_path: bool,
     pub(crate) send_self_state_pending_proposal_path: bool,
     pub(crate) send_self_state_observation_path: bool,
     pub(crate) send_self_state_trace_gap_path: bool,
+    pub(crate) send_self_state_blocked_path: bool,
+    pub(crate) send_self_state_pending_permission_path: bool,
+    pub(crate) stream_self_state_completion_path: bool,
+    pub(crate) stream_self_state_pending_proposal_path: bool,
+    pub(crate) stream_self_state_observation_path: bool,
+    pub(crate) stream_self_state_trace_gap_path: bool,
+    pub(crate) stream_self_state_blocked_path: bool,
+    pub(crate) stream_self_state_pending_permission_path: bool,
     pub(crate) stream_deferred_blocker: Option<String>,
+}
+
+fn passed_scenario_count_for_ids(
+    evidence: &[MainChatRuntimeFactsScenarioEvidence],
+    scenario_ids: &[&str],
+) -> usize {
+    scenario_ids
+        .iter()
+        .filter(|scenario_id| {
+            evidence
+                .iter()
+                .any(|row| row.scenario_id == **scenario_id && row.passed)
+        })
+        .count()
 }
 
 pub(crate) async fn run_main_chat_runtime_facts_slice_a_backend_report(
@@ -2969,15 +3125,30 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_a_backend_report(
             .any(|row| row.entry_point == "stream" && row.passed && !row.trace_gap),
         send_provider_route_path: false,
         send_provider_route_preflight_blocker_path: false,
+        stream_provider_route_path: false,
+        stream_provider_route_preflight_blocker_path: false,
         send_tool_availability_path: false,
         send_web_policy_blocked_path: false,
         send_mcp_no_safe_read_candidate_path: false,
         send_mcp_unknown_server_status_path: false,
         send_write_permission_path: false,
+        stream_tool_availability_path: false,
+        stream_web_policy_blocked_path: false,
+        stream_mcp_no_safe_read_candidate_path: false,
+        stream_mcp_unknown_server_status_path: false,
+        stream_write_permission_path: false,
         send_self_state_completion_path: false,
         send_self_state_pending_proposal_path: false,
         send_self_state_observation_path: false,
         send_self_state_trace_gap_path: false,
+        send_self_state_blocked_path: false,
+        send_self_state_pending_permission_path: false,
+        stream_self_state_completion_path: false,
+        stream_self_state_pending_proposal_path: false,
+        stream_self_state_observation_path: false,
+        stream_self_state_trace_gap_path: false,
+        stream_self_state_blocked_path: false,
+        stream_self_state_pending_permission_path: false,
         stream_deferred_blocker: None,
     };
     let no_silent_write_proof = evidence.iter().all(|row| !row.silent_write_detected);
@@ -3026,12 +3197,15 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_a_backend_report(
 
 pub(crate) async fn run_main_chat_runtime_facts_slice_b_provider_route_report(
 ) -> MainChatRuntimeFactsSliceReport {
-    let evidence = vec![
-        run_slice_b_rf07_case().await,
-        run_slice_b_rf08_case().await,
-        run_slice_b_rf09_case().await,
-        run_slice_b_rf10_case().await,
-    ];
+    let mut evidence = Vec::new();
+    evidence.push(Box::pin(run_slice_b_rf07_case("send")).await);
+    evidence.push(Box::pin(run_slice_b_rf07_case("stream")).await);
+    evidence.push(Box::pin(run_slice_b_rf08_case("send")).await);
+    evidence.push(Box::pin(run_slice_b_rf08_case("stream")).await);
+    evidence.push(Box::pin(run_slice_b_rf09_case("send")).await);
+    evidence.push(Box::pin(run_slice_b_rf09_case("stream")).await);
+    evidence.push(Box::pin(run_slice_b_rf10_case("send")).await);
+    evidence.push(Box::pin(run_slice_b_rf10_case("stream")).await);
 
     let current_route_requires_current_generation_evidence = evidence.iter().any(|row| {
         row.scenario_id == "RF-07"
@@ -3093,7 +3267,8 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_b_provider_route_report(
         .all(|row| row.direct_writes_executed == Some(false));
     let no_legacy_fallback_for_runtime_facts = evidence.iter().all(|row| !row.legacy_fallback_used);
     let no_silent_write_proof = evidence.iter().all(|row| !row.silent_write_detected);
-    let passed_scenario_count = evidence.iter().filter(|row| row.passed).count();
+    let passed_scenario_count = passed_scenario_count_for_ids(&evidence, &SLICE_B_SCENARIOS);
+    let all_evidence_passed = evidence.iter().all(|row| row.passed);
     let blockers = evidence
         .iter()
         .filter_map(|row| {
@@ -3111,16 +3286,35 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_b_provider_route_report(
         send_provider_route_preflight_blocker_path: evidence
             .iter()
             .any(|row| row.scenario_id == "RF-10" && row.entry_point == "send" && row.passed),
+        stream_provider_route_path: evidence
+            .iter()
+            .any(|row| row.scenario_id == "RF-07" && row.entry_point == "stream" && row.passed),
+        stream_provider_route_preflight_blocker_path: evidence
+            .iter()
+            .any(|row| row.scenario_id == "RF-10" && row.entry_point == "stream" && row.passed),
         send_tool_availability_path: false,
         send_web_policy_blocked_path: false,
         send_mcp_no_safe_read_candidate_path: false,
         send_mcp_unknown_server_status_path: false,
         send_write_permission_path: false,
+        stream_tool_availability_path: false,
+        stream_web_policy_blocked_path: false,
+        stream_mcp_no_safe_read_candidate_path: false,
+        stream_mcp_unknown_server_status_path: false,
+        stream_write_permission_path: false,
         send_self_state_completion_path: false,
         send_self_state_pending_proposal_path: false,
         send_self_state_observation_path: false,
         send_self_state_trace_gap_path: false,
-        stream_deferred_blocker: Some("slice_b_provider_route_stream_out_of_scope".into()),
+        send_self_state_blocked_path: false,
+        send_self_state_pending_permission_path: false,
+        stream_self_state_completion_path: false,
+        stream_self_state_pending_proposal_path: false,
+        stream_self_state_observation_path: false,
+        stream_self_state_trace_gap_path: false,
+        stream_self_state_blocked_path: false,
+        stream_self_state_pending_permission_path: false,
+        stream_deferred_blocker: None,
     };
     let negative_assertion_summary = MainChatRuntimeFactsNegativeAssertionSummary {
         planning_question_not_captured: None,
@@ -3162,6 +3356,7 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_b_provider_route_report(
         no_history_invention_without_trace: None,
     };
     let runtime_facts_slice_ready = passed_scenario_count == SLICE_B_SCENARIOS.len()
+        && all_evidence_passed
         && current_route_requires_current_generation_evidence
         && no_current_route_for_model_generated_false
         && configured_route_not_invocation_proof
@@ -3173,7 +3368,9 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_b_provider_route_report(
         && no_legacy_fallback_for_runtime_facts
         && no_silent_write_proof
         && command_surface_proof.send_provider_route_path
-        && command_surface_proof.send_provider_route_preflight_blocker_path;
+        && command_surface_proof.send_provider_route_preflight_blocker_path
+        && command_surface_proof.stream_provider_route_path
+        && command_surface_proof.stream_provider_route_preflight_blocker_path;
 
     MainChatRuntimeFactsSliceReport {
         report_kind: "main_chat_runtime_facts_slice",
@@ -3209,13 +3406,17 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_b_provider_route_report(
 
 pub(crate) async fn run_main_chat_runtime_facts_slice_c_tool_availability_report(
 ) -> MainChatRuntimeFactsSliceReport {
-    let evidence = vec![
-        run_slice_c_rf11_case().await,
-        run_slice_c_rf12_case().await,
-        run_slice_c_rf13_case().await,
-        run_slice_c_rf14_case().await,
-        run_slice_c_rf15_case().await,
-    ];
+    let mut evidence = Vec::new();
+    evidence.push(Box::pin(run_slice_c_rf11_case("send")).await);
+    evidence.push(Box::pin(run_slice_c_rf11_case("stream")).await);
+    evidence.push(Box::pin(run_slice_c_rf12_case("send")).await);
+    evidence.push(Box::pin(run_slice_c_rf12_case("stream")).await);
+    evidence.push(Box::pin(run_slice_c_rf13_case("send")).await);
+    evidence.push(Box::pin(run_slice_c_rf13_case("stream")).await);
+    evidence.push(Box::pin(run_slice_c_rf14_case("send")).await);
+    evidence.push(Box::pin(run_slice_c_rf14_case("stream")).await);
+    evidence.push(Box::pin(run_slice_c_rf15_case("send")).await);
+    evidence.push(Box::pin(run_slice_c_rf15_case("stream")).await);
 
     let no_provider_call_for_runtime_facts = evidence.iter().all(|row| {
         row.model_generated == Some(false) && row.scheduler_generation_called == Some(false)
@@ -3262,7 +3463,8 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_c_tool_availability_report
         .iter()
         .all(|row| row.tool_mcp_raw_manifest_exposed != Some(true));
     let no_silent_write_proof = evidence.iter().all(|row| !row.silent_write_detected);
-    let passed_scenario_count = evidence.iter().filter(|row| row.passed).count();
+    let passed_scenario_count = passed_scenario_count_for_ids(&evidence, &SLICE_C_SCENARIOS);
+    let all_evidence_passed = evidence.iter().all(|row| row.passed);
     let blockers = evidence
         .iter()
         .filter_map(|row| {
@@ -3276,6 +3478,8 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_c_tool_availability_report
         stream_runtime_clock_path: false,
         send_provider_route_path: false,
         send_provider_route_preflight_blocker_path: false,
+        stream_provider_route_path: false,
+        stream_provider_route_preflight_blocker_path: false,
         send_tool_availability_path: evidence
             .iter()
             .any(|row| row.scenario_id == "RF-11" && row.entry_point == "send" && row.passed),
@@ -3291,11 +3495,34 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_c_tool_availability_report
         send_write_permission_path: evidence
             .iter()
             .any(|row| row.scenario_id == "RF-15" && row.entry_point == "send" && row.passed),
+        stream_tool_availability_path: evidence
+            .iter()
+            .any(|row| row.scenario_id == "RF-11" && row.entry_point == "stream" && row.passed),
+        stream_web_policy_blocked_path: evidence
+            .iter()
+            .any(|row| row.scenario_id == "RF-12" && row.entry_point == "stream" && row.passed),
+        stream_mcp_no_safe_read_candidate_path: evidence
+            .iter()
+            .any(|row| row.scenario_id == "RF-13" && row.entry_point == "stream" && row.passed),
+        stream_mcp_unknown_server_status_path: evidence
+            .iter()
+            .any(|row| row.scenario_id == "RF-14" && row.entry_point == "stream" && row.passed),
+        stream_write_permission_path: evidence
+            .iter()
+            .any(|row| row.scenario_id == "RF-15" && row.entry_point == "stream" && row.passed),
         send_self_state_completion_path: false,
         send_self_state_pending_proposal_path: false,
         send_self_state_observation_path: false,
         send_self_state_trace_gap_path: false,
-        stream_deferred_blocker: Some("slice_c_tool_availability_stream_out_of_scope".into()),
+        send_self_state_blocked_path: false,
+        send_self_state_pending_permission_path: false,
+        stream_self_state_completion_path: false,
+        stream_self_state_pending_proposal_path: false,
+        stream_self_state_observation_path: false,
+        stream_self_state_trace_gap_path: false,
+        stream_self_state_blocked_path: false,
+        stream_self_state_pending_permission_path: false,
+        stream_deferred_blocker: None,
     };
     let negative_assertion_summary = MainChatRuntimeFactsNegativeAssertionSummary {
         planning_question_not_captured: None,
@@ -3327,6 +3554,7 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_c_tool_availability_report
         no_history_invention_without_trace: None,
     };
     let runtime_facts_slice_ready = passed_scenario_count == SLICE_C_SCENARIOS.len()
+        && all_evidence_passed
         && no_provider_call_for_runtime_facts
         && no_tool_call_for_runtime_facts
         && no_direct_write_for_runtime_facts
@@ -3342,7 +3570,12 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_c_tool_availability_report
         && command_surface_proof.send_web_policy_blocked_path
         && command_surface_proof.send_mcp_no_safe_read_candidate_path
         && command_surface_proof.send_mcp_unknown_server_status_path
-        && command_surface_proof.send_write_permission_path;
+        && command_surface_proof.send_write_permission_path
+        && command_surface_proof.stream_tool_availability_path
+        && command_surface_proof.stream_web_policy_blocked_path
+        && command_surface_proof.stream_mcp_no_safe_read_candidate_path
+        && command_surface_proof.stream_mcp_unknown_server_status_path
+        && command_surface_proof.stream_write_permission_path;
 
     MainChatRuntimeFactsSliceReport {
         report_kind: "main_chat_runtime_facts_slice",
@@ -3378,12 +3611,19 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_c_tool_availability_report
 
 pub(crate) async fn run_main_chat_runtime_facts_slice_d_agent_self_state_report(
 ) -> MainChatRuntimeFactsSliceReport {
-    let evidence = vec![
-        run_slice_d_rf16_case().await,
-        run_slice_d_rf17_case().await,
-        run_slice_d_rf18_case().await,
-        run_slice_d_rf19_case().await,
-    ];
+    let mut evidence = Vec::new();
+    evidence.push(Box::pin(run_slice_d_rf16_case("send")).await);
+    evidence.push(Box::pin(run_slice_d_rf16_case("stream")).await);
+    evidence.push(Box::pin(run_slice_d_rf17_case("send")).await);
+    evidence.push(Box::pin(run_slice_d_rf17_case("stream")).await);
+    evidence.push(Box::pin(run_slice_d_rf18_case("send")).await);
+    evidence.push(Box::pin(run_slice_d_rf18_case("stream")).await);
+    evidence.push(Box::pin(run_slice_d_rf19_case("send")).await);
+    evidence.push(Box::pin(run_slice_d_rf19_case("stream")).await);
+    evidence.push(Box::pin(run_slice_d_rf20_case("send")).await);
+    evidence.push(Box::pin(run_slice_d_rf20_case("stream")).await);
+    evidence.push(Box::pin(run_slice_d_rf21_case("send")).await);
+    evidence.push(Box::pin(run_slice_d_rf21_case("stream")).await);
 
     let no_provider_call_for_runtime_facts = evidence.iter().all(|row| {
         row.model_generated == Some(false) && row.scheduler_generation_called == Some(false)
@@ -3414,8 +3654,29 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_d_agent_self_state_report(
             && row.task_session_id.is_none()
             && row.run_id.is_none()
     });
+    let blocked_task_state_not_completed = evidence.iter().any(|row| {
+        row.scenario_id == "RF-20"
+            && row.passed
+            && row.task_status.as_deref() == Some("blocked")
+            && !row.blocker_codes.is_empty()
+            && row.ui_status.as_deref() == Some("restricted")
+            && row.completed_response == Some(false)
+            && row.safe_next_controls.iter().any(|control| {
+                control == "retry_failed_action" || control == "no_safe_automatic_control"
+            })
+    });
+    let pending_permission_state_not_executed = evidence.iter().any(|row| {
+        row.scenario_id == "RF-21"
+            && row.passed
+            && row.task_status.as_deref() == Some("waiting_permission")
+            && row.pending_permission_count.unwrap_or_default() > 0
+            && !row.pending_permission_target_labels.is_empty()
+            && row.ui_status.as_deref() == Some("waiting_for_user")
+            && row.completed_action_count == Some(0)
+    });
     let no_silent_write_proof = evidence.iter().all(|row| !row.silent_write_detected);
-    let passed_scenario_count = evidence.iter().filter(|row| row.passed).count();
+    let passed_scenario_count = passed_scenario_count_for_ids(&evidence, &SLICE_D_SCENARIOS);
+    let all_evidence_passed = evidence.iter().all(|row| row.passed);
     let blockers = evidence
         .iter()
         .filter_map(|row| {
@@ -3429,11 +3690,18 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_d_agent_self_state_report(
         stream_runtime_clock_path: false,
         send_provider_route_path: false,
         send_provider_route_preflight_blocker_path: false,
+        stream_provider_route_path: false,
+        stream_provider_route_preflight_blocker_path: false,
         send_tool_availability_path: false,
         send_web_policy_blocked_path: false,
         send_mcp_no_safe_read_candidate_path: false,
         send_mcp_unknown_server_status_path: false,
         send_write_permission_path: false,
+        stream_tool_availability_path: false,
+        stream_web_policy_blocked_path: false,
+        stream_mcp_no_safe_read_candidate_path: false,
+        stream_mcp_unknown_server_status_path: false,
+        stream_write_permission_path: false,
         send_self_state_completion_path: evidence
             .iter()
             .any(|row| row.scenario_id == "RF-16" && row.entry_point == "send" && row.passed),
@@ -3446,7 +3714,31 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_d_agent_self_state_report(
         send_self_state_trace_gap_path: evidence
             .iter()
             .any(|row| row.scenario_id == "RF-19" && row.entry_point == "send" && row.passed),
-        stream_deferred_blocker: Some("slice_d_agent_self_state_stream_out_of_scope".into()),
+        send_self_state_blocked_path: evidence
+            .iter()
+            .any(|row| row.scenario_id == "RF-20" && row.entry_point == "send" && row.passed),
+        send_self_state_pending_permission_path: evidence
+            .iter()
+            .any(|row| row.scenario_id == "RF-21" && row.entry_point == "send" && row.passed),
+        stream_self_state_completion_path: evidence
+            .iter()
+            .any(|row| row.scenario_id == "RF-16" && row.entry_point == "stream" && row.passed),
+        stream_self_state_pending_proposal_path: evidence
+            .iter()
+            .any(|row| row.scenario_id == "RF-17" && row.entry_point == "stream" && row.passed),
+        stream_self_state_observation_path: evidence
+            .iter()
+            .any(|row| row.scenario_id == "RF-18" && row.entry_point == "stream" && row.passed),
+        stream_self_state_trace_gap_path: evidence
+            .iter()
+            .any(|row| row.scenario_id == "RF-19" && row.entry_point == "stream" && row.passed),
+        stream_self_state_blocked_path: evidence
+            .iter()
+            .any(|row| row.scenario_id == "RF-20" && row.entry_point == "stream" && row.passed),
+        stream_self_state_pending_permission_path: evidence
+            .iter()
+            .any(|row| row.scenario_id == "RF-21" && row.entry_point == "stream" && row.passed),
+        stream_deferred_blocker: None,
     };
     let negative_assertion_summary = MainChatRuntimeFactsNegativeAssertionSummary {
         planning_question_not_captured: None,
@@ -3478,6 +3770,7 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_d_agent_self_state_report(
         no_history_invention_without_trace: Some(no_history_invention_without_trace),
     };
     let runtime_facts_slice_ready = passed_scenario_count == SLICE_D_SCENARIOS.len()
+        && all_evidence_passed
         && no_provider_call_for_runtime_facts
         && no_tool_call_for_runtime_facts
         && no_direct_write_for_runtime_facts
@@ -3486,11 +3779,21 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_d_agent_self_state_report(
         && context_cannot_override_task_runtime_state
         && proposal_pending_not_completed_durable_change
         && no_history_invention_without_trace
+        && blocked_task_state_not_completed
+        && pending_permission_state_not_executed
         && no_silent_write_proof
         && command_surface_proof.send_self_state_completion_path
         && command_surface_proof.send_self_state_pending_proposal_path
         && command_surface_proof.send_self_state_observation_path
-        && command_surface_proof.send_self_state_trace_gap_path;
+        && command_surface_proof.send_self_state_trace_gap_path
+        && command_surface_proof.send_self_state_blocked_path
+        && command_surface_proof.send_self_state_pending_permission_path
+        && command_surface_proof.stream_self_state_completion_path
+        && command_surface_proof.stream_self_state_pending_proposal_path
+        && command_surface_proof.stream_self_state_observation_path
+        && command_surface_proof.stream_self_state_trace_gap_path
+        && command_surface_proof.stream_self_state_blocked_path
+        && command_surface_proof.stream_self_state_pending_permission_path;
 
     MainChatRuntimeFactsSliceReport {
         report_kind: "main_chat_runtime_facts_slice",
@@ -3501,7 +3804,7 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_d_agent_self_state_report(
             .iter()
             .map(|id| (*id).to_string())
             .collect(),
-        out_of_scope_scenario_ids: vec!["RF-20".into(), "RF-21".into()],
+        out_of_scope_scenario_ids: Vec::new(),
         blocked_scenario_ids: Vec::new(),
         scenario_count: SLICE_D_SCENARIOS.len(),
         passed_scenario_count,
@@ -3524,12 +3827,12 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_d_agent_self_state_report(
     }
 }
 
-async fn run_slice_d_rf16_case() -> MainChatRuntimeFactsScenarioEvidence {
+async fn run_slice_d_rf16_case(entry_point: &'static str) -> MainChatRuntimeFactsScenarioEvidence {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     configure_agent_self_state_direct_answer_state(&state).await;
-    let session_id = "runtime-facts-slice-d-rf16";
+    let session_id = format!("runtime-facts-slice-d-{entry_point}-rf16");
     let _ = crate::main_chat_send::send_message_with_state(
-        session_id.into(),
+        session_id.clone(),
         vec![ChatMessage {
             role: "user".into(),
             content: "Please answer directly: DIRECT_PROSE_SHOULD_NOT_BE_STATUS".into(),
@@ -3538,15 +3841,15 @@ async fn run_slice_d_rf16_case() -> MainChatRuntimeFactsScenarioEvidence {
         &state,
     )
     .await;
-    run_slice_d_send_case("RF-16", session_id, "这个任务完成了吗", state).await
+    run_slice_d_case("RF-16", session_id, entry_point, "这个任务完成了吗", state).await
 }
 
-async fn run_slice_d_rf17_case() -> MainChatRuntimeFactsScenarioEvidence {
+async fn run_slice_d_rf17_case(entry_point: &'static str) -> MainChatRuntimeFactsScenarioEvidence {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     configure_agent_self_state_direct_answer_state(&state).await;
-    let session_id = "runtime-facts-slice-d-rf17";
+    let session_id = format!("runtime-facts-slice-d-{entry_point}-rf17");
     let _ = crate::main_chat_send::send_message_with_state(
-        session_id.into(),
+        session_id.clone(),
         vec![ChatMessage {
             role: "user".into(),
             content: "Remember that I prefer concise but rigorous reviews.".into(),
@@ -3555,15 +3858,15 @@ async fn run_slice_d_rf17_case() -> MainChatRuntimeFactsScenarioEvidence {
         &state,
     )
     .await;
-    run_slice_d_send_case("RF-17", session_id, "这个任务完成了吗", state).await
+    run_slice_d_case("RF-17", session_id, entry_point, "这个任务完成了吗", state).await
 }
 
-async fn run_slice_d_rf18_case() -> MainChatRuntimeFactsScenarioEvidence {
+async fn run_slice_d_rf18_case(entry_point: &'static str) -> MainChatRuntimeFactsScenarioEvidence {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     configure_agent_self_state_direct_answer_state(&state).await;
-    let session_id = "runtime-facts-slice-d-rf18";
+    let session_id = format!("runtime-facts-slice-d-{entry_point}-rf18");
     let _ = crate::main_chat_send::send_message_with_state(
-        session_id.into(),
+        session_id.clone(),
         vec![ChatMessage {
             role: "user".into(),
             content: "Please read file `Cargo.toml`.".into(),
@@ -3572,19 +3875,36 @@ async fn run_slice_d_rf18_case() -> MainChatRuntimeFactsScenarioEvidence {
         &state,
     )
     .await;
-    run_slice_d_send_case("RF-18", session_id, "你刚刚做了什么", state).await
+    run_slice_d_case("RF-18", session_id, entry_point, "你刚刚做了什么", state).await
 }
 
-async fn run_slice_d_rf19_case() -> MainChatRuntimeFactsScenarioEvidence {
+async fn run_slice_d_rf19_case(entry_point: &'static str) -> MainChatRuntimeFactsScenarioEvidence {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     configure_agent_self_state_direct_answer_state(&state).await;
-    run_slice_d_send_case(
+    run_slice_d_case(
         "RF-19",
-        "runtime-facts-slice-d-rf19",
+        format!("runtime-facts-slice-d-{entry_point}-rf19"),
+        entry_point,
         "你刚刚做了什么",
         state,
     )
     .await
+}
+
+async fn run_slice_d_rf20_case(entry_point: &'static str) -> MainChatRuntimeFactsScenarioEvidence {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    configure_agent_self_state_direct_answer_state(&state).await;
+    let session_id = format!("runtime-facts-slice-d-{entry_point}-rf20");
+    seed_agent_self_state_blocked_task(&state, &session_id).await;
+    run_slice_d_case("RF-20", session_id, entry_point, "这个任务完成了吗", state).await
+}
+
+async fn run_slice_d_rf21_case(entry_point: &'static str) -> MainChatRuntimeFactsScenarioEvidence {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    configure_agent_self_state_direct_answer_state(&state).await;
+    let session_id = format!("runtime-facts-slice-d-{entry_point}-rf21");
+    seed_agent_self_state_pending_permission_task(&state, &session_id).await;
+    run_slice_d_case("RF-21", session_id, entry_point, "这个任务完成了吗", state).await
 }
 
 async fn configure_agent_self_state_direct_answer_state(state: &Arc<AppState>) {
@@ -3602,36 +3922,151 @@ async fn configure_agent_self_state_direct_answer_state(state: &Arc<AppState>) {
     .with_scripted_generation_response("DIRECT_PROSE_SHOULD_NOT_BE_STATUS");
 }
 
-async fn run_slice_d_send_case(
+async fn seed_agent_self_state_blocked_task(state: &Arc<AppState>, chat_session_id: &str) {
+    let task_session_id = {
+        let Some(store_arc) = state.main_chat_agent_session_store.as_ref() else {
+            return;
+        };
+        let store = store_arc.lock().await;
+        let Ok(session) = store.create_session(AgentTaskSessionDraft {
+            chat_session_id: chat_session_id.into(),
+            user_goal: "Seed blocked read task for runtime facts RF-20.".into(),
+            selected_strategy: MainChatAgentStrategy::ReActToolExecution,
+            current_plan_summary: Some("Seeded blocked task state.".into()),
+            context_snapshot_refs: Vec::new(),
+        }) else {
+            return;
+        };
+        session.id
+    };
+
+    if let Some(queue_arc) = state.main_chat_action_queue_store.as_ref() {
+        let queue = queue_arc.lock().await;
+        if let Ok(queued) = queue.enqueue(
+            &task_session_id,
+            ExecutionAction::new("file.read", "Read a workspace file before blocker."),
+            ExecutionPolicyDecision {
+                level: MainChatPolicyLevel::L1ReadOnlyAuto,
+                reason_code: "read_only_action_allowed".into(),
+                execution_allowed: true,
+                requires_confirmation: false,
+                requires_proposal: false,
+                requires_blocker: false,
+                silent_write_allowed: false,
+            },
+        ) {
+            let _ = queue.fail(
+                &queued.id,
+                "workspace_file_blocked_for_runtime_facts",
+                Some(serde_json::json!({
+                    "sourceKind": "workspace_resolver",
+                    "retryReplayable": true,
+                    "blockerCode": "workspace_file_blocked_for_runtime_facts"
+                })),
+            );
+            if let Some(store_arc) = state.main_chat_agent_session_store.as_ref() {
+                let store = store_arc.lock().await;
+                let _ = store.record_action_queue_id(&task_session_id, &queued.id);
+            }
+        }
+    }
+
+    if let Some(store_arc) = state.main_chat_agent_session_store.as_ref() {
+        let store = store_arc.lock().await;
+        let _ = store.append_transcript_entry(ExecutionTranscriptEntryDraft {
+            session_id: task_session_id.clone(),
+            kind: ExecutionTranscriptEntryKind::Error,
+            summary: "Seeded blocked task evidence for Runtime Facts RF-20.".into(),
+            metadata: serde_json::json!({
+                "blockerCode": "workspace_file_blocked_for_runtime_facts",
+                "retryReplayable": true,
+                "safeNextControl": "retry_failed_action"
+            }),
+        });
+        let _ = store.set_pending_blockers(
+            &task_session_id,
+            vec!["workspace_file_blocked_for_runtime_facts".into()],
+        );
+        let _ = store.block_session(&task_session_id, "Seeded blocked Runtime Facts task.");
+    }
+}
+
+async fn seed_agent_self_state_pending_permission_task(
+    state: &Arc<AppState>,
+    chat_session_id: &str,
+) {
+    let task_session_id = {
+        let Some(store_arc) = state.main_chat_agent_session_store.as_ref() else {
+            return;
+        };
+        let store = store_arc.lock().await;
+        let Ok(session) = store.create_session(AgentTaskSessionDraft {
+            chat_session_id: chat_session_id.into(),
+            user_goal: "Seed pending ToolPermission task for runtime facts RF-21.".into(),
+            selected_strategy: MainChatAgentStrategy::ReActToolExecution,
+            current_plan_summary: Some("Seeded pending permission task state.".into()),
+            context_snapshot_refs: Vec::new(),
+        }) else {
+            return;
+        };
+        session.id
+    };
+
+    if let Some(queue_arc) = state.main_chat_action_queue_store.as_ref() {
+        let queue = queue_arc.lock().await;
+        if let Ok(queued) = queue.enqueue(
+            &task_session_id,
+            ExecutionAction::new(
+                "mcp.read_only",
+                "RAW_UNSAFE_MCP_MANIFEST_SHOULD_NOT_RENDER pending read target.",
+            ),
+            ExecutionPolicyDecision {
+                level: MainChatPolicyLevel::L4ExternalWrite,
+                reason_code: "tool_permission_required".into(),
+                execution_allowed: false,
+                requires_confirmation: true,
+                requires_proposal: false,
+                requires_blocker: true,
+                silent_write_allowed: false,
+            },
+        ) {
+            if let Some(store_arc) = state.main_chat_agent_session_store.as_ref() {
+                let store = store_arc.lock().await;
+                let _ = store.record_action_queue_id(&task_session_id, &queued.id);
+            }
+        }
+    }
+
+    if let Some(store_arc) = state.main_chat_agent_session_store.as_ref() {
+        let store = store_arc.lock().await;
+        let _ = store.append_transcript_entry(ExecutionTranscriptEntryDraft {
+            session_id: task_session_id.clone(),
+            kind: ExecutionTranscriptEntryKind::PermissionRequest,
+            summary: "Seeded ToolPermission request for Runtime Facts RF-21.".into(),
+            metadata: serde_json::json!({
+                "permissionTarget": "mcp.read_only",
+                "rawManifestDescription": "RAW_UNSAFE_MCP_MANIFEST_SHOULD_NOT_RENDER"
+            }),
+        });
+        let _ =
+            store.set_pending_blockers(&task_session_id, vec!["tool_permission_required".into()]);
+        let _ = store.mark_waiting_permission(&task_session_id);
+    }
+}
+
+async fn run_slice_d_case(
     scenario_id: &'static str,
-    session_id: &'static str,
+    session_id: String,
+    entry_point: &'static str,
     user_text: &'static str,
     state: Arc<AppState>,
 ) -> MainChatRuntimeFactsScenarioEvidence {
-    let result = crate::main_chat_send::send_message_with_state(
-        session_id.into(),
-        vec![ChatMessage {
-            role: "user".into(),
-            content: user_text.into(),
-        }],
-        None,
-        &state,
-    )
-    .await;
-    match result {
-        Ok(result) => match serde_json::to_value(result) {
-            Ok(response) => {
-                evidence_from_agent_self_state_response(scenario_id, "send", user_text, response)
-            }
-            Err(error) => MainChatRuntimeFactsScenarioEvidence::failed(
-                scenario_id,
-                "send",
-                user_text,
-                format!("serialize agent self-state response failed: {error}"),
-            ),
-        },
+    match runtime_fact_command_response(entry_point, session_id, user_text, &state).await {
+        Ok(response) => {
+            evidence_from_agent_self_state_response(scenario_id, entry_point, user_text, response)
+        }
         Err(error) => {
-            MainChatRuntimeFactsScenarioEvidence::failed(scenario_id, "send", user_text, error)
+            MainChatRuntimeFactsScenarioEvidence::failed(scenario_id, entry_point, user_text, error)
         }
     }
 }
@@ -3676,9 +4111,14 @@ fn evidence_from_agent_self_state_response(
     let delivery_status = string_field(&generation, "deliveryStatus");
     let blocker_codes = string_array(&generation, "blockerCodes");
     let pending_permission_count = usize_field(&generation, "pendingPermissionCount");
+    let pending_permission_target_label = string_field(&generation, "pendingPermissionTargetLabel");
+    let pending_permission_target_labels =
+        string_array(&generation, "pendingPermissionTargetLabels");
     let pending_proposal_count = usize_field(&generation, "pendingProposalCount");
     let durable_change_status = string_field(&generation, "durableChangeStatus");
     let durable_change_completed = bool_field(&generation, "durableChangeCompleted");
+    let safe_next_controls = string_array(&generation, "safeNextControls");
+    let safe_automatic_control_available = bool_field(&generation, "safeAutomaticControlAvailable");
     let completed_response = bool_field(&generation, "completedResponse");
     let final_delivery_evidence = bool_field(&generation, "finalDeliveryEvidence");
     let action_count = usize_field(&generation, "actionCount");
@@ -3697,6 +4137,14 @@ fn evidence_from_agent_self_state_response(
     let trace_gap = bool_field(&generation, "runtimeFactTraceGap").unwrap_or(false);
     let ui_primary_source_chip = string_field(&generation, "uiPrimarySourceChip");
     let ui_status = string_field(&generation, "uiStatus");
+    let raw_unsafe_pending_permission_exposed = reply
+        .contains("RAW_UNSAFE_MCP_MANIFEST_SHOULD_NOT_RENDER")
+        || pending_permission_target_label
+            .as_deref()
+            .is_some_and(|label| label.contains("RAW_UNSAFE_MCP_MANIFEST_SHOULD_NOT_RENDER"))
+        || pending_permission_target_labels
+            .iter()
+            .any(|label| label.contains("RAW_UNSAFE_MCP_MANIFEST_SHOULD_NOT_RENDER"));
     let silent_write_detected = direct_writes_executed.unwrap_or(true)
         || response
             .get("tool_calls")
@@ -3723,6 +4171,7 @@ fn evidence_from_agent_self_state_response(
         && !legacy_fallback_used
         && assistant_prose_used_for_task_status == Some(false)
         && memory_or_hs_override_allowed == Some(false)
+        && !raw_unsafe_pending_permission_exposed
         && !silent_write_detected
         && !reply.contains("DIRECT_PROSE_SHOULD_NOT_BE_STATUS");
     let scenario_passed = match scenario_id {
@@ -3789,6 +4238,48 @@ fn evidence_from_agent_self_state_response(
                 && ui_status.as_deref() == Some("unknown")
                 && reply.contains("trace_gap=task_session_missing")
                 && reply.contains("不会根据助手文字臆造历史")
+        }
+        "RF-20" => {
+            runtime_fact_keys
+                .iter()
+                .any(|key| key == RUNTIME_FACT_KEY_AGENT_BLOCKER_CODES)
+                && task_session_id.is_some()
+                && task_status.as_deref() == Some("blocked")
+                && delivery_status.as_deref() == Some("blocked")
+                && completed_response == Some(false)
+                && final_delivery_evidence == Some(false)
+                && blocker_codes
+                    .iter()
+                    .any(|code| code == "workspace_file_blocked_for_runtime_facts")
+                && safe_next_controls
+                    .iter()
+                    .any(|control| control == "retry_failed_action")
+                && safe_automatic_control_available == Some(true)
+                && ui_primary_source_chip.as_deref() == Some("已阻塞")
+                && ui_status.as_deref() == Some("restricted")
+                && reply.contains("这个任务没有完成")
+                && !reply.contains("这个任务的回答已完成")
+        }
+        "RF-21" => {
+            runtime_fact_keys
+                .iter()
+                .any(|key| key == RUNTIME_FACT_KEY_AGENT_PENDING_PERMISSION_COUNT)
+                && task_session_id.is_some()
+                && task_status.as_deref() == Some("waiting_permission")
+                && delivery_status.as_deref() == Some("waiting_permission")
+                && completed_response == Some(false)
+                && pending_permission_count.unwrap_or_default() > 0
+                && pending_permission_target_label.as_deref() == Some("mcp.read_only")
+                && pending_permission_target_labels
+                    .iter()
+                    .any(|label| label == "mcp.read_only")
+                && action_count.unwrap_or_default() > 0
+                && completed_action_count == Some(0)
+                && ui_primary_source_chip.as_deref() == Some("等待确认")
+                && ui_status.as_deref() == Some("waiting_for_user")
+                && reply.contains("需要用户先 review_permission")
+                && reply.contains("我没有执行 pending action")
+                && !raw_unsafe_pending_permission_exposed
         }
         _ => false,
     };
@@ -3869,9 +4360,13 @@ fn evidence_from_agent_self_state_response(
         delivery_status,
         blocker_codes,
         pending_permission_count,
+        pending_permission_target_label,
+        pending_permission_target_labels,
         pending_proposal_count,
         durable_change_status,
         durable_change_completed,
+        safe_next_controls,
+        safe_automatic_control_available,
         completed_response,
         final_delivery_evidence,
         action_count,
@@ -3893,7 +4388,7 @@ fn evidence_from_agent_self_state_response(
     }
 }
 
-async fn run_slice_b_rf07_case() -> MainChatRuntimeFactsScenarioEvidence {
+async fn run_slice_b_rf07_case(entry_point: &'static str) -> MainChatRuntimeFactsScenarioEvidence {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     configure_provider_route_state(
         &state,
@@ -3908,16 +4403,17 @@ async fn run_slice_b_rf07_case() -> MainChatRuntimeFactsScenarioEvidence {
         },
     )
     .await;
-    run_slice_b_send_case(
+    run_slice_b_case(
         "RF-07",
-        "runtime-facts-slice-b-rf07",
+        format!("runtime-facts-slice-b-{entry_point}-rf07"),
+        entry_point,
         "你现在用什么模型",
         state,
     )
     .await
 }
 
-async fn run_slice_b_rf08_case() -> MainChatRuntimeFactsScenarioEvidence {
+async fn run_slice_b_rf08_case(entry_point: &'static str) -> MainChatRuntimeFactsScenarioEvidence {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     configure_provider_route_state(
         &state,
@@ -3936,9 +4432,9 @@ async fn run_slice_b_rf08_case() -> MainChatRuntimeFactsScenarioEvidence {
         let mut source = state.runtime_clock_source.lock().await;
         *source = fixed_clock_source();
     }
-    let session_id = "runtime-facts-slice-b-rf08";
+    let session_id = format!("runtime-facts-slice-b-{entry_point}-rf08");
     let _ = crate::main_chat_send::send_message_with_state(
-        session_id.into(),
+        session_id.clone(),
         vec![ChatMessage {
             role: "user".into(),
             content: "今天星期几".into(),
@@ -3947,16 +4443,17 @@ async fn run_slice_b_rf08_case() -> MainChatRuntimeFactsScenarioEvidence {
         &state,
     )
     .await;
-    run_slice_b_send_case(
+    run_slice_b_case(
         "RF-08",
         session_id,
+        entry_point,
         "刚才回答今天星期几时用了什么模型",
         state,
     )
     .await
 }
 
-async fn run_slice_b_rf09_case() -> MainChatRuntimeFactsScenarioEvidence {
+async fn run_slice_b_rf09_case(entry_point: &'static str) -> MainChatRuntimeFactsScenarioEvidence {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     configure_provider_route_state(
         &state,
@@ -3973,22 +4470,23 @@ async fn run_slice_b_rf09_case() -> MainChatRuntimeFactsScenarioEvidence {
     .await;
     seed_completed_model_generation(
         &state,
-        "runtime-facts-slice-b-rf09",
+        &format!("runtime-facts-slice-b-{entry_point}-rf09"),
         "anthropic",
         "claude-last",
         "cloud",
     )
     .await;
-    run_slice_b_send_case(
+    run_slice_b_case(
         "RF-09",
-        "runtime-facts-slice-b-rf09",
+        format!("runtime-facts-slice-b-{entry_point}-rf09"),
+        entry_point,
         "你现在用什么模型",
         state,
     )
     .await
 }
 
-async fn run_slice_b_rf10_case() -> MainChatRuntimeFactsScenarioEvidence {
+async fn run_slice_b_rf10_case(entry_point: &'static str) -> MainChatRuntimeFactsScenarioEvidence {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     configure_provider_route_state(
         &state,
@@ -4030,9 +4528,10 @@ async fn run_slice_b_rf10_case() -> MainChatRuntimeFactsScenarioEvidence {
         )
         .with_model_router(router);
     }
-    run_slice_b_send_case(
+    run_slice_b_case(
         "RF-10",
-        "runtime-facts-slice-b-rf10",
+        format!("runtime-facts-slice-b-{entry_point}-rf10"),
+        entry_point,
         "你现在用什么模型",
         state,
     )
@@ -4082,19 +4581,33 @@ async fn configure_provider_route_state(
     }
 }
 
-async fn run_slice_c_rf11_case() -> MainChatRuntimeFactsScenarioEvidence {
+async fn run_slice_c_rf11_case(entry_point: &'static str) -> MainChatRuntimeFactsScenarioEvidence {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     configure_tool_availability_state(&state, true).await;
-    run_slice_c_send_case("RF-11", "runtime-facts-slice-c-rf11", "你能联网吗", state).await
+    run_slice_c_case(
+        "RF-11",
+        format!("runtime-facts-slice-c-{entry_point}-rf11"),
+        entry_point,
+        "你能联网吗",
+        state,
+    )
+    .await
 }
 
-async fn run_slice_c_rf12_case() -> MainChatRuntimeFactsScenarioEvidence {
+async fn run_slice_c_rf12_case(entry_point: &'static str) -> MainChatRuntimeFactsScenarioEvidence {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     configure_tool_availability_state(&state, false).await;
-    run_slice_c_send_case("RF-12", "runtime-facts-slice-c-rf12", "你能联网吗", state).await
+    run_slice_c_case(
+        "RF-12",
+        format!("runtime-facts-slice-c-{entry_point}-rf12"),
+        entry_point,
+        "你能联网吗",
+        state,
+    )
+    .await
 }
 
-async fn run_slice_c_rf13_case() -> MainChatRuntimeFactsScenarioEvidence {
+async fn run_slice_c_rf13_case(entry_point: &'static str) -> MainChatRuntimeFactsScenarioEvidence {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     configure_tool_availability_state(&state, true).await;
     seed_mcp_manifest_snapshot(
@@ -4112,10 +4625,17 @@ async fn run_slice_c_rf13_case() -> MainChatRuntimeFactsScenarioEvidence {
         ),
     )
     .await;
-    run_slice_c_send_case("RF-13", "runtime-facts-slice-c-rf13", "MCP 可用吗", state).await
+    run_slice_c_case(
+        "RF-13",
+        format!("runtime-facts-slice-c-{entry_point}-rf13"),
+        entry_point,
+        "MCP 可用吗",
+        state,
+    )
+    .await
 }
 
-async fn run_slice_c_rf14_case() -> MainChatRuntimeFactsScenarioEvidence {
+async fn run_slice_c_rf14_case(entry_point: &'static str) -> MainChatRuntimeFactsScenarioEvidence {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     configure_tool_availability_state(&state, true).await;
     seed_mcp_manifest_snapshot(
@@ -4133,15 +4653,23 @@ async fn run_slice_c_rf14_case() -> MainChatRuntimeFactsScenarioEvidence {
         ),
     )
     .await;
-    run_slice_c_send_case("RF-14", "runtime-facts-slice-c-rf14", "MCP 可用吗", state).await
+    run_slice_c_case(
+        "RF-14",
+        format!("runtime-facts-slice-c-{entry_point}-rf14"),
+        entry_point,
+        "MCP 可用吗",
+        state,
+    )
+    .await
 }
 
-async fn run_slice_c_rf15_case() -> MainChatRuntimeFactsScenarioEvidence {
+async fn run_slice_c_rf15_case(entry_point: &'static str) -> MainChatRuntimeFactsScenarioEvidence {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     configure_tool_availability_state(&state, true).await;
-    run_slice_c_send_case(
+    run_slice_c_case(
         "RF-15",
-        "runtime-facts-slice-c-rf15",
+        format!("runtime-facts-slice-c-{entry_point}-rf15"),
+        entry_point,
         "你有写入能力吗",
         state,
     )
@@ -4255,36 +4783,19 @@ async fn seed_completed_model_generation(
     let _ = store.create_run(&run);
 }
 
-async fn run_slice_b_send_case(
+async fn run_slice_b_case(
     scenario_id: &'static str,
-    session_id: &'static str,
+    session_id: String,
+    entry_point: &'static str,
     user_text: &'static str,
     state: Arc<AppState>,
 ) -> MainChatRuntimeFactsScenarioEvidence {
-    let result = crate::main_chat_send::send_message_with_state(
-        session_id.into(),
-        vec![ChatMessage {
-            role: "user".into(),
-            content: user_text.into(),
-        }],
-        None,
-        &state,
-    )
-    .await;
-    match result {
-        Ok(result) => match serde_json::to_value(result) {
-            Ok(response) => {
-                evidence_from_provider_route_response(scenario_id, "send", user_text, response)
-            }
-            Err(error) => MainChatRuntimeFactsScenarioEvidence::failed(
-                scenario_id,
-                "send",
-                user_text,
-                format!("serialize provider route response failed: {error}"),
-            ),
-        },
+    match runtime_fact_command_response(entry_point, session_id, user_text, &state).await {
+        Ok(response) => {
+            evidence_from_provider_route_response(scenario_id, entry_point, user_text, response)
+        }
         Err(error) => {
-            MainChatRuntimeFactsScenarioEvidence::failed(scenario_id, "send", user_text, error)
+            MainChatRuntimeFactsScenarioEvidence::failed(scenario_id, entry_point, user_text, error)
         }
     }
 }
@@ -4528,9 +5039,13 @@ fn evidence_from_provider_route_response(
         delivery_status: None,
         blocker_codes: Vec::new(),
         pending_permission_count: None,
+        pending_permission_target_label: None,
+        pending_permission_target_labels: Vec::new(),
         pending_proposal_count: None,
         durable_change_status: None,
         durable_change_completed: None,
+        safe_next_controls: Vec::new(),
+        safe_automatic_control_available: None,
         completed_response: None,
         final_delivery_evidence: None,
         action_count: None,
@@ -4555,36 +5070,19 @@ fn evidence_from_provider_route_response(
     }
 }
 
-async fn run_slice_c_send_case(
+async fn run_slice_c_case(
     scenario_id: &'static str,
-    session_id: &'static str,
+    session_id: String,
+    entry_point: &'static str,
     user_text: &'static str,
     state: Arc<AppState>,
 ) -> MainChatRuntimeFactsScenarioEvidence {
-    let result = crate::main_chat_send::send_message_with_state(
-        session_id.into(),
-        vec![ChatMessage {
-            role: "user".into(),
-            content: user_text.into(),
-        }],
-        None,
-        &state,
-    )
-    .await;
-    match result {
-        Ok(result) => match serde_json::to_value(result) {
-            Ok(response) => {
-                evidence_from_tool_availability_response(scenario_id, "send", user_text, response)
-            }
-            Err(error) => MainChatRuntimeFactsScenarioEvidence::failed(
-                scenario_id,
-                "send",
-                user_text,
-                format!("serialize tool availability response failed: {error}"),
-            ),
-        },
+    match runtime_fact_command_response(entry_point, session_id, user_text, &state).await {
+        Ok(response) => {
+            evidence_from_tool_availability_response(scenario_id, entry_point, user_text, response)
+        }
         Err(error) => {
-            MainChatRuntimeFactsScenarioEvidence::failed(scenario_id, "send", user_text, error)
+            MainChatRuntimeFactsScenarioEvidence::failed(scenario_id, entry_point, user_text, error)
         }
     }
 }
@@ -4833,9 +5331,13 @@ fn evidence_from_tool_availability_response(
         delivery_status: None,
         blocker_codes: Vec::new(),
         pending_permission_count: None,
+        pending_permission_target_label: None,
+        pending_permission_target_labels: Vec::new(),
         pending_proposal_count: None,
         durable_change_status: None,
         durable_change_completed: None,
+        safe_next_controls: Vec::new(),
+        safe_automatic_control_available: None,
         completed_response: None,
         final_delivery_evidence: None,
         action_count: None,
@@ -4857,6 +5359,51 @@ fn evidence_from_tool_availability_response(
         context_conflict_ignored: true,
         silent_write_detected,
         failure: (!passed).then(|| "tool availability runtime fact evidence incomplete".into()),
+    }
+}
+
+async fn runtime_fact_command_response(
+    entry_point: &'static str,
+    session_id: String,
+    user_text: &'static str,
+    state: &Arc<AppState>,
+) -> Result<Value, String> {
+    match entry_point {
+        "send" => {
+            let result = crate::main_chat_send::send_message_with_state(
+                session_id,
+                vec![ChatMessage {
+                    role: "user".into(),
+                    content: user_text.into(),
+                }],
+                None,
+                state,
+            )
+            .await?;
+            serde_json::to_value(result)
+                .map_err(|error| format!("serialize send response failed: {error}"))
+        }
+        "stream" => {
+            let mut emitted_events = Vec::<(String, Value)>::new();
+            crate::main_chat_streaming::start_stream_message_with_state(
+                session_id,
+                vec![ChatMessage {
+                    role: "user".into(),
+                    content: user_text.into(),
+                }],
+                None,
+                state,
+                |event, payload| emitted_events.push((event.to_string(), payload)),
+            )
+            .await?;
+            emitted_events
+                .iter()
+                .rev()
+                .find(|(event, _)| event == "stream-message-done")
+                .map(|(_, payload)| payload.clone())
+                .ok_or_else(|| "stream runtime fact case missing done payload".to_string())
+        }
+        _ => Err(format!("unsupported entry point {entry_point}")),
     }
 }
 
@@ -5026,9 +5573,13 @@ impl MainChatRuntimeFactsScenarioEvidence {
             delivery_status: None,
             blocker_codes: Vec::new(),
             pending_permission_count: None,
+            pending_permission_target_label: None,
+            pending_permission_target_labels: Vec::new(),
             pending_proposal_count: None,
             durable_change_status: None,
             durable_change_completed: None,
+            safe_next_controls: Vec::new(),
+            safe_automatic_control_available: None,
             completed_response: None,
             final_delivery_evidence: None,
             action_count: None,
@@ -5268,9 +5819,13 @@ fn evidence_from_runtime_fact_response(
         delivery_status: None,
         blocker_codes: Vec::new(),
         pending_permission_count: None,
+        pending_permission_target_label: None,
+        pending_permission_target_labels: Vec::new(),
         pending_proposal_count: None,
         durable_change_status: None,
         durable_change_completed: None,
+        safe_next_controls: Vec::new(),
+        safe_automatic_control_available: None,
         completed_response: None,
         final_delivery_evidence: None,
         action_count: None,
