@@ -1,7 +1,7 @@
 # Main Chat Next 6 Steps Acceptance Matrix
 
-> Date: 2026-06-25
-> Status: preparation artifact before the next Main Chat Agent development cycle
+> Date: 2026-06-26
+> Status: active acceptance artifact for the next Main Chat Agent development cycle
 > Parent: `plans/main_chat_next_6_steps_master_spec.md`
 
 ## 1. Purpose
@@ -28,11 +28,11 @@ reported gate output.
 | S1-C-STREAM | 1 | Tool availability runtime facts work through stream. | complete | Slice C stream command-surface proof exists and no `slice_c_tool_availability_stream_out_of_scope`. | Must not run active reachability probe; must not expose raw MCP manifest. | Runtime facts test plus command-surface matrix |
 | S1-D-STREAM | 1 | Agent self-state runtime facts work through stream. | complete | Slice D stream command-surface proof exists and no `slice_d_agent_self_state_stream_out_of_scope`. | Must not use current self-state question task as the target task; must not infer from assistant prose. | Runtime facts test plus command-surface matrix |
 | S1-READY | 1 | Runtime Facts full-layer readiness. | partial | Full report covers required RF rows or names blockers; `runtimeFactsReady` may become true only when full contract passes. | Must not flip `runtime_facts_ready` from slice-only success. | Runtime facts full report command when implemented |
-| S2-DIRECT | 2 | External live DirectAnswer. | blocked | Credited direct external live report with provider/model/run/task trace and non-empty normalized response preview. | Must reject scripted, local, fixture, loopback, synthetic, local-test HTTP credit. | Opt-in live final acceptance command |
-| S2-WEB | 2 | Provider-backed web AgentLoop. | blocked | Credited web AgentLoop report with governed `web.*` target, action status succeeded, no single-step fallback. | Must not overlap MCP success or ToolPermission proposal trace. | Opt-in live final acceptance command |
-| S2-MCP | 2 | Provider-backed registered MCP AgentLoop. | blocked | Credited MCP report with multi-candidate registered MCP set, provider-ranked selection, safe labels, and successful governed action. | Must not accept deterministic-only or local-ranked selection as provider-backed credit. | Opt-in live final acceptance command |
-| S2-PERM | 2 | Provider-backed MCP ToolPermission proposal. | blocked | Credited proposal-permission report with selected MCP candidate and pending permission proposal target match. | Must not also claim MCP read success; must not execute write. | Opt-in live final acceptance command |
-| S2-READY | 2 | Live provider gate ready. | blocked | `live_provider_ready_count=4`, live provider coverage booleans true, acceptance live gate ready. | Must fail closed without opt-in, key, network, or external provider. | `cargo test -p openlife-tauri main_chat_final_acceptance -- --nocapture` and opt-in live command |
+| S2-DIRECT | 2 | External live DirectAnswer. | complete | Credited direct external live report with provider/model/run/task trace and non-empty normalized response preview. | Must reject scripted, local, fixture, loopback, synthetic, local-test HTTP credit. | Opt-in live final acceptance command |
+| S2-WEB | 2 | Provider-backed web AgentLoop. | complete | Credited web AgentLoop report with governed `web.*` target, action status succeeded, no single-step fallback. | Must not overlap MCP success or ToolPermission proposal trace. | Opt-in live final acceptance command |
+| S2-MCP | 2 | Provider-backed registered MCP AgentLoop. | complete | Credited MCP report with multi-candidate registered MCP set, provider-ranked selection, safe labels, and successful governed action. | Must not accept deterministic-only or local-ranked selection as provider-backed credit. | Opt-in live final acceptance command |
+| S2-PERM | 2 | Provider-backed MCP ToolPermission proposal. | complete | Credited proposal-permission report with selected MCP candidate and pending permission proposal target match. | Must not also claim MCP read success; must not execute write. | Opt-in live final acceptance command |
+| S2-READY | 2 | Live provider gate ready. | complete | `live_provider_ready_count=4`, live provider coverage booleans true, acceptance live gate ready. | Must fail closed without opt-in, key, network, or external provider. | `cargo test -p openlife-tauri main_chat_final_acceptance -- --nocapture` and opt-in live command |
 | S3-INV | 3 | Legacy fallback strategy inventory. | not_started | All `main_chat_kernel_supports_turn=false` paths have explicit disposition. | Must not silently route unsupported ordinary turns to legacy success. | focused kernel and command-surface tests |
 | S3-REVIEW | 3 | `ReviewMaturation` disposition. | not_started | Either kernel support, governed blocker, or explicit non-default unreachable path. | Must not disappear into legacy generation. | kernel support test |
 | S3-ZERO | 3 | Default command surface legacy count remains zero. | baseline_passed | Command-surface report legacy fallback count is zero. | Must not hide fallback by omitting metadata. | command-surface matrix and final acceptance tests |

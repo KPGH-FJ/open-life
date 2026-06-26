@@ -1044,12 +1044,13 @@ when external-provider preflight is ready. Those paths cover DirectAnswer,
 provider-backed ReAct web AgentLoop, registered MCP AgentLoop, and MCP
 ToolPermission proposal evidence, including `liveProviderInvoked`, AgentLoop
 action status, no single-step fallback, MCP target resolution / ToolPermission
-proposal checks, and no silent writes. Those ignored live runs were not executed
-in this environment.
+proposal checks, and no silent writes. Step 2 has now executed the ignored
+external live-provider final acceptance run in this environment and credited the
+four required live scenarios.
 Main Chat Agent Execution v1 still is not complete:
-live-provider-backed generation eval, broader provider-backed web/MCP AgentLoop proof, and
-broader provider/live proposal-permission proof beyond the local runtime and command-surface proposal gates
-remain required before completion can be claimed. Future Beta hardening must keep proposal-first,
+legacy fallback containment, Runtime Facts module cleanup, default UI
+state/action surfaces, and real-task E2E evidence remain required before
+completion can be claimed. Future Beta hardening must keep proposal-first,
 permission/blocker, privacy/local-only, metadata-safe audit, and no-silent-write
 boundaries.
 ```

@@ -1,7 +1,7 @@
 # Main Chat Live Provider Eval Setup
 
-> Date: 2026-06-25
-> Status: preparation artifact before external live-provider validation
+> Date: 2026-06-26
+> Status: validated setup artifact for Step 2 external live-provider acceptance
 > Parent: `plans/main_chat_next_6_steps_master_spec.md`
 
 ## 1. Purpose
@@ -27,7 +27,9 @@ Code-confirmed current state:
 
 ## 3. Required Local Environment
 
-Use environment variables only. Do not write secrets into tracked files.
+Use environment variables only. Do not write secrets into tracked files. The
+tracked `.env.live.example` file is a placeholder template; real values belong
+in ignored local files such as `.env.live.local`.
 
 Required:
 
@@ -77,9 +79,13 @@ cargo test -p openlife-tauri main_chat_final_acceptance_gate_runner_fails_closed
 Opt-in external live run:
 
 ```bash
-OPENLIFE_MAIN_CHAT_LIVE_PROVIDER_EVAL=1 \
-cargo test -p openlife-tauri main_chat_final_acceptance_gate_runner_accepts_external_live_provider_when_opted_in -- --ignored --nocapture
+scripts/live-eval.zsh \
+  cargo test -p openlife-tauri main_chat_final_acceptance_gate_runner_accepts_external_live_provider_when_opted_in -- --ignored --nocapture
 ```
+
+The wrapper sources `${OPENLIFE_LIVE_EVAL_PROFILE:-.env.live.local}`, requires
+the Step 2 env vars, rejects obvious local/mock/fixture provider bases, and then
+executes the supplied gate command without printing secrets.
 
 Full final gate after live run:
 

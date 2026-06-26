@@ -1605,6 +1605,37 @@ pub(crate) fn main_chat_kernel_supports_turn(
     }
 }
 
+pub(crate) async fn main_chat_live_provider_eval_requires_provider_backed_react(
+    selected_strategy: &MainChatAgentStrategy,
+    state: &Arc<AppState>,
+) -> bool {
+    if !matches!(selected_strategy, MainChatAgentStrategy::ReActToolExecution) {
+        return false;
+    }
+    if !std::env::var("OPENLIFE_MAIN_CHAT_LIVE_PROVIDER_EVAL").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    }) {
+        return false;
+    }
+
+    let network_enabled = {
+        let config = state.config.lock().await;
+        config.system.network_policy.enabled
+    };
+    if !network_enabled {
+        return false;
+    }
+
+    let scheduler = state.scheduler.lock().await.clone();
+    let scripted_provider_response_present = scheduler.scripted_generation_response.is_some();
+    main_chat_provider_endpoint_kind(&scheduler, scripted_provider_response_present)
+        == "external_provider"
+        && !scheduler.effective_api_key().trim().is_empty()
+}
+
 async fn resolve_kernel_task_session_id(
     state: &Arc<AppState>,
     requested_task_session_id: &str,

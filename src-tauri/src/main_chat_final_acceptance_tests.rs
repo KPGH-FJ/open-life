@@ -670,6 +670,67 @@ fn main_chat_final_acceptance_gate_report_counts_only_auditable_live_ready_repor
 }
 
 #[test]
+fn main_chat_final_acceptance_gate_rejects_local_synthetic_live_ready_credit() {
+    let runtime_report =
+        openlife_core::agent::main_chat_agent_v1::run_main_chat_agent_v1_runtime_eval_suite(
+            openlife_core::agent::main_chat_agent_v1::main_chat_runtime_eval_cases(),
+        );
+    let command_surface_report = complete_local_kernel_command_surface_report();
+
+    let mut uncreditable_reports = Vec::new();
+    for scenario in [
+        MainChatLiveProviderEvalHarnessScenario::DirectAnswer,
+        MainChatLiveProviderEvalHarnessScenario::WebAgentLoop,
+        MainChatLiveProviderEvalHarnessScenario::RegisteredMcpAgentLoop,
+        MainChatLiveProviderEvalHarnessScenario::McpToolPermissionProposal,
+    ] {
+        for provider in [
+            "local",
+            "scripted",
+            "fixture",
+            "synthetic",
+            "openai127-0-0-1",
+        ] {
+            let mut report = successful_live_provider_harness_report(scenario);
+            report.provider = provider.into();
+            uncreditable_reports.push(report);
+        }
+
+        let mut local_http_endpoint = successful_live_provider_harness_report(scenario);
+        local_http_endpoint.provider_endpoint_kind = "local_test_http".into();
+        uncreditable_reports.push(local_http_endpoint);
+    }
+
+    let evidence = main_chat_live_provider_acceptance_evidence(&uncreditable_reports);
+    assert!(!evidence.generation_eval_executed);
+    assert!(!evidence.web_mcp_agent_loop_eval_executed);
+    assert!(!evidence.web_agent_loop_eval_executed);
+    assert!(!evidence.mcp_agent_loop_eval_executed);
+    assert!(!evidence.proposal_permission_eval_executed);
+    assert!(evidence.no_silent_writes);
+
+    let report = main_chat_agent_execution_v1_final_gate_report_from_parts(
+        runtime_report,
+        command_surface_report,
+        true,
+        uncreditable_reports,
+    );
+
+    assert_eq!(
+        report.live_provider_ready_count, 0,
+        "local, scripted, fixture, synthetic, loopback, and local-test HTTP reports must not count as external live ready evidence"
+    );
+    assert!(report
+        .live_provider_blockers
+        .contains(&"live_provider_external_provider_missing".to_string()));
+    assert!(report
+        .live_provider_scenario_reports
+        .iter()
+        .all(|scenario| !scenario.credited));
+    assert!(!report.acceptance.live_provider_gate_ready);
+}
+
+#[test]
 fn main_chat_live_provider_report_blockers_rejects_inconsistent_ready_report() {
     let mut inconsistent = successful_live_provider_harness_report(
         MainChatLiveProviderEvalHarnessScenario::DirectAnswer,
