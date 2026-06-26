@@ -1661,6 +1661,7 @@ export interface MainChatStep6FinalGateSummary {
   liveProviderReadyCount: number;
   liveProviderWebCredit: boolean;
   liveProviderMcpCredit: boolean;
+  liveProviderScenarioReports: unknown[];
   liveProviderBlockers: string[];
   blockers: string[];
 }

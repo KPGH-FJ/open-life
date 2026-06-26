@@ -51,6 +51,11 @@ export interface Step6ProductAcceptanceReport {
   localDeterministicReady: boolean;
   externalLiveReady: boolean;
   acceptanceReady: boolean;
+  overallReady?: boolean;
+  finalGateReady?: boolean;
+  finalAcceptanceBlockers?: string[];
+  finalGateSummary?: unknown;
+  finalGateReportKind?: string | null;
   reportPath: string;
   evidenceSource: string;
   runId: string;

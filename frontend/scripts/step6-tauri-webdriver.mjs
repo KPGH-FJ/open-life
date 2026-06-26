@@ -592,6 +592,7 @@ async function runStep6TauriProductAcceptance() {
     }
 
     const finalGateAudit = await auditFinalStep6GateWithBrowserEvidence(sessionId);
+    writeReport(mergeFinalGateAuditIntoBrowserReport(report, finalGateAudit));
 
     return {
       ready: finalGateAudit.ready,
@@ -1795,6 +1796,89 @@ function finalGateBlockerFromError(error) {
   return metadataSafeBlocker(`tauri_webdriver_step6_final_gate_error:${error?.message ?? error}`);
 }
 
+function mergeFinalGateAuditIntoBrowserReport(report, finalGateAudit) {
+  const gateReport = finalGateAudit?.report;
+  const gateJourneyById = new Map(
+    (gateReport?.journeys ?? [])
+      .filter(row => typeof row?.journeyId === "string")
+      .map(row => [row.journeyId, row])
+  );
+  const gateBlockers = normalizeBlockers(finalGateAudit?.blockers ?? []);
+  const observedJourneys = report.observedJourneys.map(row => {
+    const next = copyObservedJourney(row);
+    const gateJourney = gateJourneyById.get(row.journeyId);
+    const rowBlockers = normalizeBlockers([
+      ...(next.blockers ?? []),
+      ...(gateJourney?.blockers ?? []),
+    ]);
+    next.blockers = rowBlockers;
+    if (
+      next.kind === "external_live" &&
+      next.externalLiveStatus === "credited_external_live" &&
+      gateJourney &&
+      gateJourney.credited !== true
+    ) {
+      next.externalLiveStatus = "incomplete_external_live";
+    }
+    return next;
+  });
+  const merged = buildObservedReport(observedJourneys);
+  const finalGateReady =
+    finalGateAudit?.ready === true &&
+    gateReport?.overallReady === true &&
+    gateBlockers.length === 0;
+  const blockers = normalizeBlockers([
+    ...(merged.blockers ?? []),
+    ...gateBlockers,
+    ...(!finalGateReady ? ["step6_final_acceptance_not_ready"] : []),
+  ]);
+  merged.blockers = blockers;
+  merged.acceptanceReady = merged.acceptanceReady && finalGateReady && blockers.length === 0;
+  merged.overallReady = merged.acceptanceReady;
+  merged.finalGateReady = finalGateReady;
+  merged.finalAcceptanceBlockers = normalizeBlockers([
+    ...(gateReport?.finalGateSummary?.finalAcceptanceBlockers ?? []),
+    ...(gateReport?.finalGateSummary?.liveProviderBlockers ?? []),
+    ...(gateReport?.blockers ?? []),
+  ]);
+  merged.finalGateSummary = gateReport?.finalGateSummary ?? null;
+  merged.finalGateReportKind = gateReport?.reportKind ?? null;
+  merged.reportDigest = digestLabel(step6ReportDigestInput(merged));
+  if (!finalGateReady) {
+    console.error(
+      `[step6_final_gate:blocked] ${JSON.stringify(summarizeFinalGateAudit(finalGateAudit))}`
+    );
+  }
+  return merged;
+}
+
+function summarizeFinalGateAudit(finalGateAudit) {
+  const report = finalGateAudit?.report;
+  return {
+    ready: finalGateAudit?.ready === true,
+    overallReady: report?.overallReady === true,
+    localDeterministicReady: report?.localDeterministicReady === true,
+    externalLiveReady: report?.externalLiveReady === true,
+    blockers: normalizeBlockers(finalGateAudit?.blockers ?? []),
+    finalAcceptanceReady: report?.finalGateSummary?.finalAcceptanceReady === true,
+    liveProviderReadyCount: report?.finalGateSummary?.liveProviderReadyCount ?? null,
+    liveProviderWebCredit: report?.finalGateSummary?.liveProviderWebCredit === true,
+    liveProviderMcpCredit: report?.finalGateSummary?.liveProviderMcpCredit === true,
+    finalAcceptanceBlockers: normalizeBlockers(
+      report?.finalGateSummary?.finalAcceptanceBlockers ?? []
+    ),
+    liveProviderBlockers: normalizeBlockers(report?.finalGateSummary?.liveProviderBlockers ?? []),
+    journeyBlockers: (report?.journeys ?? [])
+      .filter(row => Array.isArray(row?.blockers) && row.blockers.length > 0)
+      .map(row => ({
+        journeyId: row.journeyId,
+        credited: row.credited === true,
+        status: row.status,
+        blockers: normalizeBlockers(row.blockers),
+      })),
+  };
+}
+
 function buildObservedReport(observedJourneys) {
   const journeyBlockers = validateObservedJourneysForReport(observedJourneys);
   const blockedLiveJourneys = observedJourneys
@@ -2103,6 +2187,9 @@ function validateObservedJourneysForReport(observedJourneys) {
 function step6JourneyPassed(row) {
   const expected = journeys.find(item => item.id === row.journeyId);
   if (!expected || row.kind !== expected.kind) return false;
+  if (Array.isArray(row.blockers) && row.blockers.length > 0) {
+    return false;
+  }
   if (
     row.unavailableEvidenceInvented ||
     row.legacyFallbackUsed ||

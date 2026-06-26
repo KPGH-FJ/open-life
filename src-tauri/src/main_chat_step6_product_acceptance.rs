@@ -119,6 +119,8 @@ pub struct Step6FinalGateSummary {
     pub live_provider_ready_count: usize,
     pub live_provider_web_credit: bool,
     pub live_provider_mcp_credit: bool,
+    pub live_provider_scenario_reports:
+        Vec<crate::main_chat_final_gate::MainChatLiveProviderScenarioReport>,
     pub live_provider_blockers: Vec<String>,
     pub blockers: Vec<String>,
 }
@@ -449,26 +451,34 @@ async fn collect_step6_final_gate_summary(state: &Arc<AppState>) -> Step6FinalGa
     )
     .await
     {
-        Ok(report) => Step6FinalGateSummary {
-            collected: true,
-            final_acceptance_ready: report.final_gate.acceptance.ready,
-            final_acceptance_blockers: report.final_gate.acceptance.blockers,
-            command_surface_legacy_fallback_count: report.command_surface_eval.legacy_fallback_count,
-            command_surface_silent_write_count: report.command_surface_eval.silent_write_count,
-            live_provider_attempted: report.live_provider_attempted,
-            live_provider_ready_count: report.final_gate.live_provider_ready_count,
-            live_provider_web_credit: report
+        Ok(report) => {
+            let live_provider_web_credit = report
                 .final_gate
                 .live_provider_scenario_reports
                 .iter()
-                .any(|row| row.scenario == "web_agent_loop" && row.credited),
-            live_provider_mcp_credit: report
+                .any(|row| row.scenario == "web_agent_loop" && row.credited);
+            let live_provider_mcp_credit = report
                 .final_gate
                 .live_provider_scenario_reports
                 .iter()
-                .any(|row| row.scenario == "registered_mcp_agent_loop" && row.credited),
-            live_provider_blockers: report.final_gate.live_provider_blockers,
-            blockers: Vec::new(),
+                .any(|row| row.scenario == "registered_mcp_agent_loop" && row.credited);
+            let live_provider_scenario_reports = report.final_gate.live_provider_scenario_reports;
+            Step6FinalGateSummary {
+                collected: true,
+                final_acceptance_ready: report.final_gate.acceptance.ready,
+                final_acceptance_blockers: report.final_gate.acceptance.blockers,
+                command_surface_legacy_fallback_count: report
+                    .command_surface_eval
+                    .legacy_fallback_count,
+                command_surface_silent_write_count: report.command_surface_eval.silent_write_count,
+                live_provider_attempted: report.live_provider_attempted,
+                live_provider_ready_count: report.final_gate.live_provider_ready_count,
+                live_provider_web_credit,
+                live_provider_mcp_credit,
+                live_provider_scenario_reports,
+                live_provider_blockers: report.final_gate.live_provider_blockers,
+                blockers: Vec::new(),
+            }
         },
         Err(error) => Step6FinalGateSummary {
             collected: false,
@@ -480,6 +490,7 @@ async fn collect_step6_final_gate_summary(state: &Arc<AppState>) -> Step6FinalGa
             live_provider_ready_count: 0,
             live_provider_web_credit: false,
             live_provider_mcp_credit: false,
+            live_provider_scenario_reports: Vec::new(),
             live_provider_blockers: Vec::new(),
             blockers: vec![format!("step6_final_gate_collection_failed_{}", error_code(&error))],
         },
@@ -552,6 +563,12 @@ fn build_step6_product_acceptance_report(
     }
     if !final_gate_summary.final_acceptance_ready {
         push_unique(&mut blockers, "step6_final_acceptance_not_ready");
+    }
+    for blocker in &final_gate_summary.final_acceptance_blockers {
+        push_unique(&mut blockers, blocker);
+    }
+    for blocker in &final_gate_summary.live_provider_blockers {
+        push_unique(&mut blockers, blocker);
     }
     for blocker in &final_gate_summary.blockers {
         push_unique(&mut blockers, blocker);
@@ -1815,6 +1832,7 @@ pub(crate) fn clean_step6_final_gate_summary_for_tests() -> Step6FinalGateSummar
         live_provider_ready_count: 2,
         live_provider_web_credit: true,
         live_provider_mcp_credit: true,
+        live_provider_scenario_reports: Vec::new(),
         live_provider_blockers: Vec::new(),
         blockers: Vec::new(),
     }

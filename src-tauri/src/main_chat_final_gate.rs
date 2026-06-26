@@ -328,7 +328,7 @@ pub(crate) fn completed_main_chat_live_provider_eval_harness_report(
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MainChatLiveProviderScenarioReport {
     pub(crate) scenario: String,
