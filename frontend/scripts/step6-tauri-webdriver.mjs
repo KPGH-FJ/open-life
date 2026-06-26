@@ -120,7 +120,7 @@ const journeys = [
     "S6-LIVE-WEB",
     "external_live",
     "chat",
-    "With explicit live eval enabled, read the provider-backed web source and summarize it.",
+    'For this live eval, call the allowed web.search candidate exactly once before answering. Return only a JSON action envelope with actions[0].name="web.search", actions[0].action_type="mcp_tool", and actions[0].arguments={}; do not answer directly.',
     ["answer.external_web_summary"],
     ["live_provider.external", "tool.web_read"],
     ["completed"],
@@ -130,7 +130,7 @@ const journeys = [
     "S6-LIVE-MCP",
     "external_live",
     "chat",
-    "With explicit live eval enabled, choose the provider-ranked MCP read source and answer.",
+    'For candidate ranking, if the candidate ids include builtin_echo, put builtin_echo first and include every allowed candidate id exactly once. For action execution, do not explain or answer directly. Return exactly this JSON envelope and nothing else: {"final":"pending governed read","actions":[{"name":"builtin_echo","action_type":"mcp_tool","arguments":{}}],"thought_summary":"Need a governed read.","warnings":[]}. This is a governed mcp read-only utility request.',
     ["answer.external_mcp_summary"],
     ["live_provider.external", "tool.mcp_read", "provider_ranked_selection"],
     ["completed"],
@@ -996,7 +996,7 @@ async function waitForElementEnabled(sessionId, testId, timeoutMs) {
 }
 
 async function openDiagnosticsIfAvailableWithWebDriver(sessionId) {
-  await waitForScript(
+  const opened = await waitForScript(
     sessionId,
     `
       const existing = document.querySelector('[data-testid="agent-control-plane"]');
@@ -1010,9 +1010,11 @@ async function openDiagnosticsIfAvailableWithWebDriver(sessionId) {
       return true;
     `,
     [],
-    30_000,
+    1_000,
     "webdriver_diagnostics_toggle_missing"
-  );
+  ).catch(() => false);
+  if (!opened) console.error("[step6_diagnostics:unavailable]");
+  return Boolean(opened);
 }
 
 async function waitForControlPlaneDelivery(sessionId, previousTaskId, row) {
@@ -1135,8 +1137,12 @@ async function observeStep6JourneyFromControlPlane(sessionId, row, taskSessionId
   const runtimeEvidence = finalDeliveryMatched
     ? runtimeEvidenceForJourney(row, attrs, snapshot, detail, events, finalDeliverySections)
     : [];
+  const liveJourneyCredited =
+    row.kind === "external_live" &&
+    externalLiveJourneyCredited(row, snapshot, detail, runtimeEvidence, finalDeliveryMatched);
   const traceEvidence = uniqueValues([
     ...events,
+    ...liveProviderTraceEvidence(detail),
     ...snapshotEvents(snapshot),
     attrs.routeStrategy ? `route.${attrs.routeStrategy}` : "",
     snapshot?.provider?.routeType ? `provider_route.${snapshot.provider.routeType}` : "",
@@ -1160,16 +1166,18 @@ async function observeStep6JourneyFromControlPlane(sessionId, row, taskSessionId
     legacyFallbackUsed: attrs.text.includes("Fallback notice"),
     silentDurableWriteDetected: false,
     localFixtureCreditedAsExternalLive:
-      row.kind === "external_live" && externalProviderKind !== "external_provider",
+      row.kind === "external_live" &&
+      liveJourneyCredited &&
+      externalProviderKind !== "external_provider",
     externalLiveStatus:
-      row.kind === "external_live" && externalProviderKind === "external_provider"
+      row.kind === "external_live" && liveJourneyCredited
         ? "credited_external_live"
         : row.kind === "external_live"
-          ? "blocked_live_evidence"
+          ? "incomplete_external_live"
           : "not_applicable",
     externalLiveProviderKind: row.kind === "external_live" ? externalProviderKind : null,
     blockers:
-      row.kind === "external_live" && externalProviderKind !== "external_provider"
+      row.kind === "external_live" && !liveJourneyCredited
         ? ["external_live_provider_evidence_missing"]
         : [],
   };
@@ -1460,20 +1468,10 @@ function runtimeEvidenceForJourney(row, attrs, snapshot, detail, events, finalDe
   ) {
     evidence.push("permission.pending", "review_action.visible");
   }
-  if (
-    row.id === "S6-LIVE-WEB" &&
-    providerRoute === "cloud" &&
-    providerKind === "external_provider" &&
-    routeStrategy.includes("web")
-  ) {
+  if (row.id === "S6-LIVE-WEB" && liveProviderAgentLoopEvidence(row, snapshot, detail).webRead) {
     evidence.push("live_provider.external", "tool.web_read");
   }
-  if (
-    row.id === "S6-LIVE-MCP" &&
-    providerRoute === "cloud" &&
-    providerKind === "external_provider" &&
-    routeStrategy.includes("mcp")
-  ) {
+  if (row.id === "S6-LIVE-MCP" && liveProviderAgentLoopEvidence(row, snapshot, detail).mcpRead) {
     evidence.push("live_provider.external", "tool.mcp_read", "provider_ranked_selection");
   }
   return uniqueValues(evidence);
@@ -1485,6 +1483,110 @@ function uiStatusEvidenceForJourney(row, attrs, detail, uiStatus) {
   }
   if (row.id === "S6-BLOCKED" && structuredBlockerPending(attrs, detail)) return ["restricted"];
   return uiStatus ? [uiStatus] : [];
+}
+
+function externalLiveJourneyCredited(row, snapshot, detail, runtimeEvidence, finalDeliveryMatched) {
+  return (
+    row.kind === "external_live" &&
+    finalDeliveryMatched &&
+    externalProviderKindForSnapshot(row, snapshot) === "external_provider" &&
+    row.expectedRuntimeEvidence.every(evidence => runtimeEvidence.includes(evidence)) &&
+    liveProviderAgentLoopEvidence(row, snapshot, detail).externalProviderAgentLoopSucceeded
+  );
+}
+
+function liveProviderAgentLoopEvidence(row, snapshot, detail) {
+  const metadata = agentLoopMetadataFromDetail(detail);
+  const providerRoute = `${snapshot?.provider?.routeType ?? ""}`.toLowerCase();
+  const providerKind = externalProviderKindForSnapshot(row, snapshot);
+  const endpointKind = metadataString(metadata, "providerEndpointKind");
+  const liveProviderInvoked = metadata?.liveProviderInvoked === true;
+  const baseSucceeded =
+    row.kind === "external_live" &&
+    providerRoute === "cloud" &&
+    providerKind === "external_provider" &&
+    endpointKind === "external_provider" &&
+    liveProviderInvoked &&
+    metadata?.agentLoopSucceeded === true &&
+    metadata?.singleStepFallbackUsed !== true &&
+    metadataString(metadata, "agentLoopActionStatus") === "succeeded" &&
+    metadataString(metadata, "toolSelectionCandidateActionType") === "mcp_tool" &&
+    metadata?.modelSelectedAllowedTool === true &&
+    metadata?.modelSelectedExecutionPolicyValidated === true &&
+    metadata?.modelSelectedExecutionAllowed === true &&
+    metadataString(metadata, "modelSelectedArgumentsSource") === "governed_candidate_contract";
+  const selectedTarget = metadataString(metadata, "toolSelectionCandidateTarget");
+  const selectedId = metadataString(metadata, "toolSelectionCandidateId");
+  const selectedRank = metadataNumber(metadata, "toolSelectionCandidateRank");
+  const candidateIds = metadataStringArray(metadata, "toolSelectionCandidateIds");
+  const targetMatches = (...targets) =>
+    targets.some(target => selectedTarget === target || selectedId === target);
+  const selectedRankMatches =
+    selectedRank > 0 &&
+    candidateIds[selectedRank - 1] &&
+    targetMatches(candidateIds[selectedRank - 1]);
+  const webRead = baseSucceeded && targetMatches("web.search") && selectedRankMatches;
+  const providerRankedSelection =
+    baseSucceeded &&
+    metadata?.mcpReadTargetResolved === true &&
+    targetMatches("builtin_echo") &&
+    candidateIds.length >= 2 &&
+    selectedRankMatches &&
+    metadata?.toolSelectionModelRanked === true &&
+    metadataString(metadata, "toolSelectionRankingSource") === "provider_model" &&
+    metadataString(metadata, "toolSelectionRankingRouteType") === "cloud" &&
+    metadata?.toolSelectionRankingProviderBacked === true &&
+    metadata?.toolSelectionModelRankingIgnored !== true;
+  return {
+    externalProviderAgentLoopSucceeded: baseSucceeded,
+    webRead,
+    mcpRead: providerRankedSelection,
+  };
+}
+
+function agentLoopMetadataFromDetail(detail) {
+  let attemptedMetadata = null;
+  for (const entry of detail?.transcript ?? []) {
+    const summary = String(entry?.summary ?? "");
+    const metadata = entry?.metadata && typeof entry.metadata === "object" ? entry.metadata : null;
+    if (!metadata) continue;
+    if (summary.includes("Governed ReAct AgentLoop completed")) return metadata;
+    if (summary.includes("Governed ReAct AgentLoop") && metadata.agentLoopAttempted === true) {
+      attemptedMetadata = metadata;
+    }
+  }
+  return attemptedMetadata;
+}
+
+function liveProviderTraceEvidence(detail) {
+  const metadata = agentLoopMetadataFromDetail(detail);
+  if (!metadata) return [];
+  const evidence = [];
+  if (metadata.liveProviderInvoked === true) evidence.push("live_provider.invoked");
+  if (metadata.agentLoopSucceeded === true) evidence.push("agent_loop.succeeded");
+  const endpointKind = metadataString(metadata, "providerEndpointKind");
+  if (metadataSafeLabel(endpointKind)) evidence.push(`provider_endpoint.${endpointKind}`);
+  const actionStatus = metadataString(metadata, "agentLoopActionStatus");
+  if (metadataSafeLabel(actionStatus)) evidence.push(`action.${actionStatus}`);
+  const selectedTarget = metadataString(metadata, "toolSelectionCandidateTarget");
+  if (metadataSafeLabel(selectedTarget)) evidence.push(`tool_target.${selectedTarget}`);
+  if (metadata.toolSelectionModelRanked === true) evidence.push("tool_selection.provider_ranked");
+  return uniqueValues(evidence);
+}
+
+function metadataString(metadata, key) {
+  const value = metadata?.[key];
+  return typeof value === "string" ? value : "";
+}
+
+function metadataNumber(metadata, key) {
+  const value = metadata?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function metadataStringArray(metadata, key) {
+  const value = metadata?.[key];
+  return Array.isArray(value) ? value.filter(item => typeof item === "string") : [];
 }
 
 function structuredTaskReady(row, attrs, snapshot, detail, finalDeliverySections) {

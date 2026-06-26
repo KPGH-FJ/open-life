@@ -396,6 +396,24 @@ pub(crate) async fn prepare_main_chat_step6_live_provider_eval_state_with_env(
     for blocker in &preflight.blockers {
         push_unique(&mut blockers, blocker);
     }
+    let mut blockers = normalize_blockers(blockers);
+    let preliminarily_ready = should_prepare_state
+        && preflight.ready
+        && provider_endpoint_kind == "external_provider"
+        && blockers.is_empty();
+    if preliminarily_ready {
+        if let Err(error) =
+            crate::main_chat_command_surface_eval::grant_builtin_echo_read_once(state).await
+        {
+            push_unique(
+                &mut blockers,
+                format!(
+                    "step6_live_mcp_permission_seed_failed:{}",
+                    error_code(&error)
+                ),
+            );
+        }
+    }
     let blockers = normalize_blockers(blockers);
     let ready = should_prepare_state
         && preflight.ready

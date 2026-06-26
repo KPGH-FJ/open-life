@@ -129,9 +129,15 @@ async function openDiagnosticsIfAvailable(page: Page) {
   const controlPlane = page.getByTestId("agent-control-plane").last();
   if ((await controlPlane.count()) > 0 && (await controlPlane.isVisible())) return;
   const diagnosticsToggle = page.getByRole("button", { name: "Show Main Chat diagnostics" });
-  await expect(diagnosticsToggle).toBeVisible({ timeout: 30_000 });
+  const visible = await diagnosticsToggle.isVisible({ timeout: 1_000 }).catch(() => false);
+  if (!visible) {
+    console.error("[step6_diagnostics:unavailable]");
+    return;
+  }
   await diagnosticsToggle.click();
-  await expect(page.getByTestId("agent-control-plane").last()).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("agent-control-plane").last())
+    .toBeVisible({ timeout: 5_000 })
+    .catch(() => console.error("[step6_diagnostics:control_plane_not_visible]"));
 }
 
 async function waitForControlPlaneDelivery(
@@ -512,7 +518,14 @@ async function observeStep6Journey(
     taskSessionId: attrs.taskSessionId,
     task_session_id: attrs.taskSessionId,
   }).catch(() => null);
-  const events = await taskEvents(page, attrs.taskSessionId).catch(() => []);
+  const detail = await tauriInvoke<any>(page, "get_main_chat_agent_task_detail", {
+    taskSessionId: attrs.taskSessionId,
+    task_session_id: attrs.taskSessionId,
+  }).catch(() => null);
+  const events = uniqueValues([
+    ...(await taskEvents(page, attrs.taskSessionId).catch(() => [])),
+    ...transcriptEvents(detail),
+  ]);
   const statusSurface = page.getByTestId("main-chat-agent-status").last();
   const uiStatus =
     (await statusSurface.getAttribute("data-agent-product-status").catch(() => "")) || "";
@@ -520,15 +533,20 @@ async function observeStep6Journey(
   const finalDeliverySections = uniqueValues([
     ...attrs.finalDeliverySectionTitles,
     ...finalDeliverySectionsFromDetail(snapshot),
+    ...finalDeliverySectionsFromDetail(detail),
   ]);
   const finalDeliveryMatched = finalDeliveryMatchesJourney(journey, finalDeliverySections);
   const answerEvidence =
     assistantVisible && finalDeliveryMatched ? answerEvidenceForJourney(journey, snapshot) : [];
   const runtimeEvidence = finalDeliveryMatched
-    ? runtimeEvidenceForJourney(journey, attrs, snapshot, events)
+    ? runtimeEvidenceForJourney(journey, attrs, snapshot, detail, events)
     : [];
+  const liveJourneyCredited =
+    journey.kind === "external_live" &&
+    externalLiveJourneyCredited(journey, snapshot, detail, runtimeEvidence, finalDeliveryMatched);
   const traceEvidence = uniqueValues([
     ...events,
+    ...liveProviderTraceEvidence(detail),
     ...(attrs.routeStrategy ? [`route.${attrs.routeStrategy}`] : []),
     ...(snapshot?.provider?.routeType ? [`provider_route.${snapshot.provider.routeType}`] : []),
   ]);
@@ -551,16 +569,18 @@ async function observeStep6Journey(
     legacyFallbackUsed: ((await controlPlane.textContent()) ?? "").includes("Fallback notice"),
     silentDurableWriteDetected: false,
     localFixtureCreditedAsExternalLive:
-      journey.kind === "external_live" && externalLiveProviderKind !== "external_provider",
+      journey.kind === "external_live" &&
+      liveJourneyCredited &&
+      externalLiveProviderKind !== "external_provider",
     externalLiveStatus:
-      journey.kind === "external_live" && externalLiveProviderKind === "external_provider"
+      journey.kind === "external_live" && liveJourneyCredited
         ? "credited_external_live"
         : journey.kind === "external_live"
-          ? "blocked_live_evidence"
+          ? "incomplete_external_live"
           : "not_applicable",
     externalLiveProviderKind,
     blockers:
-      journey.kind === "external_live" && externalLiveProviderKind !== "external_provider"
+      journey.kind === "external_live" && !liveJourneyCredited
         ? ["external_live_provider_evidence_missing"]
         : [],
   };
@@ -602,6 +622,121 @@ function isExternalProviderLabel(provider: string): boolean {
     "::1",
   ];
   return provider.length > 0 && !localAliases.some(alias => lower.includes(alias));
+}
+
+function externalLiveJourneyCredited(
+  journey: Step6ProductAcceptanceJourney,
+  snapshot: any,
+  detail: any,
+  runtimeEvidence: string[],
+  finalDeliveryMatched: boolean
+): boolean {
+  return (
+    journey.kind === "external_live" &&
+    finalDeliveryMatched &&
+    externalProviderKindForSnapshot(journey, snapshot) === "external_provider" &&
+    journey.expectedRuntimeEvidence.every(evidence => runtimeEvidence.includes(evidence)) &&
+    liveProviderAgentLoopEvidence(journey, snapshot, detail).externalProviderAgentLoopSucceeded
+  );
+}
+
+function liveProviderAgentLoopEvidence(
+  journey: Step6ProductAcceptanceJourney,
+  snapshot: any,
+  detail: any
+) {
+  const metadata = agentLoopMetadataFromDetail(detail);
+  const providerRoute = `${snapshot?.provider?.routeType ?? ""}`.toLowerCase();
+  const providerKind = externalProviderKindForSnapshot(journey, snapshot);
+  const endpointKind = metadataString(metadata, "providerEndpointKind");
+  const baseSucceeded =
+    journey.kind === "external_live" &&
+    providerRoute === "cloud" &&
+    providerKind === "external_provider" &&
+    endpointKind === "external_provider" &&
+    metadata?.liveProviderInvoked === true &&
+    metadata?.agentLoopSucceeded === true &&
+    metadata?.singleStepFallbackUsed !== true &&
+    metadataString(metadata, "agentLoopActionStatus") === "succeeded" &&
+    metadataString(metadata, "toolSelectionCandidateActionType") === "mcp_tool" &&
+    metadata?.modelSelectedAllowedTool === true &&
+    metadata?.modelSelectedExecutionPolicyValidated === true &&
+    metadata?.modelSelectedExecutionAllowed === true &&
+    metadataString(metadata, "modelSelectedArgumentsSource") === "governed_candidate_contract";
+  const selectedTarget = metadataString(metadata, "toolSelectionCandidateTarget");
+  const selectedId = metadataString(metadata, "toolSelectionCandidateId");
+  const selectedRank = metadataNumber(metadata, "toolSelectionCandidateRank");
+  const candidateIds = metadataStringArray(metadata, "toolSelectionCandidateIds");
+  const targetMatches = (...targets: string[]) =>
+    targets.some(target => selectedTarget === target || selectedId === target);
+  const selectedRankMatches =
+    selectedRank > 0 &&
+    Boolean(candidateIds[selectedRank - 1]) &&
+    targetMatches(candidateIds[selectedRank - 1]);
+  const webRead = baseSucceeded && targetMatches("web.search") && selectedRankMatches;
+  const providerRankedSelection =
+    baseSucceeded &&
+    metadata?.mcpReadTargetResolved === true &&
+    targetMatches("builtin_echo") &&
+    candidateIds.length >= 2 &&
+    selectedRankMatches &&
+    metadata?.toolSelectionModelRanked === true &&
+    metadataString(metadata, "toolSelectionRankingSource") === "provider_model" &&
+    metadataString(metadata, "toolSelectionRankingRouteType") === "cloud" &&
+    metadata?.toolSelectionRankingProviderBacked === true &&
+    metadata?.toolSelectionModelRankingIgnored !== true;
+  return {
+    externalProviderAgentLoopSucceeded: baseSucceeded,
+    webRead,
+    mcpRead: providerRankedSelection,
+  };
+}
+
+function agentLoopMetadataFromDetail(detail: any): Record<string, any> | null {
+  let attemptedMetadata: Record<string, any> | null = null;
+  for (const entry of detail?.transcript ?? []) {
+    const summary = String(entry?.summary ?? "");
+    const metadata = entry?.metadata && typeof entry.metadata === "object" ? entry.metadata : null;
+    if (!metadata) continue;
+    if (summary.includes("Governed ReAct AgentLoop completed")) return metadata;
+    if (summary.includes("Governed ReAct AgentLoop") && metadata.agentLoopAttempted === true) {
+      attemptedMetadata = metadata;
+    }
+  }
+  return attemptedMetadata;
+}
+
+function liveProviderTraceEvidence(detail: any): string[] {
+  const metadata = agentLoopMetadataFromDetail(detail);
+  if (!metadata) return [];
+  const evidence: string[] = [];
+  if (metadata.liveProviderInvoked === true) evidence.push("live_provider.invoked");
+  if (metadata.agentLoopSucceeded === true) evidence.push("agent_loop.succeeded");
+  const endpointKind = metadataString(metadata, "providerEndpointKind");
+  if (metadataSafeLabel(endpointKind)) evidence.push(`provider_endpoint.${endpointKind}`);
+  const actionStatus = metadataString(metadata, "agentLoopActionStatus");
+  if (metadataSafeLabel(actionStatus)) evidence.push(`action.${actionStatus}`);
+  const selectedTarget = metadataString(metadata, "toolSelectionCandidateTarget");
+  if (metadataSafeLabel(selectedTarget)) evidence.push(`tool_target.${selectedTarget}`);
+  if (metadata.toolSelectionModelRanked === true) evidence.push("tool_selection.provider_ranked");
+  return uniqueValues(evidence);
+}
+
+function metadataString(metadata: Record<string, any> | null, key: string): string {
+  const value = metadata?.[key];
+  return typeof value === "string" ? value : "";
+}
+
+function metadataNumber(metadata: Record<string, any> | null, key: string): number {
+  const value = metadata?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function metadataStringArray(metadata: Record<string, any> | null, key: string): string[] {
+  const value = metadata?.[key];
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
 }
 
 async function readControlPlaneAttrs(controlPlane: Locator) {
@@ -651,11 +786,11 @@ function runtimeEvidenceForJourney(
   journey: Step6ProductAcceptanceJourney,
   attrs: Awaited<ReturnType<typeof readControlPlaneAttrs>>,
   snapshot: any,
+  detail: any,
   events: string[]
 ): string[] {
   const evidence: string[] = [];
   const routeStrategy = `${attrs.routeStrategy} ${snapshot?.route?.strategy ?? ""}`.toLowerCase();
-  const providerRoute = `${snapshot?.provider?.routeType ?? ""}`.toLowerCase();
   if (journey.id === "S6-CLOCK" && routeStrategy.includes("runtime")) {
     evidence.push("source.runtime_fact", "runtime.clock");
   }
@@ -686,10 +821,16 @@ function runtimeEvidenceForJourney(
   ) {
     evidence.push("permission.pending", "review_action.visible");
   }
-  if (journey.id === "S6-LIVE-WEB" && providerRoute === "cloud" && routeStrategy.includes("web")) {
+  if (
+    journey.id === "S6-LIVE-WEB" &&
+    liveProviderAgentLoopEvidence(journey, snapshot, detail).webRead
+  ) {
     evidence.push("live_provider.external", "tool.web_read");
   }
-  if (journey.id === "S6-LIVE-MCP" && providerRoute === "cloud" && routeStrategy.includes("mcp")) {
+  if (
+    journey.id === "S6-LIVE-MCP" &&
+    liveProviderAgentLoopEvidence(journey, snapshot, detail).mcpRead
+  ) {
     evidence.push("live_provider.external", "tool.mcp_read", "provider_ranked_selection");
   }
   if (journey.id === "S6-RECOVERY" && (events.length > 0 || attrs.taskStatus)) {

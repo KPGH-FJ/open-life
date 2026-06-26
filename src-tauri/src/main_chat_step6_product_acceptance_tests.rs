@@ -826,6 +826,19 @@ async fn main_chat_step6_live_provider_eval_state_prep_uses_dedicated_key_withou
     assert_eq!(scheduler.openai_key, "sk-step6-secret-test-key");
     assert!(scheduler.scripted_generation_response.is_none());
     assert!(!scheduler.prefer_local);
+    let permissions = state
+        .tool_permission_store
+        .lock()
+        .await
+        .list()
+        .expect("tool permissions");
+    assert!(permissions.iter().any(|permission| {
+        permission.tool_name == "builtin_echo"
+            && permission.source == "builtin"
+            && permission.risk_level == "low"
+            && permission.action_type == "read"
+            && permission.consumed_at.is_none()
+    }));
 }
 
 #[tokio::test]

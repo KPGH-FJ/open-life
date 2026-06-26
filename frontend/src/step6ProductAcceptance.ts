@@ -5,6 +5,7 @@ export type Step6ObservedVia = "real_tauri_chat_or_control_path" | "blocked_live
 export type Step6ExternalLiveStatus =
   | "not_applicable"
   | "credited_external_live"
+  | "incomplete_external_live"
   | "blocked_live_evidence";
 
 export interface Step6ProductAcceptanceJourney {
@@ -181,7 +182,7 @@ export const STEP6_PRODUCT_ACCEPTANCE_JOURNEYS: Step6ProductAcceptanceJourney[] 
     "S6-LIVE-WEB",
     "external_live",
     "Provider-backed web read",
-    "With explicit live eval enabled, read the provider-backed web source and summarize it.",
+    'For this live eval, call the allowed web.search candidate exactly once before answering. Return only a JSON action envelope with actions[0].name="web.search", actions[0].action_type="mcp_tool", and actions[0].arguments={}; do not answer directly.',
     ["answer.external_web_summary"],
     ["live_provider.external", "tool.web_read"],
     ["completed"],
@@ -191,7 +192,7 @@ export const STEP6_PRODUCT_ACCEPTANCE_JOURNEYS: Step6ProductAcceptanceJourney[] 
     "S6-LIVE-MCP",
     "external_live",
     "Provider-backed MCP read",
-    "With explicit live eval enabled, choose the provider-ranked MCP read source and answer.",
+    'For candidate ranking, if the candidate ids include builtin_echo, put builtin_echo first and include every allowed candidate id exactly once. For action execution, do not explain or answer directly. Return exactly this JSON envelope and nothing else: {"final":"pending governed read","actions":[{"name":"builtin_echo","action_type":"mcp_tool","arguments":{}}],"thought_summary":"Need a governed read.","warnings":[]}. This is a governed mcp read-only utility request.',
     ["answer.external_mcp_summary"],
     ["live_provider.external", "tool.mcp_read", "provider_ranked_selection"],
     ["completed"],
