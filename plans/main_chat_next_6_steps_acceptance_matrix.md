@@ -57,10 +57,10 @@ S6 blocked live rows still must satisfy every per-row safety invariant. A blocke
 S6 WebDriver `--validate-journeys-only` must validate and emit the full static journey contract, including id/order, kind, execution mode, prompts, answer/runtime/UI/final-delivery evidence labels, seeded prep task ids, and control labels; frontend tests compare that emitted contract against the TypeScript Step6 matrix.
 
 S6 current evidence on 2026-06-26: GitHub Actions Linux PR run
-`28243953899` at commit `ff42140731147b2f63b161f1a6f1bed1da40b35c`
+`28244710624` at commit `d523d75cf4b5b577a068b8f8f9ee5d29adef6f78`
 completed the local-only Step 6 path. The uploaded report artifact
-`7908006657`
-(`sha256:4ad79bd5b17326b16fc75636754fa249715c50819790627ba07392c17f5bb581`)
+`7908263816`
+(`sha256:911d8c1a0805e64aadfa736e2d18cedb8b74c73733840c6e6ba02a6c3b8d0756`)
 proves `e2eEnvironmentReady=true`, `localDeterministicReady=true`,
 `externalLiveReady=false`, `acceptanceReady=false`, all 9 deterministic
 local journeys passed, `S6-LIVE-WEB` and `S6-LIVE-MCP` were explicit
