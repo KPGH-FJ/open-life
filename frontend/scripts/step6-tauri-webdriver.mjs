@@ -918,6 +918,7 @@ async function navigateToChat(sessionId) {
       args: [],
     },
   });
+  await waitForElementPresent(sessionId, "chat-input", 30_000);
 }
 
 async function readCurrentTaskIdWithWebDriver(sessionId) {
@@ -932,6 +933,7 @@ async function readCurrentTaskIdWithWebDriver(sessionId) {
 }
 
 async function fillByTestId(sessionId, testId, value) {
+  await waitForElementPresent(sessionId, testId, 30_000);
   const filled = await executeScript(
     sessionId,
     `
@@ -952,6 +954,18 @@ async function fillByTestId(sessionId, testId, value) {
     [testId, value]
   );
   if (!filled) throw new Error(`webdriver_element_missing:${testId}`);
+}
+
+async function waitForElementPresent(sessionId, testId, timeoutMs) {
+  await waitForScript(
+    sessionId,
+    `
+      return Boolean(document.querySelector(\`[data-testid="\${arguments[0]}"]\`));
+    `,
+    [testId],
+    timeoutMs,
+    `webdriver_element_missing:${testId}`
+  );
 }
 
 async function clickByTestId(sessionId, testId) {
