@@ -1010,7 +1010,7 @@ async function openDiagnosticsIfAvailableWithWebDriver(sessionId) {
       return true;
     `,
     [],
-    1_000,
+    30_000,
     "webdriver_diagnostics_toggle_missing"
   ).catch(() => false);
   if (!opened) console.error("[step6_diagnostics:unavailable]");

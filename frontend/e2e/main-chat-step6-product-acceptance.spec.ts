@@ -129,7 +129,7 @@ async function openDiagnosticsIfAvailable(page: Page) {
   const controlPlane = page.getByTestId("agent-control-plane").last();
   if ((await controlPlane.count()) > 0 && (await controlPlane.isVisible())) return;
   const diagnosticsToggle = page.getByRole("button", { name: "Show Main Chat diagnostics" });
-  const visible = await diagnosticsToggle.isVisible({ timeout: 1_000 }).catch(() => false);
+  const visible = await diagnosticsToggle.isVisible({ timeout: 30_000 }).catch(() => false);
   if (!visible) {
     console.error("[step6_diagnostics:unavailable]");
     return;
