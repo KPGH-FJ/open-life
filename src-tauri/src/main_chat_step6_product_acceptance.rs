@@ -449,19 +449,17 @@ async fn collect_step6_final_gate_summary(state: &Arc<AppState>) -> Step6FinalGa
         state,
         live_opt_in,
     )
-    .await
+        .await
     {
         Ok(report) => {
-            let live_provider_web_credit = report
-                .final_gate
-                .live_provider_scenario_reports
-                .iter()
-                .any(|row| row.scenario == "web_agent_loop" && row.credited);
-            let live_provider_mcp_credit = report
-                .final_gate
-                .live_provider_scenario_reports
-                .iter()
-                .any(|row| row.scenario == "registered_mcp_agent_loop" && row.credited);
+            let live_provider_web_credit = step6_live_provider_scenario_credit(
+                &report.final_gate.live_provider_scenario_reports,
+                &["web-agent-loop", "web_agent_loop"],
+            );
+            let live_provider_mcp_credit = step6_live_provider_scenario_credit(
+                &report.final_gate.live_provider_scenario_reports,
+                &["registered-mcp-agent-loop", "registered_mcp_agent_loop"],
+            );
             let live_provider_scenario_reports = report.final_gate.live_provider_scenario_reports;
             Step6FinalGateSummary {
                 collected: true,
@@ -495,6 +493,15 @@ async fn collect_step6_final_gate_summary(state: &Arc<AppState>) -> Step6FinalGa
             blockers: vec![format!("step6_final_gate_collection_failed_{}", error_code(&error))],
         },
     }
+}
+
+pub(crate) fn step6_live_provider_scenario_credit(
+    reports: &[crate::main_chat_final_gate::MainChatLiveProviderScenarioReport],
+    accepted_scenarios: &[&str],
+) -> bool {
+    reports
+        .iter()
+        .any(|report| report.credited && accepted_scenarios.contains(&report.scenario.as_str()))
 }
 
 fn read_step6_browser_report_from_default_path() -> Option<Step6BrowserReport> {

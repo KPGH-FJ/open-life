@@ -2,7 +2,8 @@ use crate::main_chat_step6_product_acceptance::{
     build_step6_product_acceptance_report_for_tests, clean_step6_final_gate_summary_for_tests,
     prepare_main_chat_step6_live_provider_eval_state_with_env,
     refresh_step6_browser_report_digest_for_tests, step6_browser_report_for_tests,
-    step6_observed_journey_for_tests, Step6LiveProviderEvalEnv, Step6ObservedJourney,
+    step6_live_provider_scenario_credit, step6_observed_journey_for_tests,
+    Step6LiveProviderEvalEnv, Step6ObservedJourney,
 };
 
 fn required_step6_ids() -> [&'static str; 11] {
@@ -26,6 +27,40 @@ fn passing_rows() -> Vec<Step6ObservedJourney> {
         .into_iter()
         .map(step6_observed_journey_for_tests)
         .collect()
+}
+
+fn live_scenario_report_for_step6_tests(
+    scenario: &str,
+    credited: bool,
+) -> crate::main_chat_final_gate::MainChatLiveProviderScenarioReport {
+    crate::main_chat_final_gate::MainChatLiveProviderScenarioReport {
+        scenario: scenario.into(),
+        ready: credited,
+        credited,
+        status: "completed".into(),
+        provider_endpoint_kind: "external_provider".into(),
+        blockers: Vec::new(),
+        live_provider_invocation_allowed: true,
+        main_chat_invoked: true,
+        model_invoked: true,
+        direct_writes_executed: false,
+        legacy_fallback_used: false,
+        agent_loop_succeeded: credited,
+        single_step_fallback_used: false,
+        agent_loop_action_status: Some("succeeded".into()),
+        mcp_read_target_resolved: false,
+        tool_permission_proposal_created: false,
+        tool_selection_candidate_count: 1,
+        model_selected_allowed_tool: credited,
+        model_selected_execution_policy_validated: credited,
+        model_selected_execution_allowed: credited,
+        model_selected_governed_arguments: credited,
+        model_selected_candidate_id: Some(scenario.into()),
+        model_selected_candidate_target: Some(scenario.into()),
+        run_id_present: true,
+        task_session_id_present: true,
+        response_preview_present: true,
+    }
 }
 
 fn mark_live_rows_blocked(rows: &mut [Step6ObservedJourney]) {
@@ -67,6 +102,31 @@ fn main_chat_step6_product_acceptance_credits_complete_structured_product_journe
     assert_eq!(report.external_live_journey_count, 2);
     assert_eq!(report.passed_journey_count, 11);
     assert_eq!(report.blockers, Vec::<String>::new());
+}
+
+#[test]
+fn main_chat_step6_product_acceptance_accepts_final_gate_kebab_live_scenario_labels() {
+    let reports = vec![
+        live_scenario_report_for_step6_tests("web-agent-loop", true),
+        live_scenario_report_for_step6_tests("registered-mcp-agent-loop", true),
+        live_scenario_report_for_step6_tests("web_agent_loop", false),
+    ];
+
+    assert!(step6_live_provider_scenario_credit(
+        &reports,
+        &["web-agent-loop", "web_agent_loop"]
+    ));
+    assert!(step6_live_provider_scenario_credit(
+        &reports,
+        &["registered-mcp-agent-loop", "registered_mcp_agent_loop"]
+    ));
+    assert!(!step6_live_provider_scenario_credit(
+        &reports,
+        &[
+            "mcp-tool-permission-proposal",
+            "mcp_tool_permission_proposal"
+        ]
+    ));
 }
 
 #[test]
