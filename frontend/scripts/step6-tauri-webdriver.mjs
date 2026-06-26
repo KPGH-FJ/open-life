@@ -1778,6 +1778,7 @@ function finalGateBlockedExternalLiveOnly(report) {
     "runtime_eval_final_completion_not_ready",
     "command_surface_final_completion_not_ready",
     "provider_live_proposal_permission_not_executed",
+    "provider_backed_web_mcp_agent_loop_not_executed",
   ]);
   const liveOnlyBlockers = (report.blockers ?? []).every(blocker => {
     const text = String(blocker ?? "");
@@ -1816,6 +1817,7 @@ function step6LiveOnlyFinalGateBlocker(blocker, allowedBlockers = defaultStep6Li
     text.startsWith("S6-LIVE-MCP:") ||
     text.startsWith("step6_final_gate_live_credit_missing:S6-LIVE-WEB") ||
     text.startsWith("step6_final_gate_live_credit_missing:S6-LIVE-MCP") ||
+    text.includes("provider_backed_web_mcp_agent_loop_not_executed") ||
     text.includes("provider_backed_web_agent_loop_not_executed") ||
     text.includes("provider_backed_mcp_agent_loop_not_executed") ||
     text.includes("live_provider") ||
@@ -1832,6 +1834,7 @@ function defaultStep6LiveOnlyBlockers() {
     "runtime_eval_final_completion_not_ready",
     "command_surface_final_completion_not_ready",
     "provider_live_proposal_permission_not_executed",
+    "provider_backed_web_mcp_agent_loop_not_executed",
   ]);
 }
 
