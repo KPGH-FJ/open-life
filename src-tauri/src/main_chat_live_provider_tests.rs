@@ -528,6 +528,100 @@ async fn main_chat_live_provider_eval_harness_invokes_external_direct_answer_whe
 
 #[tokio::test]
 #[ignore = "requires OPENLIFE_MAIN_CHAT_LIVE_PROVIDER_EVAL=1, network, and a real provider API key"]
+async fn main_chat_live_provider_stream_command_surface_invokes_external_step6_web_when_opted_in() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    configure_live_provider_eval_state(&state).await;
+
+    let events = std::sync::Arc::new(std::sync::Mutex::new(
+        Vec::<(String, serde_json::Value)>::new(),
+    ));
+    let captured_events = events.clone();
+    let started = std::time::Instant::now();
+    let stream_result = tokio::time::timeout(
+        std::time::Duration::from_secs(240),
+        crate::main_chat_streaming::start_stream_message_with_state(
+            "live-provider-step6-stream-web".into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: "For this live eval, call the allowed web.search candidate exactly once before answering. Return only a JSON action envelope with actions[0].name=\"web.search\", actions[0].action_type=\"mcp_tool\", and actions[0].arguments={}; do not answer directly.".into(),
+            }],
+            None,
+            &state,
+            move |event, payload| {
+                captured_events
+                    .lock()
+                    .expect("capture stream event")
+                    .push((event.to_string(), payload));
+            },
+        ),
+    )
+    .await;
+    let elapsed_ms = started.elapsed().as_millis();
+    let captured = events.lock().expect("read stream events").clone();
+    let event_names = captured
+        .iter()
+        .map(|(event, _)| event.as_str())
+        .collect::<Vec<_>>();
+    eprintln!(
+        "live provider stream command summary: {}",
+        serde_json::json!({
+            "elapsedMs": elapsed_ms,
+            "eventNames": event_names,
+        })
+    );
+
+    let stream_result = stream_result.unwrap_or_else(|_| {
+        panic!(
+            "external Step 6 stream command timed out after {elapsed_ms}ms with events {:?}",
+            event_names
+        )
+    });
+    stream_result.unwrap_or_else(|error| {
+        panic!(
+            "external Step 6 stream command failed after {elapsed_ms}ms: {error}; events {:?}",
+            event_names
+        )
+    });
+
+    let done_payload = captured
+        .iter()
+        .rev()
+        .find(|(event, _)| event == "stream-message-done")
+        .map(|(_, payload)| payload)
+        .expect("stream-message-done event");
+    assert_eq!(
+        done_payload
+            .get("session_id")
+            .and_then(serde_json::Value::as_str),
+        Some("live-provider-step6-stream-web")
+    );
+    assert!(
+        done_payload
+            .get("agent_ingress")
+            .and_then(|value| value.get("agentTaskSessionId"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty()),
+        "stream done payload must expose task-session evidence: {done_payload}"
+    );
+    assert!(
+        done_payload
+            .get("execution_transcript")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry
+                        .get("metadata")
+                        .and_then(|metadata| metadata.get("liveProviderInvoked"))
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                })
+            }),
+        "stream done payload must preserve live-provider invocation evidence: {done_payload}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires OPENLIFE_MAIN_CHAT_LIVE_PROVIDER_EVAL=1, network, and a real provider API key"]
 async fn main_chat_live_provider_eval_harness_invokes_external_react_web_and_mcp_when_opted_in() {
     let mut reports = Vec::new();
     for scenario in [

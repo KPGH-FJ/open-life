@@ -472,6 +472,8 @@ describe("Step6 product acceptance evidence", () => {
     expect(script).toContain("executeStep6LiveJourneyWithWebDriver");
     expect(script).toContain("executeStep6SeededControlJourneyWithWebDriver");
     expect(script).toContain("executeStep6PermissionAcceptanceJourneyWithWebDriver");
+    expect(script).toContain("openDiagnosticsIfPossible");
+    expect(script).toContain("Show Main Chat diagnostics");
     expect(script).toContain("schemaVersion");
     expect(script).toContain("step6-product-acceptance-v1");
     expect(script).toContain("readinessSemantics");

@@ -744,7 +744,6 @@ async function executeStep6LiveJourneyWithWebDriver(sessionId, row, liveProvider
   await fillByTestId(sessionId, "chat-input", row.prompt);
   await waitForElementEnabled(sessionId, "send-button", 10_000);
   await clickByTestId(sessionId, "send-button");
-  await openDiagnosticsIfAvailableWithWebDriver(sessionId);
   const controlPlane = await waitForControlPlaneDelivery(sessionId, previousTaskId, row);
   return await observeStep6JourneyFromControlPlane(sessionId, row, controlPlane.taskSessionId);
 }
@@ -1024,9 +1023,20 @@ async function waitForControlPlaneDelivery(sessionId, previousTaskId, row) {
     return await waitForScript(
       sessionId,
       `
+        const openDiagnosticsIfPossible = () => {
+          const button = [...document.querySelectorAll('button')].find(item =>
+            item.getAttribute('aria-label') === 'Show Main Chat diagnostics' && !item.disabled
+          );
+          if (!button) return false;
+          button.click();
+          return true;
+        };
         const controls = [...document.querySelectorAll('[data-testid="agent-control-plane"]')];
         const control = controls.at(-1);
-        if (!control) return null;
+        if (!control) {
+          openDiagnosticsIfPossible();
+          return null;
+        }
         const taskSessionId = control.getAttribute('data-task-session-id') ?? '';
         const finalDelivery = control.getAttribute('data-final-delivery') === 'true';
         const taskStatus = control.getAttribute('data-task-status') ?? '';
