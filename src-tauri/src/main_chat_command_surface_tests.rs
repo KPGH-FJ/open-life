@@ -25,7 +25,8 @@ fn main_chat_command_surface_ipc_tests_are_not_concentrated_in_lib_rs() {
         "send_message_web_policy_blocker_completes_through_agent_loop_not_fallback",
         "start_stream_message_web_policy_blocker_completes_through_agent_loop_not_fallback",
         "send_message_registered_mcp_multi_candidate_agent_loop_selects_allowed_manifest",
-        "send_message_missing_workspace_file_source_blocks_before_queue_execution",
+        "send_message_missing_workspace_file_source_records_kernel_blocked_read_evidence",
+        "main_chat_kernel_goal_3_review_maturation_send_stream_returns_governed_blocker_without_legacy",
         "main_chat_command_surface_eval_gate_covers_send_stream_runtime_matrix",
     ] {
         assert!(
@@ -174,6 +175,20 @@ async fn load_command_surface_session(
         .load_session(task_session_id)
         .expect("load task session")
         .expect("task session exists")
+}
+
+async fn list_command_surface_transcript(
+    state: &std::sync::Arc<crate::AppState>,
+    task_session_id: &str,
+) -> Vec<openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry> {
+    let store_arc = state
+        .main_chat_agent_session_store
+        .as_ref()
+        .expect("main chat session store");
+    let store = store_arc.lock().await;
+    store
+        .list_transcript_entries(task_session_id)
+        .expect("list task transcript")
 }
 
 async fn list_command_surface_actions(
@@ -1554,7 +1569,109 @@ async fn main_chat_kernel_goal_3_unknown_tool_send_stream_blocks_without_fallbac
 }
 
 #[tokio::test]
-async fn send_message_missing_workspace_file_source_blocks_before_queue_execution() {
+async fn main_chat_kernel_goal_3_review_maturation_send_stream_returns_governed_blocker_without_legacy(
+) {
+    let user_text = "Review what changed in my working style this month.";
+    let expected_blocker = "review_maturation_kernel_executor_unavailable";
+
+    let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let send_response = invoke_send_message_for_kernel_goal_3(
+        send_state.clone(),
+        "k3-send-review-maturation",
+        user_text,
+    )
+    .await;
+    assert_eq!(send_response["legacy_fallback_used"], false);
+    assert_eq!(
+        send_response["agent_ingress"]["selectedStrategy"],
+        "review_maturation"
+    );
+    assert!(send_response["tool_calls"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    assert!(send_response["reply"]
+        .as_str()
+        .is_some_and(|reply| reply.contains(expected_blocker)));
+    let generation = &send_response["reasoning_trace"]["generation_result"];
+    assert_eq!(generation["selectedStrategy"], "review_maturation");
+    assert_eq!(generation["legacyFallbackUsed"], false);
+    assert_eq!(generation["directWritesExecuted"], false);
+    assert_eq!(generation["kernelBackedGovernedBlocker"], true);
+    assert_eq!(generation["kernelSupportDisposition"], "governed_blocker");
+    assert!(generation["blockers"]
+        .as_array()
+        .is_some_and(|blockers| blockers.iter().any(|blocker| blocker == expected_blocker)));
+    let send_task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
+        .as_str()
+        .expect("send review task session id");
+    let send_session = load_command_surface_session(&send_state, send_task_session_id).await;
+    assert_eq!(
+        send_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
+    );
+    assert!(send_session
+        .pending_blockers
+        .contains(&expected_blocker.to_string()));
+    let send_actions = list_command_surface_actions(&send_state, send_task_session_id).await;
+    assert!(send_actions.is_empty());
+    let send_transcript = list_command_surface_transcript(&send_state, send_task_session_id).await;
+    assert!(send_transcript.iter().any(|entry| {
+        entry
+            .metadata
+            .get("kernelBackedGovernedBlocker")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+            && entry
+                .metadata
+                .get("kernelSupportDisposition")
+                .and_then(serde_json::Value::as_str)
+                == Some("governed_blocker")
+    }));
+    assert!(!send_transcript.iter().any(|entry| {
+        entry.kind
+            == openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Fallback
+    }));
+
+    let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    invoke_start_stream_message_for_kernel_goal_3(
+        stream_state.clone(),
+        "k3-stream-review-maturation",
+        user_text,
+    )
+    .await;
+    let stream_task_session_id = expected_task_session_id("k3-stream-review-maturation", user_text);
+    let stream_session = load_command_surface_session(&stream_state, &stream_task_session_id).await;
+    assert_eq!(
+        stream_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
+    );
+    assert!(stream_session
+        .pending_blockers
+        .contains(&expected_blocker.to_string()));
+    let stream_actions = list_command_surface_actions(&stream_state, &stream_task_session_id).await;
+    assert!(stream_actions.is_empty());
+    let stream_transcript =
+        list_command_surface_transcript(&stream_state, &stream_task_session_id).await;
+    assert!(stream_transcript.iter().any(|entry| {
+        entry
+            .metadata
+            .get("kernelBackedGovernedBlocker")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+            && entry
+                .metadata
+                .get("kernelSupportDisposition")
+                .and_then(serde_json::Value::as_str)
+                == Some("governed_blocker")
+    }));
+    assert!(!stream_transcript.iter().any(|entry| {
+        entry.kind
+            == openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Fallback
+    }));
+}
+
+#[tokio::test]
+async fn send_message_missing_workspace_file_source_records_kernel_blocked_read_evidence() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let app = tauri::test::mock_builder()
         .manage(state.clone())
@@ -1589,9 +1706,20 @@ async fn send_message_missing_workspace_file_source_blocks_before_queue_executio
         response["agent_ingress"]["selectedStrategy"],
         "re_act_tool_execution"
     );
-    assert!(response["reply"]
-        .as_str()
-        .is_some_and(|reply| reply.contains("missing or unreadable")));
+    assert!(
+        response["reply"]
+            .as_str()
+            .is_some_and(|reply| reply.contains("filesystem_read_blocked")),
+        "missing file response: {response:#}"
+    );
+    assert_eq!(
+        response["reasoning_trace"]["generation_result"]["kernelBackedReadOnlyToolLoop"],
+        true
+    );
+    assert_eq!(
+        response["reasoning_trace"]["generation_result"]["legacyFallbackUsed"],
+        false
+    );
     let task_session_id = response["agent_ingress"]["agentTaskSessionId"]
         .as_str()
         .expect("missing file task session id");
@@ -1613,52 +1741,64 @@ async fn send_message_missing_workspace_file_source_blocks_before_queue_executio
     );
     assert_eq!(
         session.pending_blockers,
-        vec!["workspace_file_read_source_missing".to_string()]
+        vec!["filesystem_read_blocked".to_string()]
     );
 
-    let actions = {
-        let queue_arc = state
-            .main_chat_action_queue_store
-            .as_ref()
-            .expect("main chat action queue store");
-        let queue = queue_arc.lock().await;
-        queue
-            .list_for_session(task_session_id)
-            .expect("list missing file actions")
-    };
-    assert!(
-        actions.is_empty(),
-        "missing file plan preparation should block before queue execution: {actions:?}"
+    let actions = list_command_surface_actions(&state, task_session_id).await;
+    let file_action = actions
+        .iter()
+        .find(|action| action.action.action_type == "file.read")
+        .expect("missing file.read blocked action");
+    assert_eq!(
+        file_action.status,
+        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed
+    );
+    let action_metadata = file_action
+        .observation_metadata
+        .as_ref()
+        .expect("missing file blocked observation metadata");
+    assert_eq!(
+        action_metadata
+            .get("kernelBackedReadOnlyToolLoop")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        action_metadata
+            .get("blockerReason")
+            .and_then(serde_json::Value::as_str),
+        Some("filesystem_read_blocked")
+    );
+    assert_eq!(
+        action_metadata
+            .get("legacyFallbackUsed")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
     );
 
-    let transcript = {
-        let store_arc = state
-            .main_chat_agent_session_store
-            .as_ref()
-            .expect("main chat session store");
-        let store = store_arc.lock().await;
-        store
-            .list_transcript_entries(task_session_id)
-            .expect("list missing file transcript")
-    };
+    let transcript = list_command_surface_transcript(&state, task_session_id).await;
     let error_entry = transcript
         .iter()
-        .find(|entry| entry.summary == "ReAct tool action was blocked before execution.")
+        .find(|entry| {
+            entry
+                .summary
+                .contains("MainChatKernel read-only tool loop returned a blocker")
+        })
         .expect("missing file blocker transcript entry");
     assert_eq!(
         error_entry
             .metadata
-            .get("blockerReason")
-            .and_then(serde_json::Value::as_str),
-        Some("workspace_file_read_source_missing")
-    );
-    assert_eq!(
-        error_entry
-            .metadata
-            .get("sourceMissing")
+            .get("kernelBackedReadOnlyToolLoop")
             .and_then(serde_json::Value::as_bool),
         Some(true)
     );
+    assert!(error_entry
+        .metadata
+        .get("blockers")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|blockers| blockers
+            .iter()
+            .any(|blocker| blocker == "filesystem_read_blocked")));
     assert_eq!(
         error_entry
             .metadata

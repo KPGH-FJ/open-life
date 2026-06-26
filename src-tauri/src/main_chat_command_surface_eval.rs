@@ -3230,6 +3230,7 @@ struct MainChatCommandSurfaceKernelEvidence {
     kernel_read_only_tool_loop: bool,
     kernel_proposal_only_write: bool,
     kernel_plan_execute: bool,
+    kernel_governed_blocker: bool,
     kernel_blocker: bool,
     kernel_hs_context: bool,
     kernel_web_tool: bool,
@@ -3252,6 +3253,7 @@ fn main_chat_command_surface_eval_kernel_evidence(
         evidence.kernel_proposal_only_write |=
             metadata_flag(metadata, "kernelBackedProposalOnlyWrite");
         evidence.kernel_plan_execute |= metadata_flag(metadata, "kernelBackedPlanExecuteDraft");
+        evidence.kernel_governed_blocker |= metadata_flag(metadata, "kernelBackedGovernedBlocker");
         evidence.kernel_hs_context |= metadata_has_any_key(
             metadata,
             &[
@@ -3276,6 +3278,8 @@ fn main_chat_command_surface_eval_kernel_evidence(
             evidence.kernel_proposal_only_write |=
                 metadata_flag(metadata, "kernelBackedProposalOnlyWrite");
             evidence.kernel_plan_execute |= metadata_flag(metadata, "kernelBackedPlanExecuteDraft");
+            evidence.kernel_governed_blocker |=
+                metadata_flag(metadata, "kernelBackedGovernedBlocker");
             evidence.kernel_web_tool |= action.action.action_type == "web.search"
                 && metadata_flag(metadata, "kernelBackedReadOnlyToolLoop");
             evidence.kernel_mcp_tool |= action.action.action_type == "mcp.read_only"
@@ -3290,6 +3294,7 @@ fn main_chat_command_surface_eval_kernel_evidence(
         evidence.kernel_proposal_only_write |=
             metadata_flag(response, "kernelBackedProposalOnlyWrite");
         evidence.kernel_plan_execute |= metadata_flag(response, "kernelBackedPlanExecuteDraft");
+        evidence.kernel_governed_blocker |= metadata_flag(response, "kernelBackedGovernedBlocker");
         evidence.kernel_hs_context |= metadata_has_any_key(
             response,
             &[
@@ -3305,11 +3310,13 @@ fn main_chat_command_surface_eval_kernel_evidence(
         && (evidence.kernel_read_only_tool_loop
             || evidence.kernel_proposal_only_write
             || evidence.kernel_plan_execute
-            || evidence.kernel_direct_answer);
+            || evidence.kernel_direct_answer
+            || evidence.kernel_governed_blocker);
     evidence.kernel_backed = evidence.kernel_direct_answer
         || evidence.kernel_read_only_tool_loop
         || evidence.kernel_proposal_only_write
-        || evidence.kernel_plan_execute;
+        || evidence.kernel_plan_execute
+        || evidence.kernel_governed_blocker;
     evidence
 }
 

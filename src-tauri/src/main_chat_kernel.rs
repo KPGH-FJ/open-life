@@ -185,6 +185,25 @@ pub struct MainChatRouteMetadata {
     pub scripted_response_configured: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MainChatKernelSupportDisposition {
+    KernelSupported,
+    GovernedBlocker,
+}
+
+impl MainChatKernelSupportDisposition {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::KernelSupported => "kernel_supported",
+            Self::GovernedBlocker => "governed_blocker",
+        }
+    }
+
+    fn handled_by_kernel(self) -> bool {
+        matches!(self, Self::KernelSupported | Self::GovernedBlocker)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MainChatKernelContextMetadata {
@@ -1330,6 +1349,11 @@ where
                 "silentWritesAllowed": false,
                 "kernelBackedDirectAnswer": main_chat_agent_turn.decision.selected_strategy == MainChatAgentStrategy::DirectAnswer,
                 "kernelBackedReadOnlyToolLoop": main_chat_agent_turn.decision.selected_strategy == MainChatAgentStrategy::ReActToolExecution,
+                "kernelBackedGovernedBlocker": main_chat_agent_turn.decision.selected_strategy == MainChatAgentStrategy::ReviewMaturation,
+                "kernelSupportDisposition": main_chat_kernel_support_disposition(
+                    &main_chat_agent_turn.decision.selected_strategy,
+                    &messages,
+                ).as_str(),
                 "kernelEventSink": event_sink_label,
             }),
         )
@@ -1382,7 +1406,16 @@ where
                 .await,
             );
         }
-        MainChatAgentStrategy::ReviewMaturation => {}
+        MainChatAgentStrategy::ReviewMaturation => {
+            execution_transcript.extend(
+                append_main_chat_kernel_review_maturation_blocker_transcript(
+                    state,
+                    main_chat_agent_turn,
+                    sanitized_selected_skill_id.as_deref(),
+                )
+                .await,
+            );
+        }
     }
 
     let scheduler = state.scheduler.lock().await.clone();
@@ -1583,8 +1616,15 @@ pub(crate) fn main_chat_kernel_supports_turn(
     selected_strategy: &MainChatAgentStrategy,
     messages: &[ChatMessage],
 ) -> bool {
+    main_chat_kernel_support_disposition(selected_strategy, messages).handled_by_kernel()
+}
+
+pub(crate) fn main_chat_kernel_support_disposition(
+    selected_strategy: &MainChatAgentStrategy,
+    messages: &[ChatMessage],
+) -> MainChatKernelSupportDisposition {
     match selected_strategy {
-        MainChatAgentStrategy::DirectAnswer => true,
+        MainChatAgentStrategy::DirectAnswer => MainChatKernelSupportDisposition::KernelSupported,
         MainChatAgentStrategy::ReActToolExecution => {
             let input = MainChatTurnInput {
                 session_id: "kernel_support_probe".into(),
@@ -1594,14 +1634,23 @@ pub(crate) fn main_chat_kernel_supports_turn(
                 model_supplied_tool_arguments: None,
                 runtime_fact_direct_answer: false,
             };
-            !plan_kernel_read_tools(&input, false).is_empty()
+            if !plan_kernel_read_tools(&input, false).is_empty()
                 || plan_kernel_write_outcome(&input, false).is_some()
+            {
+                MainChatKernelSupportDisposition::KernelSupported
+            } else {
+                MainChatKernelSupportDisposition::GovernedBlocker
+            }
         }
-        MainChatAgentStrategy::PlanExecute => true,
+        MainChatAgentStrategy::PlanExecute => MainChatKernelSupportDisposition::KernelSupported,
         MainChatAgentStrategy::MemoryProposal
         | MainChatAgentStrategy::LifeModelProposal
-        | MainChatAgentStrategy::BlockedConfirmation => true,
-        _ => false,
+        | MainChatAgentStrategy::BlockedConfirmation => {
+            MainChatKernelSupportDisposition::KernelSupported
+        }
+        MainChatAgentStrategy::ReviewMaturation => {
+            MainChatKernelSupportDisposition::GovernedBlocker
+        }
     }
 }
 
@@ -1834,6 +1883,39 @@ async fn append_main_chat_kernel_write_contract_transcript(
             "silentWritesAllowed": false,
             "legacyFallbackUsed": false,
             "kernelBackedProposalOnlyWrite": true,
+            "selectedSkillId": selected_skill_id,
+        }),
+    )
+    .await
+}
+
+async fn append_main_chat_kernel_review_maturation_blocker_transcript(
+    state: &Arc<AppState>,
+    main_chat_agent_turn: &MainChatAgentTurn,
+    selected_skill_id: Option<&str>,
+) -> Vec<ExecutionTranscriptEntry> {
+    let Some(task_session_id) = main_chat_agent_turn
+        .decision
+        .agent_task_session_id
+        .as_deref()
+    else {
+        return Vec::new();
+    };
+    append_main_chat_agent_transcript(
+        state,
+        Some(task_session_id),
+        ExecutionTranscriptEntryKind::Plan,
+        "MainChatKernel ReviewMaturation disposition was prepared.",
+        serde_json::json!({
+            "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
+            "promptContract": "kernel_review_maturation_governed_blocker",
+            "toolExecutionAllowed": false,
+            "writeExecutionAllowed": false,
+            "silentWritesAllowed": false,
+            "legacyFallbackUsed": false,
+            "kernelBackedGovernedBlocker": true,
+            "kernelSupportDisposition": MainChatKernelSupportDisposition::GovernedBlocker.as_str(),
+            "blockerReason": "review_maturation_kernel_executor_unavailable",
             "selectedSkillId": selected_skill_id,
         }),
     )
@@ -2099,6 +2181,15 @@ where
             route_metadata: route_metadata.clone(),
         });
 
+        if input.selected_strategy == Some(MainChatAgentStrategy::ReviewMaturation) {
+            return self.governed_blocker(
+                "review_maturation_kernel_executor_unavailable",
+                context_metadata,
+                route_metadata,
+                event_sink,
+            );
+        }
+
         if let Some(outcome) = write_outcome {
             return self.run_write_outcome_turn(
                 context_metadata,
@@ -2163,6 +2254,30 @@ where
     {
         event_sink.emit(MainChatKernelEvent::Blocker { code: code.into() });
         MainChatTurnResult::blocked(code)
+    }
+
+    fn governed_blocker<S>(
+        &self,
+        code: &'static str,
+        context_metadata: MainChatKernelContextMetadata,
+        route_metadata: MainChatRouteMetadata,
+        event_sink: &mut S,
+    ) -> MainChatTurnResult
+    where
+        S: MainChatEventSink + ?Sized,
+    {
+        event_sink.emit(MainChatKernelEvent::Blocker { code: code.into() });
+        MainChatTurnResult {
+            assistant_message: None,
+            blockers: vec![code.into()],
+            proposals: Vec::new(),
+            tool_calls: Vec::new(),
+            write_outcome: None,
+            route_metadata: Some(route_metadata),
+            context_metadata: Some(context_metadata),
+            direct_writes_executed: false,
+            legacy_fallback_used: false,
+        }
     }
 
     async fn run_read_tool_turn<S>(
@@ -2437,7 +2552,7 @@ async fn build_successful_kernel_command_surface_result(
     } else {
         main_chat_provider_endpoint_kind(&scheduler, scripted_provider_response)
     };
-    let live_provider_invoked = !read_tool_loop_used
+    let provider_live_invoked = !read_tool_loop_used
         && !direct_reflex_used
         && !scripted_provider_response
         && route_metadata.provider != "none"
@@ -2534,9 +2649,9 @@ async fn build_successful_kernel_command_surface_result(
         "routeReason": route_metadata.reason,
         "providerHealthEstimated": false,
         "scriptedProviderResponse": scripted_provider_response,
-        "liveProviderInvoked": live_provider_invoked,
+        "liveProviderInvoked": provider_live_invoked,
         "providerEndpointKind": provider_endpoint_kind,
-        "localProviderHttpHarness": live_provider_invoked
+        "localProviderHttpHarness": provider_live_invoked
             && provider_endpoint_kind == "local_test_http",
         "externalLiveProviderEvalPreflighted": false,
     });
@@ -3378,6 +3493,8 @@ async fn build_blocked_kernel_command_surface_result(
     let blockers = kernel_result.blockers.clone();
     let blocker_summary = blockers.join(",");
     let read_tool_loop_used = !kernel_result.tool_calls.is_empty();
+    let governed_strategy_blocker =
+        main_chat_agent_turn.decision.selected_strategy == MainChatAgentStrategy::ReviewMaturation;
     if let Some(ref store_arc) = state.main_chat_agent_session_store {
         let store = store_arc.lock().await;
         if let Err(err) = store.set_pending_blockers(task_session_id, blockers.clone()) {
@@ -3410,6 +3527,12 @@ async fn build_blocked_kernel_command_surface_result(
                 "legacyFallbackUsed": false,
                 "kernelBackedDirectAnswer": !read_tool_loop_used,
                 "kernelBackedReadOnlyToolLoop": read_tool_loop_used,
+                "kernelBackedGovernedBlocker": governed_strategy_blocker,
+                "kernelSupportDisposition": if governed_strategy_blocker {
+                    MainChatKernelSupportDisposition::GovernedBlocker.as_str()
+                } else {
+                    MainChatKernelSupportDisposition::KernelSupported.as_str()
+                },
                 "kernelEventSink": event_sink_label,
                 "kernelEventCount": kernel_events.len(),
                 "modelGenerated": false,
@@ -3472,6 +3595,12 @@ async fn build_blocked_kernel_command_surface_result(
                 .unwrap_or_default(),
             "kernelBackedDirectAnswer": !read_tool_loop_used,
             "kernelBackedReadOnlyToolLoop": read_tool_loop_used,
+            "kernelBackedGovernedBlocker": governed_strategy_blocker,
+            "kernelSupportDisposition": if governed_strategy_blocker {
+                MainChatKernelSupportDisposition::GovernedBlocker.as_str()
+            } else {
+                MainChatKernelSupportDisposition::KernelSupported.as_str()
+            },
             "kernelEventSink": event_sink_label,
             "kernelEventCount": kernel_events.len(),
             "modelGenerated": false,
@@ -4357,7 +4486,8 @@ fn plan_kernel_read_tool(
             "agents.md",
             "cargo.toml",
         ],
-    ) {
+    ) || looks_like_workspace_file_read_request(&lower)
+    {
         return Some(MainChatKernelReadToolDecision {
             tool_name: "file.read".into(),
             queue_action_type: "file.read".into(),
@@ -4422,7 +4552,26 @@ fn plan_kernel_read_tool(
         ));
     }
 
+    if input.selected_strategy == Some(MainChatAgentStrategy::ReActToolExecution) {
+        return Some(kernel_memory_search_read_tool_decision(
+            user_text,
+            "kernel_react_default_memory_query_from_user_text",
+            "bounded memory search used for ReAct tool request without a more specific kernel target",
+            model_arguments_ignored,
+        ));
+    }
+
     None
+}
+
+fn looks_like_workspace_file_read_request(lower: &str) -> bool {
+    lower.contains("read ")
+        && contains_any(
+            lower,
+            &[
+                "/", ".md", ".toml", ".json", ".rs", ".ts", ".tsx", ".yaml", ".yml",
+            ],
+        )
 }
 
 fn plan_kernel_write_outcome(
@@ -5601,6 +5750,161 @@ mod tests {
         }
     }
 
+    #[test]
+    fn main_chat_kernel_strategy_disposition_covers_ordinary_strategies_without_legacy() {
+        let messages = vec![user_message("Search notes about energy.")];
+        for strategy in [
+            MainChatAgentStrategy::DirectAnswer,
+            MainChatAgentStrategy::ReActToolExecution,
+            MainChatAgentStrategy::PlanExecute,
+            MainChatAgentStrategy::MemoryProposal,
+            MainChatAgentStrategy::LifeModelProposal,
+            MainChatAgentStrategy::BlockedConfirmation,
+        ] {
+            let disposition = main_chat_kernel_support_disposition(&strategy, &messages);
+            assert_eq!(
+                disposition,
+                MainChatKernelSupportDisposition::KernelSupported,
+                "{strategy:?} should not require ordinary legacy fallback"
+            );
+            assert!(main_chat_kernel_supports_turn(&strategy, &messages));
+        }
+
+        let review_disposition = main_chat_kernel_support_disposition(
+            &MainChatAgentStrategy::ReviewMaturation,
+            &messages,
+        );
+        assert_eq!(
+            review_disposition,
+            MainChatKernelSupportDisposition::GovernedBlocker
+        );
+        assert!(main_chat_kernel_supports_turn(
+            &MainChatAgentStrategy::ReviewMaturation,
+            &messages
+        ));
+    }
+
+    #[tokio::test]
+    async fn main_chat_kernel_review_maturation_returns_governed_blocker_without_model_call() {
+        let model = ScriptedModelClient::ok("model should not be called");
+        let kernel = test_kernel(model.clone(), Vec::new());
+        let mut events = BufferedMainChatEventSink::default();
+
+        let result = kernel
+            .run_turn(
+                MainChatTurnInput {
+                    session_id: "session-review-maturation".into(),
+                    messages: vec![user_message(
+                        "Review what changed in my working style this month.",
+                    )],
+                    selected_skill_id: None,
+                    selected_strategy: Some(MainChatAgentStrategy::ReviewMaturation),
+                    model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
+                },
+                &mut events,
+            )
+            .await;
+
+        assert_eq!(model.call_count(), 0);
+        assert_eq!(
+            result.blockers,
+            vec!["review_maturation_kernel_executor_unavailable".to_string()]
+        );
+        assert!(result.assistant_message.is_none());
+        assert!(result.route_metadata.is_some());
+        assert!(result.context_metadata.is_some());
+        assert!(!result.direct_writes_executed);
+        assert!(!result.legacy_fallback_used);
+        assert!(events.events().iter().any(|event| {
+            matches!(
+                event,
+                MainChatKernelEvent::Blocker { code }
+                    if code == "review_maturation_kernel_executor_unavailable"
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn main_chat_kernel_react_without_specific_target_uses_bounded_memory_read() {
+        let model = ScriptedModelClient::ok("model should not be called");
+        let decisions = Arc::new(Mutex::new(Vec::new()));
+        let kernel = test_kernel(model.clone(), Vec::new()).with_read_tool_executor(Arc::new(
+            RecordingReadToolExecutor {
+                decisions: decisions.clone(),
+            },
+        ));
+        let mut events = BufferedMainChatEventSink::default();
+
+        let result = kernel
+            .run_turn(
+                MainChatTurnInput {
+                    session_id: "session-react-default-memory".into(),
+                    messages: vec![user_message("Search notes about energy.")],
+                    selected_skill_id: None,
+                    selected_strategy: Some(MainChatAgentStrategy::ReActToolExecution),
+                    model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
+                },
+                &mut events,
+            )
+            .await;
+
+        assert_eq!(model.call_count(), 0);
+        assert!(result.blockers.is_empty());
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "memory.search");
+        assert_eq!(
+            result.tool_calls[0].governed_input["governedInputSource"],
+            serde_json::json!("kernel_react_default_memory_query_from_user_text")
+        );
+        assert!(!result.direct_writes_executed);
+        assert!(!result.legacy_fallback_used);
+        let recorded = decisions.lock().expect("decisions lock");
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].tool_name, "memory.search");
+    }
+
+    #[tokio::test]
+    async fn main_chat_kernel_react_path_like_read_uses_file_tool_before_memory_default() {
+        let model = ScriptedModelClient::ok("model should not be called");
+        let decisions = Arc::new(Mutex::new(Vec::new()));
+        let kernel = test_kernel(model.clone(), Vec::new()).with_read_tool_executor(Arc::new(
+            RecordingReadToolExecutor {
+                decisions: decisions.clone(),
+            },
+        ));
+        let mut events = BufferedMainChatEventSink::default();
+
+        let result = kernel
+            .run_turn(
+                MainChatTurnInput {
+                    session_id: "session-react-path-read".into(),
+                    messages: vec![user_message(
+                        "Read frontend/definitely-missing-stage2-file.md before answering.",
+                    )],
+                    selected_skill_id: None,
+                    selected_strategy: Some(MainChatAgentStrategy::ReActToolExecution),
+                    model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
+                },
+                &mut events,
+            )
+            .await;
+
+        assert_eq!(model.call_count(), 0);
+        assert!(result.blockers.is_empty());
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "file.read");
+        assert_eq!(
+            result.tool_calls[0].governed_input["governedInputSource"],
+            serde_json::json!("workspace_scoped_resolver_pending")
+        );
+        let recorded = decisions.lock().expect("decisions lock");
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].tool_name, "file.read");
+    }
+
     #[tokio::test]
     async fn main_chat_kernel_direct_answer_returns_one_response_no_tools_or_writes() {
         let model = ScriptedModelClient::ok("Kernel direct answer.");
@@ -6362,11 +6666,14 @@ mod tests {
     fn main_chat_kernel_goal_3_has_no_final_live_or_broad_react_dependency() {
         let source = include_str!("main_chat_kernel.rs");
         let final_gate = ["main_chat_", "final_gate"].concat();
-        let live_provider = ["main_chat_", "live_provider"].concat();
+        let live_provider_harness = ["main_chat_", "live_provider_harness"].concat();
+        let live_provider_tests = ["main_chat_", "live_provider_tests"].concat();
         let react_agent_loop = ["Agent", "Loop"].concat();
 
         assert!(!source.contains(&final_gate));
-        assert!(!source.contains(&live_provider));
+        assert!(!source.contains(&live_provider_harness));
+        assert!(!source.contains(&live_provider_tests));
+        assert!(source.contains("main_chat_live_provider_eval_requires_provider_backed_react"));
         assert!(!source.contains(&react_agent_loop));
     }
 }
