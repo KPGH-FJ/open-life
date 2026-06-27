@@ -39,6 +39,9 @@ use crate::main_chat_runtime_support::{
     append_main_chat_agent_transcript, start_main_chat_agent_turn,
 };
 use crate::main_chat_strategy::try_run_main_chat_agent_strategy;
+use crate::main_chat_tool_loop::{
+    run_main_chat_tool_loop_adapter, MainChatToolLoopInput, MainChatToolLoopOutcome,
+};
 use crate::{persist_life_model, AppState, SendMessageResult, ToolCallResult};
 
 const STREAM_INIT_TIMEOUT_SECS: u64 = 45;
@@ -143,10 +146,17 @@ impl MainChatTurnRouteDecision {
     }
 
     pub(crate) fn legacy_compat_fallback(&self) -> Self {
+        self.legacy_compat_fallback_with_reason("legacy_compat_after_strategy_no_result")
+    }
+
+    pub(crate) fn legacy_compat_fallback_with_reason(
+        &self,
+        reason_code: impl Into<String>,
+    ) -> Self {
         Self {
             path: MainChatExecutionPath::LegacyCompatFallback,
             strategy_label: self.strategy_label.clone(),
-            reason_code: "legacy_compat_after_strategy_no_result".into(),
+            reason_code: reason_code.into(),
             kernel_supported: self.kernel_supported,
             kernel_support_disposition: self.kernel_support_disposition.clone(),
             fallback_allowed: true,
@@ -384,6 +394,75 @@ pub(crate) async fn run_main_chat_turn_pipeline_buffered(
         None
     };
 
+    if route_decision.path == MainChatExecutionPath::ToolLoop {
+        let outcome = run_main_chat_tool_loop_adapter(
+            MainChatToolLoopInput {
+                session_id: &session_id,
+                user_msg: user_msg.as_ref(),
+                desensitized_messages: &desensitized_messages,
+                life_model: &life_model,
+                context_summary: context_summary.clone(),
+                embed_err: embed_err.clone(),
+                auto_checkin_msg: auto_checkin_msg.clone(),
+                main_chat_agent_turn: &main_chat_agent_turn,
+                privacy_engine: &privacy_engine,
+                privacy_map: &privacy_map,
+                existing_agent_run: None,
+                selected_skill_id: selected_skill_id.as_deref(),
+            },
+            state,
+        )
+        .await?;
+        match outcome {
+            MainChatToolLoopOutcome::AgentLoopSuccess(result)
+            | MainChatToolLoopOutcome::GovernedBlocker(result)
+            | MainChatToolLoopOutcome::ToolPermissionProposal(result)
+            | MainChatToolLoopOutcome::SingleStepFallback(result) => {
+                materialize_optional_main_chat_agent_events(state, result.agent_state.as_ref())
+                    .await?;
+                return Ok(MainChatTurnPipelineOutput {
+                    route_decision,
+                    delivery: MainChatTurnDelivery::Buffered { result },
+                });
+            }
+            MainChatToolLoopOutcome::ExplicitFallbackAvailable { reason_code }
+            | MainChatToolLoopOutcome::NoResult { reason_code } => {
+                if !route_decision.fallback_allowed {
+                    return Err(format!(
+                        "ToolLoop adapter returned {reason_code}, but legacy fallback is not allowed"
+                    ));
+                }
+                let legacy_route_decision =
+                    route_decision.legacy_compat_fallback_with_reason(reason_code);
+                let ordinary_plan = ordinary_send_chat_execution_plan(layer);
+                let result = send_message_with_legacy_generation(
+                    session_id,
+                    user_msg,
+                    life_model,
+                    tools_prompt,
+                    privacy_engine,
+                    privacy_map,
+                    desensitized_messages,
+                    embed_err,
+                    auto_checkin_msg,
+                    layer,
+                    context_summary,
+                    ordinary_plan,
+                    main_chat_agent_turn,
+                    legacy_route_decision.clone(),
+                    state,
+                )
+                .await?;
+                materialize_optional_main_chat_agent_events(state, result.agent_state.as_ref())
+                    .await?;
+                return Ok(MainChatTurnPipelineOutput {
+                    route_decision: legacy_route_decision,
+                    delivery: MainChatTurnDelivery::Buffered { result },
+                });
+            }
+        }
+    }
+
     if let Some(result) = try_run_main_chat_agent_strategy(
         &session_id,
         user_msg.as_ref(),
@@ -604,6 +683,86 @@ pub(crate) async fn run_main_chat_turn_pipeline_streaming(
     } else {
         None
     };
+
+    if route_decision.path == MainChatExecutionPath::ToolLoop {
+        let outcome = run_main_chat_tool_loop_adapter(
+            MainChatToolLoopInput {
+                session_id: &session_id,
+                user_msg: user_msg.as_ref(),
+                desensitized_messages: &desensitized_messages,
+                life_model: &life_model,
+                context_summary: context_summary.clone(),
+                embed_err: embed_err.clone(),
+                auto_checkin_msg: auto_checkin_msg_stream.clone(),
+                main_chat_agent_turn: &main_chat_agent_turn,
+                privacy_engine: &privacy_engine,
+                privacy_map: &privacy_map,
+                existing_agent_run: Some(agent_run.clone()),
+                selected_skill_id: selected_skill_id.as_deref(),
+            },
+            state,
+        )
+        .await?;
+        match outcome {
+            MainChatToolLoopOutcome::AgentLoopSuccess(result)
+            | MainChatToolLoopOutcome::GovernedBlocker(result)
+            | MainChatToolLoopOutcome::ToolPermissionProposal(result)
+            | MainChatToolLoopOutcome::SingleStepFallback(result) => {
+                let durable_events =
+                    materialize_optional_main_chat_agent_events(state, result.agent_state.as_ref())
+                        .await?;
+                let durable_event_count = durable_events.len();
+                let run_id = result.run_id.clone();
+                let legacy_fallback_used = result.legacy_fallback_used;
+                emit_stream_send_message_result(
+                    &session_id,
+                    result,
+                    None,
+                    durable_events,
+                    true,
+                    emit_stream_event,
+                )?;
+                return Ok(MainChatTurnPipelineOutput {
+                    route_decision,
+                    delivery: MainChatTurnDelivery::Streamed {
+                        run_id,
+                        legacy_fallback_used,
+                        kernel_event_count: None,
+                        durable_event_count,
+                    },
+                });
+            }
+            MainChatToolLoopOutcome::ExplicitFallbackAvailable { reason_code }
+            | MainChatToolLoopOutcome::NoResult { reason_code } => {
+                if !route_decision.fallback_allowed {
+                    return Err(format!(
+                        "ToolLoop adapter returned {reason_code}, but legacy fallback is not allowed"
+                    ));
+                }
+                let legacy_route_decision =
+                    route_decision.legacy_compat_fallback_with_reason(reason_code);
+                return run_legacy_streaming_delivery(
+                    &session_id,
+                    user_msg,
+                    life_model,
+                    tools_prompt,
+                    privacy_engine,
+                    privacy_map,
+                    desensitized_messages,
+                    embed_err,
+                    auto_checkin_msg_stream,
+                    layer,
+                    context_summary,
+                    agent_run,
+                    main_chat_agent_turn,
+                    legacy_route_decision,
+                    state,
+                    emit_stream_event,
+                )
+                .await;
+            }
+        }
+    }
 
     if let Some(result) = try_run_main_chat_agent_strategy(
         &session_id,
@@ -1514,6 +1673,19 @@ mod tests {
         assert!(
             pipeline_source.contains("pub(crate) enum MainChatTurnDelivery"),
             "the pipeline exposes typed delivery evidence"
+        );
+        assert!(
+            pipeline_source.contains("run_main_chat_tool_loop_adapter("),
+            "the pipeline must call the ToolLoop adapter for ToolLoop route decisions"
+        );
+        assert!(
+            pipeline_source.contains("route_decision.path == MainChatExecutionPath::ToolLoop"),
+            "ToolLoop dispatch must be gated by the typed route decision"
+        );
+        assert!(
+            pipeline_source.contains("MainChatToolLoopOutcome::ExplicitFallbackAvailable")
+                && pipeline_source.contains("MainChatToolLoopOutcome::NoResult"),
+            "legacy fallback after ToolLoop must be explicit outcome handling"
         );
         assert!(
             pipeline_source.contains("route_decision: legacy_route_decision"),

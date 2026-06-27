@@ -70,6 +70,7 @@ pub(crate) mod main_chat_streaming;
 #[allow(dead_code)]
 pub(crate) mod main_chat_task_continuity_eval;
 pub(crate) mod main_chat_task_controls;
+pub(crate) mod main_chat_tool_loop;
 pub(crate) mod main_chat_turn_pipeline;
 pub(crate) mod provider_validation;
 pub mod runtime_build_info;

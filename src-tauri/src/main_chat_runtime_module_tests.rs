@@ -308,17 +308,25 @@ fn ordinary_chat_entrypoints_try_kernel_before_legacy_strategy_paths() {
     let strategy_attempt = pipeline_body
         .find("try_run_main_chat_agent_strategy(")
         .expect("pipeline should keep the explicit legacy strategy fallback");
-    let legacy_plan = pipeline_body
+    let tool_loop_attempt = pipeline_body
+        .find("run_main_chat_tool_loop_adapter(")
+        .expect("pipeline should dispatch ToolLoop before legacy strategy fallback");
+    let legacy_plan_after_strategy = pipeline_body[strategy_attempt..]
         .find("run_legacy_streaming_delivery(")
-        .expect("pipeline should keep the final legacy stream delivery");
+        .map(|offset| strategy_attempt + offset)
+        .expect("pipeline should keep the final non-ToolLoop legacy stream delivery");
 
     assert!(
-        route_decision < strategy_attempt,
-        "pipeline should make the shared route decision before legacy strategy fallback"
+        route_decision < tool_loop_attempt,
+        "pipeline should make the shared route decision before ToolLoop dispatch"
     );
     assert!(
-        strategy_attempt < legacy_plan,
-        "pipeline should attempt legacy strategy before building the final legacy stream delivery"
+        tool_loop_attempt < strategy_attempt,
+        "ToolLoop adapter should handle ToolLoop route decisions before old strategy fallback"
+    );
+    assert!(
+        strategy_attempt < legacy_plan_after_strategy,
+        "pipeline should attempt old strategy before building the final non-ToolLoop legacy stream delivery"
     );
 }
 

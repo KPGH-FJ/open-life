@@ -420,6 +420,56 @@ Acceptance:
 - The route result is observable in trace.
 - Tool executor arguments still come from governed candidates or typed builders.
 
+Phase 5 readiness supplement:
+
+- Phase 5 is an advisory structured-route preview phase. It must not replace
+  `MainChatTurnRouteDecision` control flow until deterministic fallback and
+  trace evidence prove parity.
+- Gate model-backed preview behind all of these conditions:
+  - `runtime_mode=capability_first_beta`;
+  - provider is configured and freshly validated;
+  - route is not HS-sensitive/local-only;
+  - network policy allows provider invocation;
+  - prompt/context can be rendered as metadata-safe bounded routing context.
+- The parser must accept only an exact JSON object with the declared fields:
+
+```json
+{
+  "route": "direct_answer | tool_loop | plan_execute | memory_proposal | permission_request | blocked",
+  "confidence": 0.0,
+  "requires_tools": false,
+  "requires_write": false,
+  "reason": "metadata-safe short reason"
+}
+```
+
+- Reject markdown fences, arrays, extra fields, missing fields, non-finite
+  confidence, confidence outside `0.0..=1.0`, unknown route labels, control
+  characters, oversized reason text, unsafe reason text, and inconsistent
+  `requires_tools` / `requires_write` combinations.
+- The model output is advisory. On parser failure, provider failure, local-only
+  policy, unvalidated provider, or low confidence, keep the deterministic route
+  decision and record a typed ignored reason.
+- Never let route preview include tool target, candidate id, action arguments,
+  filesystem paths, raw MCP manifest descriptions, raw memory, raw LifeModel YAML,
+  credentials, or executor arguments. Tool executor inputs still come only from
+  governed candidates or typed builders.
+- Add route preview evidence to the turn trace:
+  - attempted/not attempted;
+  - provider/model identity when invoked;
+  - deterministic route before preview;
+  - accepted advisory route or ignored reason;
+  - parser status;
+  - metadata-safe response digest, not raw invalid model output.
+- Add route-preview tests for exact valid JSON, invalid JSON, markdown fenced
+  JSON, extra fields, unknown route, unsafe reason, low confidence, local-only
+  skip, unvalidated-provider skip, and deterministic fallback parity.
+- Add command-surface tests proving Phase 5 does not change existing
+  DirectAnswer, file read, PlanExecute, proposal, web blocker, MCP read, and
+  ToolPermission proposal outcomes when preview is disabled or ignored.
+- Do not introduce a new routing framework or orchestration stack. Keep the
+  preview module small and owned by `MainChatTurnPipeline`.
+
 ### 5.5 Real Capability Evals
 
 Preparation content:

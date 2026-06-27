@@ -12,6 +12,12 @@ fn main_chat_strategy_source() -> String {
     std::fs::read_to_string(module_path).expect("read main_chat_strategy.rs")
 }
 
+fn main_chat_tool_loop_source() -> String {
+    let module_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_tool_loop.rs");
+    std::fs::read_to_string(module_path).expect("read main_chat_tool_loop.rs")
+}
+
 #[test]
 fn main_chat_strategy_dispatcher_is_extracted_from_lib_rs() {
     let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
@@ -45,46 +51,53 @@ fn main_chat_direct_answer_strategy_does_not_return_to_hidden_legacy_generation(
         &source,
         "pub(crate) async fn try_run_main_chat_agent_strategy(",
     );
+    let direct_answer_start = strategy_body
+        .find("MainChatAgentStrategy::DirectAnswer =>")
+        .expect("DirectAnswer strategy arm exists");
+    let react_start = strategy_body
+        .find("MainChatAgentStrategy::ReActToolExecution =>")
+        .expect("ReAct no-result strategy arm exists");
+    let direct_answer_arm = &strategy_body[direct_answer_start..react_start];
 
     assert!(
-        !strategy_body.contains("if strategy == MainChatAgentStrategy::DirectAnswer")
-            || !strategy_body.contains("return Ok(None);"),
+        !direct_answer_arm.contains("return Ok(None);"),
         "DirectAnswer must execute as a Main Chat strategy instead of returning to legacy generation"
     );
 }
 
 #[test]
 fn main_chat_react_strategy_uses_action_executor_instead_of_keyword_mapper_core() {
-    let source = main_chat_strategy_source();
+    let strategy_source = main_chat_strategy_source();
     let strategy_body = extract_rust_function_body(
-        &source,
+        &strategy_source,
         "pub(crate) async fn try_run_main_chat_agent_strategy(",
     );
+    let tool_loop_source = main_chat_tool_loop_source();
 
     assert!(
-        !strategy_body.contains("main_chat_react_action_type("),
+        strategy_body.contains("MainChatAgentStrategy::ReActToolExecution => {\n            return Ok(None);\n        }"),
+        "ReActToolExecution should leave old strategy dispatch as no-result for the pipeline ToolLoop adapter"
+    );
+    assert!(
+        !tool_loop_source.contains("main_chat_react_action_type("),
         "ReActToolExecution must not use the keyword action mapper as its core execution path"
     );
     assert!(
-        strategy_body.contains("execute_main_chat_react_action_with_executor("),
-        "ReActToolExecution should delegate read actions to the governed ActionExecutor path"
+        tool_loop_source.contains("execute_main_chat_react_action_with_executor("),
+        "ReActToolExecution should delegate read actions to the governed ActionExecutor fallback path from the ToolLoop adapter"
     );
 }
 
 #[test]
 fn main_chat_react_strategy_synthesizes_follow_up_after_observation() {
-    let source = main_chat_strategy_source();
-    let strategy_body = extract_rust_function_body(
-        &source,
-        "pub(crate) async fn try_run_main_chat_agent_strategy(",
-    );
+    let source = main_chat_tool_loop_source();
 
     assert!(
-        strategy_body.contains("synthesize_main_chat_react_follow_up("),
+        source.contains("synthesize_main_chat_react_follow_up("),
         "ReActToolExecution must synthesize a governed follow-up/final answer after observation instead of echoing the observation"
     );
     assert!(
-        !strategy_body.contains("reply = observation.final_answer;"),
+        !source.contains("reply = observation.final_answer;"),
         "ReActToolExecution should not use the raw observation answer as its final response"
     );
 }
@@ -112,10 +125,10 @@ fn main_chat_mcp_read_resolves_registered_tool_instead_of_wrapper_only() {
 
 #[test]
 fn main_chat_react_attempts_agent_loop_before_single_step_fallback() {
-    let source = main_chat_strategy_source();
-    let strategy_body = extract_rust_function_body(
+    let source = main_chat_tool_loop_source();
+    let tool_loop_body = extract_rust_function_body(
         &source,
-        "pub(crate) async fn try_run_main_chat_agent_strategy(",
+        "pub(crate) async fn run_main_chat_tool_loop_adapter(",
     );
     let runtime_module_path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_react_runtime.rs");
@@ -123,7 +136,7 @@ fn main_chat_react_attempts_agent_loop_before_single_step_fallback() {
         std::fs::read_to_string(runtime_module_path).expect("read main_chat_react_runtime.rs");
 
     assert!(
-        strategy_body.contains("try_run_main_chat_react_agent_loop("),
+        tool_loop_body.contains("try_run_main_chat_react_agent_loop("),
         "ReActToolExecution must attempt the governed AgentLoop before single-step fallback"
     );
     assert!(
