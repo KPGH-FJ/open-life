@@ -170,7 +170,7 @@ export const STAGE1_DOGFOOD_SCENARIOS: Stage1DogfoodScenario[] = [
   s(
     "D23",
     "chat_e2e",
-    "Use web while network policy blocks it.",
+    "Fetch http://127.0.0.1/stage1-dogfood-network-policy while network policy blocks private addresses.",
     ["blocked"],
     ["blocked_work", "next_action"],
     "web_network_policy_blocked"

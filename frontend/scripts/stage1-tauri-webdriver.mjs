@@ -36,15 +36,15 @@ const D23_WEB_BLOCKER_SCRIPTED_RESPONSE = JSON.stringify({
   final: "I will run the governed web read first.",
   actions: [
     {
-      name: "web.search",
+      name: "web.fetch",
       action_type: "mcp_tool",
       arguments: {
-        query: "OpenLife release notes",
-        max_results: 3,
+        url: "http://127.0.0.1/stage1-dogfood-network-policy",
+        summarize: true,
       },
     },
   ],
-  thought_summary: "Need a governed network-policy checked web observation.",
+  thought_summary: "Need a governed network-policy checked web fetch observation.",
   warnings: [],
 });
 
