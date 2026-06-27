@@ -370,6 +370,15 @@ export default function ProviderConfigSection({
             </ul>
           </div>
         )}
+        {ollamaServiceOnline === true && diagnostics && !diagnostics.ollama_online && (
+          <div className="rounded-lg bg-blue-50 border border-blue-200 p-3 text-xs text-blue-800 space-y-1">
+            <div className="font-medium">Ollama 已启动，但当前模型未匹配：{selectedLocalModel}</div>
+            <ul className="list-disc pl-4 space-y-0.5">
+              <li>如果已下载 llama3.1，请选择 Llama 3.1，或点击上方检测到的模型。</li>
+              <li>如果想继续使用当前名称，请先运行 ollama pull {selectedLocalModel}。</li>
+            </ul>
+          </div>
+        )}
       </section>
     </>
   );
