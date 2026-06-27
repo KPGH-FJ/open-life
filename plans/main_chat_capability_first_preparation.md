@@ -254,6 +254,49 @@ pub struct MainChatTurnRouteDecision {
   focused route-decision tests, and
   `main_chat_command_surface_eval_gate_covers_send_stream_runtime_matrix`.
 
+Phase 3 readiness supplement:
+
+- Phase 3 is the `MainChatTurnPipeline` wrapper phase. It should use the Phase 2
+  `MainChatTurnRouteDecision` object, but it must still preserve existing
+  behavior.
+- Do not start the ReAct ToolLoop adapter in Phase 3. That remains the following
+  phase after the wrapper exists and send/stream parity is proven.
+- Add a small orchestration boundary such as:
+
+```rust
+pub struct MainChatTurnPipelineInput {
+    pub session_id: String,
+    pub messages: Vec<ChatMessage>,
+    pub selected_skill_id: Option<String>,
+    pub stream_mode: MainChatTurnStreamMode,
+}
+
+pub struct MainChatTurnPipelineOutput {
+    pub route_decision: MainChatTurnRouteDecision,
+    pub delivery: MainChatTurnDelivery,
+}
+```
+
+- The first wrapper may still delegate to the existing Kernel, strategy, and
+  legacy helpers. Its job is ownership and evidence shape, not a new executor.
+- Keep send/stream as thin command adapters around the wrapper. They may retain
+  transport-specific event emission, but they must not own route branching or
+  fallback selection.
+- Pipeline output must carry typed route evidence for Kernel, strategy result,
+  and explicit legacy fallback. Do not rely on final answer prose to infer path.
+- Preserve task-session, transcript, action queue, proposal, permission, and
+  event emission behavior exactly.
+- Add parity tests proving the wrapper has the same observable outcomes as the
+  current send/stream command-surface matrix for DirectAnswer, file read,
+  PlanExecute draft, proposal, web blocker, MCP read, ToolPermission proposal,
+  and explicit legacy fallback eligibility.
+- Add negative assertions that Phase 3 does not call provider/model during route
+  decision, does not introduce writes, and does not make `LegacyCompatFallback`
+  the default ordinary path.
+- Verification for Phase 3 must include `cargo check -p openlife-tauri`, focused
+  pipeline wrapper tests, source guards that send/stream remain thin adapters,
+  and `main_chat_command_surface_eval_gate_covers_send_stream_runtime_matrix`.
+
 ### 5.3 ReAct As ToolLoop Executor
 
 Preparation content:

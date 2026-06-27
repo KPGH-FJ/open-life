@@ -18,8 +18,6 @@ use crate::main_chat_generation_support::{
 };
 use crate::main_chat_hs_runtime::{build_chat_runtime_hs_packet, included_life_model_sections};
 use crate::main_chat_kernel::{
-    main_chat_kernel_supports_turn, main_chat_live_provider_eval_requires_provider_backed_react,
-    main_chat_react_turn_requires_governed_agent_loop_candidate_selection,
     run_main_chat_kernel_direct_answer_with_state, StreamingMainChatEventSink,
 };
 use crate::main_chat_legacy_fallback::ordinary_stream_chat_execution_plan;
@@ -31,6 +29,7 @@ use crate::main_chat_runtime_support::{
     append_main_chat_agent_transcript, start_main_chat_agent_turn,
 };
 use crate::main_chat_strategy::try_run_main_chat_agent_strategy;
+use crate::main_chat_turn_pipeline::decide_main_chat_turn_route;
 use crate::{persist_life_model, AppState, ToolCallResult};
 
 const STREAM_INIT_TIMEOUT_SECS: u64 = 45;
@@ -52,25 +51,13 @@ pub(crate) async fn start_stream_message_with_state(
     )
     .await?;
 
-    let kernel_supported =
-        main_chat_kernel_supports_turn(&main_chat_agent_turn.decision.selected_strategy, &messages);
-    let live_eval_provider_backed_react_required =
-        main_chat_live_provider_eval_requires_provider_backed_react(
-            &main_chat_agent_turn.decision.selected_strategy,
-            state,
-        )
-        .await;
-    let governed_agent_loop_candidate_selection_required =
-        main_chat_react_turn_requires_governed_agent_loop_candidate_selection(
-            &main_chat_agent_turn.decision.selected_strategy,
-            &messages,
-            state,
-        )
-        .await;
-    if kernel_supported
-        && !live_eval_provider_backed_react_required
-        && !governed_agent_loop_candidate_selection_required
-    {
+    let route_decision = decide_main_chat_turn_route(
+        &main_chat_agent_turn.decision.selected_strategy,
+        &messages,
+        state,
+    )
+    .await;
+    if route_decision.path.is_kernel_dispatch() {
         let result = {
             let mut event_sink = StreamingMainChatEventSink::new(&mut emit_stream_event);
             run_main_chat_kernel_direct_answer_with_state(
@@ -306,6 +293,7 @@ pub(crate) async fn start_stream_message_with_state(
         return Ok(());
     }
 
+    let legacy_route_decision = route_decision.legacy_compat_fallback();
     let ordinary_plan = ordinary_stream_chat_execution_plan(layer);
     debug_assert!(!ordinary_plan.constructs_agent_loop);
     debug_assert!(!ordinary_plan.constructs_action_executor);
@@ -768,6 +756,8 @@ pub(crate) async fn start_stream_message_with_state(
                 serde_json::json!({
                     "runId": agent_run.id,
                     "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
+                    "executionPath": legacy_route_decision.execution_path_label(),
+                    "routeDecisionReasonCode": legacy_route_decision.reason_code,
                     "fallbackReason": "strategy_stream_executor_not_yet_available_for_this_path",
                     "fallbackVisible": true,
                 }),

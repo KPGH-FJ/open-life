@@ -11,8 +11,6 @@ use crate::main_chat_conversation_updates::{
 };
 use crate::main_chat_event_stream::materialize_optional_main_chat_agent_events;
 use crate::main_chat_kernel::{
-    main_chat_kernel_supports_turn, main_chat_live_provider_eval_requires_provider_backed_react,
-    main_chat_react_turn_requires_governed_agent_loop_candidate_selection,
     run_main_chat_kernel_direct_answer_with_state, BufferedMainChatEventSink,
 };
 use crate::main_chat_legacy_fallback::{
@@ -24,6 +22,7 @@ use crate::main_chat_preprocess::{
 };
 use crate::main_chat_runtime_support::start_main_chat_agent_turn;
 use crate::main_chat_strategy::try_run_main_chat_agent_strategy;
+use crate::main_chat_turn_pipeline::decide_main_chat_turn_route;
 use crate::{persist_life_model, AppState, SendMessageResult};
 
 pub(crate) async fn send_message_with_state(
@@ -41,25 +40,13 @@ pub(crate) async fn send_message_with_state(
     )
     .await?;
 
-    let kernel_supported =
-        main_chat_kernel_supports_turn(&main_chat_agent_turn.decision.selected_strategy, &messages);
-    let live_eval_provider_backed_react_required =
-        main_chat_live_provider_eval_requires_provider_backed_react(
-            &main_chat_agent_turn.decision.selected_strategy,
-            state,
-        )
-        .await;
-    let governed_agent_loop_candidate_selection_required =
-        main_chat_react_turn_requires_governed_agent_loop_candidate_selection(
-            &main_chat_agent_turn.decision.selected_strategy,
-            &messages,
-            state,
-        )
-        .await;
-    if kernel_supported
-        && !live_eval_provider_backed_react_required
-        && !governed_agent_loop_candidate_selection_required
-    {
+    let route_decision = decide_main_chat_turn_route(
+        &main_chat_agent_turn.decision.selected_strategy,
+        &messages,
+        state,
+    )
+    .await;
+    if route_decision.path.is_kernel_dispatch() {
         let mut event_sink = BufferedMainChatEventSink::default();
         let result = run_main_chat_kernel_direct_answer_with_state(
             &session_id,
@@ -158,6 +145,7 @@ pub(crate) async fn send_message_with_state(
         return Ok(result);
     }
 
+    let legacy_route_decision = route_decision.legacy_compat_fallback();
     let ordinary_plan = ordinary_send_chat_execution_plan(layer);
     let result = send_message_with_legacy_generation(
         session_id,
@@ -173,6 +161,7 @@ pub(crate) async fn send_message_with_state(
         context_summary,
         ordinary_plan,
         main_chat_agent_turn,
+        legacy_route_decision,
         state,
     )
     .await?;

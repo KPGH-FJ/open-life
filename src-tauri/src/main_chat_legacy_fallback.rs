@@ -11,6 +11,7 @@ use crate::main_chat_generation_support::{
 };
 use crate::main_chat_hs_runtime::build_chat_runtime_hs_packet;
 use crate::main_chat_runtime_support::{append_main_chat_agent_transcript, MainChatAgentTurn};
+use crate::main_chat_turn_pipeline::MainChatTurnRouteDecision;
 use crate::{AppState, SendMessageResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +86,7 @@ pub(crate) async fn send_message_with_legacy_generation(
     context_summary: openlife_core::agent::types::ContextSummary,
     ordinary_plan: OrdinaryChatExecutionPlan,
     main_chat_agent_turn: MainChatAgentTurn,
+    legacy_route_decision: MainChatTurnRouteDecision,
     state: &Arc<AppState>,
 ) -> Result<SendMessageResult, String> {
     debug_assert_eq!(
@@ -180,6 +182,8 @@ pub(crate) async fn send_message_with_legacy_generation(
                 serde_json::json!({
                     "runId": agent_run.id,
                     "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
+                    "executionPath": legacy_route_decision.execution_path_label(),
+                    "routeDecisionReasonCode": legacy_route_decision.reason_code,
                     "fallbackReason": "strategy_executor_not_yet_available_for_this_path",
                     "fallbackVisible": true,
                 }),

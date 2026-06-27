@@ -254,16 +254,20 @@ fn ordinary_chat_entrypoints_try_kernel_before_legacy_strategy_paths() {
     let send_source = std::fs::read_to_string(send_module_path).expect("read main_chat_send.rs");
     let send_body =
         extract_rust_function_body(&send_source, "pub(crate) async fn send_message_with_state(");
-    let send_kernel_attempt = send_body
-        .find("main_chat_kernel_supports_turn(")
-        .expect("send command should check MainChatKernel support first");
+    let send_route_decision = send_body
+        .find("decide_main_chat_turn_route(")
+        .expect("send command should call the shared route decision helper first");
     let send_strategy_attempt = send_body
         .find("try_run_main_chat_agent_strategy(")
         .expect("send command should keep the explicit legacy strategy fallback");
 
     assert!(
-        send_kernel_attempt < send_strategy_attempt,
-        "send_message should try MainChatKernel before legacy strategy fallback"
+        send_route_decision < send_strategy_attempt,
+        "send_message should make the shared route decision before legacy strategy fallback"
+    );
+    assert!(
+        !send_body.contains("main_chat_kernel_supports_turn("),
+        "send_message must not reimplement kernel-vs-strategy route branching"
     );
 
     let stream_module_path = format!("{}/src/main_chat_streaming.rs", env!("CARGO_MANIFEST_DIR"));
@@ -272,9 +276,9 @@ fn ordinary_chat_entrypoints_try_kernel_before_legacy_strategy_paths() {
         &source,
         "pub(crate) async fn start_stream_message_with_state(",
     );
-    let kernel_attempt = stream_body
-        .find("main_chat_kernel_supports_turn(")
-        .expect("stream command should check MainChatKernel support first");
+    let route_decision = stream_body
+        .find("decide_main_chat_turn_route(")
+        .expect("stream command should call the shared route decision helper first");
     let strategy_attempt = stream_body
         .find("try_run_main_chat_agent_strategy(")
         .expect("stream command should keep the explicit legacy strategy fallback");
@@ -283,8 +287,12 @@ fn ordinary_chat_entrypoints_try_kernel_before_legacy_strategy_paths() {
         .expect("stream command should keep a legacy stream fallback plan");
 
     assert!(
-        kernel_attempt < strategy_attempt,
-        "start_stream_message should try MainChatKernel before legacy strategy fallback"
+        route_decision < strategy_attempt,
+        "start_stream_message should make the shared route decision before legacy strategy fallback"
+    );
+    assert!(
+        !stream_body.contains("main_chat_kernel_supports_turn("),
+        "start_stream_message must not reimplement kernel-vs-strategy route branching"
     );
     assert!(
         strategy_attempt < legacy_plan,
