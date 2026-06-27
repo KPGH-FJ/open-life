@@ -617,9 +617,8 @@ fn agent_self_state_fact_bindings(
                 RUNTIME_FACT_KEY_AGENT_TRACE_GAP => snapshot.trace_gap_code.clone(),
                 _ => None,
             };
-            let missing = value.is_none()
-                || (key == RUNTIME_FACT_KEY_AGENT_TRACE_GAP && !snapshot.trace_gap)
-                || snapshot.trace_gap;
+            let missing =
+                value.is_none() || key == RUNTIME_FACT_KEY_AGENT_TRACE_GAP || snapshot.trace_gap;
             let (value_shape, source, authority, freshness, visibility, privacy) = match key {
                 RUNTIME_FACT_KEY_AGENT_CHAT_SESSION_ID => (
                     "bounded_id",

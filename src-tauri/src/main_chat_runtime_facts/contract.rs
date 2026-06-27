@@ -68,6 +68,7 @@ pub(crate) const RUNTIME_FACT_KEY_AGENT_TRACE_GAP: &str = "agent.self_state.trac
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum MainChatRuntimeClockIntent {
     AskCurrentWeekday,
     AskCurrentDate,
@@ -295,7 +296,7 @@ pub(crate) fn merge_json_object(target: &mut Value, extra: Value) {
 }
 
 pub(crate) fn matches_exact_runtime_fact_phrase(value: &str, phrases: &[&str]) -> bool {
-    phrases.iter().any(|phrase| value == *phrase)
+    phrases.contains(&value)
 }
 
 pub(crate) fn trim_outer_punctuation(value: &str) -> &str {

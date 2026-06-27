@@ -12,6 +12,7 @@ use crate::main_chat_conversation_updates::{
 use crate::main_chat_event_stream::materialize_optional_main_chat_agent_events;
 use crate::main_chat_kernel::{
     main_chat_kernel_supports_turn, main_chat_live_provider_eval_requires_provider_backed_react,
+    main_chat_react_turn_requires_governed_agent_loop_candidate_selection,
     run_main_chat_kernel_direct_answer_with_state, BufferedMainChatEventSink,
 };
 use crate::main_chat_legacy_fallback::{
@@ -45,7 +46,17 @@ pub(crate) async fn send_message_with_state(
             state,
         )
         .await;
-    if kernel_supported && !live_eval_provider_backed_react_required {
+    let governed_agent_loop_candidate_selection_required =
+        main_chat_react_turn_requires_governed_agent_loop_candidate_selection(
+            &main_chat_agent_turn.decision.selected_strategy,
+            &messages,
+            state,
+        )
+        .await;
+    if kernel_supported
+        && !live_eval_provider_backed_react_required
+        && !governed_agent_loop_candidate_selection_required
+    {
         let mut event_sink = BufferedMainChatEventSink::default();
         let result = run_main_chat_kernel_direct_answer_with_state(
             &session_id,

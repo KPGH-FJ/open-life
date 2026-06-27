@@ -1531,7 +1531,10 @@ async fn main_chat_kernel_goal_3_unknown_tool_send_stream_blocks_without_fallbac
     );
     assert_eq!(send_response["tool_calls"][0]["name"], "unsupported.tool");
     assert_eq!(send_response["tool_calls"][0]["status"], "blocked");
-    assert_eq!(send_response["tool_calls"][0]["error"], "unsupported_tool");
+    assert_eq!(
+        send_response["tool_calls"][0]["error"],
+        "model_selected_disallowed_tool"
+    );
     let send_task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
         .as_str()
         .expect("send unknown task session id");
@@ -1542,7 +1545,7 @@ async fn main_chat_kernel_goal_3_unknown_tool_send_stream_blocks_without_fallbac
     );
     assert!(send_session
         .pending_blockers
-        .contains(&"unsupported_tool".to_string()));
+        .contains(&"model_selected_disallowed_tool".to_string()));
 
     let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     invoke_start_stream_message_for_kernel_goal_3(
@@ -1559,7 +1562,7 @@ async fn main_chat_kernel_goal_3_unknown_tool_send_stream_blocks_without_fallbac
     );
     assert!(stream_session
         .pending_blockers
-        .contains(&"unsupported_tool".to_string()));
+        .contains(&"model_selected_disallowed_tool".to_string()));
     let stream_actions = list_command_surface_actions(&stream_state, &stream_task_session_id).await;
     assert!(stream_actions
         .iter()
@@ -4044,7 +4047,7 @@ async fn send_message_registered_mcp_multi_candidate_agent_loop_selects_allowed_
             "openai".into(),
             "https://example.invalid/v1".into(),
             "test-key".into(),
-            "gpt-react-mcp-loop-multi-candidate".into(),
+            "gpt-general-read-model".into(),
             "text-embedding-test".into(),
             false,
         )
@@ -4056,9 +4059,9 @@ async fn send_message_registered_mcp_multi_candidate_agent_loop_selects_allowed_
                     "action_type": "mcp_tool",
                     "arguments": {
                         "text": "multi candidate selected"
-                    }
-                }],
-                "thought_summary": "Select one governed read-only manifest from the candidate set.",
+                        }
+                    }],
+                "thought_summary": "Select the allowed read manifest.",
                 "warnings": []
             })
             .to_string(),
@@ -4118,59 +4121,58 @@ async fn send_message_registered_mcp_multi_candidate_agent_loop_selects_allowed_
             .expect("mcp multi-candidate AgentLoop completion transcript entry")
     };
     let metadata = completed_entry.metadata;
-    if metadata
-        .get("kernelBackedReadOnlyToolLoop")
-        .and_then(serde_json::Value::as_bool)
-        == Some(true)
-    {
-        assert_kernel_read_loop_final_metadata(&metadata);
-    } else {
-        let candidate_count = metadata
-            .get("toolSelectionCandidateCount")
-            .and_then(serde_json::Value::as_u64)
-            .expect("candidate count metadata");
-        assert!(
-            candidate_count >= 2,
-            "AgentLoop completion metadata must preserve the multi-candidate contract"
-        );
-        let candidate_ids = metadata
-            .get("toolSelectionCandidateIds")
-            .and_then(serde_json::Value::as_array)
-            .expect("candidate ids metadata");
-        assert!(candidate_ids
-            .iter()
-            .any(|candidate| candidate == "builtin_echo"));
-        assert_eq!(
-            metadata
-                .get("toolSelectionCandidateId")
-                .and_then(serde_json::Value::as_str),
-            Some("builtin_echo")
-        );
-        assert_eq!(
-            metadata
-                .get("toolSelectionCandidateTarget")
-                .and_then(serde_json::Value::as_str),
-            Some("builtin_echo")
-        );
-        assert_eq!(
-            metadata
-                .get("modelSelectedAllowedTool")
-                .and_then(serde_json::Value::as_bool),
-            Some(true)
-        );
-        assert_eq!(
-            metadata
-                .get("singleStepFallbackUsed")
-                .and_then(serde_json::Value::as_bool),
-            Some(false)
-        );
-        assert_eq!(
-            metadata
-                .get("directWritesExecuted")
-                .and_then(serde_json::Value::as_bool),
-            Some(false)
-        );
-    }
+    assert_eq!(
+        metadata
+            .get("kernelBackedReadOnlyToolLoop")
+            .and_then(serde_json::Value::as_bool),
+        None,
+        "multi-candidate MCP candidate-selection must use governed AgentLoop, not Kernel read loop"
+    );
+    let candidate_count = metadata
+        .get("toolSelectionCandidateCount")
+        .and_then(serde_json::Value::as_u64)
+        .expect("candidate count metadata");
+    assert!(
+        candidate_count >= 2,
+        "AgentLoop completion metadata must preserve the multi-candidate contract"
+    );
+    let candidate_ids = metadata
+        .get("toolSelectionCandidateIds")
+        .and_then(serde_json::Value::as_array)
+        .expect("candidate ids metadata");
+    assert!(candidate_ids
+        .iter()
+        .any(|candidate| candidate == "builtin_echo"));
+    assert_eq!(
+        metadata
+            .get("toolSelectionCandidateId")
+            .and_then(serde_json::Value::as_str),
+        Some("builtin_echo")
+    );
+    assert_eq!(
+        metadata
+            .get("toolSelectionCandidateTarget")
+            .and_then(serde_json::Value::as_str),
+        Some("builtin_echo")
+    );
+    assert_eq!(
+        metadata
+            .get("modelSelectedAllowedTool")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        metadata
+            .get("singleStepFallbackUsed")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        metadata
+            .get("directWritesExecuted")
+            .and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
 
     let actions = {
         let queue_arc = state
@@ -4194,31 +4196,26 @@ async fn send_message_registered_mcp_multi_candidate_agent_loop_selects_allowed_
         .observation_metadata
         .as_ref()
         .expect("mcp multi-candidate AgentLoop observation metadata");
-    if observation
-        .get("kernelBackedReadOnlyToolLoop")
-        .and_then(serde_json::Value::as_bool)
-        == Some(true)
-    {
-        assert_eq!(
-            observation["executorStatus"],
-            serde_json::json!("succeeded")
-        );
-        assert_kernel_mcp_read_selection_metadata(observation, 2);
-    } else {
-        assert_eq!(observation["agentLoopSucceeded"], serde_json::json!(true));
-        assert_eq!(
-            observation["toolSelectionCandidateId"],
-            serde_json::json!("builtin_echo")
-        );
-        assert_eq!(
-            observation["toolSelectionCandidateTarget"],
-            serde_json::json!("builtin_echo")
-        );
-        assert_eq!(
-            observation["singleStepFallbackUsed"],
-            serde_json::json!(false)
-        );
-    }
+    assert_eq!(
+        observation
+            .get("kernelBackedReadOnlyToolLoop")
+            .and_then(serde_json::Value::as_bool),
+        None,
+        "multi-candidate MCP observation must come from governed AgentLoop"
+    );
+    assert_eq!(observation["agentLoopSucceeded"], serde_json::json!(true));
+    assert_eq!(
+        observation["toolSelectionCandidateId"],
+        serde_json::json!("builtin_echo")
+    );
+    assert_eq!(
+        observation["toolSelectionCandidateTarget"],
+        serde_json::json!("builtin_echo")
+    );
+    assert_eq!(
+        observation["singleStepFallbackUsed"],
+        serde_json::json!(false)
+    );
     assert_eq!(
         observation["directWritesExecuted"],
         serde_json::json!(false)

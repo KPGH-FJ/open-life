@@ -646,7 +646,7 @@ pub(crate) async fn run_main_chat_runtime_facts_slice_c_tool_availability_report
     let no_legacy_fallback_for_runtime_facts = evidence.iter().all(|row| !row.legacy_fallback_used);
     let no_active_reachability_probe_for_tool_availability = evidence
         .iter()
-        .all(|row| row.tool_web_active_reachability_probe.unwrap_or(false) == false);
+        .all(|row| !row.tool_web_active_reachability_probe.unwrap_or(false));
     let web_policy_blocker_not_fake_availability = evidence.iter().any(|row| {
         row.scenario_id == "RF-12"
             && row.passed

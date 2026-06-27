@@ -8,17 +8,12 @@ use super::contract::{
     RUNTIME_FACT_KEY_WEEKDAY,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum MainChatRuntimeClockSource {
+    #[default]
     LocalSystem,
     Fixed(chrono::DateTime<chrono::FixedOffset>),
     Unavailable,
-}
-
-impl Default for MainChatRuntimeClockSource {
-    fn default() -> Self {
-        Self::LocalSystem
-    }
 }
 
 impl MainChatRuntimeClockSource {

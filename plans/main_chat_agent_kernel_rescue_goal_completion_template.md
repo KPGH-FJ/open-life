@@ -23,7 +23,7 @@ List changed files and classify each change:
 
 Copy the goal checklist and mark each item:
 
-- [ ] 
+- [ ]
 
 ## Acceptance Matrix Rows
 
@@ -90,4 +90,3 @@ List unresolved risks and whether they block the next goal:
 | Risk | Blocks next goal? | Follow-up |
 | --- | --- | --- |
 |  |  |  |
-

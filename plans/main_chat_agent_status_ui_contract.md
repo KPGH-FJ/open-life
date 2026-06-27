@@ -129,4 +129,3 @@ Stop UI work if:
 - UI would expose sensitive raw metadata by default;
 - a control button can call an action not allowed by backend task controls;
 - product copy claims durable completion while proposal or permission is pending.
-

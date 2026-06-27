@@ -43,6 +43,7 @@ pub(crate) async fn provider_route_fact_should_block_before_model(
     preflight.status == "blocked"
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn resolve_provider_route_fact_answer(
     user_text: &str,
     state: &Arc<AppState>,
@@ -390,6 +391,7 @@ fn provider_route_fact_bindings(
     facts
 }
 
+#[allow(clippy::too_many_arguments)]
 fn provider_fact_binding(
     key: &'static str,
     value_shape: &'static str,
@@ -472,6 +474,7 @@ fn provider_route_labels(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn provider_route_reply(
     intent: MainChatProviderRouteIntent,
     configured: &ProviderRouteFactSnapshot,

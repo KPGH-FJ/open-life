@@ -204,4 +204,3 @@ npm --prefix frontend test -- --run
 Do not add broad final acceptance requirements to early kernel goals. Final
 acceptance is realigned in Goal 8 after kernel behavior is covered by focused
 tests and command-surface evidence.
-

@@ -619,9 +619,20 @@ async function waitForControlPlaneDelivery(sessionId, previousTaskId, scenario) 
     return await waitForScript(
       sessionId,
       `
+        const openDiagnosticsIfPossible = () => {
+          const button = [...document.querySelectorAll('button')].find(item =>
+            item.getAttribute('aria-label') === 'Show Main Chat diagnostics' && !item.disabled
+          );
+          if (!button) return false;
+          button.click();
+          return true;
+        };
         const controls = [...document.querySelectorAll('[data-testid="agent-control-plane"]')];
         const control = controls.at(-1);
-        if (!control) return null;
+        if (!control) {
+          openDiagnosticsIfPossible();
+          return null;
+        }
         const expectedUiStates = arguments[1] ?? [];
         const taskSessionId = control.getAttribute('data-task-session-id') ?? '';
         const finalDelivery = control.getAttribute('data-final-delivery') === 'true';

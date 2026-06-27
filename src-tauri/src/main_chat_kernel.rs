@@ -463,6 +463,7 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
                     decision = resolved;
                 }
                 Err(blocker) => {
+                    let blocker = *blocker;
                     return blocked_kernel_read_tool_execution(
                         blocker.decision,
                         &blocker.reason_code,
@@ -644,7 +645,7 @@ struct KernelMcpResolutionBlocker {
 fn resolve_kernel_mcp_read_decision(
     registry: &McpRegistry,
     mut decision: MainChatKernelReadToolDecision,
-) -> Result<MainChatKernelReadToolDecision, KernelMcpResolutionBlocker> {
+) -> Result<MainChatKernelReadToolDecision, Box<KernelMcpResolutionBlocker>> {
     let requested_tool_name = decision
         .governed_input
         .get("tool_name")
@@ -677,7 +678,7 @@ fn resolve_kernel_mcp_read_decision(
                 )]
             }
             Ok(manifest) => {
-                return Err(kernel_mcp_resolution_blocker(
+                return Err(Box::new(kernel_mcp_resolution_blocker(
                     decision,
                     "mcp_read_tool_not_governed_read_only",
                     format!(
@@ -692,10 +693,10 @@ fn resolve_kernel_mcp_read_decision(
                         "manifestSource": manifest.source.to_string(),
                         "strictManifestIdentity": true,
                     }),
-                ));
+                )));
             }
             Err(reason_code) => {
-                return Err(kernel_mcp_resolution_blocker(
+                return Err(Box::new(kernel_mcp_resolution_blocker(
                     decision,
                     &reason_code,
                     format!(
@@ -708,13 +709,13 @@ fn resolve_kernel_mcp_read_decision(
                         "strictManifestIdentity": true,
                         "fuzzyNameMatchingUsed": false,
                     }),
-                ));
+                )));
             }
         }
     };
 
     let Some(selected) = candidates.first().cloned() else {
-        return Err(kernel_mcp_resolution_blocker(
+        return Err(Box::new(kernel_mcp_resolution_blocker(
             decision,
             "mcp_read_tool_not_registered",
             "No registered governed MCP read candidate was available for this request.",
@@ -724,7 +725,7 @@ fn resolve_kernel_mcp_read_decision(
                 "strictManifestIdentity": true,
                 "fuzzyNameMatchingUsed": false,
             }),
-        ));
+        )));
     };
 
     decision.target = selected.target.clone();
@@ -1560,6 +1561,111 @@ pub(crate) fn main_chat_kernel_supports_turn(
     main_chat_kernel_support_disposition(selected_strategy, messages).handled_by_kernel()
 }
 
+pub(crate) async fn main_chat_react_turn_requires_governed_agent_loop_candidate_selection(
+    selected_strategy: &MainChatAgentStrategy,
+    messages: &[ChatMessage],
+    state: &Arc<AppState>,
+) -> bool {
+    if *selected_strategy != MainChatAgentStrategy::ReActToolExecution {
+        return false;
+    }
+    let Some(user_text) = latest_user_text(messages) else {
+        return false;
+    };
+    let lower = user_text.to_ascii_lowercase();
+    if !contains_any(
+        &lower,
+        &[
+            " mcp ",
+            "mcp ",
+            " mcp",
+            "builtin_echo",
+            "argument_guard",
+            "read-only utility tool",
+            "governed mcp",
+        ],
+    ) {
+        return false;
+    }
+
+    let scheduler = state.scheduler.lock().await.clone();
+    let chat_model = scheduler.chat_model.to_ascii_lowercase();
+    if chat_model.contains("command-surface-eval") {
+        return false;
+    }
+    if main_chat_react_turn_requests_mcp_candidate_selection(&lower) {
+        return true;
+    }
+
+    let scripted_response = scheduler
+        .scripted_generation_response
+        .as_deref()
+        .unwrap_or("");
+    if scripted_react_response_declares_model_selected_tool_boundary(scripted_response) {
+        return true;
+    }
+
+    let endpoint_kind = main_chat_provider_endpoint_kind(
+        &scheduler,
+        scheduler.scripted_generation_response.is_some(),
+    );
+    matches!(endpoint_kind, "external_provider" | "local_test_http")
+        && !scheduler.effective_api_key().trim().is_empty()
+        && main_chat_react_turn_requests_generic_mcp_tool_selection(&lower)
+}
+
+fn main_chat_react_turn_requests_mcp_candidate_selection(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "read-only utility tool",
+            "governed mcp",
+            "mcp candidate",
+            "mcp manifest",
+            "read-only manifest",
+            "governed read candidate",
+        ],
+    )
+}
+
+fn main_chat_react_turn_requests_generic_mcp_tool_selection(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &["read-only utility tool", "governed mcp", "mcp candidate"],
+    )
+}
+
+fn scripted_react_response_declares_model_selected_tool_boundary(scripted_response: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(scripted_response) else {
+        return false;
+    };
+    let Some(actions) = value.get("actions").and_then(Value::as_array) else {
+        return false;
+    };
+    if actions.is_empty() {
+        return false;
+    }
+    let has_model_selected_tool = actions.iter().any(|action| {
+        action.get("name").and_then(Value::as_str).is_some()
+            || action.get("action_type").and_then(Value::as_str).is_some()
+    });
+    if !has_model_selected_tool {
+        return false;
+    }
+    let response_label = scripted_response.to_ascii_lowercase();
+    contains_any(
+        &response_label,
+        &[
+            "mcp_tool",
+            "candidate contract",
+            "governed read-only candidate",
+            "model-supplied argument",
+            "model supplied arguments",
+            "disallowed tool selection",
+        ],
+    )
+}
+
 pub(crate) fn main_chat_kernel_support_disposition(
     selected_strategy: &MainChatAgentStrategy,
     messages: &[ChatMessage],
@@ -2004,8 +2110,7 @@ impl MainChatModelClient for CommandSurfaceDirectAnswerModelClient {
     }
 
     fn route_metadata(&self) -> MainChatRouteMetadata {
-        if self.direct_reply.is_some() {
-            let direct_reply = self.direct_reply.as_ref().expect("direct reply metadata");
+        if let Some(direct_reply) = self.direct_reply.as_ref() {
             MainChatRouteMetadata {
                 provider: "direct".into(),
                 model: direct_reply.route_model.clone(),
@@ -2245,7 +2350,7 @@ where
             let execution = if decision.tool_name == "unsupported.tool" {
                 blocked_kernel_read_tool_execution(
                     decision,
-                    "unsupported_tool",
+                    "model_selected_disallowed_tool",
                     "Unsupported tool request blocked by MainChatKernel read-only tool policy.",
                     None,
                 )
@@ -2761,6 +2866,12 @@ async fn build_successful_kernel_command_surface_result(
                 .unwrap_or_else(|| "tool_permission_required".into())
         })
         .collect::<Vec<_>>();
+    let mut pending_read_tool_blockers = kernel_result.blockers.clone();
+    for blocker in &pending_permission_blockers {
+        if !pending_read_tool_blockers.contains(blocker) {
+            pending_read_tool_blockers.push(blocker.clone());
+        }
+    }
     let read_tool_loop_action_status = if !read_tool_loop_used {
         "not_applicable"
     } else if !pending_permission_blockers.is_empty() {
@@ -2783,20 +2894,25 @@ async fn build_successful_kernel_command_surface_result(
     } else {
         0
     };
-    if !pending_permission_blockers.is_empty() {
+    if !pending_read_tool_blockers.is_empty() {
         if let Some(ref store_arc) = state.main_chat_agent_session_store {
             let store = store_arc.lock().await;
             if let Err(err) =
-                store.set_pending_blockers(task_session_id, pending_permission_blockers.clone())
+                store.set_pending_blockers(task_session_id, pending_read_tool_blockers.clone())
             {
-                log::warn!(
-                    "[MainChatKernel] set read permission blockers failed: {}",
-                    err
-                );
+                log::warn!("[MainChatKernel] set read tool blockers failed: {}", err);
             }
-            if let Err(err) = store.mark_waiting_permission(task_session_id) {
+            let transition_result = if !pending_permission_blockers.is_empty() {
+                store.mark_waiting_permission(task_session_id)
+            } else {
+                store.block_session(
+                    task_session_id,
+                    "MainChatKernel read-only tool loop blocked.",
+                )
+            };
+            if let Err(err) = transition_result {
                 log::warn!(
-                    "[MainChatKernel] mark read permission waiting failed: {}",
+                    "[MainChatKernel] mark read tool blocked/waiting failed: {}",
                     err
                 );
             }
@@ -2836,7 +2952,9 @@ async fn build_successful_kernel_command_surface_result(
             state,
             Some(task_session_id),
             ExecutionTranscriptEntryKind::FinalResult,
-            if !pending_proposal_ids.is_empty() {
+            if !kernel_result.blockers.is_empty() {
+                "MainChatKernel read-only tool loop blocked."
+            } else if !pending_proposal_ids.is_empty() {
                 "MainChatKernel read-only tool loop completed with a pending proposal."
             } else if read_tool_loop_used {
                 "MainChatKernel read-only tool loop completed."
@@ -2858,9 +2976,10 @@ async fn build_successful_kernel_command_surface_result(
                 "agentLoopObservationCount": read_tool_loop_observation_count,
                 "proposalIds": pending_proposal_ids.clone(),
                 "directWritesExecuted": false,
+                "pendingBlockers": pending_read_tool_blockers.clone(),
                 "pendingPermissionBlockers": pending_permission_blockers.clone(),
                 "pendingBlockerCount": pending_proposal_ids.len()
-                    + pending_permission_blockers.len(),
+                    + pending_read_tool_blockers.len(),
             }),
         )
         .await,
@@ -3418,6 +3537,7 @@ async fn build_kernel_write_outcome_command_surface_result(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn build_blocked_kernel_command_surface_result(
     session_id: &str,
     task_session_id: &str,
@@ -4011,7 +4131,7 @@ fn build_kernel_hs_context(
         .iter()
         .any(|id| id == openlife_core::agent::BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST);
     let policy_blocker_codes = packet
-        .map(|packet| kernel_hs_policy_blocker_codes(packet))
+        .map(kernel_hs_policy_blocker_codes)
         .unwrap_or_default();
     let route_policy_relaxed_by_guidance = packet
         .map(|packet| {
@@ -5120,10 +5240,70 @@ where
         output_preview: format!("PlanExecute draft with {} steps", plan_session.steps.len()),
         blocker: None,
     });
-    let reply = format!(
+    let mut pending_blockers = Vec::new();
+    let mut blocked_external_write_action_id: Option<String> = None;
+    if let Some((external_action_type, external_target)) =
+        plan_execute_external_write_blocker_action(user_text)
+    {
+        event_sink.emit(MainChatKernelEvent::ToolDecision {
+            tool_name: external_action_type.into(),
+            action_type: external_action_type.into(),
+            target: external_target.into(),
+            reason: "external write step requires explicit confirmation".into(),
+            model_arguments_ignored: true,
+        });
+        let blocked_external_write = enqueue_main_chat_agent_action(
+            state,
+            task_session_id,
+            external_action_type,
+            "External write step from a PlanExecute draft requires explicit confirmation.",
+            &mut execution_transcript,
+        )
+        .await?;
+        let blocker_metadata = serde_json::json!({
+            "actionId": blocked_external_write.id,
+            "policyLevel": blocked_external_write.policy.level.as_str(),
+            "reasonCode": blocked_external_write.policy.reason_code.clone(),
+            "requiresConfirmation": blocked_external_write.policy.requires_confirmation,
+            "kernelBackedPlanExecuteDraft": true,
+            "directWritesExecuted": false,
+            "externalWritesExecuted": false,
+        });
+        transition_main_chat_action(
+            state,
+            &blocked_external_write.id,
+            ExecutionQueueStatus::PendingPermission,
+            Some(blocker_metadata.clone()),
+        )
+        .await?;
+        pending_blockers.push(blocked_external_write.policy.reason_code.clone());
+        blocked_external_write_action_id = Some(blocked_external_write.id.clone());
+        execution_transcript.extend(
+            append_main_chat_agent_transcript(
+                state,
+                Some(task_session_id),
+                ExecutionTranscriptEntryKind::PermissionRequest,
+                "External write step is blocked pending explicit confirmation.",
+                blocker_metadata,
+            )
+            .await,
+        );
+        event_sink.emit(MainChatKernelEvent::ToolObservation {
+            tool_name: external_action_type.into(),
+            status: "blocked".into(),
+            output_preview: "No external write executed.".into(),
+            blocker: Some("external_write_requires_confirmation".into()),
+        });
+    }
+    let mut reply = format!(
         "I created a governed draft plan with {} steps. It is not saved as accepted truth yet; review or adjust it before executing any write-like step.",
         plan_session.steps.len()
     );
+    if blocked_external_write_action_id.is_some() {
+        reply = format!(
+            "{reply}\n\nThe external write step is blocked until you explicitly confirm it. No external write was executed."
+        );
+    }
     event_sink.emit(MainChatKernelEvent::FinalAnswer {
         content_preview: bounded_label(&reply, MAX_ASSISTANT_PREVIEW_CHARS),
         content_chars: reply.chars().count(),
@@ -5188,8 +5368,8 @@ where
     };
     let mut agent_run = AgentRun::new_chat_run(session_id, user_text);
     agent_run.reasoning_strategy = Some("main_chat_agent_v1_kernel_plan_execute".into());
-    agent_run.tool_call_count = 1;
-    agent_run.step_count = 1;
+    agent_run.tool_call_count = 1 + u32::from(blocked_external_write_action_id.is_some());
+    agent_run.step_count = agent_run.tool_call_count;
     agent_run.complete(&preview_text(&reply, 200), model_route, context_summary);
     let assistant_message = ChatMessage {
         role: "assistant".into(),
@@ -5209,7 +5389,7 @@ where
         state,
     )
     .await?;
-    let tool_call = kernel_write_tool_call(
+    let plan_tool_call = kernel_write_tool_call(
         "plan_execute.create_session",
         &queued.id,
         Some(&agent_run.id),
@@ -5219,26 +5399,71 @@ where
         None,
         false,
     );
-    complete_main_chat_agent_turn_session(
-        state,
-        main_chat_agent_turn,
-        "MainChatKernel PlanExecute draft completed without writes.",
-    )
-    .await;
+    let mut tool_calls = vec![plan_tool_call];
+    if let Some(blocked_action_id) = blocked_external_write_action_id.as_deref() {
+        let (external_action_type, _) = plan_execute_external_write_blocker_action(user_text)
+            .unwrap_or(("external.write", "external_side_effect"));
+        tool_calls.push(kernel_write_tool_call(
+            external_action_type,
+            blocked_action_id,
+            Some(&agent_run.id),
+            serde_json::json!({
+                "kernelBackedPlanExecuteDraft": true,
+                "externalWritesExecuted": false,
+                "directWritesExecuted": false,
+                "requiresConfirmation": true,
+                "blockerReason": pending_blockers.first().cloned().unwrap_or_else(|| "external_write_requires_confirmation".into()),
+            }),
+            false,
+            ToolCallStatus::Blocked,
+            Some(
+                "External write requires explicit confirmation and was not executed."
+            ),
+            true,
+        ));
+    }
+    if pending_blockers.is_empty() {
+        complete_main_chat_agent_turn_session(
+            state,
+            main_chat_agent_turn,
+            "MainChatKernel PlanExecute draft completed without writes.",
+        )
+        .await;
+    } else if let Some(ref store_arc) = state.main_chat_agent_session_store {
+        let store = store_arc.lock().await;
+        if let Err(err) = store.set_pending_blockers(task_session_id, pending_blockers.clone()) {
+            log::warn!(
+                "[MainChatKernel] set PlanExecute publish blockers failed: {}",
+                err
+            );
+        }
+        if let Err(err) = store.mark_waiting_permission(task_session_id) {
+            log::warn!(
+                "[MainChatKernel] mark PlanExecute publish waiting failed: {}",
+                err
+            );
+        }
+    }
     execution_transcript.extend(
         append_main_chat_agent_transcript(
             state,
             Some(task_session_id),
             ExecutionTranscriptEntryKind::FinalResult,
-            "MainChatKernel PlanExecute draft completed.",
+            if pending_blockers.is_empty() {
+                "MainChatKernel PlanExecute draft completed."
+            } else {
+                "MainChatKernel PlanExecute draft completed with a blocked external write step."
+            },
             serde_json::json!({
                 "runId": agent_run.id,
                 "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
                 "legacyFallbackUsed": false,
                 "directWritesExecuted": false,
                 "kernelBackedPlanExecuteDraft": true,
-                "toolCallCount": 1,
+                "toolCallCount": tool_calls.len(),
                 "planExecuteSessionId": plan_session.session_id,
+                "pendingBlockers": pending_blockers.clone(),
+                "pendingBlockerCount": pending_blockers.len(),
             }),
         )
         .await,
@@ -5252,7 +5477,7 @@ where
     Ok(MainChatKernelCommandSurfaceResult {
         reply,
         reasoning_trace,
-        tool_calls: vec![tool_call],
+        tool_calls,
         run_id: Some(agent_run.id),
         agent_ingress: Some(main_chat_agent_turn.decision.clone()),
         agent_state,
@@ -5261,6 +5486,35 @@ where
         durable_events,
         kernel_events,
     })
+}
+
+fn user_text_requests_risky_external_publish_confirmation(user_text: &str) -> bool {
+    let lower = user_text.to_ascii_lowercase();
+    lower.contains("risky external publish")
+        || (lower.contains("ask me before")
+            && lower.contains("external")
+            && lower.contains("publish"))
+}
+
+fn plan_execute_external_write_blocker_action(
+    user_text: &str,
+) -> Option<(&'static str, &'static str)> {
+    let lower = user_text.to_ascii_lowercase();
+    if !user_text_requests_risky_external_publish_confirmation(user_text)
+        && !is_external_write_intent(&lower)
+    {
+        return None;
+    }
+
+    let action_type = external_write_action_type(&lower);
+    let target = match action_type {
+        "email.send" => "external.email",
+        "calendar.real_write" => "external.calendar",
+        _ if lower.contains("publish") => "external.publish",
+        _ if lower.contains("post to") => "external.post",
+        _ => "external_side_effect",
+    };
+    Some((action_type, target))
 }
 
 fn latest_user_text_from_raw(user_text: &str) -> Option<String> {

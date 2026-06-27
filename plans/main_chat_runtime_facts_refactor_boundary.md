@@ -116,4 +116,3 @@ Stop the refactor if:
 - a behavior changes without a corresponding acceptance matrix update;
 - a catch-all resolver starts using broad natural-language regexes for
   unrelated fact categories.
-

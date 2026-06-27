@@ -305,15 +305,13 @@ as reference only.
      accepted candidate-order evidence only when the provider returns a
      complete bounded candidate-id permutation; ignored provider orders keep
      only the ignored flag and metadata-safe response digest. This path is covered with ordinary `send_message` through a
-     local HTTP OpenAI-compatible provider. Step 2 has now added an opt-in
-     external live-provider profile wrapper and executed the ignored external
-     live final-acceptance run in this environment, producing credited
-     DirectAnswer, web AgentLoop, registered MCP AgentLoop, and MCP
-     ToolPermission proposal evidence while preserving no-credit behavior for
-     local, scripted, fixture, synthetic, loopback, and local-test HTTP evidence.
-     Main Chat Agent Execution v1 is still not complete: the remaining blockers
-     are the later steps for legacy fallback containment, runtime-facts module
-     structure, default UI state/action surfaces, and real-task E2E evidence.
+     local HTTP OpenAI-compatible provider. The next-six-steps evidence track now
+     includes the Step 6 Linux real-Tauri local-only journeys plus the opt-in
+     external live-provider product acceptance proof, while preserving no-credit
+     behavior for local, scripted, fixture, synthetic, loopback, and local-test
+     HTTP evidence. Main Chat Agent Execution v1 is still not a Stage 2 internal
+     trial completion claim: the current PR must keep CI green, and broader
+     Stage 2 readiness remains governed separately.
 5. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 6. `plans/lifemodel_governed_backend_completion_goal_spec.md`
@@ -363,7 +361,10 @@ active planning entry point**. Stage 1 automated engineering dogfood is complete
 for default deterministic readiness: Linux CI run `27807633105` passed the real
 Tauri Chat UI D01-D36 dogfood gate with
 `evidenceSource=tauri_command_surface_browser_observed`, 36 observed scenarios,
-36 passed journeys, 0 failed journeys, and `blockers=[]`.
+36 passed journeys, 0 failed journeys, and `blockers=[]`. Current PR-level
+merge readiness still depends on the live CI status: `CI / Rust Check`,
+`CI / Rust Check (macOS)`, and `Stage 1 Tauri Dogfood` must be green before
+the Step 6 evidence can be treated as merge-ready.
 
 Do not use stale local macOS fail-closed browser reports as Stage 1 pass
 evidence; macOS remains unsupported for the official Tauri WebDriver desktop
@@ -552,10 +553,10 @@ workspace/configured `AGENTS.md`, `SOUL.md`, root / `memories/` `USER.md` /
 frontend Tauri wrappers plus an explicit manual Chat composer `SKILL.md`
 context field; the async context compiler and selected-skill sanitizer are now
 owned by the same focused context module. This improves the current narrow
-paths, and Step 2 now supplies the external live-provider evidence required by
-the next-six-steps acceptance matrix. It does not complete Main Chat Agent
-Execution v1: legacy fallback containment, Runtime Facts module cleanup, default
-UI state/action surfaces, and real-task E2E evidence remain outstanding.
+paths, and the next-six-steps acceptance matrix now has Step 6 local plus
+external live evidence. It does not complete Stage 2 Internal Trial Readiness:
+CI must remain green, default UI/task-control quality must hold, and real
+limited-trial readiness is tracked separately from Step 6 acceptance.
 
 `plans/legacy_direct_write_convergence_goal_spec.md` is retained as the
 completed W90-W97 Goal-mode spec and audit trail. W90-W92 retire the
@@ -1193,7 +1194,7 @@ metadata-safe safety, default Chat impact, and next dependency.
 | W147-W149 | Backend Completion Goal 8: Pre-UI Backend Contract Freeze | Pure backend/core read-model contracts for Learning Inbox, Evidence Timeline, Proposal Review, Runtime Trace, Guidance Impact, Privacy Controls, and LifeModel Overview are frozen; final backend completion gate report and docs/progress/verification sync are complete; no command/UI/store write/runtime/model/tool/default Chat impact |
 | W150-W158 | Skill Runtime Beta Maturity | Built-in skill readiness, bounded metadata-safe context, HS privacy/model-route governance, fail-soft output envelopes, proposal candidate governance, plugin declarative-only boundary, non-default read-only status command, Runs/Review trace integration, and docs sync are complete; no ordinary Chat routing change and no migration permission |
 | Main Chat Kernel Rescue Goal 8 | Current Main Chat default realignment | Ordinary send/stream command-surface cases are expected to be MainChatKernel-backed for DirectAnswer, read-only tools, proposal-only writes, PlanExecute draft, blockers, HS context, web, and MCP; legacy fallback must stay explicit/countable and final/readiness gates consume kernel evidence counters |
-| Main Chat Agent Execution v1 | Main Chat Agent remediation | Ordinary `send_message` / `start_stream_message` enter AgentIngress and governed task sessions; DirectAnswer, ReAct read/tool paths, proposal paths, command-surface gates, runtime-facts slices, and Step 2 external live-provider evidence now have typed, auditable coverage. Step 2 credited DirectAnswer, provider-backed web AgentLoop, provider-backed registered MCP AgentLoop, and MCP ToolPermission proposal through the opt-in external live final-acceptance run while rejecting local/scripted/fixture/synthetic/loopback/local-test HTTP credit. Main Chat Agent Execution v1 is still not complete: legacy fallback containment, Runtime Facts module cleanup, default UI state/action surfaces, and real-task E2E evidence remain required before completion. |
+| Main Chat Agent Execution v1 | Main Chat Agent remediation | Ordinary `send_message` / `start_stream_message` enter AgentIngress and governed task sessions; DirectAnswer, ReAct read/tool paths, proposal paths, command-surface gates, runtime-facts slices, and Step 6 local plus external live-provider evidence now have typed, auditable coverage. The Step 6 proof rejects local/scripted/fixture/synthetic/loopback/local-test HTTP credit for external live acceptance. Main Chat Agent Execution v1 is still not a Stage 2 completion claim: PR merge readiness depends on green CI, and limited internal trial readiness remains separately governed. |
 
 ## 4. Current Authoritative Entry Points
 

@@ -19,6 +19,7 @@ use crate::main_chat_generation_support::{
 use crate::main_chat_hs_runtime::{build_chat_runtime_hs_packet, included_life_model_sections};
 use crate::main_chat_kernel::{
     main_chat_kernel_supports_turn, main_chat_live_provider_eval_requires_provider_backed_react,
+    main_chat_react_turn_requires_governed_agent_loop_candidate_selection,
     run_main_chat_kernel_direct_answer_with_state, StreamingMainChatEventSink,
 };
 use crate::main_chat_legacy_fallback::ordinary_stream_chat_execution_plan;
@@ -56,7 +57,17 @@ pub(crate) async fn start_stream_message_with_state(
             state,
         )
         .await;
-    if kernel_supported && !live_eval_provider_backed_react_required {
+    let governed_agent_loop_candidate_selection_required =
+        main_chat_react_turn_requires_governed_agent_loop_candidate_selection(
+            &main_chat_agent_turn.decision.selected_strategy,
+            &messages,
+            state,
+        )
+        .await;
+    if kernel_supported
+        && !live_eval_provider_backed_react_required
+        && !governed_agent_loop_candidate_selection_required
+    {
         let result = {
             let mut event_sink = StreamingMainChatEventSink::new(&mut emit_stream_event);
             run_main_chat_kernel_direct_answer_with_state(

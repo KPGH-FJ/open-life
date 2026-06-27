@@ -764,10 +764,10 @@ fn audit_browser_report(report: Option<&Step6BrowserReport>) -> BrowserAudit {
             || (row_live_evidence_kind(row) == "external_live_provider"
                 && !row.local_fixture_credited_as_external_live)
     });
-    let rows_no_invented_unavailable_evidence = report.observed_journeys.iter().all(|row| {
-        (row.no_invented_unavailable_evidence || !row.unavailable_evidence_invented)
-            && !row.unavailable_evidence_invented
-    });
+    let rows_no_invented_unavailable_evidence = report
+        .observed_journeys
+        .iter()
+        .all(|row| row.no_invented_unavailable_evidence && !row.unavailable_evidence_invented);
     let rows_ui_status_from_structured_evidence = report
         .observed_journeys
         .iter()
@@ -1367,8 +1367,7 @@ fn row_non_fake_evidence_observed(row: &Step6ObservedJourney) -> bool {
 }
 
 fn row_no_invented_unavailable_evidence(row: &Step6ObservedJourney) -> bool {
-    (row.no_invented_unavailable_evidence || !row.unavailable_evidence_invented)
-        && !row.unavailable_evidence_invented
+    row.no_invented_unavailable_evidence && !row.unavailable_evidence_invented
 }
 
 fn row_external_live_credit(row: &Step6ObservedJourney) -> bool {
@@ -1420,9 +1419,7 @@ fn all_ids_credited(journeys: &[Step6JourneyReport], ids: &[&str]) -> bool {
 }
 
 fn is_step6_external_live_id(id: &str) -> bool {
-    STEP6_EXTERNAL_LIVE_JOURNEYS
-        .iter()
-        .any(|candidate| *candidate == id)
+    STEP6_EXTERNAL_LIVE_JOURNEYS.contains(&id)
 }
 
 struct Step6ExpectedJourneyEvidence {
