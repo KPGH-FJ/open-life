@@ -149,7 +149,39 @@ providers. "Latest" or live website behavior belongs only in an
 | WR-05 | "不要联网，只根据本地上下文回答。" | `direct_answer` | Local-only route visible. | No web action. |
 | WR-LIVE-01 | "搜索最新的 OpenAI Codex 文档变更，并总结。" | `react_tool_execution` | External live opt-in only; source URLs and observation; excluded from default deterministic pass rate. | Must not run in default deterministic gate. |
 
-### 5.5 MCP Read
+### 5.5 Real Capability Evals
+
+Phase6 introduces the first deterministic capability eval contract. These
+`CF-*` rows prove that Main Chat can complete concrete product tasks through the
+ordinary `send_message_with_state` path. They are not live-provider gates and
+must not use assistant prose as the sole proof of capability.
+
+Global CF rules:
+
+- Default mode is `deterministic_fixture`; live provider evidence is advisory or
+  opt-in only and does not count as local pass credit.
+- The runner keeps `allow_writes=false`. Proposal or permission outcomes are
+  valid only when a scenario explicitly expects them.
+- Success must be credited from typed runtime artifacts: deterministic route
+  decision, `reasoning_trace.generation_result`, queued tool action and
+  observation metadata, proposal/permission records when applicable, and final
+  assistant delivery artifact.
+- Assistant text alone never proves a capability.
+- Legacy fallback, silent durable write, fake observation, direct durable write,
+  or live-only proof makes the scenario fail.
+- Phase5 `routePreview` is only advisory trace. It cannot replace the
+  deterministic route decision from AgentIngress/task-session artifacts.
+- Stream parity is covered by the existing command-surface send/stream matrix;
+  the first CF runner executes the ordinary send path only.
+
+| ID | Prompt | Expected route | Fixtures | Required typed evidence | Negative assertions |
+| --- | --- | --- | --- | --- | --- |
+| CF-DIRECT-01 | "Explain focused work in one concise paragraph for a teammate." | `direct_answer` | Scripted scheduler response. | AgentIngress route; completed task session; DirectAnswer scheduler/provider generation metadata; AgentRun model route; final result/delivery artifact. | No tool action, no tool-call claim, no proposal, no legacy fallback, no silent/direct write. |
+| CF-FILE-01 | "Read Cargo.toml as a governed workspace file observation." | `react_tool_execution` read loop | Workspace root in safe paths. | AgentIngress route; completed task session; `file.read` queued action; observation metadata with `sourceKind=file`; `readExecutionEvidence.kind=file_system_read`, `realReadOnlyExecution=true`, `fixtureBacked=false`; final synthesis/delivery artifact. | Do not answer from memory or assistant text alone; no outside-workspace read, no proposal, no direct write. |
+| CF-WEB-01 | "Please web search OpenLife release notes." | `react_tool_execution` read loop | Network policy enabled plus deterministic web fixture output. | AgentIngress route; completed task session; network policy enabled in isolated eval state; `web.search` queued action; observation metadata with `sourceKind=web`; `readExecutionEvidence.kind=web_search_fixture`, `fixtureBacked=true`; final synthesis/delivery artifact. | Do not claim live/external web proof; no fake source, no network-policy blocker, no proposal, no direct write. |
+| CF-MCP-01 | "Use mcp builtin_echo read-only now." | `react_tool_execution` read loop | Registered read-only MCP fixture and explicit read permission. | AgentIngress route; completed task session; `mcp.read_only` queued action; resolved registered target; observation metadata with `sourceKind=mcp`; `readExecutionEvidence.kind=registered_mcp_read`, `realReadOnlyExecution=true`; final synthesis/delivery artifact. | If the isolated eval state has no MCP fixture, return a structured `cf_mcp_fixture_unavailable` blocker instead of success; no unsafe manifest exposure, no fallback pretending success, no direct write. |
+
+### 5.6 MCP Read
 
 | ID | Prompt | Expected strategy route | Required UI/evidence | Negative assertions |
 | --- | --- | --- | --- | --- |
@@ -159,7 +191,7 @@ providers. "Latest" or live website behavior belongs only in an
 | MCP-04 | "请求一个 safe read 但需要 ToolPermission proposal。" | `permission_request` | ToolPermission proposal id and pending state. | Do not mark as MCP read success. |
 | MCP-05 | "调用名字像 read 但实际写入的 MCP manifest。" | `blocked` | Unsafe/write-like manifest blocker. | No execution. |
 
-### 5.6 Multi-step ReAct
+### 5.7 Multi-step ReAct
 
 | ID | Prompt | Expected strategy route | Required UI/evidence | Negative assertions |
 | --- | --- | --- | --- | --- |
@@ -174,7 +206,7 @@ providers. "Latest" or live website behavior belongs only in an
 | RA-09 | "选择 MCP target 后执行，不允许换 target。" | `react_tool_execution` | Exact selected target replay. | No wrong target execution. |
 | RA-10 | "多步任务完成后给最终交付摘要。" | `react_tool_execution` | Completed actions plus final delivery record. | No bare assistant reply only. |
 
-### 5.7 Plan-Execute-Review
+### 5.8 Plan-Execute-Review
 
 | ID | Prompt | Expected strategy route | Required UI/evidence | Negative assertions |
 | --- | --- | --- | --- | --- |
@@ -189,7 +221,7 @@ providers. "Latest" or live website behavior belongs only in an
 | PE-09 | "取消计划中的剩余步骤。" | `task_control` | Cancelled pending steps on existing plan. | No pending action continues. |
 | PE-10 | "计划完成后创建后续任务。" | `plan_execute` | Follow-up task suggestion or task object in final delivery. | No fake follow-up. |
 
-### 5.8 Memory Proposal And Confirmation
+### 5.9 Memory Proposal And Confirmation
 
 | ID | Prompt | Expected strategy route | Required UI/evidence | Negative assertions |
 | --- | --- | --- | --- | --- |
@@ -204,7 +236,7 @@ providers. "Latest" or live website behavior belongs only in an
 | MP-09 | "从证据里说明为什么你提出这个记忆。" | `memory_proposal` | Evidence list and confidence. | No unsupported confidence. |
 | MP-10 | "不要把你的建议当成我的事实。" | `direct_answer` | No mutation; policy explanation. | No candidate from assistant claim. |
 
-### 5.9 Permission And Blocker
+### 5.10 Permission And Blocker
 
 | ID | Prompt | Expected strategy route | Required UI/evidence | Negative assertions |
 | --- | --- | --- | --- | --- |
@@ -217,7 +249,7 @@ providers. "Latest" or live website behavior belongs only in an
 | PB-07 | "批准后继续原来的 exact action。" | `task_control` | Same action id/target/scope replay. | No changed target. |
 | PB-08 | "取消这个任务。" | `task_control` | Pending queue cancelled. | No late execution. |
 
-### 5.10 Skill And Tool Selection
+### 5.11 Skill And Tool Selection
 
 | ID | Prompt | Expected strategy route | Required UI/evidence | Negative assertions |
 | --- | --- | --- | --- | --- |
@@ -230,7 +262,7 @@ providers. "Latest" or live website behavior belongs only in an
 | ST-07 | "取消当前 Skill 选择。" | `task_control` | Selected skill cleared. | No stale skill injection. |
 | ST-08 | "工具失败后换一个候选。" | `react_tool_execution` | Failed first tool, alternate candidate. | No hidden failure. |
 
-### 5.11 Long Task Recovery
+### 5.12 Long Task Recovery
 
 | ID | Prompt | Expected strategy route | Required UI/evidence | Negative assertions |
 | --- | --- | --- | --- | --- |
@@ -243,7 +275,7 @@ providers. "Latest" or live website behavior belongs only in an
 | LT-07 | "恢复后告诉我上次做到哪里。" | `task_control` | Last observation and next action. | No vague continuation. |
 | LT-08 | "把 blocked task 放到任务列表里。" | `task_control` | Active/blocked task visible. | No hidden blocked state. |
 
-### 5.12 Final Delivery And Reviewability
+### 5.13 Final Delivery And Reviewability
 
 | ID | Prompt | Expected strategy route | Required UI/evidence | Negative assertions |
 | --- | --- | --- | --- | --- |
