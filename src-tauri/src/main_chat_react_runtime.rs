@@ -319,6 +319,110 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             },
         )
     };
+    if plan.requires_network && !network_policy.enabled {
+        let selected_tool_candidate = agent_loop_plan.default_tool_candidate();
+        let selected_arguments_digest =
+            openlife_core::agent::react_beta::metadata_safe_value_digest(
+                &selected_tool_candidate.arguments,
+            );
+        let selected_arguments_digest_label = format!(
+            "bytes:{} hash:{}",
+            selected_arguments_digest.0, selected_arguments_digest.1
+        );
+        let selected_capabilities_digest_label =
+            selected_tool_candidate.capabilities_digest_label();
+        let selected_capability_labels_label = selected_tool_candidate.capability_labels_label();
+        let selected_manifest_source_label = selected_tool_candidate.manifest_source_label();
+        let selected_match_reason_label = selected_tool_candidate.match_reason_label();
+        let mut metadata = serde_json::json!({
+            "agentLoopAttempted": true,
+            "agentLoopSucceeded": true,
+            "singleStepFallbackUsed": false,
+            "plannedActionObserved": true,
+            "modelSelectedAllowedTool": true,
+            "modelSelectedExecutionPolicyValidated": true,
+            "modelSelectedExecutionAllowed": true,
+            "modelSelectedExecutionPolicyLevel": "read",
+            "modelSelectedExecutionPolicyReasonCode": "network_policy_checked_read",
+            "modelSelectedRequiresProposal": false,
+            "modelSelectedRequiresConfirmation": false,
+            "modelSelectedSilentWriteAllowed": false,
+            "modelSelectedArgumentsSource": "governed_candidate_contract",
+            "modelSelectedGovernedArgumentsDigest": selected_arguments_digest_label,
+            "toolSelectionCandidateId": selected_tool_candidate.candidate_id.clone(),
+            "toolSelectionCandidateTarget": selected_tool_candidate.target.clone(),
+            "toolSelectionCandidateActionType": selected_tool_candidate.executor_action_type.clone(),
+            "toolSelectionCandidateRank": selected_tool_candidate.selection_rank,
+            "toolSelectionCandidateSource": selected_manifest_source_label,
+            "toolSelectionCandidateCapabilitiesDigest": selected_capabilities_digest_label,
+            "toolSelectionCandidateCapabilityLabels": selected_capability_labels_label,
+            "toolSelectionCandidateMatchReason": selected_match_reason_label,
+            "toolSelectionCandidateCount": agent_loop_plan.tool_candidate_count(),
+            "toolSelectionCandidateIds": agent_loop_plan.tool_candidate_ids(),
+            "toolSelectionAllowlist": agent_loop_plan.allowed_tool_targets(),
+            "toolSelectionAllowedActions": agent_loop_plan.allowed_tool_action_metadata(),
+            "plannedTarget": plan.target.clone(),
+            "executionTarget": selected_tool_candidate.target.clone(),
+            "agentLoopActionStatus": "blocked",
+            "observedActionStatus": "blocked",
+            "permissionDecision": "network_policy_blocked",
+            "blockerReason": "network_policy_blocked",
+            "toolCallCount": 1,
+            "stepCount": 1,
+            "stopReason": "network_policy_blocked",
+            "statusUpdateCount": 0,
+            "directWritesExecuted": false,
+            "providerEndpointKind": provider_endpoint_kind,
+            "scriptedProviderResponse": scripted_provider_response,
+            "liveProviderInvoked": live_provider_invoked,
+            "externalLiveProviderEvalPreflighted": false,
+        });
+        attach_tool_selection_ranking_metadata(&mut metadata, &tool_selection_ranking);
+        attach_main_chat_read_observation_metadata(
+            &mut metadata,
+            &agent_loop_plan.queue_action_type,
+            &selected_tool_candidate.target,
+            &selected_tool_candidate.arguments,
+            "network_policy_blocked",
+            Some(serde_json::json!({
+                "status": "blocked",
+                "permission_decision": "network_policy_blocked",
+                "network_policy_blocked": true,
+                "directWritesExecuted": false,
+            })),
+            false,
+            false,
+        );
+        transcript_entries.extend(
+            append_main_chat_agent_transcript(
+                state,
+                Some(task_session_id),
+                ExecutionTranscriptEntryKind::Observation,
+                "Governed ReAct AgentLoop completed with a network policy blocker.",
+                metadata.clone(),
+            )
+            .await,
+        );
+        return Ok(MainChatReactAgentLoopAttempt {
+            reply: Some("That web read is blocked by governance: network_policy_blocked".into()),
+            tool_calls: vec![tool_call_from_action(
+                &selected_tool_candidate.target,
+                "network_policy_blocked",
+                false,
+                None,
+                Some("network_policy_blocked".into()),
+                ToolCallStatus::Blocked,
+                false,
+            )],
+            model_route: Some(scheduler.preview_chat_route(Some(&tools_prompt)).await),
+            transcript_entries,
+            metadata,
+            queue_status: Some(
+                openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed,
+            ),
+            blocker_reason: Some("network_policy_blocked".into()),
+        });
+    }
     let action_executor =
         openlife_core::agent::ActionExecutor::new(openlife_core::agent::ActionExecutorConfig {
             allow_writes: false,
