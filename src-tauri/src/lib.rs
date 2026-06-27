@@ -197,6 +197,7 @@ use commands::agent_runtime::{
     run_main_chat_external_live_productization_gate, run_main_chat_stage3_execution_ux_report,
     run_multi_strategy_agent_preview, select_main_chat_skill,
     set_main_chat_agent_stage1_browser_network_policy,
+    set_main_chat_agent_stage1_browser_scripted_response,
     set_main_chat_agent_stage1_browser_web_fixture_output, skip_plan_execute_step,
     update_plan_execute_session_draft, validate_main_chat_agent_stage2_manual_dogfood_artifact,
 };
@@ -708,6 +709,7 @@ pub fn run() {
             validate_main_chat_agent_stage2_manual_dogfood_artifact,
             prepare_main_chat_agent_stage1_browser_dogfood_state,
             set_main_chat_agent_stage1_browser_network_policy,
+            set_main_chat_agent_stage1_browser_scripted_response,
             set_main_chat_agent_stage1_browser_web_fixture_output,
             run_main_chat_agent_execution_v1_final_acceptance_gate,
             get_runtime_strategy_registry_status,

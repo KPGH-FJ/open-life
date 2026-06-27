@@ -500,6 +500,8 @@ describe("stage1 browser evidence report builder", () => {
     expect(script).toContain("STAGE1_DOGFOOD_SCENARIOS");
     expect(script).toContain("prepare_main_chat_agent_stage1_browser_dogfood_state");
     expect(script).toContain("set_main_chat_agent_stage1_browser_network_policy");
+    expect(script).toContain("set_main_chat_agent_stage1_browser_scripted_response");
+    expect(script).toContain("D23_WEB_BLOCKER_SCRIPTED_RESPONSE");
     expect(script).toContain("restoreStage1ScenarioNetworkPolicy");
     expect(script.indexOf("prepare_main_chat_agent_stage1_browser_dogfood_state")).toBeLessThan(
       script.indexOf("await navigateToChat(sessionId);")

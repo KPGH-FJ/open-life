@@ -2097,6 +2097,20 @@ pub async fn set_main_chat_agent_stage1_browser_web_fixture_output(
 }
 
 #[tauri::command]
+pub async fn set_main_chat_agent_stage1_browser_scripted_response(
+    response: Option<String>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<String>, String> {
+    if !cfg!(debug_assertions) {
+        return Err("stage1_browser_scripted_response_toggle_debug_only".into());
+    }
+    let mut scheduler = state.scheduler.lock().await;
+    let previous = scheduler.scripted_generation_response.clone();
+    scheduler.scripted_generation_response = response;
+    Ok(previous)
+}
+
+#[tauri::command]
 pub async fn run_main_chat_agent_execution_v1_final_acceptance_gate(
     state: State<'_, Arc<AppState>>,
 ) -> Result<MainChatAgentExecutionV1FinalAcceptanceGateCommandReport, String> {

@@ -32,6 +32,21 @@ const macosBlocker = "tauri_webdriver_macos_not_supported_by_tauri_driver";
 const reportPath = "frontend/test-results/main-chat-stage1-dogfood-report.json";
 const webdriverUrl = "http://127.0.0.1:4444";
 const frontendDevUrl = "http://127.0.0.1:5173";
+const D23_WEB_BLOCKER_SCRIPTED_RESPONSE = JSON.stringify({
+  final: "I will run the governed web read first.",
+  actions: [
+    {
+      name: "web.search",
+      action_type: "mcp_tool",
+      arguments: {
+        query: "OpenLife release notes",
+        max_results: 3,
+      },
+    },
+  ],
+  thought_summary: "Need a governed network-policy checked web observation.",
+  warnings: [],
+});
 
 if (process.argv.includes("--validate-scenarios-only")) {
   console.log(`validated_stage1_dogfood_scenarios=${STAGE1_DOGFOOD_SCENARIOS.length}`);
@@ -389,7 +404,18 @@ async function prepareStage1ScenarioNetworkPolicy(sessionId, scenario) {
       output: null,
     }
   );
-  return { previousNetworkPolicy, previousWebFixtureOutput };
+  const previousScriptedResponse = await tauriInvoke(
+    sessionId,
+    "set_main_chat_agent_stage1_browser_scripted_response",
+    {
+      response: D23_WEB_BLOCKER_SCRIPTED_RESPONSE,
+    }
+  );
+  return {
+    previousNetworkPolicy,
+    previousWebFixtureOutput,
+    previousScriptedResponse,
+  };
 }
 
 async function restoreStage1ScenarioNetworkPolicy(sessionId, previousScenarioState) {
@@ -406,6 +432,13 @@ async function restoreStage1ScenarioNetworkPolicy(sessionId, previousScenarioSta
   }).catch(error => {
     console.error(
       `[stage1_web_fixture_restore:error] ${metadataSafeBlocker(error?.message ?? error)}`
+    );
+  });
+  await tauriInvoke(sessionId, "set_main_chat_agent_stage1_browser_scripted_response", {
+    response: previousScenarioState.previousScriptedResponse ?? null,
+  }).catch(error => {
+    console.error(
+      `[stage1_scripted_response_restore:error] ${metadataSafeBlocker(error?.message ?? error)}`
     );
   });
 }
