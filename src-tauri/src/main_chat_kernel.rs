@@ -6798,11 +6798,13 @@ mod tests {
     fn main_chat_kernel_goal_2_send_and_stream_use_kernel_direct_answer_adapter() {
         let send_source = include_str!("main_chat_send.rs");
         let stream_source = include_str!("main_chat_streaming.rs");
+        let pipeline_source = include_str!("main_chat_turn_pipeline.rs");
 
-        assert!(send_source.contains("run_main_chat_kernel_direct_answer_with_state"));
-        assert!(stream_source.contains("run_main_chat_kernel_direct_answer_with_state"));
-        assert!(send_source.contains("BufferedMainChatEventSink"));
-        assert!(stream_source.contains("StreamingMainChatEventSink"));
+        assert!(send_source.contains("run_main_chat_turn_pipeline_buffered"));
+        assert!(stream_source.contains("run_main_chat_turn_pipeline_streaming"));
+        assert!(pipeline_source.contains("run_main_chat_kernel_direct_answer_with_state"));
+        assert!(pipeline_source.contains("BufferedMainChatEventSink"));
+        assert!(pipeline_source.contains("StreamingMainChatEventSink"));
     }
 
     #[test]

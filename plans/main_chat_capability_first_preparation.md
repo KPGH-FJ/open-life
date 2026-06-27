@@ -331,6 +331,57 @@ Acceptance:
 - ToolLoop cannot accidentally inherit `ActionExecutorConfig::default()`
   write allowance.
 
+Phase 4 readiness supplement:
+
+- Phase 4 is the ToolLoop adapter phase. It should move ReAct execution under
+  the `MainChatTurnPipeline` `ToolLoop` path label, but it must not introduce
+  structured/model-backed routing yet.
+- The first adapter should wrap existing ReAct helpers instead of rewriting tool
+  planning or candidate selection:
+
+```rust
+pub struct MainChatToolLoopInput<'a> {
+    pub session_id: &'a str,
+    pub user_msg: Option<&'a ChatMessage>,
+    pub desensitized_messages: &'a [ChatMessage],
+    pub life_model: &'a LifeModel,
+    pub context_summary: ContextSummary,
+    pub embed_err: Option<String>,
+    pub auto_checkin_msg: Option<String>,
+    pub main_chat_agent_turn: &'a MainChatAgentTurn,
+    pub selected_skill_id: Option<&'a str>,
+}
+
+pub enum MainChatToolLoopOutcome {
+    Completed(SendMessageResult),
+    ExplicitFallbackAvailable { reason_code: String },
+    GovernedBlocker(SendMessageResult),
+}
+```
+
+- The adapter may call the existing ReAct AgentLoop/runtime helpers and existing
+  single-step fallback helper, but the pipeline must be able to tell whether the
+  result came from AgentLoop, governed blocker, ToolPermission proposal,
+  single-step fallback, or no result.
+- Do not let Phase 4 change route selection. `MainChatTurnRouteDecision` remains
+  the source of whether this turn is `ToolLoop`.
+- All ToolLoop adapter construction of `ActionExecutor` must use explicit
+  `ActionExecutorConfig { allow_writes: false, ... }`; source guards should fail
+  if the adapter relies on `ActionExecutorConfig::default()`.
+- Preserve existing candidate contract enforcement, exact target/action
+  allowlists, ToolPermission proposal flow, ActionQueue/transcript writes, and
+  follow-up synthesis behavior.
+- Add no-hidden-fallback tests for file read, web blocker, registered MCP read,
+  registered MCP ToolPermission proposal, and model-selected disallowed tool.
+- Add negative tests proving a ToolLoop result cannot claim success without
+  runtime observation/tool-call/proposal/blocker evidence.
+- Keep legacy fallback available only as an explicit compatibility path after the
+  adapter returns no result or an explicit fallback outcome; do not silently drop
+  into legacy generation.
+- Verification for Phase 4 must include existing ReAct focused tests, the new
+  ToolLoop adapter tests, source guards for `allow_writes=false`, and
+  `main_chat_command_surface_eval_gate_covers_send_stream_runtime_matrix`.
+
 ### 5.4 Structured Routing
 
 Preparation content:
