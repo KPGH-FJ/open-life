@@ -26,6 +26,15 @@ pub(crate) struct MainChatAgentBetaV1DefaultExperienceReport {
     pub command_surface_legacy_fallback_count: usize,
     pub command_surface_silent_write_count: usize,
     pub command_surface_send_stream_matrix_ready: bool,
+    pub command_surface_kernel_backed_case_count: usize,
+    pub command_surface_kernel_direct_answer_case_count: usize,
+    pub command_surface_kernel_read_only_tool_case_count: usize,
+    pub command_surface_kernel_proposal_write_case_count: usize,
+    pub command_surface_kernel_plan_execute_case_count: usize,
+    pub command_surface_kernel_blocker_case_count: usize,
+    pub command_surface_kernel_hs_context_case_count: usize,
+    pub command_surface_kernel_web_tool_case_count: usize,
+    pub command_surface_kernel_mcp_tool_case_count: usize,
     pub required_state_count: usize,
     pub verified_state_count: usize,
     pub state_mappings: Vec<MainChatAgentBetaV1DefaultExperienceStateMapping>,
@@ -58,6 +67,33 @@ pub(crate) async fn run_main_chat_agent_beta_v1_default_experience_report(
     }
     if !command_surface_send_stream_matrix_ready {
         blockers.push("command_surface_send_stream_matrix_not_ready".into());
+    }
+    if command_surface.kernel_backed_case_count < command_surface.total_cases {
+        blockers.push("command_surface_kernel_evidence_incomplete".into());
+    }
+    if command_surface.kernel_direct_answer_case_count == 0 {
+        blockers.push("command_surface_kernel_direct_answer_missing".into());
+    }
+    if command_surface.kernel_read_only_tool_case_count == 0 {
+        blockers.push("command_surface_kernel_read_only_tool_missing".into());
+    }
+    if command_surface.kernel_proposal_write_case_count == 0 {
+        blockers.push("command_surface_kernel_proposal_write_missing".into());
+    }
+    if command_surface.kernel_plan_execute_case_count == 0 {
+        blockers.push("command_surface_kernel_plan_execute_missing".into());
+    }
+    if command_surface.kernel_blocker_case_count == 0 {
+        blockers.push("command_surface_kernel_blocker_missing".into());
+    }
+    if command_surface.kernel_hs_context_case_count == 0 {
+        blockers.push("command_surface_kernel_hs_context_missing".into());
+    }
+    if command_surface.kernel_web_tool_case_count == 0 {
+        blockers.push("command_surface_kernel_web_tool_missing".into());
+    }
+    if command_surface.kernel_mcp_tool_case_count == 0 {
+        blockers.push("command_surface_kernel_mcp_tool_missing".into());
     }
 
     let global_ready = blockers.is_empty();
@@ -109,6 +145,19 @@ pub(crate) async fn run_main_chat_agent_beta_v1_default_experience_report(
         command_surface_legacy_fallback_count: command_surface.legacy_fallback_count,
         command_surface_silent_write_count: command_surface.silent_write_count,
         command_surface_send_stream_matrix_ready,
+        command_surface_kernel_backed_case_count: command_surface.kernel_backed_case_count,
+        command_surface_kernel_direct_answer_case_count: command_surface
+            .kernel_direct_answer_case_count,
+        command_surface_kernel_read_only_tool_case_count: command_surface
+            .kernel_read_only_tool_case_count,
+        command_surface_kernel_proposal_write_case_count: command_surface
+            .kernel_proposal_write_case_count,
+        command_surface_kernel_plan_execute_case_count: command_surface
+            .kernel_plan_execute_case_count,
+        command_surface_kernel_blocker_case_count: command_surface.kernel_blocker_case_count,
+        command_surface_kernel_hs_context_case_count: command_surface.kernel_hs_context_case_count,
+        command_surface_kernel_web_tool_case_count: command_surface.kernel_web_tool_case_count,
+        command_surface_kernel_mcp_tool_case_count: command_surface.kernel_mcp_tool_case_count,
         required_state_count,
         verified_state_count,
         state_mappings,

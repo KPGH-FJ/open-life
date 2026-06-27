@@ -315,6 +315,8 @@ async fn run_main_chat_command_surface_state_eval_case(
             (response_value, task_session_id, legacy_fallback_used)
         }
     };
+    wait_for_main_chat_command_surface_eval_case_artifacts(&state, scenario, &task_session_id)
+        .await?;
     let store_arc = state
         .main_chat_agent_session_store
         .as_ref()
@@ -373,6 +375,12 @@ async fn run_main_chat_command_surface_state_eval_case(
         main_chat_command_surface_eval_memory_conflict_evidence(&state).await?;
     let knowledge_asset_edit_evidence =
         main_chat_command_surface_eval_knowledge_asset_edit_evidence(&proposals);
+    let kernel_evidence = main_chat_command_surface_eval_kernel_evidence(
+        Some(&response_value),
+        &session,
+        &transcript,
+        &actions,
+    );
 
     Ok(MainChatCommandSurfaceEvalEvidence::for_case(
         entry_point,
@@ -410,7 +418,76 @@ async fn run_main_chat_command_surface_state_eval_case(
         knowledge_asset_edit_evidence.proposal_created,
         knowledge_asset_edit_evidence.proposed_diff_present,
         knowledge_asset_edit_evidence.direct_write_detected,
+        kernel_evidence.kernel_backed,
+        kernel_evidence.kernel_direct_answer,
+        kernel_evidence.kernel_read_only_tool_loop,
+        kernel_evidence.kernel_proposal_only_write,
+        kernel_evidence.kernel_plan_execute,
+        kernel_evidence.kernel_blocker,
+        kernel_evidence.kernel_hs_context,
+        kernel_evidence.kernel_web_tool,
+        kernel_evidence.kernel_mcp_tool,
     ))
+}
+
+async fn wait_for_main_chat_command_surface_eval_case_artifacts(
+    state: &Arc<AppState>,
+    scenario: MainChatCommandSurfaceEvalScenario,
+    task_session_id: &str,
+) -> Result<(), String> {
+    if scenario != MainChatCommandSurfaceEvalScenario::WebPolicyBlocker {
+        return Ok(());
+    }
+
+    for _ in 0..80 {
+        if main_chat_command_surface_eval_web_policy_blocker_ready(state, task_session_id).await? {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    Ok(())
+}
+
+async fn main_chat_command_surface_eval_web_policy_blocker_ready(
+    state: &Arc<AppState>,
+    task_session_id: &str,
+) -> Result<bool, String> {
+    let session_ready = {
+        let store_arc = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .ok_or_else(|| "command-surface eval missing main chat session store".to_string())?;
+        let store = store_arc.lock().await;
+        store
+            .load_session(task_session_id)
+            .map_err(|error| format!("load command-surface eval task session failed: {error}"))?
+            .is_some_and(|session| {
+                session
+                    .pending_blockers
+                    .iter()
+                    .any(|blocker| blocker.contains("network_policy_blocked"))
+            })
+    };
+    if !session_ready {
+        return Ok(false);
+    }
+
+    let action_ready = if let Some(ref queue_arc) = state.main_chat_action_queue_store {
+        let queue = queue_arc.lock().await;
+        queue
+            .list_for_session(task_session_id)
+            .map_err(|error| format!("list command-surface eval actions failed: {error}"))?
+            .iter()
+            .any(|action| {
+                action.action.action_type == "web.search"
+                    && action.status
+                        == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed
+            })
+    } else {
+        false
+    };
+
+    Ok(action_ready)
 }
 
 pub(crate) async fn configure_main_chat_command_surface_eval_state(
@@ -592,6 +669,19 @@ pub(crate) async fn configure_main_chat_command_surface_eval_state(
                 .to_string(),
             );
         }
+        MainChatCommandSurfaceEvalScenario::MissingMcpBlocker => {
+            let mut scheduler = state.scheduler.lock().await;
+            *scheduler = scripted_eval_scheduler(
+                "gpt-command-surface-eval-mcp-missing-fallback",
+                serde_json::json!({
+                    "final": "I cannot complete the requested MCP read without a governed observation.",
+                    "actions": [],
+                    "thought_summary": "No governed observation was executed.",
+                    "warnings": []
+                })
+                .to_string(),
+            );
+        }
         MainChatCommandSurfaceEvalScenario::RegisteredMcpReadSuccess => {
             grant_builtin_echo_read_once(state).await?;
             let mut scheduler = state.scheduler.lock().await;
@@ -714,8 +804,7 @@ pub(crate) async fn configure_main_chat_command_surface_eval_state(
                 .to_string(),
             );
         }
-        MainChatCommandSurfaceEvalScenario::ProposalPath
-        | MainChatCommandSurfaceEvalScenario::MissingMcpBlocker => {}
+        MainChatCommandSurfaceEvalScenario::ProposalPath => {}
     }
     Ok(())
 }
@@ -1097,6 +1186,20 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
             {
                 return Err("missing provider generation path metadata".into());
             }
+            if generation_entry
+                .metadata
+                .get("kernelBackedDirectAnswer")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+                || generation_entry
+                    .metadata
+                    .get("kernelEventCount")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default()
+                    == 0
+            {
+                return Err("DirectAnswer command-surface evidence was not kernel-backed".into());
+            }
             let run = runs
                 .iter()
                 .find(|run| {
@@ -1345,9 +1448,33 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
             }
             let completed_entry = transcript
                 .iter()
-                .find(|entry| entry.summary.contains("Governed ReAct AgentLoop completed"))
-                .ok_or_else(|| "missing file read AgentLoop completion transcript".to_string())?;
-            if completed_entry
+                .find(|entry| {
+                    entry.summary.contains("Governed ReAct AgentLoop completed")
+                        || entry
+                            .summary
+                            .contains("MainChatKernel read-only tool loop completed")
+                })
+                .ok_or_else(|| "missing file read completion transcript".to_string())?;
+            let kernel_read_loop = completed_entry
+                .metadata
+                .get("kernelBackedReadOnlyToolLoop")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+            if kernel_read_loop {
+                if completed_entry
+                    .metadata
+                    .get("toolCallCount")
+                    .and_then(serde_json::Value::as_u64)
+                    != Some(1)
+                    || completed_entry
+                        .metadata
+                        .get("directWritesExecuted")
+                        .and_then(serde_json::Value::as_bool)
+                        != Some(false)
+                {
+                    return Err("file read kernel metadata incomplete".into());
+                }
+            } else if completed_entry
                 .metadata
                 .get("agentLoopSucceeded")
                 .and_then(serde_json::Value::as_bool)
@@ -1423,7 +1550,19 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                 );
             }
             assert_response_agent_state_read_execution(response, "file_system_read", true, false)?;
-            if metadata
+            let kernel_action = metadata
+                .get("kernelBackedReadOnlyToolLoop")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+            if kernel_action {
+                if metadata
+                    .get("directWritesExecuted")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(false)
+                {
+                    return Err("file.read kernel action metadata incomplete".into());
+                }
+            } else if metadata
                 .get("agentLoopSucceeded")
                 .and_then(serde_json::Value::as_bool)
                 != Some(true)
@@ -1458,11 +1597,33 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
             }
             let completed_entry = transcript
                 .iter()
-                .find(|entry| entry.summary.contains("Governed ReAct AgentLoop completed"))
-                .ok_or_else(|| {
-                    "missing session search AgentLoop completion transcript".to_string()
-                })?;
-            if completed_entry
+                .find(|entry| {
+                    entry.summary.contains("Governed ReAct AgentLoop completed")
+                        || entry
+                            .summary
+                            .contains("MainChatKernel read-only tool loop completed")
+                })
+                .ok_or_else(|| "missing session search completion transcript".to_string())?;
+            let kernel_read_loop = completed_entry
+                .metadata
+                .get("kernelBackedReadOnlyToolLoop")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+            if kernel_read_loop {
+                if completed_entry
+                    .metadata
+                    .get("toolCallCount")
+                    .and_then(serde_json::Value::as_u64)
+                    != Some(1)
+                    || completed_entry
+                        .metadata
+                        .get("directWritesExecuted")
+                        .and_then(serde_json::Value::as_bool)
+                        != Some(false)
+                {
+                    return Err("session search kernel metadata incomplete".into());
+                }
+            } else if completed_entry
                 .metadata
                 .get("agentLoopSucceeded")
                 .and_then(serde_json::Value::as_bool)
@@ -1560,7 +1721,19 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                 );
             }
             assert_response_agent_state_read_execution(response, "session_read", true, false)?;
-            if metadata
+            let kernel_action = metadata
+                .get("kernelBackedReadOnlyToolLoop")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+            if kernel_action {
+                if metadata
+                    .get("directWritesExecuted")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(false)
+                {
+                    return Err("session.search kernel action metadata incomplete".into());
+                }
+            } else if metadata
                 .get("agentLoopSucceeded")
                 .and_then(serde_json::Value::as_bool)
                 != Some(true)
@@ -1640,8 +1813,13 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                         .get("directWritesExecuted")
                         .and_then(serde_json::Value::as_bool)
                         == Some(false)
+                    && entry
+                        .metadata
+                        .get("kernelBackedPlanExecuteDraft")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
             }) {
-                return Err("missing PlanExecute transcript metadata".into());
+                return Err("missing kernel-backed PlanExecute transcript metadata".into());
             }
         }
         MainChatCommandSurfaceEvalScenario::SelectedSkillContextSuccess => {
@@ -1698,6 +1876,11 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                         .get("directWritesExecuted")
                         .and_then(serde_json::Value::as_bool)
                         == Some(false)
+                    && entry
+                        .metadata
+                        .get("kernelBackedPlanExecuteDraft")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
             }) {
                 return Err("selected skill plan review missing final governed delivery".into());
             }
@@ -1821,11 +2004,20 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
             }
             let edit_action = actions
                 .iter()
-                .find(|action| action.action.action_type == "knowledge.propose_edit")
-                .ok_or_else(|| "missing knowledge.propose_edit action".to_string())?;
+                .find(|action| {
+                    action.action.action_type == "knowledge.propose_edit"
+                        || (action.action.action_type == "proposal.create"
+                            && action
+                                .observation_metadata
+                                .as_ref()
+                                .and_then(|metadata| metadata.get("writeOutcomeKind"))
+                                .and_then(serde_json::Value::as_str)
+                                == Some("lifemodel_proposal"))
+                })
+                .ok_or_else(|| "missing knowledge proposal action".to_string())?;
             if edit_action.status != ExecutionQueueStatus::Completed {
                 return Err(format!(
-                    "knowledge.propose_edit action status {:?}",
+                    "knowledge proposal action status {:?}",
                     edit_action.status
                 ));
             }
@@ -1833,10 +2025,12 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                 .iter()
                 .find(|proposal| {
                     proposal.source == openlife_core::agent::ProposalSource::ChatConversation
-                        && proposal.source_detail.as_deref()
-                            == Some(
-                                format!("main_chat_agent_task_session:{task_session_id}").as_str(),
-                            )
+                        && matches!(
+                            proposal.source_detail.as_deref(),
+                            Some(detail)
+                                if detail == task_session_id
+                                    || detail == format!("main_chat_agent_task_session:{task_session_id}")
+                        )
                         && proposal.affected_path == "knowledge_asset.AGENTS.md"
                 })
                 .ok_or_else(|| "knowledge asset edit proposal not linked to task".to_string())?;
@@ -1890,8 +2084,12 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
             }
             if !proposals.iter().any(|proposal| {
                 proposal.source == openlife_core::agent::ProposalSource::ChatConversation
-                    && proposal.source_detail.as_deref()
-                        == Some(format!("main_chat_agent_task_session:{task_session_id}").as_str())
+                    && matches!(
+                        proposal.source_detail.as_deref(),
+                        Some(detail)
+                            if detail == task_session_id
+                                || detail == format!("main_chat_agent_task_session:{task_session_id}")
+                    )
             }) {
                 return Err("pending Review Center proposal not linked to task".into());
             }
@@ -1941,9 +2139,33 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
             }
             let completed_entry = transcript
                 .iter()
-                .find(|entry| entry.summary.contains("Governed ReAct AgentLoop completed"))
+                .find(|entry| {
+                    entry.summary.contains("Governed ReAct AgentLoop completed")
+                        || entry
+                            .summary
+                            .contains("MainChatKernel read-only tool loop returned a blocker")
+                })
                 .ok_or_else(|| "missing web AgentLoop completion transcript".to_string())?;
-            if completed_entry
+            let kernel_entry = completed_entry
+                .metadata
+                .get("kernelBackedReadOnlyToolLoop")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+            if kernel_entry {
+                if completed_entry
+                    .metadata
+                    .get("toolCallCount")
+                    .and_then(serde_json::Value::as_u64)
+                    != Some(1)
+                    || completed_entry
+                        .metadata
+                        .get("directWritesExecuted")
+                        .and_then(serde_json::Value::as_bool)
+                        != Some(false)
+                {
+                    return Err("web kernel blocker metadata incomplete".into());
+                }
+            } else if completed_entry
                 .metadata
                 .get("agentLoopSucceeded")
                 .and_then(serde_json::Value::as_bool)
@@ -1980,7 +2202,27 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                 .observation_metadata
                 .as_ref()
                 .ok_or_else(|| "missing web AgentLoop observation metadata".to_string())?;
-            if metadata
+            let kernel_action = metadata
+                .get("kernelBackedReadOnlyToolLoop")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+            if kernel_action {
+                if metadata
+                    .get("executorStatus")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("blocked")
+                    || metadata
+                        .get("blockerReason")
+                        .and_then(serde_json::Value::as_str)
+                        != Some("network_policy_blocked")
+                    || metadata
+                        .get("directWritesExecuted")
+                        .and_then(serde_json::Value::as_bool)
+                        != Some(false)
+                {
+                    return Err("web kernel blocker action metadata incomplete".into());
+                }
+            } else if metadata
                 .get("agentLoopSucceeded")
                 .and_then(serde_json::Value::as_bool)
                 != Some(true)
@@ -2015,9 +2257,33 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
             }
             let completed_entry = transcript
                 .iter()
-                .find(|entry| entry.summary.contains("Governed ReAct AgentLoop completed"))
+                .find(|entry| {
+                    entry.summary.contains("Governed ReAct AgentLoop completed")
+                        || entry
+                            .summary
+                            .contains("MainChatKernel read-only tool loop completed")
+                })
                 .ok_or_else(|| "missing web AgentLoop success transcript".to_string())?;
-            if completed_entry
+            let kernel_entry = completed_entry
+                .metadata
+                .get("kernelBackedReadOnlyToolLoop")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+            if kernel_entry {
+                if completed_entry
+                    .metadata
+                    .get("toolCallCount")
+                    .and_then(serde_json::Value::as_u64)
+                    != Some(1)
+                    || completed_entry
+                        .metadata
+                        .get("directWritesExecuted")
+                        .and_then(serde_json::Value::as_bool)
+                        != Some(false)
+                {
+                    return Err("web kernel success metadata incomplete".into());
+                }
+            } else if completed_entry
                 .metadata
                 .get("agentLoopSucceeded")
                 .and_then(serde_json::Value::as_bool)
@@ -2099,7 +2365,23 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                 false,
                 true,
             )?;
-            if metadata
+            let kernel_action = metadata
+                .get("kernelBackedReadOnlyToolLoop")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+            if kernel_action {
+                if metadata
+                    .get("executorStatus")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("succeeded")
+                    || metadata
+                        .get("directWritesExecuted")
+                        .and_then(serde_json::Value::as_bool)
+                        != Some(false)
+                {
+                    return Err("web kernel success action metadata incomplete".into());
+                }
+            } else if metadata
                 .get("agentLoopSucceeded")
                 .and_then(serde_json::Value::as_bool)
                 != Some(true)
@@ -2154,9 +2436,33 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
             assert_mcp_read_success_action(actions, response, true)?;
             let completed_entry = transcript
                 .iter()
-                .find(|entry| entry.summary.contains("Governed ReAct AgentLoop completed"))
+                .find(|entry| {
+                    entry.summary.contains("Governed ReAct AgentLoop completed")
+                        || entry
+                            .summary
+                            .contains("MainChatKernel read-only tool loop completed")
+                })
                 .ok_or_else(|| "missing AgentLoop completion transcript".to_string())?;
-            if completed_entry
+            let kernel_entry = completed_entry
+                .metadata
+                .get("kernelBackedReadOnlyToolLoop")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+            if kernel_entry {
+                if completed_entry
+                    .metadata
+                    .get("toolCallCount")
+                    .and_then(serde_json::Value::as_u64)
+                    != Some(1)
+                    || completed_entry
+                        .metadata
+                        .get("directWritesExecuted")
+                        .and_then(serde_json::Value::as_bool)
+                        != Some(false)
+                {
+                    return Err("kernel MCP completion metadata incomplete".into());
+                }
+            } else if completed_entry
                 .metadata
                 .get("agentLoopSucceeded")
                 .and_then(serde_json::Value::as_bool)
@@ -2192,8 +2498,13 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
             }
             let completed_entry = transcript
                 .iter()
-                .find(|entry| entry.summary.contains("Governed ReAct AgentLoop completed"))
-                .ok_or_else(|| "missing multi-read AgentLoop completion transcript".to_string())?;
+                .find(|entry| {
+                    entry.summary.contains("Governed ReAct AgentLoop completed")
+                        || entry
+                            .summary
+                            .contains("MainChatKernel read-only tool loop completed")
+                })
+                .ok_or_else(|| "missing multi-read completion transcript".to_string())?;
             let tool_call_count = metadata_usize(&completed_entry.metadata, "toolCallCount");
             let action_count = metadata_usize(&completed_entry.metadata, "agentLoopActionCount");
             let observation_count =
@@ -2210,6 +2521,11 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                     != Some(false)
                 || completed_entry
                     .metadata
+                    .get("kernelBackedReadOnlyToolLoop")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
+                || completed_entry
+                    .metadata
                     .get("agentLoopActionStatus")
                     .and_then(serde_json::Value::as_str)
                     != Some("succeeded")
@@ -2223,7 +2539,7 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                 || observation_count < 2
             {
                 return Err(format!(
-                    "multi-read AgentLoop metadata incomplete: tool_calls={tool_call_count}, actions={action_count}, observations={observation_count}"
+                    "multi-read metadata incomplete: tool_calls={tool_call_count}, actions={action_count}, observations={observation_count}"
                 ));
             }
         }
@@ -2246,9 +2562,33 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
             )?;
             let completed_entry = transcript
                 .iter()
-                .find(|entry| entry.summary.contains("Governed ReAct AgentLoop completed"))
+                .find(|entry| {
+                    entry.summary.contains("Governed ReAct AgentLoop completed")
+                        || entry
+                            .summary
+                            .contains("MainChatKernel read-only tool permission request recorded")
+                })
                 .ok_or_else(|| "missing AgentLoop permission transcript".to_string())?;
-            if completed_entry
+            let kernel_entry = completed_entry
+                .metadata
+                .get("kernelBackedReadOnlyToolLoop")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+            if kernel_entry {
+                if completed_entry
+                    .metadata
+                    .get("executorStatus")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("needs_confirmation")
+                    || completed_entry
+                        .metadata
+                        .get("permissionProposalLinkedToPendingAction")
+                        .and_then(serde_json::Value::as_bool)
+                        != Some(true)
+                {
+                    return Err("kernel permission transcript metadata incomplete".into());
+                }
+            } else if completed_entry
                 .metadata
                 .get("agentLoopSucceeded")
                 .and_then(serde_json::Value::as_bool)
@@ -2345,7 +2685,39 @@ fn assert_mcp_read_success_action(
     {
         return Err("MCP fallback observation target metadata incomplete".into());
     }
-    if require_agent_loop
+    let kernel_action = metadata
+        .get("kernelBackedReadOnlyToolLoop")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    if require_agent_loop && kernel_action {
+        if metadata
+            .get("strictManifestIdentity")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+            || metadata
+                .get("fuzzyNameMatchingUsed")
+                .and_then(serde_json::Value::as_bool)
+                != Some(false)
+            || metadata
+                .get("toolSelectionDeterministicFallbackReady")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+            || metadata
+                .get("toolSelectionProviderRankingRequiredForLocalCompletion")
+                .and_then(serde_json::Value::as_bool)
+                != Some(false)
+            || metadata
+                .get("selectedCandidateId")
+                .and_then(serde_json::Value::as_str)
+                != Some("builtin_echo")
+            || metadata
+                .get("selectedCandidateTarget")
+                .and_then(serde_json::Value::as_str)
+                != Some("builtin_echo")
+        {
+            return Err("kernel MCP deterministic selection metadata incomplete".into());
+        }
+    } else if require_agent_loop
         && (metadata
             .get("agentLoopSucceeded")
             .and_then(serde_json::Value::as_bool)
@@ -2458,7 +2830,42 @@ fn assert_mcp_tool_permission_proposal_action(
     {
         return Err("MCP permission metadata missing no-write proof".into());
     }
-    if require_agent_loop
+    let kernel_action = metadata
+        .get("kernelBackedReadOnlyToolLoop")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    if require_agent_loop && kernel_action {
+        if metadata
+            .get("executorStatus")
+            .and_then(serde_json::Value::as_str)
+            != Some("needs_confirmation")
+            || metadata
+                .get("permissionProposalLinkedToPendingAction")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+            || metadata
+                .get("strictManifestIdentity")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+            || metadata
+                .get("blockedAction")
+                .and_then(|value| value.get("action_type"))
+                .and_then(serde_json::Value::as_str)
+                != Some("mcp.read_only")
+            || metadata
+                .get("blockedAction")
+                .and_then(|value| value.get("target"))
+                .and_then(serde_json::Value::as_str)
+                != Some("mcp.call_tool")
+            || metadata
+                .get("blockedAction")
+                .and_then(|value| value.get("resolved_target"))
+                .and_then(serde_json::Value::as_str)
+                != Some("memory.search")
+        {
+            return Err("kernel MCP permission action metadata incomplete".into());
+        }
+    } else if require_agent_loop
         && (metadata
             .get("agentLoopSucceeded")
             .and_then(serde_json::Value::as_bool)
@@ -2722,7 +3129,12 @@ fn main_chat_command_surface_eval_agent_loop_count(
 ) -> usize {
     transcript
         .iter()
-        .find(|entry| entry.summary.contains("Governed ReAct AgentLoop completed"))
+        .find(|entry| {
+            entry.summary.contains("Governed ReAct AgentLoop completed")
+                || entry
+                    .summary
+                    .contains("MainChatKernel read-only tool loop completed")
+        })
         .map(|entry| metadata_usize(&entry.metadata, key))
         .unwrap_or_default()
 }
@@ -2811,6 +3223,144 @@ fn metadata_usize(metadata: &serde_json::Value, key: &str) -> usize {
         .unwrap_or_default()
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct MainChatCommandSurfaceKernelEvidence {
+    kernel_backed: bool,
+    kernel_direct_answer: bool,
+    kernel_read_only_tool_loop: bool,
+    kernel_proposal_only_write: bool,
+    kernel_plan_execute: bool,
+    kernel_governed_blocker: bool,
+    kernel_blocker: bool,
+    kernel_hs_context: bool,
+    kernel_web_tool: bool,
+    kernel_mcp_tool: bool,
+}
+
+fn main_chat_command_surface_eval_kernel_evidence(
+    response: Option<&serde_json::Value>,
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    transcript: &[openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry],
+    actions: &[openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction],
+) -> MainChatCommandSurfaceKernelEvidence {
+    let mut evidence = MainChatCommandSurfaceKernelEvidence::default();
+
+    for entry in transcript {
+        let metadata = &entry.metadata;
+        evidence.kernel_direct_answer |= metadata_flag(metadata, "kernelBackedDirectAnswer");
+        evidence.kernel_read_only_tool_loop |=
+            metadata_flag(metadata, "kernelBackedReadOnlyToolLoop");
+        evidence.kernel_proposal_only_write |=
+            metadata_flag(metadata, "kernelBackedProposalOnlyWrite");
+        evidence.kernel_plan_execute |= metadata_flag(metadata, "kernelBackedPlanExecuteDraft");
+        evidence.kernel_governed_blocker |= metadata_flag(metadata, "kernelBackedGovernedBlocker");
+        evidence.kernel_hs_context |= metadata_has_any_key(
+            metadata,
+            &[
+                "hsContextAvailable",
+                "hsWarningCodes",
+                "hsSelectedPolicyIds",
+                "hsRawLifeModelYamlIncluded",
+            ],
+        );
+        evidence.kernel_web_tool |= metadata_string_equals(metadata, "toolName", "web.search")
+            || metadata_string_equals(metadata, "queueActionType", "web.search")
+            || metadata_string_equals(metadata, "target", "web.search");
+        evidence.kernel_mcp_tool |= metadata_string_equals(metadata, "toolName", "mcp.read_only")
+            || metadata_string_equals(metadata, "queueActionType", "mcp.read_only")
+            || metadata_string_equals(metadata, "requestedTarget", "mcp.call_tool");
+    }
+
+    for action in actions {
+        if let Some(metadata) = action.observation_metadata.as_ref() {
+            evidence.kernel_read_only_tool_loop |=
+                metadata_flag(metadata, "kernelBackedReadOnlyToolLoop");
+            evidence.kernel_proposal_only_write |=
+                metadata_flag(metadata, "kernelBackedProposalOnlyWrite");
+            evidence.kernel_plan_execute |= metadata_flag(metadata, "kernelBackedPlanExecuteDraft");
+            evidence.kernel_governed_blocker |=
+                metadata_flag(metadata, "kernelBackedGovernedBlocker");
+            evidence.kernel_web_tool |= action.action.action_type == "web.search"
+                && metadata_flag(metadata, "kernelBackedReadOnlyToolLoop");
+            evidence.kernel_mcp_tool |= action.action.action_type == "mcp.read_only"
+                && metadata_flag(metadata, "kernelBackedReadOnlyToolLoop");
+        }
+    }
+
+    if let Some(response) = response {
+        evidence.kernel_direct_answer |= metadata_flag(response, "kernelBackedDirectAnswer");
+        evidence.kernel_read_only_tool_loop |=
+            metadata_flag(response, "kernelBackedReadOnlyToolLoop");
+        evidence.kernel_proposal_only_write |=
+            metadata_flag(response, "kernelBackedProposalOnlyWrite");
+        evidence.kernel_plan_execute |= metadata_flag(response, "kernelBackedPlanExecuteDraft");
+        evidence.kernel_governed_blocker |= metadata_flag(response, "kernelBackedGovernedBlocker");
+        evidence.kernel_hs_context |= metadata_has_any_key(
+            response,
+            &[
+                "hsContextAvailable",
+                "hsWarningCodes",
+                "hsSelectedPolicyIds",
+                "hsRawLifeModelYamlIncluded",
+            ],
+        );
+    }
+
+    evidence.kernel_blocker = !session.pending_blockers.is_empty()
+        && (evidence.kernel_read_only_tool_loop
+            || evidence.kernel_proposal_only_write
+            || evidence.kernel_plan_execute
+            || evidence.kernel_direct_answer
+            || evidence.kernel_governed_blocker);
+    evidence.kernel_backed = evidence.kernel_direct_answer
+        || evidence.kernel_read_only_tool_loop
+        || evidence.kernel_proposal_only_write
+        || evidence.kernel_plan_execute
+        || evidence.kernel_governed_blocker;
+    evidence
+}
+
+fn metadata_flag(value: &serde_json::Value, key: &str) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.get(key).and_then(serde_json::Value::as_bool) == Some(true)
+                || map.values().any(|nested| metadata_flag(nested, key))
+        }
+        serde_json::Value::Array(values) => values.iter().any(|nested| metadata_flag(nested, key)),
+        _ => false,
+    }
+}
+
+fn metadata_has_any_key(value: &serde_json::Value, keys: &[&str]) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            keys.iter().any(|key| map.contains_key(*key))
+                || map
+                    .values()
+                    .any(|nested| metadata_has_any_key(nested, keys))
+        }
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|nested| metadata_has_any_key(nested, keys)),
+        _ => false,
+    }
+}
+
+fn metadata_string_equals(value: &serde_json::Value, key: &str, expected: &str) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.get(key).and_then(serde_json::Value::as_str) == Some(expected)
+                || map
+                    .values()
+                    .any(|nested| metadata_string_equals(nested, key, expected))
+        }
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|nested| metadata_string_equals(nested, key, expected)),
+        _ => false,
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MainChatCommandSurfaceEvalReport {
@@ -2839,6 +3389,15 @@ pub(crate) struct MainChatCommandSurfaceEvalReport {
     pub(crate) final_completion_blockers: Vec<String>,
     pub(crate) legacy_fallback_count: usize,
     pub(crate) silent_write_count: usize,
+    pub(crate) kernel_backed_case_count: usize,
+    pub(crate) kernel_direct_answer_case_count: usize,
+    pub(crate) kernel_read_only_tool_case_count: usize,
+    pub(crate) kernel_proposal_write_case_count: usize,
+    pub(crate) kernel_plan_execute_case_count: usize,
+    pub(crate) kernel_blocker_case_count: usize,
+    pub(crate) kernel_hs_context_case_count: usize,
+    pub(crate) kernel_web_tool_case_count: usize,
+    pub(crate) kernel_mcp_tool_case_count: usize,
     pub(crate) case_evidence: Vec<MainChatCommandSurfaceEvalEvidence>,
     pub(crate) failures: Vec<String>,
 }
@@ -2950,6 +3509,30 @@ impl MainChatCommandSurfaceEvalReport {
                 .iter()
                 .filter(|case| case.silent_write_detected)
                 .count(),
+            kernel_backed_case_count: evidence.iter().filter(|case| case.kernel_backed).count(),
+            kernel_direct_answer_case_count: evidence
+                .iter()
+                .filter(|case| case.kernel_direct_answer)
+                .count(),
+            kernel_read_only_tool_case_count: evidence
+                .iter()
+                .filter(|case| case.kernel_read_only_tool_loop)
+                .count(),
+            kernel_proposal_write_case_count: evidence
+                .iter()
+                .filter(|case| case.kernel_proposal_only_write)
+                .count(),
+            kernel_plan_execute_case_count: evidence
+                .iter()
+                .filter(|case| case.kernel_plan_execute)
+                .count(),
+            kernel_blocker_case_count: evidence.iter().filter(|case| case.kernel_blocker).count(),
+            kernel_hs_context_case_count: evidence
+                .iter()
+                .filter(|case| case.kernel_hs_context)
+                .count(),
+            kernel_web_tool_case_count: evidence.iter().filter(|case| case.kernel_web_tool).count(),
+            kernel_mcp_tool_case_count: evidence.iter().filter(|case| case.kernel_mcp_tool).count(),
             case_evidence: evidence,
             failures,
         }
@@ -2975,6 +3558,15 @@ impl MainChatCommandSurfaceEvalReport {
             && self.send_coverage >= 0.45
             && self.stream_coverage >= 0.45
             && required_scenario_coverage_present
+            && self.kernel_backed_case_count == self.total_cases
+            && self.kernel_direct_answer_case_count > 0
+            && self.kernel_read_only_tool_case_count > 0
+            && self.kernel_proposal_write_case_count > 0
+            && self.kernel_plan_execute_case_count > 0
+            && self.kernel_blocker_case_count > 0
+            && self.kernel_hs_context_case_count > 0
+            && self.kernel_web_tool_case_count > 0
+            && self.kernel_mcp_tool_case_count > 0
         {
             1.0
         } else {
@@ -2986,6 +3578,25 @@ impl MainChatCommandSurfaceEvalReport {
             legacy_fallback_count: usize_to_u32_saturating(self.legacy_fallback_count),
             silent_write_count: usize_to_u32_saturating(self.silent_write_count),
             send_stream_matrix_coverage,
+            kernel_backed_case_count: usize_to_u32_saturating(self.kernel_backed_case_count),
+            kernel_direct_answer_case_count: usize_to_u32_saturating(
+                self.kernel_direct_answer_case_count,
+            ),
+            kernel_read_only_tool_case_count: usize_to_u32_saturating(
+                self.kernel_read_only_tool_case_count,
+            ),
+            kernel_proposal_write_case_count: usize_to_u32_saturating(
+                self.kernel_proposal_write_case_count,
+            ),
+            kernel_plan_execute_case_count: usize_to_u32_saturating(
+                self.kernel_plan_execute_case_count,
+            ),
+            kernel_blocker_case_count: usize_to_u32_saturating(self.kernel_blocker_case_count),
+            kernel_hs_context_case_count: usize_to_u32_saturating(
+                self.kernel_hs_context_case_count,
+            ),
+            kernel_web_tool_case_count: usize_to_u32_saturating(self.kernel_web_tool_case_count),
+            kernel_mcp_tool_case_count: usize_to_u32_saturating(self.kernel_mcp_tool_case_count),
             final_completion_ready: self.final_completion_ready,
         }
     }
@@ -3026,6 +3637,15 @@ pub(crate) struct MainChatCommandSurfaceEvalEvidence {
     pub(crate) mcp_agent_loop_tool_permission_proposal: bool,
     pub(crate) legacy_fallback_used: bool,
     pub(crate) silent_write_detected: bool,
+    pub(crate) kernel_backed: bool,
+    pub(crate) kernel_direct_answer: bool,
+    pub(crate) kernel_read_only_tool_loop: bool,
+    pub(crate) kernel_proposal_only_write: bool,
+    pub(crate) kernel_plan_execute: bool,
+    pub(crate) kernel_blocker: bool,
+    pub(crate) kernel_hs_context: bool,
+    pub(crate) kernel_web_tool: bool,
+    pub(crate) kernel_mcp_tool: bool,
     pub(crate) selected_skill_id: Option<String>,
     pub(crate) selected_skill_instruction_loaded: bool,
     pub(crate) unselected_skill_instruction_loaded: bool,
@@ -3069,6 +3689,15 @@ impl MainChatCommandSurfaceEvalEvidence {
         knowledge_asset_edit_proposal_created: bool,
         knowledge_asset_edit_proposed_diff_present: bool,
         knowledge_asset_edit_direct_write_detected: bool,
+        kernel_backed: bool,
+        kernel_direct_answer: bool,
+        kernel_read_only_tool_loop: bool,
+        kernel_proposal_only_write: bool,
+        kernel_plan_execute: bool,
+        kernel_blocker: bool,
+        kernel_hs_context: bool,
+        kernel_web_tool: bool,
+        kernel_mcp_tool: bool,
     ) -> Self {
         Self {
             entry_point,
@@ -3107,6 +3736,15 @@ impl MainChatCommandSurfaceEvalEvidence {
                 == MainChatCommandSurfaceEvalScenario::RegisteredMcpAgentLoopPermissionProposal,
             legacy_fallback_used,
             silent_write_detected,
+            kernel_backed,
+            kernel_direct_answer,
+            kernel_read_only_tool_loop,
+            kernel_proposal_only_write,
+            kernel_plan_execute,
+            kernel_blocker,
+            kernel_hs_context,
+            kernel_web_tool,
+            kernel_mcp_tool,
             selected_skill_id,
             selected_skill_instruction_loaded,
             unselected_skill_instruction_loaded,

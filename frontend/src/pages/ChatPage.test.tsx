@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, fireEvent, act } from "@testing-library/react";
 import { BrowserRouter, MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
-import ChatPage from "./ChatPage";
+import ChatPage, { buildMainChatAgentStatusView } from "./ChatPage";
 import ProposalReviewPage from "./ProposalReviewPage";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -149,6 +149,35 @@ describe("ChatPage", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.clearAllMocks();
+  });
+
+  it("maps structured agent evidence to the default product status vocabulary", () => {
+    const viewFor = (
+      generation: Record<string, unknown>,
+      overrides: Partial<Parameters<typeof buildMainChatAgentStatusView>[0]> = {}
+    ) =>
+      buildMainChatAgentStatusView({
+        reasoningTrace: { generation_result: generation },
+        taskState: null,
+        agentState: null,
+        pendingProposals: [],
+        sending: false,
+        canCancel: false,
+        ...overrides,
+      });
+
+    expect(viewFor({ completedResponse: true })?.status).toBe("completed");
+    expect(viewFor({}, { reasoningTrace: null, sending: true })?.status).toBe("running");
+    expect(viewFor({ taskStatus: "waiting_permission" })?.status).toBe("waiting_for_user");
+    expect(viewFor({ uiStatus: "restricted" })?.status).toBe("restricted");
+    expect(viewFor({ taskStatus: "blocked", blockerCodes: ["safe_read_failed"] })?.status).toBe(
+      "blocked"
+    );
+    expect(
+      viewFor({ runtimeFactTraceGap: true, traceGapCode: "task_session_missing" })?.status
+    ).toBe("trace_gap");
+    expect(viewFor({ pendingProposalCount: 1 })?.status).toBe("proposal_pending");
+    expect(viewFor({ pendingPermissionCount: 1 })?.status).toBe("permission_pending");
   });
 
   it("renders chat page with session list", async () => {
@@ -1229,9 +1258,14 @@ describe("ChatPage", () => {
       await Promise.resolve();
     });
 
+    expect(await screen.findByText("Execution evidence")).toBeInTheDocument();
+    expect(screen.queryByText("Agent Control Plane")).not.toBeInTheDocument();
+    expect(screen.getByText("Tool observation")).toBeInTheDocument();
+    expect(screen.getByText("Final answer")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show Main Chat diagnostics" }));
     expect(await screen.findByText("Agent Control Plane")).toBeInTheDocument();
-    expect(screen.getByText("Workspace planning read")).toBeInTheDocument();
-    expect(screen.getByText("react_tool_execution")).toBeInTheDocument();
+    expect(screen.getAllByText("Workspace planning read").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("react_tool_execution").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("AGENTS.md bounded context")).toBeInTheDocument();
     expect(screen.getAllByText("Read workspace guidance").length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText("file.read").length).toBeGreaterThanOrEqual(1);
@@ -1243,6 +1277,387 @@ describe("ChatPage", () => {
     expect(
       screen.getByText("Use the bounded workspace guidance without creating durable writes.")
     ).toBeInTheDocument();
+  });
+
+  it("shows direct answer execution evidence without default diagnostics clutter", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+    const base = buildMainChatAgentStateSnapshot();
+    const directState = buildMainChatAgentStateSnapshot({
+      task: {
+        ...base.task,
+        taskId: "mainchat-task-direct-k5-1",
+        runId: "run-direct-k5-1",
+        title: "Simple direct answer",
+        strategy: "direct_answer",
+        status: "completed",
+        controls: [],
+        actionIds: [],
+        observationIds: [],
+        blockerIds: [],
+        proposalIds: [],
+        finalDeliveryId: "delivery-direct-k5-1",
+      },
+      route: { strategy: "direct_answer", reason: "ordinary_direct_answer", confidence: 0.94 },
+      context: [],
+      provider: undefined,
+      plan: undefined,
+      actions: [],
+      observations: [],
+      blockers: [],
+      proposals: [],
+      finalDelivery: {
+        ...base.finalDelivery!,
+        deliveryId: "delivery-direct-k5-1",
+        taskId: "mainchat-task-direct-k5-1",
+        runId: "run-direct-k5-1",
+        headline: "Direct answer delivered",
+        answer: "A direct answer with no tool work.",
+        completedActions: [],
+        observationsUsed: [],
+        proposalsCreated: [],
+        blockers: [],
+        pendingUserActions: [],
+        durableChanges: [],
+        nextSteps: [],
+      },
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Answer directly" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+    await waitFor(() => {
+      expect(listeners.get("stream-message-done")).toBeDefined();
+    });
+
+    await act(async () => {
+      await listeners.get("stream-message-done")?.({
+        payload: {
+          session_id: "session-1",
+          run_id: "run-direct-k5-1",
+          reply: "A direct answer with no tool work.",
+          reasoning_trace: null,
+          tool_calls: [],
+          agent_state: directState,
+          execution_transcript: [],
+          legacy_fallback_used: false,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText("A direct answer with no tool work.")).toBeInTheDocument();
+    expect(screen.getByText("Execution evidence")).toBeInTheDocument();
+    expect(screen.getByText("Final answer")).toBeInTheDocument();
+    expect(screen.queryByText("Agent Control Plane")).not.toBeInTheDocument();
+    expect(screen.queryByText("Reviewer trace")).not.toBeInTheDocument();
+  });
+
+  it("renders kernel-event thinking, tool running, and tool observation states", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Read AGENTS.md" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+    await waitFor(() => {
+      expect(listeners.get("main-chat-kernel-event")).toBeDefined();
+    });
+
+    await act(async () => {
+      await listeners.get("main-chat-kernel-event")?.({
+        payload: { type: "turn_started", session_id: "session-1", selected_skill_id: null },
+      });
+      await listeners.get("main-chat-kernel-event")?.({
+        payload: {
+          type: "context_loaded",
+          context_snapshot_ref: "context:k5",
+          selected_source_count: 2,
+          selected_skill_instruction_loaded: false,
+        },
+      });
+      await listeners.get("main-chat-kernel-event")?.({
+        payload: {
+          type: "tool_decision",
+          tool_name: "file.read",
+          action_type: "file.read",
+          target: "AGENTS.md",
+          reason: "read_workspace_context",
+          model_arguments_ignored: true,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText("Execution evidence")).toBeInTheDocument();
+    expect(screen.getByText("Thinking")).toBeInTheDocument();
+    expect(screen.getByText("Tool running")).toBeInTheDocument();
+    expect(screen.getByText("AGENTS.md")).toBeInTheDocument();
+
+    await act(async () => {
+      await listeners.get("main-chat-kernel-event")?.({
+        payload: {
+          type: "tool_observation",
+          tool_name: "file.read",
+          status: "succeeded",
+          output_preview: "Main Chat evidence mapping found in AGENTS.md.",
+          blocker: null,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("Tool observation")).toBeInTheDocument();
+    expect(screen.getByText("Main Chat evidence mapping found in AGENTS.md.")).toBeInTheDocument();
+  });
+
+  it("renders proposal, permission, and blocker evidence with review navigation", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+    const base = buildMainChatAgentStateSnapshot();
+    const permissionState = buildMainChatAgentStateSnapshot({
+      task: {
+        ...base.task,
+        taskId: "mainchat-task-permission-k5-1",
+        runId: "run-permission-k5-1",
+        title: "Permission needed",
+        strategy: "permission_request",
+        status: "waiting_permission",
+        controls: ["cancel_task", "open_review_center"],
+        actionIds: ["action-permission-k5-1"],
+        observationIds: [],
+        blockerIds: ["blocker-permission-k5-1"],
+        proposalIds: ["proposal-permission-k5-1"],
+        finalDeliveryId: undefined,
+      },
+      route: { strategy: "permission_request", reason: "permission required", confidence: 0.9 },
+      actions: [
+        {
+          ...base.actions[0],
+          actionId: "action-permission-k5-1",
+          actionType: "mcp_tool",
+          target: "registered.mcp.read",
+          label: "Read registered MCP target",
+          status: "pending_permission",
+          observationIds: [],
+        },
+      ],
+      observations: [],
+      blockers: [
+        {
+          blockerId: "blocker-permission-k5-1",
+          reasonCode: "tool_permission_required",
+          title: "Permission required",
+          detail: "This governed tool action needs user approval before it can continue.",
+          affectedActionId: "action-permission-k5-1",
+          recoverable: true,
+          controls: ["approve_once", "deny", "defer", "open_review_center"],
+        },
+      ],
+      proposals: [
+        {
+          proposalId: "proposal-permission-k5-1",
+          proposalType: "tool_permission",
+          status: "pending_review",
+          title: "Allow registered MCP read",
+          summary: "Approve one registered read-only MCP call.",
+          evidenceIds: ["evidence-permission-k5-1"],
+          actionIds: ["action-permission-k5-1"],
+          controls: ["approve_once", "deny", "defer", "open_review_center"],
+        },
+      ],
+      finalDelivery: undefined,
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Use the registered MCP target" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+    await waitFor(() => {
+      expect(listeners.get("stream-message-done")).toBeDefined();
+    });
+
+    await act(async () => {
+      await listeners.get("stream-message-done")?.({
+        payload: {
+          session_id: "session-1",
+          run_id: "run-permission-k5-1",
+          reply: "I need your approval before continuing.",
+          reasoning_trace: null,
+          tool_calls: [],
+          agent_state: permissionState,
+          execution_transcript: [],
+          legacy_fallback_used: false,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText("Proposal created")).toBeInTheDocument();
+    expect(screen.getAllByText("Permission needed").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("Blocked")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open proposal" })).toHaveAttribute("href", "/review");
+    expect(screen.getByRole("link", { name: "Open Review Center" })).toHaveAttribute(
+      "href",
+      "/review"
+    );
+    expect(screen.getByText(/Next:/)).toBeInTheDocument();
+  });
+
+  it("cancels an in-progress stream task and renders canceled state from task evidence", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+    const base = buildMainChatAgentStateSnapshot();
+    const runningState = buildMainChatAgentStateSnapshot({
+      task: {
+        ...base.task,
+        taskId: "mainchat-task-cancel-k5-1",
+        runId: "run-cancel-k5-1",
+        title: "Cancelable tool run",
+        strategy: "react_tool_execution",
+        status: "running",
+        controls: ["cancel_task"],
+        finalDeliveryId: undefined,
+      },
+      actions: [{ ...base.actions[0], status: "executing" }],
+      observations: [],
+      finalDelivery: undefined,
+    });
+    const runningTaskState = {
+      session: {
+        id: "mainchat-task-cancel-k5-1",
+        chatSessionId: "session-1",
+        userGoal: "Cancelable tool run",
+        selectedStrategy: "react_tool_execution",
+        status: "running",
+        currentPlanSummary: "Read with cancel support.",
+        actionQueueIds: ["action-product-ui-1"],
+        pendingBlockers: [],
+        contextSnapshotRefs: [],
+        createdAt: "2026-06-16T00:00:00.000Z",
+        updatedAt: "2026-06-16T00:00:01.000Z",
+      },
+      actions: [],
+      transcript: [],
+      pendingApprovalCount: 0,
+      activeToolCount: 1,
+      canResume: false,
+      canCancel: true,
+      canRetry: false,
+    };
+    const canceledTaskState = {
+      ...runningTaskState,
+      session: {
+        ...runningTaskState.session,
+        status: "cancelled",
+        finalSummary: "Cancelled from Main Chat controls.",
+      },
+      activeToolCount: 0,
+      canCancel: false,
+    };
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: any) => {
+      if (cmd === "get_main_chat_agent_task_state") {
+        return Promise.resolve(runningTaskState);
+      }
+      if (cmd === "cancel_main_chat_agent_task") {
+        return Promise.resolve(canceledTaskState);
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Read a slow workspace file" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+    await waitFor(() => {
+      expect(listeners.get("stream-message-start")).toBeDefined();
+    });
+
+    await act(async () => {
+      await listeners.get("stream-message-start")?.({
+        payload: {
+          session_id: "session-1",
+          run_id: "run-cancel-k5-1",
+          reasoning_trace: null,
+          tool_calls: [],
+          agent_ingress: {
+            requestId: "request-cancel-k5-1",
+            sourceSessionId: "session-1",
+            taskKind: "conversation",
+            selectedStrategy: "react_tool_execution",
+            confidence: 0.9,
+            reasonSummary: "read tool",
+            fallbackEligible: false,
+            privacyRisk: {
+              riskLevel: "low",
+              privacyClass: "standard",
+              policyReasonCode: "read_only",
+              localOnlyRequired: false,
+              writeLike: false,
+              externalWriteLike: false,
+            },
+            agentTaskSessionId: "mainchat-task-cancel-k5-1",
+          },
+          agent_state: runningState,
+          execution_transcript: [],
+          legacy_fallback_used: false,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel current Main Chat task" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "cancel_main_chat_agent_task",
+        expect.objectContaining({ taskSessionId: "mainchat-task-cancel-k5-1" })
+      );
+    });
+    expect(await screen.findByText("Canceled")).toBeInTheDocument();
+    expect(screen.getByText("Cancelled from Main Chat controls.")).toBeInTheDocument();
+    expect(screen.queryByText("Final answer")).not.toBeInTheDocument();
   });
 
   it("refreshes agent snapshot after accepting a memory proposal so rollback is visible", async () => {
@@ -1382,6 +1797,7 @@ describe("ChatPage", () => {
       await Promise.resolve();
     });
 
+    fireEvent.click(await screen.findByRole("button", { name: "Show Main Chat diagnostics" }));
     fireEvent.click(await screen.findByRole("button", { name: "Accept proposal" }));
 
     expect(await screen.findByRole("button", { name: "Rollback memory" })).toBeInTheDocument();
@@ -1480,6 +1896,7 @@ describe("ChatPage", () => {
       await Promise.resolve();
     });
 
+    fireEvent.click(await screen.findByRole("button", { name: "Show Main Chat diagnostics" }));
     expect(await screen.findByText("Event stream")).toBeInTheDocument();
     expect(screen.getByText("receiving_event")).toBeInTheDocument();
     expect(screen.getAllByText(/final_delivery\.created/).length).toBeGreaterThanOrEqual(1);
@@ -1603,6 +2020,7 @@ describe("ChatPage", () => {
       await Promise.resolve();
     });
 
+    fireEvent.click(await screen.findByRole("button", { name: "Show Main Chat diagnostics" }));
     fireEvent.click(await screen.findByRole("button", { name: "Confirm plan" }));
     fireEvent.click(await screen.findByRole("button", { name: "Edit step Review priorities" }));
     fireEvent.click(await screen.findByRole("button", { name: "Execute step Review priorities" }));
@@ -1749,6 +2167,7 @@ describe("ChatPage", () => {
       await Promise.resolve();
     });
 
+    fireEvent.click(await screen.findByRole("button", { name: "Show Main Chat diagnostics" }));
     await screen.findAllByText("Plan interaction");
     expect(screen.queryByRole("button", { name: "Confirm plan" })).not.toBeInTheDocument();
     expect(
@@ -1858,6 +2277,7 @@ describe("ChatPage", () => {
       await Promise.resolve();
     });
 
+    fireEvent.click(await screen.findByRole("button", { name: "Show Main Chat diagnostics" }));
     fireEvent.click(
       await screen.findByRole("button", { name: "Execute step Continue next read step" })
     );
@@ -2042,6 +2462,7 @@ describe("ChatPage", () => {
       await Promise.resolve();
     });
 
+    fireEvent.click(await screen.findByRole("button", { name: "Show Main Chat diagnostics" }));
     await screen.findAllByText("cancelled");
     expect(screen.getAllByText("cancelled").length).toBeGreaterThan(0);
     expect(screen.getByText("Review summary")).toBeInTheDocument();
@@ -2213,6 +2634,7 @@ describe("ChatPage", () => {
         })
       );
     });
+    fireEvent.click(await screen.findByRole("button", { name: "Show Main Chat diagnostics" }));
     expect(await screen.findByText("stream_recovered")).toBeInTheDocument();
     expect(screen.getByText("3 events")).toBeInTheDocument();
 
@@ -2247,7 +2669,7 @@ describe("ChatPage", () => {
     });
     expect(await screen.findByText("snapshot_refresh_required")).toBeInTheDocument();
     expect(screen.getAllByText("sequence 5").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText("Recovered from snapshot")).toBeInTheDocument();
+    expect(screen.getAllByText("Recovered from snapshot").length).toBeGreaterThanOrEqual(1);
   });
 
   it("approves an exact ToolPermission proposal inline and resumes the Main Chat task", async () => {
@@ -2449,6 +2871,7 @@ describe("ChatPage", () => {
       await Promise.resolve();
     });
 
+    fireEvent.click(await screen.findByRole("button", { name: "Show Main Chat diagnostics" }));
     fireEvent.click(await screen.findByRole("button", { name: "Approve once" }));
 
     await waitFor(() => {
@@ -2582,8 +3005,13 @@ describe("ChatPage", () => {
       await Promise.resolve();
     });
 
+    expect(await screen.findByText("Execution evidence")).toBeInTheDocument();
+    expect(screen.queryByText("Agent Control Plane")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show Main Chat diagnostics" }));
     expect(await screen.findByText("Agent Control Plane")).toBeInTheDocument();
-    expect(screen.getByText("Direct response with no tool evidence")).toBeInTheDocument();
+    expect(
+      screen.getAllByText("Direct response with no tool evidence").length
+    ).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText("Direct answer delivered").length).toBeGreaterThanOrEqual(1);
     expect(screen.queryByText("fake.file.read")).not.toBeInTheDocument();
     expect(screen.queryByText("Ghost observation")).not.toBeInTheDocument();
@@ -2745,6 +3173,9 @@ describe("ChatPage", () => {
       await Promise.resolve();
     });
 
+    expect(await screen.findByText("Execution evidence")).toBeInTheDocument();
+    expect(screen.queryByText("Diagnostic task shell")).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Show Main Chat diagnostics" }));
     expect(await screen.findByText("Diagnostic task shell")).toBeInTheDocument();
     expect(screen.getByTestId("agent-diagnostic-task-shell")).toHaveAttribute(
       "data-agent-state-source",
@@ -2756,7 +3187,9 @@ describe("ChatPage", () => {
       )
     ).toBeInTheDocument();
     expect(screen.getByText("Goal")).toBeInTheDocument();
-    expect(screen.getByText("Prepare a low energy weekly plan")).toBeInTheDocument();
+    expect(screen.getAllByText("Prepare a low energy weekly plan").length).toBeGreaterThanOrEqual(
+      1
+    );
     expect(screen.getByText("Current plan")).toBeInTheDocument();
     expect(
       screen.getByText("Search planning memory, then ask before creating tasks.")
@@ -2770,17 +3203,356 @@ describe("ChatPage", () => {
     expect(screen.getByText("Proposal store unavailable")).toBeInTheDocument();
     expect(screen.getByText("Proposal required")).toBeInTheDocument();
     expect(screen.getByText("Permission required")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Open Review Center" })).toHaveAttribute(
+    expect(screen.getAllByRole("link", { name: "Open Review Center" })[0]).toHaveAttribute(
       "href",
       "/review"
     );
     expect(screen.getByText("Pending blockers")).toBeInTheDocument();
-    expect(screen.getByText("resumeBlockedByPendingPermission")).toBeInTheDocument();
+    expect(screen.getAllByText("resumeBlockedByPendingPermission").length).toBeGreaterThanOrEqual(
+      1
+    );
     expect(screen.getByText(/Fallback notice/)).toBeInTheDocument();
     expect(screen.getByText(/visible legacy fallback/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Resume task" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Retry failed action" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Cancel task" })).toBeEnabled();
+  });
+
+  it("shows default agent status and opens the bounded structured trace without diagnostics", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Did that finish?" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+
+    const streamCall = await waitFor(() =>
+      vi.mocked(invoke).mock.calls.find(([cmd]) => cmd === "start_stream_message")
+    );
+    const eventSessionId = (streamCall?.[1] as any)?.sessionId ?? "session-1";
+    const doneHandler = listeners.get("stream-message-done");
+    expect(doneHandler).toBeDefined();
+
+    await act(async () => {
+      await doneHandler?.({
+        payload: {
+          session_id: eventSessionId,
+          run_id: "run-default-status-complete",
+          reply: "PROSE_PERMISSION_PENDING_SHOULD_NOT_CONTROL_STATUS",
+          reasoning_trace: {
+            generation_result: {
+              text: "Trace text is not the task-state source.",
+              sourceType: "runtime_fact",
+              uiPrimarySourceChip: "Local runtime",
+              uiStatus: "completed",
+              completedResponse: true,
+              finalDeliveryEvidence: true,
+              taskStatus: "completed",
+              safeNextControls: [],
+            },
+          },
+          tool_calls: [],
+          agent_ingress: {
+            requestId: "req-default-status-complete",
+            sourceSessionId: "session-1",
+            taskKind: "conversation",
+            selectedStrategy: "direct_answer",
+            confidence: 0.95,
+            reasonSummary: "Structured completion evidence.",
+            fallbackEligible: false,
+            privacyRisk: {
+              riskLevel: "low",
+              privacyClass: "conversation",
+              policyReasonCode: "direct_answer",
+              localOnlyRequired: false,
+              writeLike: false,
+              externalWriteLike: false,
+            },
+            agentTaskSessionId: "task-default-status-complete",
+          },
+          execution_transcript: [],
+          legacy_fallback_used: false,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    const status = await screen.findByTestId("main-chat-agent-status");
+    expect(status).toHaveAttribute("data-agent-product-status", "completed");
+    expect(screen.getByText("Completed")).toBeInTheDocument();
+    expect(screen.getByText("Local runtime")).toBeInTheDocument();
+    expect(screen.queryByText("Diagnostic task shell")).not.toBeInTheDocument();
+    expect(screen.queryByText("为什么这样回答")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show structured trace" }));
+    expect(await screen.findByText("为什么这样回答")).toBeInTheDocument();
+    expect(screen.getByText("状态：completed")).toBeInTheDocument();
+    expect(screen.getByText("任务状态证据")).toBeInTheDocument();
+  });
+
+  it("shows only backend-allowed default status actions for pending proposal and permission", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    const taskState = {
+      session: {
+        id: "task-default-actions",
+        chatSessionId: "session-1",
+        userGoal: "Review permission before continuing",
+        selectedStrategy: "react_tool_execution",
+        status: "waiting_permission",
+        currentPlanSummary: "Wait for review, then continue the safe read.",
+        actionQueueIds: ["action-default-failed", "action-default-permission"],
+        pendingBlockers: ["tool_permission_required"],
+        contextSnapshotRefs: ["ctx-default-actions"],
+        createdAt: "2026-06-26T00:00:00.000Z",
+        updatedAt: "2026-06-26T00:00:01.000Z",
+      },
+      actions: [
+        {
+          id: "action-default-failed",
+          sessionId: "task-default-actions",
+          action: { actionType: "file.read", description: "Retryable governed read." },
+          policy: {
+            level: "low",
+            reasonCode: "read_only_action_allowed",
+            executionAllowed: true,
+            requiresConfirmation: false,
+            requiresProposal: false,
+            requiresBlocker: false,
+            silentWriteAllowed: false,
+          },
+          status: "failed",
+          attempts: 1,
+          createdAt: "2026-06-26T00:00:00.000Z",
+          updatedAt: "2026-06-26T00:00:01.000Z",
+        },
+        {
+          id: "action-default-permission",
+          sessionId: "task-default-actions",
+          action: { actionType: "mcp_tool", description: "Permission-gated read." },
+          policy: {
+            level: "medium",
+            reasonCode: "tool_permission_required",
+            executionAllowed: false,
+            requiresConfirmation: true,
+            requiresProposal: true,
+            requiresBlocker: true,
+            silentWriteAllowed: false,
+          },
+          status: "pending_permission",
+          attempts: 0,
+          createdAt: "2026-06-26T00:00:00.000Z",
+          updatedAt: "2026-06-26T00:00:01.000Z",
+        },
+      ],
+      transcript: [],
+      pendingApprovalCount: 1,
+      activeToolCount: 0,
+      canResume: true,
+      canCancel: true,
+      canRetry: true,
+    };
+    const taskDetail = {
+      taskSession: taskState.session,
+      actions: taskState.actions,
+      transcript: [],
+      proposals: [],
+      blockers: ["tool_permission_required"],
+      finalDelivery: null,
+      continuityDiagnostics: {
+        staleContext: true,
+        missingActionEvidence: false,
+        permissionScopeMismatch: false,
+        terminalNoResume: false,
+        providerUnavailable: false,
+        toolUnavailable: false,
+        requiresUserDecision: true,
+        selectedSkillContextDigestMismatch: false,
+        planRevisionMismatch: false,
+        reasonCodes: ["stale_context", "requires_user_decision"],
+        automaticReplayAllowed: false,
+      },
+      allowedControls: ["refresh_context"],
+      nextRecommendedControl: "refresh_context",
+      lastSafeResumePoint: null,
+      contextDigest: "bytes:12 hash:sha256:context",
+      selectedSkillDigest: null,
+      toolManifestDigest: "bytes:12 hash:sha256:tools",
+    };
+
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (
+        cmd === "get_main_chat_agent_task_state" ||
+        cmd === "resume_main_chat_agent_task" ||
+        cmd === "retry_main_chat_agent_action" ||
+        cmd === "cancel_main_chat_agent_task"
+      ) {
+        return Promise.resolve(taskState);
+      }
+      if (cmd === "refresh_main_chat_agent_task_context") {
+        return Promise.resolve(taskDetail);
+      }
+      if (cmd === "get_pending_proposals" || cmd === "list_proposals") {
+        return Promise.resolve([
+          {
+            id: "proposal-default-tool",
+            runId: "run-default-actions",
+            proposalType: "tool_permission",
+            source: "chat_conversation",
+            sourceDetail: "task-default-actions",
+            affectedPath: "tools.permissions.file.read",
+            before: "",
+            after: { permission: "allow_once" },
+            reason: "Review the read permission.",
+            confidence: 0.9,
+            riskLevel: "medium",
+            status: "pending",
+            createdAt: "2026-06-26T00:00:00.000Z",
+          },
+          {
+            id: "proposal-default-memory",
+            runId: "run-default-actions",
+            proposalType: "memory_write",
+            source: "chat_conversation",
+            sourceDetail: "task-default-actions",
+            affectedPath: "memory.reviewed.preference",
+            before: "",
+            after: { preference: "quiet planning" },
+            reason: "Review the memory proposal.",
+            confidence: 0.8,
+            riskLevel: "low",
+            status: "pending",
+            createdAt: "2026-06-26T00:00:00.000Z",
+          },
+        ]);
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Continue after approval" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+
+    const streamCall = await waitFor(() =>
+      vi.mocked(invoke).mock.calls.find(([cmd]) => cmd === "start_stream_message")
+    );
+    const eventSessionId = (streamCall?.[1] as any)?.sessionId ?? "session-1";
+    const doneHandler = listeners.get("stream-message-done");
+    expect(doneHandler).toBeDefined();
+
+    await act(async () => {
+      await doneHandler?.({
+        payload: {
+          session_id: eventSessionId,
+          run_id: "run-default-actions",
+          reply: "Waiting for review.",
+          reasoning_trace: {
+            generation_result: {
+              sourceType: "runtime_fact",
+              uiPrimarySourceChip: "任务状态",
+              uiStatus: "waiting_for_user",
+              taskStatus: "waiting_permission",
+              pendingPermissionCount: 1,
+              pendingProposalCount: 2,
+              safeNextControls: ["refresh_context"],
+              blockerCodes: ["tool_permission_required"],
+            },
+          },
+          tool_calls: [],
+          agent_ingress: {
+            requestId: "req-default-actions",
+            sourceSessionId: "session-1",
+            taskKind: "conversation",
+            selectedStrategy: "react_tool_execution",
+            confidence: 0.9,
+            reasonSummary: "Permission and proposal review required.",
+            fallbackEligible: false,
+            privacyRisk: {
+              riskLevel: "medium",
+              privacyClass: "user_state",
+              policyReasonCode: "tool_permission_required",
+              localOnlyRequired: true,
+              writeLike: false,
+              externalWriteLike: false,
+            },
+            agentTaskSessionId: "task-default-actions",
+          },
+          execution_transcript: [],
+          legacy_fallback_used: false,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    const status = await screen.findByTestId("main-chat-agent-status");
+    expect(status).toHaveAttribute("data-agent-product-status", "permission_pending");
+    expect(screen.getByText("Permission pending")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Review proposal" })).toHaveAttribute(
+      "href",
+      "/review"
+    );
+    expect(screen.getByRole("link", { name: "Review permission" })).toHaveAttribute(
+      "href",
+      "/review"
+    );
+    expect(screen.getByRole("button", { name: "Resume current task" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Retry current action" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Cancel current task" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Refresh current task context" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh current task context" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "refresh_main_chat_agent_task_context",
+        expect.objectContaining({ taskSessionId: "task-default-actions" })
+      );
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Retry current action" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "retry_main_chat_agent_action",
+        expect.objectContaining({
+          taskSessionId: "task-default-actions",
+          actionId: "action-default-failed",
+        })
+      );
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Resume current task" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "resume_main_chat_agent_task",
+        expect.objectContaining({ taskSessionId: "task-default-actions" })
+      );
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Cancel current task" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "cancel_main_chat_agent_task",
+        expect.objectContaining({ taskSessionId: "task-default-actions" })
+      );
+    });
   });
 
   it("carries proposal review approval back to the blocked main chat task", async () => {
@@ -2953,7 +3725,8 @@ describe("ChatPage", () => {
       await Promise.resolve();
     });
 
-    fireEvent.click(await screen.findByRole("link", { name: "Open Review Center" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Show Main Chat diagnostics" }));
+    fireEvent.click((await screen.findAllByRole("link", { name: "Open Review Center" }))[0]);
 
     expect(await screen.findByText("Review Center")).toBeInTheDocument();
     expect(await screen.findByText("tools.permissions.file.read")).toBeInTheDocument();

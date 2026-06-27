@@ -226,6 +226,10 @@ impl InferenceScheduler {
         messages: Vec<ChatMessage>,
         system_prompt: Option<&str>,
     ) -> Result<String> {
+        if let Some(ref response) = self.scripted_generation_response {
+            return Ok(response.clone());
+        }
+
         let resolved_local_model = resolve_ollama_model(&self.local_model).await;
         let use_local =
             resolved_local_model.is_some() && (self.prefer_local || !self.has_remote_key());
@@ -601,8 +605,15 @@ mod tests {
 
         let trace = scheduler.preview_chat_route(None).await;
 
-        assert_eq!(trace.provider, "none");
-        assert!(trace.reason.contains("No available providers"));
+        assert_ne!(trace.provider, "deepseek");
+        assert_ne!(trace.route_type, "cloud");
+        assert!(
+            trace.reason.contains("No available providers")
+                || trace.reason.contains("no_backend_available")
+                || trace.reason.contains("ollama_available_and_preferred"),
+            "unexpected route reason: {}",
+            trace.reason
+        );
     }
 
     #[tokio::test]

@@ -180,10 +180,11 @@
 > `selectedSkillId`; Chat composer also exposes an explicit manual `SKILL.md`
 > context field that carries the selected skill id through ordinary stream
 > payloads without calling Skill Runtime commands. The existing 24-case
-> send/stream command-surface gate remains green. This does not complete the
-> Goal: real final/live-provider acceptance, remaining external live-provider
-> harness evidence, and further module cleanup of other Main Chat
-> runtime/strategy code remain blockers.
+> send/stream command-surface gate remains green. Step 2 now provides credited
+> external live-provider DirectAnswer, web AgentLoop, registered MCP AgentLoop,
+> and MCP ToolPermission proposal evidence. This still does not complete the
+> Goal: legacy fallback containment, Runtime Facts module cleanup, default UI
+> state/action surfaces, and real-task E2E evidence remain blockers.
 
 ## 1. CLI Goal-Mode Short Instruction
 

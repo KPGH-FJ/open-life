@@ -1774,6 +1774,15 @@ pub(crate) async fn run_main_chat_agent_execution_v1_eval_gate_with_state(
                         legacy_fallback_count: 0,
                         silent_write_count: 0,
                         send_stream_matrix_coverage: 0.0,
+                        kernel_backed_case_count: 0,
+                        kernel_direct_answer_case_count: 0,
+                        kernel_read_only_tool_case_count: 0,
+                        kernel_proposal_write_case_count: 0,
+                        kernel_plan_execute_case_count: 0,
+                        kernel_blocker_case_count: 0,
+                        kernel_hs_context_case_count: 0,
+                        kernel_web_tool_case_count: 0,
+                        kernel_mcp_tool_case_count: 0,
                         final_completion_ready: false,
                     },
                 live_provider:
@@ -1993,6 +2002,41 @@ pub async fn validate_main_chat_agent_stage2_manual_dogfood_artifact(
 }
 
 #[tauri::command]
+pub async fn run_main_chat_agent_step6_product_acceptance_gate(
+    state: State<'_, Arc<AppState>>,
+) -> Result<crate::main_chat_step6_product_acceptance::MainChatStep6ProductAcceptanceReport, String>
+{
+    let state = state.inner().clone();
+    let runtime_handle = tokio::runtime::Handle::current();
+    std::thread::Builder::new()
+        .name("step6-product-acceptance-gate".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            runtime_handle.block_on(
+                crate::main_chat_step6_product_acceptance::run_main_chat_step6_product_acceptance_report(
+                    &state,
+                ),
+            )
+        })
+        .map_err(|err| format!("spawn step6 product acceptance gate worker: {err}"))?
+        .join()
+        .map_err(|_| "step6 product acceptance gate worker panicked".to_string())?
+}
+
+#[tauri::command]
+pub async fn prepare_main_chat_step6_live_provider_eval_state(
+    state: State<'_, Arc<AppState>>,
+) -> Result<
+    crate::main_chat_step6_product_acceptance::MainChatStep6LiveProviderEvalStatePrepReport,
+    String,
+> {
+    crate::main_chat_step6_product_acceptance::prepare_main_chat_step6_live_provider_eval_state_with_state(
+        &state.inner().clone(),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn run_main_chat_agent_stage1_dogfood_gate(
     _state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {
@@ -2035,6 +2079,34 @@ pub async fn set_main_chat_agent_stage1_browser_network_policy(
     let mut config = state.config.lock().await;
     let previous = config.system.network_policy.enabled;
     config.system.network_policy.enabled = enabled;
+    Ok(previous)
+}
+
+#[tauri::command]
+pub async fn set_main_chat_agent_stage1_browser_web_fixture_output(
+    output: Option<String>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<String>, String> {
+    if !cfg!(debug_assertions) {
+        return Err("stage1_browser_web_fixture_toggle_debug_only".into());
+    }
+    let mut fixture = state.web_search_fixture_output.lock().await;
+    let previous = fixture.clone();
+    *fixture = output;
+    Ok(previous)
+}
+
+#[tauri::command]
+pub async fn set_main_chat_agent_stage1_browser_scripted_response(
+    response: Option<String>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<String>, String> {
+    if !cfg!(debug_assertions) {
+        return Err("stage1_browser_scripted_response_toggle_debug_only".into());
+    }
+    let mut scheduler = state.scheduler.lock().await;
+    let previous = scheduler.scripted_generation_response.clone();
+    scheduler.scripted_generation_response = response;
     Ok(previous)
 }
 

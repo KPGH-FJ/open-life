@@ -572,6 +572,10 @@ pub(crate) async fn prepare_main_chat_agent_stage1_browser_dogfood_state_with_st
         "D36".into(),
         seed_stage1_browser_pending_memory_proposal_task(state, &prep_run_id).await?,
     );
+    task_session_ids.insert(
+        "S6_PERMISSION_ACCEPT".into(),
+        seed_step6_browser_tool_permission_accept_task(state, &prep_run_id).await?,
+    );
 
     Ok(MainChatAgentStage1BrowserDogfoodPrepReport {
         prepared: true,
@@ -892,6 +896,106 @@ async fn seed_stage1_browser_pending_memory_proposal_task(
                 &session.id,
                 "Stage 1 seeded memory proposal is pending review.",
             )
+            .map_err(|err| err.to_string())?;
+    }
+    Ok(session.id)
+}
+
+async fn seed_step6_browser_tool_permission_accept_task(
+    state: &Arc<AppState>,
+    prep_run_id: &str,
+) -> Result<String, String> {
+    use openlife_core::agent::main_chat_agent_v1::{
+        ExecutionAction, ExecutionQueueStatus, ExecutionTranscriptEntryKind, MainChatAgentStrategy,
+    };
+    use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
+
+    let session = create_stage1_browser_task_session(
+        state,
+        prep_run_id,
+        "S6_PERMISSION_ACCEPT",
+        "Use mcp builtin_echo read-only now.",
+        MainChatAgentStrategy::ReActToolExecution,
+        Some("Waiting for Step 6 ToolPermission acceptance before governed replay.".into()),
+        vec!["step6-browser-tool-permission-accept-context".into()],
+    )
+    .await?;
+    let action = ExecutionAction::new(
+        "mcp.read_only",
+        "Pending registered MCP read awaiting Step 6 ToolPermission acceptance.",
+    );
+    let queued = enqueue_stage1_browser_action(state, &session.id, action).await?;
+
+    let mut proposal = AgentProposal::new(
+        ProposalType::ToolPermission,
+        "tool_permission.builtin.builtin_echo",
+        serde_json::json!({
+            "tool_name": "builtin_echo",
+            "source": "builtin",
+            "risk_level": "low",
+            "action_type": "read",
+            "permission": "allow_once"
+        }),
+        "Step 6 product acceptance seed asks the user to accept a governed ToolPermission.",
+        0.74,
+        RiskLevel::Medium,
+        ProposalSource::ChatConversation,
+    );
+    proposal.source_detail = Some(session.id.clone());
+    proposal.run_id = Some(format!("{prep_run_id}:S6_PERMISSION_ACCEPT"));
+    let proposal_id = proposal.id.clone();
+    {
+        let proposal_store = state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(|| "proposal store missing".to_string())?;
+        proposal_store
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .map_err(|err| err.to_string())?;
+    }
+
+    transition_stage1_browser_action(state, &queued.id, ExecutionQueueStatus::Executing, None)
+        .await?;
+    transition_stage1_browser_action(
+        state,
+        &queued.id,
+        ExecutionQueueStatus::PendingPermission,
+        Some(serde_json::json!({
+            "proposalId": proposal_id,
+            "toolName": "builtin_echo",
+            "resumeReplayable": true,
+            "directWritesExecuted": false,
+        })),
+    )
+    .await?;
+    record_stage1_browser_action(state, &session.id, &queued.id).await?;
+    append_stage1_browser_transcript(
+        state,
+        &session.id,
+        ExecutionTranscriptEntryKind::PermissionRequest,
+        "Step 6 seeded ToolPermission proposal is pending explicit acceptance.",
+        serde_json::json!({
+            "proposalId": proposal_id,
+            "actionId": queued.id,
+            "runId": format!("{prep_run_id}:S6_PERMISSION_ACCEPT"),
+            "resumeReplayable": true,
+            "directWritesExecuted": false,
+        }),
+    )
+    .await?;
+    {
+        let store_arc = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .ok_or_else(|| "session store missing".to_string())?;
+        let store = store_arc.lock().await;
+        store
+            .set_pending_blockers(&session.id, vec!["tool_permission_required".into()])
+            .map_err(|err| err.to_string())?;
+        store
+            .mark_waiting_permission(&session.id)
             .map_err(|err| err.to_string())?;
     }
     Ok(session.id)
@@ -2891,8 +2995,8 @@ fn stage1_scenarios() -> Vec<Stage1ScenarioDef> {
         d("D20", "P1", "seeded_task_control_e2e", "Reconnect and replay seeded task events.", "event_replay", &["replaying_events", "observation_ready", "completed"], &["completed_work", "next_action"], "success", None, "seeded_event_stream"),
         d("D21", "P0", "chat_e2e", "Compare two memory facts that conflict.", "memory_conflict", &["completed"], &["completed_work", "observations_used"], "success", None, "conflicting_memory_pair"),
         d("D22", "P0", "chat_e2e", "Ask a task that needs multiple reads.", "multi_read_ReAct", &["planning", "action_running", "observation_ready", "completed"], &["completed_work", "observations_used"], "success", None, "dogfood/project_brief.md + memory/session seed"),
-        d("D23", "P0", "chat_e2e", "Use web while network policy blocks it.", "web_blocker", &["blocked"], &["blocked_work", "next_action"], "expected_blocker", Some("web_network_policy_blocked"), "network_disabled_policy"),
-        d("D24", "P0", "chat_e2e", "Use MCP when no manifest exists.", "MCP_blocker", &["blocked"], &["blocked_work", "next_action"], "expected_blocker", Some("mcp_missing_read_target"), "missing_mcp_target"),
+        d("D23", "P0", "chat_e2e", "Fetch http://127.0.0.1/stage1-dogfood-network-policy while network policy blocks private addresses.", "web_blocker", &["blocked"], &["blocked_work", "next_action"], "expected_blocker", Some("web_network_policy_blocked"), "network_private_address_policy"),
+        d("D24", "P0", "chat_e2e", "Use MCP missing_manifest_tool read-only when no manifest exists.", "MCP_blocker", &["blocked"], &["blocked_work", "next_action"], "expected_blocker", Some("mcp_missing_read_target"), "missing_mcp_target"),
         d("D25", "P0", "chat_e2e", "Inspect loaded knowledge assets.", "context_inspection", &["completed"], &["completed_work", "observations_used"], "success", None, "knowledge_asset_files"),
         d("D26", "P0", "chat_e2e", "Propose an edit to USER.md for my planning preference.", "knowledge_proposal", &["memory_candidate", "permission_needed"], &["proposals_created", "pending_user_action"], "proposal", None, "USER.md"),
         d("D27", "P1", "seeded_task_control_e2e", "Recover from stale resume context.", "stale_blocker", &["blocked", "retry_available"], &["blocked_work", "next_action"], "expected_blocker", Some("stale_context"), "stale_task_context"),

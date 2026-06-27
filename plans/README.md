@@ -1,7 +1,7 @@
 # OpenLife Plans Document Governance
 
-> Last updated: 2026-06-19
-> Status: authoritative document index for Agents; Stage 2 Internal Trial Readiness preparation is the current entry point
+> Last updated: 2026-06-25
+> Status: authoritative document index for Agents; Main Chat kernel rescue Goal 8 remains the current runtime entry point, and Runtime Facts / Agent Self-State is the current post-Goal-8 preparation track
 
 This file prevents old planning documents from steering new Agent work. If two
 documents disagree, use the precedence below and treat lower-priority stale text
@@ -13,7 +13,39 @@ as reference only.
    - Project-wide Agent instructions, current constraints, and Tool Taxonomy.
 2. `plans/README.md`
    - This authority map and current entry point.
-3. `plans/main_chat_stage2_preparation_index.md` and
+3. `plans/main_chat_agent_kernel_rescue_goal_8_cleanup_final_gate.md`,
+   `plans/main_chat_agent_kernel_rescue_goal_mode_index.md`, and
+   `plans/main_chat_agent_kernel_rescue_acceptance_matrix.md`
+   - Current rescue entry point. Goal 8 treats `MainChatKernel` as the product
+     default for ordinary Main Chat, keeps legacy fallback explicit and counted,
+     and realigns final/readiness gates to consume kernel evidence fields
+     instead of old over-orchestrated strategy-path proof. The supporting
+     preparation scope, industry practice digest, and spec-coding contract live in
+     `plans/main_chat_agent_kernel_rescue_preparation_scope.md`,
+     `plans/main_chat_agent_kernel_rescue_industry_practices.md`, and
+     `plans/main_chat_agent_kernel_rescue_spec_coding_contract.md`. Goal
+     completion reporting must use
+     `plans/main_chat_agent_kernel_rescue_goal_completion_template.md`.
+   - Post-Goal-8 Runtime Facts / Agent Self-State preparation is governed by
+     `plans/main_chat_runtime_facts_source_registry.md`,
+     `plans/main_chat_runtime_facts_ui_contract.md`, and
+     `plans/main_chat_runtime_facts_eval_matrix.md`. These documents define
+     fact source authority, UI visibility, and eval gates for deterministic
+     runtime facts. They are preparation artifacts only and must not be read as
+     implementation completion or product readiness.
+   - The next post-Slice-D development cycle is governed by
+     `plans/main_chat_next_6_steps_master_spec.md`,
+     `plans/main_chat_next_6_steps_acceptance_matrix.md`,
+     `plans/main_chat_live_provider_eval_setup.md`,
+     `plans/main_chat_runtime_facts_refactor_boundary.md`, and
+     `plans/main_chat_agent_status_ui_contract.md`. These documents define the
+     six-step order, acceptance rows, live-provider setup, Runtime Facts
+     refactor boundary, and default Agent status UI contract. They are
+     development preparation artifacts only and must not be read as evidence
+     that RF-20/RF-21, external live-provider credit, legacy fallback
+     containment, Runtime Facts refactor, product UI, or E2E product acceptance
+     has completed.
+4. `plans/main_chat_stage2_preparation_index.md` and
    `plans/main_chat_agent_stage2_internal_trial_goal_spec.md`
    - Current Stage 2 planning and Goal-mode entry point. Stage 2 targets
      limited internal trial readiness, not public beta and not another
@@ -22,7 +54,7 @@ as reference only.
      evidence, AgentControlPlane product states, memory
      proposal trial flow, failure recovery coverage, and a fail-closed
      `ready_for_limited_internal_trial` readiness report.
-4. `plans/main_chat_stage1_preparation_index.md` and
+5. `plans/main_chat_stage1_preparation_index.md` and
    `plans/main_chat_agent_stage1_dogfood_goal_spec.md`
    - Completed Stage 1 Real End-to-End Dogfood implementation and acceptance
      audit trail. Linux CI run `27807633105` produced real
@@ -30,7 +62,7 @@ as reference only.
      scenarios, 36 passed journeys, 0 failed journeys, and no blockers. Manual
      dogfood / internal-trial approval and external live-provider proof remain
      opt-in and separate from default deterministic readiness.
-5. `plans/main_chat_agent_v1_stabilization_goal_spec.md`
+6. `plans/main_chat_agent_v1_stabilization_goal_spec.md`
    - Previous Goal-mode entry for the stabilization / acceptance-blocker
      remediation pass after checkpoint `d8e415f`. This Goal does not restart
      the previous broad migration Goal and does not expand the product roadmap.
@@ -40,7 +72,7 @@ as reference only.
      knowledge-format context surfaces, and `src-tauri/src/lib.rs` module
      cleanup. It must fail closed and must not claim completion without real
      evidence.
-6. `plans/main_chat_agent_migration_v1_goal_spec.md`
+7. `plans/main_chat_agent_migration_v1_goal_spec.md`
    - Main Chat Agent Execution v1 remediation spec / audit trail and capability
      target.
      Ordinary Main Chat now enters AgentIngress and a governed task session,
@@ -273,13 +305,13 @@ as reference only.
      accepted candidate-order evidence only when the provider returns a
      complete bounded candidate-id permutation; ignored provider orders keep
      only the ignored flag and metadata-safe response digest. This path is covered with ordinary `send_message` through a
-     local HTTP OpenAI-compatible provider. The ignored external live runs were
-     not executed in this environment and do not count as live-provider
-     completion.
-     Final completion still requires live-provider-backed
-     generation eval coverage, broader provider-backed web/MCP AgentLoop and
-     manifest/permission coverage, and broader provider/live proposal-permission
-     proof.
+     local HTTP OpenAI-compatible provider. The next-six-steps evidence track now
+     includes the Step 6 Linux real-Tauri local-only journeys plus the opt-in
+     external live-provider product acceptance proof, while preserving no-credit
+     behavior for local, scripted, fixture, synthetic, loopback, and local-test
+     HTTP evidence. Main Chat Agent Execution v1 is still not a Stage 2 internal
+     trial completion claim: the current PR must keep CI green, and broader
+     Stage 2 readiness remains governed separately.
 5. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 6. `plans/lifemodel_governed_backend_completion_goal_spec.md`
@@ -329,7 +361,10 @@ active planning entry point**. Stage 1 automated engineering dogfood is complete
 for default deterministic readiness: Linux CI run `27807633105` passed the real
 Tauri Chat UI D01-D36 dogfood gate with
 `evidenceSource=tauri_command_surface_browser_observed`, 36 observed scenarios,
-36 passed journeys, 0 failed journeys, and `blockers=[]`.
+36 passed journeys, 0 failed journeys, and `blockers=[]`. Current PR-level
+merge readiness still depends on the live CI status: `CI / Rust Check`,
+`CI / Rust Check (macOS)`, and `Stage 1 Tauri Dogfood` must be green before
+the Step 6 evidence can be treated as merge-ready.
 
 Do not use stale local macOS fail-closed browser reports as Stage 1 pass
 evidence; macOS remains unsupported for the official Tauri WebDriver desktop
@@ -477,9 +512,10 @@ live in `src-tauri/src/main_chat_runtime_support.rs`.
 Main Chat send command state executor now lives in
 `src-tauri/src/main_chat_send.rs`, leaving the Tauri send command in
 `src-tauri/src/lib.rs` as command-surface wiring.
-Main Chat strategy dispatch now lives in `src-tauri/src/main_chat_strategy.rs`,
-leaving `src-tauri/src/lib.rs` focused on command-surface wiring and fallback
-orchestration.
+MainChatKernel is the default Main Chat runtime spine for ordinary send/stream
+behavior. `src-tauri/src/main_chat_strategy.rs` is retained for explicitly
+legacy or unsupported strategy surfaces only; it is not the product-authoritative
+default path.
 Main Chat stream command state executor and stream timeout policy now live in
 `src-tauri/src/main_chat_streaming.rs`, leaving the Tauri stream command in
 `src-tauri/src/lib.rs` as command-surface wiring.
@@ -516,10 +552,11 @@ workspace/configured `AGENTS.md`, `SOUL.md`, root / `memories/` `USER.md` /
 `selectedSkillId` plumbing through ordinary send/stream command surfaces and
 frontend Tauri wrappers plus an explicit manual Chat composer `SKILL.md`
 context field; the async context compiler and selected-skill sanitizer are now
-owned by the same focused context module. This improves the current narrow paths, but it does
-not change the final completion status or satisfy real live-provider evidence,
-remaining external live-provider harness evidence, or further module cleanup of
-other Main Chat runtime/strategy code.
+owned by the same focused context module. This improves the current narrow
+paths, and the next-six-steps acceptance matrix now has Step 6 local plus
+external live evidence. It does not complete Stage 2 Internal Trial Readiness:
+CI must remain green, default UI/task-control quality must hold, and real
+limited-trial readiness is tracked separately from Step 6 acceptance.
 
 `plans/legacy_direct_write_convergence_goal_spec.md` is retained as the
 completed W90-W97 Goal-mode spec and audit trail. W90-W92 retire the
@@ -1156,17 +1193,21 @@ metadata-safe safety, default Chat impact, and next dependency.
 | W144-W146 | Backend Completion Goal 7: Backend Golden Paths | Pure backend/core Weekly Planning, Low-Energy Support, and Preference Correction golden paths are complete; no default Chat migration, no ordinary send/stream replacement, no Tauri command, no UI, no durable LifeModel/Memory/external provider state write, and ordinary Chat does not call golden path helpers or treat golden path ready as migration permission |
 | W147-W149 | Backend Completion Goal 8: Pre-UI Backend Contract Freeze | Pure backend/core read-model contracts for Learning Inbox, Evidence Timeline, Proposal Review, Runtime Trace, Guidance Impact, Privacy Controls, and LifeModel Overview are frozen; final backend completion gate report and docs/progress/verification sync are complete; no command/UI/store write/runtime/model/tool/default Chat impact |
 | W150-W158 | Skill Runtime Beta Maturity | Built-in skill readiness, bounded metadata-safe context, HS privacy/model-route governance, fail-soft output envelopes, proposal candidate governance, plugin declarative-only boundary, non-default read-only status command, Runs/Review trace integration, and docs sync are complete; no ordinary Chat routing change and no migration permission |
-| Main Chat Agent Execution v1 | Main Chat Agent remediation | Ordinary `send_message` / `start_stream_message` enter AgentIngress and governed task sessions with transcript/action queue foundations; DirectAnswer is on a real strategy path with send/stream AgentRun, prompt/context transcript, task-session completion proof, and L2 scheduler/provider generation trace proof; ReActToolExecution attempts the governed plan-guided AgentLoop first with a metadata-safe tool-candidate contract, generic MCP read bounded read-only manifest candidate set, deterministic capability/name/tag ranking evidence, provider/model-ranked preselection local HTTP proof, candidate rank/source/capability digest/bounded safe capability labels/sanitized match reason metadata, model-selected ExecutionPolicy metadata, governed candidate arguments source/digest metadata, high-risk/confirmation/write-like candidate exclusion, exact `toolset_allowlist` target enforcement, and exact action-target candidate enforcement, with ReAct tool-selection plan/candidate helpers extracted to `src-tauri/src/main_chat_react_tool_selection.rs`, ReAct AgentLoop attempt execution/runtime helper types/follow-up synthesis/action-to-tool-call conversion/tool-call metadata helpers extracted to `src-tauri/src/main_chat_react_runtime.rs`, ReAct ActionExecutor-backed fallback execution extracted to `src-tauri/src/main_chat_react_execution.rs`, proposal/ToolPermission proposal support helpers extracted to `src-tauri/src/main_chat_proposal_support.rs`, HS runtime packet/topic/tool-requirement helpers extracted to `src-tauri/src/main_chat_hs_runtime.rs`, task-session/transcript/action-queue runtime support helpers extracted to `src-tauri/src/main_chat_runtime_support.rs`, send command state executor extracted to `src-tauri/src/main_chat_send.rs`, strategy dispatch extracted to `src-tauri/src/main_chat_strategy.rs`, and stream command state executor extracted to `src-tauri/src/main_chat_streaming.rs`; rejects no-planned-action AgentLoop results as incomplete tool execution, blocks model-selected exact-target allowlist misses / wrong action-target pairs / write-like or unsupported action types / unknown non-candidate calls as explicit `model_selected_disallowed_tool` blockers without single-step fallback, replaces model-supplied arguments with exact allowlist governed executor input before execution, and blocks policy-denied selected candidates as `model_selected_tool_policy_blocked`, otherwise falling back to a single-step ActionExecutor-backed read path with direct read parser/executor input alignment, eval-gated memory/session multi-step read/observe/follow-up proof, web AgentLoop blocker proof, fixture-backed successful web read AgentLoop proof, registered MCP AgentLoop success proof, registered MCP ToolPermission proposal proof, and governed follow-up synthesis; Main Chat context assembly now uses a controlled knowledge-format loader for bounded workspace/configured `AGENTS.md`, `SOUL.md`, `USER.md`, `MEMORY.md`, and selected `SKILL.md` surfaces, with context compilation / selected-skill sanitization extracted to `src-tauri/src/main_chat_context_loader.rs`, optional sanitized selected-skill id plumbing through send/stream command surfaces, frontend Tauri wrappers, and an explicit manual Chat composer source; `proposal.create`, safe retry/replay, permission-preserving resume, accepted ToolPermission resume replay, cancel, execution task panel, and Review Center accept/resume handoff are covered; a 100-case runtime harness covers per-capability execution plus provider/local-only/eval-generation/webAgentLoop/mcpAgentLoop/mcpToolPermissionProposal metrics; a fail-closed live-provider eval preflight reports missing opt-in/key/network/non-scripted/local-only blockers without invoking a model; Tauri mock IPC covers send/stream DirectAnswer, L2 scheduler/provider generation trace, governed file-read, PlanExecute draft, proposal-path, registered-MCP AgentLoop success, registered-MCP ToolPermission proposal, web AgentLoop blocker, fixture-backed web AgentLoop success, web-policy blocker, and missing-MCP blocker; a 24-case send/stream command-surface eval gate keeps legacy fallback=0 and silent write=0; live-provider-backed generation eval, broader live/provider-backed web/MCP manifest coverage, and broader provider/live proposal-permission proof remain required before completion |
+| Main Chat Kernel Rescue Goal 8 | Current Main Chat default realignment | Ordinary send/stream command-surface cases are expected to be MainChatKernel-backed for DirectAnswer, read-only tools, proposal-only writes, PlanExecute draft, blockers, HS context, web, and MCP; legacy fallback must stay explicit/countable and final/readiness gates consume kernel evidence counters |
+| Main Chat Agent Execution v1 | Main Chat Agent remediation | Ordinary `send_message` / `start_stream_message` enter AgentIngress and governed task sessions; DirectAnswer, ReAct read/tool paths, proposal paths, command-surface gates, runtime-facts slices, and Step 6 local plus external live-provider evidence now have typed, auditable coverage. The Step 6 proof rejects local/scripted/fixture/synthetic/loopback/local-test HTTP credit for external live acceptance. Main Chat Agent Execution v1 is still not a Stage 2 completion claim: PR merge readiness depends on green CI, and limited internal trial readiness remains separately governed. |
 
 ## 4. Current Authoritative Entry Points
 
 | Document | Use for |
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, and current hard constraints. |
+| `plans/main_chat_agent_kernel_rescue_goal_8_cleanup_final_gate.md` | Current Goal-mode target for kernel-backed default Main Chat cleanup and final/readiness gate realignment. |
+| `plans/main_chat_agent_kernel_rescue_goal_mode_index.md` | Eight-goal Main Chat kernel rescue sequence and cross-goal rules. |
+| `plans/main_chat_agent_kernel_rescue_acceptance_matrix.md` | K1-K8 acceptance rows; K8 is authoritative for default kernel path, legacy fallback isolation, final/readiness gate evidence, docs, and safety regression checks. |
 | `plans/main_chat_stage1_preparation_index.md` | Completed Stage 1 preparation / implementation entrypoint and post-pass evidence summary. Keep as Stage 1 audit trail. |
 | `plans/main_chat_agent_stage1_dogfood_goal_spec.md` | Completed CLI Goal-mode entry for Main Chat Agent Stage 1 Real End-to-End Dogfood. Keep as acceptance criteria and audit trail. |
-| `plans/main_chat_agent_productization_v1_goal_spec.md` | Next development goal spec for Main Chat Agent Control Plane, product eval, runtime-backed UI state, L0-L2 product completion, and narrow L3/L4/L5 continuity. |
-| `plans/openlife_agent_product_capability_matrix_v1.md` | Product capability matrix for the next Agent phase: capability levels, current/target state, UI/backend dependencies, acceptance gates, and Codex/Hermes/OpenClaw gaps. |
+| `plans/main_chat_agent_productization_v1_goal_spec.md` | Planned post-rescue development goal spec for Main Chat Agent Control Plane, product eval, runtime-backed UI state, L0-L2 product completion, and narrow L3/L4/L5 continuity. |
+| `plans/openlife_agent_product_capability_matrix_v1.md` | Product capability matrix for a post-rescue Agent phase: capability levels, current/target state, UI/backend dependencies, acceptance gates, and Codex/Hermes/OpenClaw gaps. |
 | `plans/main_chat_agent_product_eval_scenarios_v1.md` | Product-level Main Chat Agent scenario set covering DirectAnswer, read tools, ReAct, PlanExecute, memory, permission, skill, recovery, and final delivery. |
 | `plans/main_chat_agent_control_plane_ui_contract_v1.md` | Runtime-backed Agent Control Plane UI objects, state machine, controls, streaming rules, and anti-fake UI constraints. |
 | `plans/main_chat_runtime_to_ui_evidence_mapping_v1.md` | Contract mapping runtime evidence to UI task, action, observation, blocker, proposal, and final delivery objects. |

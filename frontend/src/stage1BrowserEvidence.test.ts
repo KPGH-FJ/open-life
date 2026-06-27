@@ -13,6 +13,16 @@ import {
   type Stage1ObservedBrowserScenario,
 } from "./stage1BrowserEvidence";
 import { STAGE1_DOGFOOD_SCENARIOS } from "./stage1DogfoodScenarios";
+import {
+  STEP6_PRODUCT_ACCEPTANCE_JOURNEYS,
+  STEP6_BLOCKED_LIVE_UI_STATUS,
+  STEP6_PRODUCT_ACCEPTANCE_REPORT_PATH,
+  STEP6_REQUIRED_PRODUCT_JOURNEYS,
+  buildStep6BlockedProductAcceptanceReport,
+  buildStep6ProductAcceptanceReportFromObservedJourneys,
+  step6ObservedJourneyBlockers,
+  type Step6ObservedProductJourney,
+} from "./step6ProductAcceptance";
 
 function baseGateReport(overrides: Record<string, unknown> = {}) {
   const scenarios = STAGE1_REQUIRED_BROWSER_JOURNEYS.map(id => ({
@@ -490,6 +500,8 @@ describe("stage1 browser evidence report builder", () => {
     expect(script).toContain("STAGE1_DOGFOOD_SCENARIOS");
     expect(script).toContain("prepare_main_chat_agent_stage1_browser_dogfood_state");
     expect(script).toContain("set_main_chat_agent_stage1_browser_network_policy");
+    expect(script).toContain("set_main_chat_agent_stage1_browser_scripted_response");
+    expect(script).toContain("D23_WEB_BLOCKER_SCRIPTED_RESPONSE");
     expect(script).toContain("restoreStage1ScenarioNetworkPolicy");
     expect(script.indexOf("prepare_main_chat_agent_stage1_browser_dogfood_state")).toBeLessThan(
       script.indexOf("await navigateToChat(sessionId);")
@@ -666,7 +678,204 @@ describe("stage1 browser evidence report builder", () => {
       expect(source).not.toContain("/Blockers|blocked/i.test(text)");
     }
   });
+
+  it("exports a bounded Step 6 product-acceptance journey matrix", () => {
+    expect(STEP6_REQUIRED_PRODUCT_JOURNEYS).toEqual([
+      "S6-CLOCK",
+      "S6-ROUTE",
+      "S6-TOOLS",
+      "S6-FILE",
+      "S6-DIRECT-SELF",
+      "S6-PROPOSAL",
+      "S6-BLOCKED",
+      "S6-PERMISSION",
+      "S6-LIVE-WEB",
+      "S6-LIVE-MCP",
+      "S6-RECOVERY",
+    ]);
+    expect(STEP6_PRODUCT_ACCEPTANCE_JOURNEYS).toHaveLength(11);
+    expect(
+      STEP6_PRODUCT_ACCEPTANCE_JOURNEYS.filter(journey => journey.kind === "deterministic_local")
+    ).toHaveLength(9);
+    expect(
+      STEP6_PRODUCT_ACCEPTANCE_JOURNEYS.filter(journey => journey.kind === "external_live")
+    ).toHaveLength(2);
+    expect(STEP6_PRODUCT_ACCEPTANCE_REPORT_PATH).toBe(
+      "frontend/test-results/main-chat-step6-product-acceptance-report.json"
+    );
+  });
+
+  it("builds a Step 6 report with local journeys ready and external live honestly blocked", () => {
+    const observed = step6ObservedJourneys({
+      liveStatus: "blocked_live_evidence",
+      liveObservedVia: "blocked_live_evidence_report",
+      liveProviderKind: null,
+      liveBlockers: ["provider_api_key_missing"],
+    });
+    const report = buildStep6ProductAcceptanceReportFromObservedJourneys(observed, {
+      now: new Date("2026-06-26T08:00:00.000Z"),
+      runId: "step6-product-e2e-local-ready-live-blocked",
+    });
+
+    expect(report.reportKind).toBe("main_chat_step6_product_acceptance");
+    expect(report.localDeterministicReady).toBe(true);
+    expect(report.externalLiveReady).toBe(false);
+    expect(report.acceptanceReady).toBe(false);
+    expect(report.passedJourneys).toEqual(
+      STEP6_REQUIRED_PRODUCT_JOURNEYS.filter(id => !id.startsWith("S6-LIVE-"))
+    );
+    expect(report.blockedLiveJourneys).toEqual(["S6-LIVE-WEB", "S6-LIVE-MCP"]);
+    expect(report.failedJourneys).toEqual([]);
+    expect(report.externalLiveBlockers).toEqual([
+      "S6-LIVE-WEB:provider_api_key_missing",
+      "S6-LIVE-MCP:provider_api_key_missing",
+    ]);
+    expect(report.blockers).toContain("step6_external_live_evidence_blocked_or_incomplete");
+    expect(report.noSilentDurableWrite).toBe(true);
+    expect(report.noHiddenLegacyFallback).toBe(true);
+    expect(report.noLocalEvidenceCreditedAsExternalLive).toBe(true);
+    expect(report.noInventedUnavailableEvidence).toBe(true);
+    expect(report.uiStatusFromStructuredEvidence).toBe(true);
+    expect(report.reportDigest).toMatch(/^bytes:[1-9][0-9]* hash:sha256:[a-f0-9]{64}$/);
+  });
+
+  it("credits Step 6 external live only for real external-provider evidence", () => {
+    const credited = buildStep6ProductAcceptanceReportFromObservedJourneys(
+      step6ObservedJourneys({
+        liveStatus: "credited_external_live",
+        liveObservedVia: "real_tauri_chat_or_control_path",
+        liveProviderKind: "external_provider",
+        liveBlockers: [],
+      }),
+      {
+        now: new Date("2026-06-26T08:00:00.000Z"),
+        runId: "step6-product-e2e-external-live-credited",
+      }
+    );
+
+    expect(credited.externalLiveReady).toBe(true);
+    expect(credited.acceptanceReady).toBe(true);
+    expect(credited.blockers).toEqual([]);
+
+    const localHttp = buildStep6ProductAcceptanceReportFromObservedJourneys(
+      step6ObservedJourneys({
+        liveStatus: "credited_external_live",
+        liveObservedVia: "real_tauri_chat_or_control_path",
+        liveProviderKind: "local_test_http",
+        liveBlockers: [],
+      }),
+      {
+        now: new Date("2026-06-26T08:00:00.000Z"),
+        runId: "step6-product-e2e-local-http-rejected",
+      }
+    );
+
+    expect(localHttp.externalLiveReady).toBe(false);
+    expect(localHttp.acceptanceReady).toBe(false);
+    expect(localHttp.blockers).toContain("step6_external_provider_missing:S6-LIVE-WEB");
+    expect(localHttp.blockers).toContain("step6_external_provider_missing:S6-LIVE-MCP");
+  });
+
+  it("rejects Step 6 reports that rely on unsafe labels or invented unavailable evidence", () => {
+    const observed = step6ObservedJourneys({
+      liveStatus: "blocked_live_evidence",
+      liveObservedVia: "blocked_live_evidence_report",
+      liveProviderKind: null,
+      liveBlockers: ["network_disabled"],
+    });
+    observed[0] = {
+      ...observed[0],
+      uiStatusEvidence: ["completed from assistant prose"],
+      unavailableEvidenceInvented: true,
+    };
+
+    expect(step6ObservedJourneyBlockers(observed)).toEqual(
+      expect.arrayContaining([
+        "step6_ui_status_unsafe:S6-CLOCK",
+        "step6_ui_status_missing:S6-CLOCK",
+        "step6_invented_unavailable_evidence:S6-CLOCK",
+      ])
+    );
+  });
+
+  it("keeps unavailable Step 6 browser/Tauri infrastructure as a blocked report", () => {
+    const report = buildStep6BlockedProductAcceptanceReport(
+      ["real_tauri_browser_command_surface_unavailable"],
+      {
+        now: new Date("2026-06-26T08:00:00.000Z"),
+        runId: "step6-product-e2e-blocked-test",
+      }
+    );
+
+    expect(report.e2eEnvironmentReady).toBe(false);
+    expect(report.localDeterministicReady).toBe(false);
+    expect(report.externalLiveReady).toBe(false);
+    expect(report.acceptanceReady).toBe(false);
+    expect(report.passedJourneys).toEqual([]);
+    expect(report.blockedLiveJourneys).toEqual(["S6-LIVE-WEB", "S6-LIVE-MCP"]);
+    expect(report.failedJourneys).toEqual(
+      STEP6_REQUIRED_PRODUCT_JOURNEYS.filter(id => !id.startsWith("S6-LIVE-"))
+    );
+    expect(report.blockers).toEqual([
+      "step6_product_acceptance_e2e_blocked",
+      "real_tauri_browser_command_surface_unavailable",
+    ]);
+  });
 });
+
+function step6ObservedJourneys(input: {
+  liveStatus: Step6ObservedProductJourney["externalLiveStatus"];
+  liveObservedVia: Step6ObservedProductJourney["observedVia"];
+  liveProviderKind: string | null;
+  liveBlockers: string[];
+}): Step6ObservedProductJourney[] {
+  return STEP6_PRODUCT_ACCEPTANCE_JOURNEYS.map((journey, index) => {
+    const isLive = journey.kind === "external_live";
+    const seededControl = journey.id === "S6-PERMISSION" || journey.id === "S6-RECOVERY";
+    return {
+      journeyId: journey.id,
+      kind: journey.kind,
+      observedVia: isLive ? input.liveObservedVia : "real_tauri_chat_or_control_path",
+      entryPoint:
+        isLive && input.liveStatus === "blocked_live_evidence"
+          ? "blocked_live_evidence_report"
+          : seededControl
+            ? "task_continuity_control"
+            : "ordinary_main_chat_input",
+      routeStrategy:
+        isLive && input.liveStatus === "blocked_live_evidence"
+          ? "blocked_external_live"
+          : seededControl
+            ? "task_continuity_control"
+            : isLive
+              ? "external_live_provider"
+              : "main_chat_kernel",
+      taskSessionId:
+        isLive && input.liveStatus === "blocked_live_evidence" ? "" : `real-task-${journey.id}`,
+      runId: isLive && input.liveStatus === "blocked_live_evidence" ? "" : `real-run-${journey.id}`,
+      answerEvidence: [...journey.expectedAnswerEvidence],
+      runtimeEvidence: [...journey.expectedRuntimeEvidence],
+      uiStatusEvidence:
+        isLive && input.liveStatus === "blocked_live_evidence"
+          ? [STEP6_BLOCKED_LIVE_UI_STATUS]
+          : [journey.expectedUiStatus[0]],
+      finalDeliverySections:
+        isLive && input.liveStatus === "blocked_live_evidence"
+          ? []
+          : [journey.expectedFinalDeliverySections[0]],
+      traceEvidence: [`trace.step6.${index + 1}`],
+      noInventedUnavailableEvidence: true,
+      unavailableEvidenceInvented: false,
+      legacyFallbackUsed: false,
+      silentDurableWriteDetected: false,
+      localFixtureCreditedAsExternalLive: false,
+      externalLiveStatus: isLive ? input.liveStatus : "not_applicable",
+      externalLiveProviderKind: isLive ? input.liveProviderKind : null,
+      blockers:
+        isLive && input.liveStatus === "blocked_live_evidence" ? [...input.liveBlockers] : [],
+    };
+  });
+}
 
 function isChatScenarioId(id: string): boolean {
   return new Set([

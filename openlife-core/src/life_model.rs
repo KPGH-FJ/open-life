@@ -1642,6 +1642,18 @@ impl Default for LifeModelManager {
 }
 
 impl LifeModelManager {
+    pub fn load_existing(&self) -> Result<Option<LifeModel>> {
+        let path = self.data_dir.join("life_model.yaml");
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content =
+            fs::read_to_string(&path).with_context(|| format!("读取人生模型失败: {:?}", path))?;
+        let model: LifeModel =
+            serde_yaml::from_str(&content).with_context(|| "解析人生模型 YAML 失败")?;
+        Ok(Some(model))
+    }
+
     pub fn load(&self) -> Result<LifeModel> {
         let path = self.data_dir.join("life_model.yaml");
         if path.exists() {

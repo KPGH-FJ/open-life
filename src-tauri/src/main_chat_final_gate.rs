@@ -328,7 +328,7 @@ pub(crate) fn completed_main_chat_live_provider_eval_harness_report(
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MainChatLiveProviderScenarioReport {
     pub(crate) scenario: String,
@@ -540,6 +540,15 @@ pub(crate) fn command_surface_evidence_with_live_provider(
         && evidence.legacy_fallback_count == 0
         && evidence.silent_write_count == 0
         && evidence.send_stream_matrix_coverage >= 1.0
+        && evidence.kernel_backed_case_count >= evidence.total_cases.min(u32::MAX as usize) as u32
+        && evidence.kernel_direct_answer_case_count > 0
+        && evidence.kernel_read_only_tool_case_count > 0
+        && evidence.kernel_proposal_write_case_count > 0
+        && evidence.kernel_plan_execute_case_count > 0
+        && evidence.kernel_blocker_case_count > 0
+        && evidence.kernel_hs_context_case_count > 0
+        && evidence.kernel_web_tool_case_count > 0
+        && evidence.kernel_mcp_tool_case_count > 0
         && live_provider_ready;
     evidence
 }
@@ -680,7 +689,11 @@ pub(crate) fn main_chat_live_provider_report_blockers(
     if claims_live_completion && !report.model_invoked {
         push_live_provider_blocker(&mut blockers, "live_provider_model_not_invoked");
     }
-    if (claims_live_completion || report.model_invoked)
+    if (claims_live_completion
+        || report.model_invoked
+        || (report.live_provider_invocation_allowed
+            && report.main_chat_invoked
+            && report.provider_model.is_some()))
         && !live_provider_model_identity_trace_present(report)
     {
         push_live_provider_blocker(&mut blockers, "live_provider_model_identity_missing");

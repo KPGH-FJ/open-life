@@ -13,6 +13,174 @@ function formatTimingMs(ms?: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
+function sanitizeTraceText(value: string, maxLength: number): string {
+  const cleaned = value
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .replace(/\/Users\/[^\s]+/g, "[workspace path]")
+    .replace(/[A-Za-z]:\\[^\s]+/g, "[workspace path]")
+    .trim()
+    .slice(0, maxLength);
+  if (cleaned.startsWith("/") || /^[A-Za-z]:[\\/]/.test(cleaned)) {
+    return "workspace item";
+  }
+  return cleaned;
+}
+
+function boundedTraceString(value: unknown): string {
+  if (typeof value !== "string" && typeof value !== "boolean" && typeof value !== "number") {
+    return "";
+  }
+  return sanitizeTraceText(String(value), 140);
+}
+
+function boundedTraceText(value: unknown): string {
+  if (typeof value !== "string" && typeof value !== "boolean" && typeof value !== "number") {
+    return "";
+  }
+  return sanitizeTraceText(String(value), 900);
+}
+
+function traceStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(boundedTraceString).filter(Boolean).slice(0, 8);
+}
+
+function runtimeRouteRows(generation: any): Array<{ label: string; value: string }> {
+  if (!generation || typeof generation !== "object") return [];
+  const routeLabels = traceStringArray(generation.routeLabels);
+  const rows = routeLabels.map(label => {
+    const [prefix, ...rest] = label.split(":");
+    return {
+      label: prefix ? prefix.replace(/_/g, " ") : "route evidence",
+      value: rest.join(":").trim() || label,
+    };
+  });
+  const preflightStatus = boundedTraceString(generation.providerPreflightStatus);
+  if (preflightStatus) {
+    const blockers = traceStringArray(generation.providerPreflightBlockers).join(", ");
+    rows.push({
+      label: "provider preflight",
+      value: blockers ? `${preflightStatus} (${blockers})` : preflightStatus,
+    });
+  }
+  return rows.slice(0, 6);
+}
+
+function runtimeToolRows(generation: any): Array<{ label: string; value: string }> {
+  if (!generation || typeof generation !== "object") return [];
+  const rows = traceStringArray(generation.toolAvailabilityLabels).map(label => {
+    const [prefix, ...rest] = label.split(":");
+    return {
+      label: prefix ? prefix.replace(/_/g, " ") : "tool evidence",
+      value: rest.join(":").trim() || label,
+    };
+  });
+  const webPolicy = boundedTraceString(generation.toolWebPolicyAllowed);
+  const webReachability = boundedTraceString(generation.toolWebReachabilityStatus);
+  const webAvailable = boundedTraceString(generation.toolWebAvailable);
+  if (webPolicy || webReachability || webAvailable) {
+    rows.push({
+      label: "web availability",
+      value: [
+        webPolicy ? `policy=${webPolicy}` : "",
+        webReachability ? `reachability=${webReachability}` : "",
+        webAvailable ? `available=${webAvailable}` : "",
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    });
+  }
+  const mcpSafeReadCount = boundedTraceString(generation.toolMcpSafeReadCandidateCount);
+  const mcpServerStatus = boundedTraceString(generation.toolMcpServerStatus);
+  const mcpAvailable = boundedTraceString(generation.toolMcpAvailable);
+  if (mcpSafeReadCount || mcpServerStatus || mcpAvailable) {
+    rows.push({
+      label: "mcp availability",
+      value: [
+        mcpSafeReadCount ? `safeRead=${mcpSafeReadCount}` : "",
+        mcpServerStatus ? `server=${mcpServerStatus}` : "",
+        mcpAvailable ? `available=${mcpAvailable}` : "",
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    });
+  }
+  const writeAvailable = boundedTraceString(generation.toolWriteAvailable);
+  const writeRequiresPermission = boundedTraceString(generation.toolWriteRequiresPermission);
+  if (writeAvailable || writeRequiresPermission) {
+    rows.push({
+      label: "write policy",
+      value: [
+        writeAvailable ? `available=${writeAvailable}` : "",
+        writeRequiresPermission ? `requiresPermission=${writeRequiresPermission}` : "",
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    });
+  }
+  return rows.slice(0, 8);
+}
+
+function runtimeSelfStateRows(generation: any): Array<{ label: string; value: string }> {
+  if (!generation || typeof generation !== "object") return [];
+  const rows: Array<{ label: string; value: string }> = [];
+  const taskStatus = boundedTraceString(generation.taskStatus);
+  const runStatus = boundedTraceString(generation.runStatus);
+  const deliveryStatus = boundedTraceString(generation.deliveryStatus);
+  if (taskStatus || runStatus || deliveryStatus) {
+    rows.push({
+      label: "task status",
+      value: [
+        taskStatus ? `task=${taskStatus}` : "",
+        runStatus ? `run=${runStatus}` : "",
+        deliveryStatus ? `delivery=${deliveryStatus}` : "",
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    });
+  }
+  const pendingPermissionCount = boundedTraceString(generation.pendingPermissionCount);
+  const pendingProposalCount = boundedTraceString(generation.pendingProposalCount);
+  const durableChangeStatus = boundedTraceString(generation.durableChangeStatus);
+  if (pendingPermissionCount || pendingProposalCount || durableChangeStatus) {
+    rows.push({
+      label: "pending state",
+      value: [
+        pendingPermissionCount ? `permission=${pendingPermissionCount}` : "",
+        pendingProposalCount ? `proposal=${pendingProposalCount}` : "",
+        durableChangeStatus ? `durable=${durableChangeStatus}` : "",
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    });
+  }
+  const lastActionSummary = boundedTraceString(generation.lastActionSummary);
+  const observationCount = boundedTraceString(generation.observationCount);
+  if (lastActionSummary || observationCount) {
+    rows.push({
+      label: "last action",
+      value: [lastActionSummary, observationCount ? `observations=${observationCount}` : ""]
+        .filter(Boolean)
+        .join(" · "),
+    });
+  }
+  const traceGapCode = boundedTraceString(generation.traceGapCode);
+  if (generation.runtimeFactTraceGap === true || traceGapCode) {
+    rows.push({
+      label: "trace gap",
+      value: traceGapCode || "true",
+    });
+  }
+  const evidenceLabels = traceStringArray(generation.selfStateEvidenceLabels);
+  if (evidenceLabels.length > 0) {
+    rows.push({
+      label: "evidence",
+      value: evidenceLabels.join(", "),
+    });
+  }
+  return rows.slice(0, 8);
+}
+
 function LayerBlock({
   icon: Icon,
   label,
@@ -50,31 +218,45 @@ function LayerBlock({
 }
 
 export default function ReasoningTracePanel({ trace, show, onToggle }: Props) {
-  const meaningText =
+  const meaningText = boundedTraceText(
     trace.meaning_result?.text ??
-    (typeof trace.meaning_result === "string" ? trace.meaning_result : "");
-  const strategyText =
+      (typeof trace.meaning_result === "string" ? trace.meaning_result : "")
+  );
+  const strategyText = boundedTraceText(
     trace.strategy_result?.text ??
-    (typeof trace.strategy_result === "string" ? trace.strategy_result : "");
-  const generationText =
+      (typeof trace.strategy_result === "string" ? trace.strategy_result : "")
+  );
+  const generationText = boundedTraceText(
     trace.generation_result?.text ??
-    (typeof trace.generation_result === "string" ? trace.generation_result : "");
-  const alignedValues = trace.meaning_result?.aligned_values ?? [];
-  const alignedGoals = trace.strategy_result?.aligned_goals ?? [];
-  const planSteps = trace.strategy_result?.plan_steps ?? [];
-  const stableSteps = trace.stable_steps ?? [];
+      (typeof trace.generation_result === "string" ? trace.generation_result : "")
+  );
+  const outputText = boundedTraceText(trace.output);
+  const alignedValues = traceStringArray(trace.meaning_result?.aligned_values);
+  const alignedGoals = traceStringArray(trace.strategy_result?.aligned_goals);
+  const planSteps = traceStringArray(trace.strategy_result?.plan_steps);
+  const stableSteps = traceStringArray(trace.stable_steps);
   const needsTools = trace.strategy_result?.needs_tools;
-  const toolPlan = trace.tool_plan ?? trace.strategy_result?.suggested_tools ?? [];
-  const safetyCheckWarnings = trace.safety_check_result?.warnings ?? [];
+  const toolPlan = traceStringArray(trace.tool_plan ?? trace.strategy_result?.suggested_tools);
+  const safetyCheckWarnings = traceStringArray(trace.safety_check_result?.warnings);
+  const errorLabels = traceStringArray(trace.errors);
+  const runtimeRouteEvidenceRows = runtimeRouteRows(trace.generation_result);
+  const runtimeToolEvidenceRows = runtimeToolRows(trace.generation_result);
+  const runtimeSelfStateEvidenceRows = runtimeSelfStateRows(trace.generation_result);
+  const sourceChip = boundedTraceString(trace.generation_result?.uiPrimarySourceChip);
+  const uiStatus = boundedTraceString(trace.generation_result?.uiStatus);
+  const hasHiddenInput = typeof trace.input === "string" && trace.input.trim().length > 0;
   const hasContent =
-    trace.input ||
+    hasHiddenInput ||
     meaningText ||
     strategyText ||
     generationText ||
-    trace.output ||
+    runtimeRouteEvidenceRows.length > 0 ||
+    runtimeToolEvidenceRows.length > 0 ||
+    runtimeSelfStateEvidenceRows.length > 0 ||
+    outputText ||
     toolPlan.length > 0 ||
     safetyCheckWarnings.length > 0 ||
-    (trace.errors && trace.errors.length > 0);
+    errorLabels.length > 0;
 
   const totalMs = trace.layer_timings_ms
     ? Object.values(trace.layer_timings_ms).reduce((a, b) => a + (b || 0), 0)
@@ -89,6 +271,8 @@ export default function ReasoningTracePanel({ trace, show, onToggle }: Props) {
     Array.isArray(toolPlan) && toolPlan.length > 0
       ? `计划工具：${toolPlan.slice(0, 2).join("、")}`
       : "无需外部工具",
+    sourceChip ? `来源：${sourceChip}` : "",
+    uiStatus ? `状态：${uiStatus}` : "",
   ].filter(Boolean);
 
   return (
@@ -122,9 +306,9 @@ export default function ReasoningTracePanel({ trace, show, onToggle }: Props) {
             有 {safetyCheckWarnings.length} 条不确定性提醒
           </span>
         )}
-        {trace.errors && trace.errors.length > 0 && (
+        {errorLabels.length > 0 && (
           <span className="rounded-full bg-red-50 px-2.5 py-1 text-[10px] font-medium text-red-700 border border-red-100">
-            有 {trace.errors.length} 条错误
+            有 {errorLabels.length} 条错误
           </span>
         )}
       </div>
@@ -139,14 +323,14 @@ export default function ReasoningTracePanel({ trace, show, onToggle }: Props) {
                   思考你问题的过程。它不代表绝对判断，而是让你知道回答从哪里来、有哪些不确定性。
                 </p>
               </div>
-              {trace.input && (
+              {hasHiddenInput && (
                 <div className="rounded-lg border border-gray-200 bg-white/70 p-3">
                   <div className="flex items-center gap-2 font-medium text-gray-700">
                     <Terminal size={14} />
-                    输入
+                    输入已隐藏
                   </div>
                   <div className="mt-2 whitespace-pre-wrap text-xs leading-relaxed text-gray-800">
-                    {trace.input}
+                    原始输入不在 trace 中展示；请以结构化状态和证据字段为准。
                   </div>
                 </div>
               )}
@@ -238,6 +422,54 @@ export default function ReasoningTracePanel({ trace, show, onToggle }: Props) {
                   </div>
                 </div>
               )}
+              {runtimeRouteEvidenceRows.length > 0 && (
+                <div className="rounded-lg border border-cyan-100 bg-white/70 p-3">
+                  <div className="text-[11px] font-medium text-cyan-800">模型路线证据</div>
+                  <dl className="mt-2 space-y-1.5">
+                    {runtimeRouteEvidenceRows.map(row => (
+                      <div
+                        key={`${row.label}-${row.value}`}
+                        className="grid gap-1 text-xs text-gray-700 sm:grid-cols-[150px_1fr]"
+                      >
+                        <dt className="font-medium text-cyan-700">{row.label}</dt>
+                        <dd className="break-words">{row.value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </div>
+              )}
+              {runtimeToolEvidenceRows.length > 0 && (
+                <div className="rounded-lg border border-sky-100 bg-white/70 p-3">
+                  <div className="text-[11px] font-medium text-sky-800">工具可用性证据</div>
+                  <dl className="mt-2 space-y-1.5">
+                    {runtimeToolEvidenceRows.map(row => (
+                      <div
+                        key={`${row.label}-${row.value}`}
+                        className="grid gap-1 text-xs text-gray-700 sm:grid-cols-[150px_1fr]"
+                      >
+                        <dt className="font-medium text-sky-700">{row.label}</dt>
+                        <dd className="break-words">{row.value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </div>
+              )}
+              {runtimeSelfStateEvidenceRows.length > 0 && (
+                <div className="rounded-lg border border-teal-100 bg-white/70 p-3">
+                  <div className="text-[11px] font-medium text-teal-800">任务状态证据</div>
+                  <dl className="mt-2 space-y-1.5">
+                    {runtimeSelfStateEvidenceRows.map(row => (
+                      <div
+                        key={`${row.label}-${row.value}`}
+                        className="grid gap-1 text-xs text-gray-700 sm:grid-cols-[150px_1fr]"
+                      >
+                        <dt className="font-medium text-teal-700">{row.label}</dt>
+                        <dd className="break-words">{row.value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </div>
+              )}
               <LayerBlock
                 icon={Terminal}
                 label="组织回答"
@@ -246,14 +478,14 @@ export default function ReasoningTracePanel({ trace, show, onToggle }: Props) {
                 timingKey="Execution"
                 timings={trace.layer_timings_ms}
               />
-              {trace.output && (
+              {outputText && (
                 <div className="rounded-lg border border-emerald-200 bg-emerald-50/60 p-3">
                   <div className="flex items-center gap-2 font-medium text-emerald-800">
                     <Terminal size={14} />
                     最终输出
                   </div>
                   <div className="mt-2 whitespace-pre-wrap text-xs leading-relaxed text-emerald-900">
-                    {trace.output}
+                    {outputText}
                   </div>
                 </div>
               )}
@@ -270,14 +502,14 @@ export default function ReasoningTracePanel({ trace, show, onToggle }: Props) {
                   </ul>
                 </div>
               )}
-              {trace.errors && trace.errors.length > 0 && (
+              {errorLabels.length > 0 && (
                 <div className="rounded-lg border border-red-200 bg-red-50/70 p-3">
                   <div className="flex items-center gap-2 font-semibold text-red-700">
                     <AlertCircle size={14} />
                     错误
                   </div>
                   <ul className="mt-2 list-disc pl-4 text-red-700">
-                    {trace.errors.map((e, i) => (
+                    {errorLabels.map((e, i) => (
                       <li key={i}>{e}</li>
                     ))}
                   </ul>

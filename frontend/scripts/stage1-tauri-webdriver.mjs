@@ -32,6 +32,21 @@ const macosBlocker = "tauri_webdriver_macos_not_supported_by_tauri_driver";
 const reportPath = "frontend/test-results/main-chat-stage1-dogfood-report.json";
 const webdriverUrl = "http://127.0.0.1:4444";
 const frontendDevUrl = "http://127.0.0.1:5173";
+const D23_WEB_BLOCKER_SCRIPTED_RESPONSE = JSON.stringify({
+  final: "I will run the governed web read first.",
+  actions: [
+    {
+      name: "web.fetch",
+      action_type: "mcp_tool",
+      arguments: {
+        url: "http://127.0.0.1/stage1-dogfood-network-policy",
+        summarize: true,
+      },
+    },
+  ],
+  thought_summary: "Need a governed network-policy checked web fetch observation.",
+  warnings: [],
+});
 
 if (process.argv.includes("--validate-scenarios-only")) {
   console.log(`validated_stage1_dogfood_scenarios=${STAGE1_DOGFOOD_SCENARIOS.length}`);
@@ -375,18 +390,55 @@ async function executeChatScenarioWithWebDriver(sessionId, scenario, gateRow) {
 
 async function prepareStage1ScenarioNetworkPolicy(sessionId, scenario) {
   if (scenario.id !== "D23") return null;
-  return await tauriInvoke(sessionId, "set_main_chat_agent_stage1_browser_network_policy", {
-    enabled: false,
-  });
+  const previousNetworkPolicy = await tauriInvoke(
+    sessionId,
+    "set_main_chat_agent_stage1_browser_network_policy",
+    {
+      enabled: false,
+    }
+  );
+  const previousWebFixtureOutput = await tauriInvoke(
+    sessionId,
+    "set_main_chat_agent_stage1_browser_web_fixture_output",
+    {
+      output: null,
+    }
+  );
+  const previousScriptedResponse = await tauriInvoke(
+    sessionId,
+    "set_main_chat_agent_stage1_browser_scripted_response",
+    {
+      response: D23_WEB_BLOCKER_SCRIPTED_RESPONSE,
+    }
+  );
+  return {
+    previousNetworkPolicy,
+    previousWebFixtureOutput,
+    previousScriptedResponse,
+  };
 }
 
-async function restoreStage1ScenarioNetworkPolicy(sessionId, previousNetworkPolicy) {
-  if (previousNetworkPolicy === null || previousNetworkPolicy === undefined) return;
+async function restoreStage1ScenarioNetworkPolicy(sessionId, previousScenarioState) {
+  if (previousScenarioState === null || previousScenarioState === undefined) return;
   await tauriInvoke(sessionId, "set_main_chat_agent_stage1_browser_network_policy", {
-    enabled: Boolean(previousNetworkPolicy),
+    enabled: Boolean(previousScenarioState.previousNetworkPolicy),
   }).catch(error => {
     console.error(
       `[stage1_network_policy_restore:error] ${metadataSafeBlocker(error?.message ?? error)}`
+    );
+  });
+  await tauriInvoke(sessionId, "set_main_chat_agent_stage1_browser_web_fixture_output", {
+    output: previousScenarioState.previousWebFixtureOutput ?? null,
+  }).catch(error => {
+    console.error(
+      `[stage1_web_fixture_restore:error] ${metadataSafeBlocker(error?.message ?? error)}`
+    );
+  });
+  await tauriInvoke(sessionId, "set_main_chat_agent_stage1_browser_scripted_response", {
+    response: previousScenarioState.previousScriptedResponse ?? null,
+  }).catch(error => {
+    console.error(
+      `[stage1_scripted_response_restore:error] ${metadataSafeBlocker(error?.message ?? error)}`
     );
   });
 }
@@ -619,9 +671,20 @@ async function waitForControlPlaneDelivery(sessionId, previousTaskId, scenario) 
     return await waitForScript(
       sessionId,
       `
+        const openDiagnosticsIfPossible = () => {
+          const button = [...document.querySelectorAll('button')].find(item =>
+            item.getAttribute('aria-label') === 'Show Main Chat diagnostics' && !item.disabled
+          );
+          if (!button) return false;
+          button.click();
+          return true;
+        };
         const controls = [...document.querySelectorAll('[data-testid="agent-control-plane"]')];
         const control = controls.at(-1);
-        if (!control) return null;
+        if (!control) {
+          openDiagnosticsIfPossible();
+          return null;
+        }
         const expectedUiStates = arguments[1] ?? [];
         const taskSessionId = control.getAttribute('data-task-session-id') ?? '';
         const finalDelivery = control.getAttribute('data-final-delivery') === 'true';
@@ -890,17 +953,22 @@ async function observeFromControlPlaneWithWebDriver(
     taskSessionId: attrs.taskSessionId,
     task_session_id: attrs.taskSessionId,
   });
+  const taskDetail = await tauriInvoke(sessionId, "get_main_chat_agent_task_detail", {
+    taskSessionId: attrs.taskSessionId,
+    task_session_id: attrs.taskSessionId,
+  }).catch(() => null);
+  const evidence = mergeRuntimeEvidence(snapshot, taskDetail);
   const events = await taskEventsWithWebDriver(sessionId, attrs.taskSessionId);
   const text = attrs.text ?? "";
-  const visibleBlockers = visibleBlockersForScenario(scenario, snapshot);
+  const visibleBlockers = visibleBlockersForScenario(scenario, evidence);
   const visibleUiStates = scenario.expectedUiStates.filter(state =>
-    uiStateObserved(state, attrs, snapshot)
+    uiStateObserved(state, attrs, evidence)
   );
   const finalDeliverySections = scenario.expectedFinalSections.filter(section =>
     finalSectionObserved(
       section,
       attrs.finalDeliverySectionTitles,
-      snapshot,
+      evidence,
       visibleControlEvents,
       events
     )
@@ -916,7 +984,7 @@ async function observeFromControlPlaneWithWebDriver(
     routeStrategy: gateRow.routeStrategy,
     runtimeEvents: uniqueValues([
       ...events,
-      ...snapshotEvents(snapshot),
+      ...snapshotEvents(evidence),
       ...visibleControlEvents,
       runtimeStrategyEvent,
     ]),
@@ -928,7 +996,9 @@ async function observeFromControlPlaneWithWebDriver(
     finalDeliveryObserved: scenario.expectedFinalSections.every(section =>
       finalDeliverySections.includes(section)
     ),
-    nonFakeEvidenceObserved: Boolean(snapshot?.task?.taskId && attrs.taskSessionId),
+    nonFakeEvidenceObserved: Boolean(
+      (evidence?.task?.taskId || evidence?.taskSession?.id) && attrs.taskSessionId
+    ),
     legacyFallbackUsed: text.includes("Fallback notice"),
     silentDurableWriteDetected: false,
     fakeExecutionDetected: false,
@@ -1173,7 +1243,12 @@ function uiStateObserved(state, attrs, snapshot) {
     );
   }
   if (state === "blocked") {
-    return attrs.blockerCount > 0 || /blocked|waiting_permission/.test(attrs.taskStatus);
+    return (
+      attrs.blockerCount > 0 ||
+      runtimeBlockerEvidenceCount(snapshot) > 0 ||
+      /blocked|waiting_permission/.test(attrs.taskStatus) ||
+      /blocked|waiting_permission/.test(snapshot?.task?.status ?? snapshot?.taskSession?.status ?? "")
+    );
   }
   if (state === "retry_available") {
     return (
@@ -1309,14 +1384,15 @@ function finalSectionObserved(
       visibleTitles.includes("Pending user actions") ||
       arrayLength(deliveryMetrics, "pendingUserActions") > 0 ||
       (snapshot?.proposals?.length ?? 0) > 0 ||
-      (snapshot?.blockers?.length ?? 0) > 0
+      runtimeBlockerEvidenceCount(snapshot) > 0
     );
   }
   if (section === "blocked_work") {
     return (
       visibleTitles.includes("Blocked items") ||
       arrayLength(deliveryMetrics, "blockers") > 0 ||
-      (snapshot?.blockers?.length ?? 0) > 0
+      arrayLength(deliveryMetrics, "blockedItems") > 0 ||
+      runtimeBlockerEvidenceCount(snapshot) > 0
     );
   }
   if (section === "skipped_work") {
@@ -1345,13 +1421,92 @@ function finalSectionObserved(
 
 function visibleBlockersForScenario(scenario, evidence) {
   if (!scenario.expectedBlocker) return [];
-  const blockerEvidence =
-    (evidence?.blockers?.length ?? 0) > 0 ||
-    (evidence?.finalDelivery?.blockers?.length ?? 0) > 0 ||
-    (evidence?.final_delivery?.blockers?.length ?? 0) > 0 ||
-    (evidence?.finalDelivery?.metadata?.blockers?.length ?? 0) > 0 ||
-    (evidence?.final_delivery?.metadata?.blockers?.length ?? 0) > 0;
+  const blockerEvidence = runtimeBlockerEvidenceCount(evidence) > 0;
   return blockerEvidence ? [scenario.expectedBlocker] : [];
+}
+
+function mergeRuntimeEvidence(snapshot, detail) {
+  if (!detail) return snapshot;
+  const finalDelivery = snapshot?.finalDelivery ?? snapshot?.final_delivery;
+  const detailFinalDelivery = detail?.finalDelivery ?? detail?.final_delivery;
+  return {
+    ...(snapshot ?? {}),
+    task: snapshot?.task ?? {
+      taskId: detail?.taskSession?.id,
+      status: detail?.taskSession?.status,
+      controls: detail?.allowedControls ?? [],
+    },
+    taskSession: detail?.taskSession ?? snapshot?.taskSession,
+    blockers: uniqueRecords([...(snapshot?.blockers ?? []), ...(detail?.blockers ?? [])]),
+    proposals: uniqueRecords([...(snapshot?.proposals ?? []), ...(detail?.proposals ?? [])]),
+    finalDelivery: mergeFinalDeliveryEvidence(finalDelivery, detailFinalDelivery),
+    events: uniqueRecords([...(snapshot?.events ?? []), ...(detail?.events ?? [])]),
+    transcript: uniqueRecords([...(snapshot?.transcript ?? []), ...(detail?.transcript ?? [])]),
+    allowedControls: uniqueValues([
+      ...(snapshot?.allowedControls ?? []),
+      ...(detail?.allowedControls ?? []),
+    ]),
+    nextRecommendedControl: snapshot?.nextRecommendedControl ?? detail?.nextRecommendedControl,
+  };
+}
+
+function mergeFinalDeliveryEvidence(left, right) {
+  if (!left) return right;
+  if (!right) return left;
+  const leftMetadata = left.metadata && typeof left.metadata === "object" ? left.metadata : {};
+  const rightMetadata = right.metadata && typeof right.metadata === "object" ? right.metadata : {};
+  return {
+    ...left,
+    ...right,
+    metadata: {
+      ...leftMetadata,
+      ...rightMetadata,
+      blockers: uniqueRecords([...(leftMetadata.blockers ?? []), ...(rightMetadata.blockers ?? [])]),
+      blockedItems: uniqueRecords([
+        ...(leftMetadata.blockedItems ?? []),
+        ...(rightMetadata.blockedItems ?? []),
+      ]),
+      pendingUserActions: uniqueRecords([
+        ...(leftMetadata.pendingUserActions ?? []),
+        ...(rightMetadata.pendingUserActions ?? []),
+      ]),
+    },
+    blockers: uniqueRecords([...(left.blockers ?? []), ...(right.blockers ?? [])]),
+    blockedItems: uniqueRecords([...(left.blockedItems ?? []), ...(right.blockedItems ?? [])]),
+    pendingUserActions: uniqueRecords([
+      ...(left.pendingUserActions ?? []),
+      ...(right.pendingUserActions ?? []),
+    ]),
+    nextSteps: uniqueRecords([...(left.nextSteps ?? []), ...(right.nextSteps ?? [])]),
+  };
+}
+
+function runtimeBlockerEvidenceCount(evidence) {
+  const delivery = evidence?.finalDelivery ?? evidence?.final_delivery;
+  const deliveryMetrics =
+    delivery?.metadata && typeof delivery.metadata === "object"
+      ? { ...delivery, ...delivery.metadata }
+      : delivery;
+  return (
+    arrayLength(evidence, "blockers") +
+    arrayLength(evidence, "pendingBlockers") +
+    arrayLength(evidence?.task, "pendingBlockers") +
+    arrayLength(evidence?.taskSession, "pendingBlockers") +
+    arrayLength(deliveryMetrics, "blockers") +
+    arrayLength(deliveryMetrics, "blockedItems") +
+    arrayLength(deliveryMetrics, "pendingUserActions")
+  );
+}
+
+function uniqueRecords(values) {
+  const seen = new Set();
+  return (values ?? []).filter(value => {
+    if (value === null || value === undefined) return false;
+    const key = JSON.stringify(value);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function arrayLength(value, key) {

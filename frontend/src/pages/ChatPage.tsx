@@ -99,6 +99,7 @@ import type {
   MainChatTaskDetail,
   MainChatAgentStateSnapshot,
   MainChatAgentDurableEvent,
+  MainChatKernelEvent,
   MainChatSkillSummary,
   MainChatSkillDetail,
   MainChatSelectedSkill,
@@ -127,6 +128,7 @@ import ReasoningTracePanel from "../components/ReasoningTracePanel";
 import ToolCallCard from "../components/ToolCallCard";
 import AgentStateIndicator from "../components/AgentStateIndicator";
 import AgentControlPlane from "../components/AgentControlPlane";
+import MainChatExecutionEvidence from "../components/MainChatExecutionEvidence";
 import type { AgentStageState } from "../components/AgentStage";
 import RuntimeDisclosureStrip from "../components/RuntimeDisclosureStrip";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
@@ -210,6 +212,7 @@ function CompanionTaskControlStrip({
   const status = taskState?.session?.status?.replace(/_/g, " ") ?? "读取任务状态";
   const activeToolCount = taskState?.activeToolCount ?? 0;
   const pendingApprovalCount = taskState?.pendingApprovalCount ?? 0;
+  const displayError = error ? boundedProductText(error) || "Action failed" : "";
 
   return (
     <div
@@ -268,7 +271,9 @@ function CompanionTaskControlStrip({
       {taskState?.session?.currentPlanSummary && (
         <div className="mt-2 truncate text-stone-600">{taskState.session.currentPlanSummary}</div>
       )}
-      {error && <div className="mt-2 rounded-md bg-rose-50 px-2 py-1 text-rose-800">{error}</div>}
+      {displayError && (
+        <div className="mt-2 rounded-md bg-rose-50 px-2 py-1 text-rose-800">{displayError}</div>
+      )}
     </div>
   );
 }
@@ -441,6 +446,477 @@ const CHAT_PREVIEW_SAFE_SUMMARY_KEYS = [
 
 function classNames(...classes: (string | false | undefined)[]) {
   return classes.filter(Boolean).join(" ");
+}
+
+type MainChatAgentProductStatus =
+  | "completed"
+  | "running"
+  | "waiting_for_user"
+  | "restricted"
+  | "blocked"
+  | "trace_gap"
+  | "proposal_pending"
+  | "permission_pending";
+
+type MainChatAgentProductAction =
+  | "review_proposal"
+  | "review_permission"
+  | "resume"
+  | "retry"
+  | "cancel"
+  | "refresh_context"
+  | "show_trace";
+
+type MainChatAgentStatusView = {
+  status: MainChatAgentProductStatus;
+  label: string;
+  detail: string;
+  sourceLabel: string;
+  tone: "success" | "info" | "warning" | "danger" | "neutral";
+  blockerLabels: string[];
+  pendingProposalCount: number;
+  pendingPermissionCount: number;
+  actions: MainChatAgentProductAction[];
+  taskSessionId?: string;
+};
+
+function boundedProductLabel(value: unknown, maxLength = 88): string {
+  if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
+    return "";
+  }
+  const label = String(value)
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!label) return "";
+  if (
+    label.startsWith("/") ||
+    /^[A-Za-z]:[\\/]/.test(label) ||
+    label.includes("/Users/") ||
+    label.includes("\\Users\\")
+  ) {
+    return "workspace item";
+  }
+  return label.slice(0, maxLength);
+}
+
+function productStringArray(value: unknown, maxItems = 6): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map(item => boundedProductLabel(item))
+    .filter(Boolean)
+    .slice(0, maxItems);
+}
+
+function boundedProductText(value: unknown, maxLength = 180): string {
+  if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") {
+    return "";
+  }
+  return String(value)
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .replace(/\/Users\/[^\s]+/g, "[workspace path]")
+    .replace(/[A-Za-z]:\\[^\s]+/g, "[workspace path]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
+function productCount(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, value);
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return Math.max(0, parsed);
+  }
+  return 0;
+}
+
+function includesAnyControl(controls: string[], candidates: string[]): boolean {
+  const normalized = new Set(controls.map(control => control.trim().toLowerCase()));
+  return candidates.some(candidate => normalized.has(candidate));
+}
+
+function productStatusLabel(status: MainChatAgentProductStatus): string {
+  switch (status) {
+    case "completed":
+      return "Completed";
+    case "running":
+      return "Running";
+    case "waiting_for_user":
+      return "Waiting for you";
+    case "restricted":
+      return "Restricted";
+    case "blocked":
+      return "Blocked";
+    case "trace_gap":
+      return "Evidence missing";
+    case "proposal_pending":
+      return "Proposal pending";
+    case "permission_pending":
+      return "Permission pending";
+    default:
+      return "Task status";
+  }
+}
+
+function productStatusTone(status: MainChatAgentProductStatus): MainChatAgentStatusView["tone"] {
+  switch (status) {
+    case "completed":
+      return "success";
+    case "running":
+      return "info";
+    case "restricted":
+    case "blocked":
+      return "danger";
+    case "waiting_for_user":
+    case "proposal_pending":
+    case "permission_pending":
+    case "trace_gap":
+      return "warning";
+    default:
+      return "neutral";
+  }
+}
+
+function isRestrictedEvidence(uiStatus: string, blockerLabels: string[]): boolean {
+  if (uiStatus === "restricted") return true;
+  return blockerLabels.some(label =>
+    /(policy|permission|provider|network|mcp|web|restricted|not_allowed|blocked_by)/i.test(label)
+  );
+}
+
+export function buildMainChatAgentStatusView({
+  reasoningTrace,
+  taskState,
+  agentState,
+  pendingProposals,
+  sending,
+  canCancel,
+}: {
+  reasoningTrace: ReasoningTrace | null;
+  taskState: MainChatAgentTaskState | null;
+  agentState: MainChatAgentStateSnapshot | null;
+  pendingProposals: AgentProposal[];
+  sending: boolean;
+  canCancel: boolean;
+}): MainChatAgentStatusView | null {
+  const generation =
+    reasoningTrace?.generation_result &&
+    typeof reasoningTrace.generation_result === "object" &&
+    !Array.isArray(reasoningTrace.generation_result)
+      ? reasoningTrace.generation_result
+      : null;
+  const taskStatus = boundedProductLabel(
+    generation?.taskStatus || taskState?.session?.status || agentState?.task.status
+  );
+  const runStatus = boundedProductLabel(generation?.runStatus);
+  const deliveryStatus = boundedProductLabel(
+    generation?.deliveryStatus || agentState?.finalDelivery?.status
+  );
+  const uiStatus = boundedProductLabel(generation?.uiStatus);
+  const sourceLabel =
+    boundedProductLabel(generation?.uiPrimarySourceChip) ||
+    boundedProductLabel(generation?.sourceType) ||
+    (agentState?.route.strategy ? formatMainChatStrategy(agentState.route.strategy as any) : "") ||
+    (taskState?.session?.selectedStrategy
+      ? formatMainChatStrategy(taskState.session.selectedStrategy)
+      : "") ||
+    "Structured task evidence";
+  const taskSessionId = currentTaskSessionIdFromView(taskState, agentState);
+  const runId = agentState?.task.runId;
+  const matchingPendingProposalCount = pendingProposals.filter(
+    proposal =>
+      proposal.status === "pending" &&
+      ((taskSessionId && proposal.sourceDetail === taskSessionId) ||
+        (runId && proposal.runId === runId))
+  ).length;
+  const pendingProposalCount = Math.max(
+    productCount(generation?.pendingProposalCount),
+    matchingPendingProposalCount,
+    agentState?.proposals.filter(proposal => proposal.status === "pending").length ?? 0
+  );
+  const pendingPermissionCount = Math.max(
+    productCount(generation?.pendingPermissionCount),
+    taskState?.pendingApprovalCount ?? 0,
+    taskState?.actions.filter(action => action.status === "pending_permission").length ?? 0,
+    agentState?.proposals.filter(
+      proposal => proposal.status === "pending" && proposal.proposalType === "tool_permission"
+    ).length ?? 0
+  );
+  const safeNextControls = productStringArray(generation?.safeNextControls);
+  const taskControls = [
+    ...(agentState?.task.controls ?? []),
+    ...safeNextControls,
+    ...(taskState?.canResume ? ["resume"] : []),
+    ...(taskState?.canRetry ? ["retry"] : []),
+    ...(canCancel ? ["cancel"] : []),
+  ];
+  const blockerLabels = Array.from(
+    new Set(
+      [
+        ...productStringArray(generation?.blockerCodes),
+        ...productStringArray(taskState?.session?.pendingBlockers),
+        ...(agentState?.blockers ?? []).map(blocker => boundedProductLabel(blocker.reasonCode)),
+      ].filter(Boolean)
+    )
+  ).slice(0, 4);
+  const hasTraceGap = generation?.runtimeFactTraceGap === true || Boolean(generation?.traceGapCode);
+  const hasCompletedEvidence =
+    generation?.completedResponse === true ||
+    generation?.finalDeliveryEvidence === true ||
+    taskStatus === "completed" ||
+    runStatus === "completed" ||
+    deliveryStatus === "delivered" ||
+    deliveryStatus === "completed" ||
+    agentState?.finalDelivery?.status === "delivered";
+
+  let status: MainChatAgentProductStatus | null = null;
+  if (pendingPermissionCount > 0) {
+    status = "permission_pending";
+  } else if (pendingProposalCount > 0) {
+    status = "proposal_pending";
+  } else if (hasTraceGap) {
+    status = "trace_gap";
+  } else if (isRestrictedEvidence(uiStatus, blockerLabels)) {
+    status = "restricted";
+  } else if (taskStatus === "blocked" || blockerLabels.length > 0) {
+    status = "blocked";
+  } else if (taskStatus === "waiting_permission" || taskStatus === "waiting_for_user") {
+    status = "waiting_for_user";
+  } else if (sending || taskStatus === "running" || runStatus === "running") {
+    status = "running";
+  } else if (hasCompletedEvidence) {
+    status = "completed";
+  }
+
+  if (!status && !generation && !taskState?.session && !agentState) return null;
+  const resolvedStatus = status ?? "trace_gap";
+  const actions: MainChatAgentProductAction[] = [];
+  if (pendingProposalCount > 0) actions.push("review_proposal");
+  if (pendingPermissionCount > 0) actions.push("review_permission");
+  if (includesAnyControl(taskControls, ["resume", "resume_task", "resume_agent_task"])) {
+    actions.push("resume");
+  }
+  if (includesAnyControl(taskControls, ["retry", "retry_action", "retry_failed_action"])) {
+    actions.push("retry");
+  }
+  if (includesAnyControl(taskControls, ["cancel", "cancel_task"])) {
+    actions.push("cancel");
+  }
+  if (taskSessionId && includesAnyControl(taskControls, ["refresh_context"])) {
+    actions.push("refresh_context");
+  }
+  if (reasoningTrace) actions.push("show_trace");
+
+  const detail =
+    resolvedStatus === "completed"
+      ? "Structured run or delivery evidence says this task is complete."
+      : resolvedStatus === "running"
+        ? "The agent is still executing or streaming; no completion claim yet."
+        : resolvedStatus === "permission_pending"
+          ? "A tool or action needs explicit permission before it can continue."
+          : resolvedStatus === "proposal_pending"
+            ? "A proposed durable change is waiting for review; it is not written yet."
+            : resolvedStatus === "restricted"
+              ? "Policy, provider, web, or MCP availability blocked part of this task."
+              : resolvedStatus === "blocked"
+                ? "The task cannot progress without a supported recovery action."
+                : resolvedStatus === "trace_gap"
+                  ? "Required task evidence is missing, so OpenLife will not infer what happened."
+                  : "The agent is waiting for your decision before continuing.";
+
+  return {
+    status: resolvedStatus,
+    label: productStatusLabel(resolvedStatus),
+    detail,
+    sourceLabel,
+    tone: productStatusTone(resolvedStatus),
+    blockerLabels,
+    pendingProposalCount,
+    pendingPermissionCount,
+    actions: Array.from(new Set(actions)),
+    taskSessionId,
+  };
+}
+
+function currentTaskSessionIdFromView(
+  taskState: MainChatAgentTaskState | null,
+  agentState: MainChatAgentStateSnapshot | null
+): string | undefined {
+  return taskState?.session?.id ?? agentState?.task.taskId;
+}
+
+function mainChatAgentStatusClass(tone: MainChatAgentStatusView["tone"]): string {
+  switch (tone) {
+    case "success":
+      return "border-emerald-200 bg-emerald-50 text-emerald-900";
+    case "info":
+      return "border-blue-200 bg-blue-50 text-blue-900";
+    case "warning":
+      return "border-amber-200 bg-amber-50 text-amber-950";
+    case "danger":
+      return "border-rose-200 bg-rose-50 text-rose-900";
+    default:
+      return "border-stone-200 bg-stone-50 text-stone-800";
+  }
+}
+
+function MainChatAgentStatusSurface({
+  view,
+  busy,
+  error,
+  onResume,
+  onRetry,
+  onCancel,
+  onRefreshContext,
+  onShowTrace,
+}: {
+  view: MainChatAgentStatusView;
+  busy: boolean;
+  error: string | null;
+  onResume: () => void;
+  onRetry: () => void;
+  onCancel: () => void;
+  onRefreshContext: () => void;
+  onShowTrace: () => void;
+}) {
+  const statusClass = mainChatAgentStatusClass(view.tone);
+  const hasAction = (action: MainChatAgentProductAction) => view.actions.includes(action);
+  const displayError = error ? boundedProductText(error) || "Action failed" : "";
+
+  return (
+    <section
+      data-testid="main-chat-agent-status"
+      data-agent-product-status={view.status}
+      aria-label="Agent task status"
+      className="px-4 py-2"
+    >
+      <div className={`max-w-2xl rounded-lg border px-3 py-2 text-xs shadow-sm ${statusClass}`}>
+        <div className="flex flex-wrap items-start gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex min-h-6 items-center rounded-md bg-white/80 px-2 font-semibold">
+                {view.label}
+              </span>
+              <span className="inline-flex min-h-6 items-center rounded-md border border-white/70 bg-white/60 px-2 font-medium">
+                {view.sourceLabel}
+              </span>
+              {view.pendingProposalCount > 0 && (
+                <span className="inline-flex min-h-6 items-center rounded-md border border-white/70 bg-white/60 px-2 font-medium">
+                  {view.pendingProposalCount} proposal
+                </span>
+              )}
+              {view.pendingPermissionCount > 0 && (
+                <span className="inline-flex min-h-6 items-center rounded-md border border-white/70 bg-white/60 px-2 font-medium">
+                  {view.pendingPermissionCount} permission
+                </span>
+              )}
+            </div>
+            <div className="mt-1 leading-5">{view.detail}</div>
+            {view.blockerLabels.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1">
+                {view.blockerLabels.map(label => (
+                  <span
+                    key={label}
+                    className="inline-flex min-h-5 items-center rounded-md border border-white/80 bg-white/70 px-1.5 font-medium"
+                  >
+                    {label}
+                  </span>
+                ))}
+              </div>
+            )}
+            {displayError && (
+              <div className="mt-2 rounded-md border border-rose-200 bg-white/70 px-2 py-1 text-rose-800">
+                {displayError}
+              </div>
+            )}
+          </div>
+          <div className="flex shrink-0 flex-wrap justify-end gap-1">
+            {hasAction("review_proposal") && (
+              <Link
+                to="/review"
+                state={{ mainChatTaskSessionId: view.taskSessionId, returnTo: "/chat" }}
+                aria-label="Review proposal"
+                className="inline-flex min-h-7 items-center gap-1 rounded-md border border-white/80 bg-white px-2 font-semibold text-stone-800 hover:bg-stone-50"
+              >
+                <FileText size={13} />
+                Proposal
+              </Link>
+            )}
+            {hasAction("review_permission") && (
+              <Link
+                to="/review"
+                state={{ mainChatTaskSessionId: view.taskSessionId, returnTo: "/chat" }}
+                aria-label="Review permission"
+                className="inline-flex min-h-7 items-center gap-1 rounded-md border border-white/80 bg-white px-2 font-semibold text-stone-800 hover:bg-stone-50"
+              >
+                <ShieldCheck size={13} />
+                Permission
+              </Link>
+            )}
+            {hasAction("resume") && (
+              <button
+                type="button"
+                aria-label="Resume current task"
+                title="Resume current task"
+                disabled={busy}
+                onClick={onResume}
+                className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-white/80 bg-white text-stone-800 hover:bg-stone-50 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <Play size={14} />
+              </button>
+            )}
+            {hasAction("retry") && (
+              <button
+                type="button"
+                aria-label="Retry current action"
+                title="Retry current action"
+                disabled={busy}
+                onClick={onRetry}
+                className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-white/80 bg-white text-stone-800 hover:bg-stone-50 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <RotateCw size={14} />
+              </button>
+            )}
+            {hasAction("cancel") && (
+              <button
+                type="button"
+                aria-label="Cancel current task"
+                title="Cancel current task"
+                disabled={busy}
+                onClick={onCancel}
+                className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-white/80 bg-white text-stone-800 hover:bg-stone-50 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <Ban size={14} />
+              </button>
+            )}
+            {hasAction("refresh_context") && (
+              <button
+                type="button"
+                aria-label="Refresh current task context"
+                title="Refresh current task context"
+                disabled={busy}
+                onClick={onRefreshContext}
+                className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-white/80 bg-white text-stone-800 hover:bg-stone-50 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <RotateCw size={14} className={busy ? "animate-spin" : ""} />
+              </button>
+            )}
+            {hasAction("show_trace") && (
+              <button
+                type="button"
+                aria-label="Show structured trace"
+                title="Show structured trace"
+                onClick={onShowTrace}
+                className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-white/80 bg-white text-stone-800 hover:bg-stone-50"
+              >
+                <ExternalLink size={14} />
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
 }
 
 function formatMainChatStrategy(
@@ -697,6 +1173,8 @@ export default function ChatPage({
   const [currentAgentState, setCurrentAgentState] = useState<MainChatAgentStateSnapshot | null>(
     null
   );
+  const [currentKernelEvents, setCurrentKernelEvents] = useState<MainChatKernelEvent[]>([]);
+  const [showMainChatDiagnostics, setShowMainChatDiagnostics] = useState(false);
   const [agentEventStreamState, setAgentEventStreamState] =
     useState<MainChatEventStreamViewState | null>(null);
   const [agentTaskControlBusy, setAgentTaskControlBusy] = useState(false);
@@ -758,6 +1236,7 @@ export default function ChatPage({
   const appliedMainChatEventIdsRef = useRef<Set<string>>(new Set());
   const lastAppliedMainChatEventSequenceRef = useRef(0);
   const currentAgentTaskSessionIdRef = useRef<string | null>(null);
+  const currentKernelEventSessionRef = useRef<string | null>(null);
   const lastUserMessageRef = useRef<ChatMessage | null>(null);
   const currentSessionIdRef = useRef<string>(currentSessionId);
   const promotedControlledPilotKeysRef = useRef<Record<string, boolean>>({});
@@ -772,6 +1251,8 @@ export default function ChatPage({
       setCurrentAgentState(snapshot);
       if (!snapshot) {
         currentAgentTaskSessionIdRef.current = null;
+        currentKernelEventSessionRef.current = null;
+        setCurrentKernelEvents([]);
         lastAppliedMainChatEventSequenceRef.current = 0;
         appliedMainChatEventIdsRef.current = new Set();
         setAgentEventStreamState(null);
@@ -915,6 +1396,17 @@ export default function ChatPage({
     },
     [applyMainChatAgentEvents, applyMainChatAgentStateSnapshot]
   );
+
+  const handleMainChatKernelEvent = useCallback((event: MainChatKernelEvent) => {
+    if (event.type === "turn_started") {
+      if (event.session_id !== currentSessionIdRef.current) return;
+      currentKernelEventSessionRef.current = event.session_id;
+      setCurrentKernelEvents([event]);
+      return;
+    }
+    if (currentKernelEventSessionRef.current !== currentSessionIdRef.current) return;
+    setCurrentKernelEvents(prev => [...prev, event].slice(-40));
+  }, []);
 
   const emitCompanionStage = useCallback(
     (state: AgentStageState) => {
@@ -1220,6 +1712,7 @@ export default function ChatPage({
     let unlistenDone: (() => void) | null = null;
     let unlistenError: (() => void) | null = null;
     let unlistenAgentEvent: (() => void) | null = null;
+    let unlistenKernelEvent: (() => void) | null = null;
 
     (async () => {
       unlistenAgentEvent = await listen<MainChatAgentDurableEvent>(
@@ -1228,6 +1721,9 @@ export default function ChatPage({
           await handleMainChatAgentEvent(event.payload);
         }
       );
+      unlistenKernelEvent = await listen<MainChatKernelEvent>("main-chat-kernel-event", event => {
+        handleMainChatKernelEvent(event.payload);
+      });
       unlistenStart = await listen<StreamMessageStartPayload>(
         "stream-message-start",
         async event => {
@@ -1347,12 +1843,14 @@ export default function ChatPage({
       if (unlistenDone) unlistenDone();
       if (unlistenError) unlistenError();
       if (unlistenAgentEvent) unlistenAgentEvent();
+      if (unlistenKernelEvent) unlistenKernelEvent();
     };
   }, [
     applyMainChatAgentStateSnapshot,
     currentSessionId,
     emitCompanionStage,
     handleMainChatAgentEvent,
+    handleMainChatKernelEvent,
   ]);
 
   const togglePreferLocal = async () => {
@@ -1606,6 +2104,7 @@ export default function ChatPage({
     setShowToolCalls(false);
     setCurrentAgentIngress(null);
     applyMainChatAgentStateSnapshot(null);
+    setShowMainChatDiagnostics(false);
     setCurrentExecutionTranscript([]);
     setCurrentAgentTaskState(null);
     setAgentTaskControlError(null);
@@ -1714,6 +2213,7 @@ export default function ChatPage({
     setShowToolCalls(false);
     setCurrentAgentIngress(null);
     applyMainChatAgentStateSnapshot(null);
+    setShowMainChatDiagnostics(false);
     setCurrentExecutionTranscript([]);
     setCurrentAgentTaskState(null);
     setAgentTaskControlError(null);
@@ -1963,6 +2463,33 @@ export default function ChatPage({
     }
   }, [agentTaskControlBusy, currentMainChatTaskSessionId, refreshMainChatControlState]);
 
+  const handleRefreshCurrentMainChatTaskContext = useCallback(async () => {
+    const taskSessionId = currentMainChatTaskSessionId();
+    if (!taskSessionId || agentTaskControlBusy) return;
+    setAgentTaskControlBusy(true);
+    setAgentTaskControlError(null);
+    try {
+      const detail = await refreshMainChatAgentTaskContext(taskSessionId);
+      setTaskContinuityDetail(detail);
+      await loadMainChatTaskState(taskSessionId, currentSessionIdRef.current);
+      await loadTaskContinuityList();
+    } catch (error) {
+      setAgentTaskControlError(`Refresh context failed: ${readablePreviewError(error)}`);
+    } finally {
+      setAgentTaskControlBusy(false);
+    }
+  }, [
+    agentTaskControlBusy,
+    currentMainChatTaskSessionId,
+    loadMainChatTaskState,
+    loadTaskContinuityList,
+  ]);
+
+  const handleShowMainChatStructuredTrace = useCallback(() => {
+    setShowMainChatDiagnostics(true);
+    setShowReasoningTrace(true);
+  }, []);
+
   useEffect(() => {
     if (!companionMode || !sending) return;
     const taskSessionId = currentMainChatTaskSessionId();
@@ -2001,6 +2528,9 @@ export default function ChatPage({
       const state = await cancelMainChatAgentTask(taskSessionId);
       setCurrentAgentTaskState(state);
       setCurrentExecutionTranscript(state.transcript ?? []);
+      setSending(false);
+      setStreamingReply("");
+      setStreamInterrupted(false);
     } catch (e) {
       setAgentTaskControlError(`Cancel failed: ${readablePreviewError(e)}`);
     } finally {
@@ -2147,6 +2677,41 @@ export default function ChatPage({
       loadTaskContinuityDetail,
       loadTaskContinuityList,
       taskContinuityBusy,
+      taskContinuityDetail?.taskSession.id,
+    ]
+  );
+
+  const handleAcceptTaskContinuityProposal = useCallback(
+    async (proposalId: string) => {
+      const taskSessionId = taskContinuityDetail?.taskSession.id;
+      const proposal = taskContinuityDetail?.proposals.find(item => item.id === proposalId);
+      if (!taskSessionId || taskContinuityBusy) return;
+      if (proposal?.proposalType !== "tool_permission") {
+        setTaskContinuityError("Accept proposal is only available for ToolPermission task resume.");
+        return;
+      }
+      setTaskContinuityBusy(true);
+      setTaskContinuityError(null);
+      try {
+        await acceptProposal(proposalId);
+        const state = await resumeMainChatAgentTask(taskSessionId);
+        setCurrentAgentTaskState(state);
+        setCurrentExecutionTranscript(state.transcript ?? []);
+        await loadTaskContinuityDetail(taskSessionId);
+        await loadTaskContinuityList();
+        await refreshPendingProposals();
+      } catch (e) {
+        setTaskContinuityError(`Accept proposal failed: ${readablePreviewError(e)}`);
+      } finally {
+        setTaskContinuityBusy(false);
+      }
+    },
+    [
+      loadTaskContinuityDetail,
+      loadTaskContinuityList,
+      refreshPendingProposals,
+      taskContinuityBusy,
+      taskContinuityDetail?.proposals,
       taskContinuityDetail?.taskSession.id,
     ]
   );
@@ -2920,6 +3485,48 @@ export default function ChatPage({
     [messages, currentSessionId]
   );
 
+  const hasMainChatExecutionEvidence =
+    Boolean(currentAgentState) ||
+    Boolean(currentAgentTaskState?.session) ||
+    currentKernelEvents.length > 0 ||
+    toolCalls.length > 0;
+  const hasMainChatDiagnostics =
+    Boolean(currentAgentState) ||
+    Boolean(currentAgentIngress) ||
+    Boolean(currentRun) ||
+    Boolean(reasoningTrace) ||
+    currentExecutionTranscript.length > 0 ||
+    Boolean(agentEventStreamState?.events.length) ||
+    Boolean(stage5Preflight || stage5LatestBundle || stage5LatestIssue || stage5Artifacts.length) ||
+    toolCalls.length > 0;
+  const canCancelCurrentMainChatTask = Boolean(
+    currentAgentTaskState?.canCancel ||
+    currentAgentState?.task.controls.includes("cancel_task") ||
+    currentAgentState?.task.controls.includes("cancel")
+  );
+  const mainChatAgentStatusView = useMemo(
+    () =>
+      buildMainChatAgentStatusView({
+        reasoningTrace,
+        taskState: currentAgentTaskState,
+        agentState: currentAgentState,
+        pendingProposals,
+        sending,
+        canCancel: canCancelCurrentMainChatTask,
+      }),
+    [
+      canCancelCurrentMainChatTask,
+      currentAgentState,
+      currentAgentTaskState,
+      pendingProposals,
+      reasoningTrace,
+      sending,
+    ]
+  );
+  const safeAgentTaskControlError = agentTaskControlError
+    ? boundedProductText(agentTaskControlError) || "Action failed"
+    : null;
+
   return (
     <div
       data-testid={companionMode ? "companion-chat-runtime" : "chat-page"}
@@ -3634,7 +4241,7 @@ export default function ChatPage({
               </div>
             </div>
           )}
-          {!companionMode && reasoningTrace && (
+          {!companionMode && showMainChatDiagnostics && reasoningTrace && (
             <div className="flex justify-start">
               <ReasoningTracePanel
                 trace={reasoningTrace}
@@ -3643,7 +4250,7 @@ export default function ChatPage({
               />
             </div>
           )}
-          {!companionMode && toolCalls.length > 0 && (
+          {!companionMode && showMainChatDiagnostics && toolCalls.length > 0 && (
             <div className="flex justify-start">
               <div className="max-w-2xl px-4 py-3 rounded-xl text-sm bg-gray-50 text-gray-900 border border-gray-200 w-full">
                 <button
@@ -3932,18 +4539,46 @@ export default function ChatPage({
               </div>
             </div>
           )}
+          {!companionMode && mainChatAgentStatusView && (
+            <MainChatAgentStatusSurface
+              view={mainChatAgentStatusView}
+              busy={agentTaskControlBusy}
+              error={safeAgentTaskControlError}
+              onResume={handleResumeMainChatTask}
+              onRetry={() => handleRetryMainChatAction()}
+              onCancel={handleCancelMainChatTask}
+              onRefreshContext={handleRefreshCurrentMainChatTaskContext}
+              onShowTrace={handleShowMainChatStructuredTrace}
+            />
+          )}
+          {!companionMode && hasMainChatExecutionEvidence && (
+            <MainChatExecutionEvidence
+              state={currentAgentState}
+              taskState={currentAgentTaskState}
+              kernelEvents={currentKernelEvents}
+              toolCalls={toolCalls}
+              sending={sending}
+              diagnosticsOpen={showMainChatDiagnostics}
+              hasDiagnostics={hasMainChatDiagnostics}
+              canCancel={canCancelCurrentMainChatTask}
+              cancelBusy={agentTaskControlBusy}
+              cancelError={safeAgentTaskControlError}
+              onCancel={handleCancelMainChatTask}
+              onToggleDiagnostics={() => setShowMainChatDiagnostics(open => !open)}
+            />
+          )}
           {companionMode && (sending || currentAgentTaskState) && (
             <CompanionTaskControlStrip
               taskState={currentAgentTaskState}
               busy={agentTaskControlBusy}
-              error={agentTaskControlError}
+              error={safeAgentTaskControlError}
               onResume={handleResumeMainChatTask}
               onRetry={() => handleRetryMainChatAction()}
               onCancel={handleCancelMainChatTask}
               onRefresh={handleRefreshCurrentMainChatTask}
             />
           )}
-          {!companionMode && currentAgentState && (
+          {!companionMode && showMainChatDiagnostics && currentAgentState && (
             <div className="px-4 py-2">
               <AgentControlPlane
                 state={currentAgentState}
@@ -3980,251 +4615,259 @@ export default function ChatPage({
                   error: stage5DebugError,
                 }}
               />
-              {agentTaskControlError && (
+              {safeAgentTaskControlError && (
                 <div className="border-b border-rose-200 bg-rose-50 px-4 py-2 text-xs text-rose-800">
-                  {agentTaskControlError}
+                  {safeAgentTaskControlError}
                 </div>
               )}
             </div>
           )}
-          {!companionMode && !currentAgentState && currentAgentIngress && (
-            <div className="px-4 py-2">
-              <div
-                data-testid="agent-diagnostic-task-shell"
-                data-agent-state-source="ingress-task-state-diagnostic"
-                className="border-y border-stone-200 bg-stone-50/75 px-3 py-3 text-xs text-stone-700"
-              >
-                <div className="flex flex-wrap items-start gap-2">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="inline-flex h-6 items-center rounded-md bg-stone-900 px-2 font-semibold text-white">
-                        Diagnostic task shell
-                      </span>
-                      <span className="inline-flex h-6 items-center rounded-md border border-stone-300 bg-white px-2 font-semibold text-stone-800">
-                        {formatMainChatStrategy(currentAgentIngress.selectedStrategy)}
-                      </span>
-                      <span className="font-medium">
-                        {currentAgentIngress.privacyRisk.riskLevel} risk
-                      </span>
-                      <span className="text-stone-500">
-                        {Math.round(currentAgentIngress.confidence * 100)}% confidence
-                      </span>
-                      {currentAgentIngress.agentTaskSessionId && (
+          {!companionMode &&
+            showMainChatDiagnostics &&
+            !currentAgentState &&
+            currentAgentIngress && (
+              <div className="px-4 py-2">
+                <div
+                  data-testid="agent-diagnostic-task-shell"
+                  data-agent-state-source="ingress-task-state-diagnostic"
+                  className="border-y border-stone-200 bg-stone-50/75 px-3 py-3 text-xs text-stone-700"
+                >
+                  <div className="flex flex-wrap items-start gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="inline-flex h-6 items-center rounded-md bg-stone-900 px-2 font-semibold text-white">
+                          Diagnostic task shell
+                        </span>
+                        <span className="inline-flex h-6 items-center rounded-md border border-stone-300 bg-white px-2 font-semibold text-stone-800">
+                          {formatMainChatStrategy(currentAgentIngress.selectedStrategy)}
+                        </span>
+                        <span className="font-medium">
+                          {currentAgentIngress.privacyRisk.riskLevel} risk
+                        </span>
                         <span className="text-stone-500">
-                          Session {currentAgentIngress.agentTaskSessionId.slice(-8)}
+                          {Math.round(currentAgentIngress.confidence * 100)}% confidence
                         </span>
-                      )}
-                      {currentAgentTaskState?.session?.status && (
-                        <span className="inline-flex h-6 items-center rounded-md border border-stone-200 bg-white px-2 font-medium text-stone-700">
-                          {currentAgentTaskState.session.status.replace(/_/g, " ")}
-                        </span>
-                      )}
-                      {currentAgentTaskState && (
-                        <>
+                        {currentAgentIngress.agentTaskSessionId && (
                           <span className="text-stone-500">
-                            {currentAgentTaskState.activeToolCount} active
+                            Session {currentAgentIngress.agentTaskSessionId.slice(-8)}
                           </span>
-                          <span className="text-stone-500">
-                            {currentAgentTaskState.pendingApprovalCount} pending
+                        )}
+                        {currentAgentTaskState?.session?.status && (
+                          <span className="inline-flex h-6 items-center rounded-md border border-stone-200 bg-white px-2 font-medium text-stone-700">
+                            {currentAgentTaskState.session.status.replace(/_/g, " ")}
                           </span>
-                        </>
-                      )}
+                        )}
+                        {currentAgentTaskState && (
+                          <>
+                            <span className="text-stone-500">
+                              {currentAgentTaskState.activeToolCount} active
+                            </span>
+                            <span className="text-stone-500">
+                              {currentAgentTaskState.pendingApprovalCount} pending
+                            </span>
+                          </>
+                        )}
+                      </div>
+                      <div className="mt-2 border-l-2 border-stone-300 bg-white/70 px-2 py-1 text-stone-700">
+                        Typed AgentControlPlane snapshot is not available yet; this shell is derived
+                        from AgentIngress and task detail only.
+                      </div>
+                      <div className="mt-2 grid gap-2 md:grid-cols-2">
+                        {currentAgentTaskState?.session?.userGoal && (
+                          <div className="min-w-0">
+                            <div className="text-[10px] font-semibold uppercase tracking-wide text-stone-500">
+                              Goal
+                            </div>
+                            <div className="truncate text-stone-900">
+                              {currentAgentTaskState.session.userGoal}
+                            </div>
+                          </div>
+                        )}
+                        {currentAgentTaskState?.session?.currentPlanSummary && (
+                          <div className="min-w-0">
+                            <div className="text-[10px] font-semibold uppercase tracking-wide text-stone-500">
+                              Current plan
+                            </div>
+                            <div className="truncate text-stone-900">
+                              {currentAgentTaskState.session.currentPlanSummary}
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     </div>
-                    <div className="mt-2 border-l-2 border-stone-300 bg-white/70 px-2 py-1 text-stone-700">
-                      Typed AgentControlPlane snapshot is not available yet; this shell is derived
-                      from AgentIngress and task detail only.
-                    </div>
-                    <div className="mt-2 grid gap-2 md:grid-cols-2">
-                      {currentAgentTaskState?.session?.userGoal && (
-                        <div className="min-w-0">
-                          <div className="text-[10px] font-semibold uppercase tracking-wide text-stone-500">
-                            Goal
-                          </div>
-                          <div className="truncate text-stone-900">
-                            {currentAgentTaskState.session.userGoal}
-                          </div>
-                        </div>
-                      )}
-                      {currentAgentTaskState?.session?.currentPlanSummary && (
-                        <div className="min-w-0">
-                          <div className="text-[10px] font-semibold uppercase tracking-wide text-stone-500">
-                            Current plan
-                          </div>
-                          <div className="truncate text-stone-900">
-                            {currentAgentTaskState.session.currentPlanSummary}
-                          </div>
-                        </div>
-                      )}
-                    </div>
+                    {currentAgentTaskState && (
+                      <div className="ml-auto flex shrink-0 items-center gap-1">
+                        <button
+                          type="button"
+                          aria-label="Resume task"
+                          title="Resume task"
+                          disabled={!currentAgentTaskState.canResume || agentTaskControlBusy}
+                          onClick={handleResumeMainChatTask}
+                          className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          <Play size={14} />
+                        </button>
+                        <button
+                          type="button"
+                          aria-label="Retry failed action"
+                          title="Retry failed action"
+                          disabled={!currentAgentTaskState.canRetry || agentTaskControlBusy}
+                          onClick={() => handleRetryMainChatAction()}
+                          className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          <RotateCw size={14} />
+                        </button>
+                        <button
+                          type="button"
+                          aria-label="Cancel task"
+                          title="Cancel task"
+                          disabled={!currentAgentTaskState.canCancel || agentTaskControlBusy}
+                          onClick={handleCancelMainChatTask}
+                          className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          <Ban size={14} />
+                        </button>
+                      </div>
+                    )}
                   </div>
-                  {currentAgentTaskState && (
-                    <div className="ml-auto flex shrink-0 items-center gap-1">
-                      <button
-                        type="button"
-                        aria-label="Resume task"
-                        title="Resume task"
-                        disabled={!currentAgentTaskState.canResume || agentTaskControlBusy}
-                        onClick={handleResumeMainChatTask}
-                        className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        <Play size={14} />
-                      </button>
-                      <button
-                        type="button"
-                        aria-label="Retry failed action"
-                        title="Retry failed action"
-                        disabled={!currentAgentTaskState.canRetry || agentTaskControlBusy}
-                        onClick={() => handleRetryMainChatAction()}
-                        className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        <RotateCw size={14} />
-                      </button>
-                      <button
-                        type="button"
-                        aria-label="Cancel task"
-                        title="Cancel task"
-                        disabled={!currentAgentTaskState.canCancel || agentTaskControlBusy}
-                        onClick={handleCancelMainChatTask}
-                        className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        <Ban size={14} />
-                      </button>
+                  {legacyFallbackUsed && (
+                    <div className="mt-2 border-l-2 border-amber-400 bg-amber-50 px-2 py-1 text-amber-900">
+                      <span className="font-semibold">Fallback notice</span>: response used the
+                      visible legacy fallback path.
+                    </div>
+                  )}
+                  {safeAgentTaskControlError && (
+                    <div className="mt-2 border-l-2 border-rose-400 bg-rose-50 px-2 py-1 text-rose-900">
+                      {safeAgentTaskControlError}
+                    </div>
+                  )}
+                  {currentAgentTaskState?.actions?.length ? (
+                    <div className="mt-3">
+                      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-stone-500">
+                        Diagnostic queue preview
+                      </div>
+                      <div className="divide-y divide-stone-200 border-y border-stone-200 bg-white/75">
+                        {currentAgentTaskState.actions.map(action => {
+                          const metadataEntries = formatMainChatMetadataEntries(
+                            action.observationMetadata
+                          );
+                          const needsReview =
+                            action.policy.requiresProposal || action.policy.requiresConfirmation;
+                          return (
+                            <div
+                              key={action.id}
+                              className="grid gap-2 py-2 md:grid-cols-[1fr_auto]"
+                            >
+                              <div className="min-w-0 px-2">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="font-semibold text-stone-950">
+                                    {action.action.actionType}
+                                  </span>
+                                  <span
+                                    className={classNames(
+                                      "inline-flex h-5 items-center rounded-md border px-1.5 font-medium",
+                                      mainChatActionStatusClass(action.status)
+                                    )}
+                                  >
+                                    {action.status.replace(/_/g, " ")}
+                                  </span>
+                                  <span className="text-stone-500">{action.policy.reasonCode}</span>
+                                  {action.policy.requiresProposal && (
+                                    <span className="inline-flex h-5 items-center rounded-md border border-amber-200 bg-amber-50 px-1.5 font-medium text-amber-900">
+                                      Proposal required
+                                    </span>
+                                  )}
+                                  {action.policy.requiresConfirmation && (
+                                    <span className="inline-flex h-5 items-center rounded-md border border-amber-200 bg-amber-50 px-1.5 font-medium text-amber-900">
+                                      Permission required
+                                    </span>
+                                  )}
+                                  {needsReview && (
+                                    <Link
+                                      to="/review"
+                                      state={{
+                                        mainChatTaskSessionId:
+                                          currentAgentTaskState?.session?.id ??
+                                          currentAgentIngress.agentTaskSessionId,
+                                        returnTo: "/chat",
+                                      }}
+                                      className="inline-flex h-5 items-center gap-1 rounded-md border border-stone-200 bg-white px-1.5 font-medium text-stone-800 hover:bg-stone-100"
+                                    >
+                                      <ExternalLink size={12} />
+                                      Open Review Center
+                                    </Link>
+                                  )}
+                                </div>
+                                <div className="mt-1 text-stone-700">
+                                  {action.action.description}
+                                </div>
+                                {metadataEntries.length > 0 && (
+                                  <div className="mt-1 flex flex-wrap gap-1">
+                                    {metadataEntries.map(entry => (
+                                      <span
+                                        key={`${action.id}-${entry}`}
+                                        className="inline-flex h-5 items-center rounded-md bg-stone-100 px-1.5 text-stone-600"
+                                      >
+                                        {entry}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                                {action.error && (
+                                  <div className="mt-1 text-rose-700">{action.error}</div>
+                                )}
+                              </div>
+                              <div className="px-2 text-right text-stone-500">
+                                attempt {action.attempts}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : null}
+                  {currentAgentTaskState?.session?.pendingBlockers?.length ? (
+                    <div className="mt-3">
+                      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-stone-500">
+                        Pending blockers
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {currentAgentTaskState.session.pendingBlockers.map(blocker => (
+                          <span
+                            key={blocker}
+                            className="inline-flex h-6 items-center rounded-md border border-amber-200 bg-amber-50 px-2 font-medium text-amber-900"
+                          >
+                            {blocker}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                  {currentExecutionTranscript.length > 0 && (
+                    <div className="mt-3">
+                      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-stone-500">
+                        Diagnostic transcript
+                      </div>
+                      <div className="grid gap-1 sm:grid-cols-2">
+                        {currentExecutionTranscript.slice(-4).map(entry => (
+                          <div
+                            key={entry.id}
+                            className="min-w-0 border-l border-stone-300 bg-white/70 px-2 py-1"
+                          >
+                            <div className="flex items-center gap-2">
+                              <span className="shrink-0 font-semibold text-stone-900">
+                                {formatTranscriptKind(entry.kind)}
+                              </span>
+                              <span className="truncate text-stone-600">{entry.summary}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   )}
                 </div>
-                {legacyFallbackUsed && (
-                  <div className="mt-2 border-l-2 border-amber-400 bg-amber-50 px-2 py-1 text-amber-900">
-                    <span className="font-semibold">Fallback notice</span>: response used the
-                    visible legacy fallback path.
-                  </div>
-                )}
-                {agentTaskControlError && (
-                  <div className="mt-2 border-l-2 border-rose-400 bg-rose-50 px-2 py-1 text-rose-900">
-                    {agentTaskControlError}
-                  </div>
-                )}
-                {currentAgentTaskState?.actions?.length ? (
-                  <div className="mt-3">
-                    <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-stone-500">
-                      Diagnostic queue preview
-                    </div>
-                    <div className="divide-y divide-stone-200 border-y border-stone-200 bg-white/75">
-                      {currentAgentTaskState.actions.map(action => {
-                        const metadataEntries = formatMainChatMetadataEntries(
-                          action.observationMetadata
-                        );
-                        const needsReview =
-                          action.policy.requiresProposal || action.policy.requiresConfirmation;
-                        return (
-                          <div key={action.id} className="grid gap-2 py-2 md:grid-cols-[1fr_auto]">
-                            <div className="min-w-0 px-2">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <span className="font-semibold text-stone-950">
-                                  {action.action.actionType}
-                                </span>
-                                <span
-                                  className={classNames(
-                                    "inline-flex h-5 items-center rounded-md border px-1.5 font-medium",
-                                    mainChatActionStatusClass(action.status)
-                                  )}
-                                >
-                                  {action.status.replace(/_/g, " ")}
-                                </span>
-                                <span className="text-stone-500">{action.policy.reasonCode}</span>
-                                {action.policy.requiresProposal && (
-                                  <span className="inline-flex h-5 items-center rounded-md border border-amber-200 bg-amber-50 px-1.5 font-medium text-amber-900">
-                                    Proposal required
-                                  </span>
-                                )}
-                                {action.policy.requiresConfirmation && (
-                                  <span className="inline-flex h-5 items-center rounded-md border border-amber-200 bg-amber-50 px-1.5 font-medium text-amber-900">
-                                    Permission required
-                                  </span>
-                                )}
-                                {needsReview && (
-                                  <Link
-                                    to="/review"
-                                    state={{
-                                      mainChatTaskSessionId:
-                                        currentAgentTaskState?.session?.id ??
-                                        currentAgentIngress.agentTaskSessionId,
-                                      returnTo: "/chat",
-                                    }}
-                                    className="inline-flex h-5 items-center gap-1 rounded-md border border-stone-200 bg-white px-1.5 font-medium text-stone-800 hover:bg-stone-100"
-                                  >
-                                    <ExternalLink size={12} />
-                                    Open Review Center
-                                  </Link>
-                                )}
-                              </div>
-                              <div className="mt-1 text-stone-700">{action.action.description}</div>
-                              {metadataEntries.length > 0 && (
-                                <div className="mt-1 flex flex-wrap gap-1">
-                                  {metadataEntries.map(entry => (
-                                    <span
-                                      key={`${action.id}-${entry}`}
-                                      className="inline-flex h-5 items-center rounded-md bg-stone-100 px-1.5 text-stone-600"
-                                    >
-                                      {entry}
-                                    </span>
-                                  ))}
-                                </div>
-                              )}
-                              {action.error && (
-                                <div className="mt-1 text-rose-700">{action.error}</div>
-                              )}
-                            </div>
-                            <div className="px-2 text-right text-stone-500">
-                              attempt {action.attempts}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ) : null}
-                {currentAgentTaskState?.session?.pendingBlockers?.length ? (
-                  <div className="mt-3">
-                    <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-stone-500">
-                      Pending blockers
-                    </div>
-                    <div className="flex flex-wrap gap-1">
-                      {currentAgentTaskState.session.pendingBlockers.map(blocker => (
-                        <span
-                          key={blocker}
-                          className="inline-flex h-6 items-center rounded-md border border-amber-200 bg-amber-50 px-2 font-medium text-amber-900"
-                        >
-                          {blocker}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-                {currentExecutionTranscript.length > 0 && (
-                  <div className="mt-3">
-                    <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-stone-500">
-                      Diagnostic transcript
-                    </div>
-                    <div className="grid gap-1 sm:grid-cols-2">
-                      {currentExecutionTranscript.slice(-4).map(entry => (
-                        <div
-                          key={entry.id}
-                          className="min-w-0 border-l border-stone-300 bg-white/70 px-2 py-1"
-                        >
-                          <div className="flex items-center gap-2">
-                            <span className="shrink-0 font-semibold text-stone-900">
-                              {formatTranscriptKind(entry.kind)}
-                            </span>
-                            <span className="truncate text-stone-600">{entry.summary}</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
               </div>
-            </div>
-          )}
+            )}
           {!companionMode && skillToolSurfaceAvailable && (
             <section className="px-4 py-2" aria-label="Skills and tools">
               <div className="border-y border-stone-200 bg-white px-3 py-3 text-xs text-stone-700">
@@ -4696,6 +5339,18 @@ export default function ChatPage({
                               <div className="truncate text-stone-600">{proposal.reason}</div>
                               {proposal.status === "pending" && (
                                 <div className="flex flex-wrap gap-1">
+                                  {proposal.proposalType === "tool_permission" && (
+                                    <button
+                                      type="button"
+                                      disabled={taskContinuityBusy}
+                                      onClick={() =>
+                                        handleAcceptTaskContinuityProposal(proposal.id)
+                                      }
+                                      className="inline-flex min-h-6 items-center rounded-md border border-stone-200 bg-white px-2 font-medium text-stone-800 hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-40"
+                                    >
+                                      Accept proposal
+                                    </button>
+                                  )}
                                   <button
                                     type="button"
                                     disabled={taskContinuityBusy}
@@ -4752,7 +5407,7 @@ export default function ChatPage({
               </div>
             </div>
           )}
-          {!companionMode && currentRun && (
+          {!companionMode && showMainChatDiagnostics && currentRun && (
             <div className="px-4 py-2">
               <RuntimeDisclosureStrip
                 view={buildRuntimeDisclosure(currentRun, {

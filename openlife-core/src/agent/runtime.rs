@@ -566,7 +566,8 @@ mod tests {
             "gpt-4".to_string(),
             "text-embedding-3-small".to_string(),
             false,
-        );
+        )
+        .with_scripted_generation_response("scripted layered response: 下一步继续确认目标。");
         let config = AgentRuntimeConfig::default();
         let runtime = AgentRuntime::with_config(life_model, scheduler, config);
         let task = create_test_task();
@@ -582,13 +583,15 @@ mod tests {
             )
             .await;
 
-        // L3 task uses layered strategy, which will fail because no API key
-        // But context assembly should succeed
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            AgentRuntimeError::Reasoning(_) => {}
-            other => panic!("Expected Reasoning error, got: {:?}", other),
-        }
+        let output = result.expect("L3 layered runtime should use scripted raw generation");
+        assert!(!output.run_id.trim().is_empty());
+        assert!(!output.final_messages.is_empty());
+        assert!(output
+            .reasoning_trace
+            .output
+            .as_deref()
+            .is_some_and(|output| output.contains("scripted layered response")));
+        assert!(!output.plan_steps.is_empty());
     }
 
     #[tokio::test]

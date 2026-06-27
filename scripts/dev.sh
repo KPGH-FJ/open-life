@@ -37,6 +37,7 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FRONTEND_DIR="$REPO_ROOT/frontend"
+DEV_FRONTEND_DIST="$REPO_ROOT/target/openlife-dev/frontend-dist-placeholder"
 
 # 加载 .env
 ENV_FILE="$REPO_ROOT/.env"
@@ -63,8 +64,22 @@ if [ -z "${A2A_PORT:-}" ]; then
 fi
 VITE_PORT="${PORT:-5173}"
 OPENLIFE_DEV_URL="http://127.0.0.1:$VITE_PORT"
-OPENLIFE_FRONTEND_DIST="$FRONTEND_DIR/dist"
+OPENLIFE_FRONTEND_DIST="$DEV_FRONTEND_DIST"
 export OPENLIFE_DEV_URL OPENLIFE_FRONTEND_DIST OPENLIFE_FRONTEND_MODE="dev_server"
+
+mkdir -p "$DEV_FRONTEND_DIST"
+cat > "$DEV_FRONTEND_DIST/index.html" <<'HTML'
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>OpenLife Dev Server Placeholder</title>
+  </head>
+  <body>
+    OpenLife dev server placeholder. If you see this, Vite did not load.
+  </body>
+</html>
+HTML
 
 json_escape() {
     printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
@@ -109,6 +124,7 @@ echo -e "${NC}"
 echo -e "${BLUE}OpenLife - 开发模式启动${NC}"
 echo -e "${BLUE}[INFO]${NC} Profile: $OPENLIFE_PROFILE"
 echo -e "${BLUE}[INFO]${NC} Vite: $OPENLIFE_DEV_URL"
+echo -e "${BLUE}[INFO]${NC} Dev frontendDist placeholder: $OPENLIFE_FRONTEND_DIST"
 echo -e "${BLUE}[INFO]${NC} A2A: 127.0.0.1:$A2A_PORT"
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"

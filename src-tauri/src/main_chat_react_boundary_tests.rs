@@ -238,11 +238,27 @@ fn read_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
     let mut request_bytes = Vec::new();
     let mut buffer = [0u8; 4096];
     let mut expected_request_len = None;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
-        let bytes_read = std::io::Read::read(stream, &mut buffer).unwrap_or(0);
-        if bytes_read == 0 {
-            break;
-        }
+        let bytes_read = match std::io::Read::read(stream, &mut buffer) {
+            Ok(0) => break,
+            Ok(bytes_read) => bytes_read,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                continue;
+            }
+            Err(_) => break,
+        };
         request_bytes.extend_from_slice(&buffer[..bytes_read]);
         let request_so_far = String::from_utf8_lossy(&request_bytes);
         if expected_request_len.is_none() {
@@ -341,6 +357,7 @@ async fn fake_ranked_then_ordered_chat_provider_endpoint(
                     let request = String::from_utf8_lossy(&request_bytes);
                     let reply = if request.contains("Return ranked_candidate_ids now")
                         || request.contains("Metadata-safe candidate contract")
+                        || request.contains("ranked_candidate_ids")
                     {
                         ranking_reply.clone()
                     } else {
@@ -475,8 +492,7 @@ async fn main_chat_react_registered_mcp_agent_loop_uses_provider_ranked_candidat
         ],
     )
     .await;
-    configure_http_provider_scheduler(&state, &provider_base, "gpt-provider-ranked-selection")
-        .await;
+    configure_http_provider_scheduler(&state, &provider_base, "gpt-general-read-model").await;
 
     let response = send_message_with_state(
         "command-surface-mcp-agent-loop-provider-ranked".into(),
@@ -534,7 +550,7 @@ async fn main_chat_react_registered_mcp_agent_loop_uses_provider_ranked_candidat
             .metadata
             .get("toolSelectionRankingModel")
             .and_then(serde_json::Value::as_str),
-        Some("gpt-provider-ranked-selection")
+        Some("gpt-general-read-model")
     );
     assert_eq!(
         plan_entry

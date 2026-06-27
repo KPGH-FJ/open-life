@@ -140,6 +140,8 @@ pub enum ContextSourceKind {
     SkillMetadata,
     SkillInstruction,
     Observation,
+    HsSummary,
+    AcceptedGuidance,
     LifeModelYaml,
     RawMemorySnippet,
 }
@@ -158,6 +160,8 @@ impl ContextSourceKind {
             Self::SkillMetadata => "skill_metadata",
             Self::SkillInstruction => "skill_instruction",
             Self::Observation => "observation",
+            Self::HsSummary => "hs_summary",
+            Self::AcceptedGuidance => "accepted_guidance",
             Self::LifeModelYaml => "life_model_yaml",
             Self::RawMemorySnippet => "raw_memory_snippet",
         }
@@ -552,6 +556,7 @@ impl ExecutionPolicy {
                 "session.search",
                 "file.read",
                 "file search",
+                "web.read",
                 "web.search",
                 "web.fetch",
                 "mcp.read_only",
@@ -1992,6 +1997,15 @@ pub struct MainChatAgentExecutionV1AcceptanceCommandSurfaceEvidence {
     pub legacy_fallback_count: u32,
     pub silent_write_count: u32,
     pub send_stream_matrix_coverage: f32,
+    pub kernel_backed_case_count: u32,
+    pub kernel_direct_answer_case_count: u32,
+    pub kernel_read_only_tool_case_count: u32,
+    pub kernel_proposal_write_case_count: u32,
+    pub kernel_plan_execute_case_count: u32,
+    pub kernel_blocker_case_count: u32,
+    pub kernel_hs_context_case_count: u32,
+    pub kernel_web_tool_case_count: u32,
+    pub kernel_mcp_tool_case_count: u32,
     pub final_completion_ready: bool,
 }
 
@@ -2301,6 +2315,43 @@ pub fn evaluate_main_chat_agent_execution_v1_acceptance_gate(
             "command_surface_send_stream_matrix_incomplete",
         );
     }
+    let command_total_cases = command.total_cases.min(u32::MAX as usize) as u32;
+    if command.kernel_backed_case_count < command_total_cases {
+        push_unique_blocker(&mut blockers, "command_surface_kernel_evidence_incomplete");
+    }
+    if command.kernel_direct_answer_case_count == 0 {
+        push_unique_blocker(
+            &mut blockers,
+            "command_surface_kernel_direct_answer_missing",
+        );
+    }
+    if command.kernel_read_only_tool_case_count == 0 {
+        push_unique_blocker(
+            &mut blockers,
+            "command_surface_kernel_read_only_tool_missing",
+        );
+    }
+    if command.kernel_proposal_write_case_count == 0 {
+        push_unique_blocker(
+            &mut blockers,
+            "command_surface_kernel_proposal_write_missing",
+        );
+    }
+    if command.kernel_plan_execute_case_count == 0 {
+        push_unique_blocker(&mut blockers, "command_surface_kernel_plan_execute_missing");
+    }
+    if command.kernel_blocker_case_count == 0 {
+        push_unique_blocker(&mut blockers, "command_surface_kernel_blocker_missing");
+    }
+    if command.kernel_hs_context_case_count == 0 {
+        push_unique_blocker(&mut blockers, "command_surface_kernel_hs_context_missing");
+    }
+    if command.kernel_web_tool_case_count == 0 {
+        push_unique_blocker(&mut blockers, "command_surface_kernel_web_tool_missing");
+    }
+    if command.kernel_mcp_tool_case_count == 0 {
+        push_unique_blocker(&mut blockers, "command_surface_kernel_mcp_tool_missing");
+    }
     if !command.final_completion_ready {
         push_unique_blocker(&mut blockers, "command_surface_final_completion_not_ready");
     }
@@ -2341,6 +2392,15 @@ pub fn evaluate_main_chat_agent_execution_v1_acceptance_gate(
         && command.legacy_fallback_count == 0
         && command.silent_write_count == 0
         && command.send_stream_matrix_coverage >= 1.0
+        && command.kernel_backed_case_count >= command_total_cases
+        && command.kernel_direct_answer_case_count > 0
+        && command.kernel_read_only_tool_case_count > 0
+        && command.kernel_proposal_write_case_count > 0
+        && command.kernel_plan_execute_case_count > 0
+        && command.kernel_blocker_case_count > 0
+        && command.kernel_hs_context_case_count > 0
+        && command.kernel_web_tool_case_count > 0
+        && command.kernel_mcp_tool_case_count > 0
         && command.final_completion_ready;
     let live_provider_gate_ready = live.generation_eval_executed
         && live.web_mcp_agent_loop_eval_executed
@@ -2357,6 +2417,7 @@ pub fn evaluate_main_chat_agent_execution_v1_acceptance_gate(
         required_evidence: vec![
             "core_100_case_runtime_eval".to_string(),
             "send_stream_command_surface_eval".to_string(),
+            "kernel_backed_command_surface_evidence".to_string(),
             "live_provider_generation".to_string(),
             "provider_backed_web_mcp_agent_loop".to_string(),
             "provider_backed_web_agent_loop".to_string(),

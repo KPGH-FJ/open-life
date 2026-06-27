@@ -38,6 +38,8 @@ pub(crate) mod main_chat_event_stream;
 pub(crate) mod main_chat_final_gate;
 pub(crate) mod main_chat_generation_support;
 pub(crate) mod main_chat_hs_runtime;
+#[allow(dead_code)]
+pub(crate) mod main_chat_kernel;
 pub(crate) mod main_chat_legacy_agent_loop;
 pub(crate) mod main_chat_legacy_fallback;
 #[allow(dead_code)]
@@ -53,12 +55,16 @@ pub(crate) mod main_chat_proposal_support;
 pub(crate) mod main_chat_react_execution;
 pub(crate) mod main_chat_react_runtime;
 pub(crate) mod main_chat_react_tool_selection;
+#[allow(dead_code)]
+pub(crate) mod main_chat_runtime_facts;
 pub(crate) mod main_chat_runtime_support;
 pub(crate) mod main_chat_send;
 pub(crate) mod main_chat_skills_tools;
 pub(crate) mod main_chat_stage3_execution_ux;
 pub(crate) mod main_chat_stage4_memory_knowledge;
 pub(crate) mod main_chat_stage5_release_debug;
+#[allow(dead_code)]
+pub(crate) mod main_chat_step6_product_acceptance;
 pub(crate) mod main_chat_strategy;
 pub(crate) mod main_chat_streaming;
 #[allow(dead_code)]
@@ -116,7 +122,13 @@ mod main_chat_stage4_memory_knowledge_tests;
 mod main_chat_stage5_release_debug_tests;
 
 #[cfg(test)]
+mod main_chat_step6_product_acceptance_tests;
+
+#[cfg(test)]
 mod main_chat_event_stream_tests;
+
+#[cfg(test)]
+mod main_chat_runtime_facts_tests;
 
 #[cfg(test)]
 pub mod test_utils;
@@ -161,6 +173,7 @@ use commands::agent_runtime::{
     get_main_chat_skill_detail, get_plan_execute_session, get_react_beta_execution_status,
     get_runtime_strategy_registry_status, list_main_chat_skills, list_main_chat_tool_candidates,
     list_plan_execute_sessions, prepare_main_chat_agent_stage1_browser_dogfood_state,
+    prepare_main_chat_step6_live_provider_eval_state,
     record_controlled_chat_cutover_candidate_review_decision,
     record_controlled_chat_migration_review_decision,
     record_controlled_chat_migration_shadow_review_decision,
@@ -180,11 +193,13 @@ use commands::agent_runtime::{
     run_main_chat_agent_product_maturity_v2_plan_gate,
     run_main_chat_agent_product_maturity_v2_skills_gate,
     run_main_chat_agent_productization_v1_gate, run_main_chat_agent_stage1_dogfood_gate,
-    run_main_chat_agent_stage2_readiness_gate, run_main_chat_external_live_productization_gate,
-    run_main_chat_stage3_execution_ux_report, run_multi_strategy_agent_preview,
-    select_main_chat_skill, set_main_chat_agent_stage1_browser_network_policy,
-    skip_plan_execute_step, update_plan_execute_session_draft,
-    validate_main_chat_agent_stage2_manual_dogfood_artifact,
+    run_main_chat_agent_stage2_readiness_gate, run_main_chat_agent_step6_product_acceptance_gate,
+    run_main_chat_external_live_productization_gate, run_main_chat_stage3_execution_ux_report,
+    run_multi_strategy_agent_preview, select_main_chat_skill,
+    set_main_chat_agent_stage1_browser_network_policy,
+    set_main_chat_agent_stage1_browser_scripted_response,
+    set_main_chat_agent_stage1_browser_web_fixture_output, skip_plan_execute_step,
+    update_plan_execute_session_draft, validate_main_chat_agent_stage2_manual_dogfood_artifact,
 };
 
 use commands::builder::{
@@ -688,10 +703,14 @@ pub fn run() {
             run_main_chat_agent_beta_v1_readiness_gate,
             run_main_chat_agent_stage1_dogfood_gate,
             run_main_chat_agent_stage2_readiness_gate,
+            run_main_chat_agent_step6_product_acceptance_gate,
+            prepare_main_chat_step6_live_provider_eval_state,
             run_main_chat_stage3_execution_ux_report,
             validate_main_chat_agent_stage2_manual_dogfood_artifact,
             prepare_main_chat_agent_stage1_browser_dogfood_state,
             set_main_chat_agent_stage1_browser_network_policy,
+            set_main_chat_agent_stage1_browser_scripted_response,
+            set_main_chat_agent_stage1_browser_web_fixture_output,
             run_main_chat_agent_execution_v1_final_acceptance_gate,
             get_runtime_strategy_registry_status,
             get_react_beta_execution_status,

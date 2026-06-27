@@ -178,8 +178,21 @@ function Set-RuntimeProfile($commandName) {
 
 function New-TauriConfigOverride {
     $env:OPENLIFE_DEV_URL = "http://127.0.0.1:$script:VitePort"
-    $env:OPENLIFE_FRONTEND_DIST = Join-Path $FrontendDir "dist"
+    $env:OPENLIFE_FRONTEND_DIST = Join-Path $RepoRoot "target/openlife-dev/frontend-dist-placeholder"
     $env:OPENLIFE_FRONTEND_MODE = "dev_server"
+    New-Item -ItemType Directory -Force -Path $env:OPENLIFE_FRONTEND_DIST | Out-Null
+    @"
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>OpenLife Dev Server Placeholder</title>
+  </head>
+  <body>
+    OpenLife dev server placeholder. If you see this, Vite did not load.
+  </body>
+</html>
+"@ | Set-Content -Encoding UTF8 -Path (Join-Path $env:OPENLIFE_FRONTEND_DIST "index.html")
     @{
         build = @{
             beforeDevCommand = "cd `"$FrontendDir`" && corepack pnpm dev --host 127.0.0.1 --port $script:VitePort"

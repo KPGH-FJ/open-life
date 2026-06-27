@@ -547,7 +547,7 @@ async fn main_chat_agent_stage1_browser_prep_seeds_real_task_control_state_only(
     assert!(prep.prepared);
     assert_eq!(prep.evidence_source, "real_app_state_task_continuity_seed");
     assert!(!prep.direct_writes_executed);
-    assert_eq!(prep.task_session_ids.len(), 9);
+    assert_eq!(prep.task_session_ids.len(), 10);
 
     let config = state.config.lock().await.clone();
     assert_eq!(config.llm.provider, "openai");
@@ -574,7 +574,16 @@ async fn main_chat_agent_stage1_browser_prep_seeds_real_task_control_state_only(
     );
 
     for id in [
-        "D13", "D14", "D15", "D19", "D20", "D27", "D28", "D35", "D36",
+        "D13",
+        "D14",
+        "D15",
+        "D19",
+        "D20",
+        "D27",
+        "D28",
+        "D35",
+        "D36",
+        "S6_PERMISSION_ACCEPT",
     ] {
         assert!(
             prep.task_session_ids.contains_key(id),
@@ -741,6 +750,52 @@ async fn main_chat_agent_stage1_browser_prep_seeds_real_task_control_state_only(
         proposal.proposal_type == openlife_core::agent::ProposalType::MemoryWrite
             && proposal.status == openlife_core::agent::ProposalStatus::Postponed
     }));
+
+    let s6_permission = crate::main_chat_task_controls::get_main_chat_agent_task_detail_with_state(
+        prep.task_session_ids
+            .get("S6_PERMISSION_ACCEPT")
+            .expect("S6 permission accept task id"),
+        &state,
+    )
+    .await
+    .expect("S6 permission accept detail");
+    assert!(s6_permission
+        .blockers
+        .iter()
+        .any(|blocker| blocker == "tool_permission_required"));
+    assert!(s6_permission
+        .allowed_controls
+        .iter()
+        .any(|control| control == "resume"));
+    let s6_permission_proposal = s6_permission
+        .proposals
+        .iter()
+        .find(|proposal| {
+            proposal.proposal_type == openlife_core::agent::ProposalType::ToolPermission
+        })
+        .expect("S6 ToolPermission proposal");
+    assert_eq!(
+        s6_permission_proposal.status,
+        openlife_core::agent::ProposalStatus::Pending
+    );
+    crate::commands::proposal::accept_proposal_with_state(
+        s6_permission_proposal.id.clone(),
+        &state,
+    )
+    .await
+    .expect("accept S6 ToolPermission proposal");
+    let s6_resumed = crate::main_chat_task_controls::resume_main_chat_agent_task_with_state(
+        prep.task_session_ids
+            .get("S6_PERMISSION_ACCEPT")
+            .expect("S6 permission accept task id"),
+        &state,
+    )
+    .await
+    .expect("resume S6 accepted permission task");
+    assert_eq!(
+        s6_resumed.session.as_ref().map(|session| &session.status),
+        Some(&openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed)
+    );
 }
 
 #[tokio::test]

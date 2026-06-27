@@ -249,23 +249,46 @@ fn legacy_stream_fallback_plan_stays_legacy_stream_for_l2_l3() {
 }
 
 #[test]
-fn ordinary_stream_legacy_plan_is_built_after_governed_strategy_attempt() {
-    let module_path = format!("{}/src/main_chat_streaming.rs", env!("CARGO_MANIFEST_DIR"));
-    let source = std::fs::read_to_string(module_path).expect("read main_chat_streaming.rs");
+fn ordinary_chat_entrypoints_try_kernel_before_legacy_strategy_paths() {
+    let send_module_path = format!("{}/src/main_chat_send.rs", env!("CARGO_MANIFEST_DIR"));
+    let send_source = std::fs::read_to_string(send_module_path).expect("read main_chat_send.rs");
+    let send_body =
+        extract_rust_function_body(&send_source, "pub(crate) async fn send_message_with_state(");
+    let send_kernel_attempt = send_body
+        .find("main_chat_kernel_supports_turn(")
+        .expect("send command should check MainChatKernel support first");
+    let send_strategy_attempt = send_body
+        .find("try_run_main_chat_agent_strategy(")
+        .expect("send command should keep the explicit legacy strategy fallback");
+
+    assert!(
+        send_kernel_attempt < send_strategy_attempt,
+        "send_message should try MainChatKernel before legacy strategy fallback"
+    );
+
+    let stream_module_path = format!("{}/src/main_chat_streaming.rs", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read_to_string(stream_module_path).expect("read main_chat_streaming.rs");
     let stream_body = extract_rust_function_body(
         &source,
         "pub(crate) async fn start_stream_message_with_state(",
     );
+    let kernel_attempt = stream_body
+        .find("main_chat_kernel_supports_turn(")
+        .expect("stream command should check MainChatKernel support first");
     let strategy_attempt = stream_body
         .find("try_run_main_chat_agent_strategy(")
-        .expect("stream command should attempt Main Chat v1 strategy");
+        .expect("stream command should keep the explicit legacy strategy fallback");
     let legacy_plan = stream_body
         .find("ordinary_stream_chat_execution_plan(layer)")
         .expect("stream command should keep a legacy stream fallback plan");
 
     assert!(
+        kernel_attempt < strategy_attempt,
+        "start_stream_message should try MainChatKernel before legacy strategy fallback"
+    );
+    assert!(
         strategy_attempt < legacy_plan,
-        "start_stream_message should attempt Main Chat v1 before building the legacy fallback plan"
+        "start_stream_message should attempt legacy strategy before building the final legacy stream plan"
     );
 }
 

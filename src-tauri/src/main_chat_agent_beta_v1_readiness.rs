@@ -71,6 +71,15 @@ pub struct MainChatAgentBetaV1ReadinessReport {
     pub legacy_fallback_count: usize,
     pub silent_durable_write_count: usize,
     pub no_silent_durable_writes: bool,
+    pub kernel_backed_case_count: usize,
+    pub kernel_direct_answer_case_count: usize,
+    pub kernel_read_only_tool_case_count: usize,
+    pub kernel_proposal_write_case_count: usize,
+    pub kernel_plan_execute_case_count: usize,
+    pub kernel_blocker_case_count: usize,
+    pub kernel_hs_context_case_count: usize,
+    pub kernel_web_tool_case_count: usize,
+    pub kernel_mcp_tool_case_count: usize,
     pub default_blockers: Vec<String>,
     pub opt_in_live_blockers: Vec<String>,
     pub readiness_dimensions: Vec<MainChatAgentBetaV1ReadinessDimension>,
@@ -154,6 +163,14 @@ pub(crate) async fn run_main_chat_agent_beta_v1_readiness_report_with_live_opt_i
     if !no_silent_durable_writes || silent_durable_write_count > 0 {
         push_unique(&mut default_blockers, "silent_durable_write_detected");
     }
+    if default_experience.command_surface_kernel_backed_case_count
+        < default_experience.command_surface_total_cases
+    {
+        push_unique(
+            &mut default_blockers,
+            "kernel_command_surface_evidence_incomplete",
+        );
+    }
 
     let default_ready = default_blockers.is_empty();
     let opt_in_live_ready = product_maturity.opt_in_live_ready && real_tasks.external_live_ready;
@@ -199,6 +216,20 @@ pub(crate) async fn run_main_chat_agent_beta_v1_readiness_report_with_live_opt_i
         legacy_fallback_count,
         silent_durable_write_count,
         no_silent_durable_writes,
+        kernel_backed_case_count: default_experience.command_surface_kernel_backed_case_count,
+        kernel_direct_answer_case_count: default_experience
+            .command_surface_kernel_direct_answer_case_count,
+        kernel_read_only_tool_case_count: default_experience
+            .command_surface_kernel_read_only_tool_case_count,
+        kernel_proposal_write_case_count: default_experience
+            .command_surface_kernel_proposal_write_case_count,
+        kernel_plan_execute_case_count: default_experience
+            .command_surface_kernel_plan_execute_case_count,
+        kernel_blocker_case_count: default_experience.command_surface_kernel_blocker_case_count,
+        kernel_hs_context_case_count: default_experience
+            .command_surface_kernel_hs_context_case_count,
+        kernel_web_tool_case_count: default_experience.command_surface_kernel_web_tool_case_count,
+        kernel_mcp_tool_case_count: default_experience.command_surface_kernel_mcp_tool_case_count,
         default_blockers: default_blockers.clone(),
         opt_in_live_blockers: opt_in_live_blockers.clone(),
         readiness_dimensions: readiness_dimensions(
@@ -212,9 +243,9 @@ pub(crate) async fn run_main_chat_agent_beta_v1_readiness_report_with_live_opt_i
 fn foundation_inventory_items() -> Vec<MainChatAgentBetaV1FoundationInventoryItem> {
     vec![
         foundation_item(
-            "Governed Main Chat ingress and strategy routing",
+            "MainChatKernel default ingress and routing",
             "verified",
-            &["ordinary send/stream governed task sessions"],
+            &["ordinary send/stream MainChatKernel task sessions"],
             "reuse",
         ),
         foundation_item(
@@ -226,13 +257,13 @@ fn foundation_inventory_items() -> Vec<MainChatAgentBetaV1FoundationInventoryIte
         foundation_item(
             "DirectAnswer path",
             "verified",
-            &["governed DirectAnswer provider trace"],
+            &["kernel DirectAnswer provider trace"],
             "reuse",
         ),
         foundation_item(
-            "ReAct / governed read / blocker paths",
+            "Kernel read / blocker paths",
             "verified",
-            &["38-case command-surface matrix"],
+            &["38-case kernel-backed command-surface matrix"],
             "reuse",
         ),
         foundation_item(
@@ -364,7 +395,7 @@ fn readiness_dimensions(
     opt_in_live_blockers: &[String],
 ) -> Vec<MainChatAgentBetaV1ReadinessDimension> {
     [
-        ("Routing", "governed task sessions and strategy routing"),
+        ("Routing", "MainChatKernel task sessions and route evidence"),
         ("UI", "default experience runtime-to-UI state mappings"),
         ("Events", "Product Maturity v2 event replay gate"),
         ("Memory", "memory lifecycle and B21 conflict evidence"),
@@ -374,7 +405,7 @@ fn readiness_dimensions(
         ),
         (
             "Tools",
-            "file/session/memory/web/MCP/skill command-surface matrix",
+            "kernel file/session/memory/web/MCP/skill command-surface matrix",
         ),
         (
             "Permissions",

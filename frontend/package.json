@@ -20,6 +20,8 @@
     "typecheck": "tsc --noEmit",
     "test:e2e": "playwright test",
     "test:e2e:tauri": "node scripts/stage1-tauri-webdriver.mjs",
+    "test:e2e:tauri:step6": "node scripts/step6-tauri-webdriver.mjs",
+    "test:e2e:tauri:step6:local": "node scripts/step6-tauri-webdriver.mjs --allow-blocked-live",
     "test:e2e:ui": "playwright test --ui"
   },
   "dependencies": {
