@@ -254,10 +254,25 @@ fn default_search_provider() -> String {
     "duckduckgo".to_string()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRuntimeMode {
+    LocalFirstDefault,
+    CapabilityFirstBeta,
+}
+
+impl Default for AgentRuntimeMode {
+    fn default() -> Self {
+        Self::LocalFirstDefault
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
     pub llm: LlmConfig,
+    #[serde(default)]
+    pub runtime_mode: AgentRuntimeMode,
     #[serde(default)]
     pub prefer_local_model: bool,
     #[serde(default = "default_local_model")]
@@ -280,6 +295,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             llm: LlmConfig::default(),
+            runtime_mode: AgentRuntimeMode::default(),
             prefer_local_model: true,
             local_model: default_local_model(),
             chat_proposal: ChatProposalConfig::default(),
@@ -409,6 +425,10 @@ mod tests {
         assert_eq!(config.llm.embedding_model, "text-embedding-3-small");
         assert_eq!(config.llm.chat_model, "gpt-4o-mini");
         assert!(config.llm.embedding_enabled);
+        assert!(matches!(
+            config.runtime_mode,
+            AgentRuntimeMode::LocalFirstDefault
+        ));
         assert_eq!(config.local_model, "llama2");
         assert!(config.prefer_local_model);
     }
@@ -425,6 +445,7 @@ mod tests {
                 chat_model: "gpt-4".into(),
                 embedding_enabled: false,
             },
+            runtime_mode: AgentRuntimeMode::CapabilityFirstBeta,
             prefer_local_model: true,
             local_model: "qwen2.5".into(),
             chat_proposal: ChatProposalConfig::default(),
@@ -441,6 +462,10 @@ mod tests {
         assert_eq!(loaded.llm.embedding_model, config.llm.embedding_model);
         assert_eq!(loaded.llm.chat_model, config.llm.chat_model);
         assert_eq!(loaded.llm.embedding_enabled, config.llm.embedding_enabled);
+        assert!(matches!(
+            loaded.runtime_mode,
+            AgentRuntimeMode::CapabilityFirstBeta
+        ));
         assert_eq!(loaded.prefer_local_model, config.prefer_local_model);
         assert_eq!(loaded.local_model, config.local_model);
     }

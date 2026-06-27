@@ -23,7 +23,10 @@ use crate::main_chat_kernel::{
     run_main_chat_kernel_direct_answer_with_state, StreamingMainChatEventSink,
 };
 use crate::main_chat_legacy_fallback::ordinary_stream_chat_execution_plan;
-use crate::main_chat_preprocess::{preprocess_chat_input, preprocess_chat_input_v2};
+use crate::main_chat_preprocess::{
+    preprocess_chat_input_v2_with_options, preprocess_chat_input_with_options,
+    MainChatPreprocessOptions,
+};
 use crate::main_chat_runtime_support::{
     append_main_chat_agent_transcript, start_main_chat_agent_turn,
 };
@@ -162,9 +165,12 @@ pub(crate) async fn start_stream_message_with_state(
         }
     }
 
-    let use_v2 = {
+    let (use_v2, preprocess_options) = {
         let cfg = state.config.lock().await;
-        cfg.experimental_context_assembler
+        (
+            cfg.experimental_context_assembler,
+            MainChatPreprocessOptions::from_runtime_mode(&cfg.runtime_mode),
+        )
     };
 
     let (
@@ -176,9 +182,10 @@ pub(crate) async fn start_stream_message_with_state(
         embed_err,
         context_summary,
     ) = match if use_v2 {
-        preprocess_chat_input_v2(&session_id, &messages, state).await
+        preprocess_chat_input_v2_with_options(&session_id, &messages, state, preprocess_options)
+            .await
     } else {
-        preprocess_chat_input(&session_id, &messages, state).await
+        preprocess_chat_input_with_options(&session_id, &messages, state, preprocess_options).await
     } {
         Ok(result) => result,
         Err(message) => {

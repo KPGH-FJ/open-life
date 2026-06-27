@@ -203,6 +203,57 @@ Acceptance:
 - Legacy fallback remains visible and countable.
 - No product capability is lost in the extraction PR.
 
+Phase 2 readiness supplement:
+
+- Phase 2 is an extraction and parity phase, not a behavior rewrite. It must not
+  move ReAct execution, change Kernel support rules, introduce model-backed
+  routing, or delete legacy fallback.
+- The first code object should be a typed decision record, not another
+  strategy-specific branch:
+
+```rust
+pub enum MainChatExecutionPath {
+    KernelDirect,
+    KernelReadTool,
+    KernelWriteOutcome,
+    ToolLoop,
+    PlanExecute,
+    GovernedBlocker,
+    LegacyCompatFallback,
+}
+
+pub struct MainChatTurnRouteDecision {
+    pub path: MainChatExecutionPath,
+    pub strategy_label: String,
+    pub reason_code: String,
+    pub kernel_supported: bool,
+    pub fallback_allowed: bool,
+    pub requires_provider: bool,
+    pub requires_tool_loop: bool,
+}
+```
+
+- `reason_code` must be a bounded enum-like string, not free-form assistant text.
+- The helper must be pure over already-available command inputs and runtime
+  config. It must not perform tool execution, provider calls, file reads, writes,
+  or task-session mutation.
+- Send and stream must call the same route-decision helper before dispatch. Any
+  divergence must be represented as input fields on the same helper, not copied
+  branching logic.
+- Add a send/stream parity test table covering at least DirectAnswer,
+  read-tool/file prompt, PlanExecute draft, proposal path, web blocker,
+  registered MCP success, ToolPermission proposal, and legacy fallback
+  eligibility.
+- Add negative assertions that extraction keeps `legacyFallbackCount=0` for the
+  existing ordinary command-surface matrix and keeps any explicit legacy fallback
+  path labelled `LegacyCompatFallback`.
+- Add a source guard that `main_chat_send.rs` and `main_chat_streaming.rs` do not
+  each re-implement Kernel-vs-strategy-vs-fallback branching after the helper
+  lands.
+- Verification for Phase 2 must include `cargo check -p openlife-tauri`, the
+  focused route-decision tests, and
+  `main_chat_command_surface_eval_gate_covers_send_stream_runtime_matrix`.
+
 ### 5.3 ReAct As ToolLoop Executor
 
 Preparation content:

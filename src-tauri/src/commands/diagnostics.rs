@@ -64,31 +64,34 @@ pub async fn get_system_diagnostics(
         cloud_provider,
         cloud_api_validated,
         cloud_api_last_error,
+        cloud_api_validation_status,
+        cloud_api_validated_at,
+        cloud_api_failed_at,
+        cloud_api_validation_source,
         embedding_enabled,
     ) = {
         let cfg = state.config.lock().await;
-        let effective_key = cfg.effective_cloud_api_key();
         let provider = cfg.effective_provider_label();
-        let base_ready = !cfg.llm.openai_base.trim().is_empty()
-            || matches!(
-                cfg.llm.provider.as_str(),
-                "deepseek"
-                    | "openrouter"
-                    | "openai"
-                    | "siliconflow"
-                    | "moonshot"
-                    | "dashscope"
-                    | "zhipu"
+        let validation_record =
+            crate::provider_validation::load_provider_validation_record_from_path(
+                &crate::provider_validation::provider_validation_path(),
             );
-        let model_ready = !cfg.llm.chat_model.trim().is_empty();
-        let configured = !effective_key.trim().is_empty() && base_ready && model_ready;
+        let validation = crate::provider_validation::summarize_provider_validation(
+            &cfg,
+            validation_record.as_ref(),
+            chrono::Utc::now(),
+        );
         (
             cfg.local_model.clone(),
             cfg.prefer_local_model,
-            configured,
+            validation.configured,
             provider,
-            configured,
-            None,
+            validation.validated,
+            validation.last_error,
+            validation.status.to_string(),
+            validation.validated_at,
+            validation.failed_at,
+            validation.validation_source,
             cfg.llm.embedding_enabled,
         )
     };
@@ -179,6 +182,11 @@ pub async fn get_system_diagnostics(
     if !ollama_online && !cloud_api_configured {
         readiness_issues
             .push("聊天不可用：未检测到可用 Ollama 本地模型，也没有配置云端 API Key。".to_string());
+    } else if !ollama_online && cloud_api_configured && !cloud_api_validated {
+        readiness_issues.push(format!(
+            "聊天不可用：未检测到可用 Ollama 本地模型，{} API 已配置但尚未通过真实连接验证。",
+            cloud_provider
+        ));
     }
     if !life_model_ready {
         readiness_issues
@@ -195,7 +203,7 @@ pub async fn get_system_diagnostics(
             unfinished_builder_sessions
         ));
     }
-    if prefer_local_model && !ollama_online && !cloud_api_configured {
+    if prefer_local_model && !ollama_online && !cloud_api_validated {
         readiness_issues.push(format!(
             "当前设置为优先本地模型，但未找到可用模型：{}。",
             local_model
@@ -240,7 +248,7 @@ pub async fn get_system_diagnostics(
             state.startup_warnings.join("；")
         ));
     }
-    let chat_ready = life_model_ready && (ollama_online || cloud_api_configured);
+    let chat_ready = life_model_ready && (ollama_online || cloud_api_validated);
 
     let mut beta_readiness_issues = Vec::new();
     if !chat_ready {
@@ -268,6 +276,11 @@ pub async fn get_system_diagnostics(
     }
     if !cloud_api_configured {
         beta_readiness_issues.push("未配置云端 API：试用期间建议至少配置 OpenRouter 或 OpenAI API Key，以获得更稳定的体验。".to_string());
+    } else if !cloud_api_validated {
+        beta_readiness_issues.push(format!(
+            "{} API 尚未通过真实连接验证：请先在 Settings 测试连接。",
+            cloud_provider
+        ));
     }
     if !onboarding_completed {
         beta_readiness_issues.push(
@@ -308,7 +321,7 @@ pub async fn get_system_diagnostics(
     let beta_ready = chat_ready
         && !model_empty
         && chat_session_count > 0
-        && cloud_api_configured
+        && cloud_api_validated
         && onboarding_completed
         && state.startup_warnings.is_empty()
         && vector_corrupt_embedding_count == 0
@@ -335,6 +348,10 @@ pub async fn get_system_diagnostics(
         cloud_provider,
         cloud_api_validated,
         cloud_api_last_error,
+        cloud_api_validation_status,
+        cloud_api_validated_at,
+        cloud_api_failed_at,
+        cloud_api_validation_source,
         chat_ready,
         readiness_issues,
         data_dir: app_data_dir().display().to_string(),

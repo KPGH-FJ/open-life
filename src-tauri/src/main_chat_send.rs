@@ -18,7 +18,10 @@ use crate::main_chat_kernel::{
 use crate::main_chat_legacy_fallback::{
     ordinary_send_chat_execution_plan, send_message_with_legacy_generation,
 };
-use crate::main_chat_preprocess::{preprocess_chat_input, preprocess_chat_input_v2};
+use crate::main_chat_preprocess::{
+    preprocess_chat_input_v2_with_options, preprocess_chat_input_with_options,
+    MainChatPreprocessOptions,
+};
 use crate::main_chat_runtime_support::start_main_chat_agent_turn;
 use crate::main_chat_strategy::try_run_main_chat_agent_strategy;
 use crate::{persist_life_model, AppState, SendMessageResult};
@@ -89,9 +92,12 @@ pub(crate) async fn send_message_with_state(
         Layer::L2
     };
 
-    let use_v2 = {
+    let (use_v2, preprocess_options) = {
         let cfg = state.config.lock().await;
-        cfg.experimental_context_assembler
+        (
+            cfg.experimental_context_assembler,
+            MainChatPreprocessOptions::from_runtime_mode(&cfg.runtime_mode),
+        )
     };
 
     let (
@@ -103,9 +109,11 @@ pub(crate) async fn send_message_with_state(
         embed_err,
         context_summary,
     ) = if use_v2 {
-        preprocess_chat_input_v2(&session_id, &messages, state).await?
+        preprocess_chat_input_v2_with_options(&session_id, &messages, state, preprocess_options)
+            .await?
     } else {
-        preprocess_chat_input(&session_id, &messages, state).await?
+        preprocess_chat_input_with_options(&session_id, &messages, state, preprocess_options)
+            .await?
     };
 
     let auto_checkin_msg = if let Some(ref m) = user_msg {

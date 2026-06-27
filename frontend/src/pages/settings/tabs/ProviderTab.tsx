@@ -9,6 +9,7 @@ interface ProviderTabProps {
   routerStatus: RouterStatus | null;
   modelRouterStatus: ModelRouterStatus | null;
   showInternalDebug?: boolean;
+  onProviderValidationChanged?: () => Promise<unknown> | unknown;
 }
 
 type ModelMode = "local" | "auto" | "cloud";
@@ -25,9 +26,22 @@ export default function ProviderTab({
   diagnostics,
   routerStatus,
   modelRouterStatus,
+  onProviderValidationChanged,
 }: ProviderTabProps) {
   const mode = activeMode(config, diagnostics);
   const cloudConfigured = Boolean(diagnostics?.cloud_api_configured);
+  const cloudStatus = diagnostics?.cloud_api_validation_status ?? "unvalidated";
+  const cloudValidated = cloudConfigured && cloudStatus === "validated";
+  const cloudFailed = cloudConfigured && cloudStatus === "failed";
+  const cloudMeta = cloudConfigured
+    ? cloudValidated
+      ? "validated"
+      : cloudFailed
+        ? "failed"
+        : cloudStatus === "stale"
+          ? "stale"
+          : "unvalidated"
+    : "not configured";
   const localAvailable = Boolean(diagnostics?.ollama_online);
 
   function setMode(nextMode: ModelMode) {
@@ -108,17 +122,38 @@ export default function ProviderTab({
         <CapabilityCard
           title="云端模型"
           description="云端会离开本机；回复中必须展示 provider、model 和隐私边界。"
-          tone={cloudConfigured ? "warning" : "neutral"}
-          meta={cloudConfigured ? "已配置" : "未配置"}
+          tone={
+            cloudValidated
+              ? "ready"
+              : cloudFailed
+                ? "danger"
+                : cloudConfigured
+                  ? "warning"
+                  : "neutral"
+          }
+          meta={cloudMeta}
         >
           <StatusChip
             label={diagnostics?.cloud_provider || config.llm?.provider || "cloud"}
-            tone={cloudConfigured ? "warning" : "neutral"}
+            tone={
+              cloudValidated
+                ? "ready"
+                : cloudFailed
+                  ? "danger"
+                  : cloudConfigured
+                    ? "warning"
+                    : "neutral"
+            }
           />
         </CapabilityCard>
       </section>
 
-      <ProviderConfigSection config={config} onConfigChange={setConfig} diagnostics={diagnostics} />
+      <ProviderConfigSection
+        config={config}
+        onConfigChange={setConfig}
+        diagnostics={diagnostics}
+        onProviderValidationChanged={onProviderValidationChanged}
+      />
     </>
   );
 }

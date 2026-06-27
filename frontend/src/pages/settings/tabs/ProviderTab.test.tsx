@@ -32,6 +32,8 @@ describe("ProviderTab", () => {
   const mockDiagnostics = {
     cloud_api_configured: true,
     cloud_provider: "DeepSeek",
+    cloud_api_validated: false,
+    cloud_api_validation_status: "unvalidated",
     ollama_online: true,
     local_model: "llama3",
     resolved_local_model: "llama3",
@@ -55,6 +57,100 @@ describe("ProviderTab", () => {
     expect(screen.getByRole("button", { name: /Auto/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Cloud/ })).toBeInTheDocument();
     expect(screen.getByText(/LocalOnly 时不会调用云端/)).toBeInTheDocument();
+    expect(screen.getByText("unvalidated")).toBeInTheDocument();
+    expect(screen.getByText(/尚未验证/)).toBeInTheDocument();
+  });
+
+  it("shows validated, failed, and stale provider status distinctly", async () => {
+    let view!: ReturnType<typeof render>;
+    await act(async () => {
+      view = render(
+        <MemoryRouter>
+          <ProviderTab
+            config={mockConfig}
+            setConfig={vi.fn()}
+            diagnostics={
+              {
+                ...mockDiagnostics,
+                cloud_api_validated: true,
+                cloud_api_validation_status: "validated",
+                cloud_api_validated_at: "2026-06-27T00:00:00Z",
+              } as any
+            }
+            routerStatus={null}
+            modelRouterStatus={null}
+          />
+        </MemoryRouter>
+      );
+    });
+
+    expect(screen.getByText("validated")).toBeInTheDocument();
+    expect(screen.getByText(/Provider 已验证/)).toBeInTheDocument();
+
+    view.rerender(
+      <MemoryRouter>
+        <ProviderTab
+          config={mockConfig}
+          setConfig={vi.fn()}
+          diagnostics={
+            {
+              ...mockDiagnostics,
+              cloud_api_validated: false,
+              cloud_api_validation_status: "failed",
+              cloud_api_last_error: "http_status:401",
+            } as any
+          }
+          routerStatus={null}
+          modelRouterStatus={null}
+        />
+      </MemoryRouter>
+    );
+    expect(screen.getByText("failed")).toBeInTheDocument();
+    expect(screen.getByText(/安全错误标签：http_status:401/)).toBeInTheDocument();
+
+    view.rerender(
+      <MemoryRouter>
+        <ProviderTab
+          config={mockConfig}
+          setConfig={vi.fn()}
+          diagnostics={
+            {
+              ...mockDiagnostics,
+              cloud_api_validated: false,
+              cloud_api_validation_status: "stale",
+            } as any
+          }
+          routerStatus={null}
+          modelRouterStatus={null}
+        />
+      </MemoryRouter>
+    );
+    expect(screen.getByText("stale")).toBeInTheDocument();
+    expect(screen.getByText(/Provider 验证已失效/)).toBeInTheDocument();
+  });
+
+  it("lets users opt into capability-first beta without changing the default mode", async () => {
+    const setConfig = vi.fn();
+    await act(async () => {
+      render(
+        <MemoryRouter>
+          <ProviderTab
+            config={{ ...mockConfig, runtime_mode: "local_first_default" }}
+            setConfig={setConfig}
+            diagnostics={mockDiagnostics}
+            routerStatus={null}
+            modelRouterStatus={null}
+          />
+        </MemoryRouter>
+      );
+    });
+
+    expect(screen.getByRole("button", { name: /Local-first default/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Capability-first beta/ }));
+    expect(setConfig).toHaveBeenCalledWith({
+      ...mockConfig,
+      runtime_mode: "capability_first_beta",
+    });
   });
 
   it("summarizes router state without exposing internals", async () => {

@@ -70,6 +70,7 @@ pub(crate) mod main_chat_streaming;
 #[allow(dead_code)]
 pub(crate) mod main_chat_task_continuity_eval;
 pub(crate) mod main_chat_task_controls;
+pub(crate) mod provider_validation;
 pub mod runtime_build_info;
 pub mod scheduler_runner;
 pub mod state;
@@ -363,6 +364,10 @@ pub struct SystemDiagnostics {
     pub cloud_provider: String,
     pub cloud_api_validated: bool,
     pub cloud_api_last_error: Option<String>,
+    pub cloud_api_validation_status: String,
+    pub cloud_api_validated_at: Option<String>,
+    pub cloud_api_failed_at: Option<String>,
+    pub cloud_api_validation_source: Option<String>,
     pub chat_ready: bool,
     pub readiness_issues: Vec<String>,
     pub data_dir: String,
