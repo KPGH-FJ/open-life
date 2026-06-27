@@ -1201,6 +1201,7 @@ metadata-safe safety, default Chat impact, and next dependency.
 | Document | Use for |
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, and current hard constraints. |
+| `plans/main_chat_capability_first_preparation.md` | Capability-first Main Chat preparation-only entrypoint: defines the 1-7 development route, minimum governance backstop, industry cross-check, PR sequence, and real capability eval seed set. It does not supersede K8/runtime acceptance until implementation lands. |
 | `plans/main_chat_agent_kernel_rescue_goal_8_cleanup_final_gate.md` | Current Goal-mode target for kernel-backed default Main Chat cleanup and final/readiness gate realignment. |
 | `plans/main_chat_agent_kernel_rescue_goal_mode_index.md` | Eight-goal Main Chat kernel rescue sequence and cross-goal rules. |
 | `plans/main_chat_agent_kernel_rescue_acceptance_matrix.md` | K1-K8 acceptance rows; K8 is authoritative for default kernel path, legacy fallback isolation, final/readiness gate evidence, docs, and safety regression checks. |
