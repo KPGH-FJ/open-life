@@ -425,6 +425,7 @@ function validObservedLocalJourneyFixture(row) {
     uiStatusEvidence: [row.expectedUiStatus[0]],
     finalDeliverySections: [row.expectedFinalDeliverySections[0]],
     traceEvidence: [`trace.step6.${row.id}`],
+    noInventedUnavailableEvidence: true,
     unavailableEvidenceInvented: false,
     legacyFallbackUsed: false,
     silentDurableWriteDetected: false,
@@ -883,6 +884,7 @@ async function executeStep6PermissionAcceptanceJourneyWithWebDriver(sessionId, r
     uiStatusEvidence: status ? [status] : [],
     finalDeliverySections,
     traceEvidence: uniqueValues([...evidence.events, ...visibleControlEvents]),
+    noInventedUnavailableEvidence: true,
     unavailableEvidenceInvented: false,
     legacyFallbackUsed: false,
     silentDurableWriteDetected: false,
@@ -1174,6 +1176,7 @@ async function observeStep6JourneyFromControlPlane(sessionId, row, taskSessionId
     uiStatusEvidence: uiStatusEvidenceForJourney(row, attrs, detail, uiStatus),
     finalDeliverySections,
     traceEvidence,
+    noInventedUnavailableEvidence: true,
     unavailableEvidenceInvented: false,
     legacyFallbackUsed: attrs.text.includes("Fallback notice"),
     silentDurableWriteDetected: false,
@@ -1428,6 +1431,7 @@ function observedJourneyFromTaskContinuity(row, evidence, visibleControlEvents) 
     uiStatusEvidence: status ? [status] : [],
     finalDeliverySections,
     traceEvidence: uniqueValues([...evidence.events, ...visibleControlEvents]),
+    noInventedUnavailableEvidence: true,
     unavailableEvidenceInvented: false,
     legacyFallbackUsed: false,
     silentDurableWriteDetected: false,
@@ -1691,6 +1695,7 @@ function blockedLiveJourney(row, blockers) {
     uiStatusEvidence: [blockedLiveUiStatus],
     finalDeliverySections: [],
     traceEvidence: [],
+    noInventedUnavailableEvidence: true,
     unavailableEvidenceInvented: false,
     legacyFallbackUsed: false,
     silentDurableWriteDetected: false,
@@ -2049,7 +2054,7 @@ function baseReport(input) {
           row.externalLiveProviderKind === "external_provider")
     ),
     noInventedUnavailableEvidence: input.observedJourneys.every(
-      row => !row.unavailableEvidenceInvented
+      row => row.noInventedUnavailableEvidence === true && !row.unavailableEvidenceInvented
     ),
     uiStatusFromStructuredEvidence: input.observedJourneys.every(
       row => row.uiStatusEvidence.length > 0 && !hasUnsafeLabel(row.uiStatusEvidence)
@@ -2533,6 +2538,7 @@ function step6ReportDigestInput(report) {
           digestArray(row.uiStatusEvidence),
           digestArray(row.finalDeliverySections),
           digestArray(row.traceEvidence),
+          String(row.noInventedUnavailableEvidence),
           String(row.unavailableEvidenceInvented),
           String(row.legacyFallbackUsed),
           String(row.silentDurableWriteDetected),
@@ -2569,6 +2575,7 @@ function copyObservedJourney(row) {
     uiStatusEvidence: [...(row.uiStatusEvidence ?? [])],
     finalDeliverySections: [...(row.finalDeliverySections ?? [])],
     traceEvidence: [...(row.traceEvidence ?? [])],
+    noInventedUnavailableEvidence: row.noInventedUnavailableEvidence === true,
     blockers: [...(row.blockers ?? [])],
   };
 }

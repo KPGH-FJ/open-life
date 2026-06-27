@@ -862,6 +862,7 @@ function step6ObservedJourneys(input: {
           ? []
           : [journey.expectedFinalDeliverySections[0]],
       traceEvidence: [`trace.step6.${index + 1}`],
+      noInventedUnavailableEvidence: true,
       unavailableEvidenceInvented: false,
       legacyFallbackUsed: false,
       silentDurableWriteDetected: false,

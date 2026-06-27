@@ -32,6 +32,7 @@ export interface Step6ObservedProductJourney {
   uiStatusEvidence: string[];
   finalDeliverySections: string[];
   traceEvidence: string[];
+  noInventedUnavailableEvidence: boolean;
   unavailableEvidenceInvented: boolean;
   legacyFallbackUsed: boolean;
   silentDurableWriteDetected: boolean;
@@ -531,7 +532,7 @@ function step6Report(input: {
         row.externalLiveProviderKind === "external_provider")
   );
   const noInventedUnavailableEvidence = input.observedJourneys.every(
-    row => !row.unavailableEvidenceInvented
+    row => row.noInventedUnavailableEvidence && !row.unavailableEvidenceInvented
   );
   const uiStatusFromStructuredEvidence = input.observedJourneys.every(
     row => row.uiStatusEvidence.length > 0 && !hasUnsafeLabel(row.uiStatusEvidence)
@@ -574,6 +575,7 @@ function step6Report(input: {
       uiStatusEvidence: [...row.uiStatusEvidence],
       finalDeliverySections: [...row.finalDeliverySections],
       traceEvidence: [...row.traceEvidence],
+      noInventedUnavailableEvidence: row.noInventedUnavailableEvidence,
       blockers: [...row.blockers],
     })),
     noSilentDurableWrite,
@@ -606,6 +608,7 @@ function step6ReportDigestInput(report: Step6ProductAcceptanceReport): string {
         digestArray(row.uiStatusEvidence),
         digestArray(row.finalDeliverySections),
         digestArray(row.traceEvidence),
+        String(row.noInventedUnavailableEvidence),
         String(row.unavailableEvidenceInvented),
         String(row.legacyFallbackUsed),
         String(row.silentDurableWriteDetected),
@@ -669,6 +672,7 @@ function blockedExternalLiveObservedJourney(
     uiStatusEvidence: [STEP6_BLOCKED_LIVE_UI_STATUS],
     finalDeliverySections: [],
     traceEvidence: [],
+    noInventedUnavailableEvidence: true,
     unavailableEvidenceInvented: false,
     legacyFallbackUsed: false,
     silentDurableWriteDetected: false,

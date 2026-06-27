@@ -61,6 +61,7 @@ function observedJourneys(input: {
           ? []
           : [journey.expectedFinalDeliverySections[0]],
       traceEvidence: [`trace.step6.${index + 1}`],
+      noInventedUnavailableEvidence: true,
       unavailableEvidenceInvented: false,
       legacyFallbackUsed: false,
       silentDurableWriteDetected: false,
@@ -167,6 +168,14 @@ describe("Step6 product acceptance evidence", () => {
     expect(step6ReportDigest({ ...report, localJourneyCount: 0 })).not.toBe(report.reportDigest);
     expect(
       step6ReportDigest({ ...report, externalLiveBlockers: ["S6-LIVE-WEB:tampered"] })
+    ).not.toBe(report.reportDigest);
+    expect(
+      step6ReportDigest({
+        ...report,
+        observedJourneys: report.observedJourneys.map((row, index) =>
+          index === 0 ? { ...row, noInventedUnavailableEvidence: false } : row
+        ),
+      })
     ).not.toBe(report.reportDigest);
   });
 

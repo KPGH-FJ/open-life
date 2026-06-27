@@ -901,17 +901,22 @@ async function observeFromControlPlaneWithWebDriver(
     taskSessionId: attrs.taskSessionId,
     task_session_id: attrs.taskSessionId,
   });
+  const taskDetail = await tauriInvoke(sessionId, "get_main_chat_agent_task_detail", {
+    taskSessionId: attrs.taskSessionId,
+    task_session_id: attrs.taskSessionId,
+  }).catch(() => null);
+  const evidence = mergeRuntimeEvidence(snapshot, taskDetail);
   const events = await taskEventsWithWebDriver(sessionId, attrs.taskSessionId);
   const text = attrs.text ?? "";
-  const visibleBlockers = visibleBlockersForScenario(scenario, snapshot);
+  const visibleBlockers = visibleBlockersForScenario(scenario, evidence);
   const visibleUiStates = scenario.expectedUiStates.filter(state =>
-    uiStateObserved(state, attrs, snapshot)
+    uiStateObserved(state, attrs, evidence)
   );
   const finalDeliverySections = scenario.expectedFinalSections.filter(section =>
     finalSectionObserved(
       section,
       attrs.finalDeliverySectionTitles,
-      snapshot,
+      evidence,
       visibleControlEvents,
       events
     )
@@ -927,7 +932,7 @@ async function observeFromControlPlaneWithWebDriver(
     routeStrategy: gateRow.routeStrategy,
     runtimeEvents: uniqueValues([
       ...events,
-      ...snapshotEvents(snapshot),
+      ...snapshotEvents(evidence),
       ...visibleControlEvents,
       runtimeStrategyEvent,
     ]),
@@ -939,7 +944,9 @@ async function observeFromControlPlaneWithWebDriver(
     finalDeliveryObserved: scenario.expectedFinalSections.every(section =>
       finalDeliverySections.includes(section)
     ),
-    nonFakeEvidenceObserved: Boolean(snapshot?.task?.taskId && attrs.taskSessionId),
+    nonFakeEvidenceObserved: Boolean(
+      (evidence?.task?.taskId || evidence?.taskSession?.id) && attrs.taskSessionId
+    ),
     legacyFallbackUsed: text.includes("Fallback notice"),
     silentDurableWriteDetected: false,
     fakeExecutionDetected: false,
@@ -1184,7 +1191,12 @@ function uiStateObserved(state, attrs, snapshot) {
     );
   }
   if (state === "blocked") {
-    return attrs.blockerCount > 0 || /blocked|waiting_permission/.test(attrs.taskStatus);
+    return (
+      attrs.blockerCount > 0 ||
+      runtimeBlockerEvidenceCount(snapshot) > 0 ||
+      /blocked|waiting_permission/.test(attrs.taskStatus) ||
+      /blocked|waiting_permission/.test(snapshot?.task?.status ?? snapshot?.taskSession?.status ?? "")
+    );
   }
   if (state === "retry_available") {
     return (
@@ -1320,14 +1332,15 @@ function finalSectionObserved(
       visibleTitles.includes("Pending user actions") ||
       arrayLength(deliveryMetrics, "pendingUserActions") > 0 ||
       (snapshot?.proposals?.length ?? 0) > 0 ||
-      (snapshot?.blockers?.length ?? 0) > 0
+      runtimeBlockerEvidenceCount(snapshot) > 0
     );
   }
   if (section === "blocked_work") {
     return (
       visibleTitles.includes("Blocked items") ||
       arrayLength(deliveryMetrics, "blockers") > 0 ||
-      (snapshot?.blockers?.length ?? 0) > 0
+      arrayLength(deliveryMetrics, "blockedItems") > 0 ||
+      runtimeBlockerEvidenceCount(snapshot) > 0
     );
   }
   if (section === "skipped_work") {
@@ -1356,13 +1369,92 @@ function finalSectionObserved(
 
 function visibleBlockersForScenario(scenario, evidence) {
   if (!scenario.expectedBlocker) return [];
-  const blockerEvidence =
-    (evidence?.blockers?.length ?? 0) > 0 ||
-    (evidence?.finalDelivery?.blockers?.length ?? 0) > 0 ||
-    (evidence?.final_delivery?.blockers?.length ?? 0) > 0 ||
-    (evidence?.finalDelivery?.metadata?.blockers?.length ?? 0) > 0 ||
-    (evidence?.final_delivery?.metadata?.blockers?.length ?? 0) > 0;
+  const blockerEvidence = runtimeBlockerEvidenceCount(evidence) > 0;
   return blockerEvidence ? [scenario.expectedBlocker] : [];
+}
+
+function mergeRuntimeEvidence(snapshot, detail) {
+  if (!detail) return snapshot;
+  const finalDelivery = snapshot?.finalDelivery ?? snapshot?.final_delivery;
+  const detailFinalDelivery = detail?.finalDelivery ?? detail?.final_delivery;
+  return {
+    ...(snapshot ?? {}),
+    task: snapshot?.task ?? {
+      taskId: detail?.taskSession?.id,
+      status: detail?.taskSession?.status,
+      controls: detail?.allowedControls ?? [],
+    },
+    taskSession: detail?.taskSession ?? snapshot?.taskSession,
+    blockers: uniqueRecords([...(snapshot?.blockers ?? []), ...(detail?.blockers ?? [])]),
+    proposals: uniqueRecords([...(snapshot?.proposals ?? []), ...(detail?.proposals ?? [])]),
+    finalDelivery: mergeFinalDeliveryEvidence(finalDelivery, detailFinalDelivery),
+    events: uniqueRecords([...(snapshot?.events ?? []), ...(detail?.events ?? [])]),
+    transcript: uniqueRecords([...(snapshot?.transcript ?? []), ...(detail?.transcript ?? [])]),
+    allowedControls: uniqueValues([
+      ...(snapshot?.allowedControls ?? []),
+      ...(detail?.allowedControls ?? []),
+    ]),
+    nextRecommendedControl: snapshot?.nextRecommendedControl ?? detail?.nextRecommendedControl,
+  };
+}
+
+function mergeFinalDeliveryEvidence(left, right) {
+  if (!left) return right;
+  if (!right) return left;
+  const leftMetadata = left.metadata && typeof left.metadata === "object" ? left.metadata : {};
+  const rightMetadata = right.metadata && typeof right.metadata === "object" ? right.metadata : {};
+  return {
+    ...left,
+    ...right,
+    metadata: {
+      ...leftMetadata,
+      ...rightMetadata,
+      blockers: uniqueRecords([...(leftMetadata.blockers ?? []), ...(rightMetadata.blockers ?? [])]),
+      blockedItems: uniqueRecords([
+        ...(leftMetadata.blockedItems ?? []),
+        ...(rightMetadata.blockedItems ?? []),
+      ]),
+      pendingUserActions: uniqueRecords([
+        ...(leftMetadata.pendingUserActions ?? []),
+        ...(rightMetadata.pendingUserActions ?? []),
+      ]),
+    },
+    blockers: uniqueRecords([...(left.blockers ?? []), ...(right.blockers ?? [])]),
+    blockedItems: uniqueRecords([...(left.blockedItems ?? []), ...(right.blockedItems ?? [])]),
+    pendingUserActions: uniqueRecords([
+      ...(left.pendingUserActions ?? []),
+      ...(right.pendingUserActions ?? []),
+    ]),
+    nextSteps: uniqueRecords([...(left.nextSteps ?? []), ...(right.nextSteps ?? [])]),
+  };
+}
+
+function runtimeBlockerEvidenceCount(evidence) {
+  const delivery = evidence?.finalDelivery ?? evidence?.final_delivery;
+  const deliveryMetrics =
+    delivery?.metadata && typeof delivery.metadata === "object"
+      ? { ...delivery, ...delivery.metadata }
+      : delivery;
+  return (
+    arrayLength(evidence, "blockers") +
+    arrayLength(evidence, "pendingBlockers") +
+    arrayLength(evidence?.task, "pendingBlockers") +
+    arrayLength(evidence?.taskSession, "pendingBlockers") +
+    arrayLength(deliveryMetrics, "blockers") +
+    arrayLength(deliveryMetrics, "blockedItems") +
+    arrayLength(deliveryMetrics, "pendingUserActions")
+  );
+}
+
+function uniqueRecords(values) {
+  const seen = new Set();
+  return (values ?? []).filter(value => {
+    if (value === null || value === undefined) return false;
+    const key = JSON.stringify(value);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function arrayLength(value, key) {
