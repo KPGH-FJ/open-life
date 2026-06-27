@@ -35,17 +35,18 @@ use crate::main_chat_preprocess::{
     preprocess_chat_input_v2_with_options, preprocess_chat_input_with_options,
     MainChatPreprocessOptions,
 };
+use crate::main_chat_route_preview::{
+    attach_route_preview_trace, preview_main_chat_turn_route, MainChatRoutePreviewTrace,
+};
 use crate::main_chat_runtime_support::{
     append_main_chat_agent_transcript, start_main_chat_agent_turn,
 };
 use crate::main_chat_strategy::try_run_main_chat_agent_strategy;
+use crate::main_chat_streaming::{STREAM_CHUNK_TIMEOUT_SECS, STREAM_INIT_TIMEOUT_SECS};
 use crate::main_chat_tool_loop::{
     run_main_chat_tool_loop_adapter, MainChatToolLoopInput, MainChatToolLoopOutcome,
 };
 use crate::{persist_life_model, AppState, SendMessageResult, ToolCallResult};
-
-const STREAM_INIT_TIMEOUT_SECS: u64 = 45;
-const STREAM_CHUNK_TIMEOUT_SECS: u64 = 90;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum MainChatExecutionPath {
@@ -311,6 +312,14 @@ pub(crate) async fn run_main_chat_turn_pipeline_buffered(
         state,
     )
     .await;
+    let route_preview_trace = preview_main_chat_turn_route(
+        state,
+        &messages,
+        &main_chat_agent_turn.decision,
+        &route_decision,
+        MainChatTurnStreamMode::Buffered,
+    )
+    .await;
     if route_decision.path.is_kernel_dispatch() {
         let mut event_sink = BufferedMainChatEventSink::default();
         let result = run_main_chat_kernel_direct_answer_with_state(
@@ -323,11 +332,11 @@ pub(crate) async fn run_main_chat_turn_pipeline_buffered(
             MainChatTurnStreamMode::Buffered.as_str(),
         )
         .await?;
+        let mut result = result.into_send_message_result();
+        attach_route_preview_trace(&mut result.reasoning_trace, &route_preview_trace);
         return Ok(MainChatTurnPipelineOutput {
             route_decision,
-            delivery: MainChatTurnDelivery::Buffered {
-                result: result.into_send_message_result(),
-            },
+            delivery: MainChatTurnDelivery::Buffered { result },
         });
     }
 
@@ -414,10 +423,11 @@ pub(crate) async fn run_main_chat_turn_pipeline_buffered(
         )
         .await?;
         match outcome {
-            MainChatToolLoopOutcome::AgentLoopSuccess(result)
-            | MainChatToolLoopOutcome::GovernedBlocker(result)
-            | MainChatToolLoopOutcome::ToolPermissionProposal(result)
-            | MainChatToolLoopOutcome::SingleStepFallback(result) => {
+            MainChatToolLoopOutcome::AgentLoopSuccess(mut result)
+            | MainChatToolLoopOutcome::GovernedBlocker(mut result)
+            | MainChatToolLoopOutcome::ToolPermissionProposal(mut result)
+            | MainChatToolLoopOutcome::SingleStepFallback(mut result) => {
+                attach_route_preview_trace(&mut result.reasoning_trace, &route_preview_trace);
                 materialize_optional_main_chat_agent_events(state, result.agent_state.as_ref())
                     .await?;
                 return Ok(MainChatTurnPipelineOutput {
@@ -453,6 +463,8 @@ pub(crate) async fn run_main_chat_turn_pipeline_buffered(
                     state,
                 )
                 .await?;
+                let mut result = result;
+                attach_route_preview_trace(&mut result.reasoning_trace, &route_preview_trace);
                 materialize_optional_main_chat_agent_events(state, result.agent_state.as_ref())
                     .await?;
                 return Ok(MainChatTurnPipelineOutput {
@@ -463,7 +475,7 @@ pub(crate) async fn run_main_chat_turn_pipeline_buffered(
         }
     }
 
-    if let Some(result) = try_run_main_chat_agent_strategy(
+    if let Some(mut result) = try_run_main_chat_agent_strategy(
         &session_id,
         user_msg.as_ref(),
         &desensitized_messages,
@@ -480,6 +492,7 @@ pub(crate) async fn run_main_chat_turn_pipeline_buffered(
     )
     .await?
     {
+        attach_route_preview_trace(&mut result.reasoning_trace, &route_preview_trace);
         materialize_optional_main_chat_agent_events(state, result.agent_state.as_ref()).await?;
         return Ok(MainChatTurnPipelineOutput {
             route_decision,
@@ -507,6 +520,8 @@ pub(crate) async fn run_main_chat_turn_pipeline_buffered(
         state,
     )
     .await?;
+    let mut result = result;
+    attach_route_preview_trace(&mut result.reasoning_trace, &route_preview_trace);
     materialize_optional_main_chat_agent_events(state, result.agent_state.as_ref()).await?;
     Ok(MainChatTurnPipelineOutput {
         route_decision: legacy_route_decision,
@@ -541,6 +556,14 @@ pub(crate) async fn run_main_chat_turn_pipeline_streaming(
         state,
     )
     .await;
+    let route_preview_trace = preview_main_chat_turn_route(
+        state,
+        &messages,
+        &main_chat_agent_turn.decision,
+        &route_decision,
+        MainChatTurnStreamMode::Streaming,
+    )
+    .await;
     if route_decision.path.is_kernel_dispatch() {
         let result = {
             let mut event_sink = StreamingMainChatEventSink::new(emit_stream_event);
@@ -560,9 +583,11 @@ pub(crate) async fn run_main_chat_turn_pipeline_streaming(
         let durable_event_count = durable_events.len();
         let run_id = result.run_id.clone();
         let legacy_fallback_used = result.legacy_fallback_used;
+        let mut result = result.into_send_message_result();
+        attach_route_preview_trace(&mut result.reasoning_trace, &route_preview_trace);
         emit_stream_send_message_result(
             &session_id,
-            result.into_send_message_result(),
+            result,
             Some(kernel_event_count),
             durable_events,
             false,
@@ -704,10 +729,11 @@ pub(crate) async fn run_main_chat_turn_pipeline_streaming(
         )
         .await?;
         match outcome {
-            MainChatToolLoopOutcome::AgentLoopSuccess(result)
-            | MainChatToolLoopOutcome::GovernedBlocker(result)
-            | MainChatToolLoopOutcome::ToolPermissionProposal(result)
-            | MainChatToolLoopOutcome::SingleStepFallback(result) => {
+            MainChatToolLoopOutcome::AgentLoopSuccess(mut result)
+            | MainChatToolLoopOutcome::GovernedBlocker(mut result)
+            | MainChatToolLoopOutcome::ToolPermissionProposal(mut result)
+            | MainChatToolLoopOutcome::SingleStepFallback(mut result) => {
+                attach_route_preview_trace(&mut result.reasoning_trace, &route_preview_trace);
                 let durable_events =
                     materialize_optional_main_chat_agent_events(state, result.agent_state.as_ref())
                         .await?;
@@ -757,6 +783,7 @@ pub(crate) async fn run_main_chat_turn_pipeline_streaming(
                     main_chat_agent_turn,
                     legacy_route_decision,
                     state,
+                    route_preview_trace.clone(),
                     emit_stream_event,
                 )
                 .await;
@@ -764,7 +791,7 @@ pub(crate) async fn run_main_chat_turn_pipeline_streaming(
         }
     }
 
-    if let Some(result) = try_run_main_chat_agent_strategy(
+    if let Some(mut result) = try_run_main_chat_agent_strategy(
         &session_id,
         user_msg.as_ref(),
         &desensitized_messages,
@@ -781,6 +808,7 @@ pub(crate) async fn run_main_chat_turn_pipeline_streaming(
     )
     .await?
     {
+        attach_route_preview_trace(&mut result.reasoning_trace, &route_preview_trace);
         let durable_events =
             materialize_optional_main_chat_agent_events(state, result.agent_state.as_ref()).await?;
         let durable_event_count = durable_events.len();
@@ -822,6 +850,7 @@ pub(crate) async fn run_main_chat_turn_pipeline_streaming(
         main_chat_agent_turn,
         legacy_route_decision,
         state,
+        route_preview_trace,
         emit_stream_event,
     )
     .await
@@ -902,6 +931,7 @@ async fn run_legacy_streaming_delivery(
     main_chat_agent_turn: crate::main_chat_runtime_support::MainChatAgentTurn,
     legacy_route_decision: MainChatTurnRouteDecision,
     state: &Arc<AppState>,
+    route_preview_trace: MainChatRoutePreviewTrace,
     emit_stream_event: &mut (impl FnMut(&str, serde_json::Value) + Send),
 ) -> Result<MainChatTurnPipelineOutput, String> {
     let ordinary_plan = ordinary_stream_chat_execution_plan(layer);
@@ -1268,6 +1298,7 @@ async fn run_legacy_streaming_delivery(
     };
     let preview = preview_text(&reply, 200);
     agent_run.complete(&preview, model_route, context_summary);
+    attach_route_preview_trace(&mut reasoning_trace, &route_preview_trace);
     if let Err(e) = finalize_chat_agent_run(
         session_id,
         &assistant_message,

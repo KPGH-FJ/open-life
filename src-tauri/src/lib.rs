@@ -55,6 +55,7 @@ pub(crate) mod main_chat_proposal_support;
 pub(crate) mod main_chat_react_execution;
 pub(crate) mod main_chat_react_runtime;
 pub(crate) mod main_chat_react_tool_selection;
+pub(crate) mod main_chat_route_preview;
 #[allow(dead_code)]
 pub(crate) mod main_chat_runtime_facts;
 pub(crate) mod main_chat_runtime_support;

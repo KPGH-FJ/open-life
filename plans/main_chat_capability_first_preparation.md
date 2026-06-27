@@ -504,6 +504,53 @@ Acceptance:
 - Hidden fallback, silent write, and fake observation are zero-tolerance
   failures.
 
+Phase 6 readiness supplement:
+
+- Phase 6 is the first real capability-eval phase. It must prove that Main Chat
+  can complete useful product tasks through the current pipeline, not merely that
+  governance blockers fire.
+- Add or extend `plans/main_chat_agent_product_eval_scenarios_v1.md` with a
+  stable scenario contract for each `CF-*` case. Each row must declare:
+  - scenario id and user job;
+  - fixture/session/provider setup;
+  - expected deterministic route and allowed alternate advisory preview state;
+  - required runtime evidence fields;
+  - final user-visible delivery requirement;
+  - forbidden evidence shortcuts.
+- Add a deterministic runner module, for example
+  `src-tauri/src/main_chat_capability_eval.rs`, rather than putting the eval
+  logic into `lib.rs`, `main_chat_send.rs`, or UI code.
+- The runner should execute ordinary Main Chat command-surface paths
+  (`send_message_with_state` first; stream coverage may reuse existing
+  command-surface gate unless a scenario specifically needs stream events).
+- Measure success from typed runtime artifacts:
+  - `MainChatTurnRouteDecision` / execution path evidence;
+  - `reasoning_trace.generation_result` capability flags;
+  - tool-call and observation transcript entries;
+  - proposal or permission records when the scenario requires them;
+  - final assistant delivery text that reflects the observed result.
+- Do not count any of these as completion:
+  - assistant text claiming a tool was used without matching observation;
+  - legacy fallback used as the successful path;
+  - synthetic observation not tied to the scenario fixture;
+  - direct durable writes outside proposal or permission flows;
+  - live-provider success without deterministic fixture proof.
+- Keep optional live-provider runs separate from deterministic capability credit.
+  Live runs may add confidence, but they must not be required for local CI and
+  must not mask failed fixture scenarios.
+- Keep privacy/governance backstop minimal for this phase: `allow_writes=false`
+  remains hard for ordinary ToolLoop execution, proposals and permissions remain
+  explicit, and the eval runner must not serialize secrets or raw provider keys.
+- Initial Phase 6 implementation should cover at least:
+  - `CF-DIRECT-01`;
+  - `CF-FILE-01`;
+  - `CF-WEB-01` with fixture-backed web evidence when external network is absent;
+  - one MCP read scenario or a clear blocker if registered MCP fixtures are not
+    available in the isolated eval state.
+- Verification for Phase 6 must include the new capability-eval focused tests,
+  `main_chat_command_surface_eval_gate_covers_send_stream_runtime_matrix`,
+  `main_chat_route_preview`, and `main_chat_runtime_module`.
+
 ### 5.6 Product UI State Simplification
 
 Preparation content:

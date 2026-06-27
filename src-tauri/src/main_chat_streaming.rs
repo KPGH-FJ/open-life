@@ -7,6 +7,9 @@ use crate::main_chat_turn_pipeline::{
 };
 use crate::AppState;
 
+pub(crate) const STREAM_INIT_TIMEOUT_SECS: u64 = 45;
+pub(crate) const STREAM_CHUNK_TIMEOUT_SECS: u64 = 90;
+
 pub(crate) async fn start_stream_message_with_state(
     session_id: String,
     messages: Vec<ChatMessage>,
