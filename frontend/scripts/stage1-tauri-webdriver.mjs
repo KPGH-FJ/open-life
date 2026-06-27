@@ -375,18 +375,37 @@ async function executeChatScenarioWithWebDriver(sessionId, scenario, gateRow) {
 
 async function prepareStage1ScenarioNetworkPolicy(sessionId, scenario) {
   if (scenario.id !== "D23") return null;
-  return await tauriInvoke(sessionId, "set_main_chat_agent_stage1_browser_network_policy", {
-    enabled: false,
-  });
+  const previousNetworkPolicy = await tauriInvoke(
+    sessionId,
+    "set_main_chat_agent_stage1_browser_network_policy",
+    {
+      enabled: false,
+    }
+  );
+  const previousWebFixtureOutput = await tauriInvoke(
+    sessionId,
+    "set_main_chat_agent_stage1_browser_web_fixture_output",
+    {
+      output: null,
+    }
+  );
+  return { previousNetworkPolicy, previousWebFixtureOutput };
 }
 
-async function restoreStage1ScenarioNetworkPolicy(sessionId, previousNetworkPolicy) {
-  if (previousNetworkPolicy === null || previousNetworkPolicy === undefined) return;
+async function restoreStage1ScenarioNetworkPolicy(sessionId, previousScenarioState) {
+  if (previousScenarioState === null || previousScenarioState === undefined) return;
   await tauriInvoke(sessionId, "set_main_chat_agent_stage1_browser_network_policy", {
-    enabled: Boolean(previousNetworkPolicy),
+    enabled: Boolean(previousScenarioState.previousNetworkPolicy),
   }).catch(error => {
     console.error(
       `[stage1_network_policy_restore:error] ${metadataSafeBlocker(error?.message ?? error)}`
+    );
+  });
+  await tauriInvoke(sessionId, "set_main_chat_agent_stage1_browser_web_fixture_output", {
+    output: previousScenarioState.previousWebFixtureOutput ?? null,
+  }).catch(error => {
+    console.error(
+      `[stage1_web_fixture_restore:error] ${metadataSafeBlocker(error?.message ?? error)}`
     );
   });
 }

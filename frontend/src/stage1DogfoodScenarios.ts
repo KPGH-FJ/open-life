@@ -178,7 +178,7 @@ export const STAGE1_DOGFOOD_SCENARIOS: Stage1DogfoodScenario[] = [
   s(
     "D24",
     "chat_e2e",
-    "Use MCP when no manifest exists.",
+    "Use MCP missing_manifest_tool read-only when no manifest exists.",
     ["blocked"],
     ["blocked_work", "next_action"],
     "mcp_missing_read_target"

@@ -2083,6 +2083,20 @@ pub async fn set_main_chat_agent_stage1_browser_network_policy(
 }
 
 #[tauri::command]
+pub async fn set_main_chat_agent_stage1_browser_web_fixture_output(
+    output: Option<String>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<String>, String> {
+    if !cfg!(debug_assertions) {
+        return Err("stage1_browser_web_fixture_toggle_debug_only".into());
+    }
+    let mut fixture = state.web_search_fixture_output.lock().await;
+    let previous = fixture.clone();
+    *fixture = output;
+    Ok(previous)
+}
+
+#[tauri::command]
 pub async fn run_main_chat_agent_execution_v1_final_acceptance_gate(
     state: State<'_, Arc<AppState>>,
 ) -> Result<MainChatAgentExecutionV1FinalAcceptanceGateCommandReport, String> {

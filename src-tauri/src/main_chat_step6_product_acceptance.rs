@@ -1623,6 +1623,7 @@ fn step6_browser_report_digest_input(report: &Step6BrowserReport) -> String {
                 digest_part(&digest_array(&row.ui_status_evidence)),
                 digest_part(&digest_array(&row.final_delivery_sections)),
                 digest_part(&digest_array(&row.trace_evidence)),
+                digest_part(bool_label(row.no_invented_unavailable_evidence)),
                 digest_part(bool_label(row.unavailable_evidence_invented)),
                 digest_part(bool_label(row.legacy_fallback_used)),
                 digest_part(bool_label(row.silent_durable_write_detected)),
