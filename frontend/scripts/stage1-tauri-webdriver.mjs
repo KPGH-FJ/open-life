@@ -776,7 +776,7 @@ async function readControlPlaneTimeoutSnapshotWithWebDriver(sessionId, previousT
       const control = controls.at(-1);
       const selectedSkillControl = document.querySelector('[data-testid="skill-context-control"]');
       const sendButton = document.querySelector('[data-testid="send-button"]');
-      const assistantMessages = [...document.querySelectorAll('[data-testid="chat-message-assistant"]')];
+      const assistantMessages = [...document.querySelectorAll('[data-testid="assistant-message"]')];
       const lastTaskSessionId = control?.getAttribute('data-task-session-id') ?? '';
       return {
         controlCount: controls.length,

@@ -254,17 +254,12 @@ fn default_search_provider() -> String {
     "duckduckgo".to_string()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRuntimeMode {
+    #[default]
     LocalFirstDefault,
     CapabilityFirstBeta,
-}
-
-impl Default for AgentRuntimeMode {
-    fn default() -> Self {
-        Self::LocalFirstDefault
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

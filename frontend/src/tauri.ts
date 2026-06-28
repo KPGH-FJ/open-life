@@ -2360,13 +2360,13 @@ export async function startStreamMessage(
   sessionId: string,
   messages: ChatMessage[],
   options: MainChatMessageOptions = {}
-): Promise<void | StreamMessageDonePayload> {
+): Promise<StreamMessageDonePayload> {
   const payload = {
     ...sessionArgs(sessionId),
     messages,
     ...selectedSkillArgs(options.selectedSkillId),
   };
-  return safeInvoke<void>("start_stream_message", { ...payload, args: payload });
+  return safeInvoke<StreamMessageDonePayload>("start_stream_message", { ...payload, args: payload });
 }
 
 // Note: Hermes dispatch command has been removed. Use AgentRuntime instead.

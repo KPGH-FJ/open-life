@@ -131,13 +131,14 @@ pub(crate) struct MainChatTurnPipelineOutput {
 
 pub(crate) enum MainChatTurnDelivery {
     Buffered {
-        result: SendMessageResult,
+        result: Box<SendMessageResult>,
     },
     Streamed {
         run_id: Option<String>,
         legacy_fallback_used: bool,
         kernel_event_count: Option<usize>,
         durable_event_count: usize,
+        done_payload: serde_json::Value,
     },
 }
 
@@ -336,7 +337,9 @@ pub(crate) async fn run_main_chat_turn_pipeline_buffered(
         attach_route_preview_trace(&mut result.reasoning_trace, &route_preview_trace);
         return Ok(MainChatTurnPipelineOutput {
             route_decision,
-            delivery: MainChatTurnDelivery::Buffered { result },
+            delivery: MainChatTurnDelivery::Buffered {
+                result: Box::new(result),
+            },
         });
     }
 
@@ -432,7 +435,9 @@ pub(crate) async fn run_main_chat_turn_pipeline_buffered(
                     .await?;
                 return Ok(MainChatTurnPipelineOutput {
                     route_decision,
-                    delivery: MainChatTurnDelivery::Buffered { result },
+                    delivery: MainChatTurnDelivery::Buffered {
+                        result: Box::new(result),
+                    },
                 });
             }
             MainChatToolLoopOutcome::ExplicitFallbackAvailable { reason_code }
@@ -469,7 +474,9 @@ pub(crate) async fn run_main_chat_turn_pipeline_buffered(
                     .await?;
                 return Ok(MainChatTurnPipelineOutput {
                     route_decision: legacy_route_decision,
-                    delivery: MainChatTurnDelivery::Buffered { result },
+                    delivery: MainChatTurnDelivery::Buffered {
+                        result: Box::new(result),
+                    },
                 });
             }
         }
@@ -496,7 +503,9 @@ pub(crate) async fn run_main_chat_turn_pipeline_buffered(
         materialize_optional_main_chat_agent_events(state, result.agent_state.as_ref()).await?;
         return Ok(MainChatTurnPipelineOutput {
             route_decision,
-            delivery: MainChatTurnDelivery::Buffered { result },
+            delivery: MainChatTurnDelivery::Buffered {
+                result: Box::new(result),
+            },
         });
     }
 
@@ -525,7 +534,9 @@ pub(crate) async fn run_main_chat_turn_pipeline_buffered(
     materialize_optional_main_chat_agent_events(state, result.agent_state.as_ref()).await?;
     Ok(MainChatTurnPipelineOutput {
         route_decision: legacy_route_decision,
-        delivery: MainChatTurnDelivery::Buffered { result },
+        delivery: MainChatTurnDelivery::Buffered {
+            result: Box::new(result),
+        },
     })
 }
 
@@ -585,7 +596,7 @@ pub(crate) async fn run_main_chat_turn_pipeline_streaming(
         let legacy_fallback_used = result.legacy_fallback_used;
         let mut result = result.into_send_message_result();
         attach_route_preview_trace(&mut result.reasoning_trace, &route_preview_trace);
-        emit_stream_send_message_result(
+        let done_payload = emit_stream_send_message_result(
             &session_id,
             result,
             Some(kernel_event_count),
@@ -600,6 +611,7 @@ pub(crate) async fn run_main_chat_turn_pipeline_streaming(
                 legacy_fallback_used,
                 kernel_event_count: Some(kernel_event_count),
                 durable_event_count,
+                done_payload,
             },
         });
     }
@@ -740,7 +752,7 @@ pub(crate) async fn run_main_chat_turn_pipeline_streaming(
                 let durable_event_count = durable_events.len();
                 let run_id = result.run_id.clone();
                 let legacy_fallback_used = result.legacy_fallback_used;
-                emit_stream_send_message_result(
+                let done_payload = emit_stream_send_message_result(
                     &session_id,
                     result,
                     None,
@@ -755,6 +767,7 @@ pub(crate) async fn run_main_chat_turn_pipeline_streaming(
                         legacy_fallback_used,
                         kernel_event_count: None,
                         durable_event_count,
+                        done_payload,
                     },
                 });
             }
@@ -814,7 +827,7 @@ pub(crate) async fn run_main_chat_turn_pipeline_streaming(
         let durable_event_count = durable_events.len();
         let run_id = result.run_id.clone();
         let legacy_fallback_used = result.legacy_fallback_used;
-        emit_stream_send_message_result(
+        let done_payload = emit_stream_send_message_result(
             &session_id,
             result,
             None,
@@ -829,6 +842,7 @@ pub(crate) async fn run_main_chat_turn_pipeline_streaming(
                 legacy_fallback_used,
                 kernel_event_count: None,
                 durable_event_count,
+                done_payload,
             },
         });
     }
@@ -863,7 +877,7 @@ fn emit_stream_send_message_result(
     durable_events: Vec<crate::main_chat_event_stream::MainChatAgentDurableEvent>,
     emit_empty_chunk: bool,
     emit_stream_event: &mut (impl FnMut(&str, serde_json::Value) + Send),
-) -> Result<(), String> {
+) -> Result<serde_json::Value, String> {
     let run_id = result.run_id.clone().unwrap_or_default();
     let agent_state = result.agent_state.clone();
     let mut start_payload = serde_json::json!({
@@ -904,14 +918,14 @@ fn emit_stream_send_message_result(
     if let Some(count) = kernel_event_count {
         done_payload["kernel_event_count"] = serde_json::json!(count);
     }
-    emit_stream_event("stream-message-done", done_payload);
+    emit_stream_event("stream-message-done", done_payload.clone());
     for event in durable_events {
         emit_stream_event(
             "main-chat-agent-event",
             serde_json::to_value(event).map_err(|err| err.to_string())?,
         );
     }
-    Ok(())
+    Ok(done_payload)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1373,9 +1387,7 @@ async fn run_legacy_streaming_delivery(
         materialize_optional_main_chat_agent_events(state, agent_state.as_ref()).await?;
     let durable_event_count = durable_events.len();
 
-    emit_stream_event(
-        "stream-message-done",
-        serde_json::json!({
+    let done_payload = serde_json::json!({
             "session_id": session_id,
             "run_id": agent_run.id,
             "reply": reply,
@@ -1385,8 +1397,8 @@ async fn run_legacy_streaming_delivery(
             "agent_state": agent_state,
             "execution_transcript": execution_transcript,
             "legacy_fallback_used": legacy_fallback_used,
-        }),
-    );
+    });
+    emit_stream_event("stream-message-done", done_payload.clone());
     for event in durable_events {
         emit_stream_event(
             "main-chat-agent-event",
@@ -1401,6 +1413,7 @@ async fn run_legacy_streaming_delivery(
             legacy_fallback_used,
             kernel_event_count: None,
             durable_event_count,
+            done_payload,
         },
     })
 }

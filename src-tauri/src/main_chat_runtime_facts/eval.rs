@@ -2695,11 +2695,12 @@ async fn run_slice_a_case(
             )
             .await;
             match result {
-                Ok(()) => emitted_events
+                Ok(done_payload) => emitted_events
                     .iter()
                     .rev()
                     .find(|(event, _)| event == "stream-message-done")
                     .map(|(_, payload)| payload.clone())
+                    .or(Some(done_payload))
                     .ok_or_else(|| "stream runtime fact case missing done payload".to_string()),
                 Err(error) => Err(error),
             }

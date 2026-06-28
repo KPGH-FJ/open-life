@@ -26,7 +26,7 @@ pub(crate) async fn send_message_with_state(
     debug_assert!(!output.route_decision.reason_code.is_empty());
 
     match output.delivery {
-        MainChatTurnDelivery::Buffered { result } => Ok(result),
+        MainChatTurnDelivery::Buffered { result } => Ok(*result),
         MainChatTurnDelivery::Streamed { .. } => {
             Err("MainChatTurnPipeline returned streaming delivery to send_message".into())
         }

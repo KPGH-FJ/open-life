@@ -462,7 +462,7 @@ async fn start_stream_message<R: tauri::Runtime>(
     selected_skill_id: Option<String>,
     app_handle: tauri::AppHandle<R>,
     state: State<'_, Arc<AppState>>,
-) -> Result<(), String> {
+) -> Result<serde_json::Value, String> {
     let (session_id, messages, selected_skill_id) = if let Some(args) = args {
         (args.session_id, args.messages, args.selected_skill_id)
     } else {

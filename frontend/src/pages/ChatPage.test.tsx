@@ -1163,6 +1163,69 @@ describe("ChatPage", () => {
     expect(saveCalls).toHaveLength(0);
   });
 
+  it("renders returned stream completion payload when the done event is missed", async () => {
+    const base = buildMainChatAgentStateSnapshot();
+    const returnedState = buildMainChatAgentStateSnapshot({
+      task: {
+        ...base.task,
+        taskId: "task-return-fallback",
+        runId: "run-return-fallback",
+        title: "Returned stream completion",
+      },
+      finalDelivery: {
+        ...base.finalDelivery!,
+        deliveryId: "delivery-return-fallback",
+        taskId: "task-return-fallback",
+        runId: "run-return-fallback",
+        headline: "Returned stream completion delivered",
+        answer: "Returned fallback answer.",
+      },
+    });
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "start_stream_message") {
+        return Promise.resolve({
+          session_id: "session-1",
+          run_id: "run-return-fallback",
+          reply: "Returned fallback answer.",
+          reasoning_trace: null,
+          tool_calls: [],
+          agent_ingress: {
+            selectedStrategy: "direct_answer",
+            agentTaskSessionId: "task-return-fallback",
+          },
+          agent_state: returnedState,
+          execution_transcript: [],
+          legacy_fallback_used: false,
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Fast WebDriver click" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+
+    expect(await screen.findByText("Returned fallback answer.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show Main Chat diagnostics" }));
+    await waitFor(() => {
+      expect(screen.getByTestId("agent-control-plane")).toHaveAttribute(
+        "data-task-session-id",
+        "task-return-fallback"
+      );
+    });
+    expect(screen.getByTestId("agent-control-plane")).toHaveAttribute(
+      "data-run-id",
+      "run-return-fallback"
+    );
+  });
+
   it("ignores duplicate stream completion events for the same run", async () => {
     type StreamListener = (event: { payload: any }) => void | Promise<void>;
     const listeners = new Map<string, StreamListener>();
