@@ -725,7 +725,9 @@ async function executeStep6LocalJourneyWithWebDriver(sessionId, row) {
   try {
     await fillByTestId(sessionId, "chat-input", row.prompt);
     await waitForElementEnabled(sessionId, "send-button", 10_000);
+    const previousUserMessageCount = await readUserMessageCountWithWebDriver(sessionId);
     await clickByTestId(sessionId, "send-button");
+    await waitForChatSendStartedWithWebDriver(sessionId, previousUserMessageCount);
     await openDiagnosticsIfAvailableWithWebDriver(sessionId);
     const controlPlane = await waitForControlPlaneDelivery(sessionId, previousTaskId, row);
     return await observeStep6JourneyFromControlPlane(sessionId, row, controlPlane.taskSessionId);
@@ -744,7 +746,9 @@ async function executeStep6LiveJourneyWithWebDriver(sessionId, row, liveProvider
   const previousTaskId = await readCurrentTaskIdWithWebDriver(sessionId);
   await fillByTestId(sessionId, "chat-input", row.prompt);
   await waitForElementEnabled(sessionId, "send-button", 10_000);
+  const previousUserMessageCount = await readUserMessageCountWithWebDriver(sessionId);
   await clickByTestId(sessionId, "send-button");
+  await waitForChatSendStartedWithWebDriver(sessionId, previousUserMessageCount);
   const controlPlane = await waitForControlPlaneDelivery(sessionId, previousTaskId, row);
   return await observeStep6JourneyFromControlPlane(sessionId, row, controlPlane.taskSessionId);
 }
@@ -935,6 +939,15 @@ async function readCurrentTaskIdWithWebDriver(sessionId) {
   );
 }
 
+async function readUserMessageCountWithWebDriver(sessionId) {
+  return await executeScript(
+    sessionId,
+    `
+      return document.querySelectorAll('[data-testid="user-message"]').length;
+    `
+  );
+}
+
 async function fillByTestId(sessionId, testId, value) {
   await waitForElementPresent(sessionId, testId, 30_000);
   const filled = await executeScript(
@@ -950,13 +963,38 @@ async function fillByTestId(sessionId, testId, value) {
         : inputValueSetter;
       if (!valueSetter) return false;
       valueSetter.call(element, arguments[1]);
-      element.dispatchEvent(new Event('input', { bubbles: true }));
+      try {
+        element.dispatchEvent(new InputEvent('input', {
+          bubbles: true,
+          data: arguments[1],
+          inputType: arguments[1] ? 'insertText' : 'deleteContentBackward',
+        }));
+      } catch {
+        element.dispatchEvent(new Event('input', { bubbles: true }));
+      }
       element.dispatchEvent(new Event('change', { bubbles: true }));
-      return true;
+      return element.value === arguments[1];
     `,
     [testId, value]
   );
   if (!filled) throw new Error(`webdriver_element_missing:${testId}`);
+  await waitForScript(
+    sessionId,
+    `
+      const element = document.querySelector(\`[data-testid="\${arguments[0]}"]\`);
+      const sendButton = document.querySelector('[data-testid="send-button"]');
+      const expected = String(arguments[1] ?? '');
+      const shouldEnableSend = arguments[0] === 'chat-input' && expected.trim().length > 0;
+      return Boolean(
+        element &&
+        element.value === expected &&
+        (!shouldEnableSend || (sendButton && !sendButton.disabled))
+      );
+    `,
+    [testId, value],
+    10_000,
+    `webdriver_input_state_not_committed:${testId}`
+  );
 }
 
 async function waitForElementPresent(sessionId, testId, timeoutMs) {
@@ -972,6 +1010,25 @@ async function waitForElementPresent(sessionId, testId, timeoutMs) {
 }
 
 async function clickByTestId(sessionId, testId) {
+  const elementId = await findElementIdByTestId(sessionId, testId);
+  if (elementId) {
+    try {
+      await webdriverRequest(
+        `/session/${encodeURIComponent(sessionId)}/element/${encodeURIComponent(elementId)}/click`,
+        {
+          method: "POST",
+          body: {},
+        }
+      );
+      return;
+    } catch (error) {
+      console.error(
+        `[webdriver_native_click:error] ${metadataSafeBlocker(testId)}:${metadataSafeBlocker(
+          error?.message ?? error
+        )}`
+      );
+    }
+  }
   const clicked = await executeScript(
     sessionId,
     `
@@ -985,6 +1042,19 @@ async function clickByTestId(sessionId, testId) {
   if (!clicked) throw new Error(`webdriver_click_failed:${testId}`);
 }
 
+async function findElementIdByTestId(sessionId, testId) {
+  const response = await webdriverRequest(`/session/${encodeURIComponent(sessionId)}/element`, {
+    method: "POST",
+    body: {
+      using: "css selector",
+      value: `[data-testid="${testId}"]`,
+    },
+  }).catch(() => null);
+  const element = response?.value;
+  if (!element || typeof element !== "object") return "";
+  return element["element-6066-11e4-a52e-4f735466cecf"] ?? element.ELEMENT ?? "";
+}
+
 async function waitForElementEnabled(sessionId, testId, timeoutMs) {
   await waitForScript(
     sessionId,
@@ -995,6 +1065,26 @@ async function waitForElementEnabled(sessionId, testId, timeoutMs) {
     [testId],
     timeoutMs,
     `webdriver_element_not_enabled:${testId}`
+  );
+}
+
+async function waitForChatSendStartedWithWebDriver(sessionId, previousUserMessageCount) {
+  await waitForScript(
+    sessionId,
+    `
+      const input = document.querySelector('[data-testid="chat-input"]');
+      const sendButton = document.querySelector('[data-testid="send-button"]');
+      const userMessages = [...document.querySelectorAll('[data-testid="user-message"]')];
+      const previousUserMessageCount = Number(arguments[0] ?? 0);
+      return Boolean(
+        (input && input.value.trim().length === 0) ||
+        (sendButton && sendButton.disabled) ||
+        userMessages.length > previousUserMessageCount
+      );
+    `,
+    [previousUserMessageCount],
+    10_000,
+    "webdriver_chat_send_not_started"
   );
 }
 
@@ -1085,6 +1175,7 @@ async function waitForControlPlaneDelivery(sessionId, previousTaskId, row) {
       snapshotError =>
         `snapshot_error=${metadataSafeBlocker(snapshotError?.message ?? snapshotError)}`
     );
+    console.error(`[step6_control_plane_timeout_snapshot] ${snapshot}`);
     throw new Error(`${error?.message ?? error}:${snapshot}`);
   }
 }
@@ -1101,6 +1192,9 @@ async function readControlPlaneTimeoutSnapshotWithWebDriver(sessionId, previousT
       const evidence = document.querySelector('[data-testid="main-chat-execution-evidence"]');
       const status = document.querySelector('[data-testid="main-chat-agent-status"]');
       const sendButton = document.querySelector('[data-testid="send-button"]');
+      const chatInput = document.querySelector('[data-testid="chat-input"]');
+      const assistantMessages = [...document.querySelectorAll('[data-testid="assistant-message"]')];
+      const userMessages = [...document.querySelectorAll('[data-testid="user-message"]')];
       const lastTaskSessionId = control?.getAttribute('data-task-session-id') ?? '';
       return {
         controlCount: controls.length,
@@ -1115,6 +1209,11 @@ async function readControlPlaneTimeoutSnapshotWithWebDriver(sessionId, previousT
         blockerCount: Number(control?.getAttribute('data-blocker-count') ?? '0'),
         proposalCount: Number(control?.getAttribute('data-proposal-count') ?? '0'),
         sendDisabled: Boolean(sendButton?.disabled),
+        sendAria: safe(sendButton?.getAttribute('aria-label') ?? ''),
+        chatInputLength: Number(chatInput?.value?.length ?? '0'),
+        chatInputEmpty: Boolean(!chatInput?.value?.trim()),
+        assistantMessageCount: assistantMessages.length,
+        userMessageCount: userMessages.length,
       };
     `,
     [previousTaskId]
