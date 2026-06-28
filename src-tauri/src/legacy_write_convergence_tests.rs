@@ -302,6 +302,7 @@ fn legacy_write_convergence_w97_materializer_matrix_matches_current_production_c
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let persist_call_files = [
         "src/lib.rs",
+        "src/main_chat_turn_pipeline.rs",
         "src/main_chat_send.rs",
         "src/main_chat_streaming.rs",
         "src/main_chat_legacy_agent_loop.rs",
@@ -361,8 +362,8 @@ fn legacy_write_convergence_w97_materializer_matrix_tracks_extracted_main_chat_c
     for (stable_id, source_file_path, caller_function_name) in [
         (
             "ordinary_chat_auto_checkin_source_data",
-            "src-tauri/src/main_chat_send.rs",
-            "send_message_with_state",
+            "src-tauri/src/main_chat_turn_pipeline.rs",
+            "run_main_chat_turn_pipeline_buffered",
         ),
         (
             "ordinary_stream_agent_loop_auto_checkin_source_data",
@@ -371,8 +372,8 @@ fn legacy_write_convergence_w97_materializer_matrix_tracks_extracted_main_chat_c
         ),
         (
             "ordinary_stream_legacy_auto_checkin_source_data",
-            "src-tauri/src/main_chat_streaming.rs",
-            "start_stream_message_with_state",
+            "src-tauri/src/main_chat_turn_pipeline.rs",
+            "run_main_chat_turn_pipeline_streaming",
         ),
     ] {
         let entry = materializer_entry(&entries, stable_id);
