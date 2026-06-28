@@ -200,9 +200,11 @@ describe("MailboxPage", () => {
     expect((await screen.findAllByText("新增目标")).length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: /确认外部能力/ }));
 
+    await waitFor(() => {
+      expect(screen.getByTestId("mail-reader")).toHaveTextContent("插件请求获得写权限。");
+    });
     expect(screen.getByTestId("mail-reader")).toHaveTextContent("OpenLife");
     expect(screen.getAllByText("确认外部能力").length).toBeGreaterThan(0);
-    expect(screen.getByTestId("mail-reader")).toHaveTextContent("插件请求获得写权限。");
     expect(screen.getByText(/影响与风险/)).toBeInTheDocument();
     expect(screen.getByText("技术详情")).toBeInTheDocument();
     expect(screen.getByText(/plugins\.demo\.write/)).toBeInTheDocument();

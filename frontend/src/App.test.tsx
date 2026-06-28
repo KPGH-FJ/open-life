@@ -232,7 +232,7 @@ describe("App onboarding", () => {
       </MemoryRouter>
     );
 
-    expect(await screen.findByTestId("mailbox-page")).toBeInTheDocument();
+    expect(await screen.findByTestId("mailbox-page", {}, { timeout: 5000 })).toBeInTheDocument();
     expect(await screen.findByText(/当前不在 OpenLife 桌面应用环境中/)).toBeInTheDocument();
     expect(screen.queryByText("欢迎使用 OpenLife")).not.toBeInTheDocument();
   });

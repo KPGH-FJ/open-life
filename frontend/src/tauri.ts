@@ -2366,7 +2366,10 @@ export async function startStreamMessage(
     messages,
     ...selectedSkillArgs(options.selectedSkillId),
   };
-  return safeInvoke<StreamMessageDonePayload>("start_stream_message", { ...payload, args: payload });
+  return safeInvoke<StreamMessageDonePayload>("start_stream_message", {
+    ...payload,
+    args: payload,
+  });
 }
 
 // Note: Hermes dispatch command has been removed. Use AgentRuntime instead.
