@@ -5,15 +5,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::AppState;
+use openlife_core::config::AppConfig;
 use openlife_core::scheduler::InferenceScheduler;
 
 const BROWSER_E2E_REPORT_PATH: &str = "frontend/test-results/main-chat-stage1-dogfood-report.json";
 const BROWSER_E2E_MAX_AGE_HOURS: i64 = 24;
-const STAGE1_BROWSER_DOGFOOD_PROVIDER: &str = "openai";
-const STAGE1_BROWSER_DOGFOOD_BASE: &str = "https://stage1-browser-dogfood.invalid/v1";
-const STAGE1_BROWSER_DOGFOOD_KEY: &str = "stage1-browser-dogfood-scripted-key";
-const STAGE1_BROWSER_DOGFOOD_MODEL: &str = "stage1-browser-dogfood-scripted";
-const STAGE1_BROWSER_DOGFOOD_RESPONSE: &str =
+pub(crate) const STAGE1_BROWSER_DOGFOOD_PROVIDER: &str = "openai";
+pub(crate) const STAGE1_BROWSER_DOGFOOD_BASE: &str = "https://stage1-browser-dogfood.invalid/v1";
+pub(crate) const STAGE1_BROWSER_DOGFOOD_KEY: &str = "stage1-browser-dogfood-scripted-key";
+pub(crate) const STAGE1_BROWSER_DOGFOOD_MODEL: &str = "stage1-browser-dogfood-scripted";
+pub(crate) const STAGE1_BROWSER_DOGFOOD_RESPONSE: &str =
     "Stage 1 browser dogfood deterministic model response.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -616,6 +617,33 @@ async fn prepare_stage1_browser_dogfood_scheduler(state: &Arc<AppState>) {
         false,
     )
     .with_scripted_generation_response(STAGE1_BROWSER_DOGFOOD_RESPONSE);
+}
+
+pub(crate) async fn stage1_browser_dogfood_scripted_provider_ready(
+    state: &Arc<AppState>,
+    config: &AppConfig,
+) -> bool {
+    if !cfg!(debug_assertions) {
+        return false;
+    }
+    if config.prefer_local_model
+        || config.llm.embedding_enabled
+        || config.llm.provider != STAGE1_BROWSER_DOGFOOD_PROVIDER
+        || config.llm.openai_base != STAGE1_BROWSER_DOGFOOD_BASE
+        || config.llm.openai_key != STAGE1_BROWSER_DOGFOOD_KEY
+        || config.llm.chat_model != STAGE1_BROWSER_DOGFOOD_MODEL
+    {
+        return false;
+    }
+
+    let scheduler = state.scheduler.lock().await;
+    scheduler.provider == STAGE1_BROWSER_DOGFOOD_PROVIDER
+        && scheduler.openai_base == STAGE1_BROWSER_DOGFOOD_BASE
+        && scheduler.openai_key == STAGE1_BROWSER_DOGFOOD_KEY
+        && scheduler.chat_model == STAGE1_BROWSER_DOGFOOD_MODEL
+        && !scheduler.embedding_enabled
+        && scheduler.scripted_generation_response.as_deref()
+            == Some(STAGE1_BROWSER_DOGFOOD_RESPONSE)
 }
 
 async fn seed_stage1_browser_permission_resume_task(

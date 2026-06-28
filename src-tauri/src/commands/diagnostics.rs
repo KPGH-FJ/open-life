@@ -23,6 +23,12 @@ pub struct SchedulerConfigResponse {
 pub async fn get_system_diagnostics(
     state: State<'_, Arc<AppState>>,
 ) -> Result<SystemDiagnostics, AppError> {
+    get_system_diagnostics_with_state(&state.inner().clone()).await
+}
+
+pub(crate) async fn get_system_diagnostics_with_state(
+    state: &Arc<AppState>,
+) -> Result<SystemDiagnostics, AppError> {
     let router = {
         let status = state.intent_router.lock().await.status();
         status
@@ -62,12 +68,12 @@ pub async fn get_system_diagnostics(
         prefer_local_model,
         cloud_api_configured,
         cloud_provider,
-        cloud_api_validated,
-        cloud_api_last_error,
-        cloud_api_validation_status,
-        cloud_api_validated_at,
-        cloud_api_failed_at,
-        cloud_api_validation_source,
+        mut cloud_api_validated,
+        mut cloud_api_last_error,
+        mut cloud_api_validation_status,
+        mut cloud_api_validated_at,
+        mut cloud_api_failed_at,
+        mut cloud_api_validation_source,
         embedding_enabled,
     ) = {
         let cfg = state.config.lock().await;
@@ -95,6 +101,20 @@ pub async fn get_system_diagnostics(
             cfg.llm.embedding_enabled,
         )
     };
+    let config_for_browser_dogfood = { state.config.lock().await.clone() };
+    if crate::main_chat_agent_stage1_dogfood::stage1_browser_dogfood_scripted_provider_ready(
+        state,
+        &config_for_browser_dogfood,
+    )
+    .await
+    {
+        cloud_api_validated = true;
+        cloud_api_last_error = None;
+        cloud_api_validation_status = "stage1_browser_dogfood_scripted".into();
+        cloud_api_validated_at.get_or_insert_with(|| chrono::Utc::now().to_rfc3339());
+        cloud_api_failed_at = None;
+        cloud_api_validation_source = Some("stage1_browser_dogfood_scripted".into());
+    }
     let ollama_status = inspect_ollama_status(&local_model).await;
     let ollama_service_online = ollama_status.server_online;
     let ollama_models = ollama_status
