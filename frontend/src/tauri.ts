@@ -292,6 +292,14 @@ export interface ChatProposalConfig {
   cooldown_seconds?: number;
 }
 
+export type AgentRuntimeMode = "local_first_default" | "capability_first_beta";
+export type CloudApiValidationStatus =
+  | "unconfigured"
+  | "unvalidated"
+  | "validated"
+  | "failed"
+  | "stale";
+
 export interface AppConfig {
   llm: {
     provider?:
@@ -309,6 +317,7 @@ export interface AppConfig {
     chat_model: string;
     embedding_enabled?: boolean;
   };
+  runtime_mode?: AgentRuntimeMode;
   prefer_local_model: boolean;
   local_model: string;
   chat_proposal?: ChatProposalConfig;
@@ -2351,13 +2360,16 @@ export async function startStreamMessage(
   sessionId: string,
   messages: ChatMessage[],
   options: MainChatMessageOptions = {}
-): Promise<void | StreamMessageDonePayload> {
+): Promise<StreamMessageDonePayload> {
   const payload = {
     ...sessionArgs(sessionId),
     messages,
     ...selectedSkillArgs(options.selectedSkillId),
   };
-  return safeInvoke<void>("start_stream_message", { ...payload, args: payload });
+  return safeInvoke<StreamMessageDonePayload>("start_stream_message", {
+    ...payload,
+    args: payload,
+  });
 }
 
 // Note: Hermes dispatch command has been removed. Use AgentRuntime instead.
@@ -2453,6 +2465,10 @@ export interface SystemDiagnostics {
   cloud_provider?: string;
   cloud_api_validated?: boolean;
   cloud_api_last_error?: string | null;
+  cloud_api_validation_status?: CloudApiValidationStatus | string;
+  cloud_api_validated_at?: string | null;
+  cloud_api_failed_at?: string | null;
+  cloud_api_validation_source?: string | null;
   chat_ready: boolean;
   readiness_issues: string[];
   data_dir: string;
@@ -3190,6 +3206,7 @@ export interface LlmConnectionTestResult {
   ok: boolean;
   provider: string;
   message: string;
+  validation_status?: string;
 }
 
 export async function testLlmConnection(config: AppConfig): Promise<LlmConnectionTestResult> {

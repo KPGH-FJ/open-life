@@ -254,16 +254,18 @@ fn ordinary_chat_entrypoints_try_kernel_before_legacy_strategy_paths() {
     let send_source = std::fs::read_to_string(send_module_path).expect("read main_chat_send.rs");
     let send_body =
         extract_rust_function_body(&send_source, "pub(crate) async fn send_message_with_state(");
-    let send_kernel_attempt = send_body
-        .find("main_chat_kernel_supports_turn(")
-        .expect("send command should check MainChatKernel support first");
-    let send_strategy_attempt = send_body
-        .find("try_run_main_chat_agent_strategy(")
-        .expect("send command should keep the explicit legacy strategy fallback");
-
+    assert!(send_body.contains("run_main_chat_turn_pipeline_buffered("));
     assert!(
-        send_kernel_attempt < send_strategy_attempt,
-        "send_message should try MainChatKernel before legacy strategy fallback"
+        !send_body.contains("decide_main_chat_turn_route("),
+        "send_message must not own route branching after the turn pipeline wrapper lands"
+    );
+    assert!(
+        !send_body.contains("try_run_main_chat_agent_strategy("),
+        "send_message must not own strategy fallback after the turn pipeline wrapper lands"
+    );
+    assert!(
+        !send_body.contains("main_chat_kernel_supports_turn("),
+        "send_message must not reimplement kernel-vs-strategy route branching"
     );
 
     let stream_module_path = format!("{}/src/main_chat_streaming.rs", env!("CARGO_MANIFEST_DIR"));
@@ -272,23 +274,59 @@ fn ordinary_chat_entrypoints_try_kernel_before_legacy_strategy_paths() {
         &source,
         "pub(crate) async fn start_stream_message_with_state(",
     );
-    let kernel_attempt = stream_body
-        .find("main_chat_kernel_supports_turn(")
-        .expect("stream command should check MainChatKernel support first");
-    let strategy_attempt = stream_body
-        .find("try_run_main_chat_agent_strategy(")
-        .expect("stream command should keep the explicit legacy strategy fallback");
-    let legacy_plan = stream_body
-        .find("ordinary_stream_chat_execution_plan(layer)")
-        .expect("stream command should keep a legacy stream fallback plan");
-
+    assert!(stream_body.contains("run_main_chat_turn_pipeline_streaming("));
     assert!(
-        kernel_attempt < strategy_attempt,
-        "start_stream_message should try MainChatKernel before legacy strategy fallback"
+        !stream_body.contains("decide_main_chat_turn_route("),
+        "start_stream_message must not own route branching after the turn pipeline wrapper lands"
     );
     assert!(
-        strategy_attempt < legacy_plan,
-        "start_stream_message should attempt legacy strategy before building the final legacy stream plan"
+        !stream_body.contains("try_run_main_chat_agent_strategy("),
+        "start_stream_message must not own strategy fallback after the turn pipeline wrapper lands"
+    );
+    assert!(
+        !stream_body.contains("ordinary_stream_chat_execution_plan(layer)"),
+        "start_stream_message must not own fallback selection after the turn pipeline wrapper lands"
+    );
+    assert!(
+        !stream_body.contains("main_chat_kernel_supports_turn("),
+        "start_stream_message must not reimplement kernel-vs-strategy route branching"
+    );
+
+    let pipeline_module_path = format!(
+        "{}/src/main_chat_turn_pipeline.rs",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let pipeline_source =
+        std::fs::read_to_string(pipeline_module_path).expect("read main_chat_turn_pipeline.rs");
+    let pipeline_body = extract_rust_function_body(
+        &pipeline_source,
+        "pub(crate) async fn run_main_chat_turn_pipeline_streaming(",
+    );
+    let route_decision = pipeline_body
+        .find("decide_main_chat_turn_route(")
+        .expect("pipeline should call the shared route decision helper first");
+    let strategy_attempt = pipeline_body
+        .find("try_run_main_chat_agent_strategy(")
+        .expect("pipeline should keep the explicit legacy strategy fallback");
+    let tool_loop_attempt = pipeline_body
+        .find("run_main_chat_tool_loop_adapter(")
+        .expect("pipeline should dispatch ToolLoop before legacy strategy fallback");
+    let legacy_plan_after_strategy = pipeline_body[strategy_attempt..]
+        .find("run_legacy_streaming_delivery(")
+        .map(|offset| strategy_attempt + offset)
+        .expect("pipeline should keep the final non-ToolLoop legacy stream delivery");
+
+    assert!(
+        route_decision < tool_loop_attempt,
+        "pipeline should make the shared route decision before ToolLoop dispatch"
+    );
+    assert!(
+        tool_loop_attempt < strategy_attempt,
+        "ToolLoop adapter should handle ToolLoop route decisions before old strategy fallback"
+    );
+    assert!(
+        strategy_attempt < legacy_plan_after_strategy,
+        "pipeline should attempt old strategy before building the final non-ToolLoop legacy stream delivery"
     );
 }
 

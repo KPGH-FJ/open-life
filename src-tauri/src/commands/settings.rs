@@ -444,6 +444,7 @@ pub struct LlmConnectionTestResult {
     pub ok: bool,
     pub provider: String,
     pub message: String,
+    pub validation_status: String,
 }
 
 #[tauri::command]
@@ -451,6 +452,7 @@ pub async fn test_llm_connection(
     mut config: AppConfig,
     state: State<'_, Arc<AppState>>,
 ) -> Result<LlmConnectionTestResult, AppError> {
+    config.normalize_provider_from_base();
     let provider = config.llm.provider.clone();
     let label = provider_label(&provider);
 
@@ -459,16 +461,44 @@ pub async fn test_llm_connection(
         cfg.llm.openai_key.clone()
     };
     let resolved_key = resolve_masked_api_key(&config.llm.openai_key, &current_key);
-    if !resolved_key.trim().is_empty() {
-        config.llm.openai_key = resolved_key;
-    }
+    config.llm.openai_key = resolved_key;
 
     let api_key = effective_api_key(&provider, &config.llm.openai_key);
     if api_key.trim().is_empty() {
+        let record = crate::provider_validation::failed_provider_validation_record(
+            &config,
+            "settings_manual_test",
+            "missing_api_key",
+            chrono::Utc::now(),
+        );
+        crate::provider_validation::save_provider_validation_record_to_path(
+            &crate::provider_validation::provider_validation_path(),
+            &record,
+        )?;
         return Ok(LlmConnectionTestResult {
             ok: false,
             provider: label,
             message: "未检测到 API Key，请填写后再测试。".to_string(),
+            validation_status: "failed".into(),
+        });
+    }
+
+    if !config.system.network_policy.enabled {
+        let record = crate::provider_validation::failed_provider_validation_record(
+            &config,
+            "settings_manual_test",
+            "network_policy_disabled",
+            chrono::Utc::now(),
+        );
+        crate::provider_validation::save_provider_validation_record_to_path(
+            &crate::provider_validation::provider_validation_path(),
+            &record,
+        )?;
+        return Ok(LlmConnectionTestResult {
+            ok: false,
+            provider: label,
+            message: "连接测试被当前网络策略阻止。请先启用网络访问后再验证 provider。".to_string(),
+            validation_status: "failed".into(),
         });
     }
 
@@ -498,10 +528,33 @@ pub async fn test_llm_connection(
         .json(&body)
         .send()
         .await
-        .map_err(|e| AppError::external(format!("API request failed: {}", e)))?;
+        .map_err(|e| {
+            let record = crate::provider_validation::failed_provider_validation_record(
+                &config,
+                "settings_manual_test",
+                crate::provider_validation::reqwest_validation_error_label(&e),
+                chrono::Utc::now(),
+            );
+            let _ = crate::provider_validation::save_provider_validation_record_to_path(
+                &crate::provider_validation::provider_validation_path(),
+                &record,
+            );
+            AppError::external(format!(
+                "API request failed: {}",
+                crate::provider_validation::reqwest_validation_error_label(&e)
+            ))
+        })?;
     let status = res.status();
-    let text = res.text().await.unwrap_or_default();
     if status.is_success() {
+        let record = crate::provider_validation::successful_provider_validation_record(
+            &config,
+            "settings_manual_test",
+            chrono::Utc::now(),
+        );
+        crate::provider_validation::save_provider_validation_record_to_path(
+            &crate::provider_validation::provider_validation_path(),
+            &record,
+        )?;
         let model_note = if model.to_lowercase().contains("reasoner") {
             " 当前选择的是推理模型，首次可见输出可能更慢；试用聊天建议优先使用 deepseek-chat 这类通用聊天模型。"
         } else {
@@ -511,16 +564,28 @@ pub async fn test_llm_connection(
             ok: true,
             provider: label,
             message: format!("连接成功，云端模型可用。{}", model_note),
+            validation_status: "validated".into(),
         })
     } else {
+        let safe_error = format!("http_status:{}", status.as_u16());
+        let record = crate::provider_validation::failed_provider_validation_record(
+            &config,
+            "settings_manual_test",
+            &safe_error,
+            chrono::Utc::now(),
+        );
+        crate::provider_validation::save_provider_validation_record_to_path(
+            &crate::provider_validation::provider_validation_path(),
+            &record,
+        )?;
         Ok(LlmConnectionTestResult {
             ok: false,
             provider: label,
             message: format!(
-                "连接失败 ({}): {}",
-                status,
-                text.chars().take(240).collect::<String>()
+                "连接失败（HTTP {}）。请检查 provider、模型和 API Key。",
+                status
             ),
+            validation_status: "failed".into(),
         })
     }
 }
@@ -608,6 +673,7 @@ mod tests {
         assert_eq!(resolve_masked_api_key(KEY_MASK, "sk-current"), "sk-current");
         assert_eq!(resolve_masked_api_key("", "sk-current"), "sk-current");
         assert_eq!(resolve_masked_api_key("   ", "sk-current"), "sk-current");
+        assert_eq!(resolve_masked_api_key(KEY_MASK, ""), "");
     }
 
     #[test]

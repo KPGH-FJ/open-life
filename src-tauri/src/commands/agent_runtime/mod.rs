@@ -1847,6 +1847,13 @@ pub async fn run_main_chat_agent_productization_v1_gate(
 }
 
 #[tauri::command]
+pub async fn run_main_chat_capability_eval_gate(
+    _state: State<'_, Arc<AppState>>,
+) -> Result<crate::main_chat_capability_eval::MainChatCapabilityEvalReport, String> {
+    Ok(crate::main_chat_capability_eval::run_main_chat_capability_eval_report().await)
+}
+
+#[tauri::command]
 pub async fn run_main_chat_stage3_execution_ux_report(
     _state: State<'_, Arc<AppState>>,
 ) -> Result<crate::main_chat_stage3_execution_ux::MainChatStage3ExecutionUxReport, String> {

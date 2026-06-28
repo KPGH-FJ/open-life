@@ -284,6 +284,25 @@ impl PrivacyEngine {
         (text, map)
     }
 
+    /// Redact only credential-like secrets while preserving ordinary personal context.
+    /// The returned map intentionally does not contain raw secret values, so later
+    /// reconstruction cannot rehydrate credentials into assistant output.
+    pub fn desensitize_secrets_only(&self, message: &str) -> (String, HashMap<String, String>) {
+        let mut text = message.to_string();
+        let mut map = HashMap::new();
+        let mut findings = secret_like_findings(message);
+        findings.sort_by_key(|finding| Reverse(finding.len()));
+        findings.dedup();
+
+        for original in findings {
+            let placeholder = format!("<SECRET_{}>", map.len());
+            text = text.replacen(&original, &placeholder, 1);
+            map.insert(placeholder, "<redacted-secret>".to_string());
+        }
+
+        (text, map)
+    }
+
     /// Strict desensitize that returns Err if any Block-level finding is detected.
     /// Use this for contexts where blocked data should halt processing.
     pub fn desensitize_strict(
@@ -317,6 +336,28 @@ impl PrivacyEngine {
         }
         text
     }
+}
+
+fn secret_like_findings(message: &str) -> Vec<String> {
+    let patterns = [
+        r"(?is)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+        r"(?i)\bsk-[A-Za-z0-9_-]{8,}\b",
+        r"(?i)\bsk-or-v1-[A-Za-z0-9_-]{8,}\b",
+        r"(?i)\bgh[pousr]_[A-Za-z0-9_]{8,}\b",
+        r"(?i)\bxox[baprs]-[A-Za-z0-9-]{8,}\b",
+        r"(?i)\beyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
+        r#"(?i)\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|token|password|passwd|secret|authorization|bearer)\b\s*(is|=|:)?\s*[`'"“”‘’]?[^`'"“”‘’\s,;]{6,}"#,
+    ];
+
+    let mut findings = Vec::new();
+    for pattern in patterns {
+        if let Ok(regex) = Regex::new(pattern) {
+            for mat in regex.find_iter(message) {
+                findings.push(mat.as_str().to_string());
+            }
+        }
+    }
+    findings
 }
 
 #[cfg(test)]
@@ -440,5 +481,51 @@ mod tests {
         let findings = engine.detect(text);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].1, "SECRET_12345");
+    }
+
+    #[test]
+    fn secrets_only_preserves_ordinary_context_but_redacts_credentials() {
+        let engine = PrivacyEngine::new();
+        let text = "我叫张三，目标是完成 OpenLife Beta。api key: sk-test-secret-123456";
+        let (masked, map) = engine.desensitize_secrets_only(text);
+
+        assert!(masked.contains("张三"));
+        assert!(masked.contains("OpenLife Beta"));
+        assert!(!masked.contains("sk-test-secret-123456"));
+        assert!(masked.contains("<SECRET_0>"));
+        assert_eq!(
+            map.get("<SECRET_0>").map(String::as_str),
+            Some("<redacted-secret>")
+        );
+        assert!(!map.values().any(|value| value.contains("sk-test-secret")));
+    }
+
+    #[test]
+    fn secrets_only_redacts_private_key_blocks() {
+        let engine = PrivacyEngine::new();
+        let text = "key -----BEGIN PRIVATE KEY-----\nabc123\n-----END PRIVATE KEY----- done";
+        let (masked, map) = engine.desensitize_secrets_only(text);
+
+        assert!(!masked.contains("abc123"));
+        assert!(masked.contains("<SECRET_0>"));
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn secrets_only_redacts_credentials_even_when_general_privacy_is_disabled() {
+        let mut policy = PrivacyPolicy::default();
+        policy.enabled = false;
+        let engine = PrivacyEngine::with_policy(policy);
+        let text = "普通上下文保留，但 api key: sk-test-secret-123456 仍必须拦截";
+
+        let (masked, map) = engine.desensitize_secrets_only(text);
+
+        assert!(masked.contains("普通上下文"));
+        assert!(!masked.contains("sk-test-secret-123456"));
+        assert!(masked.contains("<SECRET_0>"));
+        assert_eq!(
+            map.get("<SECRET_0>").map(String::as_str),
+            Some("<redacted-secret>")
+        );
     }
 }

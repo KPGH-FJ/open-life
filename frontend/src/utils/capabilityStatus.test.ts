@@ -25,6 +25,10 @@ function diagnostics(overrides: Partial<SystemDiagnostics> = {}): SystemDiagnost
     cloud_provider: "DeepSeek",
     cloud_api_validated: false,
     cloud_api_last_error: null,
+    cloud_api_validation_status: "unconfigured",
+    cloud_api_validated_at: null,
+    cloud_api_failed_at: null,
+    cloud_api_validation_source: null,
     chat_ready: true,
     readiness_issues: [],
     data_dir: "/tmp/openlife-test",
@@ -72,7 +76,11 @@ function diagnostics(overrides: Partial<SystemDiagnostics> = {}): SystemDiagnost
 describe("capabilityStatus", () => {
   it("distinguishes configured but unvalidated cloud API from validated cloud availability", () => {
     const configuredOnly = buildCapabilityStatusViewModel(
-      diagnostics({ cloud_api_configured: true, cloud_api_validated: false }),
+      diagnostics({
+        cloud_api_configured: true,
+        cloud_api_validated: false,
+        cloud_api_validation_status: "unvalidated",
+      }),
       0
     );
     expect(configuredOnly.modelRouteLabel).toContain("已配置，连接未验证");
@@ -80,11 +88,42 @@ describe("capabilityStatus", () => {
     expect(configuredOnly.cloudApiStatusLabel).toBe("DeepSeek 已配置，连接未验证");
 
     const validated = buildCapabilityStatusViewModel(
-      diagnostics({ cloud_api_configured: true, cloud_api_validated: true }),
+      diagnostics({
+        cloud_api_configured: true,
+        cloud_api_validated: true,
+        cloud_api_validation_status: "validated",
+      }),
       0
     );
     expect(validated.modelRouteLabel).toContain("备用");
     expect(validated.cloudApiStatusLabel).toBe("DeepSeek 已验证可用");
+  });
+
+  it("shows failed and stale provider validation without treating cloud as ready", () => {
+    const failed = buildCapabilityStatusViewModel(
+      diagnostics({
+        cloud_api_configured: true,
+        cloud_api_validated: false,
+        cloud_api_validation_status: "failed",
+        cloud_api_last_error: "http_status:401",
+      }),
+      0
+    );
+    expect(failed.modelRouteLabel).toContain("验证失败");
+    expect(failed.modelRouteLabel).not.toContain("备用");
+    expect(failed.cloudApiStatusLabel).toBe("DeepSeek 验证失败：http_status:401");
+
+    const stale = buildCapabilityStatusViewModel(
+      diagnostics({
+        cloud_api_configured: true,
+        cloud_api_validated: false,
+        cloud_api_validation_status: "stale",
+      }),
+      0
+    );
+    expect(stale.modelRouteLabel).toContain("验证已过期或配置已变更");
+    expect(stale.modelRouteLabel).not.toContain("备用");
+    expect(stale.cloudApiStatusLabel).toBe("DeepSeek 验证已过期或配置已变更");
   });
 
   it("maps exact governance blocker reasons without exposing raw reason codes", () => {

@@ -117,7 +117,7 @@ async fn invoke_start_stream_message_for_kernel_goal_3(
     state: std::sync::Arc<crate::AppState>,
     session_id: &str,
     user_text: &str,
-) {
+) -> serde_json::Value {
     let app = tauri::test::mock_builder()
         .manage(state)
         .invoke_handler(tauri::generate_handler![crate::start_stream_message])
@@ -148,6 +148,48 @@ async fn invoke_start_stream_message_for_kernel_goal_3(
         response.is_ok(),
         "start_stream_message kernel Goal 3 failed: {response:?}"
     );
+    response
+        .expect("start_stream_message kernel Goal 3 response")
+        .deserialize::<serde_json::Value>()
+        .expect("deserialize kernel Goal 3 stream response")
+}
+
+#[tokio::test]
+async fn start_stream_message_returns_final_done_payload_for_browser_fallback() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let response = invoke_start_stream_message_for_kernel_goal_3(
+        state,
+        "stream-return-final-payload",
+        "hello",
+    )
+    .await;
+
+    assert_eq!(response["session_id"], "stream-return-final-payload");
+    assert!(
+        response["run_id"]
+            .as_str()
+            .is_some_and(|run_id| !run_id.trim().is_empty()),
+        "stream response must include run_id: {response}"
+    );
+    assert!(
+        response["reply"]
+            .as_str()
+            .is_some_and(|reply| !reply.trim().is_empty()),
+        "stream response must include assistant reply: {response}"
+    );
+    assert!(
+        response["agent_ingress"]["agentTaskSessionId"]
+            .as_str()
+            .is_some_and(|task_id| !task_id.trim().is_empty()),
+        "stream response must include task session evidence: {response}"
+    );
+    assert!(
+        response["agent_state"]["task"]["taskId"]
+            .as_str()
+            .is_some_and(|task_id| !task_id.trim().is_empty()),
+        "stream response must include agent control-plane state: {response}"
+    );
+    assert_eq!(response["legacy_fallback_used"], false);
 }
 
 fn expected_task_session_id(session_id: &str, user_text: &str) -> String {

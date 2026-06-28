@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { testLlmConnection, checkOllamaStatus } from "../../tauri";
-import type { AppConfig, SystemDiagnostics } from "../../tauri";
+import type { AgentRuntimeMode, AppConfig, SystemDiagnostics } from "../../tauri";
 
 const PROVIDER_PRESETS: Record<
   string,
@@ -63,12 +63,14 @@ interface ProviderConfigSectionProps {
   config: AppConfig;
   onConfigChange: (config: AppConfig) => void;
   diagnostics: SystemDiagnostics | null;
+  onProviderValidationChanged?: () => Promise<unknown> | unknown;
 }
 
 export default function ProviderConfigSection({
   config,
   onConfigChange,
   diagnostics,
+  onProviderValidationChanged,
 }: ProviderConfigSectionProps) {
   const [apiTestLoading, setApiTestLoading] = useState(false);
   const [apiTestResult, setApiTestResult] = useState<{ ok: boolean; text: string } | null>(null);
@@ -82,6 +84,8 @@ export default function ProviderConfigSection({
 
   const provider = config.llm.provider ?? "deepseek";
   const preset = PROVIDER_PRESETS[provider];
+  const runtimeMode = config.runtime_mode ?? "local_first_default";
+  const providerValidation = providerValidationView(diagnostics);
   const isDeepSeekReasoner = config.llm.chat_model === "deepseek-reasoner";
   const ollamaServiceOnline = diagnostics?.ollama_service_online ?? ollamaOnline;
   const resolvedLocalModel = diagnostics?.resolved_local_model ?? null;
@@ -121,13 +125,22 @@ export default function ProviderConfigSection({
     });
   };
 
+  const updateRuntimeMode = (mode: AgentRuntimeMode) => {
+    onConfigChange({
+      ...config,
+      runtime_mode: mode,
+    });
+  };
+
   const handleTestApiKey = async () => {
     setApiTestLoading(true);
     try {
       const res = await testLlmConnection(config);
       setApiTestResult({ ok: res.ok, text: `${res.provider}: ${res.message}` });
+      await onProviderValidationChanged?.();
     } catch (e: any) {
       setApiTestResult({ ok: false, text: e.message || "测试失败" });
+      await onProviderValidationChanged?.();
     } finally {
       setApiTestLoading(false);
     }
@@ -138,6 +151,46 @@ export default function ProviderConfigSection({
       <section id="llm-settings" className="space-y-4 border-t pt-4">
         <h3 className="text-sm font-medium text-gray-700">LLM 配置</h3>
         <div className="grid gap-4">
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Agent Runtime Mode</label>
+            <div className="grid gap-2 rounded-lg border border-stone-200 bg-stone-50 p-1 sm:grid-cols-2">
+              {[
+                {
+                  id: "local_first_default" as const,
+                  label: "Local-first default",
+                  desc: "保持现有用户行为和隐私边界。",
+                },
+                {
+                  id: "capability_first_beta" as const,
+                  label: "Capability-first beta",
+                  desc: "普通上下文更完整，credentials 仍会被拦截。",
+                },
+              ].map(item => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => updateRuntimeMode(item.id)}
+                  className={classNames(
+                    "rounded-md px-3 py-2 text-left transition",
+                    runtimeMode === item.id
+                      ? "bg-stone-900 text-white shadow-sm"
+                      : "bg-white text-stone-700 hover:bg-stone-100"
+                  )}
+                >
+                  <div className="text-sm font-semibold">{item.label}</div>
+                  <div
+                    className={
+                      runtimeMode === item.id
+                        ? "mt-1 text-xs leading-4 text-stone-200"
+                        : "mt-1 text-xs leading-4 text-stone-500"
+                    }
+                  >
+                    {item.desc}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
           <div>
             <label className="block text-xs text-gray-500 mb-1">云端模型 Provider</label>
             <div className="flex flex-wrap gap-2">
@@ -195,6 +248,22 @@ export default function ProviderConfigSection({
                 {apiTestResult.text}
               </div>
             )}
+            <div
+              className={classNames(
+                "mt-2 rounded-md border px-3 py-2 text-xs",
+                providerValidation.tone === "ready" &&
+                  "border-emerald-200 bg-emerald-50 text-emerald-800",
+                providerValidation.tone === "warning" &&
+                  "border-amber-200 bg-amber-50 text-amber-800",
+                providerValidation.tone === "error" && "border-red-200 bg-red-50 text-red-700",
+                providerValidation.tone === "neutral" && "border-gray-200 bg-gray-50 text-gray-600"
+              )}
+            >
+              <div className="font-medium">{providerValidation.label}</div>
+              {providerValidation.detail && (
+                <div className="mt-1 leading-5">{providerValidation.detail}</div>
+              )}
+            </div>
             {diagnostics?.config_source === "env_var" && (
               <div className="mt-1 text-xs text-blue-600">
                 检测到 API Key 来自环境变量，配置文件中无需填写
@@ -382,4 +451,55 @@ export default function ProviderConfigSection({
       </section>
     </>
   );
+}
+
+function providerValidationView(diagnostics: SystemDiagnostics | null): {
+  label: string;
+  detail?: string;
+  tone: "ready" | "warning" | "error" | "neutral";
+} {
+  if (!diagnostics) {
+    return {
+      label: "Provider 状态读取中",
+      detail: "正在读取配置和最近一次连接验证记录。",
+      tone: "neutral",
+    };
+  }
+  if (!diagnostics.cloud_api_configured) {
+    return {
+      label: "Provider 未配置",
+      detail: "需要 provider、base URL、chat model 和 API key 后才能测试连接。",
+      tone: "neutral",
+    };
+  }
+  if (diagnostics.cloud_api_validation_status === "validated") {
+    return {
+      label: "Provider 已验证",
+      detail: diagnostics.cloud_api_validated_at
+        ? `最近验证：${diagnostics.cloud_api_validated_at}`
+        : "最近一次真实连接验证成功。",
+      tone: "ready",
+    };
+  }
+  if (diagnostics.cloud_api_validation_status === "failed") {
+    return {
+      label: "Provider 验证失败",
+      detail: diagnostics.cloud_api_last_error
+        ? `安全错误标签：${diagnostics.cloud_api_last_error}`
+        : "最近一次真实连接验证失败。",
+      tone: "error",
+    };
+  }
+  if (diagnostics.cloud_api_validation_status === "stale") {
+    return {
+      label: "Provider 验证已失效",
+      detail: "provider、base URL、model、key presence、network policy 或 24h TTL 已变化。",
+      tone: "warning",
+    };
+  }
+  return {
+    label: "Provider 已配置，尚未验证",
+    detail: "填写 key 只代表 configured；点击“测试连接”成功后才会显示 validated。",
+    tone: "warning",
+  };
 }

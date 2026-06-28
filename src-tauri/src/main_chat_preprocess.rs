@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use openlife_core::agent::{ContextAssembler, MemoryLifecycleCategory, MemoryLifecycleRecord};
+use openlife_core::config::AgentRuntimeMode;
 use openlife_core::life_model::LifeModel;
 use openlife_core::llm::ChatMessage;
 use openlife_core::memory::MemorySearchHit;
@@ -17,6 +18,36 @@ use crate::AppState;
 const MEMORY_LIFECYCLE_SOURCE_PREFIX: &str = "memory_lifecycle:";
 const MEMORY_LIFECYCLE_CANDIDATE_LIMIT: i64 = 25;
 const MEMORY_LIFECYCLE_CONTEXT_LIMIT: usize = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CapabilityPrivacyMode {
+    ExistingDefault,
+    CapabilityFirstBeta,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MainChatPreprocessOptions {
+    pub capability_privacy_mode: CapabilityPrivacyMode,
+}
+
+impl Default for MainChatPreprocessOptions {
+    fn default() -> Self {
+        Self {
+            capability_privacy_mode: CapabilityPrivacyMode::ExistingDefault,
+        }
+    }
+}
+
+impl MainChatPreprocessOptions {
+    pub(crate) fn from_runtime_mode(mode: &AgentRuntimeMode) -> Self {
+        Self {
+            capability_privacy_mode: match mode {
+                AgentRuntimeMode::LocalFirstDefault => CapabilityPrivacyMode::ExistingDefault,
+                AgentRuntimeMode::CapabilityFirstBeta => CapabilityPrivacyMode::CapabilityFirstBeta,
+            },
+        }
+    }
+}
 
 pub(crate) async fn filter_lifecycle_active_memory_results(
     results: Vec<(MemoryChunk, f32)>,
@@ -197,7 +228,7 @@ fn is_common_cjk_token(token: &str) -> bool {
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(dead_code, clippy::too_many_arguments)]
 /// Shared preprocessing for chat commands:
 /// saves user message, loads model/tools/config, applies privacy filter,
 /// values filter, and vector memory retrieval.
@@ -205,6 +236,36 @@ pub(crate) async fn preprocess_chat_input(
     session_id: &str,
     messages: &[ChatMessage],
     state: &Arc<AppState>,
+) -> Result<
+    (
+        LifeModel,
+        String,
+        PrivacyEngine,
+        HashMap<String, String>,
+        Vec<ChatMessage>,
+        Option<String>,
+        openlife_core::agent::types::ContextSummary,
+    ),
+    String,
+> {
+    preprocess_chat_input_with_options(
+        session_id,
+        messages,
+        state,
+        MainChatPreprocessOptions::default(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Shared preprocessing for chat commands:
+/// saves user message, loads model/tools/config, applies privacy filter,
+/// values filter, and vector memory retrieval.
+pub(crate) async fn preprocess_chat_input_with_options(
+    session_id: &str,
+    messages: &[ChatMessage],
+    state: &Arc<AppState>,
+    options: MainChatPreprocessOptions,
 ) -> Result<
     (
         LifeModel,
@@ -248,7 +309,14 @@ pub(crate) async fn preprocess_chat_input(
     let mut privacy_map = HashMap::new();
     for msg in messages {
         if msg.role == "user" {
-            let (masked, map) = privacy_engine.desensitize(&msg.content);
+            let hs_local_only = classify_hs_policy_topic(&msg.content, &tools_prompt)
+                != openlife_core::agent::PolicyTopic::General;
+            let (masked, map) = sanitize_for_capability_privacy_mode(
+                &privacy_engine,
+                &msg.content,
+                options.capability_privacy_mode,
+                hs_local_only,
+            );
             privacy_map.extend(map);
             let mut final_text = masked;
             let router = state.intent_router.lock().await;
@@ -284,7 +352,14 @@ pub(crate) async fn preprocess_chat_input(
     };
     let memory_context = if let Some(user_msg) = messages.last() {
         if user_msg.role == "user" {
-            let (memory_query, _) = privacy_engine.desensitize(&user_msg.content);
+            let hs_local_only = classify_hs_policy_topic(&user_msg.content, &tools_prompt)
+                != openlife_core::agent::PolicyTopic::General;
+            let (memory_query, _) = sanitize_for_capability_privacy_mode(
+                &privacy_engine,
+                &user_msg.content,
+                options.capability_privacy_mode,
+                hs_local_only,
+            );
             let text_hits = {
                 let store = state.memory_store.lock().await;
                 store
@@ -450,6 +525,33 @@ pub(crate) async fn preprocess_chat_input_v2(
     ),
     String,
 > {
+    preprocess_chat_input_v2_with_options(
+        session_id,
+        messages,
+        state,
+        MainChatPreprocessOptions::default(),
+    )
+    .await
+}
+
+/// V2 preprocessing using ContextAssembler with explicit privacy options.
+pub(crate) async fn preprocess_chat_input_v2_with_options(
+    session_id: &str,
+    messages: &[ChatMessage],
+    state: &Arc<AppState>,
+    options: MainChatPreprocessOptions,
+) -> Result<
+    (
+        LifeModel,
+        String,
+        PrivacyEngine,
+        HashMap<String, String>,
+        Vec<ChatMessage>,
+        Option<String>,
+        openlife_core::agent::types::ContextSummary,
+    ),
+    String,
+> {
     let start = std::time::Instant::now();
 
     if let Some(user_msg) = messages.last() {
@@ -502,7 +604,14 @@ pub(crate) async fn preprocess_chat_input_v2(
                 let service = openlife_core::agent::MemoryService::new();
                 let memory_store = state.memory_store.lock().await;
                 let vector_store = state.vector_store.lock().await;
-                let (memory_query, _) = privacy_engine.desensitize(&user_msg.content);
+                let hs_local_only = classify_hs_policy_topic(&user_msg.content, &tools_prompt)
+                    != openlife_core::agent::PolicyTopic::General;
+                let (memory_query, _) = sanitize_for_capability_privacy_mode(
+                    &privacy_engine,
+                    &user_msg.content,
+                    options.capability_privacy_mode,
+                    hs_local_only,
+                );
 
                 match service
                     .retrieve_context(
@@ -555,7 +664,35 @@ pub(crate) async fn preprocess_chat_input_v2(
 
     let output = assembler.assemble(&input).map_err(|e| e.to_string())?;
 
-    let mut desensitized_messages = output.desensitized_messages.to_vec();
+    let mut privacy_map = output.privacy_map.clone();
+    let mut desensitized_messages =
+        if options.capability_privacy_mode == CapabilityPrivacyMode::CapabilityFirstBeta {
+            let mut messages_out = Vec::new();
+            let mut map_out = HashMap::new();
+            for message in messages {
+                if message.role == "user" {
+                    let hs_local_only = classify_hs_policy_topic(&message.content, &tools_prompt)
+                        != openlife_core::agent::PolicyTopic::General;
+                    let (content, map) = sanitize_for_capability_privacy_mode(
+                        &privacy_engine,
+                        &message.content,
+                        options.capability_privacy_mode,
+                        hs_local_only,
+                    );
+                    map_out.extend(map);
+                    messages_out.push(ChatMessage {
+                        role: message.role.clone(),
+                        content,
+                    });
+                } else {
+                    messages_out.push(message.clone());
+                }
+            }
+            privacy_map = map_out;
+            messages_out
+        } else {
+            output.desensitized_messages.to_vec()
+        };
     let hot_context = {
         let cache = state.hot_cache.read().await;
         cache.to_context_string()
@@ -573,7 +710,17 @@ pub(crate) async fn preprocess_chat_input_v2(
     let lifecycle_query = messages
         .last()
         .filter(|message| message.role == "user")
-        .map(|message| privacy_engine.desensitize(&message.content).0)
+        .map(|message| {
+            let hs_local_only = classify_hs_policy_topic(&message.content, &tools_prompt)
+                != openlife_core::agent::PolicyTopic::General;
+            sanitize_for_capability_privacy_mode(
+                &privacy_engine,
+                &message.content,
+                options.capability_privacy_mode,
+                hs_local_only,
+            )
+            .0
+        })
         .unwrap_or_default();
     let active_lifecycle_records =
         if let Some(lifecycle_store) = state.memory_lifecycle_store.as_ref() {
@@ -648,16 +795,35 @@ pub(crate) async fn preprocess_chat_input_v2(
             .iter()
             .map(|record| format!("memory_lifecycle:{}", record.memory_id)),
     );
+    context_summary.redaction_applied = !privacy_map.is_empty();
+    context_summary.redaction_level = if privacy_map.is_empty() {
+        openlife_core::agent::types::RedactionLevel::None
+    } else {
+        openlife_core::agent::types::RedactionLevel::Light
+    };
 
     Ok((
         output.life_model.as_ref().clone(),
         output.tools_prompt,
         privacy_engine,
-        output.privacy_map,
+        privacy_map,
         desensitized_messages.to_vec(),
         embed_err,
         context_summary,
     ))
+}
+
+fn sanitize_for_capability_privacy_mode(
+    privacy_engine: &PrivacyEngine,
+    content: &str,
+    mode: CapabilityPrivacyMode,
+    hs_local_only: bool,
+) -> (String, HashMap<String, String>) {
+    if mode == CapabilityPrivacyMode::CapabilityFirstBeta && !hs_local_only {
+        privacy_engine.desensitize_secrets_only(content)
+    } else {
+        privacy_engine.desensitize(content)
+    }
 }
 
 pub(crate) fn merge_memory_hits(
@@ -757,5 +923,85 @@ mod tests {
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].memory_id, "memory:kaizhou");
+    }
+
+    #[test]
+    fn capability_privacy_mode_preserves_ordinary_personal_context() {
+        let engine = PrivacyEngine::new();
+        let text = "我叫张三，偏好深度工作，项目目标是完成 OpenLife Beta。";
+
+        let (existing_default, _) = sanitize_for_capability_privacy_mode(
+            &engine,
+            text,
+            CapabilityPrivacyMode::ExistingDefault,
+            false,
+        );
+        let (capability_first, map) = sanitize_for_capability_privacy_mode(
+            &engine,
+            text,
+            CapabilityPrivacyMode::CapabilityFirstBeta,
+            false,
+        );
+
+        assert!(!existing_default.contains("张三"));
+        assert!(capability_first.contains("张三"));
+        assert!(capability_first.contains("深度工作"));
+        assert!(capability_first.contains("OpenLife Beta"));
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn capability_privacy_mode_redacts_credentials() {
+        let engine = PrivacyEngine::new();
+        let text = [
+            "API key: sk-test-secret-123456",
+            "password=hunter2-secret",
+            "token abcdefghijkl",
+            "-----BEGIN PRIVATE KEY-----\nabc123\n-----END PRIVATE KEY-----",
+        ]
+        .join("\n");
+
+        let (masked, map) = sanitize_for_capability_privacy_mode(
+            &engine,
+            &text,
+            CapabilityPrivacyMode::CapabilityFirstBeta,
+            false,
+        );
+
+        for secret in [
+            "sk-test-secret-123456",
+            "hunter2-secret",
+            "abcdefghijkl",
+            "abc123",
+        ] {
+            assert!(
+                !masked.contains(secret),
+                "capability mode leaked credential marker {secret}"
+            );
+            assert!(
+                !map.values().any(|value| value.contains(secret)),
+                "privacy reconstruction map retained credential marker {secret}"
+            );
+        }
+        assert!(masked.contains("<SECRET_"));
+        assert!(!map.is_empty());
+    }
+
+    #[test]
+    fn capability_privacy_mode_keeps_sensitive_local_only_stricter() {
+        let engine = PrivacyEngine::new();
+        let text = "我叫张三，电话 13800138000。";
+
+        let (masked, map) = sanitize_for_capability_privacy_mode(
+            &engine,
+            text,
+            CapabilityPrivacyMode::CapabilityFirstBeta,
+            true,
+        );
+
+        assert!(!masked.contains("张三"));
+        assert!(!masked.contains("13800138000"));
+        assert!(masked.contains("<NAME_") || masked.contains("<PHONE_"));
+        assert!(!map.is_empty());
     }
 }

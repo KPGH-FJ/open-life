@@ -56,6 +56,7 @@ function defaultConfig(): AppConfig {
       chat_model: "deepseek-chat",
       embedding_enabled: false,
     },
+    runtime_mode: "local_first_default",
     prefer_local_model: false,
     local_model: "llama2",
     chat_proposal: {
@@ -187,6 +188,7 @@ export default function SettingsPage() {
         diagnostics: diag,
         config_summary: {
           provider: config.llm?.provider,
+          runtime_mode: config.runtime_mode,
           prefer_local: config.prefer_local_model,
           local_model: config.local_model,
           chat_proposal_enabled: config.chat_proposal?.enabled,
@@ -467,6 +469,7 @@ export default function SettingsPage() {
             routerStatus={routerStatus}
             modelRouterStatus={modelRouterStatus}
             showInternalDebug={showInternalDebug}
+            onProviderValidationChanged={refreshAllDiagnostics}
           />
         )}
 

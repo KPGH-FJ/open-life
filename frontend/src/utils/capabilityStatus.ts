@@ -21,7 +21,7 @@ export type CapabilityStatusViewModel = {
   toolAccessDetail: string;
 };
 
-type CloudRouteState = "none" | "configured_unvalidated" | "validated";
+type CloudRouteState = "none" | "unvalidated" | "validated" | "failed" | "stale";
 
 type GovernanceBlockerReason =
   | "model_selected_disallowed_tool"
@@ -40,12 +40,21 @@ function localModelName(diagnostics: SystemDiagnostics): string {
 }
 
 function cloudRouteState(diagnostics: SystemDiagnostics): CloudRouteState {
+  if (!diagnostics.cloud_api_configured) return "none";
+  if (diagnostics.cloud_api_validation_status === "validated") return "validated";
+  if (diagnostics.cloud_api_validation_status === "failed") return "failed";
+  if (diagnostics.cloud_api_validation_status === "stale") return "stale";
   if (diagnostics.cloud_api_validated === true) return "validated";
-  if (diagnostics.cloud_api_configured) return "configured_unvalidated";
+  if (diagnostics.cloud_api_configured) return "unvalidated";
   return "none";
 }
 
-function cloudConfiguredLabel(diagnostics: SystemDiagnostics): string {
+function cloudConfiguredLabel(
+  diagnostics: SystemDiagnostics,
+  state = cloudRouteState(diagnostics)
+): string {
+  if (state === "failed") return `${providerName(diagnostics)} 验证失败`;
+  if (state === "stale") return `${providerName(diagnostics)} 验证已过期或配置已变更`;
   return `${providerName(diagnostics)} 已配置，连接未验证`;
 }
 
@@ -53,7 +62,13 @@ export function cloudApiStatusLabel(diagnostics: SystemDiagnostics | null): stri
   if (!diagnostics) return "状态读取中";
   const cloud = cloudRouteState(diagnostics);
   if (cloud === "validated") return `${providerName(diagnostics)} 已验证可用`;
-  if (cloud === "configured_unvalidated") return cloudConfiguredLabel(diagnostics);
+  if (cloud === "failed") {
+    return diagnostics.cloud_api_last_error
+      ? `${providerName(diagnostics)} 验证失败：${diagnostics.cloud_api_last_error}`
+      : `${providerName(diagnostics)} 验证失败`;
+  }
+  if (cloud === "stale") return `${providerName(diagnostics)} 验证已过期或配置已变更`;
+  if (cloud === "unvalidated") return cloudConfiguredLabel(diagnostics, cloud);
   return "未配置";
 }
 
@@ -65,12 +80,15 @@ function routeLabel(diagnostics: SystemDiagnostics | null): string {
     return `本地优先 · ${localModelName(diagnostics)} · ${providerName(diagnostics)} 备用`;
   }
   if (local && cloud === "validated") return `云端优先 · ${providerName(diagnostics)} · 本地可备用`;
-  if (local && cloud === "configured_unvalidated") {
-    return `本地模型 · ${localModelName(diagnostics)} · ${cloudConfiguredLabel(diagnostics)}`;
+  if (local && cloud !== "none" && cloud !== "validated") {
+    return `本地模型 · ${localModelName(diagnostics)} · ${cloudConfiguredLabel(
+      diagnostics,
+      cloud
+    )}`;
   }
   if (local) return `本地模型 · ${localModelName(diagnostics)}`;
   if (cloud === "validated") return `云端可用 · ${providerName(diagnostics)}`;
-  if (cloud === "configured_unvalidated") return cloudConfiguredLabel(diagnostics);
+  if (cloud !== "none") return cloudConfiguredLabel(diagnostics, cloud);
   return "模型未就绪";
 }
 

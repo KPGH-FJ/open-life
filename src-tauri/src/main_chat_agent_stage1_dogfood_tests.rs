@@ -572,6 +572,27 @@ async fn main_chat_agent_stage1_browser_prep_seeds_real_task_control_state_only(
         scheduler.scripted_generation_response.as_deref(),
         Some("Stage 1 browser dogfood deterministic model response.")
     );
+    assert!(
+        crate::main_chat_agent_stage1_dogfood::stage1_browser_dogfood_scripted_provider_ready(
+            &state, &config
+        )
+        .await
+    );
+
+    let diagnostics = crate::commands::diagnostics::get_system_diagnostics_with_state(&state)
+        .await
+        .expect("stage 1 browser diagnostics");
+    assert!(diagnostics.cloud_api_configured);
+    assert!(diagnostics.cloud_api_validated);
+    assert_eq!(
+        diagnostics.cloud_api_validation_status,
+        "stage1_browser_dogfood_scripted"
+    );
+    assert_eq!(
+        diagnostics.cloud_api_validation_source.as_deref(),
+        Some("stage1_browser_dogfood_scripted")
+    );
+    assert!(diagnostics.chat_ready);
 
     for id in [
         "D13",
