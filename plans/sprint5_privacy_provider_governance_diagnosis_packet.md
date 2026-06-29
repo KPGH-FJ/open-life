@@ -2,7 +2,7 @@
 
 Date: 2026-06-29
 
-Status: source-level preparation for bounded Slice 5A. This packet is not a fixed-status claim.
+Status: historical source-level preparation for bounded Slice 5A. Slice 5A was implemented in `083015d`; use `plans/sprint5_danger_action_preflight_diagnosis_packet.md` for current Slice 5C1 entry. This packet is retained as audit context, not a current absence claim.
 
 ## Scope
 
@@ -18,10 +18,10 @@ Checked source entrypoints:
 |---|---|---|
 | `src-tauri/src/main_chat_runtime_facts/provider_route.rs` | `RuntimeRouteEvidence` already includes `external_transmission`, route identity, provider readiness, fallback, and source refs. | This is route/transmission evidence, not a full provider payload ledger. Do not infer exact sent payloads or provider retention from it. |
 | `src-tauri/src/main_chat_runtime_facts_tests.rs` | Tests already cover cloud -> `sent`, local/runtime fact -> `not_sent`, fallback local -> `not_sent`, and missing settings instrumentation -> `not_instrumented`. | These tests prove route boundary semantics, not Privacy page history. |
-| `frontend/src/pages/RunsPage.tsx` / `frontend/src/pages/AgentRunDetail.tsx` | Runs surfaces can display route evidence and external transmission for individual run/detail contexts. | Privacy page does not yet provide an aggregated per-run transmission history. |
-| `frontend/src/pages/settings/tabs/PrivacyTab.tsx` | Privacy currently shows hot memory summary, local MCP audit counts, audit export/cleanup/key rotation actions, and PII policy. | It lacks sent/not-sent history and danger-action preflight UX. Some buttons still look like direct actions rather than preflight-first governance. |
+| `frontend/src/pages/RunsPage.tsx` / `frontend/src/pages/AgentRunDetail.tsx` | Runs surfaces can display route evidence and external transmission for individual run/detail contexts. | Before `083015d`, Privacy lacked an aggregated per-run transmission history; after `083015d`, this risk is reduced through `list_provider_transmission_history`. |
+| `frontend/src/pages/settings/tabs/PrivacyTab.tsx` | Privacy shows hot memory summary, local MCP audit counts, PII policy, and, after `083015d`, recent provider-transmission history. | Danger-action preflight UX is still missing; audit export/cleanup/key rotation buttons still need Slice 5C1. |
 | `src-tauri/src/main_chat_live_provider_harness.rs` and agent runtime final gate | Live provider harness can prove opt-in model invocation/no-invocation with blockers. | This is eval harness evidence, not user-facing transmission history. Do not run live providers in Slice 5A. |
-| Search result for `ProviderTransmission` | No dedicated ProviderTransmission source/test symbol exists yet. | A new table is optional later; Slice 5A should avoid broad storage migration unless required. |
+| Search result for `ProviderTransmission` | Pre-`083015d`, no provider-transmission read-model/test symbol existed. After `083015d`, `ProviderTransmissionHistoryItem` and focused `provider_transmission` tests exist; no dedicated `ProviderTransmissionLogEntry` table exists. | A new table remains optional later; do not duplicate route truth unless the AgentRun-derived read model proves insufficient. |
 
 ## Root-Cause Hypotheses
 
@@ -84,7 +84,7 @@ Future Slice 5B may introduce a dedicated `ProviderTransmissionLogEntry` store o
 
 ## Slice 5A Acceptance Tests
 
-Backend focused tests to add or update:
+Backend focused tests implemented by `083015d`:
 
 - `provider_transmission_view_records_local_not_sent_with_positive_route_evidence`
 - `provider_transmission_view_records_cloud_sent_with_cloud_route_evidence`
@@ -99,7 +99,7 @@ Suggested backend gates:
 - `cargo test -p openlife-tauri provider_route_runtime_route_evidence`
 - `cargo test -p openlife-tauri live_provider`
 
-Frontend focused tests to add or update:
+Frontend focused tests implemented/updated by `083015d`:
 
 - `PrivacyTab` renders `sent`, `not_sent`, `blocked`, `unknown`, and `not_instrumented` rows distinctly.
 - `PrivacyTab` shows no-key-leak diagnostics and does not display raw prompts or API keys.
