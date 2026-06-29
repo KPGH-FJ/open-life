@@ -12,7 +12,8 @@
 #   make test       - 运行所有测试
 #   make test-front - 运行前端测试
 #   make test-rust  - 运行 Rust 测试
-#   make clean      - 清理构建缓存
+#   make clean      - 清理构建缓存（保留 product-audit 证据）
+#   make clean-audit-results - 明确清理本地 product-audit 证据
 #   make a2a        - 启动 A2A 独立服务器
 #
 # 平台支持：
@@ -39,7 +40,7 @@ FRONTEND_INSTALL = corepack pnpm install
 # 主要命令
 # =============================================================================
 
-.PHONY: help setup dev build check test test-front test-rust clean a2a format format-check lint ci build-front check-pnpm check-lockfile
+.PHONY: help setup dev build check test test-front test-rust clean clean-audit-results clean-rust-target clean-all a2a format format-check lint ci build-front check-pnpm check-lockfile
 
 ## 显示帮助信息
 help:
@@ -56,7 +57,9 @@ help:
 	@echo "  make format-check - 检查格式但不改写文件"
 	@echo "  make lint        - 运行所有 Lint 检查"
 	@echo "  make ci          - 完整 CI 检查（format-check + lint + test + frontend build）"
-	@echo "  make clean       - 清理构建缓存"
+	@echo "  make clean       - 清理构建缓存（保留 product-audit 证据）"
+	@echo "  make clean-audit-results - 明确清理本地 product-audit 证据"
+	@echo "  make clean-rust-target - 清理 Cargo workspace target（释放空间，后续 Rust 构建会变慢）"
 	@echo "  make a2a         - 启动 A2A 独立服务器"
 	@echo ""
 
@@ -111,15 +114,27 @@ test-rust:
 ## 清理构建缓存和产物
 clean:
 	@echo "🧹 清理构建缓存..."
-	cd frontend && rm -rf dist node_modules/.vite
-	rm -rf src-tauri/target
+	cd frontend && rm -rf dist node_modules/.vite playwright-report
+	cd frontend && if [ -d test-results ]; then find test-results -mindepth 1 -maxdepth 1 ! -name 'product-audit-*' -exec rm -rf {} +; fi
+	rm -rf target/openlife-dev src-tauri/target
 	@echo "✅ 清理完成"
 
+## 明确清理本地 product-audit 证据（默认 clean 不会删除）
+clean-audit-results:
+	@echo "🧹 清理本地 product-audit 证据..."
+	cd frontend && rm -rf test-results/product-audit-*
+	@echo "✅ product-audit 证据已清理"
+
+## 清理 Cargo workspace target（会释放大量空间；下次 Rust 构建/测试会重新编译）
+clean-rust-target:
+	@echo "🧹 清理 Cargo workspace target..."
+	cargo clean
+	@echo "✅ Cargo target 已清理"
+
 ## 深度清理（包含 node_modules）
-clean-all: clean
+clean-all: clean clean-rust-target
 	@echo "🧹 深度清理..."
 	cd frontend && rm -rf node_modules
-	cargo clean
 	@echo "✅ 深度清理完成"
 
 # =============================================================================

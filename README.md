@@ -182,6 +182,10 @@ make dev
 ./scripts/dev.sh
 ```
 
+开发模式通过 Vite dev server 加载当前源码，不依赖 `frontend/dist`。
+如需验证生产前端产物，运行 `cd frontend && pnpm run build` 或 `make ci` 重新生成
+`frontend/dist` 后再使用 preview / Tauri build 路径。
+
 ### 测试
 
 ```bash
@@ -198,16 +202,52 @@ cd frontend && pnpm run build
 make ci
 ```
 
+### 本地缓存和旧产物清理
+
+以下目录都是本地缓存或生成产物，已被 `.gitignore` 忽略，可以按需要删除：
+
+- `frontend/dist/`：前端生产构建产物；`make dev` 不依赖它，`pnpm run build` 会重新生成。
+- `frontend/test-results/`、`frontend/playwright-report/`：本地 E2E / readiness 报告产物；普通应用运行不依赖它们。`frontend/test-results/product-audit-*` 是产品审计证据，默认 `make clean` 会保留。
+- `target/`：Cargo workspace 编译缓存，通常很大；删除后会释放空间，但下一次 Rust 构建/测试会重新编译，耗时明显增加。
+
+推荐先清理轻量产物：
+
+```bash
+make clean
+```
+
+如果确实要丢弃本地产品审计截图和报告，再显式运行：
+
+```bash
+make clean-audit-results
+```
+
+只有在需要释放大量磁盘空间时再清理 Rust target：
+
+```bash
+make clean-rust-target
+```
+
 ## 当前推荐试用路径
 
-### 主线体验（推荐）
+### 本机工程试用（推荐）
 
-1. **`Workspace`**（首页驾驶舱）查看系统状态、待处理 Proposal、今日 AgentRun 统计。
-2. **`Agent`** 发起个性化对话，观察 Chat Proposal 自动提取目标和状态。
-3. **`Review`** 审查 AI 生成的 LifeModel 更新提案，确认或拒绝。
-4. **`Builder`** 完成一次快速构建，或恢复待确认 Review。
-5. **`Runs`** 查看所有 Agent 执行记录，按状态/类型过滤，批量管理。
-6. **`Settings`** 完成模型配置、诊断检查，开启实验性功能（ContextAssembler V2 / ModelRouter）。
+1. **`今日`** 查看系统状态、今日建议和待处理 Proposal。
+2. **`陪伴`** 发起 Main Chat 对话，观察任务状态、工具/观察记录、Proposal、blocker 和安全下一步。
+3. **`Review`** 审查 AI 生成的 LifeModel / Memory / ToolPermission 等提案，确认、拒绝或延后。
+4. **`Life Model`** 查看和构建个人 LifeModel；需要快速构建时进入 Builder legacy alias。
+5. **`更多` → `Activity`** 查看 AgentRun 记录，按状态和类型过滤。
+6. **`更多` → `Settings`** 完成模型配置、诊断检查和实验性功能开关。
+
+保留的旧路由仍可直接访问：`/workspace`、`/chat`、`/agent`、`/review`、
+`/builder`、`/runs`、`/settings`。但试用文案和导航应以当前产品壳的
+`陪伴 / 今日 / Review / Life Model` 为准。
+
+### 试用状态边界
+
+本机 deterministic 工程试用可以直接运行；limited internal trial 仍需要
+manual dogfood 和真实 external live provider P0 evidence，不能用本地、mock、
+fixture 或旧报告冒充通过证据。
 
 ### 实验性功能（灰度测试）
 
@@ -217,7 +257,7 @@ make ci
 - **ModelRouter**：智能路由选择本地/云端模型（默认路由基础设施，云端 Provider 需配置并通过轻量健康检查）
 
 ```text
-Workspace -> Agent Task -> Agent Run Trace -> Proposal Review -> LifeModel/Memory Update
+今日 -> 陪伴任务 -> Agent Run Trace -> Review -> LifeModel/Memory Update
 ```
 
 ## 最近完成的重要更新
