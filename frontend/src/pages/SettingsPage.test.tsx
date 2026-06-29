@@ -78,6 +78,7 @@ describe("SettingsPage", () => {
 
     await clickTab("数据与恢复");
     expect(screen.getByText(/导出全部数据/)).toBeInTheDocument();
+    expect(await screen.findByText(/旧 run 可能未接入/)).toBeInTheDocument();
   });
 
   it("hides internal multi-strategy and default Chat migration surfaces by default", async () => {

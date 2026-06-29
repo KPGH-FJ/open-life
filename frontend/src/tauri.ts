@@ -2639,6 +2639,37 @@ export interface RuntimeRouteEvidence {
   truth_confidence: "verified" | "inferred" | "unknown" | string;
 }
 
+export type ProviderTransmissionStatus =
+  | "sent"
+  | "not_sent"
+  | "blocked"
+  | "unknown"
+  | "not_instrumented"
+  | string;
+
+export interface ProviderTransmissionSourceRef {
+  source: string;
+  ref_id?: string | null;
+  status?: string | null;
+  route_type?: string | null;
+}
+
+export interface ProviderTransmissionHistoryItem {
+  status: ProviderTransmissionStatus;
+  run_id: string;
+  task_session_id?: string | null;
+  provider: string;
+  model: string;
+  route_type: string;
+  reason: string;
+  evidence_id: string;
+  truth_confidence: "verified" | "inferred" | "unknown" | string;
+  data_category: string;
+  source_refs: ProviderTransmissionSourceRef[];
+  started_at: string;
+  finished_at?: string | null;
+}
+
 export interface SystemDiagnostics {
   router: RouterStatus;
   mcp_server_count: number;
@@ -3768,6 +3799,14 @@ export async function getAgentRun(runId: string): Promise<AgentRun | null> {
 
 export async function listAgentRuns(limit: number = 50, offset: number = 0): Promise<AgentRun[]> {
   return safeInvoke<AgentRun[]>("list_agent_runs", { limit, offset });
+}
+
+export async function listProviderTransmissionHistory(
+  limit: number = 20
+): Promise<ProviderTransmissionHistoryItem[]> {
+  return safeInvoke<ProviderTransmissionHistoryItem[]>("list_provider_transmission_history", {
+    limit,
+  });
 }
 
 export async function listRuns(limit: number = 50, offset: number = 0): Promise<AgentRun[]> {

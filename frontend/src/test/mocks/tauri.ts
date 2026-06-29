@@ -489,6 +489,8 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       return Promise.resolve(mockStateHistory as T);
     case "list_chat_sessions":
       return Promise.resolve(mockChatSessions as T);
+    case "list_provider_transmission_history":
+      return Promise.resolve([] as T);
     case "get_main_chat_agent_task_state":
       return Promise.resolve({
         session: {

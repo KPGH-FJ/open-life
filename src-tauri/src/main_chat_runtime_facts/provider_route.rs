@@ -40,6 +40,31 @@ pub struct RuntimeRouteEvidence {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderTransmissionSourceRef {
+    pub source: String,
+    pub ref_id: Option<String>,
+    pub status: Option<String>,
+    pub route_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderTransmissionHistoryItem {
+    pub status: String,
+    pub run_id: String,
+    pub task_session_id: Option<String>,
+    pub provider: String,
+    pub model: String,
+    pub route_type: String,
+    pub reason: String,
+    pub evidence_id: String,
+    pub truth_confidence: String,
+    pub data_category: String,
+    pub source_refs: Vec<ProviderTransmissionSourceRef>,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RouteIdentity {
     pub provider: String,
     pub model: String,
@@ -373,6 +398,490 @@ pub(crate) async fn build_settings_runtime_route_evidence(
         false,
     )
     .await
+}
+
+pub(crate) fn provider_transmission_history_from_runs(
+    runs: &[AgentRun],
+) -> Vec<ProviderTransmissionHistoryItem> {
+    runs.iter()
+        .map(provider_transmission_history_item_from_run)
+        .collect()
+}
+
+pub(crate) fn provider_transmission_history_item_from_run(
+    run: &AgentRun,
+) -> ProviderTransmissionHistoryItem {
+    let generation_metadata = run_generation_metadata(run);
+    let runtime_evidence = runtime_route_evidence_from_agent_run(run);
+    let route = runtime_evidence
+        .as_ref()
+        .and_then(transmission_route_from_evidence)
+        .or_else(|| {
+            run.model_route
+                .as_ref()
+                .map(route_identity_from_model_route)
+        });
+    let status_route = runtime_evidence
+        .as_ref()
+        .and_then(transmission_invocation_route_from_evidence)
+        .or_else(|| {
+            if runtime_evidence.is_none() {
+                run.model_route
+                    .as_ref()
+                    .map(route_identity_from_model_route)
+            } else {
+                None
+            }
+        });
+    let route_type = route
+        .as_ref()
+        .map(|route| normalized_evidence_route_type(Some(route.route_type.as_str())))
+        .unwrap_or_else(|| "unknown".into());
+    let status_route_type = status_route
+        .as_ref()
+        .map(|route| normalized_evidence_route_type(Some(route.route_type.as_str())))
+        .unwrap_or_else(|| "unknown".into());
+    let status = provider_transmission_status(
+        run,
+        runtime_evidence.as_ref(),
+        generation_metadata,
+        status_route.as_ref(),
+        &status_route_type,
+    );
+    let reason = transmission_reason(
+        runtime_evidence.as_ref(),
+        generation_metadata,
+        route.as_ref(),
+    );
+    let task_session_id = runtime_evidence
+        .as_ref()
+        .and_then(|evidence| evidence.task_session_id.as_deref())
+        .or_else(|| metadata_string(generation_metadata, &["taskSessionId", "task_session_id"]))
+        .or_else(|| {
+            metadata_string(
+                generation_metadata,
+                &["agentTaskSessionId", "agent_task_session_id"],
+            )
+        })
+        .map(metadata_safe_transmission_label);
+    let evidence_id = runtime_evidence
+        .as_ref()
+        .map(|evidence| metadata_safe_transmission_label(&evidence.evidence_id))
+        .or_else(|| {
+            run.model_route.as_ref().map(|_| {
+                format!(
+                    "agent_run:{}:model_route",
+                    metadata_safe_transmission_label(&run.id)
+                )
+            })
+        })
+        .unwrap_or_else(|| {
+            format!(
+                "agent_run:{}:route_not_instrumented",
+                metadata_safe_transmission_label(&run.id)
+            )
+        });
+    let truth_confidence =
+        transmission_truth_confidence(&status, runtime_evidence.as_ref(), run.model_route.as_ref());
+    let mut source_refs =
+        transmission_source_refs(run, runtime_evidence.as_ref(), generation_metadata);
+    if source_refs.is_empty() {
+        source_refs.push(ProviderTransmissionSourceRef {
+            source: "agent_run".into(),
+            ref_id: Some(metadata_safe_transmission_label(&run.id)),
+            status: Some("route_not_instrumented".into()),
+            route_type: None,
+        });
+    }
+
+    ProviderTransmissionHistoryItem {
+        status,
+        run_id: metadata_safe_transmission_label(&run.id),
+        task_session_id,
+        provider: route
+            .as_ref()
+            .map(|route| metadata_safe_transmission_label(&route.provider))
+            .unwrap_or_else(|| "unknown".into()),
+        model: route
+            .as_ref()
+            .map(|route| metadata_safe_transmission_label(&route.model))
+            .unwrap_or_else(|| "unknown".into()),
+        route_type,
+        reason: metadata_safe_transmission_label(&reason),
+        evidence_id,
+        truth_confidence,
+        data_category: "provider_transmission".into(),
+        source_refs,
+        started_at: run.started_at.to_rfc3339(),
+        finished_at: run
+            .finished_at
+            .as_ref()
+            .map(|finished_at| finished_at.to_rfc3339()),
+    }
+}
+
+fn run_generation_metadata(run: &AgentRun) -> Option<&Value> {
+    run.reasoning_trace
+        .as_ref()
+        .and_then(|trace| trace.generation_result.as_ref())
+}
+
+fn runtime_route_evidence_from_agent_run(run: &AgentRun) -> Option<RuntimeRouteEvidence> {
+    run_generation_metadata(run)
+        .and_then(|value| value.get("runtimeRouteEvidence").cloned())
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
+fn transmission_route_from_evidence(evidence: &RuntimeRouteEvidence) -> Option<RouteIdentity> {
+    evidence
+        .actual_route
+        .clone()
+        .or_else(|| evidence.last_completed_route.clone())
+        .or_else(|| evidence.planned_route.clone())
+}
+
+fn transmission_invocation_route_from_evidence(
+    evidence: &RuntimeRouteEvidence,
+) -> Option<RouteIdentity> {
+    evidence
+        .actual_route
+        .clone()
+        .or_else(|| evidence.last_completed_route.clone())
+}
+
+fn route_identity_from_model_route(route: &ModelRouteTrace) -> RouteIdentity {
+    RouteIdentity {
+        provider: metadata_safe_transmission_label(&route.provider),
+        model: metadata_safe_transmission_label(&route.model),
+        route_type: normalized_evidence_route_type(Some(&route.route_type)),
+        privacy_level: metadata_safe_transmission_label(&route.privacy_level.to_string()),
+        reason: metadata_safe_transmission_label(&route.reason),
+        provider_health_is_estimated: route.provider_health_is_estimated.unwrap_or(true),
+    }
+}
+
+fn provider_transmission_status(
+    run: &AgentRun,
+    evidence: Option<&RuntimeRouteEvidence>,
+    metadata: Option<&Value>,
+    route: Option<&RouteIdentity>,
+    route_type: &str,
+) -> String {
+    if metadata_bool(metadata, &["liveProviderInvoked", "live_provider_invoked"]) {
+        return "sent".into();
+    }
+    let invocation_route = evidence
+        .and_then(|evidence| {
+            evidence
+                .actual_route
+                .as_ref()
+                .or(evidence.last_completed_route.as_ref())
+        })
+        .or_else(|| if evidence.is_none() { route } else { None });
+    if provider_preflight_blocked(evidence, metadata)
+        && no_model_invocation_for_blocked_status(metadata, invocation_route)
+    {
+        return "blocked".into();
+    }
+    if route_type == "cloud"
+        || positive_evidence_transmission(evidence, "sent", &["cloud"])
+        || metadata_string(metadata, &["externalTransmission", "external_transmission"])
+            == Some("sent")
+    {
+        return "sent".into();
+    }
+    if positive_not_sent_route_type(route_type)
+        || positive_evidence_transmission(
+            evidence,
+            "not_sent",
+            &["local", "agent_runtime", "scripted"],
+        )
+    {
+        return "not_sent".into();
+    }
+    if let Some(evidence) = evidence {
+        return match evidence.external_transmission.as_str() {
+            "not_instrumented" => "not_instrumented".into(),
+            "unknown" => "unknown".into(),
+            _ => "unknown".into(),
+        };
+    }
+    if run.model_route.is_none() {
+        "not_instrumented".into()
+    } else {
+        "unknown".into()
+    }
+}
+
+fn positive_not_sent_route_type(route_type: &str) -> bool {
+    matches!(route_type, "local" | "agent_runtime" | "scripted")
+}
+
+fn positive_evidence_transmission(
+    evidence: Option<&RuntimeRouteEvidence>,
+    expected_status: &str,
+    allowed_route_types: &[&str],
+) -> bool {
+    let Some(evidence) = evidence else {
+        return false;
+    };
+    if evidence.external_transmission != expected_status {
+        return false;
+    }
+    let Some(route) = evidence
+        .actual_route
+        .as_ref()
+        .or(evidence.last_completed_route.as_ref())
+    else {
+        return false;
+    };
+    let route_type = normalized_evidence_route_type(Some(route.route_type.as_str()));
+    allowed_route_types
+        .iter()
+        .any(|allowed| route_type.as_str() == *allowed)
+}
+
+fn provider_preflight_blocked(
+    evidence: Option<&RuntimeRouteEvidence>,
+    metadata: Option<&Value>,
+) -> bool {
+    let evidence_blocked = evidence.is_some_and(|evidence| {
+        evidence.source_refs.iter().any(|source| {
+            source.get("source").and_then(Value::as_str) == Some("provider_preflight")
+                && source.get("status").and_then(Value::as_str) == Some("blocked")
+        }) || evidence
+            .fallback
+            .as_ref()
+            .is_some_and(|fallback| !fallback.blocker_codes.is_empty())
+    });
+    evidence_blocked
+        || metadata_string(
+            metadata,
+            &[
+                "providerPreflightStatus",
+                "provider_preflight_status",
+                "liveProviderPreflightStatus",
+                "live_provider_preflight_status",
+            ],
+        ) == Some("blocked")
+        || metadata_non_empty_array(
+            metadata,
+            &[
+                "providerPreflightBlockers",
+                "provider_preflight_blockers",
+                "liveProviderPreflightBlockers",
+                "live_provider_preflight_blockers",
+            ],
+        )
+}
+
+fn no_model_invocation_for_blocked_status(
+    metadata: Option<&Value>,
+    route: Option<&RouteIdentity>,
+) -> bool {
+    if metadata_bool(
+        metadata,
+        &[
+            "liveProviderInvoked",
+            "live_provider_invoked",
+            "modelInvoked",
+            "model_invoked",
+            "modelGenerated",
+            "model_generated",
+            "schedulerGenerationCalled",
+            "scheduler_generation_called",
+        ],
+    ) {
+        return false;
+    }
+    !route.is_some_and(|route| {
+        matches!(
+            normalized_evidence_route_type(Some(route.route_type.as_str())).as_str(),
+            "cloud" | "local" | "scripted"
+        )
+    })
+}
+
+fn transmission_reason(
+    evidence: Option<&RuntimeRouteEvidence>,
+    metadata: Option<&Value>,
+    route: Option<&RouteIdentity>,
+) -> String {
+    evidence
+        .and_then(|evidence| {
+            evidence
+                .fallback
+                .as_ref()
+                .map(|fallback| fallback.reason.clone())
+        })
+        .or_else(|| {
+            metadata_string(
+                metadata,
+                &[
+                    "blockerReason",
+                    "blocker_reason",
+                    "routeReason",
+                    "route_reason",
+                    "providerPreflightStatus",
+                    "provider_preflight_status",
+                ],
+            )
+            .map(str::to_string)
+        })
+        .or_else(|| route.map(|route| route.reason.clone()))
+        .unwrap_or_else(|| "route_metadata_missing".into())
+}
+
+fn transmission_truth_confidence(
+    status: &str,
+    evidence: Option<&RuntimeRouteEvidence>,
+    model_route: Option<&ModelRouteTrace>,
+) -> String {
+    if let Some(evidence) = evidence {
+        return metadata_safe_transmission_label(&evidence.truth_confidence);
+    }
+    match status {
+        "sent" | "not_sent" | "blocked" if model_route.is_some() => "verified".into(),
+        "not_instrumented" => "unknown".into(),
+        _ => "unknown".into(),
+    }
+}
+
+fn transmission_source_refs(
+    run: &AgentRun,
+    evidence: Option<&RuntimeRouteEvidence>,
+    metadata: Option<&Value>,
+) -> Vec<ProviderTransmissionSourceRef> {
+    let mut refs = vec![ProviderTransmissionSourceRef {
+        source: "agent_run".into(),
+        ref_id: Some(metadata_safe_transmission_label(&run.id)),
+        status: Some(metadata_safe_transmission_label(&run.status.to_string())),
+        route_type: run
+            .model_route
+            .as_ref()
+            .map(|route| normalized_evidence_route_type(Some(&route.route_type))),
+    }];
+    if run.model_route.is_some() {
+        refs.push(ProviderTransmissionSourceRef {
+            source: "agent_run_model_route".into(),
+            ref_id: Some(format!(
+                "agent_run:{}:model_route",
+                metadata_safe_transmission_label(&run.id)
+            )),
+            status: Some("present".into()),
+            route_type: run
+                .model_route
+                .as_ref()
+                .map(|route| normalized_evidence_route_type(Some(&route.route_type))),
+        });
+    }
+    if let Some(evidence) = evidence {
+        refs.push(ProviderTransmissionSourceRef {
+            source: "runtime_route_evidence".into(),
+            ref_id: Some(metadata_safe_transmission_label(&evidence.evidence_id)),
+            status: Some(metadata_safe_transmission_label(
+                &evidence.external_transmission,
+            )),
+            route_type: evidence
+                .actual_route
+                .as_ref()
+                .or(evidence.last_completed_route.as_ref())
+                .or(evidence.planned_route.as_ref())
+                .map(|route| normalized_evidence_route_type(Some(route.route_type.as_str()))),
+        });
+        refs.extend(evidence.source_refs.iter().take(8).map(|source| {
+            ProviderTransmissionSourceRef {
+                source: source_ref_string(source, &["source"])
+                    .unwrap_or_else(|| "runtime_route_evidence_source".into()),
+                ref_id: source_ref_string(
+                    source,
+                    &["runId", "run_id", "evidenceId", "evidence_id"],
+                ),
+                status: source_ref_string(source, &["status"]).or_else(|| {
+                    source
+                        .get("blockers")
+                        .and_then(Value::as_array)
+                        .filter(|blockers| !blockers.is_empty())
+                        .map(|_| "blocked".into())
+                }),
+                route_type: source_ref_string(source, &["routeType", "route_type"])
+                    .map(|route_type| normalized_evidence_route_type(Some(route_type.as_str()))),
+            }
+        }));
+    }
+    if provider_preflight_blocked(evidence, metadata) {
+        refs.push(ProviderTransmissionSourceRef {
+            source: "provider_preflight".into(),
+            ref_id: None,
+            status: Some("blocked".into()),
+            route_type: None,
+        });
+    }
+    refs
+}
+
+fn source_ref_string(source: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| source.get(*key).and_then(Value::as_str))
+        .map(metadata_safe_transmission_label)
+}
+
+fn metadata_string<'a>(metadata: Option<&'a Value>, keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|key| {
+        metadata
+            .and_then(|value| value.get(*key))
+            .and_then(Value::as_str)
+    })
+}
+
+fn metadata_bool(metadata: Option<&Value>, keys: &[&str]) -> bool {
+    keys.iter().any(|key| {
+        metadata
+            .and_then(|value| value.get(*key))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    })
+}
+
+fn metadata_non_empty_array(metadata: Option<&Value>, keys: &[&str]) -> bool {
+    keys.iter().any(|key| {
+        metadata
+            .and_then(|value| value.get(*key))
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty())
+    })
+}
+
+fn metadata_safe_transmission_label(value: &str) -> String {
+    let label = bounded_runtime_fact_label(value);
+    if contains_secret_like_material(&label) {
+        "redacted_sensitive".into()
+    } else {
+        label
+    }
+}
+
+fn contains_secret_like_material(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    contains_key_prefix(&lower)
+        || lower.contains("bearer ")
+        || lower.contains("authorization:")
+        || lower.contains("api_key=")
+        || lower.contains("api key:")
+        || lower.contains("apikey=")
+        || lower.contains("token=")
+        || lower.contains("secret=")
+        || lower.contains("password=")
+}
+
+fn contains_key_prefix(value: &str) -> bool {
+    value.match_indices("sk-").any(|(index, _)| {
+        index == 0
+            || value[..index]
+                .chars()
+                .next_back()
+                .is_some_and(|ch| !ch.is_ascii_alphanumeric())
+    })
 }
 
 fn provider_route_fact_bindings(

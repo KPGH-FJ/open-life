@@ -1,12 +1,14 @@
 use crate::main_chat_runtime_facts::{
     build_settings_runtime_route_evidence, classify_agent_self_state_query,
     classify_provider_route_query, classify_runtime_clock_query, classify_tool_availability_query,
-    resolve_provider_route_fact_answer, run_main_chat_runtime_facts_slice_a_backend_report,
+    provider_transmission_history_from_runs, resolve_provider_route_fact_answer,
+    run_main_chat_runtime_facts_slice_a_backend_report,
     run_main_chat_runtime_facts_slice_b_provider_route_report,
     run_main_chat_runtime_facts_slice_c_tool_availability_report,
-    run_main_chat_runtime_facts_slice_d_agent_self_state_report, MainChatAgentSelfStateIntent,
-    MainChatProviderRouteIntent, MainChatRuntimeClockIntent, MainChatToolAvailabilityIntent,
-    RuntimeRouteEvidence, RUNTIME_FACT_AGENT_SELF_STATE_GENERATION_PATH,
+    run_main_chat_runtime_facts_slice_d_agent_self_state_report, FallbackEvidence,
+    MainChatAgentSelfStateIntent, MainChatProviderRouteIntent, MainChatRuntimeClockIntent,
+    MainChatToolAvailabilityIntent, ProviderReadiness, ProviderTransmissionHistoryItem,
+    RouteIdentity, RuntimeRouteEvidence, RUNTIME_FACT_AGENT_SELF_STATE_GENERATION_PATH,
     RUNTIME_FACT_KEY_AGENT_BLOCKER_CODES, RUNTIME_FACT_KEY_AGENT_DURABLE_CHANGE_STATUS,
     RUNTIME_FACT_KEY_AGENT_LAST_ACTION_SUMMARY, RUNTIME_FACT_KEY_AGENT_PENDING_PERMISSION_COUNT,
     RUNTIME_FACT_KEY_AGENT_TASK_STATUS, RUNTIME_FACT_KEY_AGENT_TRACE_GAP, RUNTIME_FACT_KEY_DATE,
@@ -1325,6 +1327,349 @@ async fn provider_route_runtime_route_evidence_keeps_missing_transmission_instru
     assert_eq!(evidence.actual_route, None);
     assert_eq!(evidence.last_completed_route, None);
     assert_eq!(evidence.external_transmission, "not_instrumented");
+}
+
+#[test]
+fn provider_transmission_view_records_local_not_sent_with_positive_route_evidence() {
+    let run = provider_transmission_completed_run(
+        "run-local-route",
+        "ollama",
+        "llama3",
+        "local",
+        "positive_local_route_evidence",
+    );
+
+    let item = provider_transmission_item(&run);
+
+    assert_eq!(item.status, "not_sent");
+    assert_eq!(item.provider, "ollama");
+    assert_eq!(item.model, "llama3");
+    assert_eq!(item.route_type, "local");
+    assert_eq!(item.truth_confidence, "verified");
+    assert!(item
+        .source_refs
+        .iter()
+        .any(|source| source.source == "agent_run_model_route"));
+}
+
+#[test]
+fn provider_transmission_view_records_cloud_sent_with_cloud_route_evidence() {
+    let run = provider_transmission_completed_run(
+        "run-cloud-route",
+        "deepseek",
+        "deepseek-chat",
+        "cloud",
+        "positive_cloud_route_evidence",
+    );
+
+    let item = provider_transmission_item(&run);
+
+    assert_eq!(item.status, "sent");
+    assert_eq!(item.provider, "deepseek");
+    assert_eq!(item.model, "deepseek-chat");
+    assert_eq!(item.route_type, "cloud");
+    assert_eq!(item.truth_confidence, "verified");
+}
+
+#[test]
+fn provider_transmission_view_rejects_planned_cloud_as_sent_evidence() {
+    let mut run = openlife_core::agent::AgentRun::new_chat_run(
+        "session-planned-cloud",
+        "planned cloud fixture",
+    );
+    run.id = "run-planned-cloud-only".into();
+    let evidence = RuntimeRouteEvidence {
+        evidence_id: "runtime_route:planned_cloud_only".into(),
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        conversation_id: Some("session-planned-cloud".into()),
+        run_id: Some(run.id.clone()),
+        task_session_id: Some("task-planned-cloud".into()),
+        answer_scope: "planned_next_turn".into(),
+        planned_route: Some(RouteIdentity {
+            provider: "deepseek".into(),
+            model: "deepseek-chat".into(),
+            route_type: "cloud".into(),
+            privacy_level: "none".into(),
+            reason: "configured_preferred_cloud".into(),
+            provider_health_is_estimated: true,
+        }),
+        actual_route: None,
+        last_completed_route: None,
+        provider_readiness: provider_transmission_readiness(),
+        fallback: None,
+        external_transmission: "unknown".into(),
+        source_refs: vec![serde_json::json!({
+            "source": "config",
+            "status": "planned_only",
+            "routeType": "cloud"
+        })],
+        truth_confidence: "inferred".into(),
+    };
+    run.reasoning_trace = Some(openlife_core::agent::ReasoningTrace {
+        generation_result: Some(serde_json::json!({
+            "runtimeRouteEvidence": evidence,
+            "modelGenerated": false,
+            "schedulerGenerationCalled": false,
+            "liveProviderInvoked": false,
+            "modelInvoked": false
+        })),
+        ..Default::default()
+    });
+
+    let item = provider_transmission_item(&run);
+
+    assert_ne!(item.status, "sent");
+    assert_eq!(item.status, "unknown");
+    assert_eq!(item.route_type, "cloud");
+    assert_eq!(item.truth_confidence, "inferred");
+}
+
+#[test]
+fn provider_transmission_view_records_blocked_preflight_without_model_invocation() {
+    let mut run = openlife_core::agent::AgentRun::new_chat_run(
+        "session-provider-blocked",
+        "blocked preflight fixture",
+    );
+    run.id = "run-provider-blocked".into();
+    run.fail(openlife_core::agent::AgentRunError {
+        message: "provider_preflight_blocked".into(),
+        phase: "preflight".into(),
+        recoverable: true,
+    });
+    let evidence = provider_transmission_blocked_evidence(&run.id);
+    run.reasoning_trace = Some(openlife_core::agent::ReasoningTrace {
+        generation_result: Some(serde_json::json!({
+            "runtimeRouteEvidence": evidence,
+            "modelGenerated": false,
+            "schedulerGenerationCalled": false,
+            "liveProviderInvoked": false,
+            "modelInvoked": false,
+            "providerPreflightStatus": "blocked",
+            "providerPreflightBlockers": ["provider_api_key_missing"]
+        })),
+        ..Default::default()
+    });
+
+    let item = provider_transmission_item(&run);
+
+    assert_eq!(item.status, "blocked");
+    assert_eq!(
+        item.task_session_id.as_deref(),
+        Some("task-provider-blocked")
+    );
+    assert_eq!(item.route_type, "cloud");
+    assert_eq!(item.reason, "provider_api_key_missing");
+    assert_eq!(item.truth_confidence, "verified");
+    assert!(item
+        .source_refs
+        .iter()
+        .any(|source| source.source == "provider_preflight"
+            && source.status.as_deref() == Some("blocked")));
+}
+
+#[test]
+fn provider_transmission_view_marks_missing_route_old_run_not_instrumented() {
+    let mut run =
+        openlife_core::agent::AgentRun::new_chat_run("session-old-run", "old run fixture");
+    run.id = "run-old-missing-route".into();
+
+    let item = provider_transmission_item(&run);
+
+    assert_eq!(item.status, "not_instrumented");
+    assert_eq!(item.route_type, "unknown");
+    assert_eq!(item.provider, "unknown");
+    assert_eq!(item.truth_confidence, "unknown");
+}
+
+#[test]
+fn provider_transmission_view_rejects_missing_log_as_not_sent_evidence() {
+    let mut run = openlife_core::agent::AgentRun::new_chat_run(
+        "session-missing-route",
+        "missing route fixture",
+    );
+    run.id = "run-missing-provider-log".into();
+    run.reasoning_trace = Some(openlife_core::agent::ReasoningTrace {
+        generation_result: Some(serde_json::json!({
+            "provider": "deepseek",
+            "model": "deepseek-chat",
+            "liveProviderInvoked": false,
+            "modelInvoked": false,
+            "modelGenerated": false,
+            "schedulerGenerationCalled": false
+        })),
+        ..Default::default()
+    });
+
+    let item = provider_transmission_item(&run);
+
+    assert_ne!(item.status, "not_sent");
+    assert_eq!(item.status, "not_instrumented");
+}
+
+#[test]
+fn provider_transmission_view_never_serializes_key_material() {
+    let mut run = provider_transmission_completed_run(
+        "run-sensitive-route",
+        "deepseek",
+        "deepseek-chat",
+        "cloud",
+        "api_key=sk-provider-secret token=secret-token password=hunter2",
+    );
+    let evidence = RuntimeRouteEvidence {
+        evidence_id: "runtime-route-sk-provider-secret".into(),
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        conversation_id: Some("session-sensitive-route".into()),
+        run_id: Some(run.id.clone()),
+        task_session_id: Some("task-sensitive-route".into()),
+        answer_scope: "current_turn".into(),
+        planned_route: None,
+        actual_route: Some(RouteIdentity {
+            provider: "deepseek".into(),
+            model: "deepseek-chat".into(),
+            route_type: "cloud".into(),
+            privacy_level: "none".into(),
+            reason: "api_key=sk-provider-secret".into(),
+            provider_health_is_estimated: false,
+        }),
+        last_completed_route: None,
+        provider_readiness: provider_transmission_readiness(),
+        fallback: None,
+        external_transmission: "sent".into(),
+        source_refs: vec![serde_json::json!({
+            "source": "provider_validation",
+            "status": "token=secret-token",
+            "runId": run.id.clone(),
+            "routeType": "cloud"
+        })],
+        truth_confidence: "verified".into(),
+    };
+    run.reasoning_trace = Some(openlife_core::agent::ReasoningTrace {
+        generation_result: Some(serde_json::json!({
+            "runtimeRouteEvidence": evidence,
+            "liveProviderInvoked": true,
+            "modelInvoked": true
+        })),
+        ..Default::default()
+    });
+
+    let item = provider_transmission_item(&run);
+    let serialized = serde_json::to_string(&item).expect("serialize provider transmission view");
+
+    assert_eq!(item.status, "sent");
+    for forbidden in [
+        "sk-provider-secret",
+        "secret-token",
+        "hunter2",
+        "api_key=",
+        "token=",
+        "password=",
+    ] {
+        assert!(
+            !serialized.contains(forbidden),
+            "provider transmission view leaked {forbidden}: {serialized}"
+        );
+    }
+}
+
+fn provider_transmission_item(
+    run: &openlife_core::agent::AgentRun,
+) -> ProviderTransmissionHistoryItem {
+    provider_transmission_history_from_runs(&[run.clone()])
+        .into_iter()
+        .next()
+        .expect("provider transmission item")
+}
+
+fn provider_transmission_completed_run(
+    run_id: &str,
+    provider: &str,
+    model: &str,
+    route_type: &str,
+    reason: &str,
+) -> openlife_core::agent::AgentRun {
+    let mut run =
+        openlife_core::agent::AgentRun::new_chat_run("session-provider-transmission", "fixture");
+    run.id = run_id.into();
+    run.complete(
+        "metadata-safe output preview",
+        openlife_core::agent::ModelRouteTrace {
+            provider: provider.into(),
+            model: model.into(),
+            route_type: route_type.into(),
+            prefer_local: route_type != "cloud",
+            local_model: "llama3".into(),
+            reason: reason.into(),
+            privacy_level: openlife_core::agent::RedactionLevel::None,
+            latency_ms: None,
+            retry_count: 0,
+            fallback_reason: None,
+            provider_health_is_estimated: Some(false),
+        },
+        provider_transmission_context_summary(),
+    );
+    run
+}
+
+fn provider_transmission_context_summary() -> openlife_core::agent::ContextSummary {
+    openlife_core::agent::ContextSummary {
+        life_model_empty: false,
+        included_life_model_sections: vec![],
+        memory_hit_count: 0,
+        memory_sources: vec![],
+        used_tools_prompt: false,
+        redaction_applied: false,
+        redaction_level: openlife_core::agent::RedactionLevel::None,
+    }
+}
+
+fn provider_transmission_blocked_evidence(run_id: &str) -> RuntimeRouteEvidence {
+    let planned = RouteIdentity {
+        provider: "deepseek".into(),
+        model: "deepseek-chat".into(),
+        route_type: "cloud".into(),
+        privacy_level: "none".into(),
+        reason: "planned_cloud_provider".into(),
+        provider_health_is_estimated: true,
+    };
+    RuntimeRouteEvidence {
+        evidence_id: format!("runtime_route:blocked:{run_id}"),
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        conversation_id: Some("session-provider-blocked".into()),
+        run_id: Some(run_id.into()),
+        task_session_id: Some("task-provider-blocked".into()),
+        answer_scope: "current_turn".into(),
+        planned_route: Some(planned.clone()),
+        actual_route: None,
+        last_completed_route: None,
+        provider_readiness: provider_transmission_readiness(),
+        fallback: Some(FallbackEvidence {
+            from_route: Some(planned),
+            to_route: None,
+            reason: "provider_api_key_missing".into(),
+            blocker_codes: vec!["provider_api_key_missing".into()],
+        }),
+        external_transmission: "unknown".into(),
+        source_refs: vec![serde_json::json!({
+            "source": "provider_preflight",
+            "status": "blocked",
+            "blockers": ["provider_api_key_missing"]
+        })],
+        truth_confidence: "verified".into(),
+    }
+}
+
+fn provider_transmission_readiness() -> ProviderReadiness {
+    ProviderReadiness {
+        configured: true,
+        credential_present: false,
+        validated: false,
+        validation_status: "blocked".into(),
+        preferred: "deepseek".into(),
+        actually_used: None,
+        stale: false,
+        failed: false,
+        last_checked_at: None,
+    }
 }
 
 #[test]

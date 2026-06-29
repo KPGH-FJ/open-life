@@ -1,4 +1,7 @@
 use crate::errors::AppError;
+use crate::main_chat_runtime_facts::{
+    provider_transmission_history_from_runs, ProviderTransmissionHistoryItem,
+};
 use crate::AppState;
 use openlife_core::agent::{AgentAction, AgentRun};
 use std::sync::Arc;
@@ -26,6 +29,21 @@ pub async fn list_agent_runs(
     if let Some(ref store_arc) = state.agent_run_store {
         let store = store_arc.lock().await;
         store.list_runs(limit, offset).map_err(AppError::from)
+    } else {
+        Ok(vec![])
+    }
+}
+
+#[tauri::command]
+pub async fn list_provider_transmission_history(
+    limit: Option<i64>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<ProviderTransmissionHistoryItem>, AppError> {
+    let limit = limit.unwrap_or(20).clamp(1, 100);
+    if let Some(ref store_arc) = state.agent_run_store {
+        let store = store_arc.lock().await;
+        let runs = store.list_runs(limit, 0).map_err(AppError::from)?;
+        Ok(provider_transmission_history_from_runs(&runs))
     } else {
         Ok(vec![])
     }

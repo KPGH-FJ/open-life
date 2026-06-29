@@ -46,7 +46,9 @@ pub(crate) use eval::{
 pub(crate) use provider_route::{
     build_settings_runtime_route_evidence, classify_provider_route_query,
     provider_route_fact_should_block_before_model, provider_route_query_has_followup_task,
-    resolve_provider_route_fact_answer, FallbackEvidence, ProviderReadiness, RouteIdentity,
+    provider_transmission_history_from_runs, provider_transmission_history_item_from_run,
+    resolve_provider_route_fact_answer, FallbackEvidence, ProviderReadiness,
+    ProviderTransmissionHistoryItem, ProviderTransmissionSourceRef, RouteIdentity,
     RuntimeRouteEvidence,
 };
 pub(crate) use resolver::{

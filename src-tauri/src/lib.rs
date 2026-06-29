@@ -151,7 +151,7 @@ use commands::a2a::{
 };
 use commands::agent::{
     delete_agent_run, get_agent_run, list_agent_runs, list_agent_runs_for_session,
-    replay_agent_action, restore_agent_run,
+    list_provider_transmission_history, replay_agent_action, restore_agent_run,
 };
 use commands::agent_runtime::{
     cancel_plan_execute_session, check_controlled_chat_cutover_candidate_promotion_readiness,
@@ -703,6 +703,7 @@ pub fn run() {
             save_config,
             get_agent_run,
             list_agent_runs,
+            list_provider_transmission_history,
             list_agent_runs_for_session,
             delete_agent_run,
             restore_agent_run,
