@@ -2,7 +2,7 @@
 
 Date: 2026-06-29
 
-Status: ready after Sprint 1 route evidence DTO exists.
+Status: ready for Slice 2A after Sprint 1 route evidence DTO is committed. Timeout representation is frozen below; do not add a competing lifecycle model during implementation.
 
 ## Scope
 
@@ -41,7 +41,16 @@ Runs must be the trustworthy task ledger: what happened, what state it is in, wh
 | `failed` | Non-timeout failure. | terminal, or linked retry |
 | `completed` | Final delivery exists. | terminal |
 
-Schema guard: `timed_out` is a normalized product lifecycle target, not a verified existing `AgentTaskSessionStatus` variant. Current code references `Running`, `WaitingPermission`, `Blocked`, `Completed`, `Failed`, and `Cancelled`; implementation must either add a native timeout status through a migration or store timeout as `Failed` plus a typed `failure_kind=timeout` transcript/error field and map it to `timed_out` only in `RunEvidenceView`.
+Schema guard: `timed_out` is a normalized product lifecycle target, not a verified existing `AgentTaskSessionStatus` or `AgentRunStatus` variant. Current source defines task statuses as `Running`, `WaitingPermission`, `Blocked`, `Completed`, `Failed`, and `Cancelled`, and run statuses as `Running`, `WaitingPermission`, `Completed`, `Failed`, and `Cancelled`.
+
+Frozen implementation choice for Slice 2A: do not add a native `TimedOut` enum or migration in this slice. Persist timeout as:
+
+- `AgentRun.status = Failed` with a metadata-safe `AgentRunError` whose code/kind identifies timeout.
+- `AgentTaskSession.status = Failed` with `final_summary` containing a safe timeout summary.
+- A transcript `Error` event with `failure_kind="timeout"`, `normalized_lifecycle_state="timed_out"`, `source_ref`, and `directWritesExecuted=false`.
+- `RunEvidenceView.lifecycle_state = "timed_out"` only when the failed run/session has that typed timeout evidence.
+
+Without the typed `failure_kind=timeout` transcript/error evidence, failed runs remain `failed`; the UI must not infer `timed_out` from stale `running`, duration, or error copy alone.
 
 Every transition to terminal or blocked state must write:
 
@@ -84,6 +93,8 @@ Required behavior:
 - Blocks or fails task session with matching reason.
 - Appends transcript event.
 - Returns normalized `RunEvidenceView` or enough ids for frontend refresh.
+- Treats `timeout` as `Failed + failure_kind=timeout` per the schema guard above.
+- Is the only new writer for timeout/provider/tool/policy terminal failures in this slice.
 
 `failure_kind` values:
 
@@ -146,3 +157,11 @@ Replay:
 5. Replay stuck/timeout/blocker cases.
 
 Exit only when timeout and blocker evidence are visible without DB inspection.
+
+## Slice 2A Entry Checklist
+
+- Sprint 1 `RuntimeRouteEvidence` is committed and consumed as the route field inside `RunEvidenceView`; do not rebuild provider/fallback truth from prose or raw labels.
+- Timeout storage uses `Failed + failure_kind=timeout`; no native `TimedOut` enum or schema migration in this slice.
+- New tests must assert both stored status and normalized lifecycle state, so `Failed` cannot be accidentally displayed as `timed_out` without typed evidence.
+- Add `frontend/src/pages/AgentRunDetail.test.tsx` if detail behavior is changed; otherwise replace the candidate gate with an exact existing focused test before claiming completion.
+- Replay evidence must include task session status, AgentRun status, transcript event, route evidence, Runs list/detail UI, and next recommended control.

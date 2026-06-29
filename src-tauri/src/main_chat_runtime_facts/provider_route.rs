@@ -1,6 +1,8 @@
-use openlife_core::agent::{AgentRunStatus, ModelRouteTrace};
+use openlife_core::agent::{AgentRun, AgentRunStatus, ModelRouteTrace};
 use openlife_core::config::AppConfig;
 use openlife_core::scheduler::InferenceScheduler;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::sync::Arc;
 
 use super::contract::{
@@ -19,12 +21,65 @@ use super::contract::{
 use super::registry::provider_route_fact_keys;
 use crate::AppState;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeRouteEvidence {
+    pub evidence_id: String,
+    pub generated_at: String,
+    pub conversation_id: Option<String>,
+    pub run_id: Option<String>,
+    pub task_session_id: Option<String>,
+    pub answer_scope: String,
+    pub planned_route: Option<RouteIdentity>,
+    pub actual_route: Option<RouteIdentity>,
+    pub last_completed_route: Option<RouteIdentity>,
+    pub provider_readiness: ProviderReadiness,
+    pub fallback: Option<FallbackEvidence>,
+    pub external_transmission: String,
+    pub source_refs: Vec<Value>,
+    pub truth_confidence: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RouteIdentity {
+    pub provider: String,
+    pub model: String,
+    pub route_type: String,
+    pub privacy_level: String,
+    pub reason: String,
+    pub provider_health_is_estimated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderReadiness {
+    pub configured: bool,
+    pub credential_present: bool,
+    pub validated: bool,
+    pub validation_status: String,
+    pub preferred: String,
+    pub actually_used: Option<String>,
+    pub stale: bool,
+    pub failed: bool,
+    pub last_checked_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FallbackEvidence {
+    pub from_route: Option<RouteIdentity>,
+    pub to_route: Option<RouteIdentity>,
+    pub reason: String,
+    pub blocker_codes: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 struct ProviderRouteFactSnapshot {
     provider: Option<String>,
     model: Option<String>,
     route_type: Option<String>,
     run_id: Option<String>,
+    reason: Option<String>,
+    privacy_level: Option<String>,
+    provider_health_is_estimated: Option<bool>,
+    fallback_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +118,10 @@ pub(crate) async fn resolve_provider_route_fact_answer(
         model: Some(bounded_runtime_fact_label(&config.llm.chat_model)),
         route_type: None,
         run_id: None,
+        reason: Some("configured_default_route".into()),
+        privacy_level: Some("unknown".into()),
+        provider_health_is_estimated: Some(true),
+        fallback_reason: None,
     };
     let planned = route_snapshot_from_trace(&planned_route, None);
     let current = if current_model_generated {
@@ -75,6 +134,24 @@ pub(crate) async fn resolve_provider_route_fact_answer(
     };
     let last_completed_generation = last_completed_generation_snapshot(state, session_id).await;
     let last_turn = last_turn_snapshot(state, session_id).await;
+    let runtime_route_evidence = build_runtime_route_evidence_from_snapshots(
+        state,
+        &config,
+        scheduler,
+        Some(session_id),
+        None,
+        None,
+        if current_model_generated {
+            "current_turn"
+        } else {
+            "current_turn"
+        },
+        Some(&planned),
+        Some(&current),
+        last_completed_generation.as_ref(),
+        current_model_generated,
+    )
+    .await;
     let facts = provider_route_fact_bindings(
         &configured,
         &current,
@@ -128,6 +205,7 @@ pub(crate) async fn resolve_provider_route_fact_answer(
         "providerPreflightStatus": preflight.status.clone(),
         "providerPreflightBlockers": preflight.blockers.clone(),
         "providerPreflightIsInvocationProof": false,
+        "runtimeRouteEvidence": runtime_route_evidence,
         "routeLabels": [
             route_labels.current.clone(),
             route_labels.last_completed.clone(),
@@ -236,7 +314,65 @@ pub(crate) fn classify_provider_route_query(
         return Some(MainChatProviderRouteIntent::AskCurrentModelRoute);
     }
 
+    if is_bounded_route_truth_mixed_prompt(&normalized, compact) {
+        return Some(MainChatProviderRouteIntent::AskCurrentModelRoute);
+    }
+
     None
+}
+
+pub(crate) fn provider_route_query_has_followup_task(user_text: &str) -> bool {
+    let normalized = user_text.trim().to_lowercase();
+    if normalized.is_empty() || classify_provider_route_query(&normalized).is_none() {
+        return false;
+    }
+    let task_markers = [
+        "然后",
+        "顺便",
+        "同时",
+        "并且",
+        "再回答",
+        "再帮",
+        "回答一下",
+        "帮我",
+        "写",
+        "总结",
+        "计划",
+        "explain",
+        "then",
+        "also",
+        "and answer",
+        "please answer",
+        "summarize",
+        "write",
+        "plan",
+    ];
+    task_markers
+        .iter()
+        .any(|marker| normalized.contains(marker))
+}
+
+pub(crate) async fn build_settings_runtime_route_evidence(
+    state: &Arc<AppState>,
+    scheduler: &InferenceScheduler,
+) -> RuntimeRouteEvidence {
+    let config = state.config.lock().await.clone();
+    let planned = route_snapshot_from_trace(&planned_route_without_probe(scheduler), None);
+    let last_completed = last_completed_generation_snapshot_any_session(state).await;
+    build_runtime_route_evidence_from_snapshots(
+        state,
+        &config,
+        scheduler,
+        None,
+        None,
+        None,
+        "settings_readiness",
+        Some(&planned),
+        None,
+        last_completed.as_ref(),
+        false,
+    )
+    .await
 }
 
 fn provider_route_fact_bindings(
@@ -389,6 +525,390 @@ fn provider_route_fact_bindings(
         false,
     ));
     facts
+}
+
+fn is_bounded_route_truth_mixed_prompt(normalized: &str, compact: &str) -> bool {
+    let mentions_route_truth = [
+        "provider",
+        "model",
+        "route",
+        "routetype",
+        "fallback",
+        "actually used",
+        "current model",
+        "deepseek",
+        "ollama",
+        "openai",
+        "openrouter",
+        "cloud",
+        "local",
+        "local-first",
+        "模型",
+        "路线",
+        "路由",
+        "云端",
+        "本地",
+        "回退",
+        "外发",
+        "调用云端",
+        "当前实际使用",
+        "当前实际",
+        "实际使用",
+        "你现在用",
+        "当前用",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker) || compact.contains(marker));
+    if !mentions_route_truth {
+        return false;
+    }
+
+    let asks_for_truth = [
+        "当前",
+        "现在",
+        "实际",
+        "用了",
+        "使用",
+        "调用",
+        "是否",
+        "有没有",
+        "为什么",
+        "说明",
+        "fallbackreason",
+        "routetype",
+        "actually",
+        "current",
+        "did you",
+        "are you using",
+        "why",
+        "explain",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker) || compact.contains(marker));
+    if asks_for_truth {
+        return true;
+    }
+
+    let explicit_provider_request = [
+        "用deepseek",
+        "用openai",
+        "用openrouter",
+        "use deepseek",
+        "use openai",
+        "use openrouter",
+        "use cloud",
+        "走云端",
+        "使用云端",
+        "调用云端",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker) || compact.contains(marker));
+    explicit_provider_request
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_runtime_route_evidence_from_snapshots(
+    state: &Arc<AppState>,
+    config: &AppConfig,
+    scheduler: &InferenceScheduler,
+    conversation_id: Option<&str>,
+    run_id: Option<&str>,
+    task_session_id: Option<&str>,
+    answer_scope: &str,
+    planned: Option<&ProviderRouteFactSnapshot>,
+    actual: Option<&ProviderRouteFactSnapshot>,
+    last_completed: Option<&ProviderRouteFactSnapshot>,
+    current_turn_model_generated: bool,
+) -> RuntimeRouteEvidence {
+    let generated_at = chrono::Utc::now().to_rfc3339();
+    let validation_record = crate::provider_validation::load_provider_validation_record_from_path(
+        &crate::provider_validation::provider_validation_path(),
+    );
+    let validation = crate::provider_validation::summarize_provider_validation(
+        config,
+        validation_record.as_ref(),
+        chrono::Utc::now(),
+    );
+    let scripted_dogfood_ready =
+        crate::main_chat_agent_stage1_dogfood::stage1_browser_dogfood_scripted_provider_ready(
+            state, config,
+        )
+        .await;
+    let preflight = planned
+        .map(snapshot_to_model_route_trace)
+        .map(|route| provider_preflight_snapshot(config, scheduler, &route))
+        .unwrap_or_else(|| ProviderPreflightFactSnapshot {
+            status: "blocked".into(),
+            blockers: vec!["planned_route_missing".into()],
+        });
+    let planned_route = planned.and_then(route_identity_from_snapshot);
+    let actual_route = if current_turn_model_generated {
+        actual.and_then(route_identity_from_snapshot)
+    } else if answer_scope == "settings_readiness" {
+        None
+    } else {
+        Some(runtime_fact_route_identity())
+    };
+    let last_completed_route = last_completed.and_then(route_identity_from_snapshot);
+    let observed_fallback_reason = actual
+        .or(last_completed)
+        .and_then(|snapshot| snapshot.fallback_reason.as_deref());
+    let fallback = fallback_evidence(
+        planned_route.as_ref(),
+        actual_route.as_ref().or(last_completed_route.as_ref()),
+        observed_fallback_reason,
+        &preflight,
+    );
+    let provider_readiness = provider_readiness(
+        config,
+        &validation,
+        scripted_dogfood_ready,
+        actual_route.as_ref().or(last_completed_route.as_ref()),
+    );
+    let external_transmission = external_transmission_status(
+        actual_route.as_ref(),
+        last_completed_route.as_ref(),
+        answer_scope,
+    );
+    let mut source_refs = vec![
+        json!({
+            "source": "provider_validation",
+            "status": provider_readiness.validation_status,
+            "credentialPresent": provider_readiness.credential_present,
+        }),
+        json!({
+            "source": "provider_preflight",
+            "status": preflight.status,
+            "blockers": preflight.blockers,
+        }),
+        json!({
+            "source": "config",
+            "provider": bounded_runtime_fact_label(&config.llm.provider),
+            "model": bounded_runtime_fact_label(&config.llm.chat_model),
+            "preferLocal": config.prefer_local_model,
+        }),
+    ];
+    if let Some(route) = actual_route.as_ref() {
+        source_refs.push(json!({
+            "source": "current_turn_route",
+            "provider": route.provider,
+            "model": route.model,
+            "routeType": route.route_type,
+        }));
+    }
+    if let Some(route) = last_completed_route.as_ref() {
+        source_refs.push(json!({
+            "source": "agent_run",
+            "runId": last_completed.and_then(|snapshot| snapshot.run_id.clone()),
+            "provider": route.provider,
+            "model": route.model,
+            "routeType": route.route_type,
+        }));
+    }
+
+    let truth_confidence = if actual_route.is_some() || last_completed_route.is_some() {
+        "verified"
+    } else if planned_route.is_some() || validation.configured {
+        "inferred"
+    } else {
+        "unknown"
+    }
+    .to_string();
+
+    let evidence_id = runtime_route_evidence_id(
+        answer_scope,
+        conversation_id,
+        run_id.or_else(|| last_completed.and_then(|snapshot| snapshot.run_id.as_deref())),
+        &generated_at,
+    );
+
+    RuntimeRouteEvidence {
+        evidence_id,
+        generated_at,
+        conversation_id: conversation_id.map(bounded_runtime_fact_label),
+        run_id: run_id
+            .map(bounded_runtime_fact_label)
+            .or_else(|| last_completed.and_then(|snapshot| snapshot.run_id.clone())),
+        task_session_id: task_session_id.map(bounded_runtime_fact_label),
+        answer_scope: answer_scope.to_string(),
+        planned_route,
+        actual_route,
+        last_completed_route,
+        provider_readiness,
+        fallback,
+        external_transmission,
+        source_refs,
+        truth_confidence,
+    }
+}
+
+fn runtime_route_evidence_id(
+    answer_scope: &str,
+    conversation_id: Option<&str>,
+    run_id: Option<&str>,
+    generated_at: &str,
+) -> String {
+    format!(
+        "runtime_route:{}:{}:{}:{}",
+        bounded_runtime_fact_label(answer_scope),
+        conversation_id
+            .map(bounded_runtime_fact_label)
+            .unwrap_or_else(|| "none".into()),
+        run_id
+            .map(bounded_runtime_fact_label)
+            .unwrap_or_else(|| "none".into()),
+        bounded_runtime_fact_label(generated_at),
+    )
+}
+
+fn provider_readiness(
+    config: &AppConfig,
+    validation: &crate::provider_validation::ProviderValidationSummary,
+    scripted_dogfood_ready: bool,
+    actual_route: Option<&RouteIdentity>,
+) -> ProviderReadiness {
+    let identity = crate::provider_validation::current_provider_validation_identity(config);
+    let validation_status = if scripted_dogfood_ready {
+        "scripted_dogfood"
+    } else {
+        validation.status
+    }
+    .to_string();
+    ProviderReadiness {
+        configured: validation.configured,
+        credential_present: identity.key_present,
+        validated: validation.status == "validated" && !scripted_dogfood_ready,
+        validation_status: validation_status.clone(),
+        preferred: if config.prefer_local_model {
+            "local".into()
+        } else {
+            bounded_runtime_fact_label(&config.llm.provider)
+        },
+        actually_used: actual_route.map(|route| route.provider.clone()),
+        stale: validation_status == "stale",
+        failed: validation_status == "failed",
+        last_checked_at: validation
+            .validated_at
+            .clone()
+            .or_else(|| validation.failed_at.clone()),
+    }
+}
+
+fn external_transmission_status(
+    actual_route: Option<&RouteIdentity>,
+    last_completed_route: Option<&RouteIdentity>,
+    answer_scope: &str,
+) -> String {
+    let evidenced_route = actual_route.or(last_completed_route);
+    match evidenced_route.map(|route| route.route_type.as_str()) {
+        Some("cloud") => "sent".into(),
+        Some("local" | "agent_runtime" | "scripted") => "not_sent".into(),
+        Some(_) => "unknown".into(),
+        None if answer_scope == "settings_readiness" => "not_instrumented".into(),
+        None => "unknown".into(),
+    }
+}
+
+fn fallback_evidence(
+    planned: Option<&RouteIdentity>,
+    actual: Option<&RouteIdentity>,
+    fallback_reason: Option<&str>,
+    preflight: &ProviderPreflightFactSnapshot,
+) -> Option<FallbackEvidence> {
+    let planned_cloud = planned.is_some_and(|route| route.route_type == "cloud");
+    let actual_local = actual.is_some_and(|route| route.route_type == "local");
+    let preflight_blocked = preflight.status == "blocked";
+    let planned_cloud_actual_local = planned_cloud && actual_local;
+    if !planned_cloud_actual_local && fallback_reason.is_none() && !preflight_blocked {
+        return None;
+    }
+    if planned_cloud_actual_local || fallback_reason.is_some() || preflight_blocked {
+        let reason = fallback_reason
+            .map(bounded_runtime_fact_label)
+            .or_else(|| {
+                if planned_cloud_actual_local {
+                    Some("planned_cloud_actual_local".into())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "provider_preflight_blocked".into());
+        return Some(FallbackEvidence {
+            from_route: planned.cloned(),
+            to_route: actual.cloned(),
+            reason,
+            blocker_codes: preflight.blockers.clone(),
+        });
+    }
+    None
+}
+
+fn route_identity_from_snapshot(snapshot: &ProviderRouteFactSnapshot) -> Option<RouteIdentity> {
+    let provider = snapshot.provider.as_deref()?;
+    let model = snapshot.model.as_deref()?;
+    Some(RouteIdentity {
+        provider: bounded_runtime_fact_label(provider),
+        model: bounded_runtime_fact_label(model),
+        route_type: normalized_evidence_route_type(snapshot.route_type.as_deref()),
+        privacy_level: snapshot
+            .privacy_level
+            .clone()
+            .unwrap_or_else(|| "unknown".into()),
+        reason: snapshot
+            .reason
+            .as_deref()
+            .map(bounded_runtime_fact_label)
+            .unwrap_or_else(|| "unknown".into()),
+        provider_health_is_estimated: snapshot.provider_health_is_estimated.unwrap_or(true),
+    })
+}
+
+fn runtime_fact_route_identity() -> RouteIdentity {
+    RouteIdentity {
+        provider: "runtime_fact".into(),
+        model: "runtime_fact".into(),
+        route_type: "agent_runtime".into(),
+        privacy_level: "internal".into(),
+        reason: "runtime_fact_answer_no_model_invocation".into(),
+        provider_health_is_estimated: false,
+    }
+}
+
+fn normalized_evidence_route_type(route_type: Option<&str>) -> String {
+    match route_type
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "local" => "local".into(),
+        "cloud" => "cloud".into(),
+        "direct" | "runtime_fact" | "agent_runtime" | "none" => "agent_runtime".into(),
+        "scripted" | "local_eval" => "scripted".into(),
+        _ => "unknown".into(),
+    }
+}
+
+fn snapshot_to_model_route_trace(snapshot: &ProviderRouteFactSnapshot) -> ModelRouteTrace {
+    ModelRouteTrace {
+        provider: snapshot
+            .provider
+            .clone()
+            .unwrap_or_else(|| "unknown".into()),
+        model: snapshot.model.clone().unwrap_or_else(|| "unknown".into()),
+        route_type: snapshot
+            .route_type
+            .clone()
+            .unwrap_or_else(|| "unknown".into()),
+        prefer_local: false,
+        local_model: String::new(),
+        reason: snapshot.reason.clone().unwrap_or_else(|| "unknown".into()),
+        privacy_level: openlife_core::agent::RedactionLevel::None,
+        latency_ms: None,
+        retry_count: 0,
+        fallback_reason: snapshot.fallback_reason.clone(),
+        provider_health_is_estimated: snapshot.provider_health_is_estimated,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -586,6 +1106,23 @@ async fn last_completed_generation_snapshot(
         })
 }
 
+async fn last_completed_generation_snapshot_any_session(
+    state: &Arc<AppState>,
+) -> Option<ProviderRouteFactSnapshot> {
+    let store_arc = state.agent_run_store.as_ref()?;
+    let store = store_arc.lock().await;
+    let runs = store.list_runs(50, 0).ok()?;
+    runs.into_iter()
+        .filter(|run| run.status == AgentRunStatus::Completed)
+        .find_map(|run| route_snapshot_from_run(&run))
+}
+
+fn route_snapshot_from_run(run: &AgentRun) -> Option<ProviderRouteFactSnapshot> {
+    let route = run.model_route.as_ref()?;
+    let snapshot = route_snapshot_from_trace(route, Some(run.id.as_str()));
+    route_snapshot_is_model_generation(&snapshot).then_some(snapshot)
+}
+
 fn route_snapshot_from_trace(
     route: &ModelRouteTrace,
     run_id: Option<&str>,
@@ -595,6 +1132,13 @@ fn route_snapshot_from_trace(
         model: Some(bounded_runtime_fact_label(&route.model)),
         route_type: Some(bounded_runtime_fact_label(&route.route_type)),
         run_id: run_id.map(bounded_runtime_fact_label),
+        reason: Some(bounded_runtime_fact_label(&route.reason)),
+        privacy_level: Some(route.privacy_level.to_string()),
+        provider_health_is_estimated: route.provider_health_is_estimated,
+        fallback_reason: route
+            .fallback_reason
+            .as_deref()
+            .map(bounded_runtime_fact_label),
     }
 }
 
@@ -604,6 +1148,10 @@ fn no_current_generation_snapshot() -> ProviderRouteFactSnapshot {
         model: None,
         route_type: Some("none".into()),
         run_id: None,
+        reason: Some("no_model_generated".into()),
+        privacy_level: Some("internal".into()),
+        provider_health_is_estimated: Some(false),
+        fallback_reason: None,
     }
 }
 

@@ -44,8 +44,10 @@ pub(crate) use eval::{
     MainChatRuntimeFactsScenarioEvidence, MainChatRuntimeFactsSliceReport,
 };
 pub(crate) use provider_route::{
-    classify_provider_route_query, provider_route_fact_should_block_before_model,
-    resolve_provider_route_fact_answer,
+    build_settings_runtime_route_evidence, classify_provider_route_query,
+    provider_route_fact_should_block_before_model, provider_route_query_has_followup_task,
+    resolve_provider_route_fact_answer, FallbackEvidence, ProviderReadiness, RouteIdentity,
+    RuntimeRouteEvidence,
 };
 pub(crate) use resolver::{
     resolve_post_model_runtime_fact_answer, resolve_pre_model_runtime_fact_answer,

@@ -22,7 +22,7 @@ Preparation approval is not release approval. A phase can move from planning to 
 | Phase | Prepared artifact | Current readiness | May implement? | Reason |
 |---|---|---|---|---|
 | 1 Trust Foundation | `plans/sprint1_trust_foundation_solution_rfc.md` | Ready for thin-slice implementation after evidence-retention and external-transmission boundary review | Yes | Route/readiness fields, UI semantics, tests, and non-goals are specified; definitive sent/not-sent transmission history is deferred to Phase 5. |
-| 2 Runs / Trace / Recovery | `plans/sprint2_runs_trace_recovery_solution_rfc.md` | Ready after Phase 1 route DTO exists | Conditional | Lifecycle and RunEvidenceView are specified; implementation should consume Phase 1 route evidence. |
+| 2 Runs / Trace / Recovery | `plans/sprint2_runs_trace_recovery_solution_rfc.md` | Ready for Slice 2A after Phase 1 route DTO is committed | Conditional | Lifecycle and RunEvidenceView are specified; timeout storage is frozen as `Failed + failure_kind=timeout`; implementation must consume Phase 1 route evidence. |
 | 3 LifeModel Closed Loop | `plans/sprint3_lifemodel_closed_loop_solution_rfc.md` | Ready for design-review, then thin slice | Conditional | Change/current view models are specified; implementation should start with one low-risk preference path. |
 | 4 Agent Task Productization | `plans/sprint4_agent_task_productization_solution_rfc.md` | Ready for RFC review, not first implementation | Later | Depends on Phase 1 route truth and Phase 2 Runs evidence. |
 | 5 Privacy / Provider Governance | `plans/sprint5_privacy_provider_governance_solution_rfc.md` | Ready for schema review, not first implementation | Later | Depends on Phase 1 actual route proof and transmission truth integration. |
@@ -33,7 +33,7 @@ Preparation approval is not release approval. A phase can move from planning to 
 | Phase | Required before implementation | Must not start with |
 |---|---|---|
 | 1 Trust Foundation | One backend owner for `RuntimeRouteEvidence`, one frontend route-disclosure consumer, exact focused tests with non-zero-match plan, v6 C02/C03 replay setup. | Cloud-provider expansion, API-key changes, or definitive provider-transmission history. |
-| 2 Runs / Trace / Recovery | Phase 1 route evidence DTO available or stubbed behind the same contract; timeout representation choice frozen as native status or `Failed + failure_kind=timeout`. | Independent route/fallback model or UI-only timeout label. |
+| 2 Runs / Trace / Recovery | Phase 1 route evidence DTO committed; timeout representation frozen as `Failed + failure_kind=timeout`; focused RunEvidenceView tests named before completion. | Independent route/fallback model, native `TimedOut` enum migration in this slice, or UI-only timeout label. |
 | 3 LifeModel Closed Loop | Canonical path normalization rule and focused tests for `preferences.communication_style`; source/proposal/patch/current-view trace shape agreed. | Broad schema rewrite, bulk proposal migration, or accepting facts without current-view projection. |
 | 4 Agent Task Productization | Route evidence and Runs evidence consumable by chat/task artifact surfaces; blocker taxonomy confirmed. | New planner UX that hides blockers or bypasses Runs trace. |
 | 5 Privacy / Provider Governance | Storage choice for transmission log frozen; local/unknown/not_instrumented semantics tested; key redaction tests named. | Any claim that old runs were `not_sent` because no provider log exists. |

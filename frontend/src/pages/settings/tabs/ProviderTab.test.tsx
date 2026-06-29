@@ -57,7 +57,7 @@ describe("ProviderTab", () => {
     expect(screen.getByRole("button", { name: /Auto/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Cloud/ })).toBeInTheDocument();
     expect(screen.getByText(/LocalOnly 时不会调用云端/)).toBeInTheDocument();
-    expect(screen.getByText("unvalidated")).toBeInTheDocument();
+    expect(screen.getByText("Configured, not validated")).toBeInTheDocument();
     expect(screen.getByText(/尚未验证/)).toBeInTheDocument();
   });
 
@@ -84,7 +84,7 @@ describe("ProviderTab", () => {
       );
     });
 
-    expect(screen.getByText("validated")).toBeInTheDocument();
+    expect(screen.getByText("Validated")).toBeInTheDocument();
     expect(screen.getByText(/Provider 已验证/)).toBeInTheDocument();
 
     view.rerender(
@@ -105,7 +105,7 @@ describe("ProviderTab", () => {
         />
       </MemoryRouter>
     );
-    expect(screen.getByText("failed")).toBeInTheDocument();
+    expect(screen.getByText("Failed validation")).toBeInTheDocument();
     expect(screen.getByText(/安全错误标签：http_status:401/)).toBeInTheDocument();
 
     view.rerender(
@@ -125,8 +125,53 @@ describe("ProviderTab", () => {
         />
       </MemoryRouter>
     );
-    expect(screen.getByText("stale")).toBeInTheDocument();
+    expect(screen.getByText("Validation stale")).toBeInTheDocument();
     expect(screen.getByText(/Provider 验证已失效/)).toBeInTheDocument();
+  });
+
+  it("marks scripted dogfood as local test proof instead of external cloud ready", async () => {
+    await act(async () => {
+      render(
+        <MemoryRouter>
+          <ProviderTab
+            config={mockConfig}
+            setConfig={vi.fn()}
+            diagnostics={
+              {
+                ...mockDiagnostics,
+                cloud_api_validated: false,
+                cloud_api_validation_status: "scripted_dogfood",
+                runtime_route_evidence: {
+                  evidence_id: "dogfood-route-1",
+                  generated_at: "2026-06-29T00:00:00Z",
+                  answer_scope: "settings_readiness",
+                  provider_readiness: {
+                    configured: true,
+                    credential_present: true,
+                    validated: false,
+                    validation_status: "scripted_dogfood",
+                    preferred: "openai",
+                    actually_used: null,
+                    stale: false,
+                    failed: false,
+                    last_checked_at: "2026-06-29T00:00:00Z",
+                  },
+                  external_transmission: "not_instrumented",
+                  source_refs: [],
+                  truth_confidence: "inferred",
+                },
+              } as any
+            }
+            routerStatus={null}
+            modelRouterStatus={null}
+          />
+        </MemoryRouter>
+      );
+    });
+
+    expect(screen.getByText("Local test proof only")).toBeInTheDocument();
+    expect(screen.getByText(/不是 external cloud ready/)).toBeInTheDocument();
+    expect(screen.getByText(/外发记录未接入/)).toBeInTheDocument();
   });
 
   it("lets users opt into capability-first beta without changing the default mode", async () => {

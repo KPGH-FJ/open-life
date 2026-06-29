@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import type { AgentRun, MainChatAgentIngressDecision, MainChatTaskSummary } from "../tauri";
+import type {
+  AgentRun,
+  MainChatAgentIngressDecision,
+  MainChatTaskSummary,
+  RuntimeRouteEvidence,
+} from "../tauri";
 import { buildRuntimeDisclosure } from "./runtimeDisclosure";
 
 function run(overrides: Partial<AgentRun> = {}): AgentRun {
@@ -88,6 +93,116 @@ describe("buildRuntimeDisclosure", () => {
 
     expect(view.routeTone).toBe("warning");
     expect(view.boundaryLabel).toBe("会离开本机");
+  });
+
+  it("renders runtime route evidence ahead of stale model self-claims", () => {
+    const runtimeRouteEvidence: RuntimeRouteEvidence = {
+      evidence_id: "route-evidence-1",
+      generated_at: "2026-06-29T00:00:00Z",
+      answer_scope: "current_turn",
+      actual_route: {
+        provider: "ollama",
+        model: "llama3",
+        route_type: "local",
+        privacy_level: "none",
+        reason: "actual runtime route",
+        provider_health_is_estimated: false,
+      },
+      provider_readiness: {
+        configured: true,
+        credential_present: true,
+        validated: false,
+        validation_status: "unvalidated",
+        preferred: "deepseek",
+        actually_used: "ollama",
+        stale: false,
+        failed: false,
+        last_checked_at: null,
+      },
+      external_transmission: "not_sent",
+      source_refs: [],
+      truth_confidence: "verified",
+    };
+
+    const view = buildRuntimeDisclosure(
+      run({
+        modelRoute: {
+          provider: "DeepSeek",
+          model: "deepseek-chat",
+          routeType: "cloud",
+          preferLocal: false,
+          localModel: "llama3",
+          reason: "model prose claimed cloud",
+          privacyLevel: "none",
+          retryCount: 0,
+        },
+        reasoningTrace: {
+          generation_result: {
+            runtimeRouteEvidence,
+          },
+        },
+      })
+    );
+
+    expect(view.routeLabel).toContain("本地路线");
+    expect(view.routeLabel).toContain("ollama");
+    expect(view.routeLabel).not.toContain("DeepSeek");
+    expect(view.boundaryLabel).toBe("运行证据：未外发");
+  });
+
+  it("keeps cloud runtime route evidence ahead of stale local model routes", () => {
+    const runtimeRouteEvidence: RuntimeRouteEvidence = {
+      evidence_id: "route-evidence-cloud-1",
+      generated_at: "2026-06-29T00:00:00Z",
+      answer_scope: "current_turn",
+      actual_route: {
+        provider: "DeepSeek",
+        model: "deepseek-chat",
+        route_type: "cloud",
+        privacy_level: "general",
+        reason: "actual cloud runtime route",
+        provider_health_is_estimated: false,
+      },
+      provider_readiness: {
+        configured: true,
+        credential_present: true,
+        validated: true,
+        validation_status: "validated",
+        preferred: "DeepSeek",
+        actually_used: "DeepSeek",
+        stale: false,
+        failed: false,
+        last_checked_at: "2026-06-29T00:00:00Z",
+      },
+      external_transmission: "sent",
+      source_refs: [],
+      truth_confidence: "verified",
+    };
+
+    const view = buildRuntimeDisclosure(
+      run({
+        modelRoute: {
+          provider: "ollama",
+          model: "llama3",
+          routeType: "local",
+          preferLocal: true,
+          localModel: "llama3",
+          reason: "old local fallback",
+          privacyLevel: "none",
+          retryCount: 0,
+        },
+        reasoningTrace: {
+          generation_result: {
+            runtimeRouteEvidence,
+          },
+        },
+      })
+    );
+
+    expect(view.routeLabel).toContain("云端路线");
+    expect(view.routeLabel).toContain("DeepSeek");
+    expect(view.routeLabel).not.toContain("ollama");
+    expect(view.boundaryLabel).toBe("运行证据：已外发");
   });
 
   it("shows LocalOnly as stronger than cloud availability", () => {

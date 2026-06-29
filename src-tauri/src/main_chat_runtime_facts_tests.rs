@@ -1,14 +1,15 @@
 use crate::main_chat_runtime_facts::{
-    classify_agent_self_state_query, classify_provider_route_query, classify_runtime_clock_query,
-    classify_tool_availability_query, run_main_chat_runtime_facts_slice_a_backend_report,
+    build_settings_runtime_route_evidence, classify_agent_self_state_query,
+    classify_provider_route_query, classify_runtime_clock_query, classify_tool_availability_query,
+    resolve_provider_route_fact_answer, run_main_chat_runtime_facts_slice_a_backend_report,
     run_main_chat_runtime_facts_slice_b_provider_route_report,
     run_main_chat_runtime_facts_slice_c_tool_availability_report,
     run_main_chat_runtime_facts_slice_d_agent_self_state_report, MainChatAgentSelfStateIntent,
     MainChatProviderRouteIntent, MainChatRuntimeClockIntent, MainChatToolAvailabilityIntent,
-    RUNTIME_FACT_AGENT_SELF_STATE_GENERATION_PATH, RUNTIME_FACT_KEY_AGENT_BLOCKER_CODES,
-    RUNTIME_FACT_KEY_AGENT_DURABLE_CHANGE_STATUS, RUNTIME_FACT_KEY_AGENT_LAST_ACTION_SUMMARY,
-    RUNTIME_FACT_KEY_AGENT_PENDING_PERMISSION_COUNT, RUNTIME_FACT_KEY_AGENT_TASK_STATUS,
-    RUNTIME_FACT_KEY_AGENT_TRACE_GAP, RUNTIME_FACT_KEY_DATE,
+    RuntimeRouteEvidence, RUNTIME_FACT_AGENT_SELF_STATE_GENERATION_PATH,
+    RUNTIME_FACT_KEY_AGENT_BLOCKER_CODES, RUNTIME_FACT_KEY_AGENT_DURABLE_CHANGE_STATUS,
+    RUNTIME_FACT_KEY_AGENT_LAST_ACTION_SUMMARY, RUNTIME_FACT_KEY_AGENT_PENDING_PERMISSION_COUNT,
+    RUNTIME_FACT_KEY_AGENT_TASK_STATUS, RUNTIME_FACT_KEY_AGENT_TRACE_GAP, RUNTIME_FACT_KEY_DATE,
     RUNTIME_FACT_KEY_PROVIDER_CONFIGURED_DEFAULT_PROVIDER,
     RUNTIME_FACT_KEY_PROVIDER_CURRENT_MODEL_GENERATED, RUNTIME_FACT_KEY_PROVIDER_PLANNED_PROVIDER,
     RUNTIME_FACT_KEY_TIME, RUNTIME_FACT_KEY_TIMEZONE,
@@ -1118,6 +1119,212 @@ fn main_chat_provider_route_classifier_is_bounded_and_separates_previous_turn() 
         Some(MainChatProviderRouteIntent::AskPreviousTurnModelRoute)
     );
     assert_eq!(classify_provider_route_query("我想比较几个模型"), None);
+}
+
+#[test]
+fn main_chat_provider_route_classifier_covers_v6_mixed_route_truth_prompts() {
+    assert_eq!(
+        classify_provider_route_query(
+            "请说明当前实际使用的 provider/model/routeType/fallbackReason，然后回答这个问题。"
+        ),
+        Some(MainChatProviderRouteIntent::AskCurrentModelRoute)
+    );
+    assert_eq!(
+        classify_provider_route_query("我明确要求 cloud，请说明有没有调用云端。"),
+        Some(MainChatProviderRouteIntent::AskCurrentModelRoute)
+    );
+}
+
+mod provider_route_focused_tests {
+    use super::*;
+
+    fn focused_model_route(
+        provider: &str,
+        model: &str,
+        route_type: &str,
+    ) -> openlife_core::agent::ModelRouteTrace {
+        openlife_core::agent::ModelRouteTrace {
+            provider: provider.into(),
+            model: model.into(),
+            route_type: route_type.into(),
+            prefer_local: route_type == "local",
+            local_model: "llama3".into(),
+            reason: format!("focused_{route_type}_route"),
+            privacy_level: openlife_core::agent::RedactionLevel::None,
+            latency_ms: None,
+            retry_count: 0,
+            fallback_reason: None,
+            provider_health_is_estimated: Some(false),
+        }
+    }
+
+    async fn focused_runtime_route_evidence(
+        current_route: openlife_core::agent::ModelRouteTrace,
+        current_model_generated: bool,
+    ) -> RuntimeRouteEvidence {
+        let state = crate::test_utils::test_app_state();
+        let scheduler = state.scheduler.lock().await.clone();
+        let answer = resolve_provider_route_fact_answer(
+            "你现在用什么模型",
+            &state,
+            &scheduler,
+            "session-runtime-route-focused",
+            Some(current_route),
+            current_model_generated,
+            current_model_generated,
+            "focused_runtime_route_test",
+        )
+        .await
+        .expect("provider route answer");
+        let evidence = answer
+            .extra_metadata
+            .get("runtimeRouteEvidence")
+            .cloned()
+            .expect("runtimeRouteEvidence metadata");
+        serde_json::from_value(evidence).expect("runtime route evidence shape")
+    }
+
+    #[tokio::test]
+    async fn current_turn_cloud_route_reports_sent() {
+        let evidence = focused_runtime_route_evidence(
+            focused_model_route("deepseek", "deepseek-chat", "cloud"),
+            true,
+        )
+        .await;
+
+        let actual_route = evidence.actual_route.as_ref().expect("actual route");
+        assert_eq!(actual_route.route_type, "cloud");
+        assert_eq!(actual_route.provider, "deepseek");
+        assert_eq!(evidence.external_transmission, "sent");
+        assert_ne!(actual_route.route_type, "agent_runtime");
+        assert_ne!(actual_route.provider, "runtime_fact");
+    }
+
+    #[tokio::test]
+    async fn current_turn_local_route_reports_not_sent() {
+        let evidence =
+            focused_runtime_route_evidence(focused_model_route("ollama", "llama3", "local"), true)
+                .await;
+
+        let actual_route = evidence.actual_route.as_ref().expect("actual route");
+        assert_eq!(actual_route.route_type, "local");
+        assert_eq!(actual_route.provider, "ollama");
+        assert_eq!(evidence.external_transmission, "not_sent");
+    }
+
+    #[tokio::test]
+    async fn pre_model_runtime_fact_reports_no_model_invocation() {
+        let evidence = focused_runtime_route_evidence(
+            focused_model_route("deepseek", "deepseek-chat", "cloud"),
+            false,
+        )
+        .await;
+
+        let actual_route = evidence.actual_route.as_ref().expect("actual route");
+        assert_eq!(actual_route.route_type, "agent_runtime");
+        assert_eq!(actual_route.provider, "runtime_fact");
+        assert_eq!(evidence.external_transmission, "not_sent");
+    }
+}
+
+#[tokio::test]
+async fn provider_route_runtime_route_evidence_reports_local_fallback_and_transmission_boundary() {
+    let state = crate::test_utils::test_app_state();
+    {
+        let mut config = state.config.lock().await;
+        config.llm.provider = "deepseek".into();
+        config.llm.openai_base = "https://api.deepseek.example/v1".into();
+        config.llm.openai_key.clear();
+        config.llm.chat_model = "deepseek-chat".into();
+        config.prefer_local_model = false;
+        config.local_model = "llama3".into();
+        config.system.network_policy.enabled = true;
+    }
+    {
+        let config = state.config.lock().await.clone();
+        let mut scheduler = state.scheduler.lock().await;
+        *scheduler = openlife_core::scheduler::InferenceScheduler::new(
+            config.local_model.clone(),
+            false,
+            config.llm.provider.clone(),
+            config.llm.openai_base.clone(),
+            config.llm.openai_key.clone(),
+            config.llm.chat_model.clone(),
+            config.llm.embedding_model.clone(),
+            config.llm.embedding_enabled,
+        );
+    }
+
+    let mut run = openlife_core::agent::AgentRun::new_chat_run(
+        "session-route-evidence",
+        "请使用 cloud，如果不能请说明 fallbackReason。",
+    );
+    run.complete(
+        "local answer",
+        openlife_core::agent::ModelRouteTrace {
+            provider: "ollama".into(),
+            model: "llama3".into(),
+            route_type: "local".into(),
+            prefer_local: true,
+            local_model: "llama3".into(),
+            reason: "cloud_preflight_blocked_fallback_local".into(),
+            privacy_level: openlife_core::agent::RedactionLevel::None,
+            latency_ms: None,
+            retry_count: 0,
+            fallback_reason: Some("provider_api_key_missing".into()),
+            provider_health_is_estimated: Some(true),
+        },
+        openlife_core::agent::ContextSummary {
+            life_model_empty: false,
+            included_life_model_sections: vec![],
+            memory_hit_count: 0,
+            memory_sources: vec![],
+            used_tools_prompt: false,
+            redaction_applied: false,
+            redaction_level: openlife_core::agent::RedactionLevel::None,
+        },
+    );
+    {
+        let store = state.agent_run_store.as_ref().expect("agent run store");
+        store.lock().await.create_run(&run).expect("create run");
+    }
+
+    let scheduler = state.scheduler.lock().await.clone();
+    let evidence = build_settings_runtime_route_evidence(&state, &scheduler).await;
+
+    assert_eq!(
+        evidence
+            .last_completed_route
+            .as_ref()
+            .map(|route| route.route_type.as_str()),
+        Some("local")
+    );
+    assert_eq!(evidence.provider_readiness.validated, false);
+    assert_eq!(evidence.external_transmission, "not_sent");
+    assert_eq!(
+        evidence
+            .fallback
+            .as_ref()
+            .map(|fallback| fallback.reason.as_str()),
+        Some("provider_api_key_missing")
+    );
+    assert!(evidence
+        .source_refs
+        .iter()
+        .any(|source| source.get("source").and_then(|value| value.as_str()) == Some("agent_run")));
+}
+
+#[tokio::test]
+async fn provider_route_runtime_route_evidence_keeps_missing_transmission_instrumentation_unknown()
+{
+    let state = crate::test_utils::test_app_state();
+    let scheduler = state.scheduler.lock().await.clone();
+    let evidence = build_settings_runtime_route_evidence(&state, &scheduler).await;
+
+    assert_eq!(evidence.answer_scope, "settings_readiness");
+    assert_eq!(evidence.actual_route, None);
+    assert_eq!(evidence.last_completed_route, None);
+    assert_eq!(evidence.external_transmission, "not_instrumented");
 }
 
 #[test]

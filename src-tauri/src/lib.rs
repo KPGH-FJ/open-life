@@ -399,6 +399,7 @@ pub struct SystemDiagnostics {
     pub high_risk_pending_proposal_count: usize,
     pub proposal_store_status: String,
     pub runtime_build_info: runtime_build_info::RuntimeBuildInfo,
+    pub runtime_route_evidence: main_chat_runtime_facts::RuntimeRouteEvidence,
 }
 
 pub(crate) async fn persist_life_model(

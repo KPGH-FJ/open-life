@@ -4,6 +4,7 @@ import {
   rebuildMemoryIndex,
   type SystemDiagnostics,
 } from "../../../tauri";
+import { buildProviderReadinessView } from "../../../utils/providerReadiness";
 import { buildSafeModeBlockedMessage } from "../../../utils/runtimeMessages";
 
 function classNames(...classes: (string | false | undefined)[]) {
@@ -49,6 +50,7 @@ export default function OverviewTab({
   setRebuildResult,
 }: OverviewTabProps) {
   const runtime = diagnostics?.runtime_build_info;
+  const providerReadiness = buildProviderReadinessView(diagnostics);
   // ---- Data file health ----
   const df = diagnostics?.data_files;
   const dataFileItems = df
@@ -69,10 +71,8 @@ export default function OverviewTab({
   const trialChecks = [
     {
       label: "云端模型",
-      ok: diagnostics?.cloud_api_configured ?? false,
-      detail: diagnostics?.cloud_api_configured
-        ? `${diagnostics?.cloud_provider ?? "云端"} 已配置${diagnostics?.config_source === "env_var" ? "（来自环境变量）" : ""}`
-        : "还没有可用的云端 API Key",
+      ok: providerReadiness.cloudReady,
+      detail: `${providerReadiness.statusLabel} · ${providerReadiness.detail}`,
       action: "配置模型",
       href: "#llm-settings",
     },

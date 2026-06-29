@@ -1,6 +1,7 @@
 import ProviderConfigSection from "../ProviderConfigSection";
 import type { AppConfig, ModelRouterStatus, RouterStatus, SystemDiagnostics } from "../../../tauri";
 import { CapabilityCard, StatusChip } from "../../../components/product/ProductPrimitives";
+import { buildProviderReadinessView } from "../../../utils/providerReadiness";
 
 interface ProviderTabProps {
   config: AppConfig;
@@ -29,19 +30,7 @@ export default function ProviderTab({
   onProviderValidationChanged,
 }: ProviderTabProps) {
   const mode = activeMode(config, diagnostics);
-  const cloudConfigured = Boolean(diagnostics?.cloud_api_configured);
-  const cloudStatus = diagnostics?.cloud_api_validation_status ?? "unvalidated";
-  const cloudValidated = cloudConfigured && cloudStatus === "validated";
-  const cloudFailed = cloudConfigured && cloudStatus === "failed";
-  const cloudMeta = cloudConfigured
-    ? cloudValidated
-      ? "validated"
-      : cloudFailed
-        ? "failed"
-        : cloudStatus === "stale"
-          ? "stale"
-          : "unvalidated"
-    : "not configured";
+  const providerReadiness = buildProviderReadinessView(diagnostics);
   const localAvailable = Boolean(diagnostics?.ollama_online);
 
   function setMode(nextMode: ModelMode) {
@@ -121,30 +110,24 @@ export default function ProviderTab({
         </CapabilityCard>
         <CapabilityCard
           title="云端模型"
-          description="云端会离开本机；回复中必须展示 provider、model 和隐私边界。"
-          tone={
-            cloudValidated
-              ? "ready"
-              : cloudFailed
-                ? "danger"
-                : cloudConfigured
-                  ? "warning"
-                  : "neutral"
-          }
-          meta={cloudMeta}
+          description={providerReadiness.detail}
+          tone={providerReadiness.tone}
+          meta={providerReadiness.statusLabel}
         >
-          <StatusChip
-            label={diagnostics?.cloud_provider || config.llm?.provider || "cloud"}
-            tone={
-              cloudValidated
-                ? "ready"
-                : cloudFailed
-                  ? "danger"
-                  : cloudConfigured
-                    ? "warning"
-                    : "neutral"
-            }
-          />
+          <div className="flex flex-wrap gap-1.5">
+            <StatusChip
+              label={providerReadiness.providerLabel || config.llm?.provider || "cloud"}
+              tone={providerReadiness.tone}
+            />
+            <StatusChip
+              label={providerReadiness.actualRouteLabel}
+              tone={providerReadiness.actualRouteTone}
+            />
+            <StatusChip
+              label={providerReadiness.externalTransmissionLabel}
+              tone={providerReadiness.externalTransmissionTone}
+            />
+          </div>
         </CapabilityCard>
       </section>
 

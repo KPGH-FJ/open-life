@@ -93,4 +93,44 @@ describe("OverviewTab", () => {
     );
     expect(screen.getByText(/核心链路已就绪/)).toBeInTheDocument();
   });
+
+  it("does not show configured-only provider as cloud ready", () => {
+    render(
+      <MemoryRouter>
+        <OverviewTab
+          {...baseProps}
+          diagnostics={
+            {
+              ...defaultDiagnostics,
+              cloud_api_validated: false,
+              cloud_api_validation_status: "unvalidated",
+              runtime_route_evidence: {
+                evidence_id: "settings-route-1",
+                generated_at: "2026-06-29T00:00:00Z",
+                answer_scope: "settings_readiness",
+                provider_readiness: {
+                  configured: true,
+                  credential_present: true,
+                  validated: false,
+                  validation_status: "unvalidated",
+                  preferred: "DeepSeek",
+                  actually_used: null,
+                  stale: false,
+                  failed: false,
+                  last_checked_at: null,
+                },
+                external_transmission: "not_instrumented",
+                source_refs: [],
+                truth_confidence: "inferred",
+              },
+            } as any
+          }
+        />
+      </MemoryRouter>
+    );
+
+    expect(screen.getByText(/Configured, not validated/)).toBeInTheDocument();
+    expect(screen.getByText(/不能当作 cloud-ready/)).toBeInTheDocument();
+    expect(screen.queryByText(/云端模型 已配置/)).not.toBeInTheDocument();
+  });
 });

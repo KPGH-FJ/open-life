@@ -2446,6 +2446,64 @@ export interface RuntimeBuildInfo {
   productName: string;
 }
 
+export interface RouteIdentity {
+  provider: string;
+  model: string;
+  route_type: "local" | "cloud" | "agent_runtime" | "scripted" | "unknown" | string;
+  privacy_level: string;
+  reason: string;
+  provider_health_is_estimated: boolean;
+}
+
+export interface ProviderReadiness {
+  configured: boolean;
+  credential_present: boolean;
+  validated: boolean;
+  validation_status:
+    | "unconfigured"
+    | "unvalidated"
+    | "stale"
+    | "validated"
+    | "failed"
+    | "scripted_dogfood"
+    | string;
+  preferred: string;
+  actually_used?: string | null;
+  stale: boolean;
+  failed: boolean;
+  last_checked_at?: string | null;
+}
+
+export interface FallbackEvidence {
+  from_route?: RouteIdentity | null;
+  to_route?: RouteIdentity | null;
+  reason: string;
+  blocker_codes: string[];
+}
+
+export interface RuntimeRouteEvidence {
+  evidence_id: string;
+  generated_at: string;
+  conversation_id?: string | null;
+  run_id?: string | null;
+  task_session_id?: string | null;
+  answer_scope:
+    | "current_turn"
+    | "last_completed_turn"
+    | "settings_readiness"
+    | "planned_next_turn"
+    | "unknown"
+    | string;
+  planned_route?: RouteIdentity | null;
+  actual_route?: RouteIdentity | null;
+  last_completed_route?: RouteIdentity | null;
+  provider_readiness: ProviderReadiness;
+  fallback?: FallbackEvidence | null;
+  external_transmission: "not_sent" | "sent" | "unknown" | "not_instrumented" | string;
+  source_refs: unknown[];
+  truth_confidence: "verified" | "inferred" | "unknown" | string;
+}
+
 export interface SystemDiagnostics {
   router: RouterStatus;
   mcp_server_count: number;
@@ -2494,6 +2552,7 @@ export interface SystemDiagnostics {
   high_risk_pending_proposal_count: number;
   proposal_store_status: string;
   runtime_build_info?: RuntimeBuildInfo;
+  runtime_route_evidence?: RuntimeRouteEvidence | null;
 }
 
 export async function getSystemDiagnostics(): Promise<SystemDiagnostics> {

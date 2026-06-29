@@ -3,6 +3,8 @@ import type {
   MainChatAgentIngressDecision,
   MainChatAgentTaskState,
   MainChatTaskSummary,
+  RuntimeRouteEvidence,
+  RouteIdentity,
 } from "../tauri";
 import type { ProductTone } from "../components/product/ProductPrimitives";
 
@@ -28,8 +30,39 @@ export type RuntimeDisclosureView = {
 function routeTypeLabel(routeType?: string): { label: string; tone: ProductTone } {
   if (routeType === "local") return { label: "本地路线", tone: "ready" };
   if (routeType === "cloud") return { label: "云端路线", tone: "warning" };
+  if (routeType === "agent_runtime") return { label: "运行时事实", tone: "info" };
+  if (routeType === "scripted") return { label: "脚本 proof", tone: "info" };
   if (routeType === "auto") return { label: "自动路由", tone: "info" };
-  return { label: "路线未记录", tone: "neutral" };
+  return { label: "路线未验证", tone: "neutral" };
+}
+
+function runtimeRouteEvidenceFromRun(run: AgentRun | null): RuntimeRouteEvidence | null {
+  const raw = run?.reasoningTrace?.generation_result?.runtimeRouteEvidence;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  return raw as RuntimeRouteEvidence;
+}
+
+function primaryEvidenceRoute(evidence?: RuntimeRouteEvidence | null): RouteIdentity | null {
+  return (
+    evidence?.actual_route ?? evidence?.last_completed_route ?? evidence?.planned_route ?? null
+  );
+}
+
+function boundaryFromEvidence(evidence?: RuntimeRouteEvidence | null): {
+  label: string;
+  tone: ProductTone;
+} | null {
+  if (!evidence) return null;
+  if (evidence.external_transmission === "sent") {
+    return { label: "运行证据：已外发", tone: "warning" };
+  }
+  if (evidence.external_transmission === "not_sent") {
+    return { label: "运行证据：未外发", tone: "ready" };
+  }
+  if (evidence.external_transmission === "unknown") {
+    return { label: "外发状态未知", tone: "neutral" };
+  }
+  return { label: "外发记录未接入", tone: "neutral" };
 }
 
 function statusLabel(status?: string): { label: string; tone: ProductTone } {
@@ -100,10 +133,14 @@ export function buildRuntimeDisclosure(
     taskState?: MainChatAgentTaskState | null;
     taskSummary?: MainChatTaskSummary | null;
     ingress?: MainChatAgentIngressDecision | null;
+    runtimeRouteEvidence?: RuntimeRouteEvidence | null;
   } = {}
 ): RuntimeDisclosureView {
-  const route = routeTypeLabel(run?.modelRoute?.routeType);
-  const boundary = boundaryLabel(run, options.ingress);
+  const runtimeRouteEvidence = options.runtimeRouteEvidence ?? runtimeRouteEvidenceFromRun(run);
+  const evidenceRoute = primaryEvidenceRoute(runtimeRouteEvidence);
+  const route = routeTypeLabel(evidenceRoute?.route_type ?? run?.modelRoute?.routeType);
+  const boundary =
+    boundaryFromEvidence(runtimeRouteEvidence) ?? boundaryLabel(run, options.ingress);
   const outcome = statusLabel(run?.status);
   const tools = run?.toolCallCount ?? run?.actions?.length ?? 0;
   const toolsLabel =
@@ -114,16 +151,31 @@ export function buildRuntimeDisclosure(
         : "未调用工具";
   const proposals = proposalCount(run, options.taskSummary);
   const blockers = blockerCount(options.taskState, options.taskSummary);
-  const providerLabel = run?.modelRoute?.provider || "provider 未记录";
-  const modelLabel = run?.modelRoute?.model || "model 未记录";
+  const providerLabel =
+    evidenceRoute?.provider ||
+    (runtimeRouteEvidence ? "provider 未验证" : run?.modelRoute?.provider) ||
+    "provider 未验证";
+  const modelLabel =
+    evidenceRoute?.model ||
+    (runtimeRouteEvidence ? "model 未验证" : run?.modelRoute?.model) ||
+    "model 未验证";
   const memoryHits = run?.contextSummary?.memoryHitCount ?? 0;
-  const routeReason = run?.modelRoute?.reason || options.ingress?.reasonSummary;
-  const fallbackReason = run?.modelRoute?.fallbackReason;
+  const routeReason =
+    evidenceRoute?.reason || run?.modelRoute?.reason || options.ingress?.reasonSummary;
+  const fallbackReason = runtimeRouteEvidence?.fallback?.reason || run?.modelRoute?.fallbackReason;
   const technicalRows = [
     { label: "Run ID", value: run?.id ?? "未记录" },
     { label: "Provider", value: providerLabel },
     { label: "Model", value: modelLabel },
     { label: "Route reason", value: routeReason || "未记录" },
+    {
+      label: "Route confidence",
+      value: runtimeRouteEvidence?.truth_confidence ?? "未记录",
+    },
+    {
+      label: "External transmission",
+      value: runtimeRouteEvidence?.external_transmission ?? "未记录",
+    },
     { label: "Privacy class", value: options.ingress?.privacyRisk?.privacyClass ?? "未记录" },
     {
       label: "Pending blockers",
@@ -131,6 +183,9 @@ export function buildRuntimeDisclosure(
     },
   ];
 
+  if (runtimeRouteEvidence?.evidence_id) {
+    technicalRows.push({ label: "Evidence ID", value: runtimeRouteEvidence.evidence_id });
+  }
   if (fallbackReason) {
     technicalRows.push({ label: "Fallback", value: fallbackReason });
   }
@@ -139,7 +194,7 @@ export function buildRuntimeDisclosure(
   }
 
   return {
-    routeLabel: `${route.label} · ${providerLabel}`,
+    routeLabel: route.label === "路线未验证" ? route.label : `${route.label} · ${providerLabel}`,
     routeTone: route.tone,
     boundaryLabel: boundary.label,
     boundaryTone: boundary.tone,
