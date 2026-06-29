@@ -257,6 +257,41 @@ export async function getLifeModel(): Promise<LifeModel> {
   return safeInvoke<LifeModel>("get_life_model");
 }
 
+export interface LifeModelChangeView {
+  path: string;
+  proposalId: string;
+  proposalStatus: string;
+  proposalSource: string;
+  proposalSourceDetail?: string | null;
+  proposalRunId?: string | null;
+  sourceExcerpt?: string | null;
+  sourceUnavailableReason?: string | null;
+  confidence: number;
+  riskLevel: string;
+  before?: any;
+  after: any;
+  patchId?: string | null;
+  patchStatus?: string | null;
+  patchPath?: string | null;
+  patchUnavailableReason?: string | null;
+  snapshotVersions: string[];
+  snapshotUnavailableReason?: string | null;
+  currentMatchesAcceptedAfter: boolean;
+}
+
+export interface LifeModelCurrentView {
+  path: string;
+  label: string;
+  value?: string | null;
+  unavailableReason?: string | null;
+  currentValueSource: string;
+  change?: LifeModelChangeView | null;
+}
+
+export async function getLifeModelCurrentView(): Promise<LifeModelCurrentView> {
+  return safeInvoke<LifeModelCurrentView>("get_life_model_current_view");
+}
+
 const MANUAL_LIFEMODEL_EDITOR_SAVE_REQUEST = {
   purpose: "manual_lifemodel_editor_save",
   explicitUserIntent: true,

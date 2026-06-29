@@ -243,7 +243,7 @@ pub use openlife_core::memory_cache::HotMemoryCache;
 pub use openlife_core::memory_cache::SharedHotCache;
 pub use openlife_core::privacy::PrivacyEngine;
 // Hermes module removed: replaced by AgentRuntime
-use commands::life_model::{get_life_model, save_life_model};
+use commands::life_model::{get_life_model, get_life_model_current_view, save_life_model};
 use commands::mcp::{
     clear_mcp_audit_logs, list_mcp_audit_logs, list_mcp_servers, list_mcp_templates,
     list_mcp_tools, list_tool_manifests, recommend_mcp_manifests, register_mcp_server,
@@ -697,6 +697,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_life_model,
+            get_life_model_current_view,
             save_life_model,
             get_config,
             save_config,

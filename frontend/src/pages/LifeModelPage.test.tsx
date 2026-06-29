@@ -144,6 +144,7 @@ describe("LifeModelPage", () => {
       const calledCommands = vi.mocked(invoke).mock.calls.map(([command]) => command);
       for (const command of [
         "get_life_model",
+        "get_life_model_current_view",
         "get_system_diagnostics",
         "get_model_4d_completion",
         "builder_list_unfinished",
@@ -167,6 +168,124 @@ describe("LifeModelPage", () => {
     fireEvent.click(screen.getByRole("tab", { name: "依据" }));
     expect(await screen.findByText("最近依据来源")).toBeInTheDocument();
     expect(screen.queryByText("RAW_EVIDENCE_PAYLOAD_SHOULD_NOT_RENDER")).not.toBeInTheDocument();
+  });
+
+  it("shows an accepted communication preference in overview with proposal, patch, snapshot, and source trace", async () => {
+    const currentView = {
+      path: "preferences.communication_style",
+      label: "沟通偏好",
+      value: "先共情，再给结构化建议",
+      unavailableReason: null,
+      currentValueSource: "accepted_proposal",
+      change: {
+        path: "preferences.communication_style",
+        proposalId: "proposal-communication-1",
+        proposalStatus: "accepted",
+        proposalSource: "feedback_evolution",
+        proposalSourceDetail: "maturation:preference.communication",
+        proposalRunId: "run-communication-1",
+        sourceExcerpt: "用户接受低风险沟通偏好。",
+        sourceUnavailableReason: null,
+        confidence: 0.92,
+        riskLevel: "low",
+        before: "",
+        after: "先共情，再给结构化建议",
+        patchId: "patch-communication-1",
+        patchStatus: "applied",
+        patchPath: "preferences.communication_style",
+        patchUnavailableReason: null,
+        snapshotVersions: ["before-v1", "after-v1"],
+        snapshotUnavailableReason: null,
+        currentMatchesAcceptedAfter: true,
+      },
+    };
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_life_model") {
+        return Promise.resolve({
+          ...mockLifeModel,
+          preferences: {
+            ...mockLifeModel.preferences,
+            communication_style: "先共情，再给结构化建议",
+          },
+        });
+      }
+      if (cmd === "get_life_model_current_view") return Promise.resolve(currentView);
+      if (cmd === "get_system_diagnostics") return Promise.resolve(safeDiagnostics);
+      if (cmd === "list_proposals") return Promise.resolve([]);
+      return mockInvoke(cmd, args);
+    });
+
+    renderPage();
+    fireEvent.click(await screen.findByRole("tab", { name: "概览" }));
+
+    expect(await screen.findByTestId("communication-style-current-view")).toHaveTextContent(
+      "先共情，再给结构化建议"
+    );
+    expect(screen.getByText("沟通偏好")).toBeInTheDocument();
+    expect(screen.getByText("preferences.communication_style")).toBeInTheDocument();
+    expect(screen.getByText("proposal-communication-1")).toBeInTheDocument();
+    expect(screen.getByText("用户接受低风险沟通偏好。")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "run-communication-1" })).toHaveAttribute(
+      "href",
+      "#/runs/run-communication-1"
+    );
+    expect(screen.getByText(/patch-communication-1 · applied/)).toBeInTheDocument();
+    expect(screen.getByText("before-v1 / after-v1")).toBeInTheDocument();
+    expect(screen.getByText("92%")).toBeInTheDocument();
+    expect(screen.getByText("low")).toBeInTheDocument();
+  });
+
+  it("shows typed unavailable reasons when accepted communication preference lacks patch or snapshot evidence", async () => {
+    const currentView = {
+      path: "preferences.communication_style",
+      label: "沟通偏好",
+      value: "直接一点，先给结论",
+      unavailableReason: null,
+      currentValueSource: "accepted_proposal",
+      change: {
+        path: "preferences.communication_style",
+        proposalId: "proposal-communication-missing",
+        proposalStatus: "accepted",
+        proposalSource: "manual",
+        proposalSourceDetail: null,
+        proposalRunId: null,
+        sourceExcerpt: null,
+        sourceUnavailableReason: "source_excerpt_unavailable",
+        confidence: 0.81,
+        riskLevel: "low",
+        before: "",
+        after: "直接一点，先给结论",
+        patchId: null,
+        patchStatus: null,
+        patchPath: null,
+        patchUnavailableReason: "patch_missing",
+        snapshotVersions: [],
+        snapshotUnavailableReason: "snapshot_missing",
+        currentMatchesAcceptedAfter: true,
+      },
+    };
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_life_model") {
+        return Promise.resolve({
+          ...mockLifeModel,
+          preferences: {
+            ...mockLifeModel.preferences,
+            communication_style: "直接一点，先给结论",
+          },
+        });
+      }
+      if (cmd === "get_life_model_current_view") return Promise.resolve(currentView);
+      if (cmd === "get_system_diagnostics") return Promise.resolve(safeDiagnostics);
+      if (cmd === "list_proposals") return Promise.resolve([]);
+      return mockInvoke(cmd, args);
+    });
+
+    renderPage();
+    fireEvent.click(await screen.findByRole("tab", { name: "概览" }));
+
+    expect(await screen.findByText("patch_missing")).toBeInTheDocument();
+    expect(screen.getByText("snapshot_missing")).toBeInTheDocument();
+    expect(screen.getByText("source_excerpt_unavailable")).toBeInTheDocument();
   });
 
   it("renders a light empty state when the model is empty", async () => {

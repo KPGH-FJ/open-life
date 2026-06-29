@@ -64,6 +64,33 @@ const readableGoalProposal: AgentProposal = {
   expiresAt: "2026-07-03T09:00:00.000Z",
 };
 
+const communicationStyleProposal: AgentProposal = {
+  id: "proposal-communication-1",
+  runId: "run-communication-1",
+  proposalType: "preference_update",
+  source: "feedback_evolution",
+  sourceDetail: "maturation:preference.communication",
+  affectedPath: "/preferences/communication",
+  before: "建议太绕",
+  after: "直接给结论，再解释原因",
+  reason: "用户确认希望 OpenLife 更直接。",
+  confidence: 0.91,
+  riskLevel: "low",
+  status: "pending",
+  whyOpenLifeThinksThis: "用户在复盘中明确接受了更直接的沟通偏好。",
+  evidenceSummaries: [
+    {
+      id: "ev-communication-1",
+      summary: "对话证据支持更直接的沟通偏好。",
+      sourceAssetIds: ["run-communication-1"],
+      contentDigest: "sha256:communication",
+    },
+  ],
+  behaviorChecks: [],
+  createdAt: "2026-06-04T09:00:00.000Z",
+  expiresAt: "2026-07-04T09:00:00.000Z",
+};
+
 const unsupportedProposal: AgentProposal = {
   id: "proposal-plugin-1",
   runId: "run-plugin-1",
@@ -241,6 +268,29 @@ describe("MailboxPage", () => {
     expect(screen.getByText("name")).toBeInTheDocument();
     expect(screen.getByText("「睡前刷手机」")).toBeInTheDocument();
     expect(screen.getByText("「23 点前睡觉」")).toBeInTheDocument();
+  });
+
+  it("shows communication style proposals with path-specific trace details", async () => {
+    mockProposals([communicationStyleProposal]);
+
+    render(<MailboxPage />);
+
+    expect((await screen.findAllByText("更新沟通偏好")).length).toBeGreaterThan(0);
+    expect(screen.getByText("沟通偏好")).toBeInTheDocument();
+    expect(screen.getByText("「建议太绕」")).toBeInTheDocument();
+    expect(screen.getByText("「直接给结论，再解释原因」")).toBeInTheDocument();
+    expect(screen.getByText("来源摘录：")).toBeInTheDocument();
+    expect(
+      screen.getAllByText("用户在复盘中明确接受了更直接的沟通偏好。").length
+    ).toBeGreaterThan(0);
+    expect(screen.getByText("proposal-communication-1")).toBeInTheDocument();
+    expect(screen.getAllByText("preferences.communication_style").length).toBeGreaterThan(0);
+    expect(screen.getByRole("link", { name: "run-communication-1" })).toHaveAttribute(
+      "href",
+      "#/runs/run-communication-1"
+    );
+    expect(screen.getByText("91%")).toBeInTheDocument();
+    expect(screen.getByText("low")).toBeInTheDocument();
   });
 
   it("redacts sensitive payload-like values from the main diff panel", async () => {

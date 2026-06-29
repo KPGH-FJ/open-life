@@ -472,6 +472,15 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       } as T);
     case "get_life_model":
       return Promise.resolve(mockLifeModel as T);
+    case "get_life_model_current_view":
+      return Promise.resolve({
+        path: "preferences.communication_style",
+        label: "沟通偏好",
+        value: null,
+        unavailableReason: "current_value_empty",
+        currentValueSource: "unavailable",
+        change: null,
+      } as T);
     case "get_daily_goals":
       return Promise.resolve(mockDailyGoals as T);
     case "get_state_alerts":

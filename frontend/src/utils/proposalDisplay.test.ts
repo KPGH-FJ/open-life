@@ -79,4 +79,75 @@ describe("proposalDisplay", () => {
     expect(serializedTechnicalRows).toContain("/tmp/openlife-test/export.json");
     expect(serializedTechnicalRows).toContain("sha256:external-write-digest");
   });
+
+  it("normalizes communication style aliases into a path-specific Review display", () => {
+    const model = buildProposalDisplayModel(
+      proposal({
+        id: "proposal-communication-1",
+        runId: "run-communication-1",
+        proposalType: "preference_update",
+        source: "feedback_evolution",
+        sourceDetail: "maturation:preference.communication",
+        affectedPath: "/preferences/communication",
+        before: "建议太绕",
+        after: "直接给结论，再解释原因",
+        reason: "用户确认希望 OpenLife 更直接。",
+        confidence: 0.91,
+        riskLevel: "low",
+        whyOpenLifeThinksThis: "用户在复盘中明确接受了更直接的沟通偏好。",
+      })
+    );
+
+    expect(model.title).toBe("更新沟通偏好");
+    expect(model.domain).toBe("沟通偏好");
+    expect(model.diffRows).toEqual([
+      {
+        field: "沟通偏好",
+        before: "「建议太绕」",
+        after: "「直接给结论，再解释原因」",
+        redacted: false,
+      },
+    ]);
+    expect(model.evidenceSummary).toBe(
+      "来源摘录：用户在复盘中明确接受了更直接的沟通偏好。"
+    );
+    expect(model.technicalRows).toEqual(
+      expect.arrayContaining([
+        { label: "位置", value: "preferences.communication_style" },
+        { label: "规范位置", value: "preferences.communication_style" },
+        { label: "Proposal", value: "proposal-communication-1" },
+        { label: "置信度", value: "91%" },
+        { label: "风险", value: "low" },
+        {
+          label: "来源摘录",
+          value: "用户在复盘中明确接受了更直接的沟通偏好。",
+        },
+      ])
+    );
+    expect(model.technicalRows).toContainEqual({
+      label: "Run",
+      value: "run-communication-1",
+      href: "#/runs/run-communication-1",
+    });
+  });
+
+  it("shows a typed unavailable source reason for communication style proposals without source text", () => {
+    const model = buildProposalDisplayModel(
+      proposal({
+        proposalType: "preference_update",
+        affectedPath: "preferences.communication_style",
+        before: "",
+        after: "先给步骤",
+        reason: "",
+        whyOpenLifeThinksThis: "",
+        evidenceSummaries: [],
+      })
+    );
+
+    expect(model.evidenceSummary).toBe("source_excerpt_unavailable");
+    expect(model.technicalRows).toContainEqual({
+      label: "来源不可用",
+      value: "source_excerpt_unavailable",
+    });
+  });
 });

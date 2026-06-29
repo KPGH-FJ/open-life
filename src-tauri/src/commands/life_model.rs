@@ -1,11 +1,18 @@
+use crate::commands::proposal::{
+    canonical_lifemodel_path, is_communication_style_lifemodel_path,
+    COMMUNICATION_STYLE_CANONICAL_PATH,
+};
 use crate::errors::AppError;
 use crate::legacy_write_convergence::{
     LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
     LifeModelMaterializerCallerPurpose,
 };
 use crate::{persist_life_model, AppState};
+use openlife_core::agent::{AgentProposal, ProposalStatus};
+use openlife_core::life_model::patch::{LifeModelPatch, PatchStatus};
 use openlife_core::life_model::LifeModel;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tauri::State;
@@ -14,6 +21,41 @@ const MANUAL_LIFEMODEL_OVERRIDE_AUDIT_EVENT: &str = "manual_lifemodel_override_a
 const MANUAL_LIFEMODEL_OVERRIDE_SOURCE: &str = "manual_lifemodel_editor";
 const MANUAL_LIFEMODEL_OVERRIDE_COMMAND: &str = "save_life_model";
 const MANUAL_LIFEMODEL_OVERRIDE_RISK_CLASS: &str = "GovernedManualOverride";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LifeModelChangeView {
+    pub path: String,
+    pub proposal_id: String,
+    pub proposal_status: String,
+    pub proposal_source: String,
+    pub proposal_source_detail: Option<String>,
+    pub proposal_run_id: Option<String>,
+    pub source_excerpt: Option<String>,
+    pub source_unavailable_reason: Option<String>,
+    pub confidence: f32,
+    pub risk_level: String,
+    pub before: Option<Value>,
+    pub after: Value,
+    pub patch_id: Option<String>,
+    pub patch_status: Option<String>,
+    pub patch_path: Option<String>,
+    pub patch_unavailable_reason: Option<String>,
+    pub snapshot_versions: Vec<String>,
+    pub snapshot_unavailable_reason: Option<String>,
+    pub current_matches_accepted_after: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LifeModelCurrentView {
+    pub path: String,
+    pub label: String,
+    pub value: Option<String>,
+    pub unavailable_reason: Option<String>,
+    pub current_value_source: String,
+    pub change: Option<LifeModelChangeView>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -55,6 +97,160 @@ fn require_governed_manual_lifemodel_override_request(
     }
 }
 
+fn value_as_trimmed_string(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn compact_source_excerpt(value: &str) -> Option<String> {
+    let compact = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        None
+    } else if compact.chars().count() > 160 {
+        Some(format!(
+            "{}...",
+            compact.chars().take(157).collect::<String>()
+        ))
+    } else {
+        Some(compact)
+    }
+}
+
+fn proposal_source_excerpt(proposal: &AgentProposal) -> (Option<String>, Option<String>) {
+    if let Some(excerpt) = compact_source_excerpt(&proposal.reason) {
+        return (Some(excerpt), None);
+    }
+    if let Some(source_detail) = proposal
+        .source_detail
+        .as_deref()
+        .and_then(compact_source_excerpt)
+    {
+        return (Some(source_detail), None);
+    }
+    (None, Some("source_excerpt_unavailable".into()))
+}
+
+fn latest_matching_communication_style_proposal(
+    proposals: Vec<AgentProposal>,
+    current_value: Option<&str>,
+) -> Option<AgentProposal> {
+    let mut candidates: Vec<AgentProposal> = proposals
+        .into_iter()
+        .filter(|proposal| {
+            proposal.status == ProposalStatus::Accepted
+                && is_communication_style_lifemodel_path(&proposal.affected_path)
+        })
+        .collect();
+    candidates.sort_by(|left, right| {
+        let left_time = left.resolved_at.unwrap_or(left.created_at);
+        let right_time = right.resolved_at.unwrap_or(right.created_at);
+        right_time.cmp(&left_time)
+    });
+
+    if let Some(current) = current_value {
+        if let Some(index) = candidates.iter().position(|proposal| {
+            value_as_trimmed_string(&proposal.after).as_deref() == Some(current)
+        }) {
+            return Some(candidates.remove(index));
+        }
+    }
+    candidates.into_iter().next()
+}
+
+fn communication_style_patch_for_proposal(patches: Vec<LifeModelPatch>) -> Option<LifeModelPatch> {
+    patches.into_iter().find(|patch| {
+        canonical_lifemodel_path(&patch.path_pointer) == COMMUNICATION_STYLE_CANONICAL_PATH
+            && patch.status == PatchStatus::Applied
+    })
+}
+
+async fn communication_style_patch_view(
+    state: &Arc<AppState>,
+    proposal_id: &str,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    let Some(patch_store) = state.patch_store.as_ref() else {
+        return (None, None, None, Some("patch_store_unavailable".into()));
+    };
+    let patches = {
+        let store = patch_store.lock().await;
+        match store.list_patches_by_proposal(proposal_id) {
+            Ok(patches) => patches,
+            Err(_) => return (None, None, None, Some("patch_read_failed".into())),
+        }
+    };
+    match communication_style_patch_for_proposal(patches) {
+        Some(patch) => (
+            Some(patch.id),
+            Some(patch.status.to_string()),
+            Some(COMMUNICATION_STYLE_CANONICAL_PATH.into()),
+            None,
+        ),
+        None => (None, None, None, Some("patch_missing".into())),
+    }
+}
+
+async fn communication_style_snapshot_view(
+    state: &Arc<AppState>,
+    proposal_id: &str,
+) -> (Vec<String>, Option<String>) {
+    let snapshots = {
+        let version_manager = state.version_manager.lock().await;
+        match version_manager.get_patch_snapshots(proposal_id) {
+            Ok(snapshots) => snapshots,
+            Err(_) => return (Vec::new(), Some("snapshot_read_failed".into())),
+        }
+    };
+    if snapshots.is_empty() {
+        return (Vec::new(), Some("snapshot_missing".into()));
+    }
+    let has_before = snapshots
+        .iter()
+        .any(|snapshot| snapshot.tag == format!("patch:{proposal_id}:before"));
+    let has_after = snapshots
+        .iter()
+        .any(|snapshot| snapshot.tag == format!("patch:{proposal_id}:after"));
+    let mut versions: Vec<String> = snapshots
+        .into_iter()
+        .map(|snapshot| snapshot.version)
+        .collect();
+    versions.sort();
+    versions.dedup();
+    let unavailable = if has_before && has_after {
+        None
+    } else {
+        Some("snapshot_incomplete".into())
+    };
+    (versions, unavailable)
+}
+
+async fn accepted_communication_style_proposal(
+    state: &Arc<AppState>,
+    current_value: Option<&str>,
+) -> (Option<AgentProposal>, Option<String>) {
+    let Some(proposal_store) = state.proposal_store.as_ref() else {
+        return (None, Some("proposal_store_unavailable".into()));
+    };
+    let proposals = {
+        let store = proposal_store.lock().await;
+        match store.list_proposals_filtered(Some(ProposalStatus::Accepted), None, None, 200) {
+            Ok(proposals) => proposals,
+            Err(_) => return (None, Some("proposal_read_failed".into())),
+        }
+    };
+    match latest_matching_communication_style_proposal(proposals, current_value) {
+        Some(proposal) => (Some(proposal), None),
+        None => (None, Some("accepted_proposal_missing".into())),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ManualLifeModelOverrideAuditReport {
     pub source: String,
@@ -88,6 +284,88 @@ pub(crate) async fn get_life_model_with_state(
 #[tauri::command]
 pub async fn get_life_model(state: State<'_, Arc<AppState>>) -> Result<LifeModel, AppError> {
     get_life_model_with_state(&state.inner().clone()).await
+}
+
+pub(crate) async fn get_life_model_current_view_with_state(
+    state: &Arc<AppState>,
+) -> Result<LifeModelCurrentView, AppError> {
+    let model = get_life_model_with_state(state).await?;
+    let current_value = model.preferences.communication_style.trim().to_string();
+    let current_value = if current_value.is_empty() {
+        None
+    } else {
+        Some(current_value)
+    };
+    let (proposal, proposal_unavailable_reason) =
+        accepted_communication_style_proposal(state, current_value.as_deref()).await;
+
+    let change = if let Some(proposal) = proposal {
+        let (source_excerpt, source_unavailable_reason) = proposal_source_excerpt(&proposal);
+        let (patch_id, patch_status, patch_path, patch_unavailable_reason) =
+            communication_style_patch_view(state, &proposal.id).await;
+        let (snapshot_versions, snapshot_unavailable_reason) =
+            communication_style_snapshot_view(state, &proposal.id).await;
+        let current_matches_accepted_after =
+            current_value.as_deref() == value_as_trimmed_string(&proposal.after).as_deref();
+        Some(LifeModelChangeView {
+            path: COMMUNICATION_STYLE_CANONICAL_PATH.into(),
+            proposal_id: proposal.id,
+            proposal_status: proposal.status.to_string(),
+            proposal_source: proposal.source.to_string(),
+            proposal_source_detail: proposal.source_detail,
+            proposal_run_id: proposal.run_id,
+            source_excerpt,
+            source_unavailable_reason,
+            confidence: proposal.confidence,
+            risk_level: proposal.risk_level.to_string(),
+            before: proposal.before,
+            after: proposal.after,
+            patch_id,
+            patch_status,
+            patch_path,
+            patch_unavailable_reason,
+            snapshot_versions,
+            snapshot_unavailable_reason,
+            current_matches_accepted_after,
+        })
+    } else {
+        None
+    };
+
+    let unavailable_reason = if current_value.is_none() {
+        Some("current_value_empty".into())
+    } else {
+        None
+    };
+    let current_value_source = if current_value.is_some()
+        && change
+            .as_ref()
+            .is_some_and(|change| change.current_matches_accepted_after)
+    {
+        "accepted_proposal".into()
+    } else if current_value.is_some() && change.is_some() {
+        "accepted_proposal_mismatch".into()
+    } else if current_value.is_some() {
+        proposal_unavailable_reason.unwrap_or_else(|| "current_life_model_only".into())
+    } else {
+        "unavailable".into()
+    };
+
+    Ok(LifeModelCurrentView {
+        path: COMMUNICATION_STYLE_CANONICAL_PATH.into(),
+        label: "沟通偏好".into(),
+        value: current_value,
+        unavailable_reason,
+        current_value_source,
+        change,
+    })
+}
+
+#[tauri::command]
+pub async fn get_life_model_current_view(
+    state: State<'_, Arc<AppState>>,
+) -> Result<LifeModelCurrentView, AppError> {
+    get_life_model_current_view_with_state(&state.inner().clone()).await
 }
 
 pub(crate) async fn save_life_model_with_state(
@@ -253,6 +531,9 @@ fn changed_life_model_sections(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openlife_core::agent::{
+        AgentProposal, ProposalSource, ProposalStatus, ProposalType, RiskLevel,
+    };
     use std::collections::HashMap;
 
     fn test_app_state(temp_dir: &tempfile::TempDir) -> Arc<AppState> {
@@ -388,6 +669,266 @@ mod tests {
         assert!(result.is_ok());
         let model = result.unwrap();
         assert!(model.is_effectively_empty());
+    }
+
+    #[tokio::test]
+    async fn lifemodel_closed_loop_current_view_shows_accepted_communication_style_with_trace() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut proposal = AgentProposal::new(
+            ProposalType::PreferenceUpdate,
+            "/preferences/communication",
+            serde_json::json!("先共情，再给结构化建议"),
+            "用户接受低风险沟通偏好。",
+            0.92,
+            RiskLevel::Low,
+            ProposalSource::FeedbackEvolution,
+        );
+        proposal.run_id = Some("run-communication-style-1".into());
+        proposal.source_detail = Some("maturation:preference.communication".into());
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        crate::commands::proposal::accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap();
+
+        let view = get_life_model_current_view_with_state(&state)
+            .await
+            .unwrap();
+        assert_eq!(view.path, COMMUNICATION_STYLE_CANONICAL_PATH);
+        assert_eq!(view.value.as_deref(), Some("先共情，再给结构化建议"));
+        assert_eq!(view.unavailable_reason, None);
+        assert_eq!(view.current_value_source, "accepted_proposal");
+        let change = view.change.expect("accepted preference has trace");
+        assert_eq!(change.path, COMMUNICATION_STYLE_CANONICAL_PATH);
+        assert_eq!(change.proposal_id, proposal_id);
+        assert_eq!(change.proposal_status, "accepted");
+        assert_eq!(change.proposal_source, "feedback_evolution");
+        assert_eq!(
+            change.proposal_source_detail.as_deref(),
+            Some("maturation:preference.communication")
+        );
+        assert_eq!(
+            change.proposal_run_id.as_deref(),
+            Some("run-communication-style-1")
+        );
+        assert_eq!(
+            change.source_excerpt.as_deref(),
+            Some("用户接受低风险沟通偏好。")
+        );
+        assert_eq!(change.source_unavailable_reason, None);
+        assert_eq!(change.patch_unavailable_reason, None);
+        assert!(change.patch_id.is_some());
+        assert_eq!(change.patch_status.as_deref(), Some("applied"));
+        assert_eq!(
+            change.patch_path.as_deref(),
+            Some(COMMUNICATION_STYLE_CANONICAL_PATH)
+        );
+        assert_eq!(change.snapshot_unavailable_reason, None);
+        assert_eq!(change.snapshot_versions.len(), 2);
+        assert!(change.current_matches_accepted_after);
+    }
+
+    #[tokio::test]
+    async fn lifemodel_closed_loop_current_view_reports_missing_patch_and_snapshot_reasons() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut model = LifeModel::default();
+        model.preferences.communication_style = "直接一点，先给结论".into();
+        state.life_model_manager.lock().await.save(&model).unwrap();
+        let mut proposal = AgentProposal::new(
+            ProposalType::PreferenceUpdate,
+            "preferences.communication_style",
+            serde_json::json!("直接一点，先给结论"),
+            "用户曾接受沟通偏好。",
+            0.88,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        proposal.accept();
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        let view = get_life_model_current_view_with_state(&state)
+            .await
+            .unwrap();
+
+        assert_eq!(view.value.as_deref(), Some("直接一点，先给结论"));
+        let change = view.change.expect("accepted proposal still traced");
+        assert_eq!(change.proposal_id, proposal_id);
+        assert_eq!(
+            change.patch_unavailable_reason.as_deref(),
+            Some("patch_missing")
+        );
+        assert_eq!(
+            change.snapshot_unavailable_reason.as_deref(),
+            Some("snapshot_missing")
+        );
+    }
+
+    #[tokio::test]
+    async fn lifemodel_closed_loop_reject_and_postpone_do_not_write_current_preference() {
+        for action in ["reject", "postpone"] {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let state = test_app_state(&temp_dir);
+            let proposal = AgentProposal::new(
+                ProposalType::PreferenceUpdate,
+                "preferences.communication",
+                serde_json::json!(format!("{action} should not write")),
+                "用户还没有接受。",
+                0.8,
+                RiskLevel::Low,
+                ProposalSource::FeedbackEvolution,
+            );
+            let proposal_id = proposal.id.clone();
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .create_proposal(&proposal)
+                .unwrap();
+            if action == "reject" {
+                crate::commands::proposal::reject_proposal_with_state(proposal_id.clone(), &state)
+                    .await
+                    .unwrap();
+            } else {
+                crate::commands::proposal::postpone_proposal_with_state(
+                    proposal_id.clone(),
+                    &state,
+                )
+                .await
+                .unwrap();
+            }
+
+            let model = state.life_model_manager.lock().await.load().unwrap();
+            assert_ne!(
+                model.preferences.communication_style,
+                format!("{action} should not write")
+            );
+            let view = get_life_model_current_view_with_state(&state)
+                .await
+                .unwrap();
+            assert_eq!(view.value, None);
+            assert_eq!(
+                view.unavailable_reason.as_deref(),
+                Some("current_value_empty")
+            );
+            assert!(view.change.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn lifemodel_closed_loop_failed_accept_does_not_become_visible_current_preference() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let proposal = AgentProposal::new(
+            ProposalType::PreferenceUpdate,
+            "preferences.communication_style",
+            serde_json::json!({ "style": "object values are invalid for this field" }),
+            "坏数据不应显示为已接受偏好。",
+            0.8,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        let err =
+            crate::commands::proposal::accept_proposal_with_state(proposal_id.clone(), &state)
+                .await
+                .expect_err("invalid preference payload must fail accept");
+        assert!(!err.trim().is_empty());
+
+        let stored = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&proposal_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ProposalStatus::Pending);
+        let view = get_life_model_current_view_with_state(&state)
+            .await
+            .unwrap();
+        assert_eq!(view.value, None);
+        assert_eq!(
+            view.unavailable_reason.as_deref(),
+            Some("current_value_empty")
+        );
+        assert!(view.change.is_none());
+    }
+
+    #[tokio::test]
+    async fn lifemodel_closed_loop_current_view_deduplicates_old_slash_and_dot_paths() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut model = LifeModel::default();
+        model.preferences.communication_style = "新的 canonical 沟通偏好".into();
+        state.life_model_manager.lock().await.save(&model).unwrap();
+
+        let mut old = AgentProposal::new(
+            ProposalType::PreferenceUpdate,
+            "/preferences/communication",
+            serde_json::json!("旧 slash 沟通偏好"),
+            "旧 alias proposal。",
+            0.7,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        old.accept();
+        let old_id = old.id.clone();
+        let mut current = AgentProposal::new(
+            ProposalType::PreferenceUpdate,
+            "preferences.communication_style",
+            serde_json::json!("新的 canonical 沟通偏好"),
+            "当前 accepted proposal。",
+            0.9,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        current.accept();
+        let current_id = current.id.clone();
+        {
+            let store = state.proposal_store.as_ref().unwrap().lock().await;
+            store.create_proposal(&old).unwrap();
+            store.create_proposal(&current).unwrap();
+        }
+
+        let view = get_life_model_current_view_with_state(&state)
+            .await
+            .unwrap();
+        let change = view.change.expect("current matching accepted proposal");
+        assert_eq!(view.path, COMMUNICATION_STYLE_CANONICAL_PATH);
+        assert_eq!(change.path, COMMUNICATION_STYLE_CANONICAL_PATH);
+        assert_eq!(change.proposal_id, current_id);
+        assert_ne!(change.proposal_id, old_id);
+        assert!(change.current_matches_accepted_after);
     }
 
     #[tokio::test]

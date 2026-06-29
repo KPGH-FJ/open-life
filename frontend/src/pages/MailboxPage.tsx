@@ -23,7 +23,7 @@ import {
   type ProposalStatus,
 } from "../tauri";
 import ReviewDecisionCard from "../components/ReviewDecisionCard";
-import { proposalSubject } from "../utils/proposalDisplay";
+import { canonicalLifeModelPath, proposalSubject } from "../utils/proposalDisplay";
 import {
   buildReviewDecisionView,
   reviewGroupLabel,
@@ -163,7 +163,7 @@ function appliedNotice(proposal: AgentProposal): string {
   ) {
     return `已处理确认：${proposal.affectedPath}`;
   }
-  return `已应用到人生模型：${proposal.affectedPath}`;
+  return `已应用到人生模型：${canonicalLifeModelPath(proposal.affectedPath)}`;
 }
 
 function statusLabel(status: ProposalStatus): string {

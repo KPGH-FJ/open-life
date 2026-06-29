@@ -15,11 +15,13 @@ import {
   builderListUnfinished,
   countMemoryChunks,
   getLifeModel,
+  getLifeModelCurrentView,
   getMemoryTierStats,
   getModel4DCompletion,
   getSystemDiagnostics,
   listProposals,
   type AgentProposal,
+  type LifeModelCurrentView,
   type Model4DCompletion,
   type SystemDiagnostics,
   type TierStats,
@@ -64,6 +66,7 @@ type LifeModelPageState = {
   memoryCount: number | null;
   tierStats: TierStats | null;
   pendingProposals: AgentProposal[];
+  currentView: LifeModelCurrentView | null;
   loading: boolean;
   error: string;
 };
@@ -82,6 +85,7 @@ const INITIAL_STATE: LifeModelPageState = {
   memoryCount: null,
   tierStats: null,
   pendingProposals: [],
+  currentView: null,
   loading: true,
   error: "",
 };
@@ -131,6 +135,14 @@ function formatUpdatedAt(value: string | undefined): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "最近更新 未记录";
   return `最近更新 ${date.toLocaleDateString("zh-CN")}`;
+}
+
+function typedReasonLabel(value: string | undefined | null): string | null {
+  return value?.trim() || null;
+}
+
+function traceValue(value: string | undefined | null, fallback: string): string {
+  return value?.trim() || fallback;
 }
 
 function sourceLabel(source: string): string {
@@ -401,20 +413,114 @@ function BuildSection({
   );
 }
 
+function CommunicationStyleCurrentView({
+  currentView,
+}: {
+  currentView: LifeModelCurrentView | null;
+}) {
+  const value = currentView?.value?.trim();
+  if (!value) return null;
+  const change = currentView?.change ?? null;
+  const patchUnavailableReason = typedReasonLabel(change?.patchUnavailableReason);
+  const snapshotUnavailableReason = typedReasonLabel(change?.snapshotUnavailableReason);
+  const sourceUnavailableReason = typedReasonLabel(change?.sourceUnavailableReason);
+
+  return (
+    <section
+      data-testid="communication-style-current-view"
+      className="rounded-lg border border-stone-200 bg-white p-4"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="text-xs font-medium text-stone-500">Preferences</div>
+          <h3 className="mt-1 text-sm font-semibold text-stone-950">
+            {currentView?.label ?? "沟通偏好"}
+          </h3>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          <ProductStatusChip label="已确认偏好" tone="ready" />
+          <ProductStatusChip label={currentView?.currentValueSource ?? "unavailable"} />
+        </div>
+      </div>
+      <div className="mt-3 rounded-md border border-stone-200 bg-stone-50 px-3 py-2 text-sm leading-6 text-stone-900">
+        {value}
+      </div>
+
+      <div className="mt-3 grid gap-2 text-xs text-stone-600 md:grid-cols-2">
+        <div>
+          <span className="text-stone-400">Path：</span>
+          <span className="break-all">{currentView?.path ?? "preferences.communication_style"}</span>
+        </div>
+        <div>
+          <span className="text-stone-400">Proposal：</span>
+          <span className="break-all">{traceValue(change?.proposalId, "accepted_proposal_missing")}</span>
+        </div>
+        <div>
+          <span className="text-stone-400">Source：</span>
+          <span className="break-all">
+            {change?.sourceExcerpt ?? sourceUnavailableReason ?? "source_excerpt_unavailable"}
+          </span>
+        </div>
+        <div>
+          <span className="text-stone-400">Run：</span>
+          {change?.proposalRunId ? (
+            <a className="break-all text-stone-900 underline" href={`#/runs/${change.proposalRunId}`}>
+              {change.proposalRunId}
+            </a>
+          ) : (
+            <span>run_unavailable</span>
+          )}
+        </div>
+        <div>
+          <span className="text-stone-400">Patch：</span>
+          <span className="break-all">
+            {change?.patchId
+              ? `${change.patchId} · ${change.patchStatus ?? "status_unavailable"}`
+              : patchUnavailableReason ?? "patch_unavailable"}
+          </span>
+        </div>
+        <div>
+          <span className="text-stone-400">Snapshot：</span>
+          <span className="break-all">
+            {change?.snapshotVersions?.length
+              ? change.snapshotVersions.join(" / ")
+              : snapshotUnavailableReason ?? "snapshot_unavailable"}
+          </span>
+        </div>
+        <div>
+          <span className="text-stone-400">Confidence：</span>
+          <span>
+            {typeof change?.confidence === "number"
+              ? `${Math.round(change.confidence * 100)}%`
+              : "confidence_unavailable"}
+          </span>
+        </div>
+        <div>
+          <span className="text-stone-400">Risk：</span>
+          <span>{change?.riskLevel ?? "risk_unavailable"}</span>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function OverviewSection({
   lifeModel,
   diagnostics,
   completion,
   pendingProposals,
+  currentView,
 }: {
   lifeModel: LifeModel | null;
   diagnostics: SystemDiagnostics | null;
   completion: Model4DCompletion | null;
   pendingProposals: AgentProposal[];
+  currentView: LifeModelCurrentView | null;
 }) {
   const [ignoredIssueIds, setIgnoredIssueIds] = useState<Set<string>>(new Set());
   const [deferredIssueIds, setDeferredIssueIds] = useState<Set<string>>(new Set());
-  const empty = isModelEmpty(lifeModel, diagnostics);
+  const hasCommunicationStyle = Boolean(currentView?.value?.trim());
+  const empty = isModelEmpty(lifeModel, diagnostics) && !hasCommunicationStyle;
   const dimensions = useMemo(() => (lifeModel ? buildDimensions(lifeModel) : []), [lifeModel]);
   const suppressedByDimension = useMemo(
     () =>
@@ -500,6 +606,7 @@ function OverviewSection({
           }}
         />
       )}
+      <CommunicationStyleCurrentView currentView={currentView} />
       <div className="rounded-lg border border-stone-200 bg-white">
         {dimensions.map((dimension, index) => (
           <div
@@ -782,6 +889,7 @@ export default function LifeModelPage() {
       try {
         const [
           lifeModel,
+          currentView,
           diagnostics,
           completion,
           unfinishedSessions,
@@ -790,6 +898,7 @@ export default function LifeModelPage() {
           pendingProposals,
         ] = await Promise.all([
           getLifeModel().catch(() => null),
+          getLifeModelCurrentView().catch(() => null),
           getSystemDiagnostics().catch(() => null),
           getModel4DCompletion().catch(() => null),
           builderListUnfinished().catch(() => []),
@@ -807,6 +916,7 @@ export default function LifeModelPage() {
           memoryCount,
           tierStats,
           pendingProposals,
+          currentView,
           loading: false,
           error: "",
         });
@@ -905,6 +1015,7 @@ export default function LifeModelPage() {
               diagnostics={state.diagnostics}
               completion={state.completion}
               pendingProposals={state.pendingProposals}
+              currentView={state.currentView}
             />
           )}
           {activeSection === "evidence" && (
