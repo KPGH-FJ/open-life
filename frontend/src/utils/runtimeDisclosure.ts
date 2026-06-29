@@ -3,6 +3,7 @@ import type {
   MainChatAgentIngressDecision,
   MainChatAgentTaskState,
   MainChatTaskSummary,
+  RunEvidenceView,
   RuntimeRouteEvidence,
   RouteIdentity,
 } from "../tauri";
@@ -68,6 +69,8 @@ function boundaryFromEvidence(evidence?: RuntimeRouteEvidence | null): {
 function statusLabel(status?: string): { label: string; tone: ProductTone } {
   if (status === "completed") return { label: "已完成", tone: "ready" };
   if (status === "waiting_permission") return { label: "等待确认", tone: "warning" };
+  if (status === "blocked") return { label: "已阻断", tone: "warning" };
+  if (status === "timed_out") return { label: "已超时", tone: "danger" };
   if (status === "failed") return { label: "失败", tone: "danger" };
   if (status === "cancelled") return { label: "已取消", tone: "neutral" };
   if (status === "running") return { label: "运行中", tone: "info" };
@@ -100,22 +103,33 @@ function boundaryLabel(
 
 function blockerCount(
   taskState?: MainChatAgentTaskState | null,
-  taskSummary?: MainChatTaskSummary | null
+  taskSummary?: MainChatTaskSummary | null,
+  evidenceView?: RunEvidenceView | null
 ): number {
+  if (evidenceView) return evidenceView.blockers?.length ?? 0;
   const stateCount = taskState?.session?.pendingBlockers?.length ?? 0;
   const summaryCount = taskSummary?.pendingBlockerCount ?? 0;
   return Math.max(stateCount, summaryCount);
 }
 
-function proposalCount(run: AgentRun | null, taskSummary?: MainChatTaskSummary | null): number {
+function proposalCount(
+  run: AgentRun | null,
+  taskSummary?: MainChatTaskSummary | null,
+  evidenceView?: RunEvidenceView | null
+): number {
+  if (evidenceView) return evidenceView.proposals?.length ?? 0;
   return Math.max(run?.generatedProposals?.length ?? 0, taskSummary?.pendingProposalCount ?? 0);
 }
 
 function nextAction(
   run: AgentRun | null,
   taskState?: MainChatAgentTaskState | null,
-  taskSummary?: MainChatTaskSummary | null
+  taskSummary?: MainChatTaskSummary | null,
+  evidenceView?: RunEvidenceView | null
 ): string {
+  if (evidenceView?.nextRecommendedControl) {
+    return evidenceView.nextRecommendedControl.replace(/_/g, " ");
+  }
   if (taskSummary?.nextRecommendedControl) {
     return taskSummary.nextRecommendedControl.replace(/_/g, " ");
   }
@@ -123,7 +137,7 @@ function nextAction(
   if (taskState?.canRetry || (run?.status === "failed" && run.error?.recoverable)) return "可重试";
   if (taskState?.canCancel || run?.status === "running") return "可取消";
   if (run?.status === "waiting_permission") return "需要确认";
-  if (proposalCount(run, taskSummary) > 0) return "去 Review 处理";
+  if (proposalCount(run, taskSummary, evidenceView) > 0) return "去 Review 处理";
   return run?.status === "completed" ? "无需操作" : "查看详情";
 }
 
@@ -132,37 +146,51 @@ export function buildRuntimeDisclosure(
   options: {
     taskState?: MainChatAgentTaskState | null;
     taskSummary?: MainChatTaskSummary | null;
+    evidenceView?: RunEvidenceView | null;
     ingress?: MainChatAgentIngressDecision | null;
     runtimeRouteEvidence?: RuntimeRouteEvidence | null;
+    strictRuntimeRouteEvidence?: boolean;
   } = {}
 ): RuntimeDisclosureView {
-  const runtimeRouteEvidence = options.runtimeRouteEvidence ?? runtimeRouteEvidenceFromRun(run);
+  const runtimeRouteEvidence =
+    options.runtimeRouteEvidence ?? options.evidenceView?.routeEvidence ?? runtimeRouteEvidenceFromRun(run);
+  const strictRuntimeRouteEvidence =
+    options.strictRuntimeRouteEvidence || Boolean(options.evidenceView);
   const evidenceRoute = primaryEvidenceRoute(runtimeRouteEvidence);
-  const route = routeTypeLabel(evidenceRoute?.route_type ?? run?.modelRoute?.routeType);
+  const route = routeTypeLabel(
+    evidenceRoute?.route_type ?? (strictRuntimeRouteEvidence ? undefined : run?.modelRoute?.routeType)
+  );
   const boundary =
-    boundaryFromEvidence(runtimeRouteEvidence) ?? boundaryLabel(run, options.ingress);
-  const outcome = statusLabel(run?.status);
-  const tools = run?.toolCallCount ?? run?.actions?.length ?? 0;
+    boundaryFromEvidence(runtimeRouteEvidence) ??
+    (strictRuntimeRouteEvidence
+      ? { label: "外发记录未接入", tone: "neutral" as ProductTone }
+      : boundaryLabel(run, options.ingress));
+  const outcome = statusLabel(options.evidenceView?.lifecycleState ?? run?.status);
+  const tools = options.evidenceView?.actionCount ?? run?.toolCallCount ?? run?.actions?.length ?? 0;
   const toolsLabel =
     tools > 0
       ? `工具 ${tools}`
       : run?.contextSummary?.usedToolsPrompt
         ? "工具提示已注入"
         : "未调用工具";
-  const proposals = proposalCount(run, options.taskSummary);
-  const blockers = blockerCount(options.taskState, options.taskSummary);
+  const proposals = proposalCount(run, options.taskSummary, options.evidenceView);
+  const blockers = blockerCount(options.taskState, options.taskSummary, options.evidenceView);
   const providerLabel =
     evidenceRoute?.provider ||
-    (runtimeRouteEvidence ? "provider 未验证" : run?.modelRoute?.provider) ||
+    (runtimeRouteEvidence || strictRuntimeRouteEvidence ? "provider 未验证" : run?.modelRoute?.provider) ||
     "provider 未验证";
   const modelLabel =
     evidenceRoute?.model ||
-    (runtimeRouteEvidence ? "model 未验证" : run?.modelRoute?.model) ||
+    (runtimeRouteEvidence || strictRuntimeRouteEvidence ? "model 未验证" : run?.modelRoute?.model) ||
     "model 未验证";
   const memoryHits = run?.contextSummary?.memoryHitCount ?? 0;
   const routeReason =
-    evidenceRoute?.reason || run?.modelRoute?.reason || options.ingress?.reasonSummary;
-  const fallbackReason = runtimeRouteEvidence?.fallback?.reason || run?.modelRoute?.fallbackReason;
+    evidenceRoute?.reason ||
+    (strictRuntimeRouteEvidence ? undefined : run?.modelRoute?.reason) ||
+    options.ingress?.reasonSummary;
+  const fallbackReason =
+    runtimeRouteEvidence?.fallback?.reason ||
+    (strictRuntimeRouteEvidence ? undefined : run?.modelRoute?.fallbackReason);
   const technicalRows = [
     { label: "Run ID", value: run?.id ?? "未记录" },
     { label: "Provider", value: providerLabel },
@@ -179,17 +207,23 @@ export function buildRuntimeDisclosure(
     { label: "Privacy class", value: options.ingress?.privacyRisk?.privacyClass ?? "未记录" },
     {
       label: "Pending blockers",
-      value: options.taskState?.session?.pendingBlockers?.join(", ") || `${blockers}`,
+      value:
+        options.evidenceView?.blockers?.join(", ") ||
+        options.taskState?.session?.pendingBlockers?.join(", ") ||
+        `${blockers}`,
     },
   ];
 
   if (runtimeRouteEvidence?.evidence_id) {
     technicalRows.push({ label: "Evidence ID", value: runtimeRouteEvidence.evidence_id });
   }
+  if (options.evidenceView?.redactionState) {
+    technicalRows.push({ label: "Redaction", value: options.evidenceView.redactionState });
+  }
   if (fallbackReason) {
     technicalRows.push({ label: "Fallback", value: fallbackReason });
   }
-  if (run?.modelRoute?.retryCount) {
+  if (!strictRuntimeRouteEvidence && run?.modelRoute?.retryCount) {
     technicalRows.push({ label: "Retry", value: `${run.modelRoute.retryCount}` });
   }
 
@@ -203,7 +237,7 @@ export function buildRuntimeDisclosure(
     toolsLabel,
     proposalsLabel: proposals > 0 ? `待确认 ${proposals}` : "无新提案",
     blockersLabel: blockers > 0 ? `阻断 ${blockers}` : "无阻断",
-    nextActionLabel: nextAction(run, options.taskState, options.taskSummary),
+    nextActionLabel: nextAction(run, options.taskState, options.taskSummary, options.evidenceView),
     providerLabel,
     modelLabel,
     routeReason,

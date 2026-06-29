@@ -1,3 +1,4 @@
+use crate::main_chat_runtime_support::{finalize_main_chat_task_failure, MainChatTaskFailureKind};
 use crate::main_chat_task_controls::{
     cancel_main_chat_agent_task, get_main_chat_agent_task_detail, list_main_chat_agent_tasks,
     refresh_main_chat_agent_task_context, resume_main_chat_agent_task, MainChatAgentTaskFilter,
@@ -268,6 +269,281 @@ async fn main_chat_task_continuity_list_detail_and_refresh_are_evidence_backed()
         ExecutionQueueStatus::Failed,
         "refresh must not automatically replay failed actions"
     );
+}
+
+#[tokio::test]
+async fn failure_finalizer_records_timeout_run_session_and_transcript_evidence() {
+    use openlife_core::agent::main_chat_agent_v1::{
+        AgentTaskSessionDraft, AgentTaskSessionStatus, MainChatAgentStrategy,
+    };
+    use openlife_core::agent::{AgentRun, AgentRunStatus};
+
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let app = tauri::test::mock_builder()
+        .manage(state.clone())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("build mock tauri app");
+    let session = {
+        let store = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("main chat session store")
+            .lock()
+            .await;
+        store
+            .create_session(AgentTaskSessionDraft {
+                chat_session_id: "timeout-finalizer-chat".into(),
+                user_goal: "Provider should time out in the harness.".into(),
+                selected_strategy: MainChatAgentStrategy::DirectAnswer,
+                current_plan_summary: None,
+                context_snapshot_refs: vec!["timeout-context".into()],
+            })
+            .expect("create session")
+    };
+    let run = AgentRun::new_chat_run(&session.chat_session_id, "provider timeout fixture");
+    {
+        let run_store = state
+            .agent_run_store
+            .as_ref()
+            .expect("run store")
+            .lock()
+            .await;
+        run_store.create_run(&run).expect("create run");
+    }
+
+    let finalized = finalize_main_chat_task_failure(
+        &state,
+        Some(&run.id),
+        Some(&session.id),
+        MainChatTaskFailureKind::Timeout,
+        "Provider timed out after the configured eval deadline.",
+        "v6.provider_timeout_replay",
+    )
+    .await
+    .expect("finalize timeout");
+    assert_eq!(finalized.lifecycle_state, "timed_out");
+
+    let stored_run = {
+        let run_store = state
+            .agent_run_store
+            .as_ref()
+            .expect("run store")
+            .lock()
+            .await;
+        run_store
+            .get_run(&run.id)
+            .expect("load run")
+            .expect("run exists")
+    };
+    assert_eq!(stored_run.status, AgentRunStatus::Failed);
+    assert_eq!(
+        stored_run.error.as_ref().map(|error| error.phase.as_str()),
+        Some("timeout")
+    );
+
+    let stored_session = {
+        let store = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("main chat session store")
+            .lock()
+            .await;
+        store
+            .load_session(&session.id)
+            .expect("load session")
+            .expect("session exists")
+    };
+    assert_eq!(stored_session.status, AgentTaskSessionStatus::Failed);
+
+    let detail = get_main_chat_agent_task_detail(
+        session.id.clone(),
+        app.state::<std::sync::Arc<crate::AppState>>(),
+    )
+    .await
+    .expect("detail");
+    assert_eq!(detail.evidence_view.lifecycle_state, "timed_out");
+    assert!(detail.evidence_view.event_timeline.iter().any(|entry| {
+        entry.failure_kind.as_deref() == Some("timeout")
+            && entry.normalized_lifecycle_state.as_deref() == Some("timed_out")
+            && entry.source_ref.as_deref() == Some("v6.provider_timeout_replay")
+    }));
+    let timeout_entry = detail
+        .transcript
+        .iter()
+        .find(|entry| {
+            entry
+                .metadata
+                .get("failure_kind")
+                .and_then(serde_json::Value::as_str)
+                == Some("timeout")
+        })
+        .expect("timeout transcript entry");
+    assert_eq!(
+        timeout_entry
+            .metadata
+            .get("runId")
+            .and_then(serde_json::Value::as_str),
+        Some(run.id.as_str())
+    );
+    assert!(
+        timeout_entry
+            .metadata
+            .get("routeEvidenceRef")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .contains(&run.id),
+        "timeout finalizer should leave a traceable route evidence ref: {:?}",
+        timeout_entry.metadata
+    );
+    assert_eq!(
+        detail.evidence_view.allowed_controls,
+        vec!["open_trace".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn failure_finalizer_does_not_display_non_timeout_failure_as_timed_out() {
+    use openlife_core::agent::main_chat_agent_v1::{AgentTaskSessionDraft, MainChatAgentStrategy};
+    use openlife_core::agent::AgentRun;
+
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let app = tauri::test::mock_builder()
+        .manage(state.clone())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("build mock tauri app");
+    let session = {
+        let store = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("main chat session store")
+            .lock()
+            .await;
+        store
+            .create_session(AgentTaskSessionDraft {
+                chat_session_id: "provider-error-finalizer-chat".into(),
+                user_goal: "Provider error should not become timed out.".into(),
+                selected_strategy: MainChatAgentStrategy::DirectAnswer,
+                current_plan_summary: None,
+                context_snapshot_refs: vec![],
+            })
+            .expect("create session")
+    };
+    let run = AgentRun::new_chat_run(&session.chat_session_id, "provider error fixture");
+    {
+        let run_store = state
+            .agent_run_store
+            .as_ref()
+            .expect("run store")
+            .lock()
+            .await;
+        run_store.create_run(&run).expect("create run");
+    }
+
+    finalize_main_chat_task_failure(
+        &state,
+        Some(&run.id),
+        Some(&session.id),
+        MainChatTaskFailureKind::ProviderError,
+        "Provider returned an error.",
+        "v6.provider_error_replay",
+    )
+    .await
+    .expect("finalize provider error");
+
+    let detail = get_main_chat_agent_task_detail(
+        session.id.clone(),
+        app.state::<std::sync::Arc<crate::AppState>>(),
+    )
+    .await
+    .expect("detail");
+    assert_eq!(detail.evidence_view.lifecycle_state, "failed");
+    assert!(detail
+        .evidence_view
+        .event_timeline
+        .iter()
+        .any(|entry| entry.failure_kind.as_deref() == Some("provider_error")));
+}
+
+#[tokio::test]
+async fn policy_blocker_finalizer_creates_auditable_detail_event_without_tool_call() {
+    use openlife_core::agent::main_chat_agent_v1::{
+        AgentTaskSessionDraft, AgentTaskSessionStatus, MainChatAgentStrategy,
+    };
+    use openlife_core::agent::AgentRun;
+
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let app = tauri::test::mock_builder()
+        .manage(state.clone())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("build mock tauri app");
+    let session = {
+        let store = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("main chat session store")
+            .lock()
+            .await;
+        store
+            .create_session(AgentTaskSessionDraft {
+                chat_session_id: "blocker-finalizer-chat".into(),
+                user_goal: "Read a web or MCP target that policy blocks.".into(),
+                selected_strategy: MainChatAgentStrategy::ReActToolExecution,
+                current_plan_summary: None,
+                context_snapshot_refs: vec![],
+            })
+            .expect("create session")
+    };
+    let run = AgentRun::new_chat_run(&session.chat_session_id, "blocked read fixture");
+    {
+        let run_store = state
+            .agent_run_store
+            .as_ref()
+            .expect("run store")
+            .lock()
+            .await;
+        run_store.create_run(&run).expect("create run");
+    }
+
+    finalize_main_chat_task_failure(
+        &state,
+        Some(&run.id),
+        Some(&session.id),
+        MainChatTaskFailureKind::PolicyBlocker,
+        "web_network_policy_blocked",
+        "v4.web_mcp_blocker_replay",
+    )
+    .await
+    .expect("finalize blocker");
+
+    let stored_session = {
+        let store = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("main chat session store")
+            .lock()
+            .await;
+        store
+            .load_session(&session.id)
+            .expect("load session")
+            .expect("session exists")
+    };
+    assert_eq!(stored_session.status, AgentTaskSessionStatus::Blocked);
+
+    let detail = get_main_chat_agent_task_detail(
+        session.id.clone(),
+        app.state::<std::sync::Arc<crate::AppState>>(),
+    )
+    .await
+    .expect("detail");
+    assert_eq!(detail.evidence_view.lifecycle_state, "blocked");
+    assert_eq!(detail.evidence_view.action_count, 0);
+    assert!(detail
+        .evidence_view
+        .blockers
+        .contains(&"web_network_policy_blocked".to_string()));
+    assert!(detail.evidence_view.event_timeline.iter().any(|entry| {
+        entry.failure_kind.as_deref() == Some("policy_blocker") && entry.summary.contains("blocked")
+    }));
 }
 
 #[tokio::test]
@@ -866,6 +1142,7 @@ async fn cancel_main_chat_task_cancels_nonterminal_queued_actions() {
         AgentTaskSessionDraft, AgentTaskSessionStatus, ExecutionAction, ExecutionPolicy,
         ExecutionQueueStatus, MainChatAgentStrategy,
     };
+    use openlife_core::agent::{AgentRun, AgentRunStatus};
 
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let app = tauri::test::mock_builder()
@@ -890,6 +1167,16 @@ async fn cancel_main_chat_task_cancels_nonterminal_queued_actions() {
             })
             .expect("create main chat task session")
     };
+    let run = AgentRun::new_chat_run(&session.chat_session_id, "cancel running task fixture");
+    {
+        let run_store = state
+            .agent_run_store
+            .as_ref()
+            .expect("run store")
+            .lock()
+            .await;
+        run_store.create_run(&run).expect("create cancel run");
+    }
     let planned_action = ExecutionAction::new("memory.search", "Queued read action.");
     let permission_action = ExecutionAction::new("external.write", "Queued external write.");
     let (planned_id, permission_id) = {
@@ -957,6 +1244,19 @@ async fn cancel_main_chat_task_cancels_nonterminal_queued_actions() {
             .expect("cancelled session exists")
     };
     assert_eq!(cancelled_session.status, AgentTaskSessionStatus::Cancelled);
+    let cancelled_run = {
+        let run_store = state
+            .agent_run_store
+            .as_ref()
+            .expect("run store")
+            .lock()
+            .await;
+        run_store
+            .get_run(&run.id)
+            .expect("load cancel run")
+            .expect("cancel run exists")
+    };
+    assert_eq!(cancelled_run.status, AgentRunStatus::Cancelled);
 
     let actions = {
         let queue = state
@@ -985,6 +1285,18 @@ async fn cancel_main_chat_task_cancels_nonterminal_queued_actions() {
             Some(true)
         );
     }
+
+    let detail = get_main_chat_agent_task_detail(
+        session.id.clone(),
+        app.state::<std::sync::Arc<crate::AppState>>(),
+    )
+    .await
+    .expect("cancel detail");
+    assert_eq!(detail.evidence_view.lifecycle_state, "cancelled");
+    assert!(detail.evidence_view.event_timeline.iter().any(|entry| {
+        entry.failure_kind.as_deref() == Some("cancelled")
+            && entry.normalized_lifecycle_state.as_deref() == Some("cancelled")
+    }));
 }
 
 #[test]

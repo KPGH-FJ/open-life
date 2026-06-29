@@ -39,7 +39,8 @@ use crate::main_chat_route_preview::{
     attach_route_preview_trace, preview_main_chat_turn_route, MainChatRoutePreviewTrace,
 };
 use crate::main_chat_runtime_support::{
-    append_main_chat_agent_transcript, start_main_chat_agent_turn,
+    append_main_chat_agent_transcript, finalize_main_chat_task_failure, start_main_chat_agent_turn,
+    MainChatTaskFailureKind,
 };
 use crate::main_chat_strategy::try_run_main_chat_agent_strategy;
 use crate::main_chat_streaming::{STREAM_CHUNK_TIMEOUT_SECS, STREAM_INIT_TIMEOUT_SECS};
@@ -1133,7 +1134,17 @@ async fn run_legacy_streaming_delivery(
                                     &message,
                                     emit_stream_event,
                                 );
-                                fail_stream_agent_run(state, &mut agent_run, &message).await;
+                                fail_stream_agent_run(
+                                    state,
+                                    &mut agent_run,
+                                    main_chat_agent_turn
+                                        .decision
+                                        .agent_task_session_id
+                                        .as_deref(),
+                                    MainChatTaskFailureKind::Timeout,
+                                    &message,
+                                )
+                                .await;
                                 return Err(message);
                             }
                         }
@@ -1200,7 +1211,17 @@ async fn run_legacy_streaming_delivery(
                                     &message,
                                     emit_stream_event,
                                 );
-                                fail_stream_agent_run(state, &mut agent_run, &message).await;
+                                fail_stream_agent_run(
+                                    state,
+                                    &mut agent_run,
+                                    main_chat_agent_turn
+                                        .decision
+                                        .agent_task_session_id
+                                        .as_deref(),
+                                    MainChatTaskFailureKind::ProviderError,
+                                    &message,
+                                )
+                                .await;
                                 return Err(message);
                             }
                         }
@@ -1238,7 +1259,22 @@ async fn run_legacy_streaming_delivery(
                             stream_error, fallback_error
                         );
                         emit_stream_error(session_id, &agent_run.id, &message, emit_stream_event);
-                        fail_stream_agent_run(state, &mut agent_run, &message).await;
+                        let failure_kind = if stream_error.contains("超时") {
+                            MainChatTaskFailureKind::Timeout
+                        } else {
+                            MainChatTaskFailureKind::ProviderError
+                        };
+                        fail_stream_agent_run(
+                            state,
+                            &mut agent_run,
+                            main_chat_agent_turn
+                                .decision
+                                .agent_task_session_id
+                                .as_deref(),
+                            failure_kind,
+                            &message,
+                        )
+                        .await;
                         return Err(message);
                     }
                 }
@@ -1275,7 +1311,17 @@ async fn run_legacy_streaming_delivery(
                         stream_error, fallback_error
                     );
                     emit_stream_error(session_id, &agent_run.id, &message, emit_stream_event);
-                    fail_stream_agent_run(state, &mut agent_run, &message).await;
+                    fail_stream_agent_run(
+                        state,
+                        &mut agent_run,
+                        main_chat_agent_turn
+                            .decision
+                            .agent_task_session_id
+                            .as_deref(),
+                        MainChatTaskFailureKind::ProviderError,
+                        &message,
+                    )
+                    .await;
                     return Err(message);
                 }
             }
@@ -1437,19 +1483,27 @@ fn emit_stream_error(
 async fn fail_stream_agent_run(
     state: &Arc<AppState>,
     agent_run: &mut openlife_core::agent::AgentRun,
+    task_session_id: Option<&str>,
+    failure_kind: MainChatTaskFailureKind,
     message: &str,
 ) {
     let error = openlife_core::agent::AgentRunError {
         message: message.to_string(),
-        phase: "stream".to_string(),
+        phase: failure_kind.as_str().to_string(),
         recoverable: true,
     };
     agent_run.fail(error);
-    if let Some(ref store_arc) = state.agent_run_store {
-        let store = store_arc.lock().await;
-        if let Err(e) = store.update_run(agent_run) {
-            log::warn!("[AgentRun] 更新运行记录失败: {}", e);
-        }
+    if let Err(e) = finalize_main_chat_task_failure(
+        state,
+        Some(&agent_run.id),
+        task_session_id,
+        failure_kind,
+        message,
+        "main_chat_streaming.fail_stream_agent_run",
+    )
+    .await
+    {
+        log::warn!("[AgentRun] stream failure finalizer failed: {}", e);
     }
 }
 

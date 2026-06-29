@@ -49,7 +49,8 @@ use crate::main_chat_react_tool_selection::{
 use crate::main_chat_runtime_support::{
     append_main_chat_agent_transcript, append_main_chat_direct_answer_contract_transcript,
     complete_main_chat_agent_turn_session, enqueue_main_chat_agent_action, fail_main_chat_action,
-    transition_main_chat_action, MainChatAgentTurn,
+    finalize_main_chat_task_failure, transition_main_chat_action, MainChatAgentTurn,
+    MainChatTaskFailureKind,
 };
 use crate::{AppState, SendMessageResult, ToolCallResult, ToolCallStatus};
 
@@ -3683,6 +3684,18 @@ async fn build_blocked_kernel_command_surface_result(
         if let Err(err) = store.create_run(&agent_run) {
             log::warn!("[MainChatKernel] create failed AgentRun failed: {}", err);
         }
+    }
+    if let Err(err) = finalize_main_chat_task_failure(
+        state,
+        Some(&agent_run.id),
+        Some(task_session_id),
+        MainChatTaskFailureKind::PolicyBlocker,
+        &blocker_summary,
+        "main_chat_kernel.blocked_command_surface",
+    )
+    .await
+    {
+        log::warn!("[MainChatKernel] finalize blocker evidence failed: {}", err);
     }
     let tool_calls = record_kernel_tool_call_evidence(
         state,

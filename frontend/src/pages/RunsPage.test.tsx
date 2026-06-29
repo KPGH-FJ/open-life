@@ -163,14 +163,111 @@ describe("RunsPage contract", () => {
             runId: "run-sensitive-1",
             title: "Sensitive running task",
             strategy: "direct_answer",
-            status: "running",
+            status: "failed",
             lastUpdatedAt: new Date().toISOString(),
-            lastObservationPreview: "Waiting for model",
+            lastObservationPreview: "Provider timed out",
             pendingBlockerCount: 0,
             pendingProposalCount: 0,
-            nextRecommendedControl: "cancel",
-            staleState: "stale",
+            nextRecommendedControl: "open_trace",
+            staleState: "terminal",
             resumeSafetyDigest: "sha256:test",
+            lifecycleState: "timed_out",
+            lastSafeEvent: "Provider timed out",
+            actionCount: 1,
+            observationCount: 2,
+            allowedControls: ["open_trace"],
+            redactionState: "metadata_only",
+            routeEvidence: {
+              evidence_id: "runtime-route-run-sensitive",
+              generated_at: new Date().toISOString(),
+              conversation_id: "session-sensitive",
+              run_id: "run-sensitive-1",
+              task_session_id: "task-session-sensitive",
+              answer_scope: "current_turn",
+              planned_route: null,
+              actual_route: {
+                provider: "deepseek",
+                model: "deepseek-chat",
+                route_type: "cloud",
+                privacy_level: "summary",
+                reason: "runtime_route_evidence",
+                provider_health_is_estimated: false,
+              },
+              last_completed_route: null,
+              provider_readiness: {
+                configured: true,
+                credential_present: true,
+                validated: true,
+                validation_status: "ready",
+                preferred: "cloud",
+                actually_used: "deepseek",
+                stale: false,
+                failed: false,
+                last_checked_at: null,
+              },
+              fallback: null,
+              external_transmission: "sent",
+              source_refs: [],
+              truth_confidence: "verified",
+            },
+            evidenceView: {
+              runId: "run-sensitive-1",
+              taskSessionId: "task-session-sensitive",
+              title: "Sensitive running task",
+              lifecycleState: "timed_out",
+              routeEvidence: {
+                evidence_id: "runtime-route-run-sensitive",
+                generated_at: new Date().toISOString(),
+                conversation_id: "session-sensitive",
+                run_id: "run-sensitive-1",
+                task_session_id: "task-session-sensitive",
+                answer_scope: "current_turn",
+                planned_route: null,
+                actual_route: {
+                  provider: "deepseek",
+                  model: "deepseek-chat",
+                  route_type: "cloud",
+                  privacy_level: "summary",
+                  reason: "runtime_route_evidence",
+                  provider_health_is_estimated: false,
+                },
+                last_completed_route: null,
+                provider_readiness: {
+                  configured: true,
+                  credential_present: true,
+                  validated: true,
+                  validation_status: "ready",
+                  preferred: "cloud",
+                  actually_used: "deepseek",
+                  stale: false,
+                  failed: false,
+                  last_checked_at: null,
+                },
+                fallback: null,
+                external_transmission: "sent",
+                source_refs: [],
+                truth_confidence: "verified",
+              },
+              eventTimeline: [
+                {
+                  id: "timeout-event",
+                  kind: "error",
+                  summary: "Provider timed out",
+                  createdAt: new Date().toISOString(),
+                  failureKind: "timeout",
+                  normalizedLifecycleState: "timed_out",
+                  sourceRef: "v6.provider_timeout_replay",
+                },
+              ],
+              actionCount: 1,
+              observationCount: 2,
+              blockers: [],
+              proposals: [],
+              planRefs: ["timeout-context"],
+              allowedControls: ["open_trace"],
+              nextRecommendedControl: "open_trace",
+              redactionState: "metadata_only",
+            },
           },
         ]);
       }
@@ -194,9 +291,12 @@ describe("RunsPage contract", () => {
     expect(screen.queryByText(/qa@example\.com/)).not.toBeInTheDocument();
     expect(screen.queryByText(/sk-sensitive-token/)).not.toBeInTheDocument();
     expect(screen.getAllByText(/\[email\]/).length).toBeGreaterThan(0);
-    expect(screen.getByText("任务运行中")).toBeInTheDocument();
-    expect(screen.getByText("下一步：取消")).toBeInTheDocument();
-    expect(screen.getByText("可能已卡住")).toBeInTheDocument();
+    expect(screen.getByText("任务已超时")).toBeInTheDocument();
+    expect(screen.getByText("下一步：查看记录")).toBeInTheDocument();
+    expect(screen.getByText("连续性需复核")).toBeInTheDocument();
+    expect(screen.getByText("证据：1 action / 2 observation")).toBeInTheDocument();
+    expect(screen.getByText("脱敏：metadata_only")).toBeInTheDocument();
+    expect(screen.getAllByText(/云端路线 · deepseek/).length).toBeGreaterThan(0);
     expect(screen.getAllByText("待确认 1").length).toBeGreaterThan(0);
     expect(screen.getAllByText("策略预览").length).toBeGreaterThan(0);
     expect(screen.getByText("策略：planExecute")).toBeInTheDocument();

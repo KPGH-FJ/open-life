@@ -6,7 +6,8 @@ use crate::main_chat_react_tool_selection::{
     build_main_chat_react_action_plan, resolve_main_chat_mcp_read_target,
 };
 use crate::main_chat_runtime_support::{
-    append_main_chat_agent_transcript, fail_main_chat_action, transition_main_chat_action,
+    append_main_chat_agent_transcript, fail_main_chat_action, finalize_main_chat_task_failure,
+    transition_main_chat_action, MainChatTaskFailureKind,
 };
 use crate::AppState;
 
@@ -52,6 +53,17 @@ pub struct TaskSummary {
     pub next_recommended_control: String,
     pub stale_state: String,
     pub resume_safety_digest: String,
+    pub lifecycle_state: String,
+    #[serde(default)]
+    pub last_safe_event: Option<String>,
+    pub action_count: usize,
+    pub observation_count: usize,
+    #[serde(default)]
+    pub allowed_controls: Vec<String>,
+    pub redaction_state: String,
+    #[serde(default)]
+    pub route_evidence: Option<crate::main_chat_runtime_facts::RuntimeRouteEvidence>,
+    pub evidence_view: RunEvidenceView,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -93,6 +105,44 @@ pub struct TaskDetail {
     #[serde(default)]
     pub selected_skill_digest: Option<String>,
     pub tool_manifest_digest: String,
+    pub evidence_view: RunEvidenceView,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunEvidenceTimelineEvent {
+    pub id: String,
+    pub kind: String,
+    pub summary: String,
+    #[serde(default)]
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub failure_kind: Option<String>,
+    #[serde(default)]
+    pub normalized_lifecycle_state: Option<String>,
+    #[serde(default)]
+    pub source_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunEvidenceView {
+    #[serde(default)]
+    pub run_id: Option<String>,
+    pub task_session_id: String,
+    pub title: String,
+    pub lifecycle_state: String,
+    #[serde(default)]
+    pub route_evidence: Option<crate::main_chat_runtime_facts::RuntimeRouteEvidence>,
+    pub event_timeline: Vec<RunEvidenceTimelineEvent>,
+    pub action_count: usize,
+    pub observation_count: usize,
+    pub blockers: Vec<String>,
+    pub proposals: Vec<String>,
+    pub plan_refs: Vec<String>,
+    pub allowed_controls: Vec<String>,
+    pub next_recommended_control: String,
+    pub redaction_state: String,
 }
 
 fn default_true() -> bool {
@@ -235,6 +285,7 @@ async fn build_main_chat_agent_task_detail(
     };
     let proposals = load_main_chat_task_linked_proposals(state, &actions, &transcript).await?;
     let blockers = task_blockers_from_evidence(&session, &actions);
+    let agent_run = load_main_chat_task_agent_run(state, &session, &transcript).await?;
     let context_digest = main_chat_context_digest(&session, &transcript);
     let tool_manifest_digest = main_chat_tool_manifest_digest(state).await;
     let selected_skill_digest = main_chat_selected_skill_digest(state, &transcript).await?;
@@ -252,6 +303,17 @@ async fn build_main_chat_agent_task_detail(
         next_recommended_control_for_task(&session, &actions, &continuity_diagnostics);
     let last_safe_resume_point = last_safe_resume_point_for_task(&actions, &continuity_diagnostics);
     let final_delivery = final_delivery_from_task(&session, &transcript);
+    let evidence_view = build_run_evidence_view(
+        &session,
+        &actions,
+        &transcript,
+        &proposals,
+        &blockers,
+        final_delivery.as_ref(),
+        &allowed_controls,
+        &next_recommended_control,
+        agent_run.as_ref(),
+    );
 
     Ok(TaskDetail {
         task_session: session,
@@ -267,6 +329,7 @@ async fn build_main_chat_agent_task_detail(
         context_digest,
         selected_skill_digest,
         tool_manifest_digest,
+        evidence_view,
     })
 }
 
@@ -300,6 +363,346 @@ async fn load_main_chat_task_linked_proposals(
     Ok(proposals)
 }
 
+async fn load_main_chat_task_agent_run(
+    state: &Arc<AppState>,
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    transcript: &[openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry],
+) -> Result<Option<openlife_core::agent::AgentRun>, String> {
+    let Some(ref run_store_arc) = state.agent_run_store else {
+        return Ok(None);
+    };
+    let run_id = transcript
+        .iter()
+        .rev()
+        .find_map(|entry| string_from_metadata(&entry.metadata, &["runId", "run_id"]));
+    let run_store = run_store_arc.lock().await;
+    if let Some(run_id) = run_id {
+        if let Some(run) = run_store
+            .get_run(&run_id)
+            .map_err(|err| format!("load linked AgentRun failed: {err}"))?
+        {
+            return Ok(Some(run));
+        }
+    }
+    let runs = run_store
+        .list_runs_for_session(&session.chat_session_id, 10)
+        .map_err(|err| format!("list linked AgentRuns failed: {err}"))?;
+    Ok(runs.into_iter().next())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_run_evidence_view(
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    actions: &[openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction],
+    transcript: &[openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry],
+    proposals: &[openlife_core::agent::AgentProposal],
+    blockers: &[String],
+    final_delivery: Option<&serde_json::Value>,
+    allowed_controls: &[String],
+    next_recommended_control: &str,
+    agent_run: Option<&openlife_core::agent::AgentRun>,
+) -> RunEvidenceView {
+    let run_id = transcript
+        .iter()
+        .rev()
+        .find_map(|entry| string_from_metadata(&entry.metadata, &["runId", "run_id"]))
+        .or_else(|| agent_run.map(|run| run.id.clone()));
+    let route_evidence = route_evidence_from_transcript(transcript)
+        .or_else(|| agent_run.and_then(route_evidence_from_agent_run));
+    let event_timeline = run_evidence_timeline(transcript, blockers, agent_run);
+    let action_count = actions
+        .len()
+        .max(agent_run.map(|run| run.actions.len()).unwrap_or(0));
+    let transcript_observation_count = transcript
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.kind,
+                openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Observation
+                    | openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Error
+                    | openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::FinalResult
+                    | openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::PermissionRequest
+                    | openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::ProposalRequest
+            )
+        })
+        .count();
+    let observation_count = transcript_observation_count.max(
+        agent_run
+            .map(|run| {
+                run.observations.len()
+                    + usize::from(run.output_preview.is_some())
+                    + usize::from(run.error.is_some())
+            })
+            .unwrap_or(0),
+    );
+    let proposal_ids = run_evidence_proposal_ids(proposals, transcript, agent_run);
+    let plan_refs = run_evidence_plan_refs(session, transcript, final_delivery);
+    let lifecycle_state = normalized_run_lifecycle_state(session, transcript, agent_run);
+
+    RunEvidenceView {
+        run_id,
+        task_session_id: session.id.clone(),
+        title: bounded_text(&session.user_goal, 96),
+        lifecycle_state,
+        route_evidence,
+        event_timeline,
+        action_count,
+        observation_count,
+        blockers: blockers.to_vec(),
+        proposals: proposal_ids,
+        plan_refs,
+        allowed_controls: allowed_controls.to_vec(),
+        next_recommended_control: next_recommended_control.to_string(),
+        redaction_state: "metadata_only".into(),
+    }
+}
+
+fn normalized_run_lifecycle_state(
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    transcript: &[openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry],
+    agent_run: Option<&openlife_core::agent::AgentRun>,
+) -> String {
+    let latest_failure_kind = transcript
+        .iter()
+        .rev()
+        .find_map(|entry| string_from_metadata(&entry.metadata, &["failureKind", "failure_kind"]));
+    let latest_lifecycle = transcript.iter().rev().find_map(|entry| {
+        string_from_metadata(
+            &entry.metadata,
+            &["normalizedLifecycleState", "normalized_lifecycle_state"],
+        )
+    });
+    let stored_failed = session.status
+        == openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Failed
+        || agent_run
+            .map(|run| run.status == openlife_core::agent::AgentRunStatus::Failed)
+            .unwrap_or(false);
+    if stored_failed && latest_failure_kind.as_deref() == Some("timeout") {
+        return "timed_out".into();
+    }
+    if let Some(lifecycle) = latest_lifecycle {
+        if lifecycle == "timed_out" {
+            return "failed".into();
+        }
+        return lifecycle;
+    }
+
+    match session.status {
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Running => "running",
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+        | openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked => "blocked",
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed => "completed",
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Failed => "failed",
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Cancelled => "cancelled",
+    }
+    .into()
+}
+
+fn route_evidence_from_transcript(
+    transcript: &[openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry],
+) -> Option<crate::main_chat_runtime_facts::RuntimeRouteEvidence> {
+    transcript
+        .iter()
+        .rev()
+        .find_map(|entry| {
+            entry
+                .metadata
+                .get("routeEvidence")
+                .or_else(|| entry.metadata.get("runtimeRouteEvidence"))
+                .cloned()
+        })
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
+fn route_evidence_from_agent_run(
+    run: &openlife_core::agent::AgentRun,
+) -> Option<crate::main_chat_runtime_facts::RuntimeRouteEvidence> {
+    run.reasoning_trace
+        .as_ref()
+        .and_then(|trace| trace.generation_result.as_ref())
+        .and_then(|value| value.get("runtimeRouteEvidence").cloned())
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
+fn run_evidence_timeline(
+    transcript: &[openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry],
+    blockers: &[String],
+    agent_run: Option<&openlife_core::agent::AgentRun>,
+) -> Vec<RunEvidenceTimelineEvent> {
+    let mut events = if transcript.is_empty() {
+        agent_run_fallback_timeline(agent_run)
+    } else {
+        transcript
+            .iter()
+            .map(|entry| RunEvidenceTimelineEvent {
+                id: entry.id.clone(),
+                kind: entry.kind.as_str().into(),
+                summary: bounded_text(&entry.summary, 220),
+                created_at: Some(entry.created_at),
+                failure_kind: string_from_metadata(
+                    &entry.metadata,
+                    &["failureKind", "failure_kind"],
+                ),
+                normalized_lifecycle_state: string_from_metadata(
+                    &entry.metadata,
+                    &["normalizedLifecycleState", "normalized_lifecycle_state"],
+                ),
+                source_ref: string_from_metadata(&entry.metadata, &["sourceRef", "source_ref"]),
+            })
+            .collect::<Vec<_>>()
+    };
+
+    for (index, blocker) in blockers.iter().enumerate() {
+        let already_visible = events.iter().any(|event| {
+            event.summary.contains(blocker.as_str())
+                || event.source_ref.as_deref() == Some(blocker.as_str())
+        });
+        if already_visible {
+            continue;
+        }
+        events.push(RunEvidenceTimelineEvent {
+            id: format!("blocker-{index}"),
+            kind: "blocker".into(),
+            summary: bounded_text(blocker, 220),
+            created_at: None,
+            failure_kind: Some("policy_blocker".into()),
+            normalized_lifecycle_state: Some("blocked".into()),
+            source_ref: Some("task_session_blocker".into()),
+        });
+    }
+    events
+}
+
+fn agent_run_fallback_timeline(
+    agent_run: Option<&openlife_core::agent::AgentRun>,
+) -> Vec<RunEvidenceTimelineEvent> {
+    let Some(run) = agent_run else {
+        return Vec::new();
+    };
+    let mut events = Vec::new();
+    for (index, update) in run.status_updates.iter().enumerate() {
+        events.push(RunEvidenceTimelineEvent {
+            id: format!("run-status-{index}"),
+            kind: update.phase.to_string(),
+            summary: bounded_text(&update.message, 220),
+            created_at: Some(update.timestamp),
+            failure_kind: None,
+            normalized_lifecycle_state: None,
+            source_ref: Some("agent_run_status_update".into()),
+        });
+    }
+    for action in &run.actions {
+        events.push(RunEvidenceTimelineEvent {
+            id: format!("run-action-{}", action.id),
+            kind: "action".into(),
+            summary: bounded_text(
+                &[action.action_type.as_str(), action.status.as_str()].join(" · "),
+                220,
+            ),
+            created_at: Some(action.started_at.unwrap_or(action.timestamp)),
+            failure_kind: None,
+            normalized_lifecycle_state: None,
+            source_ref: Some("agent_run_action".into()),
+        });
+    }
+    for observation in &run.observations {
+        events.push(RunEvidenceTimelineEvent {
+            id: format!("run-observation-{}", observation.id),
+            kind: "observation".into(),
+            summary: bounded_text(
+                observation
+                    .react_trace
+                    .as_ref()
+                    .and_then(|trace| trace.output_preview.as_deref())
+                    .unwrap_or(&observation.content),
+                220,
+            ),
+            created_at: Some(observation.timestamp),
+            failure_kind: None,
+            normalized_lifecycle_state: None,
+            source_ref: Some("agent_run_observation".into()),
+        });
+    }
+    if let Some(error) = run.error.as_ref() {
+        events.push(RunEvidenceTimelineEvent {
+            id: "run-error".into(),
+            kind: "error".into(),
+            summary: bounded_text(&error.message, 220),
+            created_at: run.finished_at,
+            failure_kind: Some(error.phase.clone()),
+            normalized_lifecycle_state: Some(if error.phase == "timeout" {
+                "timed_out".into()
+            } else {
+                "failed".into()
+            }),
+            source_ref: Some("agent_run_error".into()),
+        });
+    } else if let Some(output_preview) = run.output_preview.as_ref() {
+        events.push(RunEvidenceTimelineEvent {
+            id: "run-final".into(),
+            kind: "final_result".into(),
+            summary: bounded_text(output_preview, 220),
+            created_at: run.finished_at,
+            failure_kind: None,
+            normalized_lifecycle_state: Some("completed".into()),
+            source_ref: Some("agent_run_output_preview".into()),
+        });
+    }
+    events.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    events
+}
+
+fn run_evidence_proposal_ids(
+    proposals: &[openlife_core::agent::AgentProposal],
+    transcript: &[openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry],
+    agent_run: Option<&openlife_core::agent::AgentRun>,
+) -> Vec<String> {
+    let mut ids = proposals
+        .iter()
+        .map(|proposal| proposal.id.clone())
+        .collect::<Vec<_>>();
+    for entry in transcript {
+        collect_main_chat_proposal_ids(&entry.metadata, &mut ids);
+    }
+    if let Some(run) = agent_run {
+        ids.extend(run.generated_proposals.clone());
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn run_evidence_plan_refs(
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    transcript: &[openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry],
+    final_delivery: Option<&serde_json::Value>,
+) -> Vec<String> {
+    let mut refs = session.context_snapshot_refs.clone();
+    if session.current_plan_summary.is_some() {
+        refs.push(format!("task_plan_summary:{}", session.id));
+    }
+    for entry in transcript {
+        for key in [
+            "planExecuteSessionId",
+            "planSessionId",
+            "contextSnapshotRef",
+            "lastSafeResumePoint",
+        ] {
+            if let Some(value) = string_from_metadata(&entry.metadata, &[key]) {
+                refs.push(value);
+            }
+        }
+    }
+    if let Some(final_delivery) = final_delivery {
+        if let Some(value) = string_from_metadata(final_delivery, &["planExecuteSessionId"]) {
+            refs.push(value);
+        }
+    }
+    refs.sort();
+    refs.dedup();
+    refs
+}
+
 async fn continuity_diagnostics_for_task(
     state: &Arc<AppState>,
     session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
@@ -324,7 +727,10 @@ async fn continuity_diagnostics_for_task(
     let selected_skill_context_digest_mismatch =
         selected_skill_context_digest_mismatch_detected(transcript, selected_skill_digest);
     let plan_revision_mismatch = plan_revision_mismatch_detected(state, transcript).await?;
-    let terminal_no_resume = main_chat_task_status_is_terminal(session.status);
+    let terminal_no_resume = main_chat_task_status_is_terminal(session.status)
+        || (session.status
+            == openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Failed
+            && !has_retryable_failed_action(actions));
     let requires_user_decision = matches!(
         session.status,
         openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
@@ -395,11 +801,15 @@ fn task_summary_from_detail(detail: &TaskDetail) -> TaskSummary {
         "diagnostics": detail.continuity_diagnostics.reason_codes,
         "allowedControls": detail.allowed_controls,
     }));
+    let evidence_view = detail.evidence_view.clone();
     TaskSummary {
         task_session_id: detail.task_session.id.clone(),
         conversation_id: detail.task_session.chat_session_id.clone(),
-        run_id: run_id_from_detail(detail).unwrap_or_else(|| "unknown".into()),
-        title: bounded_text(&detail.task_session.user_goal, 96),
+        run_id: evidence_view
+            .run_id
+            .clone()
+            .unwrap_or_else(|| "unknown".into()),
+        title: evidence_view.title.clone(),
         strategy: detail.task_session.selected_strategy,
         status: detail.task_session.status,
         last_updated_at: detail.task_session.updated_at,
@@ -416,15 +826,18 @@ fn task_summary_from_detail(detail: &TaskDetail) -> TaskSummary {
         next_recommended_control: detail.next_recommended_control.clone(),
         stale_state: stale_state_for_detail(detail),
         resume_safety_digest,
+        lifecycle_state: evidence_view.lifecycle_state.clone(),
+        last_safe_event: evidence_view
+            .event_timeline
+            .last()
+            .map(|event| event.summary.clone()),
+        action_count: evidence_view.action_count,
+        observation_count: evidence_view.observation_count,
+        allowed_controls: evidence_view.allowed_controls.clone(),
+        redaction_state: evidence_view.redaction_state.clone(),
+        route_evidence: evidence_view.route_evidence.clone(),
+        evidence_view,
     }
-}
-
-fn run_id_from_detail(detail: &TaskDetail) -> Option<String> {
-    detail
-        .transcript
-        .iter()
-        .rev()
-        .find_map(|entry| string_from_metadata(&entry.metadata, &["runId", "run_id"]))
 }
 
 fn stale_state_for_detail(detail: &TaskDetail) -> String {
@@ -446,15 +859,19 @@ fn allowed_controls_for_task(
     if diagnostics.terminal_no_resume {
         return vec!["open_trace".into()];
     }
+    if session.status == openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Failed {
+        if continuity_hard_resume_blocker(diagnostics).is_none()
+            && has_retryable_failed_action(actions)
+        {
+            controls.push("retry".into());
+        }
+        controls.sort();
+        controls.dedup();
+        return controls;
+    }
     controls.push("cancel".into());
     if continuity_hard_resume_blocker(diagnostics).is_none() {
-        if actions.iter().any(|action| {
-            action.status
-                == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed
-                && openlife_core::agent::main_chat_agent_v1::main_chat_action_type_supports_automatic_retry(
-                    &action.action.action_type,
-                )
-        }) {
+        if has_retryable_failed_action(actions) {
             controls.push("retry".into());
         }
         if matches!(
@@ -489,12 +906,7 @@ fn next_recommended_control_for_task(
     {
         return "refresh_context".into();
     }
-    if actions.iter().any(|action| {
-        action.status == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed
-            && openlife_core::agent::main_chat_agent_v1::main_chat_action_type_supports_automatic_retry(
-                &action.action.action_type,
-            )
-    }) {
+    if has_retryable_failed_action(actions) {
         return "retry".into();
     }
     if matches!(
@@ -511,6 +923,17 @@ fn next_recommended_control_for_task(
         return "resume".into();
     }
     "open_trace".into()
+}
+
+fn has_retryable_failed_action(
+    actions: &[openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction],
+) -> bool {
+    actions.iter().any(|action| {
+        action.status == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed
+            && openlife_core::agent::main_chat_agent_v1::main_chat_action_type_supports_automatic_retry(
+                &action.action.action_type,
+            )
+    })
 }
 
 fn last_safe_resume_point_for_task(
@@ -1302,28 +1725,16 @@ pub(crate) async fn cancel_main_chat_agent_task(
     task_session_id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<MainChatAgentTaskState, String> {
-    let store_arc = state
-        .main_chat_agent_session_store
-        .as_ref()
-        .ok_or_else(|| "Main Chat task session store not available".to_string())?;
-    let store = store_arc.lock().await;
-    store
-        .cancel_session(&task_session_id, "Cancelled from Main Chat controls.")
-        .map_err(|err| format!("cancel Main Chat task failed: {err}"))?;
-    drop(store);
     cancel_main_chat_nonterminal_actions(&state, &task_session_id).await?;
-    append_main_chat_agent_transcript(
+    finalize_main_chat_task_failure(
         &state,
+        None,
         Some(&task_session_id),
-        openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Retry,
-        "Task and queued actions were cancelled from Main Chat.",
-        serde_json::json!({
-            "cancelRequested": true,
-            "queuedActionsCancelled": true,
-            "directWritesExecuted": false,
-        }),
+        MainChatTaskFailureKind::Cancelled,
+        "Cancelled from Main Chat controls.",
+        "main_chat_task_controls.cancel",
     )
-    .await;
+    .await?;
     load_main_chat_agent_task_state(&task_session_id, &state).await
 }
 

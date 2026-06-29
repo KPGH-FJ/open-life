@@ -35,6 +35,8 @@ function statusLabel(status: string): string {
   const labels: Record<string, string> = {
     running: "运行中",
     waiting_permission: "等待确认",
+    blocked: "已阻断",
+    timed_out: "已超时",
     completed: "已完成",
     failed: "失败",
     cancelled: "已取消",
@@ -46,17 +48,27 @@ export function buildRunDisplaySummary(
   run: AgentRun,
   taskSummary?: MainChatTaskSummary
 ): RunDisplaySummary {
-  const disclosure = buildRuntimeDisclosure(run, { taskSummary });
+  const evidenceView = taskSummary?.evidenceView;
+  const disclosure = buildRuntimeDisclosure(run, {
+    taskSummary,
+    evidenceView,
+    runtimeRouteEvidence: evidenceView?.routeEvidence ?? taskSummary?.routeEvidence ?? null,
+    strictRuntimeRouteEvidence: Boolean(evidenceView),
+  });
   const title = kindLabel(run.kind);
-  const taskPart = taskSummary ? `Task ${taskSummary.status.replace(/_/g, " ")}` : null;
+  const lifecycle = evidenceView?.lifecycleState ?? taskSummary?.lifecycleState ?? run.status;
+  const taskPart = taskSummary ? `Task ${lifecycle.replace(/_/g, " ")}` : null;
   const inputPart = run.userInput ? safePreviewText(run.userInput, 96) : "无用户输入正文";
   const subtitle = [taskPart, inputPart].filter(Boolean).join(" · ");
-  const actionCount = run.actions?.length ?? 0;
-  const observationCount = run.observations?.length ?? 0;
+  const actionCount = evidenceView?.actionCount ?? taskSummary?.actionCount ?? run.actions?.length ?? 0;
+  const observationCount =
+    evidenceView?.observationCount ?? taskSummary?.observationCount ?? run.observations?.length ?? 0;
   const route = disclosure.routeLabel;
   const outcome = run.error?.message
-    ? `${statusLabel(run.status)} · ${run.error.phase || "unknown"}`
-    : `${statusLabel(run.status)} · ${actionCount} 个 action · ${observationCount} 个 observation`;
+    ? `${statusLabel(lifecycle)} · ${run.error.phase || "unknown"}`
+    : evidenceView || actionCount > 0 || observationCount > 0
+      ? `${statusLabel(lifecycle)} · ${actionCount} 个 action evidence · ${observationCount} 个 observation evidence`
+      : `${statusLabel(lifecycle)} · 未记录 task/run evidence`;
   const tools = disclosure.toolsLabel;
   const proposals = disclosure.proposalsLabel;
 

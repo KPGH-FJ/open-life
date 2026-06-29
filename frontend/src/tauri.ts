@@ -912,6 +912,14 @@ export interface MainChatTaskSummary {
   nextRecommendedControl: string;
   staleState: string;
   resumeSafetyDigest: string;
+  lifecycleState?: string;
+  lastSafeEvent?: string | null;
+  actionCount?: number;
+  observationCount?: number;
+  allowedControls?: string[];
+  redactionState?: string;
+  routeEvidence?: RuntimeRouteEvidence | null;
+  evidenceView?: RunEvidenceView;
 }
 
 export interface MainChatContinuityDiagnostics {
@@ -942,6 +950,34 @@ export interface MainChatTaskDetail {
   contextDigest: string;
   selectedSkillDigest?: string | null;
   toolManifestDigest: string;
+  evidenceView?: RunEvidenceView;
+}
+
+export interface RunEvidenceTimelineEvent {
+  id: string;
+  kind: string;
+  summary: string;
+  createdAt?: string | null;
+  failureKind?: string | null;
+  normalizedLifecycleState?: string | null;
+  sourceRef?: string | null;
+}
+
+export interface RunEvidenceView {
+  runId?: string | null;
+  taskSessionId: string;
+  title: string;
+  lifecycleState: string;
+  routeEvidence?: RuntimeRouteEvidence | null;
+  eventTimeline: RunEvidenceTimelineEvent[];
+  actionCount: number;
+  observationCount: number;
+  blockers: string[];
+  proposals: string[];
+  planRefs: string[];
+  allowedControls: string[];
+  nextRecommendedControl: string;
+  redactionState: string;
 }
 
 export interface MainChatRuntimeEvalReport {

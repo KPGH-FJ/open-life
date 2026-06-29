@@ -13,6 +13,7 @@ import {
   type AgentRun,
   type MainChatTaskSummary,
   type MainChatTaskDetail,
+  type RunEvidenceView,
 } from "../tauri";
 import RunTracePanel from "../components/RunTracePanel";
 import RuntimeDisclosureStrip from "../components/RuntimeDisclosureStrip";
@@ -43,6 +44,10 @@ function statusIcon(status: string) {
   switch (status) {
     case "running":
       return <Activity size={20} className="text-blue-500 animate-pulse" />;
+    case "blocked":
+      return <AlertTriangle size={20} className="text-amber-500" />;
+    case "timed_out":
+      return <Clock size={20} className="text-red-500" />;
     case "completed":
       return <CheckCircle size={20} className="text-emerald-500" />;
     case "failed":
@@ -98,6 +103,41 @@ function transcriptTitle(kind: string): string {
   return labels[kind] ?? kind.replace(/_/g, " ");
 }
 
+function lifecycleLabel(status: string): string {
+  const labels: Record<string, string> = {
+    running: "running",
+    blocked: "blocked",
+    timed_out: "timed_out",
+    failed: "failed",
+    cancelled: "cancelled",
+    completed: "completed",
+    waiting_permission: "blocked",
+  };
+  return labels[status] ?? status.replace(/_/g, " ");
+}
+
+function failureTitle(failureKind?: string | null, fallbackKind?: string): string {
+  const labels: Record<string, string> = {
+    timeout: "超时",
+    cancelled: "已取消",
+    provider_error: "Provider 错误",
+    tool_error: "工具错误",
+    policy_blocker: "治理阻断",
+    unknown_error: "未知错误",
+  };
+  if (failureKind && labels[failureKind]) return labels[failureKind];
+  if (fallbackKind === "blocker") return "治理阻断";
+  return transcriptTitle(fallbackKind ?? "observation");
+}
+
+function toneForLifecycle(status?: string): ActivityTimelineItem["tone"] {
+  if (status === "timed_out" || status === "failed") return "danger";
+  if (status === "blocked") return "warning";
+  if (status === "completed") return "ready";
+  if (status === "cancelled") return "neutral";
+  return "info";
+}
+
 function timelineTone(kind: string, status?: string): ActivityTimelineItem["tone"] {
   if (kind === "error" || status === "failed") return "danger";
   if (
@@ -114,8 +154,21 @@ function timelineTone(kind: string, status?: string): ActivityTimelineItem["tone
 
 function buildActivityTimeline(
   run: AgentRun,
-  taskDetail: MainChatTaskDetail | null
+  taskDetail: MainChatTaskDetail | null,
+  evidenceView: RunEvidenceView | null
 ): ActivityTimelineItem[] {
+  if (evidenceView) {
+    return evidenceView.eventTimeline.map((entry, index) => ({
+      id: entry.id || `evidence-${index}`,
+      title: failureTitle(entry.failureKind, entry.kind),
+      body: safePreviewText(entry.summary, 220),
+      timestamp: entry.createdAt ?? undefined,
+      tone: entry.normalizedLifecycleState
+        ? toneForLifecycle(entry.normalizedLifecycleState)
+        : timelineTone(entry.kind),
+    }));
+  }
+
   const transcriptItems =
     taskDetail?.transcript.map(entry => ({
       id: entry.id,
@@ -325,7 +378,13 @@ export default function AgentRunDetail() {
     (run.status === "running" &&
       Number.isFinite(startedAt) &&
       Date.now() - startedAt > STALE_RUN_THRESHOLD_MS);
-  const activityTimeline = buildActivityTimeline(run, taskDetail);
+  const evidenceView = taskDetail?.evidenceView ?? taskSummary?.evidenceView ?? null;
+  const lifecycleState = evidenceView?.lifecycleState ?? taskSummary?.lifecycleState ?? run.status;
+  const activityTimeline = buildActivityTimeline(run, taskDetail, evidenceView);
+  const allowedControls = evidenceView?.allowedControls ?? taskDetail?.allowedControls ?? [];
+  const actionControls = allowedControls.filter(control =>
+    ["resume", "retry", "cancel", "refresh_context"].includes(control)
+  );
 
   return (
     <div className="h-full overflow-auto p-6">
@@ -351,11 +410,13 @@ export default function AgentRunDetail() {
 
         <div className="bg-white rounded-xl border border-stone-200 p-6">
           <div className="flex items-center gap-3 mb-6">
-            {statusIcon(run.status)}
+            {statusIcon(lifecycleState)}
             <div>
               <h1 className="text-xl font-bold text-stone-900">{kindLabel(run.kind)}</h1>
               <div className="text-sm text-stone-500 flex items-center gap-2 mt-1">
                 <span>ID: {run.id.slice(0, 8)}...</span>
+                <span>·</span>
+                <span>{lifecycleLabel(lifecycleState)}</span>
                 <span>·</span>
                 <Clock size={14} />
                 <span>{new Date(run.startedAt).toLocaleString()}</span>
@@ -365,42 +426,91 @@ export default function AgentRunDetail() {
 
           <div className="mb-6">
             <RuntimeDisclosureStrip
-              view={buildRuntimeDisclosure(run, { taskSummary: taskSummary ?? undefined })}
+              view={buildRuntimeDisclosure(run, {
+                taskSummary: taskSummary ?? undefined,
+                evidenceView,
+                runtimeRouteEvidence:
+                  evidenceView?.routeEvidence ?? taskSummary?.routeEvidence ?? null,
+                strictRuntimeRouteEvidence: Boolean(evidenceView),
+              })}
               runId={run.id}
             />
           </div>
 
           {/* Stats Summary */}
-          <div className="mb-6 grid grid-cols-2 md:grid-cols-4 gap-3">
-            <div className="bg-stone-50 rounded-lg p-3 text-center">
-              <div className="flex items-center justify-center gap-1 text-stone-500 text-xs mb-1">
-                <ListOrdered size={14} />
-                <span>推理步数</span>
+          {evidenceView ? (
+            <div className="mb-6 grid grid-cols-2 gap-3 md:grid-cols-4">
+              <div className="bg-stone-50 rounded-lg p-3 text-center">
+                <div className="flex items-center justify-center gap-1 text-stone-500 text-xs mb-1">
+                  <ListOrdered size={14} />
+                  <span>Lifecycle</span>
+                </div>
+                <div className="text-sm font-bold text-stone-900">
+                  {lifecycleLabel(evidenceView.lifecycleState)}
+                </div>
               </div>
-              <div className="text-xl font-bold text-stone-900">{run.stepCount ?? 0}</div>
-            </div>
-            <div className="bg-stone-50 rounded-lg p-3 text-center">
-              <div className="flex items-center justify-center gap-1 text-stone-500 text-xs mb-1">
-                <Wrench size={14} />
-                <span>工具调用</span>
+              <div className="bg-stone-50 rounded-lg p-3 text-center">
+                <div className="flex items-center justify-center gap-1 text-stone-500 text-xs mb-1">
+                  <Zap size={14} />
+                  <span>Actions</span>
+                </div>
+                <div className="text-xl font-bold text-stone-900">{evidenceView.actionCount}</div>
               </div>
-              <div className="text-xl font-bold text-stone-900">{run.toolCallCount ?? 0}</div>
-            </div>
-            <div className="bg-stone-50 rounded-lg p-3 text-center">
-              <div className="flex items-center justify-center gap-1 text-stone-500 text-xs mb-1">
-                <Zap size={14} />
-                <span>Actions</span>
+              <div className="bg-stone-50 rounded-lg p-3 text-center">
+                <div className="flex items-center justify-center gap-1 text-stone-500 text-xs mb-1">
+                  <Eye size={14} />
+                  <span>Observations</span>
+                </div>
+                <div className="text-xl font-bold text-stone-900">
+                  {evidenceView.observationCount}
+                </div>
               </div>
-              <div className="text-xl font-bold text-stone-900">{run.actions.length}</div>
-            </div>
-            <div className="bg-stone-50 rounded-lg p-3 text-center">
-              <div className="flex items-center justify-center gap-1 text-stone-500 text-xs mb-1">
-                <Eye size={14} />
-                <span>Observations</span>
+              <div className="bg-stone-50 rounded-lg p-3 text-center">
+                <div className="flex items-center justify-center gap-1 text-stone-500 text-xs mb-1">
+                  <Wrench size={14} />
+                  <span>Controls</span>
+                </div>
+                <div className="text-sm font-bold text-stone-900">
+                  {evidenceView.allowedControls.join(", ") || "open_trace"}
+                </div>
               </div>
-              <div className="text-xl font-bold text-stone-900">{run.observations.length}</div>
             </div>
-          </div>
+          ) : run.stepCount || run.toolCallCount || run.actions.length || run.observations.length ? (
+            <div className="mb-6 grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div className="bg-stone-50 rounded-lg p-3 text-center">
+                <div className="flex items-center justify-center gap-1 text-stone-500 text-xs mb-1">
+                  <ListOrdered size={14} />
+                  <span>推理步数</span>
+                </div>
+                <div className="text-xl font-bold text-stone-900">{run.stepCount ?? 0}</div>
+              </div>
+              <div className="bg-stone-50 rounded-lg p-3 text-center">
+                <div className="flex items-center justify-center gap-1 text-stone-500 text-xs mb-1">
+                  <Wrench size={14} />
+                  <span>工具调用</span>
+                </div>
+                <div className="text-xl font-bold text-stone-900">{run.toolCallCount ?? 0}</div>
+              </div>
+              <div className="bg-stone-50 rounded-lg p-3 text-center">
+                <div className="flex items-center justify-center gap-1 text-stone-500 text-xs mb-1">
+                  <Zap size={14} />
+                  <span>Actions</span>
+                </div>
+                <div className="text-xl font-bold text-stone-900">{run.actions.length}</div>
+              </div>
+              <div className="bg-stone-50 rounded-lg p-3 text-center">
+                <div className="flex items-center justify-center gap-1 text-stone-500 text-xs mb-1">
+                  <Eye size={14} />
+                  <span>Observations</span>
+                </div>
+                <div className="text-xl font-bold text-stone-900">{run.observations.length}</div>
+              </div>
+            </div>
+          ) : (
+            <div className="mb-6 rounded-lg border border-dashed border-stone-200 bg-stone-50 px-4 py-5 text-sm text-stone-500">
+              没有可展示的 task/run evidence。
+            </div>
+          )}
 
           {/* Duration */}
           {run.finishedAt && (
@@ -472,60 +582,83 @@ export default function AgentRunDetail() {
               <div className="rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm text-stone-700">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="rounded-md bg-stone-900 px-2 py-1 text-xs font-semibold text-white">
-                    {taskSummary.status.replace(/_/g, " ")}
+                    {lifecycleLabel(lifecycleState)}
                   </span>
                   <span>Session {taskSummary.taskSessionId.slice(-8)}</span>
-                  <span>推荐：{taskSummary.nextRecommendedControl}</span>
+                  <span>
+                    推荐：
+                    {evidenceView?.nextRecommendedControl ?? taskSummary.nextRecommendedControl}
+                  </span>
                   {stale && (
                     <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800">
-                      可能已卡住
+                      连续性需复核
                     </span>
                   )}
                 </div>
-                {taskSummary.lastObservationPreview && (
+                {(evidenceView?.eventTimeline.length || taskSummary.lastObservationPreview) && (
                   <div className="mt-2 text-xs text-stone-500">
-                    最近观察：{safePreviewText(taskSummary.lastObservationPreview, 140)}
+                    最近事件：
+                    {safePreviewText(
+                      evidenceView?.eventTimeline[evidenceView.eventTimeline.length - 1]?.summary ??
+                        taskSummary.lastObservationPreview,
+                      140
+                    )}
                   </div>
                 )}
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => void handleTaskControl("resume")}
-                    disabled={taskBusy !== null}
-                    className="inline-flex items-center gap-1 rounded-md border border-stone-200 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 disabled:opacity-50"
-                  >
-                    <Play size={12} aria-hidden="true" /> Resume
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void handleTaskControl("retry")}
-                    disabled={taskBusy !== null}
-                    className="inline-flex items-center gap-1 rounded-md border border-stone-200 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 disabled:opacity-50"
-                  >
-                    <RotateCw size={12} aria-hidden="true" /> Retry
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void handleTaskControl("cancel")}
-                    disabled={taskBusy !== null}
-                    className="inline-flex items-center gap-1 rounded-md border border-stone-200 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 disabled:opacity-50"
-                  >
-                    <Ban size={12} aria-hidden="true" /> Cancel
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void handleTaskControl("refresh")}
-                    disabled={taskBusy !== null}
-                    className="inline-flex items-center gap-1 rounded-md border border-stone-200 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 disabled:opacity-50"
-                  >
-                    <RotateCw
-                      size={12}
-                      aria-hidden="true"
-                      className={taskBusy === "refresh" ? "animate-spin" : ""}
-                    />{" "}
-                    Refresh
-                  </button>
-                </div>
+                {evidenceView && (
+                  <div className="mt-3 grid gap-2 text-xs text-stone-600">
+                    <div>脱敏：隐藏 raw transcript 和敏感正文；保留 metadata-safe summary、ids、状态和 evidence digest。</div>
+                    {evidenceView.blockers.length > 0 && (
+                      <div>Blockers：{evidenceView.blockers.join(", ")}</div>
+                    )}
+                    {evidenceView.proposals.length > 0 && (
+                      <div>Proposals：{evidenceView.proposals.join(", ")}</div>
+                    )}
+                    {evidenceView.planRefs.length > 0 && (
+                      <div>Plan refs：{evidenceView.planRefs.join(", ")}</div>
+                    )}
+                  </div>
+                )}
+                {actionControls.length > 0 ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {actionControls.map(control => {
+                      const command =
+                        control === "refresh_context"
+                          ? "refresh"
+                          : control === "resume"
+                            ? "resume"
+                            : control === "retry"
+                              ? "retry"
+                              : "cancel";
+                      const Icon =
+                        control === "cancel" ? Ban : control === "resume" ? Play : RotateCw;
+                      return (
+                        <button
+                          key={control}
+                          type="button"
+                          onClick={() => void handleTaskControl(command)}
+                          disabled={taskBusy !== null}
+                          className="inline-flex items-center gap-1 rounded-md border border-stone-200 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 disabled:opacity-50"
+                        >
+                          <Icon
+                            size={12}
+                            aria-hidden="true"
+                            className={
+                              taskBusy === "refresh" && control === "refresh_context"
+                                ? "animate-spin"
+                                : ""
+                            }
+                          />
+                          {control.replace(/_/g, " ")}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="mt-3 text-xs text-stone-500">
+                    当前只允许查看 trace。
+                  </div>
+                )}
               </div>
             ) : (
               <div className="rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm text-stone-500">
@@ -572,7 +705,34 @@ export default function AgentRunDetail() {
             </div>
           )}
 
-          {run.modelRoute && (
+          {evidenceView?.routeEvidence ? (
+            <div className="mb-6">
+              <h3 className="text-sm font-semibold text-stone-700 mb-2">路线详情</h3>
+              <div className="bg-stone-50 rounded-lg p-3 text-sm text-stone-800 space-y-1">
+                <div>Evidence: {evidenceView.routeEvidence.evidence_id}</div>
+                <div>
+                  Provider:{" "}
+                  {evidenceView.routeEvidence.actual_route?.provider ??
+                    evidenceView.routeEvidence.planned_route?.provider ??
+                    "provider 未验证"}
+                </div>
+                <div>
+                  Model:{" "}
+                  {evidenceView.routeEvidence.actual_route?.model ??
+                    evidenceView.routeEvidence.planned_route?.model ??
+                    "model 未验证"}
+                </div>
+                <div>
+                  Route:{" "}
+                  {evidenceView.routeEvidence.actual_route?.route_type ??
+                    evidenceView.routeEvidence.planned_route?.route_type ??
+                    "unknown"}
+                </div>
+                <div>External transmission: {evidenceView.routeEvidence.external_transmission}</div>
+                <div>Truth confidence: {evidenceView.routeEvidence.truth_confidence}</div>
+              </div>
+            </div>
+          ) : !evidenceView && run.modelRoute ? (
             <div className="mb-6">
               <h3 className="text-sm font-semibold text-stone-700 mb-2">路线详情</h3>
               <div className="bg-stone-50 rounded-lg p-3 text-sm text-stone-800 space-y-1">
@@ -593,7 +753,7 @@ export default function AgentRunDetail() {
                 )}
               </div>
             </div>
-          )}
+          ) : null}
 
           <div className="mb-6">
             <h3 className="text-sm font-semibold text-stone-700 mb-2">协作行为</h3>
