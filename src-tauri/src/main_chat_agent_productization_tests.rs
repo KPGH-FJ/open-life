@@ -1411,6 +1411,56 @@ async fn main_chat_agent_state_payload_exposes_plan_execute_controls_from_later_
         "PlanExecute draft controls should be visible in agent_state: {:?}",
         plan.controls
     );
+    let artifact = plan
+        .artifact_view
+        .as_ref()
+        .expect("PlanExecute agent_state must expose product artifact view");
+    assert_eq!(artifact.plan_id.as_str(), plan.plan_id.as_str());
+    assert_eq!(
+        artifact.plan_session_id,
+        plan.plan_session_id
+            .as_deref()
+            .expect("PlanExecute session id")
+    );
+    assert_eq!(
+        artifact.task_session_id.as_str(),
+        agent_state.task.task_id.as_str()
+    );
+    assert_eq!(
+        artifact.run_id.as_str(),
+        plan.run_id.as_deref().expect("PlanExecute product run id")
+    );
+    assert!(
+        artifact.body.contains(&artifact.plan_id)
+            && artifact.body.contains(&artifact.plan_session_id)
+            && artifact.body.contains("Steps"),
+        "artifact body should be backend-built from plan/read-model evidence: {}",
+        artifact.body
+    );
+    assert!(
+        artifact
+            .steps
+            .iter()
+            .any(|step| step.title == "Review current priorities"),
+        "artifact should expose actual PlanExecute steps, not a debug-only summary: {:?}",
+        artifact.steps
+    );
+    assert!(
+        artifact
+            .unknowns
+            .iter()
+            .any(|unknown| unknown.label == "opening hours"
+                && unknown.detail.contains("source/tool evidence")),
+        "realtime facts without source evidence must remain unknowns: {:?}",
+        artifact.unknowns
+    );
+    assert_eq!(artifact.route_evidence.strategy, "plan_execute");
+    assert!(
+        !artifact.run_evidence.action_ids.is_empty()
+            && !artifact.run_evidence.observation_ids.is_empty(),
+        "artifact should bind to run/action evidence: {:?}",
+        artifact.run_evidence
+    );
     assert!(
         plan.steps
             .iter()
