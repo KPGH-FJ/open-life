@@ -24,8 +24,8 @@ Preparation approval is not release approval. A phase can move from planning to 
 | 1 Trust Foundation | `plans/sprint1_trust_foundation_solution_rfc.md` | Ready for thin-slice implementation after evidence-retention and external-transmission boundary review | Yes | Route/readiness fields, UI semantics, tests, and non-goals are specified; definitive sent/not-sent transmission history is deferred to Phase 5. |
 | 2 Runs / Trace / Recovery | `plans/sprint2_runs_trace_recovery_solution_rfc.md` | Slice 2A implemented in `bc9edea`; product fixed status still requires app replay | Done for code slice | Failure finalizer, `RunEvidenceView`, route evidence consumption, backend tests, frontend tests, typecheck, fmt, and diff check passed. |
 | 3 LifeModel Closed Loop | `plans/sprint3_lifemodel_closed_loop_solution_rfc.md` | Slice 3A implemented in `867081c`; product fixed status still requires app replay | Done for code slice | `preferences.communication_style` accepted-write visibility now has canonical path/source/proposal/patch/current-view trace, backend tests, frontend tests, typecheck, fmt, and diff check evidence. |
-| 4 Agent Task Productization | `plans/sprint4_agent_task_productization_solution_rfc.md` + `plans/sprint4_agent_task_productization_diagnosis_packet.md` | Ready for bounded Slice 4A implementation | Yes, Slice 4A only | Source-level diagnosis confirms existing PlanExecute/session/run evidence; first implementation is limited to `PlanArtifactView` and artifact card backed by existing state. |
-| 5 Privacy / Provider Governance | `plans/sprint5_privacy_provider_governance_solution_rfc.md` | Ready for schema review, not first implementation | Later | Depends on Phase 1 actual route proof and transmission truth integration. |
+| 4 Agent Task Productization | `plans/sprint4_agent_task_productization_solution_rfc.md` + `plans/sprint4_agent_task_productization_diagnosis_packet.md` | Slice 4A implemented in `1fa6c81`; product fixed status still requires app replay | Done for code slice | `PlanArtifactView` now surfaces backend-derived plan body, ids, source/tool unknowns, controls, route evidence, run evidence, backend tests, frontend tests, typecheck, fmt, and diff check evidence. |
+| 5 Privacy / Provider Governance | `plans/sprint5_privacy_provider_governance_solution_rfc.md` + `plans/sprint5_privacy_provider_governance_diagnosis_packet.md` | Ready for bounded Slice 5A implementation | Yes, Slice 5A only | Source-level diagnosis confirms `RuntimeRouteEvidence.external_transmission` exists; first implementation is limited to AgentRun-derived transmission history in Privacy. |
 | 6 Daily UX / IA / AX | `plans/sprint6_daily_ux_ia_ax_solution_rfc.md` | Ready for targeted small fixes; major IA later | Later | Depends on stable facts, tasks, and LifeModel contracts. |
 
 ## Entry Gate By Phase
@@ -36,7 +36,7 @@ Preparation approval is not release approval. A phase can move from planning to 
 | 2 Runs / Trace / Recovery | Phase 1 route evidence DTO committed; timeout representation frozen as `Failed + failure_kind=timeout`; focused RunEvidenceView tests named before completion. | Independent route/fallback model, native `TimedOut` enum migration in this slice, or UI-only timeout label. |
 | 3 LifeModel Closed Loop | Sprint 1 route evidence and Sprint 2 Runs evidence committed; canonical path normalization and Slice 3A `preferences.communication_style` trace shape frozen. | Broad schema rewrite, bulk proposal migration, new destructive rollback action, Builder direct apply, or accepting facts without current-view projection. |
 | 4 Agent Task Productization | Sprint 1 route evidence, Sprint 2 Runs evidence, and Slice 3A LifeModel visibility are committed; `PlanArtifactView` owner, source fields, tests, replay prompts, and anti-hallucination checks are frozen. | New planner UX that hides blockers, bypasses Runs trace, invents current facts, or renders frontend-only demo plan text. |
-| 5 Privacy / Provider Governance | Storage choice for transmission log frozen; local/unknown/not_instrumented semantics tested; key redaction tests named. | Any claim that old runs were `not_sent` because no provider log exists. |
+| 5 Privacy / Provider Governance | Slice 5A storage choice frozen as AgentRun-derived projection plus `RuntimeRouteEvidence`; local/sent/blocked/unknown/not_instrumented semantics and key-redaction tests named. | Any claim that old runs were `not_sent` because no provider log exists, live provider calls by default, or danger actions executing without preflight. |
 | 6 Daily UX / IA / AX | Stable typed data contracts for Today, Review counts, Runs, and route disclosure; focused AX/responsive tests named. | Large IA redesign that changes data semantics before trust chains stabilize. |
 
 ## Delivery-State Gate
@@ -57,7 +57,8 @@ These preparation artifacts are only durable if they are intentionally preserved
 5. Replay v6 route and timeout cases.
 6. Phase 3 slice A implemented in `867081c`: `preferences.communication_style` accepted-write visibility.
 7. Replay v5 LifeModel write and Review cases before claiming product-fixed status.
-8. Start Phase 4 Slice 4A: Plan artifact read model/card backed by existing PlanExecute state.
+8. Phase 4 Slice 4A implemented in `1fa6c81`: Plan artifact read model/card backed by existing PlanExecute state.
+9. Start Phase 5 Slice 5A: AgentRun-derived provider-transmission history in Privacy.
 
 Do not run broad parallel development across phases. Phase 4-6 RFCs should influence design choices, but their implementation should wait until the earlier evidence chains are stable enough to prevent duplicated route, run, LifeModel, or privacy truth models.
 
