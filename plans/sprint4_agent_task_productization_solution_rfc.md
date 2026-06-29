@@ -2,7 +2,7 @@
 
 Date: 2026-06-29
 
-Status: prepared for RFC review; implement after Sprint 1-3 foundations.
+Status: ready for bounded Slice 4A implementation after source-level diagnosis in `plans/sprint4_agent_task_productization_diagnosis_packet.md`. This is not approval for broad agent-task redesign.
 
 ## Scope
 
@@ -22,6 +22,15 @@ Primary source entrypoints:
 ## Product Goal
 
 Agent tasks should produce usable work, visible artifacts, and clear recovery paths. A user asking for a plan should receive a plan body or an artifact, not a hidden governed-draft message.
+
+## Source Reality Freeze
+
+Slice 4A must start from the current PlanExecute and Main Chat evidence surfaces:
+
+- Backend PlanExecute already has session lifecycle commands, step records, revision checks, blocker event emission, and AgentRun trace updates in `src-tauri/src/commands/agent_runtime/plan_execute_product.rs`.
+- Main Chat already exposes plan evidence and draft controls in `agent_state.plan`; existing tests prove plan/session/control/evidence presence but not a user-facing artifact body.
+- Frontend `AgentControlPlane` currently renders plan summary, step timeline, final delivery, and blockers. It does not yet present a reusable plan artifact comparable to Claude Artifacts.
+- Runs/trace evidence already exists and must be consumed, not replaced by a parallel planner-specific truth model.
 
 ## Non-Goals
 
@@ -48,6 +57,16 @@ Agent tasks should produce usable work, visible artifacts, and clear recovery pa
 | `controls` | copy, edit, continue, execute step, skip, cancel, retry. |
 | `route_evidence` | Sprint 1 route evidence. |
 | `run_evidence` | Sprint 2 evidence refs. |
+
+Slice 4A required minimum:
+
+| Field | Minimum acceptance |
+|---|---|
+| `body` | Bounded backend-derived plan text assembled from existing session summary/steps/objective. Frontend may format but may not invent content. |
+| `assumptions` | At least explicit offline/realtime limitations when current facts are requested without source evidence. |
+| `unknowns` | Date-sensitive facts, web facts, weather, opening hours, traffic, or provider capability gaps that are not verified. |
+| `controls` | Copy plus only supported plan controls; unsupported continue/edit actions must be hidden or disabled with a reason. |
+| `route_evidence` / `run_evidence` | Existing Sprint 1/Sprint 2 refs where available; unknown is allowed, fabricated evidence is not. |
 
 `BlockerRecoveryView`:
 
@@ -99,6 +118,7 @@ Every command gate must record a non-zero matched/passed test count. These gates
 Backend:
 
 - Planning intent creates PlanArtifactView with body and plan id.
+- PlanArtifactView is built from durable PlanExecute/Main Chat state, not from frontend demo text.
 - Realtime fact request without web returns blocker/offline assumption, not fabricated fact.
 - MCP missing route returns typed blocker.
 - Ambiguous prompt returns clarification within bounded time.
@@ -108,6 +128,7 @@ Candidate command-level backend gates after adding/updating focused tests:
 - `cargo test -p openlife-tauri plan_execute_product`
 - `cargo test -p openlife-tauri main_chat_command_surface`
 - `cargo test -p openlife-tauri main_chat_react`
+- `cargo test -p openlife-tauri main_chat_agent_state_payload_exposes_plan_execute_controls_from_later_plan_transcript`
 
 Frontend:
 
@@ -118,6 +139,7 @@ Frontend:
 Candidate command-level frontend gates after adding/updating focused tests:
 
 - `cd frontend && corepack pnpm test -- ChatPage.test.tsx`
+- `cd frontend && corepack pnpm test -- AgentControlPlane.test.tsx`
 - add or update focused artifact/blocker component tests before claiming PlanArtifactView or BlockerRecoveryView coverage.
 
 Replay:
@@ -129,10 +151,30 @@ Replay:
 
 ## Development Slices
 
-1. Plan artifact card for existing PlanExecute session data.
+1. Slice 4A: Plan artifact read model and card for existing PlanExecute/Main Chat plan state.
 2. Typed blocker card for missing web/current facts.
 3. Ambiguous request clarification gate.
 4. MCP/plugin capability readiness view.
 5. Replay real-life task scenarios.
 
 Exit only when planning produces usable output or actionable blocker.
+
+## Slice 4A Implementation Contract
+
+Goal: make existing PlanExecute work visible as a reusable product artifact without changing provider, MCP, web, or LifeModel write behavior.
+
+Required implementation:
+
+1. Add a backend `PlanArtifactView` builder near the PlanExecute product command or Main Chat agent-state projection. It must carry plan/session/task/run ids, status, title/summary, body, steps, assumptions, unknowns, controls, route evidence, and run evidence.
+2. Surface the artifact through the existing ordinary Main Chat PlanExecute path and/or `agent_state.plan`; do not create a separate planner truth store.
+3. Render a first-class plan artifact section/card in `AgentControlPlane`, with copy support and existing supported controls.
+4. Preserve existing final-delivery, timeline, Runs, route, and blocker surfaces.
+5. Encode the three replay prompts above as deterministic fixture/unit expectations where live app replay is not part of the automated gate.
+
+Blocked from this slice:
+
+- Direct web/current-fact implementation.
+- External provider expansion or key handling.
+- MCP/plugin readiness redesign.
+- Memory/LifeModel writes.
+- UI-only artifact body not backed by backend/read-model evidence.
