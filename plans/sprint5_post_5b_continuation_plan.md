@@ -55,6 +55,17 @@ Source inventory to check before coding:
 - `frontend/src/pages/VersionControl.tsx`: rollback/version actions currently use browser `confirm`.
 - `frontend/src/pages/settings/tabs/OverviewTab.tsx`: vector rebuild currently uses browser `confirm`.
 
+Inventory decision for the first thin slice:
+
+| Action id | Current handler | Final command | Durable write | Privacy-sensitive surface | Rollback / backup status | Safe Mode behavior | Slice decision |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `agent_run_delete` | `AgentRunDetail.handleDelete` | `delete_agent_run` | Yes | AgentRun metadata / trace metadata | Soft-delete trash view only | Blocked by preflight | Implement in first slice |
+| `agent_run_bulk_delete` | `RunsPage.handleBatchDelete` | repeated `delete_agent_run` | Yes | AgentRun metadata / trace metadata | Soft-delete trash view only | Blocked by preflight | Implement in first slice |
+| `vector_rebuild` | `OverviewTab` recovery console | `rebuild_memory_index` | Yes | Message metadata / vector index | In-command rollback of previous vectors on failure | Blocked by preflight | Implement in first slice |
+| memory archive / restore | `MemorySearch.tsx` | archive / restore memory commands | Yes | Memory chunk metadata and summaries | Archive/restore pair exists | Existing Safe Mode banner only | Deferred; needs memory-governance-specific copy and archive/restore count proof |
+| MCP server deletion | `McpPage.tsx` | MCP server delete command | Yes | Server name/config metadata, potential secret-adjacent config | No general rollback contract documented | Existing browser confirm | Deferred; must avoid exposing server config/path/key in preflight |
+| version rollback | `VersionControl.tsx` | rollback/version command | Yes | LifeModel snapshot metadata | Snapshot rollback semantics exist but impact copy needs review | Existing Safe Mode guard | Deferred; needs rollback-specific scope digest and snapshot lineage proof |
+
 Required behavior:
 
 - Create an inventory table before implementation: action id, current handler, final command, durable write, privacy sensitivity, rollback/backup status, Safe Mode behavior, first slice decision.

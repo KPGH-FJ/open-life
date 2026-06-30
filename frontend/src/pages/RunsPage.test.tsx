@@ -332,4 +332,50 @@ describe("RunsPage contract", () => {
       expect(screen.getByText("deleted run")).toBeInTheDocument();
     });
   });
+
+  it("preflights selected run deletion before calling the final delete command", async () => {
+    render(
+      <MemoryRouter>
+        <RunsPage />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText("camel case user input")).toBeInTheDocument();
+    const checkboxes = screen.getAllByRole("checkbox");
+    fireEvent.click(checkboxes[1]);
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+
+    expect(await screen.findByRole("dialog", { name: "动作预检：删除运行记录" })).toBeInTheDocument();
+    expect(screen.getByText("写入 durable state")).toBeInTheDocument();
+    expect(screen.getByText("影响数量")).toBeInTheDocument();
+    expect(screen.getByText("id / scope digest")).toBeInTheDocument();
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "delete_agent_run")).toBe(false);
+
+    const continueButton = screen.getByRole("button", { name: "继续删除" });
+    expect(continueButton).toBeDisabled();
+    fireEvent.change(screen.getByLabelText(/输入 DELETE RUN 以继续/), {
+      target: { value: "WRONG" },
+    });
+    expect(continueButton).toBeDisabled();
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "delete_agent_run")).toBe(false);
+
+    fireEvent.change(screen.getByLabelText(/输入 DELETE RUN 以继续/), {
+      target: { value: "DELETE RUN" },
+    });
+    fireEvent.click(continueButton);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "delete_agent_run",
+        expect.objectContaining({
+          runId: "run-1",
+          confirmationEvidence: expect.objectContaining({
+            actionType: "agent_run_delete",
+            confirmationPhrase: "DELETE RUN",
+            targetIds: ["run-1"],
+          }),
+        })
+      );
+    });
+  });
 });

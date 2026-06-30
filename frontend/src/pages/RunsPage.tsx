@@ -3,6 +3,8 @@ import { useNavigate } from "react-router-dom";
 import {
   listAgentRuns,
   deleteAgentRun,
+  getDangerActionPreflight,
+  buildDangerActionConfirmationEvidence,
   listMainChatAgentTasks,
   resumeMainChatAgentTask,
   cancelMainChatAgentTask,
@@ -10,6 +12,7 @@ import {
   refreshMainChatAgentTaskContext,
   getMainChatAgentTaskDetail,
   type AgentRun,
+  type DangerActionPreflightView,
   type MainChatTaskSummary,
   type RunEvidenceView,
 } from "../tauri";
@@ -23,6 +26,8 @@ import { getMultiStrategyPreviewAudit, previewWarningLabel } from "../utils/prev
 import { buildRunDisplaySummary } from "../utils/runDisplaySummary";
 import { buildRuntimeDisclosure } from "../utils/runtimeDisclosure";
 import RuntimeDisclosureStrip from "../components/RuntimeDisclosureStrip";
+import ConfirmDangerDialog from "../components/ConfirmDangerDialog";
+import DangerActionPreflightDetails from "../components/DangerActionPreflightDetails";
 import {
   Activity,
   Clock,
@@ -169,6 +174,9 @@ export default function RunsPage() {
   const [selectedRuns, setSelectedRuns] = useState<Set<string>>(new Set());
   const [showTrash, setShowTrash] = useState(false);
   const [page, setPage] = useState(0);
+  const [deletePreflight, setDeletePreflight] = useState<DangerActionPreflightView | null>(null);
+  const [deleteTargetIds, setDeleteTargetIds] = useState<string[]>([]);
+  const [deleteBusy, setDeleteBusy] = useState(false);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -283,15 +291,42 @@ export default function RunsPage() {
   }
 
   async function handleBatchDelete() {
-    if (!confirm(`确定要删除选中的 ${selectedRuns.size} 条记录吗？`)) return;
+    const targetIds = Array.from(selectedRuns);
+    if (targetIds.length === 0) return;
+    setDeleteBusy(true);
+    setError(null);
     try {
-      for (const runId of selectedRuns) {
-        await deleteAgentRun(runId);
+      const view = await getDangerActionPreflight(
+        targetIds.length === 1 ? "agent_run_delete" : "agent_run_bulk_delete",
+        false,
+        { targetIds, affectedCount: targetIds.length }
+      );
+      setDeleteTargetIds(targetIds);
+      setDeletePreflight(view);
+    } catch (e) {
+      setError(`删除预检失败: ${String(e)}`);
+    } finally {
+      setDeleteBusy(false);
+    }
+  }
+
+  async function continueBatchDelete() {
+    if (!deletePreflight || !deletePreflight.finalActionEnabled) return;
+    const evidence = buildDangerActionConfirmationEvidence(deletePreflight, deleteTargetIds);
+    setDeleteBusy(true);
+    setError(null);
+    try {
+      for (const runId of deleteTargetIds) {
+        await deleteAgentRun(runId, "user_confirmed_preflight", evidence);
       }
       setSelectedRuns(new Set());
+      setDeletePreflight(null);
+      setDeleteTargetIds([]);
       await loadRuns();
     } catch (e) {
       setError(String(e));
+    } finally {
+      setDeleteBusy(false);
     }
   }
 
@@ -315,6 +350,32 @@ export default function RunsPage() {
 
   return (
     <div className="h-full overflow-auto p-6">
+      {deletePreflight && (
+        <ConfirmDangerDialog
+          open={Boolean(deletePreflight)}
+          title={
+            deletePreflight.actionType === "agent_run_bulk_delete"
+              ? "动作预检：批量删除运行记录"
+              : "动作预检：删除运行记录"
+          }
+          description={<DangerActionPreflightDetails view={deletePreflight} />}
+          confirmLabel={deletePreflight.finalActionEnabled ? "继续删除" : "Safe Mode 已阻断"}
+          cancelLabel="返回"
+          severity="danger"
+          confirmationText={
+            deletePreflight.confirmationRequired && deletePreflight.confirmationPhrase
+              ? deletePreflight.confirmationPhrase
+              : undefined
+          }
+          confirmDisabled={!deletePreflight.finalActionEnabled}
+          busy={deleteBusy}
+          onConfirm={() => void continueBatchDelete()}
+          onCancel={() => {
+            setDeletePreflight(null);
+            setDeleteTargetIds([]);
+          }}
+        />
+      )}
       <div className="max-w-5xl mx-auto">
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
@@ -420,10 +481,11 @@ export default function RunsPage() {
               ) : (
                 <button
                   onClick={handleBatchDelete}
-                  className="flex items-center gap-1 px-3 py-1.5 bg-red-600 text-white rounded-lg text-sm hover:bg-red-700 transition"
+                  disabled={deleteBusy}
+                  className="flex items-center gap-1 px-3 py-1.5 bg-red-600 text-white rounded-lg text-sm hover:bg-red-700 transition disabled:opacity-50"
                 >
                   <Trash2 size={14} />
-                  删除
+                  {deleteBusy ? "预检中..." : "删除"}
                 </button>
               )}
               <button

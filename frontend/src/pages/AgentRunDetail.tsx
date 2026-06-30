@@ -3,6 +3,8 @@ import { useParams, useNavigate } from "react-router-dom";
 import {
   getAgentRun,
   deleteAgentRun,
+  getDangerActionPreflight,
+  buildDangerActionConfirmationEvidence,
   replayAgentAction,
   listMainChatAgentTasks,
   getMainChatAgentTaskDetail,
@@ -11,12 +13,15 @@ import {
   retryMainChatAgentAction,
   refreshMainChatAgentTaskContext,
   type AgentRun,
+  type DangerActionPreflightView,
   type MainChatTaskSummary,
   type MainChatTaskDetail,
   type RunEvidenceView,
 } from "../tauri";
 import RunTracePanel from "../components/RunTracePanel";
 import RuntimeDisclosureStrip from "../components/RuntimeDisclosureStrip";
+import ConfirmDangerDialog from "../components/ConfirmDangerDialog";
+import DangerActionPreflightDetails from "../components/DangerActionPreflightDetails";
 import { DangerZone, StatusChip } from "../components/product/ProductPrimitives";
 import { buildRuntimeDisclosure } from "../utils/runtimeDisclosure";
 import { safePreviewText } from "../utils/safePreview";
@@ -259,6 +264,8 @@ export default function AgentRunDetail() {
   const [taskBusy, setTaskBusy] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [deletePreflight, setDeletePreflight] = useState<DangerActionPreflightView | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
 
   useEffect(() => {
     if (runId) {
@@ -321,12 +328,34 @@ export default function AgentRunDetail() {
 
   async function handleDelete() {
     if (!runId || !run) return;
-    if (!confirm("确定要删除这条运行记录吗？")) return;
+    setDeleteBusy(true);
+    setError(null);
     try {
-      await deleteAgentRun(runId);
+      const view = await getDangerActionPreflight("agent_run_delete", false, {
+        targetIds: [runId],
+        affectedCount: 1,
+      });
+      setDeletePreflight(view);
+    } catch (e) {
+      setError(`删除预检失败: ${e}`);
+    } finally {
+      setDeleteBusy(false);
+    }
+  }
+
+  async function continueDelete() {
+    if (!runId || !deletePreflight || !deletePreflight.finalActionEnabled) return;
+    const evidence = buildDangerActionConfirmationEvidence(deletePreflight, [runId]);
+    setDeleteBusy(true);
+    setError(null);
+    try {
+      await deleteAgentRun(runId, "user_confirmed_preflight", evidence);
+      setDeletePreflight(null);
       navigate("/runs");
     } catch (e) {
       setError(`删除失败: ${e}`);
+    } finally {
+      setDeleteBusy(false);
     }
   }
 
@@ -388,6 +417,25 @@ export default function AgentRunDetail() {
 
   return (
     <div className="h-full overflow-auto p-6">
+      {deletePreflight && (
+        <ConfirmDangerDialog
+          open={Boolean(deletePreflight)}
+          title="动作预检：删除运行记录"
+          description={<DangerActionPreflightDetails view={deletePreflight} />}
+          confirmLabel={deletePreflight.finalActionEnabled ? "继续删除" : "Safe Mode 已阻断"}
+          cancelLabel="返回"
+          severity="danger"
+          confirmationText={
+            deletePreflight.confirmationRequired && deletePreflight.confirmationPhrase
+              ? deletePreflight.confirmationPhrase
+              : undefined
+          }
+          confirmDisabled={!deletePreflight.finalActionEnabled}
+          busy={deleteBusy}
+          onConfirm={() => void continueDelete()}
+          onCancel={() => setDeletePreflight(null)}
+        />
+      )}
       <div className="max-w-4xl mx-auto">
         <div className="flex items-center justify-between mb-6">
           <button
@@ -1000,10 +1048,11 @@ export default function AgentRunDetail() {
           >
             <button
               onClick={handleDelete}
-              className="inline-flex items-center gap-1.5 rounded-md bg-white px-3 py-2 text-sm font-medium text-rose-700 ring-1 ring-rose-200 hover:bg-rose-100"
+              disabled={deleteBusy}
+              className="inline-flex items-center gap-1.5 rounded-md bg-white px-3 py-2 text-sm font-medium text-rose-700 ring-1 ring-rose-200 hover:bg-rose-100 disabled:opacity-50"
             >
               <Trash2 size={14} />
-              删除运行记录
+              {deleteBusy ? "预检中..." : "删除运行记录"}
             </button>
           </DangerZone>
         </div>

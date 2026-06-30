@@ -12,9 +12,11 @@ import {
   exportMcpAuditLogs,
   cleanupMcpAuditLogs,
   rotateMcpAuditKey,
+  rebuildMemoryIndex,
   getPrivacyPolicy,
   setPrivacyPolicy,
   getDangerActionPreflight,
+  buildDangerActionConfirmationEvidence,
   type ExportPayload,
   type HotMemoryCache,
   type PrivacyPolicy,
@@ -23,6 +25,7 @@ import {
   type SystemDiagnostics,
   type DangerActionPreflightView,
   type DangerActionType,
+  type DangerActionConfirmationEvidence,
   listToolPermissions,
   revokeToolPermission,
   listPlugins,
@@ -48,6 +51,7 @@ import ReviewMemoryTab from "./settings/tabs/ReviewMemoryTab";
 import AdvancedTab from "./settings/tabs/AdvancedTab";
 import MultiStrategyPreviewSection from "./settings/MultiStrategyPreviewSection";
 import ConfirmDangerDialog from "../components/ConfirmDangerDialog";
+import DangerActionPreflightDetails from "../components/DangerActionPreflightDetails";
 
 function defaultConfig(): AppConfig {
   return {
@@ -95,73 +99,10 @@ const DANGER_ACTION_LABELS: Record<DangerActionType, string> = {
   mcp_audit_export: "导出审计",
   mcp_audit_cleanup: "清理旧日志",
   mcp_audit_key_rotation: "轮换密钥",
+  agent_run_delete: "删除运行记录",
+  agent_run_bulk_delete: "批量删除运行记录",
+  vector_rebuild: "重建向量索引",
 };
-
-function preflightValue(value: boolean): string {
-  return value ? "是" : "否";
-}
-
-function preflightStatus(value: string): string {
-  return value.replace(/_/g, " ");
-}
-
-function DangerActionPreflightDetails({ view }: { view: DangerActionPreflightView }) {
-  const rows = [
-    ["风险等级", preflightStatus(view.riskTier)],
-    ["写入 durable state", preflightValue(view.writesDurableState)],
-    ["external provider", preflightStatus(view.externalTransmission)],
-    ["dry run", preflightValue(view.dryRunAvailable)],
-    ["backup / snapshot", preflightStatus(view.backupStatus)],
-    ["后续执行入口", view.finalActionEnabled ? "可用" : "已阻断"],
-    ["Safe Mode", view.safeModeBlocked ? "blocked" : "未阻断"],
-  ];
-
-  return (
-    <div className="space-y-3">
-      <p>{view.scopeSummary}</p>
-      <div className="grid gap-2 text-xs sm:grid-cols-2">
-        {rows.map(([label, value]) => (
-          <div key={label} className="rounded-md border border-stone-200 bg-white px-2.5 py-2">
-            <div className="font-medium text-stone-500">{label}</div>
-            <div className="mt-0.5 font-semibold text-stone-900">{value}</div>
-          </div>
-        ))}
-      </div>
-      <div>
-        <div className="text-xs font-medium text-stone-500">数据类别</div>
-        <div className="mt-1 flex flex-wrap gap-1.5">
-          {view.dataCategories.map(category => (
-            <span
-              key={category}
-              className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs font-medium text-slate-700"
-            >
-              {preflightStatus(category)}
-            </span>
-          ))}
-        </div>
-      </div>
-      {view.safeModeBlocked && (
-        <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-          Safe Mode 已阻断最终执行入口
-          {view.blockingReasons.length ? `：${view.blockingReasons.join(" / ")}` : "。"}
-        </div>
-      )}
-      <div>
-        <div className="text-xs font-medium text-stone-500">source refs</div>
-        <div className="mt-1 space-y-1">
-          {view.sourceRefs.map(ref => (
-            <code
-              key={ref}
-              className="block rounded bg-stone-100 px-2 py-1 text-[11px] text-stone-700"
-            >
-              {ref}
-            </code>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
 
 export default function SettingsPage() {
   const [config, setConfig] = useState<AppConfig>(defaultConfig());
@@ -190,6 +131,7 @@ export default function SettingsPage() {
   const [pendingImport, setPendingImport] = useState<{
     payload: ExportPayload;
     path: string;
+    confirmationEvidence: DangerActionConfirmationEvidence;
   } | null>(null);
   const [dangerPreflight, setDangerPreflight] = useState<DangerActionPreflightView | null>(null);
   const [dangerPreflightAction, setDangerPreflightAction] = useState<DangerActionType | null>(null);
@@ -350,7 +292,9 @@ export default function SettingsPage() {
 
   const handleImport = async () => openDangerActionPreflight("data_import_overwrite", "data");
 
-  const executeImportFileSelection = async () => {
+  const executeImportFileSelection = async (
+    confirmationEvidence: DangerActionConfirmationEvidence
+  ) => {
     setImportLoading(true);
     setMessage(null);
     try {
@@ -365,7 +309,7 @@ export default function SettingsPage() {
       }
       const text = await readTextFile(path);
       const payload: ExportPayload = JSON.parse(text);
-      setPendingImport({ payload, path });
+      setPendingImport({ payload, path, confirmationEvidence });
       setMessage("已读取导入文件，请确认覆盖导入。");
     } catch (e: any) {
       setMessage(buildRuntimeActionError("导入数据", e, "data"));
@@ -379,7 +323,7 @@ export default function SettingsPage() {
     setImportLoading(true);
     setMessage(null);
     try {
-      await importAllData(pendingImport.payload);
+      await importAllData(pendingImport.payload, pendingImport.confirmationEvidence);
       setPendingImport(null);
       setMessage("导入成功，请刷新页面以查看最新数据");
       await refreshAllDiagnostics();
@@ -417,11 +361,11 @@ export default function SettingsPage() {
 
   const handleCleanupAudit = async () => openDangerActionPreflight("mcp_audit_cleanup", "security");
 
-  const executeCleanupAudit = async () => {
+  const executeCleanupAudit = async (confirmationEvidence: DangerActionConfirmationEvidence) => {
     setSecurityLoading(true);
     setSecurityMessage(null);
     try {
-      const removed = await cleanupMcpAuditLogs(90);
+      const removed = await cleanupMcpAuditLogs(90, confirmationEvidence);
       setSecurityMessage(`已清理 ${removed} 条旧 MCP 审计日志`);
       await refreshSecurityState();
     } catch (e: any) {
@@ -434,11 +378,11 @@ export default function SettingsPage() {
   const handleRotateAuditKey = async () =>
     openDangerActionPreflight("mcp_audit_key_rotation", "security");
 
-  const executeRotateAuditKey = async () => {
+  const executeRotateAuditKey = async (confirmationEvidence: DangerActionConfirmationEvidence) => {
     setSecurityLoading(true);
     setSecurityMessage(null);
     try {
-      await rotateMcpAuditKey();
+      await rotateMcpAuditKey(confirmationEvidence);
       setSecurityMessage("审计密钥已轮换，历史日志会继续按原 key epoch 解密");
     } catch (e: any) {
       setSecurityMessage(buildRuntimeActionError("轮换审计密钥", e, "data"));
@@ -447,9 +391,33 @@ export default function SettingsPage() {
     }
   };
 
+  const handleVectorRebuild = async () => openDangerActionPreflight("vector_rebuild", "data");
+
+  const executeVectorRebuild = async (confirmationEvidence: DangerActionConfirmationEvidence) => {
+    setRebuildLoading(true);
+    setRebuildResult(null);
+    try {
+      const res = await rebuildMemoryIndex(confirmationEvidence);
+      const refreshed = await refreshAllDiagnostics();
+      const recovered = refreshed && !isSafeMode(refreshed);
+      setRebuildResult(
+        `向量索引重建完成：共处理 ${res.processed} 条消息，重建 ${res.indexed} 条，跳过 ${res.skipped} 条。${
+          recovered
+            ? " 当前数据环境已恢复，可继续使用。"
+            : " 已刷新诊断，请继续确认数据环境是否恢复。"
+        }`
+      );
+    } catch (e) {
+      setRebuildResult(`向量索引重建失败：${readableError(e)}`);
+    } finally {
+      setRebuildLoading(false);
+    }
+  };
+
   const continueDangerAction = async () => {
     if (!dangerPreflight || !dangerPreflight.finalActionEnabled) return;
     const actionType = dangerPreflight.actionType;
+    const confirmationEvidence = buildDangerActionConfirmationEvidence(dangerPreflight);
     setDangerPreflight(null);
     setDangerPreflightAction(null);
 
@@ -458,16 +426,19 @@ export default function SettingsPage() {
         await executeExport();
         break;
       case "data_import_overwrite":
-        await executeImportFileSelection();
+        await executeImportFileSelection(confirmationEvidence);
         break;
       case "mcp_audit_export":
         await executeExportAudit();
         break;
       case "mcp_audit_cleanup":
-        await executeCleanupAudit();
+        await executeCleanupAudit(confirmationEvidence);
         break;
       case "mcp_audit_key_rotation":
-        await executeRotateAuditKey();
+        await executeRotateAuditKey(confirmationEvidence);
+        break;
+      case "vector_rebuild":
+        await executeVectorRebuild(confirmationEvidence);
         break;
       default:
         setMessage("动作预检失败: unsupported danger action preflight action type");
@@ -508,6 +479,11 @@ export default function SettingsPage() {
           confirmLabel={dangerPreflight.finalActionEnabled ? "继续执行" : "Safe Mode 已阻断"}
           cancelLabel="返回"
           severity={dangerPreflight.riskTier === "critical" ? "danger" : "warning"}
+          confirmationText={
+            dangerPreflight.confirmationRequired && dangerPreflight.confirmationPhrase
+              ? dangerPreflight.confirmationPhrase
+              : undefined
+          }
           confirmDisabled={!dangerPreflight.finalActionEnabled}
           busy={dangerPreflightLoading === dangerPreflightAction}
           onConfirm={() => void continueDangerAction()}
@@ -532,7 +508,7 @@ export default function SettingsPage() {
             </div>
           </div>
         }
-        confirmationText="IMPORT"
+        confirmationText={pendingImport?.confirmationEvidence.confirmationPhrase || "IMPORT"}
         confirmLabel="覆盖导入"
         busy={importLoading}
         onConfirm={() => void confirmImport()}
@@ -606,6 +582,7 @@ export default function SettingsPage() {
             setRebuildLoading={setRebuildLoading}
             rebuildResult={rebuildResult}
             setRebuildResult={setRebuildResult}
+            handleVectorRebuild={handleVectorRebuild}
           />
         )}
 

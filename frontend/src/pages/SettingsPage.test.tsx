@@ -207,7 +207,17 @@ describe("SettingsPage", () => {
     expect(readTextFile).not.toHaveBeenCalled();
     expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "import_all_data")).toBe(false);
 
-    fireEvent.click(screen.getByRole("button", { name: "继续执行" }));
+    const preflightContinue = screen.getByRole("button", { name: "继续执行" });
+    expect(preflightContinue).toBeDisabled();
+    fireEvent.change(screen.getByLabelText(/输入 IMPORT 以继续/), {
+      target: { value: "WRONG" },
+    });
+    expect(preflightContinue).toBeDisabled();
+    expect(open).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText(/输入 IMPORT 以继续/), {
+      target: { value: "IMPORT" },
+    });
+    fireEvent.click(preflightContinue);
 
     expect(await screen.findByRole("dialog", { name: "确认覆盖导入全部数据" })).toBeInTheDocument();
     expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "import_all_data")).toBe(false);
@@ -4062,12 +4072,7 @@ describe("SettingsPage", () => {
     expect(screen.getByText(/先把 Review 应用掉，比重新开始更合适/)).toBeInTheDocument();
   });
 
-  it("rebuilds vector index from recovery console", async () => {
-    vi.stubGlobal(
-      "confirm",
-      vi.fn(() => true)
-    );
-
+  it("routes vector rebuild through preflight and blocks final command in safe mode", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_system_diagnostics") {
         return Promise.resolve({
@@ -4136,10 +4141,12 @@ describe("SettingsPage", () => {
 
     fireEvent.click(await screen.findByText("重建向量索引"));
 
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith("rebuild_memory_index", undefined);
-    });
-    expect(await screen.findByText(/向量索引重建完成/)).toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: "动作预检：重建向量索引" })).toBeInTheDocument();
+    expect(screen.getByText(/Safe Mode 已阻断最终执行入口/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Safe Mode 已阻断" })).toBeDisabled();
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "rebuild_memory_index")).toBe(
+      false
+    );
   });
 
   it("blocks destructive import action in safe mode", async () => {

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { describe, expect, it, vi, afterEach } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
@@ -108,6 +108,7 @@ function renderDetail(runId: string) {
     <MemoryRouter initialEntries={[`/runs/${runId}`]}>
       <Routes>
         <Route path="/runs/:runId" element={<AgentRunDetail />} />
+        <Route path="/runs" element={<div>Runs list</div>} />
       </Routes>
     </MemoryRouter>
   );
@@ -290,5 +291,70 @@ describe("AgentRunDetail evidence view", () => {
     expect(screen.getByRole("button", { name: /refresh context/i })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /retry/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /cancel/i })).not.toBeInTheDocument();
+  });
+
+  it("preflights single run deletion before calling delete_agent_run", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "get_agent_run") return Promise.resolve(baseRun("run-delete-1"));
+      if (cmd === "list_main_chat_agent_tasks") return Promise.resolve([]);
+      if (cmd === "get_danger_action_preflight") {
+        return Promise.resolve({
+          actionType: "agent_run_delete",
+          riskTier: "high",
+          scopeSummary:
+            "删除选中的 AgentRun 运行记录；预检只保留数量和 id digest，不展开 transcript。",
+          dataCategories: ["agent_run_metadata", "run_trace_metadata"],
+          writesDurableState: true,
+          privacySensitive: true,
+          externalTransmission: "not_sent_externally",
+          dryRunAvailable: false,
+          backupStatus: "soft_delete_trash_view",
+          requiresTypedConfirmation: false,
+          confirmationRequired: true,
+          confirmationPhrase: "DELETE RUN",
+          confirmationScopeDigest: `bytes:10 hash:sha256:${"a".repeat(64)}`,
+          preflightId: `danger-preflight:sha256:${"b".repeat(64)}`,
+          affectedItemCount: 1,
+          affectedItemDigest: `bytes:10 hash:sha256:${"a".repeat(64)}`,
+          finalActionEnabled: true,
+          safeModeBlocked: false,
+          blockingReasons: [],
+          sourceRefs: [
+            "settings_command:get_danger_action_preflight",
+            "final_command:delete_agent_run",
+            "governance:slice5c_danger_zone_consolidation",
+          ],
+        });
+      }
+      if (cmd === "delete_agent_run") return Promise.resolve(undefined);
+      return Promise.reject(new Error(`unexpected command ${cmd}`));
+    });
+
+    renderDetail("run-delete-1");
+
+    fireEvent.click(await screen.findByRole("button", { name: "删除运行记录" }));
+
+    expect(await screen.findByRole("dialog", { name: "动作预检：删除运行记录" })).toBeInTheDocument();
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "delete_agent_run")).toBe(false);
+    const continueButton = screen.getByRole("button", { name: "继续删除" });
+    expect(continueButton).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText(/输入 DELETE RUN 以继续/), {
+      target: { value: "DELETE RUN" },
+    });
+    fireEvent.click(continueButton);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "delete_agent_run",
+        expect.objectContaining({
+          runId: "run-delete-1",
+          confirmationEvidence: expect.objectContaining({
+            actionType: "agent_run_delete",
+            targetIds: ["run-delete-1"],
+          }),
+        })
+      );
+    });
   });
 });

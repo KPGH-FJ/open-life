@@ -35,6 +35,18 @@ pub struct GovernedDataImportRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct DangerActionConfirmationEvidence {
+    pub action_type: String,
+    pub preflight_id: String,
+    pub confirmation_phrase: String,
+    pub confirmation_scope_digest: String,
+    pub safe_mode: bool,
+    #[serde(default)]
+    pub target_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct DangerActionPreflightView {
     pub action_type: String,
     pub risk_tier: String,
@@ -46,16 +58,115 @@ pub struct DangerActionPreflightView {
     pub dry_run_available: bool,
     pub backup_status: String,
     pub requires_typed_confirmation: bool,
+    pub confirmation_required: bool,
+    pub confirmation_phrase: Option<String>,
+    pub confirmation_scope_digest: String,
+    pub preflight_id: String,
+    pub affected_item_count: usize,
+    pub affected_item_digest: String,
     pub final_action_enabled: bool,
     pub safe_mode_blocked: bool,
     pub blocking_reasons: Vec<String>,
     pub source_refs: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct DangerActionPreflightScope {
+    target_ids: Vec<String>,
+    affected_count: Option<usize>,
+}
+
+fn validate_scope_target_ids(target_ids: &[String]) -> Result<Vec<String>, AppError> {
+    if target_ids.len() > 100 {
+        return Err(AppError::permission(
+            "danger action preflight target scope is too large",
+        ));
+    }
+    let mut safe = Vec::with_capacity(target_ids.len());
+    for target_id in target_ids {
+        if target_id.is_empty()
+            || target_id.len() > 128
+            || target_id.trim() != target_id
+            || target_id.chars().any(char::is_control)
+        {
+            return Err(AppError::permission(
+                "danger action preflight target scope is not metadata-safe",
+            ));
+        }
+        safe.push(target_id.clone());
+    }
+    safe.sort();
+    safe.dedup();
+    Ok(safe)
+}
+
+fn danger_action_confirmation_phrase(action_type: &str) -> Option<&'static str> {
+    match action_type {
+        "data_import_overwrite" => Some("IMPORT"),
+        "mcp_audit_cleanup" => Some("CLEANUP"),
+        "mcp_audit_key_rotation" => Some("ROTATE"),
+        "agent_run_delete" => Some("DELETE RUN"),
+        "agent_run_bulk_delete" => Some("DELETE RUNS"),
+        "vector_rebuild" => Some("REBUILD"),
+        _ => None,
+    }
+}
+
+fn danger_action_scope_digest(
+    action_type: &str,
+    target_ids: &[String],
+    affected_count: usize,
+) -> Result<String, AppError> {
+    let canonical = serde_json::json!({
+        "action_type": action_type,
+        "affected_count": affected_count,
+        "target_id_count": target_ids.len(),
+        "target_ids": target_ids,
+    });
+    let bytes = serde_json::to_vec(&canonical)?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Ok(format!(
+        "bytes:{} hash:sha256:{:x}",
+        bytes.len(),
+        hasher.finalize()
+    ))
+}
+
+fn danger_action_preflight_id(action_type: &str, scope_digest: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(action_type.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(scope_digest.as_bytes());
+    format!("danger-preflight:sha256:{:x}", hasher.finalize())
+}
+
+#[cfg(test)]
 fn danger_action_preflight_for_action(
     action_type: &str,
     safe_mode: bool,
 ) -> Result<DangerActionPreflightView, AppError> {
+    danger_action_preflight_for_action_scoped(
+        action_type,
+        safe_mode,
+        DangerActionPreflightScope::default(),
+    )
+}
+
+fn danger_action_preflight_for_action_scoped(
+    action_type: &str,
+    safe_mode: bool,
+    scope: DangerActionPreflightScope,
+) -> Result<DangerActionPreflightView, AppError> {
+    let safe_target_ids = validate_scope_target_ids(&scope.target_ids)?;
+    let affected_count = scope
+        .affected_count
+        .unwrap_or(safe_target_ids.len())
+        .max(safe_target_ids.len());
+    let scope_digest = danger_action_scope_digest(action_type, &safe_target_ids, affected_count)?;
+    let confirmation_phrase = danger_action_confirmation_phrase(action_type).map(str::to_string);
+    let confirmation_required = confirmation_phrase.is_some();
+    let preflight_id = danger_action_preflight_id(action_type, &scope_digest);
     let mut view = match action_type {
         "data_export" => DangerActionPreflightView {
             action_type: "data_export".into(),
@@ -68,7 +179,13 @@ fn danger_action_preflight_for_action(
             external_transmission: "not_sent_externally".into(),
             dry_run_available: false,
             backup_status: "not_required_read_only".into(),
-            requires_typed_confirmation: false,
+            requires_typed_confirmation: confirmation_required,
+            confirmation_required,
+            confirmation_phrase,
+            confirmation_scope_digest: scope_digest.clone(),
+            preflight_id: preflight_id.clone(),
+            affected_item_count: affected_count,
+            affected_item_digest: scope_digest.clone(),
             final_action_enabled: true,
             safe_mode_blocked: false,
             blocking_reasons: vec![],
@@ -90,7 +207,13 @@ fn danger_action_preflight_for_action(
             external_transmission: "not_sent_externally".into(),
             dry_run_available: false,
             backup_status: "will_create_on_execute".into(),
-            requires_typed_confirmation: false,
+            requires_typed_confirmation: confirmation_required,
+            confirmation_required,
+            confirmation_phrase,
+            confirmation_scope_digest: scope_digest.clone(),
+            preflight_id: preflight_id.clone(),
+            affected_item_count: affected_count,
+            affected_item_digest: scope_digest.clone(),
             final_action_enabled: true,
             safe_mode_blocked: false,
             blocking_reasons: vec![],
@@ -118,7 +241,13 @@ fn danger_action_preflight_for_action(
             external_transmission: "not_sent_externally".into(),
             dry_run_available: false,
             backup_status: "not_required_read_only".into(),
-            requires_typed_confirmation: false,
+            requires_typed_confirmation: confirmation_required,
+            confirmation_required,
+            confirmation_phrase,
+            confirmation_scope_digest: scope_digest.clone(),
+            preflight_id: preflight_id.clone(),
+            affected_item_count: affected_count,
+            affected_item_digest: scope_digest.clone(),
             final_action_enabled: true,
             safe_mode_blocked: false,
             blocking_reasons: vec![],
@@ -138,7 +267,13 @@ fn danger_action_preflight_for_action(
             external_transmission: "not_sent_externally".into(),
             dry_run_available: false,
             backup_status: "none".into(),
-            requires_typed_confirmation: false,
+            requires_typed_confirmation: confirmation_required,
+            confirmation_required,
+            confirmation_phrase,
+            confirmation_scope_digest: scope_digest.clone(),
+            preflight_id: preflight_id.clone(),
+            affected_item_count: affected_count,
+            affected_item_digest: scope_digest.clone(),
             final_action_enabled: true,
             safe_mode_blocked: false,
             blocking_reasons: vec![],
@@ -159,7 +294,13 @@ fn danger_action_preflight_for_action(
             external_transmission: "not_sent_externally".into(),
             dry_run_available: false,
             backup_status: "historical_key_epochs_retained".into(),
-            requires_typed_confirmation: false,
+            requires_typed_confirmation: confirmation_required,
+            confirmation_required,
+            confirmation_phrase,
+            confirmation_scope_digest: scope_digest.clone(),
+            preflight_id: preflight_id.clone(),
+            affected_item_count: affected_count,
+            affected_item_digest: scope_digest.clone(),
             final_action_enabled: true,
             safe_mode_blocked: false,
             blocking_reasons: vec![],
@@ -167,6 +308,90 @@ fn danger_action_preflight_for_action(
                 "settings_command:get_danger_action_preflight".into(),
                 "final_command:rotate_mcp_audit_key".into(),
                 "governance:slice5b_danger_action_preflight".into(),
+            ],
+        },
+        "agent_run_delete" => DangerActionPreflightView {
+            action_type: "agent_run_delete".into(),
+            risk_tier: "high".into(),
+            scope_summary:
+                "删除选中的 AgentRun 运行记录；预检只保留数量和 id digest，不展开 transcript、tool input 或模型输出。"
+                    .into(),
+            data_categories: vec!["agent_run_metadata".into(), "run_trace_metadata".into()],
+            writes_durable_state: true,
+            privacy_sensitive: true,
+            external_transmission: "not_sent_externally".into(),
+            dry_run_available: false,
+            backup_status: "soft_delete_trash_view".into(),
+            requires_typed_confirmation: confirmation_required,
+            confirmation_required,
+            confirmation_phrase,
+            confirmation_scope_digest: scope_digest.clone(),
+            preflight_id: preflight_id.clone(),
+            affected_item_count: affected_count,
+            affected_item_digest: scope_digest.clone(),
+            final_action_enabled: true,
+            safe_mode_blocked: false,
+            blocking_reasons: vec![],
+            source_refs: vec![
+                "settings_command:get_danger_action_preflight".into(),
+                "final_command:delete_agent_run".into(),
+                "governance:slice5c_danger_zone_consolidation".into(),
+            ],
+        },
+        "agent_run_bulk_delete" => DangerActionPreflightView {
+            action_type: "agent_run_bulk_delete".into(),
+            risk_tier: "high".into(),
+            scope_summary:
+                "批量删除选中的 AgentRun 运行记录；预检只保留 bounded 数量和 id digest，不展开 transcript、tool input 或模型输出。"
+                    .into(),
+            data_categories: vec!["agent_run_metadata".into(), "run_trace_metadata".into()],
+            writes_durable_state: true,
+            privacy_sensitive: true,
+            external_transmission: "not_sent_externally".into(),
+            dry_run_available: false,
+            backup_status: "soft_delete_trash_view".into(),
+            requires_typed_confirmation: confirmation_required,
+            confirmation_required,
+            confirmation_phrase,
+            confirmation_scope_digest: scope_digest.clone(),
+            preflight_id: preflight_id.clone(),
+            affected_item_count: affected_count,
+            affected_item_digest: scope_digest.clone(),
+            final_action_enabled: true,
+            safe_mode_blocked: false,
+            blocking_reasons: vec![],
+            source_refs: vec![
+                "settings_command:get_danger_action_preflight".into(),
+                "final_command:delete_agent_run".into(),
+                "governance:slice5c_danger_zone_consolidation".into(),
+            ],
+        },
+        "vector_rebuild" => DangerActionPreflightView {
+            action_type: "vector_rebuild".into(),
+            risk_tier: "high".into(),
+            scope_summary:
+                "基于现有聊天消息重建本地向量索引；预检只展示消息数量和 scope digest，不展示原始消息或向量内容。"
+                    .into(),
+            data_categories: vec!["messages_metadata".into(), "vectors".into()],
+            writes_durable_state: true,
+            privacy_sensitive: true,
+            external_transmission: "not_sent_externally".into(),
+            dry_run_available: false,
+            backup_status: "rollback_previous_vectors_on_failure".into(),
+            requires_typed_confirmation: confirmation_required,
+            confirmation_required,
+            confirmation_phrase,
+            confirmation_scope_digest: scope_digest.clone(),
+            preflight_id: preflight_id.clone(),
+            affected_item_count: affected_count,
+            affected_item_digest: scope_digest.clone(),
+            final_action_enabled: true,
+            safe_mode_blocked: false,
+            blocking_reasons: vec![],
+            source_refs: vec![
+                "settings_command:get_danger_action_preflight".into(),
+                "final_command:rebuild_memory_index".into(),
+                "governance:slice5c_danger_zone_consolidation".into(),
             ],
         },
         _ => {
@@ -183,16 +408,101 @@ fn danger_action_preflight_for_action(
             .push("safe_mode_blocks_durable_write".into());
         view.source_refs.push("safe_mode:blocked".into());
     }
+    view.source_refs
+        .push(format!("scope_digest:{}", view.confirmation_scope_digest));
 
     Ok(view)
+}
+
+pub(crate) async fn danger_action_safe_mode_active(state: &Arc<AppState>) -> bool {
+    if !state.startup_warnings.is_empty() {
+        return true;
+    }
+    let store = state.vector_store.lock().await;
+    store
+        .integrity_report()
+        .map(|report| report.corrupt_embedding_count > 0)
+        .unwrap_or(true)
+}
+
+pub(crate) async fn require_danger_action_confirmation(
+    action_type: &str,
+    target_ids: &[String],
+    affected_count: Option<usize>,
+    evidence: Option<&DangerActionConfirmationEvidence>,
+    state: &Arc<AppState>,
+) -> Result<(), AppError> {
+    if danger_action_safe_mode_active(state).await {
+        return Err(AppError::permission(
+            "danger action blocked because Safe Mode is active",
+        ));
+    }
+
+    let scope = DangerActionPreflightScope {
+        target_ids: target_ids.to_vec(),
+        affected_count,
+    };
+    let expected = danger_action_preflight_for_action_scoped(action_type, false, scope)?;
+    if !expected.confirmation_required {
+        return Ok(());
+    }
+
+    let evidence = evidence.ok_or_else(|| {
+        AppError::permission("danger action requires confirmed preflight evidence")
+    })?;
+    if evidence.safe_mode {
+        return Err(AppError::permission(
+            "danger action confirmation evidence was produced under Safe Mode",
+        ));
+    }
+    if evidence.action_type != expected.action_type
+        || evidence.preflight_id != expected.preflight_id
+        || evidence.confirmation_scope_digest != expected.confirmation_scope_digest
+        || Some(evidence.confirmation_phrase.as_str()) != expected.confirmation_phrase.as_deref()
+    {
+        return Err(AppError::permission(
+            "danger action confirmation evidence does not match preflight scope",
+        ));
+    }
+
+    let safe_evidence_targets = validate_scope_target_ids(&evidence.target_ids)?;
+    let expected_targets = validate_scope_target_ids(target_ids)?;
+    if safe_evidence_targets != expected_targets {
+        return Err(AppError::permission(
+            "danger action confirmation target scope does not match final action",
+        ));
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn get_danger_action_preflight(
     action_type: String,
     safe_mode: Option<bool>,
+    target_ids: Option<Vec<String>>,
+    affected_count: Option<usize>,
+    state: State<'_, Arc<AppState>>,
 ) -> Result<DangerActionPreflightView, AppError> {
-    danger_action_preflight_for_action(&action_type, safe_mode.unwrap_or(false))
+    let mut effective_safe_mode = safe_mode.unwrap_or(false);
+    if danger_action_safe_mode_active(state.inner()).await {
+        effective_safe_mode = true;
+    }
+    let target_ids = target_ids.unwrap_or_default();
+    let effective_affected_count = if action_type == "vector_rebuild" && affected_count.is_none() {
+        let store = state.memory_store.lock().await;
+        Some(store.export_all_messages().map_err(AppError::from)?.len())
+    } else {
+        affected_count
+    };
+    danger_action_preflight_for_action_scoped(
+        &action_type,
+        effective_safe_mode,
+        DangerActionPreflightScope {
+            target_ids,
+            affected_count: effective_affected_count,
+        },
+    )
 }
 
 impl GovernedDataImportRequest {
@@ -401,8 +711,17 @@ async fn export_all_data_with_state(state: &Arc<AppState>) -> Result<serde_json:
 pub async fn import_all_data(
     payload: serde_json::Value,
     import_request: Option<GovernedDataImportRequest>,
+    confirmation_evidence: Option<DangerActionConfirmationEvidence>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, AppError> {
+    require_danger_action_confirmation(
+        "data_import_overwrite",
+        &[],
+        None,
+        confirmation_evidence.as_ref(),
+        state.inner(),
+    )
+    .await?;
     import_all_data_with_state_gated(payload, state.inner(), import_request).await
 }
 
@@ -764,14 +1083,34 @@ pub async fn export_mcp_audit_logs(
 #[tauri::command]
 pub async fn cleanup_mcp_audit_logs(
     retention_days: i64,
+    confirmation_evidence: Option<DangerActionConfirmationEvidence>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<usize, AppError> {
+    require_danger_action_confirmation(
+        "mcp_audit_cleanup",
+        &[],
+        None,
+        confirmation_evidence.as_ref(),
+        state.inner(),
+    )
+    .await?;
     let store = state.mcp_audit_store.lock().await;
     store.cleanup(retention_days).map_err(AppError::from)
 }
 
 #[tauri::command]
-pub async fn rotate_mcp_audit_key(state: State<'_, Arc<AppState>>) -> Result<(), AppError> {
+pub async fn rotate_mcp_audit_key(
+    confirmation_evidence: Option<DangerActionConfirmationEvidence>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), AppError> {
+    require_danger_action_confirmation(
+        "mcp_audit_key_rotation",
+        &[],
+        None,
+        confirmation_evidence.as_ref(),
+        state.inner(),
+    )
+    .await?;
     let mut store = state.mcp_audit_store.lock().await;
     let new_config = AuditKeyConfig {
         mode: KeyMode::Derived,
@@ -938,11 +1277,139 @@ mod tests {
     }
 
     #[test]
+    fn danger_action_preflight_covers_run_delete_and_vector_rebuild_without_raw_scope_leaks() {
+        let view = danger_action_preflight_for_action_scoped(
+            "agent_run_bulk_delete",
+            false,
+            DangerActionPreflightScope {
+                target_ids: vec!["run-private-1".into(), "run-private-2".into()],
+                affected_count: Some(2),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(view.action_type, "agent_run_bulk_delete");
+        assert!(view.writes_durable_state);
+        assert!(view.confirmation_required);
+        assert_eq!(view.confirmation_phrase.as_deref(), Some("DELETE RUNS"));
+        assert_eq!(view.affected_item_count, 2);
+        assert!(view.affected_item_digest.starts_with("bytes:"));
+        assert!(view
+            .source_refs
+            .iter()
+            .any(|source| source == "final_command:delete_agent_run"));
+        let serialized = serde_json::to_string(&view).unwrap();
+        assert!(!serialized.contains("run-private-1"));
+        assert!(!serialized.contains("run-private-2"));
+
+        let vector = danger_action_preflight_for_action_scoped(
+            "vector_rebuild",
+            false,
+            DangerActionPreflightScope {
+                target_ids: vec![],
+                affected_count: Some(12),
+            },
+        )
+        .unwrap();
+        assert_eq!(vector.action_type, "vector_rebuild");
+        assert_eq!(vector.confirmation_phrase.as_deref(), Some("REBUILD"));
+        assert_eq!(vector.affected_item_count, 12);
+        assert!(vector
+            .source_refs
+            .iter()
+            .any(|source| source == "final_command:rebuild_memory_index"));
+    }
+
+    #[tokio::test]
+    async fn danger_action_confirmation_requires_exact_phrase_and_scope() {
+        let state = crate::test_utils::test_app_state();
+        let target_ids = vec!["run-confirm-1".to_string()];
+        let view = danger_action_preflight_for_action_scoped(
+            "agent_run_delete",
+            false,
+            DangerActionPreflightScope {
+                target_ids: target_ids.clone(),
+                affected_count: Some(1),
+            },
+        )
+        .unwrap();
+        let evidence = DangerActionConfirmationEvidence {
+            action_type: "agent_run_delete".into(),
+            preflight_id: view.preflight_id.clone(),
+            confirmation_phrase: view.confirmation_phrase.clone().unwrap(),
+            confirmation_scope_digest: view.confirmation_scope_digest.clone(),
+            safe_mode: false,
+            target_ids: target_ids.clone(),
+        };
+
+        require_danger_action_confirmation(
+            "agent_run_delete",
+            &target_ids,
+            Some(1),
+            Some(&evidence),
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let missing = require_danger_action_confirmation(
+            "agent_run_delete",
+            &target_ids,
+            Some(1),
+            None,
+            &state,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(missing, AppError::PermissionDenied { .. }));
+
+        let mut wrong_phrase = evidence.clone();
+        wrong_phrase.confirmation_phrase = "WRONG".into();
+        let err = require_danger_action_confirmation(
+            "agent_run_delete",
+            &target_ids,
+            Some(1),
+            Some(&wrong_phrase),
+            &state,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.message().contains("does not match"));
+
+        let mut safe_mode_evidence = evidence.clone();
+        safe_mode_evidence.safe_mode = true;
+        let err = require_danger_action_confirmation(
+            "agent_run_delete",
+            &target_ids,
+            Some(1),
+            Some(&safe_mode_evidence),
+            &state,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.message().contains("Safe Mode"));
+
+        let err = require_danger_action_confirmation(
+            "agent_run_delete",
+            &["run-other".into()],
+            Some(1),
+            Some(&evidence),
+            &state,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.message().contains("does not match"));
+    }
+
+    #[test]
     fn danger_action_preflight_safe_mode_blocks_destructive_actions() {
         for action_type in [
             "data_import_overwrite",
             "mcp_audit_cleanup",
             "mcp_audit_key_rotation",
+            "agent_run_delete",
+            "agent_run_bulk_delete",
+            "vector_rebuild",
         ] {
             let view = danger_action_preflight_for_action(action_type, true).unwrap();
             assert!(view.writes_durable_state);
@@ -985,6 +1452,9 @@ mod tests {
             "mcp_audit_export",
             "mcp_audit_cleanup",
             "mcp_audit_key_rotation",
+            "agent_run_delete",
+            "agent_run_bulk_delete",
+            "vector_rebuild",
         ]
         .into_iter()
         .map(|action_type| danger_action_preflight_for_action(action_type, true).unwrap())

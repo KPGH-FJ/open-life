@@ -1,3 +1,6 @@
+use crate::commands::settings::{
+    require_danger_action_confirmation, DangerActionConfirmationEvidence,
+};
 use crate::errors::AppError;
 use crate::main_chat_runtime_facts::{
     provider_transmission_history_from_runs, ProviderTransmissionHistoryItem,
@@ -69,8 +72,48 @@ pub async fn list_agent_runs_for_session(
 pub async fn delete_agent_run(
     run_id: String,
     reason: Option<String>,
+    confirmation_evidence: Option<DangerActionConfirmationEvidence>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), AppError> {
+    let evidence = confirmation_evidence.as_ref().ok_or_else(|| {
+        AppError::permission("delete_agent_run requires confirmed preflight evidence")
+    })?;
+    match evidence.action_type.as_str() {
+        "agent_run_delete" => {
+            require_danger_action_confirmation(
+                "agent_run_delete",
+                std::slice::from_ref(&run_id),
+                Some(1),
+                Some(evidence),
+                state.inner(),
+            )
+            .await?;
+        }
+        "agent_run_bulk_delete" => {
+            if !evidence
+                .target_ids
+                .iter()
+                .any(|target_id| target_id == &run_id)
+            {
+                return Err(AppError::permission(
+                    "delete_agent_run target is outside confirmed bulk preflight scope",
+                ));
+            }
+            require_danger_action_confirmation(
+                "agent_run_bulk_delete",
+                &evidence.target_ids,
+                Some(evidence.target_ids.len()),
+                Some(evidence),
+                state.inner(),
+            )
+            .await?;
+        }
+        _ => {
+            return Err(AppError::permission(
+                "delete_agent_run requires agent_run_delete preflight evidence",
+            ));
+        }
+    }
     if let Some(ref store_arc) = state.agent_run_store {
         let store = store_arc.lock().await;
         store

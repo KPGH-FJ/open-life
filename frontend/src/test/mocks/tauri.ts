@@ -3674,11 +3674,27 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
     case "get_danger_action_preflight": {
       const actionType = String(_args?.actionType ?? _args?.action_type ?? "data_export");
       const safeMode = Boolean(_args?.safeMode ?? _args?.safe_mode);
+      const targetIds = (_args?.targetIds ?? _args?.target_ids ?? []) as string[];
+      const affectedCount = Number(
+        _args?.affectedCount ?? _args?.affected_count ?? targetIds.length ?? 0
+      );
       const mutating = [
         "data_import_overwrite",
         "mcp_audit_cleanup",
         "mcp_audit_key_rotation",
+        "agent_run_delete",
+        "agent_run_bulk_delete",
+        "vector_rebuild",
       ].includes(actionType);
+      const confirmationPhrases: Record<string, string> = {
+        data_import_overwrite: "IMPORT",
+        mcp_audit_cleanup: "CLEANUP",
+        mcp_audit_key_rotation: "ROTATE",
+        agent_run_delete: "DELETE RUN",
+        agent_run_bulk_delete: "DELETE RUNS",
+        vector_rebuild: "REBUILD",
+      };
+      const digest = `bytes:${actionType.length + targetIds.join("|").length + affectedCount} hash:sha256:${"a".repeat(64)}`;
       const labels: Record<string, string> = {
         data_export: "导出本地 LifeModel、聊天记录和向量记忆到本地 JSON 文件。",
         data_import_overwrite: "覆盖当前 LifeModel、聊天记录和向量记忆。",
@@ -3686,6 +3702,9 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           "导出最近 MCP 审计日志元数据，可能包含工具输入参数文本和工具执行结果文本。",
         mcp_audit_cleanup: "删除超过保留期限的本地 MCP 审计日志。",
         mcp_audit_key_rotation: "轮换本地 MCP 审计加密 epoch。",
+        agent_run_delete: "删除选中的 AgentRun 运行记录；不展开 transcript。",
+        agent_run_bulk_delete: "批量删除选中的 AgentRun 运行记录；不展开 transcript。",
+        vector_rebuild: "基于现有聊天消息重建本地向量索引；不展示原始消息。",
       };
       const finalCommands: Record<string, string> = {
         data_export: "export_all_data",
@@ -3693,6 +3712,9 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         mcp_audit_export: "export_mcp_audit_logs",
         mcp_audit_cleanup: "cleanup_mcp_audit_logs",
         mcp_audit_key_rotation: "rotate_mcp_audit_key",
+        agent_run_delete: "delete_agent_run",
+        agent_run_bulk_delete: "delete_agent_run",
+        vector_rebuild: "rebuild_memory_index",
       };
       return Promise.resolve({
         actionType,
@@ -3705,7 +3727,11 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           ? actionType === "mcp_audit_export"
             ? ["mcp_audit_metadata", "tool_metadata", "tool_input_text", "tool_output_text"]
             : ["mcp_audit_metadata", "tool_metadata"]
-          : ["life_model", "messages", "vectors"],
+          : actionType.startsWith("agent_run")
+            ? ["agent_run_metadata", "run_trace_metadata"]
+            : actionType === "vector_rebuild"
+              ? ["messages_metadata", "vectors"]
+              : ["life_model", "messages", "vectors"],
         writesDurableState: mutating,
         privacySensitive: true,
         externalTransmission: "not_sent_externally",
@@ -3713,17 +3739,28 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         backupStatus:
           actionType === "data_import_overwrite"
             ? "will_create_on_execute"
+            : actionType === "vector_rebuild"
+              ? "rollback_previous_vectors_on_failure"
             : mutating
               ? "none"
               : "not_required_read_only",
-        requiresTypedConfirmation: false,
+        requiresTypedConfirmation: Boolean(confirmationPhrases[actionType]),
+        confirmationRequired: Boolean(confirmationPhrases[actionType]),
+        confirmationPhrase: confirmationPhrases[actionType] ?? null,
+        confirmationScopeDigest: digest,
+        preflightId: `danger-preflight:sha256:${"b".repeat(64)}`,
+        affectedItemCount: affectedCount,
+        affectedItemDigest: digest,
         finalActionEnabled: !(safeMode && mutating),
         safeModeBlocked: safeMode && mutating,
         blockingReasons: safeMode && mutating ? ["safe_mode_blocks_durable_write"] : [],
         sourceRefs: [
           "settings_command:get_danger_action_preflight",
           `final_command:${finalCommands[actionType] ?? "unknown"}`,
-          "governance:slice5b_danger_action_preflight",
+          actionType.startsWith("agent_run") || actionType === "vector_rebuild"
+            ? "governance:slice5c_danger_zone_consolidation"
+            : "governance:slice5b_danger_action_preflight",
+          `scope_digest:${digest}`,
         ],
       } as T);
     }

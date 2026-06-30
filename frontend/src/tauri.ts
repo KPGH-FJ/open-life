@@ -3091,12 +3091,16 @@ export async function countMemoryChunks(): Promise<number> {
   return safeInvoke("count_memory_chunks");
 }
 
-export async function rebuildMemoryIndex(): Promise<{
+export async function rebuildMemoryIndex(confirmationEvidence?: DangerActionConfirmationEvidence): Promise<{
   processed: number;
   indexed: number;
   skipped: number;
 }> {
-  return safeInvoke("rebuild_memory_index");
+  return safeInvoke("rebuild_memory_index", {
+    ...(confirmationEvidence
+      ? { confirmationEvidence, confirmation_evidence: confirmationEvidence }
+      : {}),
+  });
 }
 
 export async function logAnalyticsEvent(
@@ -3406,7 +3410,10 @@ export type DangerActionType =
   | "data_import_overwrite"
   | "mcp_audit_export"
   | "mcp_audit_cleanup"
-  | "mcp_audit_key_rotation";
+  | "mcp_audit_key_rotation"
+  | "agent_run_delete"
+  | "agent_run_bulk_delete"
+  | "vector_rebuild";
 
 export interface DangerActionPreflightView {
   actionType: DangerActionType;
@@ -3419,21 +3426,55 @@ export interface DangerActionPreflightView {
   dryRunAvailable: boolean;
   backupStatus: string;
   requiresTypedConfirmation: boolean;
+  confirmationRequired: boolean;
+  confirmationPhrase?: string | null;
+  confirmationScopeDigest: string;
+  preflightId: string;
+  affectedItemCount: number;
+  affectedItemDigest: string;
   finalActionEnabled: boolean;
   safeModeBlocked: boolean;
   blockingReasons: string[];
   sourceRefs: string[];
 }
 
+export interface DangerActionConfirmationEvidence {
+  actionType: DangerActionType;
+  preflightId: string;
+  confirmationPhrase: string;
+  confirmationScopeDigest: string;
+  safeMode: boolean;
+  targetIds: string[];
+}
+
+export function buildDangerActionConfirmationEvidence(
+  view: DangerActionPreflightView,
+  targetIds: string[] = []
+): DangerActionConfirmationEvidence {
+  return {
+    actionType: view.actionType,
+    preflightId: view.preflightId,
+    confirmationPhrase: view.confirmationPhrase ?? "",
+    confirmationScopeDigest: view.confirmationScopeDigest,
+    safeMode: view.safeModeBlocked,
+    targetIds,
+  };
+}
+
 export async function getDangerActionPreflight(
   actionType: DangerActionType,
-  safeMode: boolean
+  safeMode: boolean,
+  options: { targetIds?: string[]; affectedCount?: number } = {}
 ): Promise<DangerActionPreflightView> {
   return safeInvoke<DangerActionPreflightView>("get_danger_action_preflight", {
     actionType,
     action_type: actionType,
     safeMode,
     safe_mode: safeMode,
+    ...(options.targetIds ? { targetIds: options.targetIds, target_ids: options.targetIds } : {}),
+    ...(options.affectedCount !== undefined
+      ? { affectedCount: options.affectedCount, affected_count: options.affectedCount }
+      : {}),
   });
 }
 
@@ -3451,11 +3492,17 @@ export interface DataImportResult {
   imported_vector_count: number;
 }
 
-export async function importAllData(payload: ExportPayload): Promise<DataImportResult> {
+export async function importAllData(
+  payload: ExportPayload,
+  confirmationEvidence?: DangerActionConfirmationEvidence
+): Promise<DataImportResult> {
   return safeInvoke<DataImportResult>("import_all_data", {
     payload,
     importRequest: MANUAL_DATA_IMPORT_REQUEST,
     import_request: MANUAL_DATA_IMPORT_REQUEST,
+    ...(confirmationEvidence
+      ? { confirmationEvidence, confirmation_evidence: confirmationEvidence }
+      : {}),
   });
 }
 
@@ -3646,15 +3693,27 @@ export async function exportMcpAuditLogs(days: number): Promise<AuditExport> {
   return safeInvoke<AuditExport>("export_mcp_audit_logs", { days });
 }
 
-export async function cleanupMcpAuditLogs(retentionDays: number): Promise<number> {
+export async function cleanupMcpAuditLogs(
+  retentionDays: number,
+  confirmationEvidence?: DangerActionConfirmationEvidence
+): Promise<number> {
   return safeInvoke<number>("cleanup_mcp_audit_logs", {
     retentionDays,
     retention_days: retentionDays,
+    ...(confirmationEvidence
+      ? { confirmationEvidence, confirmation_evidence: confirmationEvidence }
+      : {}),
   });
 }
 
-export async function rotateMcpAuditKey(): Promise<void> {
-  return safeInvoke("rotate_mcp_audit_key");
+export async function rotateMcpAuditKey(
+  confirmationEvidence?: DangerActionConfirmationEvidence
+): Promise<void> {
+  return safeInvoke("rotate_mcp_audit_key", {
+    ...(confirmationEvidence
+      ? { confirmationEvidence, confirmation_evidence: confirmationEvidence }
+      : {}),
+  });
 }
 
 // ── Milestone D: Configurable Privacy Policy ──
@@ -3856,8 +3915,19 @@ export async function listAgentRunsForSession(
   return safeInvoke<AgentRun[]>("list_agent_runs_for_session", { sessionId, limit });
 }
 
-export async function deleteAgentRun(runId: string, reason?: string): Promise<void> {
-  return safeInvoke("delete_agent_run", { runId, reason });
+export async function deleteAgentRun(
+  runId: string,
+  reason?: string,
+  confirmationEvidence?: DangerActionConfirmationEvidence
+): Promise<void> {
+  return safeInvoke("delete_agent_run", {
+    runId,
+    run_id: runId,
+    reason,
+    ...(confirmationEvidence
+      ? { confirmationEvidence, confirmation_evidence: confirmationEvidence }
+      : {}),
+  });
 }
 
 export type ToolPermissionPolicy =
