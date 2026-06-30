@@ -381,7 +381,7 @@ export default function RunsPage() {
         <div className="flex items-center justify-between mb-6">
           <div>
             <h1 className="text-2xl font-bold text-stone-900">
-              {showTrash ? "已删除记录" : "Activity"}
+              {showTrash ? "已删除记录" : "Runs"}
             </h1>
             <div className="text-sm text-stone-500">
               运行记录 · 共 {filteredRuns.length} 条{showTrash && " (当前版本不可恢复)"}
@@ -498,14 +498,14 @@ export default function RunsPage() {
           )}
         </div>
 
-        {/* Activity List */}
+        {/* Runs List */}
         {loading ? (
           <div className="rounded-xl border border-stone-200 bg-white px-4 py-12 text-center text-stone-500">
-            正在加载 Activity...
+            正在加载 Runs...
           </div>
         ) : error ? (
           <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-6 text-rose-900">
-            <div className="text-sm font-semibold">Activity 暂不可用</div>
+            <div className="text-sm font-semibold">Runs 暂不可用</div>
             <div className="mt-1 text-xs leading-5 text-rose-800">{error}</div>
             <button
               onClick={loadRuns}
@@ -665,10 +665,7 @@ export default function RunsPage() {
                                             : control === "retry"
                                               ? "retry"
                                               : "cancel";
-                                      void handleTaskControl(
-                                        taskSummary,
-                                        command
-                                      );
+                                      void handleTaskControl(taskSummary, command);
                                     }}
                                     disabled={taskActionBusy !== null}
                                     className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700 disabled:opacity-50"

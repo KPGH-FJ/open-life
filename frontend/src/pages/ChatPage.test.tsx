@@ -4024,7 +4024,7 @@ describe("ChatPage", () => {
     expect(screen.getByText("Fallback：provider_api_key_missing")).toBeInTheDocument();
     expect(screen.getByText("参考记忆 3 条")).toBeInTheDocument();
     expect(screen.getByText("运行技术详情")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "查看 Activity 详情" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "查看 Runs 详情" })).toHaveAttribute(
       "href",
       "/runs/run-chat-1"
     );

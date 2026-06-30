@@ -102,7 +102,7 @@ export default function ProviderTab({
         </CapabilityCard>
         <CapabilityCard
           title="自动路由"
-          description="路线选择会写入 AgentRun，并在 Chat / Activity 里展示。"
+          description="路线选择会写入 AgentRun，并在 Chat / Runs 里展示。"
           tone={modelRouterStatus?.enabled ? "ready" : "info"}
           meta={modelRouterStatus?.enabled ? "已启用" : "灰度"}
         >

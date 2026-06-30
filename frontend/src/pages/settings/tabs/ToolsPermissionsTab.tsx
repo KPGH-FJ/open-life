@@ -79,7 +79,7 @@ export default function ToolsPermissionsTab({
           <div>
             <h3 className="text-sm font-medium text-gray-700">Web 与网络权限</h3>
             <p className="mt-1 text-xs text-gray-500">
-              未知域名默认应进入确认或阻断；Chat 和 Activity 会解释具体 blocker。
+              未知域名默认应进入确认或阻断；Chat 和 Runs 会解释具体 blocker。
             </p>
           </div>
           <label className="flex items-center gap-2 text-sm text-gray-700">

@@ -5,10 +5,11 @@ import {
   Check,
   Clock,
   Edit2,
-  Inbox,
-  MailOpen,
+  ListChecks,
   RefreshCw,
+  ShieldCheck,
   X,
+  type LucideIcon,
 } from "lucide-react";
 import {
   acceptProposal,
@@ -35,8 +36,8 @@ type FolderId = "pending" | "accepted" | "archived" | "needs_edit";
 type QuickAction = "accept" | "reject" | "postpone";
 type ReviewGroupFilter = "all" | ReviewDecisionGroup;
 
-const FOLDERS: Array<{ id: FolderId; label: string; icon: typeof Inbox }> = [
-  { id: "pending", label: "待确认", icon: Inbox },
+const FOLDERS: Array<{ id: FolderId; label: string; icon: LucideIcon }> = [
+  { id: "pending", label: "待确认", icon: ListChecks },
   { id: "accepted", label: "已同意", icon: Check },
   { id: "archived", label: "已处理", icon: Archive },
   { id: "needs_edit", label: "草稿修改", icon: Edit2 },
@@ -168,7 +169,7 @@ function appliedNotice(proposal: AgentProposal): string {
 
 function statusLabel(status: ProposalStatus): string {
   const labels: Record<ProposalStatus, string> = {
-    pending: "待回复",
+    pending: "待确认",
     accepted: "已同意",
     rejected: "不同意",
     edited: "已修改",
@@ -363,23 +364,23 @@ export default function MailboxPage() {
   return (
     <section
       data-testid="mailbox-page"
-      aria-label="Review Inbox"
+      aria-label="Review"
       className="h-full min-h-0 overflow-hidden overflow-x-hidden bg-[#f5f6f2] px-3 py-3 sm:px-4"
     >
       <div className="mx-auto flex h-full min-h-0 w-full max-w-[1500px] flex-col gap-3">
         <div className="flex shrink-0 items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-stone-950 text-white shadow-sm">
-              <MailOpen size={18} aria-hidden="true" />
+              <ShieldCheck size={18} aria-hidden="true" />
             </div>
             <div>
-              <h2 className="text-xl font-bold tracking-normal text-stone-950">Review Inbox</h2>
+              <h2 className="text-xl font-bold tracking-normal text-stone-950">Review</h2>
               <div className="text-xs text-stone-500">
                 记忆、权限与 Life Model 建议都需要你确认后才会生效。
               </div>
             </div>
             <span className="rounded-md border border-stone-200 bg-white px-2.5 py-1 text-xs text-stone-600">
-              待回复 {folderCounts.pending}
+              {folderCounts.pending} pending proposals
             </span>
           </div>
           <button
@@ -485,7 +486,7 @@ export default function MailboxPage() {
                 <div className="p-4 text-sm text-stone-500">正在加载确认项...</div>
               ) : visibleProposals.length === 0 ? (
                 <div className="flex h-full min-h-[260px] flex-col items-center justify-center p-8 text-center">
-                  <Inbox size={36} className="text-stone-300" aria-hidden="true" />
+                  <ListChecks size={36} className="text-stone-300" aria-hidden="true" />
                   <div className="mt-3 text-sm font-semibold text-stone-800">没有确认项</div>
                   <div className="mt-1 text-xs text-stone-500">当前文件夹没有待确认内容。</div>
                 </div>
@@ -715,7 +716,7 @@ export default function MailboxPage() {
               </article>
             ) : (
               <div className="flex h-full min-h-[420px] flex-col items-center justify-center p-8 text-center">
-                <Inbox size={42} className="text-stone-300" aria-hidden="true" />
+                <ListChecks size={42} className="text-stone-300" aria-hidden="true" />
                 <div className="mt-4 text-base font-semibold text-stone-800">选择一个确认项</div>
                 <div className="mt-1 text-sm text-stone-500">
                   左侧列表中没有可阅读的 Review 项。

@@ -1220,7 +1220,7 @@ export default function DashboardPage() {
           >
             <div className="flex items-center justify-between">
               <div className="font-semibold text-gray-800 text-sm">最近运行</div>
-              <div className="text-xs text-gray-500">Activity</div>
+              <div className="text-xs text-gray-500">Runs</div>
             </div>
             <div className="mt-2 flex items-baseline gap-1">
               <span className="text-2xl font-bold text-emerald-600">{recentRuns.length}</span>

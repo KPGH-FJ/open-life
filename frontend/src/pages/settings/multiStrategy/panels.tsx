@@ -812,7 +812,7 @@ export function RuntimePreviewPanel(props: MultiStrategyPanelProps) {
                   <div>
                     <div className="text-sm font-semibold text-stone-900">Preview result</div>
                     <div className="mt-1 text-xs text-stone-500">
-                      Metadata-safe summary only. Review the persisted trace in Activity.
+                      Metadata-safe summary only. Review the persisted trace in Runs.
                     </div>
                   </div>
                   {result.runId && (

@@ -211,8 +211,9 @@ describe("MailboxPage", () => {
     render(<MailboxPage />);
 
     expect(await screen.findByTestId("mailbox-page")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Review Inbox" })).toBeInTheDocument();
-    expect(screen.getByText("待确认")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Review" })).toBeInTheDocument();
+    expect(screen.getByText("2 pending proposals")).toBeInTheDocument();
+    expect(screen.getAllByText("待确认").length).toBeGreaterThan(0);
     expect(screen.getByText("已同意")).toBeInTheDocument();
     expect(screen.getByText("已处理")).toBeInTheDocument();
     expect(screen.getByText("草稿修改")).toBeInTheDocument();
@@ -280,9 +281,9 @@ describe("MailboxPage", () => {
     expect(screen.getByText("「建议太绕」")).toBeInTheDocument();
     expect(screen.getByText("「直接给结论，再解释原因」")).toBeInTheDocument();
     expect(screen.getByText("来源摘录：")).toBeInTheDocument();
-    expect(
-      screen.getAllByText("用户在复盘中明确接受了更直接的沟通偏好。").length
-    ).toBeGreaterThan(0);
+    expect(screen.getAllByText("用户在复盘中明确接受了更直接的沟通偏好。").length).toBeGreaterThan(
+      0
+    );
     expect(screen.getByText("proposal-communication-1")).toBeInTheDocument();
     expect(screen.getAllByText("preferences.communication_style").length).toBeGreaterThan(0);
     expect(screen.getByRole("link", { name: "run-communication-1" })).toHaveAttribute(
