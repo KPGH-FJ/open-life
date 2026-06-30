@@ -263,6 +263,45 @@ Replay:
   governance copy in the primary surface.
 - Builder long text remains readable without losing action controls.
 
+6D execution supplement:
+
+- Target ordinary-user surfaces first:
+  - `frontend/src/pages/MailboxPage.tsx` Review list/detail reader.
+  - `frontend/src/pages/LifeModelPage.tsx` and Builder/LifeModel long text summaries
+    if they expose raw proposal or source content in the primary view.
+  - `frontend/src/pages/ChatPage.tsx` plan/proposal/pilot result cards only where
+    ordinary chat output shows raw governance/debug terminology by default.
+- Do not sweep all technical terms globally. Runs, Settings Advanced, explicit
+  trace panels, and `<TechnicalDetails>`-style disclosures may keep precise ids
+  because they are developer/debug evidence surfaces.
+- Primary copy must be natural user language. Examples:
+  - Replace unexplained `governed draft` with user-facing copy such as
+    `待确认计划草稿`; keep the raw strategy/status in technical details.
+  - Replace visible `routeType`, `transcriptId`, `taskSessionId`, raw fallback
+    metadata with `运行路线`, `任务记录`, `恢复原因` summaries in ordinary copy.
+  - Keep blocker/fallback truth visible; only move raw ids and metadata shapes,
+    never hide the fact that a task was blocked, local, fallback, or incomplete.
+- Long text behavior:
+  - Proposal/body/source excerpts get a bounded collapsed preview with an explicit
+    `展开` / `收起` control when they exceed the local threshold.
+  - Primary actions such as accept/reject/defer/edit/copy remain visible when the
+    long text is collapsed or expanded.
+  - Source/detail separation should show a readable summary first, then source or
+    trace details in an expandable area.
+- Focused tests must scope assertions to the ordinary primary surface. Do not make
+  tests fail because raw ids still exist inside technical details, Runs, or
+  Settings Advanced.
+- Suggested 6D test targets:
+  - `cd frontend && corepack pnpm test -- MailboxPage.test.tsx`
+  - add/update the exact LifeModel/Builder or Chat test only when that component is
+    changed.
+  - Add assertions that long text can expand/collapse and primary action buttons
+    remain queryable by role/name.
+  - Add assertions that the primary surface no longer shows unexplained internal
+    phrases such as `governed draft`, `routeType`, `transcriptId`, or raw
+    `taskSessionId`, while a technical detail disclosure can still expose bounded
+    evidence.
+
 ## Anti-Hallucination Checks
 
 - Today source/confidence must come from typed data or existing read models, not
