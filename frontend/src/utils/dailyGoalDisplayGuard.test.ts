@@ -3,14 +3,52 @@ import { inspectDailyGoalName, splitDailyGoalsByDisplayQuality } from "./dailyGo
 
 describe("dailyGoalDisplayGuard", () => {
   it("allows normal actionable goals", () => {
-    expect(inspectDailyGoalName("阅读 30 分钟").valid).toBe(true);
-    expect(inspectDailyGoalName("完成周报初稿").valid).toBe(true);
+    expect(inspectDailyGoalName("阅读 30 分钟")).toMatchObject({
+      valid: true,
+      cardType: "goal",
+    });
+    expect(inspectDailyGoalName("完成周报初稿")).toMatchObject({
+      valid: true,
+      cardType: "goal",
+    });
   });
 
   it("blocks state receipts, metric samples, and system feedback", () => {
-    expect(inspectDailyGoalName("已记录状态 qapressure = 8 points").valid).toBe(false);
-    expect(inspectDailyGoalName("qapressure = 8 points").valid).toBe(false);
-    expect(inspectDailyGoalName("暂时无法发送普通对话：模型未就绪").valid).toBe(false);
+    expect(inspectDailyGoalName("已记录状态 qapressure = 8 points")).toMatchObject({
+      valid: false,
+      cardType: "state_signal",
+    });
+    expect(inspectDailyGoalName("qapressure = 8 points")).toMatchObject({
+      valid: false,
+      cardType: "state_signal",
+    });
+    expect(inspectDailyGoalName("energy: 6/10")).toMatchObject({
+      valid: false,
+      cardType: "state_signal",
+    });
+    expect(inspectDailyGoalName("mood = anxious")).toMatchObject({
+      valid: false,
+      cardType: "state_signal",
+    });
+    expect(inspectDailyGoalName("pressure 8 分")).toMatchObject({
+      valid: false,
+      cardType: "state_signal",
+    });
+    expect(inspectDailyGoalName("confidence = 0.7")).toMatchObject({
+      valid: false,
+      cardType: "state_signal",
+    });
+    expect(inspectDailyGoalName("暂时无法发送普通对话：模型未就绪")).toMatchObject({
+      valid: false,
+      cardType: "blocker",
+    });
+  });
+
+  it("classifies suggestions as suggestions instead of confirmed goals", () => {
+    expect(inspectDailyGoalName("建议今天先休息 20 分钟")).toMatchObject({
+      valid: false,
+      cardType: "suggestion",
+    });
   });
 
   it("blocks governance and tool blocker text from becoming goals", () => {
@@ -21,7 +59,10 @@ describe("dailyGoalDisplayGuard", () => {
       "mcp_missing_read_target",
       "tool_permission_required",
     ]) {
-      expect(inspectDailyGoalName(text).valid).toBe(false);
+      expect(inspectDailyGoalName(text)).toMatchObject({
+        valid: false,
+        cardType: "blocker",
+      });
     }
   });
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { BrowserRouter } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { readFileSync } from "node:fs";
@@ -92,6 +92,14 @@ const pendingProposal = {
   createdAt: "2026-06-07T00:00:00.000Z",
 };
 
+const secondPendingProposal = {
+  ...pendingProposal,
+  id: "proposal-today-2",
+  runId: "run-2",
+  affectedPath: "state.current_focus",
+  source: "feedback_evolution",
+};
+
 function renderPage() {
   render(
     <BrowserRouter>
@@ -104,7 +112,7 @@ describe("TodayPage", () => {
   beforeEach(() => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_system_diagnostics") return Promise.resolve(healthyDiagnostics);
-      if (cmd === "get_pending_proposals") return Promise.resolve([pendingProposal]);
+      if (cmd === "list_proposals") return Promise.resolve([pendingProposal]);
       return mockInvoke(cmd, args);
     });
   });
@@ -128,15 +136,16 @@ describe("TodayPage", () => {
 
     await waitFor(() => {
       const calledCommands = vi.mocked(invoke).mock.calls.map(([command]) => command);
-      for (const command of [
-        "get_system_diagnostics",
-        "get_daily_goals",
-        "get_pending_proposals",
-      ]) {
+      for (const command of ["get_system_diagnostics", "get_daily_goals", "list_proposals"]) {
         expect(calledCommands).toContain(command);
       }
+      expect(calledCommands).not.toContain("get_pending_proposals");
       expect(calledCommands).not.toContain("count_memory_chunks");
       expect(calledCommands).not.toContain("get_state_alerts");
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith(
+        "list_proposals",
+        expect.objectContaining({ status: "pending", limit: 100 })
+      );
     });
   });
 
@@ -144,7 +153,7 @@ describe("TodayPage", () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_daily_goals") return Promise.resolve([]);
       if (cmd === "get_system_diagnostics") return Promise.resolve(healthyDiagnostics);
-      if (cmd === "get_pending_proposals") return Promise.resolve([]);
+      if (cmd === "list_proposals") return Promise.resolve([]);
       return mockInvoke(cmd, args);
     });
 
@@ -160,6 +169,11 @@ describe("TodayPage", () => {
     renderPage();
 
     expect(await screen.findByText("待确认 1")).toBeInTheDocument();
+    expect(screen.getByTestId("today-card-pending-proposal")).toHaveAttribute(
+      "data-card-type",
+      "pending_proposal"
+    );
+    expect(screen.getByText("1 个 Review 待你确认。")).toBeInTheDocument();
     expect(screen.getAllByRole("link", { name: "查看 Review" })[0]).toHaveAttribute(
       "href",
       "/mailbox"
@@ -178,7 +192,7 @@ describe("TodayPage", () => {
           startup_warnings: ["memory.db 初始化失败，正在使用临时数据库"],
         });
       }
-      if (cmd === "get_pending_proposals") return Promise.resolve([pendingProposal]);
+      if (cmd === "list_proposals") return Promise.resolve([pendingProposal]);
       return mockInvoke(cmd, args);
     });
 
@@ -189,6 +203,55 @@ describe("TodayPage", () => {
       expect(screen.queryByRole("button", { name: label })).not.toBeInTheDocument();
     }
     expect(screen.getByRole("link", { name: "和 OpenLife 说一下现在的状态" })).toBeInTheDocument();
+  });
+
+  it("renders suspicious metric samples as state_signal, not as a goal, task, or next action", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_daily_goals") {
+        return Promise.resolve([{ name: "qapressure = 8 points", done: false }]);
+      }
+      if (cmd === "get_system_diagnostics") return Promise.resolve(healthyDiagnostics);
+      if (cmd === "list_proposals") return Promise.resolve([]);
+      return mockInvoke(cmd, args);
+    });
+
+    renderPage();
+
+    const stateSignal = await screen.findByTestId("today-card-state-signal");
+    expect(stateSignal).toHaveAttribute("data-card-type", "state_signal");
+    expect(stateSignal).toHaveTextContent("qapressure = 8 points");
+    expect(screen.getByTestId("today-state-signals")).toHaveTextContent(
+      "不会生成目标、任务或下一步行动"
+    );
+    expect(
+      within(screen.getByTestId("today-goal-section")).queryByText(/qapressure/i)
+    ).not.toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("today-next-step")).queryByText(/qapressure/i)
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/从「qapressure = 8 points」开始/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("today-card-task")).not.toBeInTheDocument();
+  });
+
+  it("uses the same pending Review source as Review instead of diagnostics fallback", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_system_diagnostics") {
+        return Promise.resolve({ ...healthyDiagnostics, pending_proposal_count: 9 });
+      }
+      if (cmd === "list_proposals")
+        return Promise.resolve([pendingProposal, secondPendingProposal]);
+      return mockInvoke(cmd, args);
+    });
+
+    renderPage();
+
+    expect(await screen.findByText("待确认 2")).toBeInTheDocument();
+    expect(screen.getByText("2 个 Review 待你确认。")).toBeInTheDocument();
+    expect(screen.queryByText("待确认 9")).not.toBeInTheDocument();
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith(
+      "list_proposals",
+      expect.objectContaining({ status: "pending", limit: 100 })
+    );
   });
 
   it("does not render dashboard-style status stats on Today", async () => {

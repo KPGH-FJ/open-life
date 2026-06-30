@@ -43,6 +43,10 @@ import {
   StatusChip as ProductStatusChip,
   TrustDrawer,
 } from "../components/product/ProductPrimitives";
+import {
+  countPendingReviewProposals,
+  REVIEW_PENDING_PROPOSAL_LIMIT,
+} from "../utils/reviewPendingCount";
 
 type LifeModelSection = "build" | "overview" | "evidence";
 
@@ -781,7 +785,7 @@ function EvidenceSection({
   pendingProposals: AgentProposal[];
 }) {
   const effectiveMemoryCount = memoryCount ?? diagnostics?.memory_chunk_count ?? 0;
-  const pendingCount = pendingProposals.length || diagnostics?.pending_proposal_count || 0;
+  const pendingCount = countPendingReviewProposals(pendingProposals);
   const sourceLabels = uniqueShortItems(
     pendingProposals.map(proposal => sourceLabel(proposal.source)),
     3
@@ -904,7 +908,9 @@ export default function LifeModelPage() {
           builderListUnfinished().catch(() => []),
           countMemoryChunks().catch(() => null),
           getMemoryTierStats().catch(() => null),
-          listProposals("pending").catch(() => []),
+          listProposals("pending", undefined, undefined, REVIEW_PENDING_PROPOSAL_LIMIT).catch(
+            () => []
+          ),
         ]);
 
         if (cancelled) return;
@@ -940,8 +946,7 @@ export default function LifeModelPage() {
   const overall = completionOverall(state.diagnostics, state.completion);
   const safeMode = isSafeMode(state.diagnostics);
   const safeModeReason = getSafeModeReason(state.diagnostics);
-  const pendingCount =
-    state.pendingProposals.length || state.diagnostics?.pending_proposal_count || 0;
+  const pendingCount = countPendingReviewProposals(state.pendingProposals);
   const topStatus =
     state.diagnostics?.life_model_ready && !state.diagnostics?.model_empty
       ? "Life Model 本地可读"
