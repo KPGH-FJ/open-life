@@ -641,17 +641,17 @@ pub(crate) fn build_plan_artifact_view(
         final_delivery_id: runtime.final_delivery_id.map(str::to_string),
         metadata_safe: true,
     };
-    let body = build_plan_artifact_body(
+    let body = build_plan_artifact_body(PlanArtifactBodyInput {
         session,
-        &title,
-        &summary,
-        &steps,
-        &assumptions,
-        &unknowns,
-        &source_evidence,
-        &route_evidence,
-        &run_evidence,
-    );
+        title: &title,
+        summary: &summary,
+        steps: &steps,
+        assumptions: &assumptions,
+        unknowns: &unknowns,
+        source_evidence: &source_evidence,
+        route_evidence: &route_evidence,
+        run_evidence: &run_evidence,
+    });
 
     PlanArtifactView {
         plan_id: session.plan_id.clone(),
@@ -671,31 +671,33 @@ pub(crate) fn build_plan_artifact_view(
     }
 }
 
-fn build_plan_artifact_body(
-    session: &PlanExecuteSession,
-    title: &str,
-    summary: &str,
-    steps: &[PlanArtifactStepView],
-    assumptions: &[PlanArtifactFactView],
-    unknowns: &[PlanArtifactFactView],
-    source_evidence: &[PlanArtifactSourceEvidence],
-    route_evidence: &PlanArtifactRouteEvidence,
-    run_evidence: &PlanArtifactRunEvidence,
-) -> String {
+struct PlanArtifactBodyInput<'a> {
+    session: &'a PlanExecuteSession,
+    title: &'a str,
+    summary: &'a str,
+    steps: &'a [PlanArtifactStepView],
+    assumptions: &'a [PlanArtifactFactView],
+    unknowns: &'a [PlanArtifactFactView],
+    source_evidence: &'a [PlanArtifactSourceEvidence],
+    route_evidence: &'a PlanArtifactRouteEvidence,
+    run_evidence: &'a PlanArtifactRunEvidence,
+}
+
+fn build_plan_artifact_body(input: PlanArtifactBodyInput<'_>) -> String {
     let mut lines = vec![
-        format!("# {title}"),
+        format!("# {}", input.title),
         String::new(),
-        summary.to_string(),
+        input.summary.to_string(),
         String::new(),
-        format!("Plan ID: {}", session.plan_id),
-        format!("Plan session: {}", session.session_id),
-        format!("Task session: {}", run_evidence.task_session_id),
-        format!("Run: {}", run_evidence.run_id),
-        format!("Status: {}", session.status),
+        format!("Plan ID: {}", input.session.plan_id),
+        format!("Plan session: {}", input.session.session_id),
+        format!("Task session: {}", input.run_evidence.task_session_id),
+        format!("Run: {}", input.run_evidence.run_id),
+        format!("Status: {}", input.session.status),
         String::new(),
         "Steps".into(),
     ];
-    for step in steps {
+    for step in input.steps {
         let source_suffix = if step.source_tool_evidence.is_empty() {
             "source/tool evidence: none attached".to_string()
         } else {
@@ -715,20 +717,20 @@ fn build_plan_artifact_body(
     }
     lines.push(String::new());
     lines.push("Assumptions".into());
-    for assumption in assumptions {
+    for assumption in input.assumptions {
         lines.push(format!("- {}: {}", assumption.label, assumption.detail));
     }
     lines.push(String::new());
     lines.push("Unknowns".into());
-    for unknown in unknowns {
+    for unknown in input.unknowns {
         lines.push(format!("- {}: {}", unknown.label, unknown.detail));
     }
     lines.push(String::new());
     lines.push("Source/tool evidence".into());
-    if source_evidence.is_empty() {
+    if input.source_evidence.is_empty() {
         lines.push("- No source/tool evidence is attached to this plan artifact yet.".into());
     } else {
-        for source in source_evidence {
+        for source in input.source_evidence {
             lines.push(format!(
                 "- {} · {} · {}{}",
                 source.evidence_id,
@@ -746,18 +748,18 @@ fn build_plan_artifact_body(
     lines.push("Route evidence".into());
     lines.push(format!(
         "- strategy: {}; reason: {}; evidence: {}",
-        route_evidence.strategy,
-        route_evidence.reason,
-        route_evidence.evidence_ids.join(", ")
+        input.route_evidence.strategy,
+        input.route_evidence.reason,
+        input.route_evidence.evidence_ids.join(", ")
     ));
     lines.push(String::new());
     lines.push("Run evidence".into());
     lines.push(format!(
         "- actions: {}; observations: {}; proposals: {}; blockers: {}",
-        count_or_none(run_evidence.action_ids.len()),
-        count_or_none(run_evidence.observation_ids.len()),
-        count_or_none(run_evidence.proposal_ids.len()),
-        count_or_none(run_evidence.blocker_ids.len())
+        count_or_none(input.run_evidence.action_ids.len()),
+        count_or_none(input.run_evidence.observation_ids.len()),
+        count_or_none(input.run_evidence.proposal_ids.len()),
+        count_or_none(input.run_evidence.blocker_ids.len())
     ));
     lines.join("\n")
 }

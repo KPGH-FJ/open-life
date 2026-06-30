@@ -153,12 +153,15 @@ export function buildRuntimeDisclosure(
   } = {}
 ): RuntimeDisclosureView {
   const runtimeRouteEvidence =
-    options.runtimeRouteEvidence ?? options.evidenceView?.routeEvidence ?? runtimeRouteEvidenceFromRun(run);
+    options.runtimeRouteEvidence ??
+    options.evidenceView?.routeEvidence ??
+    runtimeRouteEvidenceFromRun(run);
   const strictRuntimeRouteEvidence =
     options.strictRuntimeRouteEvidence || Boolean(options.evidenceView);
   const evidenceRoute = primaryEvidenceRoute(runtimeRouteEvidence);
   const route = routeTypeLabel(
-    evidenceRoute?.route_type ?? (strictRuntimeRouteEvidence ? undefined : run?.modelRoute?.routeType)
+    evidenceRoute?.route_type ??
+      (strictRuntimeRouteEvidence ? undefined : run?.modelRoute?.routeType)
   );
   const boundary =
     boundaryFromEvidence(runtimeRouteEvidence) ??
@@ -166,7 +169,8 @@ export function buildRuntimeDisclosure(
       ? { label: "外发记录未接入", tone: "neutral" as ProductTone }
       : boundaryLabel(run, options.ingress));
   const outcome = statusLabel(options.evidenceView?.lifecycleState ?? run?.status);
-  const tools = options.evidenceView?.actionCount ?? run?.toolCallCount ?? run?.actions?.length ?? 0;
+  const tools =
+    options.evidenceView?.actionCount ?? run?.toolCallCount ?? run?.actions?.length ?? 0;
   const toolsLabel =
     tools > 0
       ? `工具 ${tools}`
@@ -177,11 +181,15 @@ export function buildRuntimeDisclosure(
   const blockers = blockerCount(options.taskState, options.taskSummary, options.evidenceView);
   const providerLabel =
     evidenceRoute?.provider ||
-    (runtimeRouteEvidence || strictRuntimeRouteEvidence ? "provider 未验证" : run?.modelRoute?.provider) ||
+    (runtimeRouteEvidence || strictRuntimeRouteEvidence
+      ? "provider 未验证"
+      : run?.modelRoute?.provider) ||
     "provider 未验证";
   const modelLabel =
     evidenceRoute?.model ||
-    (runtimeRouteEvidence || strictRuntimeRouteEvidence ? "model 未验证" : run?.modelRoute?.model) ||
+    (runtimeRouteEvidence || strictRuntimeRouteEvidence
+      ? "model 未验证"
+      : run?.modelRoute?.model) ||
     "model 未验证";
   const memoryHits = run?.contextSummary?.memoryHitCount ?? 0;
   const routeReason =

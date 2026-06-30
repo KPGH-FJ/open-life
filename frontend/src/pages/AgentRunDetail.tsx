@@ -523,7 +523,10 @@ export default function AgentRunDetail() {
                 </div>
               </div>
             </div>
-          ) : run.stepCount || run.toolCallCount || run.actions.length || run.observations.length ? (
+          ) : run.stepCount ||
+            run.toolCallCount ||
+            run.actions.length ||
+            run.observations.length ? (
             <div className="mb-6 grid grid-cols-2 md:grid-cols-4 gap-3">
               <div className="bg-stone-50 rounded-lg p-3 text-center">
                 <div className="flex items-center justify-center gap-1 text-stone-500 text-xs mb-1">
@@ -655,7 +658,10 @@ export default function AgentRunDetail() {
                 )}
                 {evidenceView && (
                   <div className="mt-3 grid gap-2 text-xs text-stone-600">
-                    <div>脱敏：隐藏 raw transcript 和敏感正文；保留 metadata-safe summary、ids、状态和 evidence digest。</div>
+                    <div>
+                      脱敏：隐藏 raw transcript 和敏感正文；保留 metadata-safe summary、ids、状态和
+                      evidence digest。
+                    </div>
                     {evidenceView.blockers.length > 0 && (
                       <div>Blockers：{evidenceView.blockers.join(", ")}</div>
                     )}
@@ -703,9 +709,7 @@ export default function AgentRunDetail() {
                     })}
                   </div>
                 ) : (
-                  <div className="mt-3 text-xs text-stone-500">
-                    当前只允许查看 trace。
-                  </div>
+                  <div className="mt-3 text-xs text-stone-500">当前只允许查看 trace。</div>
                 )}
               </div>
             ) : (

@@ -1,8 +1,5 @@
 import { Link } from "react-router-dom";
-import {
-  runMemoryTierMaintenance,
-  type SystemDiagnostics,
-} from "../../../tauri";
+import { runMemoryTierMaintenance, type SystemDiagnostics } from "../../../tauri";
 import { buildProviderReadinessView } from "../../../utils/providerReadiness";
 import { buildSafeModeBlockedMessage } from "../../../utils/runtimeMessages";
 

@@ -3741,9 +3741,9 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
             ? "will_create_on_execute"
             : actionType === "vector_rebuild"
               ? "rollback_previous_vectors_on_failure"
-            : mutating
-              ? "none"
-              : "not_required_read_only",
+              : mutating
+                ? "none"
+                : "not_required_read_only",
         requiresTypedConfirmation: Boolean(confirmationPhrases[actionType]),
         confirmationRequired: Boolean(confirmationPhrases[actionType]),
         confirmationPhrase: confirmationPhrases[actionType] ?? null,

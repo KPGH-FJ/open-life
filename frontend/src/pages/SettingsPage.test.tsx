@@ -174,7 +174,9 @@ describe("SettingsPage", () => {
     const exportButton = await screen.findByRole("button", { name: "导出全部数据" });
     fireEvent.click(exportButton);
 
-    expect(await screen.findByRole("dialog", { name: "动作预检：导出全部数据" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("dialog", { name: "动作预检：导出全部数据" })
+    ).toBeInTheDocument();
     expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "export_all_data")).toBe(false);
     expect(writeTextFile).not.toHaveBeenCalled();
 
@@ -202,7 +204,9 @@ describe("SettingsPage", () => {
     await clickTab("数据与恢复");
     fireEvent.click(await screen.findByRole("button", { name: "导入覆盖备份" }));
 
-    expect(await screen.findByRole("dialog", { name: "动作预检：导入覆盖备份" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("dialog", { name: "动作预检：导入覆盖备份" })
+    ).toBeInTheDocument();
     expect(open).not.toHaveBeenCalled();
     expect(readTextFile).not.toHaveBeenCalled();
     expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "import_all_data")).toBe(false);
@@ -4141,7 +4145,9 @@ describe("SettingsPage", () => {
 
     fireEvent.click(await screen.findByText("重建向量索引"));
 
-    expect(await screen.findByRole("dialog", { name: "动作预检：重建向量索引" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("dialog", { name: "动作预检：重建向量索引" })
+    ).toBeInTheDocument();
     expect(screen.getByText(/Safe Mode 已阻断最终执行入口/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Safe Mode 已阻断" })).toBeDisabled();
     expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "rebuild_memory_index")).toBe(
@@ -4221,7 +4227,9 @@ describe("SettingsPage", () => {
     expect(importButton).not.toBeDisabled();
     fireEvent.click(importButton);
 
-    expect(await screen.findByRole("dialog", { name: "动作预检：导入覆盖备份" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("dialog", { name: "动作预检：导入覆盖备份" })
+    ).toBeInTheDocument();
     expect(screen.getByText(/Safe Mode 已阻断最终执行入口/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Safe Mode 已阻断" })).toBeDisabled();
     expect(open).not.toHaveBeenCalled();

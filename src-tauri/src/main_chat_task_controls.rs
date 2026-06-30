@@ -648,7 +648,7 @@ fn agent_run_fallback_timeline(
             source_ref: Some("agent_run_output_preview".into()),
         });
     }
-    events.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    events.sort_by_key(|event| event.created_at);
     events
 }
 

@@ -104,9 +104,9 @@ export default function PrivacyTab({
   refreshSecurityState,
   handleSavePrivacyPolicy,
 }: PrivacyTabProps) {
-  const [transmissionHistory, setTransmissionHistory] = useState<
-    ProviderTransmissionHistoryItem[]
-  >([]);
+  const [transmissionHistory, setTransmissionHistory] = useState<ProviderTransmissionHistoryItem[]>(
+    []
+  );
   const [transmissionLoading, setTransmissionLoading] = useState(false);
   const [transmissionError, setTransmissionError] = useState<string | null>(null);
 
@@ -232,8 +232,8 @@ export default function PrivacyTab({
 
           {!transmissionLoading && transmissionHistory.length === 0 ? (
             <div className="mt-3 rounded-lg border border-dashed border-slate-200 bg-slate-50 px-3 py-4 text-xs text-slate-500">
-              暂无 provider transmission history；这不等于未外发，旧 run 可能未接入
-              not_instrumented 证据。
+              暂无 provider transmission history；这不等于未外发，旧 run 可能未接入 not_instrumented
+              证据。
             </div>
           ) : (
             <div className="mt-3 space-y-2">
@@ -270,9 +270,7 @@ export default function PrivacyTab({
                     <div className="mt-2 text-slate-600">
                       reason：{safeTransmissionText(item.reason)}
                     </div>
-                    <div className="mt-1 text-slate-500">
-                      source_refs：{sourceRefSummary(item)}
-                    </div>
+                    <div className="mt-1 text-slate-500">source_refs：{sourceRefSummary(item)}</div>
                   </div>
                 );
               })}

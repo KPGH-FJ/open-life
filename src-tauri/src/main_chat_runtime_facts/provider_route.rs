@@ -166,11 +166,7 @@ pub(crate) async fn resolve_provider_route_fact_answer(
         Some(session_id),
         None,
         None,
-        if current_model_generated {
-            "current_turn"
-        } else {
-            "current_turn"
-        },
+        "current_turn",
         Some(&planned),
         Some(&current),
         last_completed_generation.as_ref(),
@@ -636,9 +632,7 @@ fn positive_evidence_transmission(
         return false;
     };
     let route_type = normalized_evidence_route_type(Some(route.route_type.as_str()));
-    allowed_route_types
-        .iter()
-        .any(|allowed| route_type.as_str() == *allowed)
+    allowed_route_types.contains(&route_type.as_str())
 }
 
 fn provider_preflight_blocked(

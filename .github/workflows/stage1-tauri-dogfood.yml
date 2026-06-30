@@ -92,7 +92,7 @@ jobs:
         run: node --check frontend/scripts/stage1-tauri-webdriver.mjs
 
       - name: Build debug Tauri app binary
-        run: cargo build -p openlife-tauri
+        run: cargo build -p openlife-tauri --locked
 
       - name: Run real Tauri Chat UI D01-D36 dogfood
         run: xvfb-run -a dbus-run-session -- corepack pnpm --dir frontend test:e2e:tauri
@@ -125,10 +125,10 @@ jobs:
           '
 
       - name: Run Stage 1 Rust dogfood gate tests
-        run: cargo test -p openlife-tauri main_chat_agent_stage1_dogfood -- --nocapture
+        run: cargo test -p openlife-tauri --locked main_chat_agent_stage1_dogfood -- --nocapture
 
       - name: Run Stage 1 isolated report command test
-        run: cargo test -p openlife-tauri run_main_chat_agent_stage1_dogfood_command_returns_isolated_report -- --nocapture
+        run: cargo test -p openlife-tauri --locked run_main_chat_agent_stage1_dogfood_command_returns_isolated_report -- --nocapture
 
       - name: Upload Stage 1 browser evidence report
         if: always()

@@ -345,7 +345,9 @@ describe("RunsPage contract", () => {
     fireEvent.click(checkboxes[1]);
     fireEvent.click(screen.getByRole("button", { name: "删除" }));
 
-    expect(await screen.findByRole("dialog", { name: "动作预检：删除运行记录" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("dialog", { name: "动作预检：删除运行记录" })
+    ).toBeInTheDocument();
     expect(screen.getByText("写入 durable state")).toBeInTheDocument();
     expect(screen.getByText("影响数量")).toBeInTheDocument();
     expect(screen.getByText("id / scope digest")).toBeInTheDocument();

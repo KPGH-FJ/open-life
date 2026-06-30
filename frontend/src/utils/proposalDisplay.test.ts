@@ -108,9 +108,7 @@ describe("proposalDisplay", () => {
         redacted: false,
       },
     ]);
-    expect(model.evidenceSummary).toBe(
-      "来源摘录：用户在复盘中明确接受了更直接的沟通偏好。"
-    );
+    expect(model.evidenceSummary).toBe("来源摘录：用户在复盘中明确接受了更直接的沟通偏好。");
     expect(model.technicalRows).toEqual(
       expect.arrayContaining([
         { label: "位置", value: "preferences.communication_style" },

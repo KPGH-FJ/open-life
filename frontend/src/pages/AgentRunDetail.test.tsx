@@ -334,7 +334,9 @@ describe("AgentRunDetail evidence view", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "删除运行记录" }));
 
-    expect(await screen.findByRole("dialog", { name: "动作预检：删除运行记录" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("dialog", { name: "动作预检：删除运行记录" })
+    ).toBeInTheDocument();
     expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "delete_agent_run")).toBe(false);
     const continueButton = screen.getByRole("button", { name: "继续删除" });
     expect(continueButton).toBeDisabled();

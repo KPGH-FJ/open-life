@@ -418,17 +418,18 @@ pub(crate) async fn finalize_main_chat_task_failure(
     )
     .await?;
 
-    let transcript_entry_id = append_failure_finalizer_transcript(
-        state,
-        resolved_run_id.as_deref(),
-        resolved_task_session_id.as_deref(),
-        failure_kind,
-        &safe_reason,
-        &source_ref,
-        route_evidence,
-        route_evidence_ref,
-    )
-    .await?;
+    let transcript_entry_id =
+        append_failure_finalizer_transcript(FailureFinalizerTranscriptInput {
+            state,
+            run_id: resolved_run_id.as_deref(),
+            task_session_id: resolved_task_session_id.as_deref(),
+            failure_kind,
+            safe_reason: &safe_reason,
+            source_ref: &source_ref,
+            route_evidence,
+            route_evidence_ref,
+        })
+        .await?;
 
     Ok(MainChatTaskFailureFinalization {
         run_id: resolved_run_id,
@@ -615,20 +616,24 @@ async fn finalize_task_session_failure(
     Ok(())
 }
 
-async fn append_failure_finalizer_transcript(
-    state: &Arc<AppState>,
-    run_id: Option<&str>,
-    task_session_id: Option<&str>,
+struct FailureFinalizerTranscriptInput<'a> {
+    state: &'a Arc<AppState>,
+    run_id: Option<&'a str>,
+    task_session_id: Option<&'a str>,
     failure_kind: MainChatTaskFailureKind,
-    safe_reason: &str,
-    source_ref: &str,
+    safe_reason: &'a str,
+    source_ref: &'a str,
     route_evidence: Option<serde_json::Value>,
     route_evidence_ref: Option<String>,
+}
+
+async fn append_failure_finalizer_transcript(
+    input: FailureFinalizerTranscriptInput<'_>,
 ) -> Result<Option<String>, String> {
-    let Some(task_session_id) = task_session_id else {
+    let Some(task_session_id) = input.task_session_id else {
         return Ok(None);
     };
-    let Some(ref store_arc) = state.main_chat_agent_session_store else {
+    let Some(ref store_arc) = input.state.main_chat_agent_session_store else {
         return Ok(None);
     };
     let store = store_arc.lock().await;
@@ -637,40 +642,40 @@ async fn append_failure_finalizer_transcript(
         .map_err(|err| format!("load transcript before failure finalizer failed: {err}"))?;
     if let Some(entry) = existing.iter().rev().find(|entry| {
         string_from_failure_metadata(&entry.metadata, &["failureKind", "failure_kind"]).as_deref()
-            == Some(failure_kind.as_str())
+            == Some(input.failure_kind.as_str())
             && string_from_failure_metadata(&entry.metadata, &["sourceRef", "source_ref"])
                 .as_deref()
-                == Some(source_ref)
+                == Some(input.source_ref)
     }) {
         return Ok(Some(entry.id.clone()));
     }
 
     let mut metadata = serde_json::json!({
-        "failureKind": failure_kind.as_str(),
-        "failure_kind": failure_kind.as_str(),
-        "normalizedLifecycleState": failure_kind.normalized_lifecycle_state(),
-        "normalized_lifecycle_state": failure_kind.normalized_lifecycle_state(),
-        "safeReason": safe_reason,
-        "safe_reason": safe_reason,
-        "sourceRef": source_ref,
-        "source_ref": source_ref,
+        "failureKind": input.failure_kind.as_str(),
+        "failure_kind": input.failure_kind.as_str(),
+        "normalizedLifecycleState": input.failure_kind.normalized_lifecycle_state(),
+        "normalized_lifecycle_state": input.failure_kind.normalized_lifecycle_state(),
+        "safeReason": input.safe_reason,
+        "safe_reason": input.safe_reason,
+        "sourceRef": input.source_ref,
+        "source_ref": input.source_ref,
         "directWritesExecuted": false,
     });
-    if let Some(run_id) = run_id {
+    if let Some(run_id) = input.run_id {
         metadata["runId"] = serde_json::json!(run_id);
         metadata["run_id"] = serde_json::json!(run_id);
     }
-    if let Some(route_evidence_ref) = route_evidence_ref {
+    if let Some(route_evidence_ref) = input.route_evidence_ref {
         metadata["routeEvidenceRef"] = serde_json::json!(route_evidence_ref);
-    } else if let Some(run_id) = run_id {
+    } else if let Some(run_id) = input.run_id {
         metadata["routeEvidenceRef"] =
             serde_json::json!(format!("agent_run:{run_id}:runtimeRouteEvidence"));
     }
-    if let Some(route_evidence) = route_evidence {
+    if let Some(route_evidence) = input.route_evidence {
         metadata["routeEvidence"] = route_evidence;
     }
 
-    let summary = match failure_kind {
+    let summary = match input.failure_kind {
         MainChatTaskFailureKind::Timeout => "Main Chat task timed out and was finalized.",
         MainChatTaskFailureKind::Cancelled => "Main Chat task was cancelled and finalized.",
         MainChatTaskFailureKind::ProviderError => {

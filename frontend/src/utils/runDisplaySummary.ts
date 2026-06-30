@@ -60,9 +60,13 @@ export function buildRunDisplaySummary(
   const taskPart = taskSummary ? `Task ${lifecycle.replace(/_/g, " ")}` : null;
   const inputPart = run.userInput ? safePreviewText(run.userInput, 96) : "无用户输入正文";
   const subtitle = [taskPart, inputPart].filter(Boolean).join(" · ");
-  const actionCount = evidenceView?.actionCount ?? taskSummary?.actionCount ?? run.actions?.length ?? 0;
+  const actionCount =
+    evidenceView?.actionCount ?? taskSummary?.actionCount ?? run.actions?.length ?? 0;
   const observationCount =
-    evidenceView?.observationCount ?? taskSummary?.observationCount ?? run.observations?.length ?? 0;
+    evidenceView?.observationCount ??
+    taskSummary?.observationCount ??
+    run.observations?.length ??
+    0;
   const route = disclosure.routeLabel;
   const outcome = run.error?.message
     ? `${statusLabel(lifecycle)} · ${run.error.phase || "unknown"}`

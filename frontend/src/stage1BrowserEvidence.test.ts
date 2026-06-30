@@ -644,13 +644,13 @@ describe("stage1 browser evidence report builder", () => {
     expect(workflow).toContain("xvfb");
     expect(workflow).toContain("corepack prepare pnpm@9.1.0 --activate");
     expect(workflow).toContain("cargo install tauri-driver --locked");
-    expect(workflow).toContain("cargo build -p openlife-tauri");
+    expect(workflow).toContain("cargo build -p openlife-tauri --locked");
     expect(workflow).toContain("pnpm --dir frontend test:e2e:tauri");
     expect(workflow).toContain(
-      "cargo test -p openlife-tauri main_chat_agent_stage1_dogfood -- --nocapture"
+      "cargo test -p openlife-tauri --locked main_chat_agent_stage1_dogfood -- --nocapture"
     );
     expect(workflow).toContain(
-      "cargo test -p openlife-tauri run_main_chat_agent_stage1_dogfood_command_returns_isolated_report -- --nocapture"
+      "cargo test -p openlife-tauri --locked run_main_chat_agent_stage1_dogfood_command_returns_isolated_report -- --nocapture"
     );
     expect(workflow).toContain("frontend/test-results/main-chat-stage1-dogfood-report.json");
     expect(workflow).toContain("actions/upload-artifact");

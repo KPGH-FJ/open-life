@@ -39,7 +39,8 @@ function transmissionItem(status: string, overrides: Record<string, any> = {}) {
             : "local",
     reason: `${status}_fixture_reason`,
     evidence_id: `evidence-${status}`,
-    truth_confidence: status === "unknown" || status === "not_instrumented" ? "unknown" : "verified",
+    truth_confidence:
+      status === "unknown" || status === "not_instrumented" ? "unknown" : "verified",
     data_category: "provider_transmission",
     source_refs: [{ source: "agent_run", status: "present", route_type: "local" }],
     started_at: "2026-06-29T00:00:00Z",
@@ -157,7 +158,13 @@ describe("PrivacyTab", () => {
 
     expect(await screen.findAllByText(/redacted_sensitive/)).not.toHaveLength(0);
     const text = container.textContent ?? "";
-    for (const forbidden of ["sk-provider-secret", "secret-token", "hunter2", "api_key=", "token="]) {
+    for (const forbidden of [
+      "sk-provider-secret",
+      "secret-token",
+      "hunter2",
+      "api_key=",
+      "token=",
+    ]) {
       expect(text).not.toContain(forbidden);
     }
   });

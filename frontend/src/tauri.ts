@@ -3091,7 +3091,9 @@ export async function countMemoryChunks(): Promise<number> {
   return safeInvoke("count_memory_chunks");
 }
 
-export async function rebuildMemoryIndex(confirmationEvidence?: DangerActionConfirmationEvidence): Promise<{
+export async function rebuildMemoryIndex(
+  confirmationEvidence?: DangerActionConfirmationEvidence
+): Promise<{
   processed: number;
   indexed: number;
   skipped: number;
