@@ -171,8 +171,14 @@ describe("SettingsPage", () => {
     renderSettings();
 
     await clickTab("数据与恢复");
-    const exportButton = await screen.findByText("导出全部数据");
+    const exportButton = await screen.findByRole("button", { name: "导出全部数据" });
     fireEvent.click(exportButton);
+
+    expect(await screen.findByRole("dialog", { name: "动作预检：导出全部数据" })).toBeInTheDocument();
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "export_all_data")).toBe(false);
+    expect(writeTextFile).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "继续执行" }));
 
     await waitFor(() => {
       expect(writeTextFile).toHaveBeenCalled();
@@ -196,6 +202,13 @@ describe("SettingsPage", () => {
     await clickTab("数据与恢复");
     fireEvent.click(await screen.findByRole("button", { name: "导入覆盖备份" }));
 
+    expect(await screen.findByRole("dialog", { name: "动作预检：导入覆盖备份" })).toBeInTheDocument();
+    expect(open).not.toHaveBeenCalled();
+    expect(readTextFile).not.toHaveBeenCalled();
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "import_all_data")).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "继续执行" }));
+
     expect(await screen.findByRole("dialog", { name: "确认覆盖导入全部数据" })).toBeInTheDocument();
     expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "import_all_data")).toBe(false);
 
@@ -212,6 +225,34 @@ describe("SettingsPage", () => {
         })
       );
     });
+  });
+
+  it("shows audit action preflights on first click before final commands", async () => {
+    renderSettings();
+
+    await clickTab("数据与恢复");
+
+    fireEvent.click(await screen.findByRole("button", { name: "导出审计" }));
+    expect(await screen.findByRole("dialog", { name: "动作预检：导出审计" })).toBeInTheDocument();
+    expect(screen.getByText(/工具输入参数文本/)).toBeInTheDocument();
+    expect(screen.getByText(/工具执行结果文本/)).toBeInTheDocument();
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "export_mcp_audit_logs")).toBe(
+      false
+    );
+    fireEvent.click(screen.getByRole("button", { name: "返回" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "清理旧日志" }));
+    expect(await screen.findByRole("dialog", { name: "动作预检：清理旧日志" })).toBeInTheDocument();
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "cleanup_mcp_audit_logs")).toBe(
+      false
+    );
+    fireEvent.click(screen.getByRole("button", { name: "返回" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "轮换密钥" }));
+    expect(await screen.findByRole("dialog", { name: "动作预检：轮换密钥" })).toBeInTheDocument();
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "rotate_mcp_audit_key")).toBe(
+      false
+    );
   });
 
   it("shows feedback evolution report as read-only candidates, not applied rules", async () => {
@@ -4170,6 +4211,13 @@ describe("SettingsPage", () => {
 
     await clickTab("数据与恢复");
     const importButton = await screen.findByRole("button", { name: "导入覆盖备份" });
-    expect(importButton).toBeDisabled();
+    expect(importButton).not.toBeDisabled();
+    fireEvent.click(importButton);
+
+    expect(await screen.findByRole("dialog", { name: "动作预检：导入覆盖备份" })).toBeInTheDocument();
+    expect(screen.getByText(/Safe Mode 已阻断最终执行入口/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Safe Mode 已阻断" })).toBeDisabled();
+    expect(open).not.toHaveBeenCalled();
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "import_all_data")).toBe(false);
   });
 });

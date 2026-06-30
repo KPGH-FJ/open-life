@@ -105,7 +105,7 @@ export default function DataTab({
         >
           <button
             onClick={handleImport}
-            disabled={importLoading || safeMode}
+            disabled={importLoading}
             className="px-3 py-2 bg-white border border-rose-200 text-rose-700 rounded-md text-sm font-medium hover:bg-rose-100 disabled:opacity-50"
           >
             {importLoading ? "导入中..." : "导入覆盖备份"}

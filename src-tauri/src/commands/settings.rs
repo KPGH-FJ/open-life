@@ -33,6 +33,168 @@ pub struct GovernedDataImportRequest {
     pub import_targets: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DangerActionPreflightView {
+    pub action_type: String,
+    pub risk_tier: String,
+    pub scope_summary: String,
+    pub data_categories: Vec<String>,
+    pub writes_durable_state: bool,
+    pub privacy_sensitive: bool,
+    pub external_transmission: String,
+    pub dry_run_available: bool,
+    pub backup_status: String,
+    pub requires_typed_confirmation: bool,
+    pub final_action_enabled: bool,
+    pub safe_mode_blocked: bool,
+    pub blocking_reasons: Vec<String>,
+    pub source_refs: Vec<String>,
+}
+
+fn danger_action_preflight_for_action(
+    action_type: &str,
+    safe_mode: bool,
+) -> Result<DangerActionPreflightView, AppError> {
+    let mut view = match action_type {
+        "data_export" => DangerActionPreflightView {
+            action_type: "data_export".into(),
+            risk_tier: "high".into(),
+            scope_summary:
+                "导出本地 LifeModel、聊天记录和向量记忆到用户选择的本地 JSON 文件。".into(),
+            data_categories: vec!["life_model".into(), "messages".into(), "vectors".into()],
+            writes_durable_state: false,
+            privacy_sensitive: true,
+            external_transmission: "not_sent_externally".into(),
+            dry_run_available: false,
+            backup_status: "not_required_read_only".into(),
+            requires_typed_confirmation: false,
+            final_action_enabled: true,
+            safe_mode_blocked: false,
+            blocking_reasons: vec![],
+            source_refs: vec![
+                "settings_command:get_danger_action_preflight".into(),
+                "final_command:export_all_data".into(),
+                "governance:slice5b_danger_action_preflight".into(),
+            ],
+        },
+        "data_import_overwrite" => DangerActionPreflightView {
+            action_type: "data_import_overwrite".into(),
+            risk_tier: "critical".into(),
+            scope_summary:
+                "读取用户选择的 OpenLife JSON 备份，并覆盖当前 LifeModel、聊天记录和向量记忆。"
+                    .into(),
+            data_categories: vec!["life_model".into(), "messages".into(), "vectors".into()],
+            writes_durable_state: true,
+            privacy_sensitive: true,
+            external_transmission: "not_sent_externally".into(),
+            dry_run_available: false,
+            backup_status: "will_create_on_execute".into(),
+            requires_typed_confirmation: false,
+            final_action_enabled: true,
+            safe_mode_blocked: false,
+            blocking_reasons: vec![],
+            source_refs: vec![
+                "settings_command:get_danger_action_preflight".into(),
+                "final_command:import_all_data".into(),
+                "governed_request:create_pre_change_snapshot_on_execute".into(),
+                "governance:slice5b_danger_action_preflight".into(),
+            ],
+        },
+        "mcp_audit_export" => DangerActionPreflightView {
+            action_type: "mcp_audit_export".into(),
+            risk_tier: "high".into(),
+            scope_summary:
+                "导出最近 MCP 审计日志到用户选择的本地 JSON 文件，可能包含工具名称、工具输入参数文本、工具执行结果文本、执行状态和审计元数据。"
+                    .into(),
+            data_categories: vec![
+                "mcp_audit_metadata".into(),
+                "tool_metadata".into(),
+                "tool_input_text".into(),
+                "tool_output_text".into(),
+            ],
+            writes_durable_state: false,
+            privacy_sensitive: true,
+            external_transmission: "not_sent_externally".into(),
+            dry_run_available: false,
+            backup_status: "not_required_read_only".into(),
+            requires_typed_confirmation: false,
+            final_action_enabled: true,
+            safe_mode_blocked: false,
+            blocking_reasons: vec![],
+            source_refs: vec![
+                "settings_command:get_danger_action_preflight".into(),
+                "final_command:export_mcp_audit_logs".into(),
+                "governance:slice5b_danger_action_preflight".into(),
+            ],
+        },
+        "mcp_audit_cleanup" => DangerActionPreflightView {
+            action_type: "mcp_audit_cleanup".into(),
+            risk_tier: "high".into(),
+            scope_summary: "删除超过保留期限的本地 MCP 审计日志。".into(),
+            data_categories: vec!["mcp_audit_metadata".into(), "tool_metadata".into()],
+            writes_durable_state: true,
+            privacy_sensitive: true,
+            external_transmission: "not_sent_externally".into(),
+            dry_run_available: false,
+            backup_status: "none".into(),
+            requires_typed_confirmation: false,
+            final_action_enabled: true,
+            safe_mode_blocked: false,
+            blocking_reasons: vec![],
+            source_refs: vec![
+                "settings_command:get_danger_action_preflight".into(),
+                "final_command:cleanup_mcp_audit_logs".into(),
+                "governance:slice5b_danger_action_preflight".into(),
+            ],
+        },
+        "mcp_audit_key_rotation" => DangerActionPreflightView {
+            action_type: "mcp_audit_key_rotation".into(),
+            risk_tier: "critical".into(),
+            scope_summary:
+                "轮换本地 MCP 审计加密 epoch；历史 epoch 会保留以便旧审计日志继续可读。".into(),
+            data_categories: vec!["mcp_audit_metadata".into(), "mcp_audit_key_epochs".into()],
+            writes_durable_state: true,
+            privacy_sensitive: true,
+            external_transmission: "not_sent_externally".into(),
+            dry_run_available: false,
+            backup_status: "historical_key_epochs_retained".into(),
+            requires_typed_confirmation: false,
+            final_action_enabled: true,
+            safe_mode_blocked: false,
+            blocking_reasons: vec![],
+            source_refs: vec![
+                "settings_command:get_danger_action_preflight".into(),
+                "final_command:rotate_mcp_audit_key".into(),
+                "governance:slice5b_danger_action_preflight".into(),
+            ],
+        },
+        _ => {
+            return Err(AppError::permission(
+                "unsupported danger action preflight action type",
+            ));
+        }
+    };
+
+    if safe_mode && view.writes_durable_state {
+        view.final_action_enabled = false;
+        view.safe_mode_blocked = true;
+        view.blocking_reasons
+            .push("safe_mode_blocks_durable_write".into());
+        view.source_refs.push("safe_mode:blocked".into());
+    }
+
+    Ok(view)
+}
+
+#[tauri::command]
+pub async fn get_danger_action_preflight(
+    action_type: String,
+    safe_mode: Option<bool>,
+) -> Result<DangerActionPreflightView, AppError> {
+    danger_action_preflight_for_action(&action_type, safe_mode.unwrap_or(false))
+}
+
 impl GovernedDataImportRequest {
     #[cfg(test)]
     fn manual_restore_all_targets() -> Self {
@@ -679,6 +841,175 @@ mod tests {
     #[test]
     fn resolve_masked_api_key_uses_submitted_new_key() {
         assert_eq!(resolve_masked_api_key("sk-new", "sk-current"), "sk-new");
+    }
+
+    #[test]
+    fn danger_action_preflight_returns_safe_data_export_scope() {
+        let view = danger_action_preflight_for_action("data_export", false).unwrap();
+
+        assert_eq!(view.action_type, "data_export");
+        assert_eq!(view.risk_tier, "high");
+        assert_eq!(
+            view.data_categories,
+            vec!["life_model", "messages", "vectors"]
+        );
+        assert!(!view.writes_durable_state);
+        assert!(view.privacy_sensitive);
+        assert_eq!(view.external_transmission, "not_sent_externally");
+        assert_eq!(view.backup_status, "not_required_read_only");
+        assert!(view.final_action_enabled);
+        assert!(!view.safe_mode_blocked);
+        assert!(view
+            .source_refs
+            .iter()
+            .any(|source| source == "final_command:export_all_data"));
+    }
+
+    #[test]
+    fn danger_action_preflight_marks_import_overwrite_as_critical_without_claiming_existing_snapshot(
+    ) {
+        let view = danger_action_preflight_for_action("data_import_overwrite", false).unwrap();
+
+        assert_eq!(view.action_type, "data_import_overwrite");
+        assert_eq!(view.risk_tier, "critical");
+        assert!(view.writes_durable_state);
+        assert!(view.privacy_sensitive);
+        assert_eq!(view.external_transmission, "not_sent_externally");
+        assert_eq!(view.backup_status, "will_create_on_execute");
+        assert!(view.final_action_enabled);
+        assert!(view
+            .source_refs
+            .iter()
+            .any(|source| source == "governed_request:create_pre_change_snapshot_on_execute"));
+
+        let serialized = serde_json::to_string(&view).unwrap();
+        for forbidden in [
+            "snapshot_available",
+            "snapshot_exists",
+            "existing_snapshot",
+            "already_created",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "import preflight must not claim existing snapshot via {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn danger_action_preflight_marks_audit_export_as_sensitive_read_only() {
+        let view = danger_action_preflight_for_action("mcp_audit_export", false).unwrap();
+
+        assert_eq!(view.action_type, "mcp_audit_export");
+        assert_eq!(view.risk_tier, "high");
+        assert_eq!(
+            view.data_categories,
+            vec![
+                "mcp_audit_metadata",
+                "tool_metadata",
+                "tool_input_text",
+                "tool_output_text"
+            ]
+        );
+        assert!(view.scope_summary.contains("工具输入参数文本"));
+        assert!(view.scope_summary.contains("工具执行结果文本"));
+        assert!(!view.writes_durable_state);
+        assert!(view.privacy_sensitive);
+        assert_eq!(view.external_transmission, "not_sent_externally");
+        assert_eq!(view.backup_status, "not_required_read_only");
+        assert!(view.final_action_enabled);
+    }
+
+    #[test]
+    fn danger_action_preflight_marks_cleanup_and_key_rotation_as_mutating() {
+        for action_type in ["mcp_audit_cleanup", "mcp_audit_key_rotation"] {
+            let view = danger_action_preflight_for_action(action_type, false).unwrap();
+            assert_eq!(view.action_type, action_type);
+            assert!(view.writes_durable_state);
+            assert!(view.privacy_sensitive);
+            assert_eq!(view.external_transmission, "not_sent_externally");
+            assert!(view.final_action_enabled);
+            assert!(!view.safe_mode_blocked);
+            assert!(
+                view.backup_status == "none"
+                    || view.backup_status == "historical_key_epochs_retained"
+            );
+        }
+    }
+
+    #[test]
+    fn danger_action_preflight_safe_mode_blocks_destructive_actions() {
+        for action_type in [
+            "data_import_overwrite",
+            "mcp_audit_cleanup",
+            "mcp_audit_key_rotation",
+        ] {
+            let view = danger_action_preflight_for_action(action_type, true).unwrap();
+            assert!(view.writes_durable_state);
+            assert!(view.safe_mode_blocked);
+            assert!(!view.final_action_enabled);
+            assert_eq!(
+                view.blocking_reasons,
+                vec!["safe_mode_blocks_durable_write"]
+            );
+        }
+
+        for action_type in ["data_export", "mcp_audit_export"] {
+            let view = danger_action_preflight_for_action(action_type, true).unwrap();
+            assert!(!view.writes_durable_state);
+            assert!(!view.safe_mode_blocked);
+            assert!(view.final_action_enabled);
+            assert!(view.blocking_reasons.is_empty());
+        }
+    }
+
+    #[test]
+    fn danger_action_preflight_rejects_unknown_action_type() {
+        let err =
+            danger_action_preflight_for_action("/tmp/sk-secret-unknown-action", false).unwrap_err();
+
+        assert!(matches!(err, AppError::PermissionDenied { .. }));
+        assert_eq!(
+            err.message(),
+            "unsupported danger action preflight action type"
+        );
+        assert!(!err.message().contains("/tmp"));
+        assert!(!err.message().contains("sk-secret"));
+    }
+
+    #[test]
+    fn danger_action_preflight_never_serializes_payload_paths_or_key_material() {
+        let views = [
+            "data_export",
+            "data_import_overwrite",
+            "mcp_audit_export",
+            "mcp_audit_cleanup",
+            "mcp_audit_key_rotation",
+        ]
+        .into_iter()
+        .map(|action_type| danger_action_preflight_for_action(action_type, true).unwrap())
+        .collect::<Vec<_>>();
+        let serialized = serde_json::to_string(&views).unwrap();
+
+        for forbidden in [
+            "/tmp/",
+            "/Users/",
+            "C:\\",
+            "sk-secret",
+            "Bearer ",
+            "api_key",
+            "openai_key",
+            "keyring",
+            "payload",
+            "arguments",
+            "results",
+            "raw_import",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "danger preflight leaked forbidden marker {forbidden}: {serialized}"
+            );
+        }
     }
 
     async fn seed_current_data(state: &Arc<AppState>) {

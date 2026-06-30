@@ -264,9 +264,9 @@ use commands::proposal::{
 use commands::router::get_model_router_status;
 use commands::settings::{
     cleanup_mcp_audit_logs, export_all_data, export_mcp_audit_logs, get_config,
-    get_last_model_error, get_privacy_policy, has_completed_onboarding, import_all_data,
-    mark_onboarding_completed, rotate_mcp_audit_key, save_config, set_privacy_policy, test_api_key,
-    test_llm_connection,
+    get_danger_action_preflight, get_last_model_error, get_privacy_policy,
+    has_completed_onboarding, import_all_data, mark_onboarding_completed, rotate_mcp_audit_key,
+    save_config, set_privacy_policy, test_api_key, test_llm_connection,
 };
 use commands::state::{
     add_daily_goal, delete_daily_goal, get_daily_goals, get_state_alerts, get_state_history,
@@ -879,6 +879,7 @@ pub fn run() {
             identity_goal_alignment_check,
             identity_goal_alignment_report,
             export_all_data,
+            get_danger_action_preflight,
             import_all_data,
             test_api_key,
             test_llm_connection,

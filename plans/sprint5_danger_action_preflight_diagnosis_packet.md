@@ -1,8 +1,8 @@
-# Sprint 5C1 Diagnosis Packet: Danger Action Preflight
+# Sprint 5B Diagnosis Packet: Danger Action Preflight
 
 Date: 2026-06-29
 
-Status: ready for bounded Slice 5C1 implementation after Slice 5A commit `083015d`. This packet is not approval for live-provider calls, final destructive-action redesign, or typed-confirmation Slice 5D.
+Status: ready for bounded Slice 5B implementation after Slice 5A commit `083015d`. This packet is not approval for live-provider calls, final destructive-action redesign, or typed-confirmation Slice 5D.
 
 ## Scope
 
@@ -10,7 +10,7 @@ Raw audit issues: `OL-010`, `V4-005`, `V5-014`.
 
 Primary promise: before a user exports sensitive local data, imports over current data, cleans audit logs, or rotates an audit key, OpenLife must show what will happen, what data or state is affected, whether the action writes durable state, whether it sends anything externally, and whether Safe Mode blocks it.
 
-Slice 5C1 covers these Settings actions only:
+Slice 5B covers these Settings actions only:
 
 - `data_export`
 - `data_import_overwrite`
@@ -47,14 +47,14 @@ Checked source entrypoints:
 
 ## Industry Benchmark Applied
 
-| Benchmark | Product bar for Slice 5C1 |
+| Benchmark | Product bar for Slice 5B |
 |---|---|
 | Granola privacy/sharing pattern | User sees whether content leaves the local/private boundary before sharing/exporting. |
 | GitHub destructive settings pattern | Destructive state changes are separated from ordinary buttons and require explicit review/confirmation. |
 | Apple/macOS privacy prompt pattern | System-level sensitive actions state the affected data category before permission is granted. |
 | Codex/Cursor background-agent controls | Long-running or irreversible operations expose durable state, logs, and recovery expectations. |
 
-## Slice 5C1 Frozen Scope
+## Slice 5B Frozen Scope
 
 Implement only: read-only `DangerActionPreflightView` plus preflight-first Settings UI for the five scoped actions.
 
@@ -75,7 +75,7 @@ Required frontend behavior:
 - Final command execution must be behind a distinct "continue/execute" action after preflight is visible.
 - Browser `confirm()` must not be the only safety layer for cleanup or key rotation.
 - Safe Mode must render as a product-level preflight block with the reason, not only a disabled button.
-- Existing `importAllData` must continue to pass the governed import request; Slice 5C1 must not weaken backend import guards.
+- Existing `importAllData` must continue to pass the governed import request; Slice 5B must not weaken backend import guards.
 
 Non-goals:
 
@@ -94,7 +94,7 @@ Non-goals:
 - Do not serialize raw import payload, audit log arguments/results, keyring state, or filesystem paths into the preflight view.
 - Do not mark `final_action_enabled=true` for Safe Mode blocked destructive actions.
 
-## Slice 5C1 Acceptance Tests
+## Slice 5B Acceptance Tests
 
 Backend focused tests to add:
 
@@ -137,7 +137,7 @@ Suggested gates:
 
 ## Rework Triggers
 
-Slice 5C1 must be returned for rework if any of these happen:
+Slice 5B must be returned for rework if any of these happen:
 
 - First click executes export/import/cleanup/key-rotation before preflight is visible.
 - Preflight claims a snapshot/backup exists without backend evidence.

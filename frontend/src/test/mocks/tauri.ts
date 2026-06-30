@@ -3671,6 +3671,62 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       return Promise.resolve([] as T);
     case "get_memory_tier_stats":
       return Promise.resolve({ total: 0, tier1: 0, tier2: 0, tier3: 0, archived: 0 } as T);
+    case "get_danger_action_preflight": {
+      const actionType = String(_args?.actionType ?? _args?.action_type ?? "data_export");
+      const safeMode = Boolean(_args?.safeMode ?? _args?.safe_mode);
+      const mutating = [
+        "data_import_overwrite",
+        "mcp_audit_cleanup",
+        "mcp_audit_key_rotation",
+      ].includes(actionType);
+      const labels: Record<string, string> = {
+        data_export: "导出本地 LifeModel、聊天记录和向量记忆到本地 JSON 文件。",
+        data_import_overwrite: "覆盖当前 LifeModel、聊天记录和向量记忆。",
+        mcp_audit_export:
+          "导出最近 MCP 审计日志元数据，可能包含工具输入参数文本和工具执行结果文本。",
+        mcp_audit_cleanup: "删除超过保留期限的本地 MCP 审计日志。",
+        mcp_audit_key_rotation: "轮换本地 MCP 审计加密 epoch。",
+      };
+      const finalCommands: Record<string, string> = {
+        data_export: "export_all_data",
+        data_import_overwrite: "import_all_data",
+        mcp_audit_export: "export_mcp_audit_logs",
+        mcp_audit_cleanup: "cleanup_mcp_audit_logs",
+        mcp_audit_key_rotation: "rotate_mcp_audit_key",
+      };
+      return Promise.resolve({
+        actionType,
+        riskTier:
+          actionType === "data_import_overwrite" || actionType === "mcp_audit_key_rotation"
+            ? "critical"
+            : "high",
+        scopeSummary: labels[actionType] ?? "未知危险动作。",
+        dataCategories: actionType.startsWith("mcp_audit")
+          ? actionType === "mcp_audit_export"
+            ? ["mcp_audit_metadata", "tool_metadata", "tool_input_text", "tool_output_text"]
+            : ["mcp_audit_metadata", "tool_metadata"]
+          : ["life_model", "messages", "vectors"],
+        writesDurableState: mutating,
+        privacySensitive: true,
+        externalTransmission: "not_sent_externally",
+        dryRunAvailable: false,
+        backupStatus:
+          actionType === "data_import_overwrite"
+            ? "will_create_on_execute"
+            : mutating
+              ? "none"
+              : "not_required_read_only",
+        requiresTypedConfirmation: false,
+        finalActionEnabled: !(safeMode && mutating),
+        safeModeBlocked: safeMode && mutating,
+        blockingReasons: safeMode && mutating ? ["safe_mode_blocks_durable_write"] : [],
+        sourceRefs: [
+          "settings_command:get_danger_action_preflight",
+          `final_command:${finalCommands[actionType] ?? "unknown"}`,
+          "governance:slice5b_danger_action_preflight",
+        ],
+      } as T);
+    }
     case "export_mcp_audit_logs":
       return Promise.resolve({
         exported_at: new Date().toISOString(),

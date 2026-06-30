@@ -3401,6 +3401,42 @@ export interface ExportPayload {
   vectors: ExportedVectorChunk[];
 }
 
+export type DangerActionType =
+  | "data_export"
+  | "data_import_overwrite"
+  | "mcp_audit_export"
+  | "mcp_audit_cleanup"
+  | "mcp_audit_key_rotation";
+
+export interface DangerActionPreflightView {
+  actionType: DangerActionType;
+  riskTier: "medium" | "high" | "critical" | string;
+  scopeSummary: string;
+  dataCategories: string[];
+  writesDurableState: boolean;
+  privacySensitive: boolean;
+  externalTransmission: "not_sent_externally" | "sent_externally" | "unknown" | string;
+  dryRunAvailable: boolean;
+  backupStatus: string;
+  requiresTypedConfirmation: boolean;
+  finalActionEnabled: boolean;
+  safeModeBlocked: boolean;
+  blockingReasons: string[];
+  sourceRefs: string[];
+}
+
+export async function getDangerActionPreflight(
+  actionType: DangerActionType,
+  safeMode: boolean
+): Promise<DangerActionPreflightView> {
+  return safeInvoke<DangerActionPreflightView>("get_danger_action_preflight", {
+    actionType,
+    action_type: actionType,
+    safeMode,
+    safe_mode: safeMode,
+  });
+}
+
 export async function exportAllData(): Promise<ExportPayload> {
   return safeInvoke<ExportPayload>("export_all_data");
 }

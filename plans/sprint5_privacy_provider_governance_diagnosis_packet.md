@@ -2,7 +2,7 @@
 
 Date: 2026-06-29
 
-Status: historical source-level preparation for bounded Slice 5A. Slice 5A was implemented in `083015d`; use `plans/sprint5_danger_action_preflight_diagnosis_packet.md` for current Slice 5C1 entry. This packet is retained as audit context, not a current absence claim.
+Status: historical source-level preparation for bounded Slice 5A. Slice 5A was implemented in `083015d`; use `plans/sprint5_danger_action_preflight_diagnosis_packet.md` for current Slice 5B entry. This packet is retained as audit context, not a current absence claim.
 
 ## Scope
 
@@ -19,7 +19,7 @@ Checked source entrypoints:
 | `src-tauri/src/main_chat_runtime_facts/provider_route.rs` | `RuntimeRouteEvidence` already includes `external_transmission`, route identity, provider readiness, fallback, and source refs. | This is route/transmission evidence, not a full provider payload ledger. Do not infer exact sent payloads or provider retention from it. |
 | `src-tauri/src/main_chat_runtime_facts_tests.rs` | Tests already cover cloud -> `sent`, local/runtime fact -> `not_sent`, fallback local -> `not_sent`, and missing settings instrumentation -> `not_instrumented`. | These tests prove route boundary semantics, not Privacy page history. |
 | `frontend/src/pages/RunsPage.tsx` / `frontend/src/pages/AgentRunDetail.tsx` | Runs surfaces can display route evidence and external transmission for individual run/detail contexts. | Before `083015d`, Privacy lacked an aggregated per-run transmission history; after `083015d`, this risk is reduced through `list_provider_transmission_history`. |
-| `frontend/src/pages/settings/tabs/PrivacyTab.tsx` | Privacy shows hot memory summary, local MCP audit counts, PII policy, and, after `083015d`, recent provider-transmission history. | Danger-action preflight UX is still missing; audit export/cleanup/key rotation buttons still need Slice 5C1. |
+| `frontend/src/pages/settings/tabs/PrivacyTab.tsx` | Privacy shows hot memory summary, local MCP audit counts, PII policy, and, after `083015d`, recent provider-transmission history. | Danger-action preflight UX is still missing; audit export/cleanup/key rotation buttons still need Slice 5B. |
 | `src-tauri/src/main_chat_live_provider_harness.rs` and agent runtime final gate | Live provider harness can prove opt-in model invocation/no-invocation with blockers. | This is eval harness evidence, not user-facing transmission history. Do not run live providers in Slice 5A. |
 | Search result for `ProviderTransmission` | Pre-`083015d`, no provider-transmission read-model/test symbol existed. After `083015d`, `ProviderTransmissionHistoryItem` and focused `provider_transmission` tests exist; no dedicated `ProviderTransmissionLogEntry` table exists. | A new table remains optional later; do not duplicate route truth unless the AgentRun-derived read model proves insufficient. |
 

@@ -88,7 +88,6 @@ interface PrivacyTabProps {
   setConfig: React.Dispatch<React.SetStateAction<AppConfig>>;
   refreshSecurityState: () => Promise<void>;
   toolManifests: ToolManifest[];
-  safeMode: boolean;
   handleSavePrivacyPolicy: () => Promise<void>;
 }
 
@@ -103,7 +102,6 @@ export default function PrivacyTab({
   handleCleanupAudit,
   handleRotateAuditKey,
   refreshSecurityState,
-  safeMode,
   handleSavePrivacyPolicy,
 }: PrivacyTabProps) {
   const [transmissionHistory, setTransmissionHistory] = useState<
@@ -197,14 +195,14 @@ export default function PrivacyTab({
               </button>
               <button
                 onClick={handleCleanupAudit}
-                disabled={securityLoading || safeMode}
+                disabled={securityLoading}
                 className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-50 disabled:opacity-50"
               >
                 清理旧日志
               </button>
               <button
                 onClick={handleRotateAuditKey}
-                disabled={securityLoading || safeMode}
+                disabled={securityLoading}
                 className="rounded-md border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-700 hover:bg-amber-100 disabled:opacity-50"
               >
                 轮换密钥

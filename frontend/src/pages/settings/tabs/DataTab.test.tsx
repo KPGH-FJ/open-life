@@ -46,17 +46,24 @@ describe("DataTab", () => {
     expect(screen.getByText("导出诊断报告")).toBeInTheDocument();
   });
 
-  it("disables import button in safe mode", () => {
+  it("keeps import button available in safe mode so preflight can show blocker", () => {
     render(<DataTab {...baseProps} safeMode={true} />);
     const importBtn = screen.getByText("导入覆盖备份");
-    expect(importBtn).toBeDisabled();
+    expect(importBtn).not.toBeDisabled();
   });
 
-  it("calls handleExport on export button click", () => {
+  it("calls preflight handlers on first export and import clicks without final tauri commands", () => {
     const handleExport = vi.fn();
-    render(<DataTab {...baseProps} handleExport={handleExport} />);
+    const handleImport = vi.fn();
+    render(<DataTab {...baseProps} handleExport={handleExport} handleImport={handleImport} />);
+
     fireEvent.click(screen.getByText("导出全部数据"));
+    fireEvent.click(screen.getByText("导入覆盖备份"));
+
     expect(handleExport).toHaveBeenCalledOnce();
+    expect(handleImport).toHaveBeenCalledOnce();
+    expect(invoke).not.toHaveBeenCalledWith("export_all_data", undefined);
+    expect(invoke).not.toHaveBeenCalledWith("import_all_data", expect.anything());
   });
 
   it("shows loading state when exporting", () => {

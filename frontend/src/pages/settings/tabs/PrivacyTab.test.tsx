@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import PrivacyTab from "./PrivacyTab";
 import { mockInvoke } from "@/test/mocks/tauri";
@@ -160,5 +160,32 @@ describe("PrivacyTab", () => {
     for (const forbidden of ["sk-provider-secret", "secret-token", "hunter2", "api_key=", "token="]) {
       expect(text).not.toContain(forbidden);
     }
+  });
+
+  it("routes audit danger buttons to preflight handlers before final commands", async () => {
+    const handleExportAudit = vi.fn().mockResolvedValue(undefined);
+    const handleCleanupAudit = vi.fn().mockResolvedValue(undefined);
+    const handleRotateAuditKey = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <PrivacyTab
+        {...baseProps}
+        handleExportAudit={handleExportAudit}
+        handleCleanupAudit={handleCleanupAudit}
+        handleRotateAuditKey={handleRotateAuditKey}
+      />
+    );
+    await screen.findByText(/旧 run 可能未接入/);
+
+    fireEvent.click(screen.getByRole("button", { name: "导出审计" }));
+    fireEvent.click(screen.getByRole("button", { name: "清理旧日志" }));
+    fireEvent.click(screen.getByRole("button", { name: "轮换密钥" }));
+
+    expect(handleExportAudit).toHaveBeenCalledOnce();
+    expect(handleCleanupAudit).toHaveBeenCalledOnce();
+    expect(handleRotateAuditKey).toHaveBeenCalledOnce();
+    expect(invoke).not.toHaveBeenCalledWith("export_mcp_audit_logs", expect.anything());
+    expect(invoke).not.toHaveBeenCalledWith("cleanup_mcp_audit_logs", expect.anything());
+    expect(invoke).not.toHaveBeenCalledWith("rotate_mcp_audit_key", undefined);
   });
 });

@@ -2,7 +2,7 @@
 
 Date: 2026-06-29
 
-Status: Slice 5A implemented in `083015d`. Ready for bounded Slice 5C1 implementation after source-level diagnosis in `plans/sprint5_danger_action_preflight_diagnosis_packet.md`. This is not approval for live-provider expansion, typed-confirmation Slice 5D, or broad danger-zone redesign.
+Status: Slice 5A implemented in `083015d`. Ready for bounded Slice 5B implementation after source-level diagnosis in `plans/sprint5_danger_action_preflight_diagnosis_packet.md`. This is not approval for live-provider expansion, typed-confirmation Slice 5D, or broad danger-zone redesign.
 
 ## Scope
 
@@ -32,7 +32,7 @@ Slice 5A started from current route/run evidence:
 - No dedicated ProviderTransmission table exists today.
 - Live provider harness evidence is opt-in eval evidence, not default product transmission history.
 
-Slice 5C1 must start from current Settings danger-action reality:
+Slice 5B must start from current Settings danger-action reality:
 
 - `frontend/src/pages/SettingsPage.tsx` still owns direct handlers for data export/import, MCP audit export/cleanup, and audit key rotation.
 - Data export and MCP audit export are read-only but privacy-sensitive because they serialize local personal/audit data.
@@ -88,7 +88,7 @@ Storage and migration precondition:
 | `final_action_enabled` | boolean |
 | `safe_mode_blocked` | boolean |
 
-Slice 5C1 concrete fields:
+Slice 5B concrete fields:
 
 | Field | Meaning |
 |---|---|
@@ -112,7 +112,7 @@ Danger zone:
 - Show preflight scope before final action.
 - Final action requires typed confirmation for high/critical actions.
 - Safe Mode disables destructive actions.
-- For Slice 5C1, first click shows preflight and must not execute final export/import/cleanup/key-rotation. A distinct continuation action may call the existing final command; typed phrases remain Slice 5D.
+- For Slice 5B, first click shows preflight and must not execute final export/import/cleanup/key-rotation. A distinct continuation action may call the existing final command; typed phrases remain Slice 5D.
 
 ## Tests
 
@@ -137,7 +137,7 @@ Command-level gates:
 - `cargo test -p openlife-tauri provider_transmission`
 - `cargo test -p openlife-tauri danger_action_preflight`
 
-Slice 5A already added provider-transmission tests. Slice 5C1 must keep those passing and add explicit focused danger-action preflight tests:
+Slice 5A already added provider-transmission tests. Slice 5B must keep those passing and add explicit focused danger-action preflight tests:
 
 - `provider_transmission_view_records_local_not_sent_with_positive_route_evidence`
 - `provider_transmission_view_records_cloud_sent_with_cloud_route_evidence`
@@ -154,7 +154,7 @@ Slice 5A already added provider-transmission tests. Slice 5C1 must keep those pa
 Frontend:
 
 - Privacy tab renders sent/not-sent history.
-- Slice 5C1 danger actions require visible preflight before final execution; typed confirmation remains Slice 5D.
+- Slice 5B danger actions require visible preflight before final execution; typed confirmation remains Slice 5D.
 - Safe Mode disables high-risk actions.
 
 Candidate command-level frontend gates after adding/updating the focused tests:
@@ -172,9 +172,9 @@ Replay:
 ## Development Slices
 
 1. Slice 5A: AgentRun-derived provider-transmission read model and Privacy history. Implemented in `083015d`.
-2. Slice 5B: optional dedicated transmission store if the read model cannot represent required payload category / confirmation state semantics. Deferred; do not start unless 5A read model proves insufficient.
-3. Slice 5C1: `DangerActionPreflightView` for Settings data export/import and MCP audit export/cleanup/key rotation, preflight-first UI, no typed phrase.
-4. Slice 5C2: broader danger-zone consolidation if needed for rollback/delete surfaces.
+2. Optional 5A.1: optional dedicated transmission store if the read model cannot represent required payload category / confirmation state semantics. Deferred; do not start unless 5A read model proves insufficient.
+3. Slice 5B: `DangerActionPreflightView` for Settings data export/import and MCP audit export/cleanup/key rotation, preflight-first UI, no typed phrase.
+4. Slice 5C: broader danger-zone consolidation if needed for rollback/delete surfaces.
 5. Slice 5D: high-risk typed confirmation.
 6. Slice 5E: replay cloud/provider contrast only after evidence exists.
 
@@ -203,7 +203,7 @@ Blocked from this slice:
 - Retention-policy claims for third-party providers.
 - A new table that bypasses `RuntimeRouteEvidence`.
 
-## Slice 5C1 Implementation Contract
+## Slice 5B Implementation Contract
 
 Goal: make Settings danger actions preflight-first, so the user sees scope, risk, durable-write effect, external-transmission status, Safe Mode blocker, and source refs before final execution.
 
@@ -220,7 +220,7 @@ Required implementation:
 9. Existing `importAllData` governed request must remain intact.
 10. Existing Slice 5A provider-transmission history behavior must not regress.
 
-Blocked from Slice 5C1:
+Blocked from Slice 5B:
 
 - Typed confirmation phrase or deletion/rollback flows.
 - Live provider calls.
