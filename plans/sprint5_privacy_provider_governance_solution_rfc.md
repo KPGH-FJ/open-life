@@ -2,7 +2,7 @@
 
 Date: 2026-06-29
 
-Status: Slice 5A implemented in `083015d`. Ready for bounded Slice 5B implementation after source-level diagnosis in `plans/sprint5_danger_action_preflight_diagnosis_packet.md`. This is not approval for live-provider expansion, typed-confirmation Slice 5D, or broad danger-zone redesign.
+Status: Slice 5A implemented in `083015d`; Slice 5B implemented in `27367ef`. Remaining Sprint 5 work must follow `plans/sprint5_post_5b_continuation_plan.md`. This is not approval for live-provider expansion, typed-confirmation Slice 5D, or broad danger-zone redesign out of order.
 
 ## Scope
 
@@ -173,8 +173,8 @@ Replay:
 
 1. Slice 5A: AgentRun-derived provider-transmission read model and Privacy history. Implemented in `083015d`.
 2. Optional 5A.1: optional dedicated transmission store if the read model cannot represent required payload category / confirmation state semantics. Deferred; do not start unless 5A read model proves insufficient.
-3. Slice 5B: `DangerActionPreflightView` for Settings data export/import and MCP audit export/cleanup/key rotation, preflight-first UI, no typed phrase.
-4. Slice 5C: broader danger-zone consolidation if needed for rollback/delete surfaces.
+3. Slice 5B: `DangerActionPreflightView` for Settings data export/import and MCP audit export/cleanup/key rotation, preflight-first UI, no typed phrase. Implemented in `27367ef`.
+4. Slice 5C: broader danger-zone consolidation for remaining destructive/governance surfaces; see `plans/sprint5_post_5b_continuation_plan.md`.
 5. Slice 5D: high-risk typed confirmation.
 6. Slice 5E: replay cloud/provider contrast only after evidence exists.
 

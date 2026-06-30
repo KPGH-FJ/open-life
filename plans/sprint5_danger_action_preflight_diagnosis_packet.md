@@ -2,7 +2,7 @@
 
 Date: 2026-06-29
 
-Status: ready for bounded Slice 5B implementation after Slice 5A commit `083015d`. This packet is not approval for live-provider calls, final destructive-action redesign, or typed-confirmation Slice 5D.
+Status: historical source-level preparation for bounded Slice 5B. Slice 5B was implemented in `27367ef`; use `plans/sprint5_post_5b_continuation_plan.md` for remaining Sprint 5 work. This packet is retained as audit context, not approval for live-provider calls, final destructive-action redesign, or typed-confirmation Slice 5D.
 
 ## Scope
 
