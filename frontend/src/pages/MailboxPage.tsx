@@ -380,7 +380,7 @@ export default function MailboxPage() {
               </div>
             </div>
             <span className="rounded-md border border-stone-200 bg-white px-2.5 py-1 text-xs text-stone-600">
-              {folderCounts.pending} pending proposals
+              {folderCounts.pending} 个待确认
             </span>
           </div>
           <button

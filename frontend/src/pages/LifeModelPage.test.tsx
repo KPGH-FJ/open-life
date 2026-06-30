@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { BrowserRouter } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { readFileSync } from "node:fs";
@@ -167,7 +167,12 @@ describe("LifeModelPage", () => {
 
     fireEvent.click(screen.getByRole("tab", { name: "依据" }));
     expect(await screen.findByText("最近依据来源")).toBeInTheDocument();
-    expect(screen.queryByText("RAW_EVIDENCE_PAYLOAD_SHOULD_NOT_RENDER")).not.toBeInTheDocument();
+    const pendingPrimary = await screen.findByTestId(
+      "life-model-pending-proposal-primary-proposal-life-model-1"
+    );
+    expect(
+      within(pendingPrimary).queryByText("RAW_EVIDENCE_PAYLOAD_SHOULD_NOT_RENDER")
+    ).not.toBeInTheDocument();
   });
 
   it("shows an accepted communication preference in overview with proposal, patch, snapshot, and source trace", async () => {
@@ -330,6 +335,24 @@ describe("LifeModelPage", () => {
     expect(screen.queryByText("Builder readiness")).not.toBeInTheDocument();
     expect(screen.queryByText(/Builder review/)).not.toBeInTheDocument();
     expect(screen.queryByText(/proposal/i)).not.toBeInTheDocument();
+  });
+
+  it("keeps pending proposal source text out of the ordinary evidence summary", async () => {
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("tab", { name: "依据" }));
+
+    const primary = await screen.findByTestId(
+      "life-model-pending-proposal-primary-proposal-life-model-1"
+    );
+    expect(primary).toHaveTextContent("OpenLife 发现一条候选更新");
+    expect(within(primary).queryByText(/Builder review produced/i)).not.toBeInTheDocument();
+
+    expect(screen.getByText("来源与技术记录")).toBeInTheDocument();
+    expect(
+      screen.getByText("Builder review produced a low-risk model update.")
+    ).toBeInTheDocument();
+    expect(screen.getByText("RAW_EVIDENCE_PAYLOAD_SHOULD_NOT_RENDER")).toBeInTheDocument();
   });
 
   it("shows three local handling actions for Life Model quality issues without writing data", async () => {
