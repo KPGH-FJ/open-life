@@ -1,11 +1,17 @@
 use crate::main_chat_hs_runtime::build_chat_runtime_hs_packet;
 use crate::AppState;
+use openlife_core::agent::main_chat_agent_productization_v1::{
+    ActionEvidence, BlockerEvidence, ObservationEvidence, PlanArtifactFactView,
+    PlanArtifactRouteEvidence, PlanArtifactRunEvidence, PlanArtifactSourceEvidence,
+    PlanArtifactStepView, PlanArtifactView, ProposalEvidence, StrategyEvidence,
+};
 use openlife_core::agent::{
     behavior_checks_for_packet, AgentExecutionBudget, AgentRun, AgentRunStatus, AgentTask,
     AgentTaskKind, ContextSummary, LifeModelGovernor, PlanExecuteInput, PlanExecuteProductContract,
-    PlanExecuteProductScenario, PlanExecuteService, PlanExecuteSession, PlanExecuteStepEdit,
-    PlanExecuteStepExecutionResult, PlanStepStatus, ReasoningTrace, RedactionLevel, RiskLevel,
-    RuntimeGuidanceConsumptionMode, RuntimeInput, RuntimeStrategyRegistry,
+    PlanExecuteProductScenario, PlanExecuteService, PlanExecuteSession, PlanExecuteSessionStatus,
+    PlanExecuteStepEdit, PlanExecuteStepExecutionResult, PlanStepStatus, ReasoningTrace,
+    RedactionLevel, RiskLevel, RuntimeGuidanceConsumptionMode, RuntimeInput,
+    RuntimeStrategyRegistry,
 };
 use openlife_core::layer_router::Layer;
 use openlife_core::life_model::LifeModel;
@@ -132,6 +138,17 @@ pub struct ReviewPlanExecuteSessionOutput {
     pub session: PlanExecuteSession,
     pub summary: openlife_core::agent::PlanExecuteReviewSummary,
     pub metadata_safe_summary: Value,
+}
+
+pub(crate) struct PlanArtifactRuntimeEvidence<'a> {
+    pub task_session_id: &'a str,
+    pub run_id: Option<&'a str>,
+    pub route: &'a StrategyEvidence,
+    pub actions: &'a [ActionEvidence],
+    pub observations: &'a [ObservationEvidence],
+    pub proposals: &'a [ProposalEvidence],
+    pub blockers: &'a [BlockerEvidence],
+    pub final_delivery_id: Option<&'a str>,
 }
 
 #[tauri::command]
@@ -533,6 +550,464 @@ pub(crate) async fn skip_plan_execute_step_with_state(
         session,
         skipped_step,
     })
+}
+
+pub(crate) fn build_plan_artifact_view(
+    session: &PlanExecuteSession,
+    runtime: PlanArtifactRuntimeEvidence<'_>,
+) -> PlanArtifactView {
+    let run_id = session
+        .source_agent_run_id
+        .as_deref()
+        .or(runtime.run_id)
+        .unwrap_or("unknown")
+        .to_string();
+    let source_evidence = source_tool_evidence(runtime.observations, runtime.actions);
+    let steps = session
+        .steps
+        .iter()
+        .map(|step| {
+            let step_sources = source_evidence_for_ids(
+                &source_evidence,
+                &step
+                    .linked_observation_ids
+                    .iter()
+                    .chain(step.evidence_ids.iter())
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            );
+            PlanArtifactStepView {
+                step_id: step.step_id.clone(),
+                index: step.index,
+                title: safe_plan_text(&step.title, 120),
+                description: safe_plan_text(&step.description, 240),
+                status: plan_execute_step_status_label(step.status).into(),
+                kind: safe_plan_text(&step.kind, 40),
+                evidence_ids: step.evidence_ids.clone(),
+                source_tool_evidence: step_sources,
+                controls: artifact_step_controls(session.status, step.status),
+            }
+        })
+        .collect::<Vec<_>>();
+    let assumptions = artifact_assumptions(session, &source_evidence);
+    let unknowns = artifact_unknowns(&source_evidence);
+    let controls = artifact_plan_controls(session.status);
+    let summary = format!(
+        "{} PlanExecute plan with {} steps, {} proposal-required step{}.",
+        status_title(session.status),
+        session.step_count,
+        session.proposal_required_step_count,
+        if session.proposal_required_step_count == 1 {
+            ""
+        } else {
+            "s"
+        }
+    );
+    let title = format!("{} plan", scenario_title(session.scenario.as_id()));
+    let route_evidence = PlanArtifactRouteEvidence {
+        strategy: runtime.route.strategy.as_str().into(),
+        reason: safe_plan_text(&runtime.route.reason, 160),
+        confidence: runtime.route.confidence,
+        evidence_ids: vec![
+            runtime.task_session_id.to_string(),
+            run_id.clone(),
+            session.session_id.clone(),
+        ],
+    };
+    let run_evidence = PlanArtifactRunEvidence {
+        task_session_id: runtime.task_session_id.to_string(),
+        run_id: run_id.clone(),
+        plan_session_id: session.session_id.clone(),
+        action_ids: runtime
+            .actions
+            .iter()
+            .map(|action| action.action_id.clone())
+            .collect(),
+        observation_ids: runtime
+            .observations
+            .iter()
+            .map(|observation| observation.observation_id.clone())
+            .collect(),
+        proposal_ids: runtime
+            .proposals
+            .iter()
+            .map(|proposal| proposal.proposal_id.clone())
+            .collect(),
+        blocker_ids: runtime
+            .blockers
+            .iter()
+            .map(|blocker| blocker.blocker_id.clone())
+            .collect(),
+        final_delivery_id: runtime.final_delivery_id.map(str::to_string),
+        metadata_safe: true,
+    };
+    let body = build_plan_artifact_body(PlanArtifactBodyInput {
+        session,
+        title: &title,
+        summary: &summary,
+        steps: &steps,
+        assumptions: &assumptions,
+        unknowns: &unknowns,
+        source_evidence: &source_evidence,
+        route_evidence: &route_evidence,
+        run_evidence: &run_evidence,
+    });
+
+    PlanArtifactView {
+        plan_id: session.plan_id.clone(),
+        plan_session_id: session.session_id.clone(),
+        task_session_id: runtime.task_session_id.to_string(),
+        run_id,
+        status: session.status.to_string(),
+        title,
+        summary,
+        body,
+        steps,
+        assumptions,
+        unknowns,
+        controls,
+        route_evidence,
+        run_evidence,
+    }
+}
+
+struct PlanArtifactBodyInput<'a> {
+    session: &'a PlanExecuteSession,
+    title: &'a str,
+    summary: &'a str,
+    steps: &'a [PlanArtifactStepView],
+    assumptions: &'a [PlanArtifactFactView],
+    unknowns: &'a [PlanArtifactFactView],
+    source_evidence: &'a [PlanArtifactSourceEvidence],
+    route_evidence: &'a PlanArtifactRouteEvidence,
+    run_evidence: &'a PlanArtifactRunEvidence,
+}
+
+fn build_plan_artifact_body(input: PlanArtifactBodyInput<'_>) -> String {
+    let mut lines = vec![
+        format!("# {}", input.title),
+        String::new(),
+        input.summary.to_string(),
+        String::new(),
+        format!("Plan ID: {}", input.session.plan_id),
+        format!("Plan session: {}", input.session.session_id),
+        format!("Task session: {}", input.run_evidence.task_session_id),
+        format!("Run: {}", input.run_evidence.run_id),
+        format!("Status: {}", input.session.status),
+        String::new(),
+        "Steps".into(),
+    ];
+    for step in input.steps {
+        let source_suffix = if step.source_tool_evidence.is_empty() {
+            "source/tool evidence: none attached".to_string()
+        } else {
+            format!(
+                "source/tool evidence: {}",
+                step.source_tool_evidence
+                    .iter()
+                    .map(|source| source.evidence_id.clone())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        lines.push(format!(
+            "{}. {} - {} ({})",
+            step.index, step.title, step.description, source_suffix
+        ));
+    }
+    lines.push(String::new());
+    lines.push("Assumptions".into());
+    for assumption in input.assumptions {
+        lines.push(format!("- {}: {}", assumption.label, assumption.detail));
+    }
+    lines.push(String::new());
+    lines.push("Unknowns".into());
+    for unknown in input.unknowns {
+        lines.push(format!("- {}: {}", unknown.label, unknown.detail));
+    }
+    lines.push(String::new());
+    lines.push("Source/tool evidence".into());
+    if input.source_evidence.is_empty() {
+        lines.push("- No source/tool evidence is attached to this plan artifact yet.".into());
+    } else {
+        for source in input.source_evidence {
+            lines.push(format!(
+                "- {} · {} · {}{}",
+                source.evidence_id,
+                source.source_kind,
+                source.source_label,
+                source
+                    .tool_name
+                    .as_ref()
+                    .map(|tool| format!(" · tool {tool}"))
+                    .unwrap_or_default()
+            ));
+        }
+    }
+    lines.push(String::new());
+    lines.push("Route evidence".into());
+    lines.push(format!(
+        "- strategy: {}; reason: {}; evidence: {}",
+        input.route_evidence.strategy,
+        input.route_evidence.reason,
+        input.route_evidence.evidence_ids.join(", ")
+    ));
+    lines.push(String::new());
+    lines.push("Run evidence".into());
+    lines.push(format!(
+        "- actions: {}; observations: {}; proposals: {}; blockers: {}",
+        count_or_none(input.run_evidence.action_ids.len()),
+        count_or_none(input.run_evidence.observation_ids.len()),
+        count_or_none(input.run_evidence.proposal_ids.len()),
+        count_or_none(input.run_evidence.blocker_ids.len())
+    ));
+    lines.join("\n")
+}
+
+fn source_tool_evidence(
+    observations: &[ObservationEvidence],
+    actions: &[ActionEvidence],
+) -> Vec<PlanArtifactSourceEvidence> {
+    observations
+        .iter()
+        .map(|observation| {
+            let tool_name = observation
+                .read_execution
+                .as_ref()
+                .map(|read| read.kind.clone())
+                .or_else(|| {
+                    actions
+                        .iter()
+                        .find(|action| action.action_id == observation.action_id)
+                        .map(|action| action.action_type.clone())
+                });
+            PlanArtifactSourceEvidence {
+                evidence_id: observation.observation_id.clone(),
+                source_kind: safe_plan_text(&observation.source_kind, 80),
+                source_label: safe_plan_text(&observation.source_label, 120),
+                tool_name: tool_name.map(|value| safe_plan_text(&value, 80)),
+                preview: Some(safe_plan_text(&observation.preview, 240)),
+            }
+        })
+        .collect()
+}
+
+fn source_evidence_for_ids(
+    source_evidence: &[PlanArtifactSourceEvidence],
+    evidence_ids: &[String],
+) -> Vec<PlanArtifactSourceEvidence> {
+    source_evidence
+        .iter()
+        .filter(|source| evidence_ids.iter().any(|id| id == &source.evidence_id))
+        .cloned()
+        .collect()
+}
+
+fn artifact_assumptions(
+    session: &PlanExecuteSession,
+    source_evidence: &[PlanArtifactSourceEvidence],
+) -> Vec<PlanArtifactFactView> {
+    let mut assumptions = vec![
+        PlanArtifactFactView {
+            label: "Draft only".into(),
+            detail: "This plan is reviewable output, not accepted LifeModel or Memory truth."
+                .into(),
+            evidence_ids: vec![session.session_id.clone()],
+            source_tool_evidence: Vec::new(),
+        },
+        PlanArtifactFactView {
+            label: "Governed execution".into(),
+            detail:
+                "Write-like steps remain proposal or confirmation gated until a supported control is used."
+                    .into(),
+            evidence_ids: vec![session.session_id.clone()],
+            source_tool_evidence: Vec::new(),
+        },
+    ];
+    for (label, keywords) in realtime_fact_categories() {
+        let evidence = matching_realtime_sources(source_evidence, keywords);
+        if !evidence.is_empty() {
+            assumptions.push(PlanArtifactFactView {
+                label: format!("Source-backed {label} note"),
+                detail: "Use only the attached source/tool evidence for this realtime planning constraint."
+                    .into(),
+                evidence_ids: evidence
+                    .iter()
+                    .map(|source| source.evidence_id.clone())
+                    .collect(),
+                source_tool_evidence: evidence,
+            });
+        }
+    }
+    assumptions
+}
+
+fn artifact_unknowns(source_evidence: &[PlanArtifactSourceEvidence]) -> Vec<PlanArtifactFactView> {
+    realtime_fact_categories()
+        .into_iter()
+        .filter_map(|(label, keywords)| {
+            let evidence = matching_realtime_sources(source_evidence, keywords);
+            if evidence.is_empty() {
+                Some(PlanArtifactFactView {
+                    label: label.to_string(),
+                    detail: match label {
+                        "opening hours" => "No source/tool evidence is attached. Treat venue opening hours, closure days, and ticket rules as unknown until a governed read provides evidence.".into(),
+                        "weather" => "No source/tool evidence is attached. Treat weather, temperature, and rain risk as unknown until a governed read provides evidence.".into(),
+                        "transportation" => "No source/tool evidence is attached. Treat traffic, transit routes, ride time, and parking as unknown until a governed read provides evidence.".into(),
+                        _ => "No source/tool evidence is attached for this realtime fact.".into(),
+                    },
+                    evidence_ids: Vec::new(),
+                    source_tool_evidence: Vec::new(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn matching_realtime_sources(
+    source_evidence: &[PlanArtifactSourceEvidence],
+    keywords: &[&str],
+) -> Vec<PlanArtifactSourceEvidence> {
+    source_evidence
+        .iter()
+        .filter(|source| {
+            let haystack = format!(
+                "{} {} {}",
+                source.source_kind,
+                source.source_label,
+                source.preview.as_deref().unwrap_or_default()
+            )
+            .to_lowercase();
+            keywords.iter().any(|keyword| haystack.contains(keyword))
+        })
+        .cloned()
+        .collect()
+}
+
+fn realtime_fact_categories() -> Vec<(&'static str, &'static [&'static str])> {
+    vec![
+        (
+            "opening hours",
+            &[
+                "opening",
+                "hours",
+                "open hours",
+                "closed",
+                "closure",
+                "开放",
+                "闭馆",
+            ],
+        ),
+        (
+            "weather",
+            &[
+                "weather",
+                "temperature",
+                "rain",
+                "forecast",
+                "天气",
+                "气温",
+                "降雨",
+            ],
+        ),
+        (
+            "transportation",
+            &[
+                "traffic", "transit", "metro", "bus", "parking", "route", "交通", "地铁", "公交",
+                "停车",
+            ],
+        ),
+    ]
+}
+
+fn artifact_plan_controls(status: PlanExecuteSessionStatus) -> Vec<String> {
+    match status {
+        PlanExecuteSessionStatus::Draft => vec![
+            "confirm_plan".into(),
+            "cancel_task".into(),
+            "open_trace".into(),
+        ],
+        PlanExecuteSessionStatus::Finalized | PlanExecuteSessionStatus::InProgress => vec![
+            "execute_step".into(),
+            "skip_step".into(),
+            "cancel_task".into(),
+            "open_trace".into(),
+        ],
+        PlanExecuteSessionStatus::Completed => vec!["review_plan".into(), "open_trace".into()],
+        PlanExecuteSessionStatus::Cancelled => vec!["open_trace".into()],
+    }
+}
+
+fn artifact_step_controls(
+    session_status: PlanExecuteSessionStatus,
+    step_status: PlanStepStatus,
+) -> Vec<String> {
+    match (session_status, step_status) {
+        (PlanExecuteSessionStatus::Draft, PlanStepStatus::Planned) => vec!["skip_step".into()],
+        (
+            PlanExecuteSessionStatus::Finalized | PlanExecuteSessionStatus::InProgress,
+            PlanStepStatus::Planned | PlanStepStatus::RequiresConfirmation,
+        ) => vec!["execute_step".into(), "skip_step".into()],
+        _ => Vec::new(),
+    }
+}
+
+fn plan_execute_step_status_label(status: PlanStepStatus) -> &'static str {
+    match status {
+        PlanStepStatus::Planned => "planned",
+        PlanStepStatus::Skipped => "skipped",
+        PlanStepStatus::Blocked => "blocked",
+        PlanStepStatus::RequiresProposal => "requires_proposal",
+        PlanStepStatus::RequiresConfirmation => "requires_confirmation",
+        PlanStepStatus::Executed => "executed",
+        PlanStepStatus::Cancelled => "cancelled",
+    }
+}
+
+fn scenario_title(scenario_id: &str) -> String {
+    scenario_id
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn status_title(status: PlanExecuteSessionStatus) -> &'static str {
+    match status {
+        PlanExecuteSessionStatus::Draft => "Draft",
+        PlanExecuteSessionStatus::Finalized => "Finalized",
+        PlanExecuteSessionStatus::InProgress => "In-progress",
+        PlanExecuteSessionStatus::Completed => "Completed",
+        PlanExecuteSessionStatus::Cancelled => "Cancelled",
+    }
+}
+
+fn count_or_none(count: usize) -> String {
+    if count == 0 {
+        "none".into()
+    } else {
+        count.to_string()
+    }
+}
+
+fn safe_plan_text(value: &str, max_chars: usize) -> String {
+    value
+        .replace(|ch: char| ch.is_control(), " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(max_chars)
+        .collect()
 }
 
 async fn ensure_plan_revision_or_append_blocker(
@@ -1673,5 +2148,176 @@ mod tests {
         assert_eq!(review_event.payload["reviewId"], review.summary.review_id);
         assert_eq!(review_event.payload["directLifeModelWrites"], false);
         assert_eq!(review_event.payload["externalWritesExecuted"], false);
+    }
+
+    #[tokio::test]
+    async fn plan_execute_product_artifact_view_builds_body_with_source_tool_evidence() {
+        let state = crate::test_utils::test_app_state();
+        let mut session = create_plan_execute_session_with_state(
+            CreatePlanExecuteSessionInput {
+                scenario_id: Some("weekly_planning".into()),
+                source_chat_session_id: Some("chat-sichuan-museum".into()),
+                max_steps: Some(5),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let source_observation_id = "observation-sichuan-hours-1".to_string();
+        session.steps[0]
+            .linked_observation_ids
+            .push(source_observation_id.clone());
+        session.steps[0]
+            .evidence_ids
+            .push(source_observation_id.clone());
+
+        let action = ActionEvidence {
+            action_id: "action-web-hours-1".into(),
+            action_type: "web.read".into(),
+            target: "https://example.invalid/sichuan-museum-hours".into(),
+            label: "Read Sichuan Museum opening hours".into(),
+            status: "succeeded".into(),
+            risk_level: "safe_read".into(),
+            policy_decision_id: "policy-hours-1".into(),
+            started_at: None,
+            finished_at: None,
+            observation_ids: vec![source_observation_id.clone()],
+            retryable: false,
+        };
+        let observation = ObservationEvidence {
+            observation_id: source_observation_id.clone(),
+            action_id: action.action_id.clone(),
+            source_kind: "web".into(),
+            source_label: "Sichuan Museum official opening hours".into(),
+            preview: "Source states opening hours require same-day verification.".into(),
+            citation_available: true,
+            read_execution: Some(
+                openlife_core::agent::main_chat_agent_productization_v1::ReadExecutionEvidence {
+                    kind: "web_read".into(),
+                    source_kind: "web".into(),
+                    source_label: "Sichuan Museum official opening hours".into(),
+                    target: action.target.clone(),
+                    real_read_only_execution: true,
+                    fixture_backed: false,
+                    network_read_attempted: true,
+                    direct_writes_executed: false,
+                },
+            ),
+            created_at: chrono::Utc::now(),
+        };
+        let route = StrategyEvidence {
+            strategy: openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentProductStrategyRoute::PlanExecute,
+            reason: "kernel_supported_plan_execute".into(),
+            confidence: Some(0.91),
+        };
+        let artifact = build_plan_artifact_view(
+            &session,
+            PlanArtifactRuntimeEvidence {
+                task_session_id: "task-plan-artifact-1",
+                run_id: session.source_agent_run_id.as_deref(),
+                route: &route,
+                actions: &[action],
+                observations: &[observation],
+                proposals: &[],
+                blockers: &[],
+                final_delivery_id: Some("delivery-plan-1"),
+            },
+        );
+
+        assert_eq!(artifact.plan_id, session.plan_id);
+        assert_eq!(artifact.plan_session_id, session.session_id);
+        assert_eq!(artifact.task_session_id, "task-plan-artifact-1");
+        assert_eq!(
+            artifact.run_id.as_str(),
+            session.source_agent_run_id.as_deref().unwrap()
+        );
+        assert!(artifact.body.contains("Plan ID:"));
+        assert!(artifact.body.contains("Steps"));
+        assert!(artifact
+            .body
+            .contains("source/tool evidence: observation-sichuan-hours-1"));
+        assert!(artifact.steps.iter().any(|step| step
+            .source_tool_evidence
+            .iter()
+            .any(|source| source.evidence_id == source_observation_id
+                && source.tool_name.as_deref() == Some("web_read"))));
+        assert!(artifact
+            .assumptions
+            .iter()
+            .any(|assumption| assumption.label == "Source-backed opening hours note"));
+        assert!(!artifact
+            .unknowns
+            .iter()
+            .any(|unknown| unknown.label == "opening hours"));
+        assert!(artifact
+            .unknowns
+            .iter()
+            .any(|unknown| unknown.label == "weather"));
+        assert!(artifact.controls.contains(&"confirm_plan".to_string()));
+        assert!(!artifact.controls.contains(&"continue".to_string()));
+        assert!(!artifact.controls.contains(&"edit_plan".to_string()));
+        assert_eq!(artifact.route_evidence.strategy, "plan_execute");
+        assert_eq!(
+            artifact.run_evidence.observation_ids,
+            vec![source_observation_id]
+        );
+        assert_eq!(
+            artifact.run_evidence.final_delivery_id.as_deref(),
+            Some("delivery-plan-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_execute_product_artifact_view_keeps_realtime_facts_unknown_without_sources() {
+        let state = crate::test_utils::test_app_state();
+        let session = create_plan_execute_session_with_state(
+            CreatePlanExecuteSessionInput {
+                scenario_id: Some("weekly_planning".into()),
+                source_chat_session_id: Some("chat-offline-plan".into()),
+                max_steps: Some(5),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let route = StrategyEvidence {
+            strategy: openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentProductStrategyRoute::PlanExecute,
+            reason: "kernel_supported_plan_execute".into(),
+            confidence: None,
+        };
+        let artifact = build_plan_artifact_view(
+            &session,
+            PlanArtifactRuntimeEvidence {
+                task_session_id: "task-offline-plan-1",
+                run_id: session.source_agent_run_id.as_deref(),
+                route: &route,
+                actions: &[],
+                observations: &[],
+                proposals: &[],
+                blockers: &[],
+                final_delivery_id: None,
+            },
+        );
+
+        for label in ["opening hours", "weather", "transportation"] {
+            assert!(
+                artifact
+                    .unknowns
+                    .iter()
+                    .any(|unknown| unknown.label == label
+                        && unknown.detail.contains("No source/tool evidence")),
+                "missing realtime unknown {label}: {:?}",
+                artifact.unknowns
+            );
+        }
+        assert!(artifact
+            .unknowns
+            .iter()
+            .any(|unknown| unknown.detail.contains("venue opening hours")));
+        assert!(artifact
+            .body
+            .contains("No source/tool evidence is attached to this plan artifact yet."));
+        assert!(artifact.body.contains("Review current priorities"));
+        assert!(!artifact.body.contains("created governed draft"));
     }
 }

@@ -42,7 +42,7 @@ export default function AdvancedTab({
             to="/mcp"
             className="rounded-lg border border-stone-200 bg-white p-4 text-sm hover:bg-stone-50"
           >
-            <div className="font-semibold text-stone-950">MCP 工具</div>
+            <div className="font-semibold text-stone-950">MCP / Tools</div>
             <div className="mt-1 text-xs text-stone-500">
               {diagnostics?.mcp_server_count ?? 0} servers · {diagnostics?.mcp_tool_count ?? 0}{" "}
               tools
@@ -52,7 +52,7 @@ export default function AdvancedTab({
             to="/a2a"
             className="rounded-lg border border-stone-200 bg-white p-4 text-sm hover:bg-stone-50"
           >
-            <div className="font-semibold text-stone-950">A2A 连接</div>
+            <div className="font-semibold text-stone-950">A2A</div>
             <div className="mt-1 text-xs text-stone-500">外部 Agent 连接与发送确认。</div>
           </Link>
           <div className="rounded-lg border border-stone-200 bg-white p-4 text-sm">
@@ -67,7 +67,7 @@ export default function AdvancedTab({
         <h3 className="text-sm font-medium text-gray-700">ModelRouter internals</h3>
         <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700 space-y-2">
           <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-            这些是诊断字段。普通任务应在 Chat 和 Activity 里看用户语言的路线解释。
+            这些是诊断字段。普通任务应在 Chat 和 Runs 里看用户语言的路线解释。
           </div>
           <div className="flex items-center justify-between">
             <span>当前后端</span>

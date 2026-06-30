@@ -1,8 +1,12 @@
 import type { KeyboardEvent, ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
-import { NavLink, useLocation } from "react-router-dom";
+import { Link, NavLink, useLocation } from "react-router-dom";
 import { CircleEllipsis } from "lucide-react";
-import { PRIMARY_PRODUCT_ROUTES, type ProductRouteLabel } from "../productShellContract";
+import {
+  ADVANCED_PRODUCT_ROUTE_GROUPS,
+  PRIMARY_PRODUCT_ROUTES,
+  type ProductRouteLabel,
+} from "../productShellContract";
 import type { SystemDiagnostics } from "../tauri";
 
 type ProductShellProps = {
@@ -13,36 +17,13 @@ type ProductShellProps = {
 };
 
 const PRODUCT_ROUTE_ALIASES: Record<ProductRouteLabel, readonly string[]> = {
-  陪伴: ["/companion", "/chat", "/agent"],
-  今日: ["/today", "/", "/workspace"],
+  Today: ["/today", "/", "/workspace"],
+  Companion: ["/companion", "/chat", "/agent"],
   Review: ["/mailbox", "/review"],
   "Life Model": ["/life-model", "/builder", "/life", "/map", "/memory"],
+  Runs: ["/runs"],
+  Settings: ["/settings"],
 };
-
-const SECONDARY_TOOL_GROUPS = [
-  {
-    label: "产品设置",
-    items: [
-      { label: "Settings", path: "/settings" },
-      { label: "Activity", path: "/runs" },
-    ],
-  },
-  {
-    label: "高级连接",
-    items: [
-      { label: "MCP 工具", path: "/mcp" },
-      { label: "A2A 连接", path: "/a2a" },
-    ],
-  },
-  {
-    label: "诊断",
-    items: [
-      { label: "版本", path: "/versions" },
-      { label: "Metrics", path: "/metrics" },
-      { label: "Calibration", path: "/calibration" },
-    ],
-  },
-] as const;
 
 function matchesRoute(pathname: string, routePath: string): boolean {
   if (routePath === "/") {
@@ -86,12 +67,12 @@ export function MainTabs() {
       aria-label="Primary product navigation"
       className="flex min-w-0 items-center justify-center"
     >
-      <div className="grid w-full min-w-0 max-w-[520px] grid-cols-4 rounded-lg border border-stone-200 bg-white p-1 shadow-sm">
+      <div className="grid w-full min-w-0 max-w-[760px] grid-cols-3 rounded-lg border border-stone-200 bg-white p-1 shadow-sm sm:grid-cols-6">
         {PRIMARY_PRODUCT_ROUTES.map(route => {
           const active = isProductRouteActive(route.label, location.pathname);
 
           return (
-            <NavLink
+            <Link
               key={route.path}
               to={route.path}
               aria-current={active ? "page" : undefined}
@@ -104,7 +85,7 @@ export function MainTabs() {
               ].join(" ")}
             >
               <span className="truncate">{route.label}</span>
-            </NavLink>
+            </Link>
           );
         })}
       </div>
@@ -144,15 +125,18 @@ function SecondaryToolsMenu() {
         className="inline-flex h-9 items-center gap-1.5 rounded-md border border-stone-200 bg-white px-2.5 text-xs font-semibold text-stone-700 shadow-sm hover:bg-stone-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-stone-900/20"
       >
         <CircleEllipsis size={15} aria-hidden="true" />
-        更多
+        Advanced
       </button>
       {open && (
         <nav
           id="secondary-tools-panel"
-          aria-label="更多功能"
+          aria-label="Advanced technical navigation"
           className="absolute right-0 top-11 z-30 w-56 rounded-lg border border-stone-200 bg-white p-1.5 shadow-lg"
         >
-          {SECONDARY_TOOL_GROUPS.map(group => (
+          <div className="px-3 pb-1 pt-1 text-[11px] font-semibold text-stone-500">
+            Technical surfaces
+          </div>
+          {ADVANCED_PRODUCT_ROUTE_GROUPS.map(group => (
             <div key={group.label} className="py-1">
               <div className="px-3 pb-1 pt-1 text-[11px] font-semibold text-stone-400">
                 {group.label}

@@ -1,3 +1,6 @@
+use crate::commands::settings::{
+    require_danger_action_confirmation, DangerActionConfirmationEvidence,
+};
 use crate::errors::AppError;
 use crate::main_chat_hs_runtime::classify_hs_policy_topic;
 use crate::main_chat_preprocess::{filter_lifecycle_active_memory_results, merge_memory_hits};
@@ -198,8 +201,21 @@ pub async fn get_memory_tier_stats(state: State<'_, Arc<AppState>>) -> Result<Ti
 
 #[tauri::command]
 pub async fn rebuild_memory_index(
+    confirmation_evidence: Option<DangerActionConfirmationEvidence>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, AppError> {
+    let affected_count = {
+        let store = state.memory_store.lock().await;
+        store.export_all_messages().map_err(AppError::from)?.len()
+    };
+    require_danger_action_confirmation(
+        "vector_rebuild",
+        &[],
+        Some(affected_count),
+        confirmation_evidence.as_ref(),
+        state.inner(),
+    )
+    .await?;
     rebuild_memory_index_with_state(state.inner()).await
 }
 

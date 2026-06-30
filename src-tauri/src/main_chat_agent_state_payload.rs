@@ -265,6 +265,24 @@ async fn enrich_plan_evidence_from_plan_execute_session(
         }
     };
 
+    let final_delivery_id = snapshot
+        .final_delivery
+        .as_ref()
+        .map(|delivery| delivery.delivery_id.as_str());
+    let artifact_view = crate::commands::agent_runtime::build_plan_artifact_view(
+        &plan_session,
+        crate::commands::agent_runtime::PlanArtifactRuntimeEvidence {
+            task_session_id: &snapshot.task.task_id,
+            run_id: Some(&snapshot.task.run_id),
+            route: &snapshot.route,
+            actions: &snapshot.actions,
+            observations: &snapshot.observations,
+            proposals: &snapshot.proposals,
+            blockers: &snapshot.blockers,
+            final_delivery_id,
+        },
+    );
+
     if let Some(plan) = snapshot.plan.as_mut() {
         plan.plan_id = plan_session.plan_id.clone();
         plan.plan_session_id = Some(plan_session.session_id.clone());
@@ -310,6 +328,7 @@ async fn enrich_plan_evidence_from_plan_execute_session(
             })
             .collect();
         plan.review_summary = plan_session.review_summary.clone();
+        plan.artifact_view = Some(artifact_view);
     }
 }
 

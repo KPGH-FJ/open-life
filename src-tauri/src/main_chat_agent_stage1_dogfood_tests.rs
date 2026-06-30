@@ -538,7 +538,7 @@ async fn main_chat_agent_stage1_dogfood_gate_rejects_browser_route_mismatch() {
 }
 
 #[tokio::test]
-async fn main_chat_agent_stage1_browser_prep_seeds_real_task_control_state_only() {
+async fn diagnostics_stage1_browser_prep_marks_scripted_dogfood_without_cloud_validation() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let prep = prepare_main_chat_agent_stage1_browser_dogfood_state_with_state(&state)
         .await
@@ -583,16 +583,26 @@ async fn main_chat_agent_stage1_browser_prep_seeds_real_task_control_state_only(
         .await
         .expect("stage 1 browser diagnostics");
     assert!(diagnostics.cloud_api_configured);
-    assert!(diagnostics.cloud_api_validated);
-    assert_eq!(
-        diagnostics.cloud_api_validation_status,
-        "stage1_browser_dogfood_scripted"
-    );
+    assert!(!diagnostics.cloud_api_validated);
+    assert_eq!(diagnostics.cloud_api_validation_status, "scripted_dogfood");
     assert_eq!(
         diagnostics.cloud_api_validation_source.as_deref(),
         Some("stage1_browser_dogfood_scripted")
     );
     assert!(diagnostics.chat_ready);
+    assert_eq!(
+        diagnostics
+            .runtime_route_evidence
+            .provider_readiness
+            .validation_status,
+        "scripted_dogfood"
+    );
+    assert!(
+        !diagnostics
+            .runtime_route_evidence
+            .provider_readiness
+            .validated
+    );
 
     for id in [
         "D13",

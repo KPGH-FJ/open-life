@@ -413,6 +413,8 @@ export default function AgentControlPlane({
   const planRevision =
     typeof plan?.revision === "number" && Number.isFinite(plan.revision) ? plan.revision : null;
   const planControls = plan?.controls ?? [];
+  const planArtifact = plan?.artifactView ?? null;
+  const planArtifactControls = planArtifact?.controls ?? [];
   const planCommandReady = Boolean(plan && planSessionId && planRevision !== null);
   const reviewSummary = plan?.reviewSummary ?? null;
   const finalDelivery = state.finalDelivery;
@@ -717,6 +719,141 @@ export default function AgentControlPlane({
         </div>
       )}
 
+      {planArtifact && (
+        <div
+          data-testid="agent-plan-artifact"
+          data-plan-id={planArtifact.planId}
+          data-plan-session-id={planArtifact.planSessionId}
+          data-task-session-id={planArtifact.taskSessionId}
+          data-run-id={planArtifact.runId}
+          className="mt-3 border-l border-emerald-500 bg-emerald-50/70 px-3 py-2"
+        >
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-semibold text-emerald-950">{planArtifact.title}</span>
+                <span
+                  className={`inline-flex h-5 items-center rounded-md border px-1.5 font-medium ${statusClass(
+                    planArtifact.status
+                  )}`}
+                >
+                  {planArtifact.status.replace(/_/g, " ")}
+                </span>
+              </div>
+              <div className="mt-1 min-w-0 break-all font-mono text-stone-700">
+                {planArtifact.planId}
+              </div>
+              <div className="mt-1 text-stone-700">{planArtifact.summary}</div>
+            </div>
+            <div className="flex shrink-0 flex-wrap gap-1">
+              <button
+                type="button"
+                aria-label="Copy plan artifact"
+                title="Copy plan artifact"
+                onClick={() => {
+                  void navigator.clipboard?.writeText(planArtifact.body).catch(() => undefined);
+                }}
+                className="inline-flex min-h-6 items-center gap-1 rounded-md border border-emerald-200 bg-white px-2 font-medium text-emerald-950 hover:bg-emerald-100"
+              >
+                <Copy size={12} />
+                <span>Copy</span>
+              </button>
+              {planCommandReady &&
+                planArtifactControls.includes("confirm_plan") &&
+                onConfirmPlan &&
+                inlineControlButton({
+                  label: "Confirm plan",
+                  icon: <CheckCircle2 size={13} />,
+                  disabled: busy,
+                  onClick: () =>
+                    onConfirmPlan({
+                      planSessionId: planSessionId!,
+                      baseRevision: planRevision!,
+                    }),
+                })}
+              {planCommandReady &&
+                planArtifactControls.includes("cancel_task") &&
+                onCancelPlan &&
+                inlineControlButton({
+                  label: "Cancel plan",
+                  icon: <Ban size={13} />,
+                  disabled: busy,
+                  onClick: () =>
+                    onCancelPlan({
+                      planSessionId: planSessionId!,
+                      baseRevision: planRevision!,
+                    }),
+                })}
+              {planCommandReady &&
+                planArtifactControls.includes("review_plan") &&
+                onReviewPlan &&
+                inlineControlButton({
+                  label: "Review plan",
+                  icon: <CheckCircle2 size={13} />,
+                  disabled: busy,
+                  onClick: () =>
+                    onReviewPlan({
+                      planSessionId: planSessionId!,
+                      baseRevision: planRevision!,
+                    }),
+                })}
+            </div>
+          </div>
+          <div className="mt-2 whitespace-pre-wrap border-y border-emerald-200 bg-white/80 px-2 py-2 text-stone-800">
+            {planArtifact.body}
+          </div>
+          <div className="mt-2 grid gap-2 md:grid-cols-2">
+            <div className="min-w-0 border-l border-emerald-300 bg-white/80 px-2 py-1">
+              <div className="font-semibold text-stone-950">Assumptions</div>
+              <div className="mt-1 space-y-1">
+                {planArtifact.assumptions.map(item => (
+                  <div key={`assumption-${item.label}`} className="min-w-0">
+                    <div className="font-medium text-stone-800">{item.label}</div>
+                    <div className="text-stone-600">{item.detail}</div>
+                    {item.sourceToolEvidence.length > 0 && (
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {item.sourceToolEvidence.map(source => (
+                          <span
+                            key={`${item.label}-${source.evidenceId}`}
+                            className="inline-flex h-5 max-w-full items-center rounded-md border border-stone-200 bg-stone-50 px-1.5 text-stone-600"
+                          >
+                            <span className="truncate">
+                              {source.sourceLabel} · {source.toolName ?? source.sourceKind}
+                            </span>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="min-w-0 border-l border-amber-300 bg-white/80 px-2 py-1">
+              <div className="font-semibold text-stone-950">Unknowns</div>
+              <div className="mt-1 space-y-1">
+                {planArtifact.unknowns.length > 0 ? (
+                  planArtifact.unknowns.map(item => (
+                    <div key={`unknown-${item.label}`} className="min-w-0">
+                      <div className="font-medium text-amber-950">{item.label}</div>
+                      <div className="text-amber-900">{item.detail}</div>
+                    </div>
+                  ))
+                ) : (
+                  <div className="text-stone-500">none</div>
+                )}
+              </div>
+            </div>
+          </div>
+          <div className="mt-2 flex flex-wrap gap-2 text-stone-600">
+            <span>route {planArtifact.routeEvidence.strategy}</span>
+            <span>run {shortId(planArtifact.runEvidence.runId)}</span>
+            <span>task {shortId(planArtifact.runEvidence.taskSessionId)}</span>
+            <span>{planArtifact.runEvidence.actionIds.length} actions</span>
+            <span>{planArtifact.runEvidence.observationIds.length} observations</span>
+          </div>
+        </div>
+      )}
+
       {timelineVisible && (
         <div
           data-testid="agent-execution-timeline"
@@ -894,7 +1031,7 @@ export default function AgentControlPlane({
               <div className="font-semibold text-stone-950">Plan interaction</div>
               <div className="mt-1 truncate text-stone-700">{plan.summary}</div>
             </div>
-            {planCommandReady && (
+            {planCommandReady && !planArtifact && (
               <div className="flex flex-wrap gap-1">
                 {planControls.includes("confirm_plan") &&
                   onConfirmPlan &&

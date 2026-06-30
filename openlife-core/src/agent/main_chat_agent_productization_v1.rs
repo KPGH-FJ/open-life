@@ -1096,6 +1096,8 @@ pub struct PlanEvidence {
     pub steps: Vec<PlanStepEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_summary: Option<PlanExecuteReviewSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_view: Option<PlanArtifactView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1126,6 +1128,85 @@ pub struct PlanStepEvidence {
     pub evidence_ids: Vec<String>,
     #[serde(default)]
     pub controls: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanArtifactView {
+    pub plan_id: String,
+    pub plan_session_id: String,
+    pub task_session_id: String,
+    pub run_id: String,
+    pub status: String,
+    pub title: String,
+    pub summary: String,
+    pub body: String,
+    pub steps: Vec<PlanArtifactStepView>,
+    pub assumptions: Vec<PlanArtifactFactView>,
+    pub unknowns: Vec<PlanArtifactFactView>,
+    pub controls: Vec<String>,
+    pub route_evidence: PlanArtifactRouteEvidence,
+    pub run_evidence: PlanArtifactRunEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanArtifactStepView {
+    pub step_id: String,
+    pub index: usize,
+    pub title: String,
+    pub description: String,
+    pub status: String,
+    pub kind: String,
+    pub evidence_ids: Vec<String>,
+    pub source_tool_evidence: Vec<PlanArtifactSourceEvidence>,
+    pub controls: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanArtifactFactView {
+    pub label: String,
+    pub detail: String,
+    pub evidence_ids: Vec<String>,
+    pub source_tool_evidence: Vec<PlanArtifactSourceEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanArtifactSourceEvidence {
+    pub evidence_id: String,
+    pub source_kind: String,
+    pub source_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanArtifactRouteEvidence {
+    pub strategy: String,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
+    pub evidence_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanArtifactRunEvidence {
+    pub task_session_id: String,
+    pub run_id: String,
+    pub plan_session_id: String,
+    pub action_ids: Vec<String>,
+    pub observation_ids: Vec<String>,
+    pub proposal_ids: Vec<String>,
+    pub blocker_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_delivery_id: Option<String>,
+    pub metadata_safe: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1766,6 +1847,7 @@ fn plan_from_evidence(
         controls: Vec::new(),
         steps: Vec::new(),
         review_summary: None,
+        artifact_view: None,
     })
 }
 

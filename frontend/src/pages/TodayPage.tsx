@@ -1,15 +1,33 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { ArrowRight, CalendarDays, CheckCircle2, Clock3, Inbox, ShieldCheck } from "lucide-react";
+import {
+  Activity,
+  AlertTriangle,
+  ArrowRight,
+  CalendarDays,
+  CheckCircle2,
+  Clock3,
+  Inbox,
+  Lightbulb,
+  ShieldCheck,
+} from "lucide-react";
 import type { DailyGoal } from "../types";
 import {
   getDailyGoals,
-  getPendingProposals,
   getSystemDiagnostics,
+  listProposals,
   type AgentProposal,
   type SystemDiagnostics,
 } from "../tauri";
-import { splitDailyGoalsByDisplayQuality } from "../utils/dailyGoalDisplayGuard";
+import {
+  inspectDailyGoalName,
+  type DailyGoalDisplayGuard,
+  type TodayCardType,
+} from "../utils/dailyGoalDisplayGuard";
+import {
+  countPendingReviewProposals,
+  REVIEW_PENDING_PROPOSAL_LIMIT,
+} from "../utils/reviewPendingCount";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
 
 type TodayPageState = {
@@ -28,6 +46,35 @@ const INITIAL_STATE: TodayPageState = {
   error: "",
 };
 
+type TodayClassifiedCardType = Extract<TodayCardType, "state_signal" | "suggestion" | "blocker">;
+
+type TodayGoalCardView = {
+  type: "goal";
+  id: string;
+  title: string;
+  goal: DailyGoal;
+  originalIndex: number;
+};
+
+type TodayClassifiedCardView = {
+  type: TodayClassifiedCardType;
+  id: string;
+  title: string;
+  detail: string;
+  guard: DailyGoalDisplayGuard;
+  originalIndex: number;
+};
+
+type TodayPendingProposalCardView = {
+  type: "pending_proposal";
+  id: string;
+  title: string;
+  count: number;
+  href: string;
+};
+
+type TodayCardView = TodayGoalCardView | TodayClassifiedCardView | TodayPendingProposalCardView;
+
 function StatusChip({ label, tone = "neutral" }: { label: string; tone?: "neutral" | "warn" }) {
   return (
     <span
@@ -43,8 +90,60 @@ function StatusChip({ label, tone = "neutral" }: { label: string; tone?: "neutra
   );
 }
 
-function choosePrimaryGoal(goals: DailyGoal[]): DailyGoal | null {
-  return goals.find(goal => !goal.done) ?? goals[0] ?? null;
+function todayCardId(type: TodayCardView["type"], originalIndex: number, title: string): string {
+  return `${type}-${originalIndex}-${title}`;
+}
+
+function buildDailyGoalCards(goals: DailyGoal[]): TodayCardView[] {
+  return goals.map((goal, originalIndex) => {
+    const guard = inspectDailyGoalName(goal.name);
+    if (guard.valid) {
+      return {
+        type: "goal",
+        id: todayCardId("goal", originalIndex, goal.name),
+        title: goal.name,
+        goal,
+        originalIndex,
+      };
+    }
+    const cardType: Extract<TodayCardType, "state_signal" | "suggestion" | "blocker"> =
+      guard.cardType === "state_signal" ||
+      guard.cardType === "suggestion" ||
+      guard.cardType === "blocker"
+        ? guard.cardType
+        : "blocker";
+
+    return {
+      type: cardType,
+      id: todayCardId(cardType, originalIndex, goal.name),
+      title: goal.name,
+      detail: `${guard.reason ?? "这条内容不会作为今日目标。"} ${
+        guard.recoveryAction ?? ""
+      }`.trim(),
+      guard,
+      originalIndex,
+    };
+  });
+}
+
+function goalCards(cards: TodayCardView[]): TodayGoalCardView[] {
+  return cards.filter((card): card is TodayGoalCardView => {
+    return card.type === "goal";
+  });
+}
+
+function classifiedCardsByType<T extends TodayClassifiedCardType>(
+  cards: TodayCardView[],
+  type: T
+): Array<TodayClassifiedCardView & { type: T }> {
+  return cards.filter((card): card is TodayClassifiedCardView & { type: T } => {
+    return card.type === type;
+  });
+}
+
+function choosePrimaryGoal(cards: TodayGoalCardView[]): DailyGoal | null {
+  const selected = cards.find(card => !card.goal.done) ?? cards[0] ?? null;
+  return selected?.goal ?? null;
 }
 
 function formatTimeBlock(goal: DailyGoal | null): string {
@@ -70,7 +169,9 @@ export default function TodayPage() {
         const [diagnostics, dailyGoals, pendingProposals] = await Promise.all([
           getSystemDiagnostics().catch(() => null),
           getDailyGoals().catch(() => []),
-          getPendingProposals(10).catch(() => []),
+          listProposals("pending", undefined, undefined, REVIEW_PENDING_PROPOSAL_LIMIT).catch(
+            () => []
+          ),
         ]);
 
         if (cancelled) return;
@@ -100,16 +201,28 @@ export default function TodayPage() {
 
   const safeMode = isSafeMode(state.diagnostics);
   const safeModeReason = getSafeModeReason(state.diagnostics);
-  const goalQuality = useMemo(
-    () => splitDailyGoalsByDisplayQuality(state.dailyGoals),
-    [state.dailyGoals]
+  const dailyGoalCards = useMemo(() => buildDailyGoalCards(state.dailyGoals), [state.dailyGoals]);
+  const primaryGoal = useMemo(() => choosePrimaryGoal(goalCards(dailyGoalCards)), [dailyGoalCards]);
+  const stateSignalCards = useMemo(
+    () => classifiedCardsByType(dailyGoalCards, "state_signal"),
+    [dailyGoalCards]
   );
-  const primaryGoal = useMemo(
-    () => choosePrimaryGoal(goalQuality.displayable),
-    [goalQuality.displayable]
+  const suggestionCards = useMemo(
+    () => classifiedCardsByType(dailyGoalCards, "suggestion"),
+    [dailyGoalCards]
   );
-  const pendingCount =
-    state.pendingProposals.length || state.diagnostics?.pending_proposal_count || 0;
+  const blockerCards = useMemo(
+    () => classifiedCardsByType(dailyGoalCards, "blocker"),
+    [dailyGoalCards]
+  );
+  const pendingCount = countPendingReviewProposals(state.pendingProposals);
+  const pendingReviewCard: TodayCardView = {
+    type: "pending_proposal",
+    id: "pending-review-proposals",
+    title: "待确认入口",
+    count: pendingCount,
+    href: "/mailbox",
+  };
 
   return (
     <div data-testid="today-page" className="h-full overflow-auto overflow-x-hidden bg-[#f5f6f2]">
@@ -166,7 +279,10 @@ export default function TodayPage() {
           </div>
         )}
 
-        <section className="rounded-lg border border-stone-200 bg-white">
+        <section
+          data-testid="today-goal-section"
+          className="rounded-lg border border-stone-200 bg-white"
+        >
           <div className="border-b border-stone-100 px-4 py-3">
             <h2 className="text-sm font-semibold text-stone-950">今日目标</h2>
           </div>
@@ -202,32 +318,97 @@ export default function TodayPage() {
           )}
         </section>
 
-        {goalQuality.suspicious.length > 0 && (
-          <section className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-4">
-            <div className="text-sm font-semibold text-amber-950">
-              已从今日建议中忽略 {goalQuality.suspicious.length} 条异常目标
+        {stateSignalCards.length > 0 && (
+          <section
+            aria-label="状态信号"
+            data-testid="today-state-signals"
+            className="rounded-lg border border-sky-200 bg-sky-50 px-4 py-4"
+          >
+            <div className="flex items-center gap-2 text-sm font-semibold text-sky-950">
+              <Activity size={16} aria-hidden="true" />
+              状态信号
             </div>
-            <div className="mt-1 text-sm text-amber-800">
-              这些内容看起来像状态记录或系统反馈，仍保留在原始数据中，但不会生成“先做 10
-              分钟”的行动建议。
+            <div className="mt-1 text-sm text-sky-800">
+              这些是压力、精力、情绪或置信度等状态，不会生成目标、任务或下一步行动。
             </div>
             <div className="mt-3 grid gap-2">
-              {goalQuality.suspicious.slice(0, 3).map(({ goal, guard, originalIndex }) => (
+              {stateSignalCards.slice(0, 3).map(card => (
                 <div
-                  key={`${originalIndex}-${goal.name}`}
-                  className="rounded-md border border-amber-200 bg-white/75 px-3 py-2"
+                  key={card.id}
+                  data-card-type="state_signal"
+                  data-testid="today-card-state-signal"
+                  className="rounded-md border border-sky-200 bg-white/80 px-3 py-2"
                 >
-                  <div className="text-sm font-medium text-amber-950">{goal.name}</div>
-                  <div className="mt-0.5 text-xs text-amber-800">
-                    {guard.reason} {guard.recoveryAction}
-                  </div>
+                  <div className="text-sm font-medium text-sky-950">{card.title}</div>
+                  <div className="mt-0.5 text-xs text-sky-800">{card.detail}</div>
                 </div>
               ))}
             </div>
           </section>
         )}
 
-        <section className="rounded-lg border border-stone-200 bg-white px-4 py-4">
+        {suggestionCards.length > 0 && (
+          <section
+            aria-label="建议"
+            data-testid="today-suggestions"
+            className="rounded-lg border border-stone-200 bg-white px-4 py-4"
+          >
+            <div className="flex items-center gap-2 text-sm font-semibold text-stone-950">
+              <Lightbulb size={16} aria-hidden="true" />
+              建议
+            </div>
+            <div className="mt-1 text-sm text-stone-600">
+              这些内容只是建议；确认前不会显示为今日目标。
+            </div>
+            <div className="mt-3 grid gap-2">
+              {suggestionCards.slice(0, 3).map(card => (
+                <div
+                  key={card.id}
+                  data-card-type="suggestion"
+                  data-testid="today-card-suggestion"
+                  className="rounded-md border border-stone-200 bg-stone-50 px-3 py-2"
+                >
+                  <div className="text-sm font-medium text-stone-950">{card.title}</div>
+                  <div className="mt-0.5 text-xs text-stone-600">{card.detail}</div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {blockerCards.length > 0 && (
+          <section
+            aria-label="阻断"
+            data-testid="today-blockers"
+            className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-4"
+          >
+            <div className="flex items-center gap-2 text-sm font-semibold text-amber-950">
+              <AlertTriangle size={16} aria-hidden="true" />
+              需要处理的阻断
+            </div>
+            <div className="mt-1 text-sm text-amber-800">
+              这些内容不是用户目标；处理后再单独确认今天要推进的目标。
+            </div>
+            <div className="mt-3 grid gap-2">
+              {blockerCards.slice(0, 3).map(card => (
+                <div
+                  key={card.id}
+                  data-card-type="blocker"
+                  data-testid="today-card-blocker"
+                  className="rounded-md border border-amber-200 bg-white/75 px-3 py-2"
+                >
+                  <div className="text-sm font-medium text-amber-950">{card.title}</div>
+                  <div className="mt-0.5 text-xs text-amber-800">{card.detail}</div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        <section
+          data-testid="today-next-step"
+          className="rounded-lg border border-stone-200 bg-white px-4 py-4"
+        >
           <div className="text-sm font-semibold text-stone-950">下一步</div>
           <div className="mt-2 text-base text-stone-800">{nextStepFor(primaryGoal)}</div>
           {!primaryGoal && (
@@ -242,16 +423,22 @@ export default function TodayPage() {
           )}
         </section>
 
-        <section className="rounded-lg border border-stone-200 bg-white px-4 py-4">
+        <section
+          data-card-type="pending_proposal"
+          data-testid="today-card-pending-proposal"
+          className="rounded-lg border border-stone-200 bg-white px-4 py-4"
+        >
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <div className="text-sm font-semibold text-stone-950">待确认入口</div>
+              <div className="text-sm font-semibold text-stone-950">{pendingReviewCard.title}</div>
               <div className="mt-1 text-sm text-stone-600">
-                {pendingCount > 0 ? `${pendingCount} 封信等你回复。` : "现在没有需要处理的信。"}
+                {pendingReviewCard.count > 0
+                  ? `${pendingReviewCard.count} 个 Review 待你确认。`
+                  : "现在没有需要处理的 Review。"}
               </div>
             </div>
             <Link
-              to="/mailbox"
+              to={pendingReviewCard.href}
               className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-stone-300 bg-white px-3 text-sm font-semibold text-stone-800 hover:bg-stone-50"
             >
               查看 Review

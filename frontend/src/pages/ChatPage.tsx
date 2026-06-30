@@ -4404,7 +4404,7 @@ export default function ChatPage({
                             to={`/runs/${m.run_id}`}
                             className="ml-2 font-semibold text-stone-900 underline-offset-4 hover:underline"
                           >
-                            打开 Activity
+                            打开 Runs
                           </Link>
                         </div>
                       )}
@@ -5431,6 +5431,9 @@ export default function ChatPage({
           onSelectedSkillIdChange={setSelectedSkillId}
           onComposerFocus={() => emitCompanionStage("listening")}
           onSend={handleSend}
+          canCancel={canCancelCurrentMainChatTask}
+          cancelBusy={agentTaskControlBusy}
+          onCancel={handleCancelMainChatTask}
           onContinueStream={handleContinueStream}
           onRetryLastMessage={retryLastUserMessage}
           getFixSuggestion={getFixSuggestion}

@@ -79,6 +79,7 @@ const baseProps = {
   setRebuildLoading: vi.fn(),
   rebuildResult: null,
   setRebuildResult: vi.fn(),
+  handleVectorRebuild: vi.fn(),
   tierResult: null,
   setTierResult: vi.fn(),
   onNavigateTab: vi.fn(),

@@ -3912,14 +3912,65 @@ describe("ChatPage", () => {
         redactionLevel: "none",
       },
       modelRoute: {
-        provider: "Ollama",
-        model: "llama3:latest",
-        routeType: "local",
-        preferLocal: true,
+        provider: "DeepSeek",
+        model: "deepseek-chat",
+        routeType: "cloud",
+        preferLocal: false,
         localModel: "llama3",
-        reason: "local preferred",
+        reason: "model prose claimed cloud",
         privacyLevel: "low",
         retryCount: 0,
+      },
+      reasoningTrace: {
+        generation_result: {
+          runtimeRouteEvidence: {
+            evidence_id: "route-evidence-chat-1",
+            generated_at: "2026-06-29T00:00:00Z",
+            answer_scope: "current_turn",
+            actual_route: {
+              provider: "Ollama",
+              model: "llama3:latest",
+              route_type: "local",
+              privacy_level: "none",
+              reason: "runtime route evidence",
+              provider_health_is_estimated: false,
+            },
+            fallback: {
+              from_route: {
+                provider: "DeepSeek",
+                model: "deepseek-chat",
+                route_type: "cloud",
+                privacy_level: "general",
+                reason: "explicit cloud request",
+                provider_health_is_estimated: true,
+              },
+              to_route: {
+                provider: "Ollama",
+                model: "llama3:latest",
+                route_type: "local",
+                privacy_level: "none",
+                reason: "runtime route evidence",
+                provider_health_is_estimated: false,
+              },
+              reason: "provider_api_key_missing",
+              blocker_codes: ["provider_api_key_missing"],
+            },
+            provider_readiness: {
+              configured: true,
+              credential_present: true,
+              validated: false,
+              validation_status: "unvalidated",
+              preferred: "DeepSeek",
+              actually_used: "Ollama",
+              stale: false,
+              failed: false,
+              last_checked_at: null,
+            },
+            external_transmission: "not_sent",
+            source_refs: [],
+            truth_confidence: "verified",
+          },
+        },
       },
       startedAt: "2026-06-08T00:00:00.000Z",
     };
@@ -3967,11 +4018,13 @@ describe("ChatPage", () => {
     expect(screen.getAllByText("待确认 1").length).toBeGreaterThan(0);
     expect(await screen.findByText("先做最小的一步。")).toBeInTheDocument();
 
-    expect(screen.getByText("留在本机")).toBeInTheDocument();
+    expect(screen.getByText("运行证据：未外发")).toBeInTheDocument();
     expect(screen.getByText("本地路线 · Ollama")).toBeInTheDocument();
+    expect(screen.queryByText("云端路线 · DeepSeek")).not.toBeInTheDocument();
+    expect(screen.getByText("Fallback：provider_api_key_missing")).toBeInTheDocument();
     expect(screen.getByText("参考记忆 3 条")).toBeInTheDocument();
     expect(screen.getByText("运行技术详情")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "查看 Activity 详情" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "查看 Runs 详情" })).toHaveAttribute(
       "href",
       "/runs/run-chat-1"
     );

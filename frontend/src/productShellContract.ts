@@ -1,8 +1,10 @@
 export const PRIMARY_PRODUCT_ROUTES = [
-  { label: "陪伴", path: "/companion", legacyAlias: "/chat" },
-  { label: "今日", path: "/today", legacyAlias: "/" },
+  { label: "Today", path: "/today", legacyAlias: "/" },
+  { label: "Companion", path: "/companion", legacyAlias: "/chat" },
   { label: "Review", path: "/mailbox", legacyAlias: "/review" },
   { label: "Life Model", path: "/life-model", legacyAlias: "/builder" },
+  { label: "Runs", path: "/runs" },
+  { label: "Settings", path: "/settings" },
 ] as const;
 
 export type ProductRouteLabel = (typeof PRIMARY_PRODUCT_ROUTES)[number]["label"];
@@ -23,13 +25,29 @@ export const RETAINED_LEGACY_ROUTES = [
   "/life",
   "/map",
   "/memory",
-  "/runs",
-  "/settings",
   "/mcp",
   "/a2a",
   "/metrics",
   "/versions",
   "/calibration",
+] as const;
+
+export const ADVANCED_PRODUCT_ROUTE_GROUPS = [
+  {
+    label: "Advanced connections",
+    items: [
+      { label: "MCP / Tools", path: "/mcp" },
+      { label: "A2A", path: "/a2a" },
+    ],
+  },
+  {
+    label: "Stage / debug / eval",
+    items: [
+      { label: "Metrics", path: "/metrics" },
+      { label: "Calibration", path: "/calibration" },
+      { label: "Versions", path: "/versions" },
+    ],
+  },
 ] as const;
 
 // Future AgentStage bitmap assets should live under frontend/public/assets/agent-stage.

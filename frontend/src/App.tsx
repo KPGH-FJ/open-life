@@ -186,16 +186,17 @@ function App() {
           <Suspense fallback={<LoadingSpinner text="加载中..." />}>
             <Routes>
               {/* W159 product route aliases; ProductShell and replacement pages start in W160+. */}
-              <Route path={productRoutePath("陪伴")} element={<CompanionPage />} />
-              <Route path={productRoutePath("今日")} element={<TodayPage />} />
+              <Route path={productRoutePath("Today")} element={<TodayPage />} />
+              <Route path={productRoutePath("Companion")} element={<CompanionPage />} />
               <Route path={productRoutePath("Life Model")} element={<LifeModelPage />} />
               <Route path={productRoutePath("Review")} element={<MailboxPage />} />
+              <Route path={productRoutePath("Runs")} element={<RunsPage />} />
+              <Route path={productRoutePath("Settings")} element={<SettingsPage />} />
               <Route path="/" element={<DashboardPage />} />
               <Route path="/workspace" element={<DashboardPage />} />
               {/* Agent: Chat + Runs */}
               <Route path="/agent" element={<ChatPage />} />
               <Route path="/chat" element={<ChatPage />} />
-              <Route path="/runs" element={<RunsPage />} />
               <Route path="/runs/:runId" element={<AgentRunDetail />} />
               {/* Life: Builder + LifeModel */}
               <Route path="/life" element={<BuilderPage />} />
@@ -206,7 +207,6 @@ function App() {
               {/* Review */}
               <Route path="/review" element={<ProposalReviewPage />} />
               {/* Settings + Experimental */}
-              <Route path="/settings" element={<SettingsPage />} />
               <Route path="/versions" element={<VersionControl />} />
               <Route path="/mcp" element={<McpPage />} />
               <Route path="/a2a" element={<A2APage />} />

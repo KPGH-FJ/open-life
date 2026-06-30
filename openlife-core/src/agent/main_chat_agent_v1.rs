@@ -1580,7 +1580,13 @@ fn session_status_transition_allowed(
                 | AgentTaskSessionStatus::Failed
                 | AgentTaskSessionStatus::Cancelled
         ),
-        AgentTaskSessionStatus::Blocked | AgentTaskSessionStatus::Failed => matches!(
+        AgentTaskSessionStatus::Blocked => matches!(
+            next,
+            AgentTaskSessionStatus::Running
+                | AgentTaskSessionStatus::Failed
+                | AgentTaskSessionStatus::Cancelled
+        ),
+        AgentTaskSessionStatus::Failed => matches!(
             next,
             AgentTaskSessionStatus::Running | AgentTaskSessionStatus::Cancelled
         ),

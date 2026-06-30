@@ -330,6 +330,155 @@ describe("AgentControlPlane", () => {
     );
   });
 
+  it("renders backend plan artifact body with copy and supported controls only", () => {
+    const artifactBody =
+      "# Weekly Planning plan\n\nPlan ID: plan:artifact-1\nPlan session: plan-session-artifact-1\n\nSteps\n1. Verify museum facts - source/tool evidence: observation-hours-1";
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const onConfirmPlan = vi.fn();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+
+    render(
+      <MemoryRouter>
+        <AgentControlPlane
+          state={agentState({
+            plan: {
+              planId: "plan:artifact-1",
+              planSessionId: "plan-session-artifact-1",
+              taskSessionId: "task-agent-control-plane-1",
+              runId: "run-plan-product-1",
+              status: "draft",
+              summary: "Draft PlanExecute plan with 1 step.",
+              editable: true,
+              source: "plan_execute",
+              evidenceId: "plan-session-artifact-1",
+              revision: 7,
+              revisionId: "rev-7",
+              controls: ["confirm_plan", "edit_plan", "cancel_task", "open_trace"],
+              steps: [
+                {
+                  stepId: "step-artifact-1",
+                  planId: "plan:artifact-1",
+                  index: 1,
+                  title: "Verify museum facts",
+                  description: "Read source evidence before using realtime facts.",
+                  kind: "read",
+                  status: "planned",
+                  revision: 7,
+                  basePlanRevision: 7,
+                  linkedActionIds: [],
+                  linkedObservationIds: ["observation-hours-1"],
+                  linkedProposalIds: [],
+                  blockerIds: [],
+                  evidenceIds: ["observation-hours-1"],
+                  controls: ["skip_step"],
+                },
+              ],
+              artifactView: {
+                planId: "plan:artifact-1",
+                planSessionId: "plan-session-artifact-1",
+                taskSessionId: "task-agent-control-plane-1",
+                runId: "run-plan-product-1",
+                status: "draft",
+                title: "Weekly Planning plan",
+                summary: "Draft PlanExecute plan with 1 step.",
+                body: artifactBody,
+                steps: [
+                  {
+                    stepId: "step-artifact-1",
+                    index: 1,
+                    title: "Verify museum facts",
+                    description: "Read source evidence before using realtime facts.",
+                    status: "planned",
+                    kind: "read",
+                    evidenceIds: ["observation-hours-1"],
+                    sourceToolEvidence: [
+                      {
+                        evidenceId: "observation-hours-1",
+                        sourceKind: "web",
+                        sourceLabel: "Sichuan Museum official opening hours",
+                        toolName: "web_read",
+                        preview: "Opening hours require same-day verification.",
+                      },
+                    ],
+                    controls: ["skip_step"],
+                  },
+                ],
+                assumptions: [
+                  {
+                    label: "Source-backed opening hours note",
+                    detail: "Use only the attached source/tool evidence.",
+                    evidenceIds: ["observation-hours-1"],
+                    sourceToolEvidence: [
+                      {
+                        evidenceId: "observation-hours-1",
+                        sourceKind: "web",
+                        sourceLabel: "Sichuan Museum official opening hours",
+                        toolName: "web_read",
+                        preview: "Opening hours require same-day verification.",
+                      },
+                    ],
+                  },
+                ],
+                unknowns: [
+                  {
+                    label: "weather",
+                    detail: "No source/tool evidence is attached.",
+                    evidenceIds: [],
+                    sourceToolEvidence: [],
+                  },
+                ],
+                controls: ["confirm_plan", "cancel_task", "open_trace"],
+                routeEvidence: {
+                  strategy: "plan_execute",
+                  reason: "kernel_supported_plan_execute",
+                  confidence: 0.92,
+                  evidenceIds: [
+                    "task-agent-control-plane-1",
+                    "run-plan-product-1",
+                    "plan-session-artifact-1",
+                  ],
+                },
+                runEvidence: {
+                  taskSessionId: "task-agent-control-plane-1",
+                  runId: "run-plan-product-1",
+                  planSessionId: "plan-session-artifact-1",
+                  actionIds: ["action-plan-1"],
+                  observationIds: ["observation-hours-1"],
+                  proposalIds: [],
+                  blockerIds: [],
+                  finalDeliveryId: "delivery-1",
+                  metadataSafe: true,
+                },
+              },
+            },
+          })}
+          onConfirmPlan={onConfirmPlan}
+        />
+      </MemoryRouter>
+    );
+
+    const card = screen.getByTestId("agent-plan-artifact");
+    expect(card).toHaveAttribute("data-plan-id", "plan:artifact-1");
+    expect(card).toHaveAttribute("data-plan-session-id", "plan-session-artifact-1");
+    expect(card).toHaveTextContent("Verify museum facts");
+    expect(card).toHaveTextContent("Sichuan Museum official opening hours");
+    expect(card).toHaveTextContent("weather");
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy plan artifact" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm plan" }));
+
+    expect(writeText).toHaveBeenCalledWith(artifactBody);
+    expect(onConfirmPlan).toHaveBeenCalledWith({
+      planSessionId: "plan-session-artifact-1",
+      baseRevision: 7,
+    });
+    expect(screen.queryByRole("button", { name: "Continue" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit plan" })).not.toBeInTheDocument();
+  });
+
   it("renders a linked execution timeline with the current action emphasized", () => {
     renderPanel(
       agentState({

@@ -15,11 +15,13 @@ import {
   builderListUnfinished,
   countMemoryChunks,
   getLifeModel,
+  getLifeModelCurrentView,
   getMemoryTierStats,
   getModel4DCompletion,
   getSystemDiagnostics,
   listProposals,
   type AgentProposal,
+  type LifeModelCurrentView,
   type Model4DCompletion,
   type SystemDiagnostics,
   type TierStats,
@@ -39,8 +41,13 @@ import {
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
 import {
   StatusChip as ProductStatusChip,
+  TechnicalDetails,
   TrustDrawer,
 } from "../components/product/ProductPrimitives";
+import {
+  countPendingReviewProposals,
+  REVIEW_PENDING_PROPOSAL_LIMIT,
+} from "../utils/reviewPendingCount";
 
 type LifeModelSection = "build" | "overview" | "evidence";
 
@@ -64,6 +71,7 @@ type LifeModelPageState = {
   memoryCount: number | null;
   tierStats: TierStats | null;
   pendingProposals: AgentProposal[];
+  currentView: LifeModelCurrentView | null;
   loading: boolean;
   error: string;
 };
@@ -82,6 +90,7 @@ const INITIAL_STATE: LifeModelPageState = {
   memoryCount: null,
   tierStats: null,
   pendingProposals: [],
+  currentView: null,
   loading: true,
   error: "",
 };
@@ -133,6 +142,14 @@ function formatUpdatedAt(value: string | undefined): string {
   return `最近更新 ${date.toLocaleDateString("zh-CN")}`;
 }
 
+function typedReasonLabel(value: string | undefined | null): string | null {
+  return value?.trim() || null;
+}
+
+function traceValue(value: string | undefined | null, fallback: string): string {
+  return value?.trim() || fallback;
+}
+
 function sourceLabel(source: string): string {
   const labels: Record<string, string> = {
     builder_review: "构建",
@@ -158,6 +175,53 @@ function proposalTypeLabel(type: string): string {
     data_export: "数据导出",
   };
   return labels[type] ?? "待确认项";
+}
+
+function proposalRiskLabel(risk: AgentProposal["riskLevel"]): string {
+  const labels: Record<AgentProposal["riskLevel"], string> = {
+    low: "低",
+    medium: "中",
+    high: "高",
+    critical: "严重",
+  };
+  return labels[risk] ?? String(risk);
+}
+
+function currentValueSourceLabel(source: string | undefined | null): string {
+  const labels: Record<string, string> = {
+    accepted_proposal: "来自已确认更新",
+    manual: "手动记录",
+    imported: "来自导入",
+    builder_review: "来自构建确认",
+    feedback_evolution: "来自反馈确认",
+  };
+  if (!source?.trim()) return "来源未读取";
+  return labels[source] ?? "来源已记录";
+}
+
+function reviewProposalSummary(proposal: AgentProposal): string {
+  const evidenceCount = proposal.evidenceSummaries?.length ?? 0;
+  const checkCount = proposal.behaviorChecks?.length ?? 0;
+  if (evidenceCount > 0 || checkCount > 0) {
+    return `有 ${evidenceCount} 条依据摘要和 ${checkCount} 条检查记录，进入 Review 后可展开查看。`;
+  }
+  return "OpenLife 发现一条候选更新，需要你在 Review 中确认后才会写入。";
+}
+
+function reviewProposalTraceRows(proposal: AgentProposal): Array<{ label: string; value: string }> {
+  const rows: Array<{ label: string; value: string }> = [
+    { label: "Review 记录", value: proposal.id },
+    { label: "位置", value: proposal.affectedPath },
+    { label: "状态", value: proposal.status },
+    { label: "把握", value: `${Math.round(proposal.confidence * 100)}%` },
+  ];
+  if (proposal.sourceDetail?.trim()) rows.push({ label: "来源详情", value: proposal.sourceDetail });
+  if (proposal.reason?.trim()) rows.push({ label: "原因原文", value: proposal.reason });
+  if (proposal.whyOpenLifeThinksThis?.trim()) {
+    rows.push({ label: "判断原文", value: proposal.whyOpenLifeThinksThis });
+  }
+  if (proposal.runId?.trim()) rows.push({ label: "Run", value: proposal.runId });
+  return rows;
 }
 
 function completionOverall(
@@ -401,20 +465,130 @@ function BuildSection({
   );
 }
 
+function CommunicationStyleCurrentView({
+  currentView,
+}: {
+  currentView: LifeModelCurrentView | null;
+}) {
+  const value = currentView?.value?.trim();
+  if (!value) return null;
+  const change = currentView?.change ?? null;
+  const patchUnavailableReason = typedReasonLabel(change?.patchUnavailableReason);
+  const snapshotUnavailableReason = typedReasonLabel(change?.snapshotUnavailableReason);
+  const sourceUnavailableReason = typedReasonLabel(change?.sourceUnavailableReason);
+
+  return (
+    <section
+      data-testid="communication-style-current-view"
+      className="rounded-lg border border-stone-200 bg-white p-4"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="text-xs font-medium text-stone-500">Preferences</div>
+          <h3 className="mt-1 text-sm font-semibold text-stone-950">
+            {currentView?.label ?? "沟通偏好"}
+          </h3>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          <ProductStatusChip label="已确认偏好" tone="ready" />
+          <ProductStatusChip label={currentValueSourceLabel(currentView?.currentValueSource)} />
+        </div>
+      </div>
+      <div className="mt-3 rounded-md border border-stone-200 bg-stone-50 px-3 py-2 text-sm leading-6 text-stone-900">
+        {value}
+      </div>
+      <p className="mt-2 text-xs leading-5 text-stone-500">
+        {change?.sourceExcerpt
+          ? "这条偏好有已确认来源摘录；原始记录和运行信息在技术详情中。"
+          : "来源摘录暂不可用；缺失原因和运行记录在技术详情中。"}
+      </p>
+
+      <div className="mt-3">
+        <TechnicalDetails summary="查看来源与记录">
+          <div className="grid gap-2 md:grid-cols-2">
+            <div>
+              <span className="text-stone-400">位置：</span>
+              <span className="break-all">
+                {currentView?.path ?? "preferences.communication_style"}
+              </span>
+            </div>
+            <div>
+              <span className="text-stone-400">Review 记录：</span>
+              <span className="break-all">
+                {traceValue(change?.proposalId, "accepted_proposal_missing")}
+              </span>
+            </div>
+            <div>
+              <span className="text-stone-400">来源摘录：</span>
+              <span className="break-all">
+                {change?.sourceExcerpt ?? sourceUnavailableReason ?? "source_excerpt_unavailable"}
+              </span>
+            </div>
+            <div>
+              <span className="text-stone-400">Run：</span>
+              {change?.proposalRunId ? (
+                <a
+                  className="break-all text-stone-900 underline"
+                  href={`#/runs/${change.proposalRunId}`}
+                >
+                  {change.proposalRunId}
+                </a>
+              ) : (
+                <span>run_unavailable</span>
+              )}
+            </div>
+            <div>
+              <span className="text-stone-400">Patch：</span>
+              <span className="break-all">
+                {change?.patchId
+                  ? `${change.patchId} · ${change.patchStatus ?? "status_unavailable"}`
+                  : (patchUnavailableReason ?? "patch_unavailable")}
+              </span>
+            </div>
+            <div>
+              <span className="text-stone-400">Snapshot：</span>
+              <span className="break-all">
+                {change?.snapshotVersions?.length
+                  ? change.snapshotVersions.join(" / ")
+                  : (snapshotUnavailableReason ?? "snapshot_unavailable")}
+              </span>
+            </div>
+            <div>
+              <span className="text-stone-400">把握：</span>
+              <span>
+                {typeof change?.confidence === "number"
+                  ? `${Math.round(change.confidence * 100)}%`
+                  : "confidence_unavailable"}
+              </span>
+            </div>
+            <div>
+              <span className="text-stone-400">风险：</span>
+              <span>{change?.riskLevel ?? "risk_unavailable"}</span>
+            </div>
+          </div>
+        </TechnicalDetails>
+      </div>
+    </section>
+  );
+}
+
 function OverviewSection({
   lifeModel,
   diagnostics,
   completion,
   pendingProposals,
+  currentView,
 }: {
   lifeModel: LifeModel | null;
   diagnostics: SystemDiagnostics | null;
   completion: Model4DCompletion | null;
   pendingProposals: AgentProposal[];
+  currentView: LifeModelCurrentView | null;
 }) {
   const [ignoredIssueIds, setIgnoredIssueIds] = useState<Set<string>>(new Set());
   const [deferredIssueIds, setDeferredIssueIds] = useState<Set<string>>(new Set());
-  const empty = isModelEmpty(lifeModel, diagnostics);
+  const hasCommunicationStyle = Boolean(currentView?.value?.trim());
+  const empty = isModelEmpty(lifeModel, diagnostics) && !hasCommunicationStyle;
   const dimensions = useMemo(() => (lifeModel ? buildDimensions(lifeModel) : []), [lifeModel]);
   const suppressedByDimension = useMemo(
     () =>
@@ -500,6 +674,7 @@ function OverviewSection({
           }}
         />
       )}
+      <CommunicationStyleCurrentView currentView={currentView} />
       <div className="rounded-lg border border-stone-200 bg-white">
         {dimensions.map((dimension, index) => (
           <div
@@ -674,7 +849,7 @@ function EvidenceSection({
   pendingProposals: AgentProposal[];
 }) {
   const effectiveMemoryCount = memoryCount ?? diagnostics?.memory_chunk_count ?? 0;
-  const pendingCount = pendingProposals.length || diagnostics?.pending_proposal_count || 0;
+  const pendingCount = countPendingReviewProposals(pendingProposals);
   const sourceLabels = uniqueShortItems(
     pendingProposals.map(proposal => sourceLabel(proposal.source)),
     3
@@ -743,17 +918,28 @@ function EvidenceSection({
               ].join(" ")}
             >
               <div>
-                <div className="text-sm font-semibold text-stone-950">
-                  {proposalTypeLabel(proposal.proposalType)}
+                <div data-testid={`life-model-pending-proposal-primary-${proposal.id}`}>
+                  <div className="text-sm font-semibold text-stone-950">
+                    {proposalTypeLabel(proposal.proposalType)}
+                  </div>
+                  <div className="mt-0.5 text-xs text-stone-500">
+                    {sourceLabel(proposal.source)} · 影响 {proposalRiskLabel(proposal.riskLevel)}
+                  </div>
+                  <div className="mt-1 text-xs text-stone-600">
+                    {reviewProposalSummary(proposal)}
+                  </div>
                 </div>
-                <div className="mt-0.5 text-xs text-stone-500">
-                  {sourceLabel(proposal.source)} · 影响 {proposal.riskLevel}
-                </div>
-                <div className="mt-1 text-xs text-stone-600">
-                  {proposal.whyOpenLifeThinksThis?.trim() ||
-                    (proposal.evidenceSummaries?.length
-                      ? `${proposal.evidenceSummaries.length} 条依据摘要待你确认`
-                      : "暂无足够依据摘要")}
+                <div className="mt-2 max-w-xl">
+                  <TechnicalDetails summary="来源与技术记录">
+                    <div className="space-y-1">
+                      {reviewProposalTraceRows(proposal).map(row => (
+                        <div key={`${proposal.id}-${row.label}`} className="min-w-0">
+                          <span className="text-stone-400">{row.label}：</span>
+                          <span className="break-all">{row.value}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </TechnicalDetails>
                 </div>
               </div>
               <Link
@@ -782,6 +968,7 @@ export default function LifeModelPage() {
       try {
         const [
           lifeModel,
+          currentView,
           diagnostics,
           completion,
           unfinishedSessions,
@@ -790,12 +977,15 @@ export default function LifeModelPage() {
           pendingProposals,
         ] = await Promise.all([
           getLifeModel().catch(() => null),
+          getLifeModelCurrentView().catch(() => null),
           getSystemDiagnostics().catch(() => null),
           getModel4DCompletion().catch(() => null),
           builderListUnfinished().catch(() => []),
           countMemoryChunks().catch(() => null),
           getMemoryTierStats().catch(() => null),
-          listProposals("pending").catch(() => []),
+          listProposals("pending", undefined, undefined, REVIEW_PENDING_PROPOSAL_LIMIT).catch(
+            () => []
+          ),
         ]);
 
         if (cancelled) return;
@@ -807,6 +997,7 @@ export default function LifeModelPage() {
           memoryCount,
           tierStats,
           pendingProposals,
+          currentView,
           loading: false,
           error: "",
         });
@@ -830,8 +1021,7 @@ export default function LifeModelPage() {
   const overall = completionOverall(state.diagnostics, state.completion);
   const safeMode = isSafeMode(state.diagnostics);
   const safeModeReason = getSafeModeReason(state.diagnostics);
-  const pendingCount =
-    state.pendingProposals.length || state.diagnostics?.pending_proposal_count || 0;
+  const pendingCount = countPendingReviewProposals(state.pendingProposals);
   const topStatus =
     state.diagnostics?.life_model_ready && !state.diagnostics?.model_empty
       ? "Life Model 本地可读"
@@ -905,6 +1095,7 @@ export default function LifeModelPage() {
               diagnostics={state.diagnostics}
               completion={state.completion}
               pendingProposals={state.pendingProposals}
+              currentView={state.currentView}
             />
           )}
           {activeSection === "evidence" && (

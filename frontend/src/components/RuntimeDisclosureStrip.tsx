@@ -43,7 +43,7 @@ export default function RuntimeDisclosureStrip({
             to={`/runs/${runId}`}
             className="font-semibold text-stone-900 underline-offset-4 hover:underline"
           >
-            查看 Activity 详情
+            查看 Runs 详情
           </Link>
         )}
         <TechnicalDetails summary="运行技术详情">

@@ -151,7 +151,7 @@ use commands::a2a::{
 };
 use commands::agent::{
     delete_agent_run, get_agent_run, list_agent_runs, list_agent_runs_for_session,
-    replay_agent_action, restore_agent_run,
+    list_provider_transmission_history, replay_agent_action, restore_agent_run,
 };
 use commands::agent_runtime::{
     cancel_plan_execute_session, check_controlled_chat_cutover_candidate_promotion_readiness,
@@ -243,7 +243,7 @@ pub use openlife_core::memory_cache::HotMemoryCache;
 pub use openlife_core::memory_cache::SharedHotCache;
 pub use openlife_core::privacy::PrivacyEngine;
 // Hermes module removed: replaced by AgentRuntime
-use commands::life_model::{get_life_model, save_life_model};
+use commands::life_model::{get_life_model, get_life_model_current_view, save_life_model};
 use commands::mcp::{
     clear_mcp_audit_logs, list_mcp_audit_logs, list_mcp_servers, list_mcp_templates,
     list_mcp_tools, list_tool_manifests, recommend_mcp_manifests, register_mcp_server,
@@ -264,9 +264,9 @@ use commands::proposal::{
 use commands::router::get_model_router_status;
 use commands::settings::{
     cleanup_mcp_audit_logs, export_all_data, export_mcp_audit_logs, get_config,
-    get_last_model_error, get_privacy_policy, has_completed_onboarding, import_all_data,
-    mark_onboarding_completed, rotate_mcp_audit_key, save_config, set_privacy_policy, test_api_key,
-    test_llm_connection,
+    get_danger_action_preflight, get_last_model_error, get_privacy_policy,
+    has_completed_onboarding, import_all_data, mark_onboarding_completed, rotate_mcp_audit_key,
+    save_config, set_privacy_policy, test_api_key, test_llm_connection,
 };
 use commands::state::{
     add_daily_goal, delete_daily_goal, get_daily_goals, get_state_alerts, get_state_history,
@@ -399,6 +399,7 @@ pub struct SystemDiagnostics {
     pub high_risk_pending_proposal_count: usize,
     pub proposal_store_status: String,
     pub runtime_build_info: runtime_build_info::RuntimeBuildInfo,
+    pub runtime_route_evidence: main_chat_runtime_facts::RuntimeRouteEvidence,
 }
 
 pub(crate) async fn persist_life_model(
@@ -696,11 +697,13 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_life_model,
+            get_life_model_current_view,
             save_life_model,
             get_config,
             save_config,
             get_agent_run,
             list_agent_runs,
+            list_provider_transmission_history,
             list_agent_runs_for_session,
             delete_agent_run,
             restore_agent_run,
@@ -876,6 +879,7 @@ pub fn run() {
             identity_goal_alignment_check,
             identity_goal_alignment_report,
             export_all_data,
+            get_danger_action_preflight,
             import_all_data,
             test_api_key,
             test_llm_connection,

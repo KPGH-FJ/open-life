@@ -550,7 +550,7 @@ describe("Step6 product acceptance evidence", () => {
     expect(workflow).toContain("externalLiveReady !== true");
     expect(workflow).not.toContain("OPENAI_API_KEY");
     expect(workflow).toContain(
-      "cargo test -p openlife-tauri main_chat_final_acceptance -- --nocapture"
+      "cargo test -p openlife-tauri --locked main_chat_final_acceptance -- --nocapture"
     );
     expect(workflow).toContain(
       "frontend/test-results/main-chat-step6-product-acceptance-report.json"

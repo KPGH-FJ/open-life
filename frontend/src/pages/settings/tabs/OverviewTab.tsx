@@ -1,9 +1,6 @@
 import { Link } from "react-router-dom";
-import {
-  runMemoryTierMaintenance,
-  rebuildMemoryIndex,
-  type SystemDiagnostics,
-} from "../../../tauri";
+import { runMemoryTierMaintenance, type SystemDiagnostics } from "../../../tauri";
+import { buildProviderReadinessView } from "../../../utils/providerReadiness";
 import { buildSafeModeBlockedMessage } from "../../../utils/runtimeMessages";
 
 function classNames(...classes: (string | false | undefined)[]) {
@@ -32,6 +29,7 @@ interface OverviewTabProps {
   setRebuildLoading: (v: boolean) => void;
   rebuildResult: string | null;
   setRebuildResult: (v: string | null) => void;
+  handleVectorRebuild: () => Promise<void>;
 }
 
 export default function OverviewTab({
@@ -44,11 +42,11 @@ export default function OverviewTab({
   setTierLoading,
   setTierResult,
   rebuildLoading,
-  setRebuildLoading,
   rebuildResult,
-  setRebuildResult,
+  handleVectorRebuild,
 }: OverviewTabProps) {
   const runtime = diagnostics?.runtime_build_info;
+  const providerReadiness = buildProviderReadinessView(diagnostics);
   // ---- Data file health ----
   const df = diagnostics?.data_files;
   const dataFileItems = df
@@ -69,10 +67,8 @@ export default function OverviewTab({
   const trialChecks = [
     {
       label: "云端模型",
-      ok: diagnostics?.cloud_api_configured ?? false,
-      detail: diagnostics?.cloud_api_configured
-        ? `${diagnostics?.cloud_provider ?? "云端"} 已配置${diagnostics?.config_source === "env_var" ? "（来自环境变量）" : ""}`
-        : "还没有可用的云端 API Key",
+      ok: providerReadiness.cloudReady,
+      detail: `${providerReadiness.statusLabel} · ${providerReadiness.detail}`,
       action: "配置模型",
       href: "#llm-settings",
     },
@@ -474,28 +470,7 @@ export default function OverviewTab({
               {tierLoading ? "检查中..." : "运行记忆层级维护"}
             </button>
             <button
-              onClick={async () => {
-                if (!confirm("确定重建向量索引吗？系统会基于现有聊天消息重新生成记忆向量。"))
-                  return;
-                setRebuildLoading(true);
-                setRebuildResult(null);
-                try {
-                  const res = await rebuildMemoryIndex();
-                  const refreshed = await refreshAllDiagnostics();
-                  const recovered = refreshed && !safeMode;
-                  setRebuildResult(
-                    `向量索引重建完成：共处理 ${res.processed} 条消息，重建 ${res.indexed} 条，跳过 ${res.skipped} 条。${
-                      recovered
-                        ? " 当前数据环境已恢复，可继续使用。"
-                        : " 已刷新诊断，请继续确认数据环境是否恢复。"
-                    }`
-                  );
-                } catch (e) {
-                  setRebuildResult(`向量索引重建失败：${readableError(e)}`);
-                } finally {
-                  setRebuildLoading(false);
-                }
-              }}
+              onClick={() => void handleVectorRebuild()}
               disabled={rebuildLoading}
               className="rounded-md border border-emerald-300 bg-white px-3 py-1.5 text-xs font-medium text-emerald-800 hover:bg-emerald-50 disabled:opacity-50"
             >

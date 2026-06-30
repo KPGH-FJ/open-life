@@ -21,7 +21,13 @@ export type CapabilityStatusViewModel = {
   toolAccessDetail: string;
 };
 
-type CloudRouteState = "none" | "unvalidated" | "validated" | "failed" | "stale";
+type CloudRouteState =
+  | "none"
+  | "unvalidated"
+  | "validated"
+  | "failed"
+  | "stale"
+  | "scripted_dogfood";
 
 type GovernanceBlockerReason =
   | "model_selected_disallowed_tool"
@@ -44,6 +50,7 @@ function cloudRouteState(diagnostics: SystemDiagnostics): CloudRouteState {
   if (diagnostics.cloud_api_validation_status === "validated") return "validated";
   if (diagnostics.cloud_api_validation_status === "failed") return "failed";
   if (diagnostics.cloud_api_validation_status === "stale") return "stale";
+  if (diagnostics.cloud_api_validation_status === "scripted_dogfood") return "scripted_dogfood";
   if (diagnostics.cloud_api_validated === true) return "validated";
   if (diagnostics.cloud_api_configured) return "unvalidated";
   return "none";
@@ -68,6 +75,7 @@ export function cloudApiStatusLabel(diagnostics: SystemDiagnostics | null): stri
       : `${providerName(diagnostics)} 验证失败`;
   }
   if (cloud === "stale") return `${providerName(diagnostics)} 验证已过期或配置已变更`;
+  if (cloud === "scripted_dogfood") return `${providerName(diagnostics)} 仅脚本化开发 proof`;
   if (cloud === "unvalidated") return cloudConfiguredLabel(diagnostics, cloud);
   return "未配置";
 }
@@ -93,8 +101,16 @@ function routeLabel(diagnostics: SystemDiagnostics | null): string {
 }
 
 function runRouteLabel(run: AgentRun | null | undefined): string | null {
-  if (!run?.modelRoute) return null;
-  const route = run.modelRoute;
+  const evidence = run?.reasoningTrace?.generation_result?.runtimeRouteEvidence;
+  const evidenceRoute = evidence?.actual_route ?? evidence?.last_completed_route ?? null;
+  const route = evidenceRoute
+    ? {
+        routeType: evidenceRoute.route_type,
+        provider: evidenceRoute.provider,
+        model: evidenceRoute.model,
+      }
+    : run?.modelRoute;
+  if (!route) return null;
   const type =
     route.routeType === "local" ? "本地" : route.routeType === "cloud" ? "云端" : route.routeType;
   return `最近实际路线 · ${type || "未知"} · ${route.provider || "unknown"} · ${

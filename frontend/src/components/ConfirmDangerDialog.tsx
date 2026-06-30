@@ -10,6 +10,7 @@ type ConfirmDangerDialogProps = {
   cancelLabel?: string;
   severity?: "warning" | "danger";
   confirmationText?: string;
+  confirmDisabled?: boolean;
   busy?: boolean;
   onConfirm: () => void | Promise<void>;
   onCancel: () => void;
@@ -23,13 +24,15 @@ export default function ConfirmDangerDialog({
   cancelLabel = "取消",
   severity = "danger",
   confirmationText,
+  confirmDisabled = false,
   busy = false,
   onConfirm,
   onCancel,
 }: ConfirmDangerDialogProps) {
   const [typedText, setTypedText] = useState("");
   const requiresTypedConfirmation = Boolean(confirmationText);
-  const canConfirm = !busy && (!requiresTypedConfirmation || typedText === confirmationText);
+  const canConfirm =
+    !busy && !confirmDisabled && (!requiresTypedConfirmation || typedText === confirmationText);
   const titleId = useId();
 
   useEffect(() => {

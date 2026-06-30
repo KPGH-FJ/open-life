@@ -58,13 +58,35 @@ const SENSITIVE_KEY_RE =
 const TECHNICAL_PATH_KEY_RE = /(^|[_.\]-])path($|[_.\]-])/i;
 const SENSITIVE_VALUE_RE =
   /(api[_-]?key|bearer\s+|token|secret|password|credential|authorization|raw[_-]?|payload|should[_-]?not[_-]?render)/i;
+export const COMMUNICATION_STYLE_CANONICAL_PATH = "preferences.communication_style";
+
+export function canonicalLifeModelPath(path: string): string {
+  const trimmed = path.trim();
+  const normalized = trimmed.startsWith("/")
+    ? trimmed
+        .replace(/^\/+|\/+$/g, "")
+        .split("/")
+        .filter(Boolean)
+        .join(".")
+    : trimmed.replace(/^\.+|\.+$/g, "");
+  const lower = normalized.toLowerCase();
+  if (lower === "preferences.communication_style" || lower === "preferences.communication") {
+    return COMMUNICATION_STYLE_CANONICAL_PATH;
+  }
+  return normalized;
+}
+
+export function isCommunicationStylePath(path: string): boolean {
+  return canonicalLifeModelPath(path) === COMMUNICATION_STYLE_CANONICAL_PATH;
+}
 
 export function sourceLabel(source: string): string {
   return SOURCE_LABELS[source] ?? "OpenLife";
 }
 
 export function proposalDomainLabel(proposal: AgentProposal): string {
-  const path = proposal.affectedPath.toLowerCase();
+  const path = canonicalLifeModelPath(proposal.affectedPath).toLowerCase();
+  if (path === COMMUNICATION_STYLE_CANONICAL_PATH) return "沟通偏好";
   if (path.startsWith("identity.voice_style")) return "陪伴语气";
   if (path.startsWith("identity.name")) return "称呼";
   if (path.startsWith("identity.")) return "身份信息";
@@ -126,6 +148,7 @@ export function metadataValueSummary(value: unknown): string {
 }
 
 function pathFieldLabel(path: string): string {
+  if (isCommunicationStylePath(path)) return "沟通偏好";
   const match = path.match(/([A-Za-z0-9_]+)(?:\]|\))?$/);
   if (!match) return path || "值";
   return match[1].replace(/_/g, " ");
@@ -205,6 +228,11 @@ function buildDiffRows(proposal: AgentProposal): ProposalDisplayDiffRow[] {
 }
 
 function evidenceSummary(proposal: AgentProposal): string {
+  if (isCommunicationStylePath(proposal.affectedPath)) {
+    const sourceExcerpt = communicationStyleSourceExcerpt(proposal);
+    if (sourceExcerpt) return `来源摘录：${sourceExcerpt}`;
+    return "source_excerpt_unavailable";
+  }
   if (proposal.whyOpenLifeThinksThis?.trim()) return proposal.whyOpenLifeThinksThis.trim();
   const evidenceCount = proposal.evidenceSummaries?.length ?? 0;
   const behaviorCount = proposal.behaviorChecks?.length ?? 0;
@@ -235,6 +263,37 @@ function technicalString(value: unknown): string | null {
   return null;
 }
 
+function compactSourceExcerpt(value: string | undefined | null, maxLength = 120): string | null {
+  const compact = value?.replace(/\s+/g, " ").trim();
+  if (!compact) return null;
+  return compact.length > maxLength ? `${compact.slice(0, maxLength - 3)}...` : compact;
+}
+
+function communicationStyleSourceExcerpt(proposal: AgentProposal): string | null {
+  return (
+    compactSourceExcerpt(proposal.whyOpenLifeThinksThis) ||
+    compactSourceExcerpt(proposal.evidenceSummaries?.[0]?.summary) ||
+    compactSourceExcerpt(proposal.reason)
+  );
+}
+
+function appendCommunicationStyleTechnicalRows(
+  rows: Array<{ label: string; value: string; href?: string }>,
+  proposal: AgentProposal
+) {
+  if (!isCommunicationStylePath(proposal.affectedPath)) return;
+  rows.push({ label: "规范位置", value: COMMUNICATION_STYLE_CANONICAL_PATH });
+  rows.push({ label: "Proposal", value: proposal.id });
+  rows.push({ label: "置信度", value: `${Math.round(proposal.confidence * 100)}%` });
+  rows.push({ label: "风险", value: proposal.riskLevel });
+  const sourceExcerpt = communicationStyleSourceExcerpt(proposal);
+  if (sourceExcerpt) {
+    rows.push({ label: "来源摘录", value: sourceExcerpt });
+  } else {
+    rows.push({ label: "来源不可用", value: "source_excerpt_unavailable" });
+  }
+}
+
 function appendExternalWriteTechnicalRows(
   rows: Array<{ label: string; value: string; href?: string }>,
   proposal: AgentProposal
@@ -255,7 +314,7 @@ export function buildProposalDisplayModel(proposal: AgentProposal): ProposalDisp
   const domain = proposalDomainLabel(proposal);
   const type = proposalTypeLabel(proposal);
   const technicalRows: Array<{ label: string; value: string; href?: string }> = [
-    { label: "位置", value: proposal.affectedPath },
+    { label: "位置", value: canonicalLifeModelPath(proposal.affectedPath) },
     { label: "类型", value: type },
     { label: "来源", value: sourceLabel(proposal.source) },
     { label: "状态", value: proposal.status },
@@ -268,6 +327,7 @@ export function buildProposalDisplayModel(proposal: AgentProposal): ProposalDisp
   if (proposal.runId) {
     technicalRows.push({ label: "Run", value: proposal.runId, href: `#/runs/${proposal.runId}` });
   }
+  appendCommunicationStyleTechnicalRows(technicalRows, proposal);
   appendExternalWriteTechnicalRows(technicalRows, proposal);
 
   return {

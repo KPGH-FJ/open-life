@@ -18,6 +18,38 @@ use tauri::State;
 
 /// Maximum content size for ExternalWriteAction (100 KB)
 const EXTERNAL_WRITE_MAX_SIZE: usize = 100 * 1024;
+pub(crate) const COMMUNICATION_STYLE_CANONICAL_PATH: &str = "preferences.communication_style";
+
+pub(crate) fn canonical_lifemodel_path(path: &str) -> String {
+    let trimmed = path.trim();
+    let normalized = if trimmed.starts_with('/') {
+        trimmed
+            .trim_matches('/')
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(".")
+    } else {
+        trimmed.trim_matches('.').to_string()
+    };
+    match normalized.to_ascii_lowercase().as_str() {
+        "preferences.communication_style" | "preferences.communication" => {
+            COMMUNICATION_STYLE_CANONICAL_PATH.to_string()
+        }
+        _ => normalized,
+    }
+}
+
+pub(crate) fn is_communication_style_lifemodel_path(path: &str) -> bool {
+    canonical_lifemodel_path(path) == COMMUNICATION_STYLE_CANONICAL_PATH
+}
+
+fn canonicalize_proposal_affected_path(proposal: &mut AgentProposal) {
+    let canonical = canonical_lifemodel_path(&proposal.affected_path);
+    if canonical != proposal.affected_path {
+        proposal.affected_path = canonical;
+    }
+}
 
 fn proposal_store_missing() -> String {
     "Proposal store is unavailable. Please check Settings > 试用就绪检查.".to_string()
@@ -997,6 +1029,7 @@ async fn apply_proposal_to_state(
         | ProposalType::StateUpdate
         | ProposalType::PreferenceUpdate
         | ProposalType::CapabilityUpdate => {
+            let canonical_affected_path = canonical_lifemodel_path(&proposal.affected_path);
             let mut model = {
                 let manager = state.life_model_manager.lock().await;
                 manager.load().map_err(|e| e.to_string())?
@@ -1011,7 +1044,7 @@ async fn apply_proposal_to_state(
 
             // 2. Generate Patch from Proposal
             let path_pointer =
-                openlife_core::life_model::patch::dot_to_pointer(&proposal.affected_path);
+                openlife_core::life_model::patch::dot_to_pointer(&canonical_affected_path);
             let path_display =
                 openlife_core::life_model::patch::pointer_to_display(&path_pointer, &model);
             let source_mapping = ensure_lifemodel_proposal_patch_source_mapping(proposal)?;
@@ -1596,6 +1629,7 @@ pub(crate) async fn accept_proposal_with_state(
         ));
     }
     proposal.accept();
+    canonicalize_proposal_affected_path(&mut proposal);
     update_proposal_with_state(state, &proposal).await?;
     record_maturation_proposal_outcome_evidence_with_state(
         state,
@@ -1704,6 +1738,7 @@ pub(crate) async fn edit_proposal_with_state(
             result.error.unwrap_or_default()
         ));
     }
+    canonicalize_proposal_affected_path(&mut proposal);
     proposal.edit(new_after);
     update_proposal_with_state(state, &proposal).await?;
     record_maturation_proposal_outcome_evidence_with_state(
@@ -2703,6 +2738,88 @@ mod tests {
         assert!(report.readiness_ready);
         assert!(report.proposal_first_convergence_complete);
         assert!(report.blocking_reasons.is_empty());
+    }
+
+    #[test]
+    fn lifemodel_closed_loop_canonicalizes_communication_style_aliases() {
+        for alias in [
+            "/preferences/communication_style",
+            "preferences.communication_style",
+            "preferences.communication",
+            "/preferences/communication",
+        ] {
+            assert_eq!(
+                canonical_lifemodel_path(alias),
+                COMMUNICATION_STYLE_CANONICAL_PATH
+            );
+            assert!(is_communication_style_lifemodel_path(alias));
+        }
+        assert_eq!(canonical_lifemodel_path("identity.name"), "identity.name");
+    }
+
+    #[tokio::test]
+    async fn proposal_accept_normalizes_communication_style_alias_before_apply() {
+        for alias in [
+            "/preferences/communication_style",
+            "preferences.communication_style",
+            "preferences.communication",
+            "/preferences/communication",
+        ] {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let state = test_app_state(&temp_dir);
+            let proposal = AgentProposal::new(
+                ProposalType::PreferenceUpdate,
+                alias,
+                serde_json::json!(format!("accepted via {alias}")),
+                "用户确认沟通偏好。",
+                0.91,
+                RiskLevel::Low,
+                ProposalSource::FeedbackEvolution,
+            );
+            let id = proposal.id.clone();
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .create_proposal(&proposal)
+                .unwrap();
+
+            let result = accept_proposal_with_state(id.clone(), &state)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                result["patch_result"]["path"],
+                serde_json::json!("/preferences/communication_style")
+            );
+            let model = state.life_model_manager.lock().await.load().unwrap();
+            assert_eq!(
+                model.preferences.communication_style,
+                format!("accepted via {alias}")
+            );
+            let stored = state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .get_proposal(&id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.affected_path, COMMUNICATION_STYLE_CANONICAL_PATH);
+            let patches = state
+                .patch_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .list_patches_by_proposal(&id)
+                .unwrap();
+            assert_eq!(patches.len(), 1);
+            assert_eq!(patches[0].path_pointer, "/preferences/communication_style");
+        }
     }
 
     #[tokio::test]

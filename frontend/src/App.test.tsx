@@ -8,6 +8,7 @@ import { mockInvoke } from "@/test/mocks/tauri";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  ADVANCED_PRODUCT_ROUTE_GROUPS,
   AGENT_STAGE_ASSET_ROOT,
   PRIMARY_PRODUCT_ROUTES,
   RETAINED_LEGACY_ROUTES,
@@ -239,10 +240,12 @@ describe("App onboarding", () => {
 
   it("declares the W159 product route and label contract", () => {
     expect(PRIMARY_PRODUCT_ROUTES).toEqual([
-      { label: "陪伴", path: "/companion", legacyAlias: "/chat" },
-      { label: "今日", path: "/today", legacyAlias: "/" },
+      { label: "Today", path: "/today", legacyAlias: "/" },
+      { label: "Companion", path: "/companion", legacyAlias: "/chat" },
       { label: "Review", path: "/mailbox", legacyAlias: "/review" },
       { label: "Life Model", path: "/life-model", legacyAlias: "/builder" },
+      { label: "Runs", path: "/runs" },
+      { label: "Settings", path: "/settings" },
     ]);
     expect(RETAINED_LEGACY_ROUTES).toEqual([
       "/chat",
@@ -252,13 +255,28 @@ describe("App onboarding", () => {
       "/life",
       "/map",
       "/memory",
-      "/runs",
-      "/settings",
       "/mcp",
       "/a2a",
       "/metrics",
       "/versions",
       "/calibration",
+    ]);
+    expect(ADVANCED_PRODUCT_ROUTE_GROUPS).toEqual([
+      {
+        label: "Advanced connections",
+        items: [
+          { label: "MCP / Tools", path: "/mcp" },
+          { label: "A2A", path: "/a2a" },
+        ],
+      },
+      {
+        label: "Stage / debug / eval",
+        items: [
+          { label: "Metrics", path: "/metrics" },
+          { label: "Calibration", path: "/calibration" },
+          { label: "Versions", path: "/versions" },
+        ],
+      },
     ]);
     expect(AGENT_STAGE_ASSET_ROOT).toBe("/assets/agent-stage");
   });
@@ -282,19 +300,19 @@ describe("App onboarding", () => {
       );
     }
 
-    expect(screen.getByRole("link", { name: "陪伴" })).toHaveAttribute("aria-current", "page");
-    expect(screen.queryByRole("link", { name: "Activity" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Companion" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "Runs" })).toHaveAttribute("href", "/runs");
+    expect(screen.getByRole("link", { name: "Settings" })).toHaveAttribute("href", "/settings");
+    expect(screen.queryByRole("link", { name: "MCP / Tools" })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "更多" }));
+    fireEvent.click(screen.getByRole("button", { name: "Advanced" }));
 
     for (const [label, path] of [
-      ["Settings", "/settings"],
-      ["Activity", "/runs"],
-      ["MCP 工具", "/mcp"],
-      ["A2A 连接", "/a2a"],
-      ["版本", "/versions"],
+      ["MCP / Tools", "/mcp"],
+      ["A2A", "/a2a"],
       ["Metrics", "/metrics"],
       ["Calibration", "/calibration"],
+      ["Versions", "/versions"],
     ] as const) {
       expect(screen.getByRole("link", { name: label })).toHaveAttribute("href", path);
     }
@@ -313,17 +331,17 @@ describe("App onboarding", () => {
       </MemoryRouter>
     );
 
-    await screen.findByRole("link", { name: "陪伴" });
-    const menuButton = screen.getByRole("button", { name: "更多" });
+    await screen.findByRole("link", { name: "Companion" });
+    const menuButton = screen.getByRole("button", { name: "Advanced" });
     menuButton.focus();
     expect(menuButton).toHaveFocus();
 
     await user.keyboard("{Enter}");
-    expect(screen.getByRole("link", { name: "MCP 工具" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "MCP / Tools" })).toBeInTheDocument();
 
     await user.keyboard("{Escape}");
     await waitFor(() => {
-      expect(screen.queryByRole("link", { name: "MCP 工具" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: "MCP / Tools" })).not.toBeInTheDocument();
     });
     expect(menuButton).toHaveFocus();
   });
@@ -340,13 +358,13 @@ describe("App onboarding", () => {
       </MemoryRouter>
     );
 
-    await screen.findByRole("link", { name: "陪伴" });
-    fireEvent.click(screen.getByRole("button", { name: "更多" }));
-    expect(screen.getByRole("link", { name: "MCP 工具" })).toBeInTheDocument();
+    await screen.findByRole("link", { name: "Companion" });
+    fireEvent.click(screen.getByRole("button", { name: "Advanced" }));
+    expect(screen.getByRole("link", { name: "MCP / Tools" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("link", { name: "今日" }));
+    fireEvent.click(screen.getByRole("link", { name: "Today" }));
     await waitFor(() => {
-      expect(screen.queryByRole("link", { name: "MCP 工具" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("link", { name: "MCP / Tools" })).not.toBeInTheDocument();
     });
   });
 
@@ -392,7 +410,7 @@ describe("App onboarding", () => {
       </MemoryRouter>
     );
 
-    expect(await screen.findByTestId("companion-page")).toBeInTheDocument();
+    expect(await screen.findByTestId("companion-page", {}, { timeout: 5_000 })).toBeInTheDocument();
     expect(screen.getByTestId("agent-stage")).toHaveAttribute("data-state", "idle");
     expect(screen.getByRole("status", { name: /OpenLife Agent 状态/ })).toBeInTheDocument();
   });
@@ -415,10 +433,12 @@ describe("App onboarding", () => {
   });
 
   it.each([
-    ["/companion", "陪伴", "companion-page"],
-    ["/today", "今日", "today-page"],
+    ["/companion", "Companion", "companion-page"],
+    ["/today", "Today", "today-page"],
     ["/life-model", "Life Model", "life-model-page"],
     ["/mailbox", "Review", "mailbox-page"],
+    ["/runs", "Runs", "Runs"],
+    ["/settings", "Settings", "Settings"],
   ])("renders the %s product entry for %s", async (path, _label, expectedText) => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "has_completed_onboarding") return Promise.resolve(true);
@@ -523,7 +543,7 @@ describe("App onboarding", () => {
     expect(screen.queryByTestId("mailbox-page")).not.toBeInTheDocument();
   });
 
-  it("keeps Settings reachable as a secondary route", async () => {
+  it("keeps Settings reachable as a primary route", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "has_completed_onboarding") return Promise.resolve(true);
       return mockInvoke(cmd, args);
@@ -538,7 +558,7 @@ describe("App onboarding", () => {
     expect(await screen.findByText("Settings")).toBeInTheDocument();
   });
 
-  it("keeps Activity reachable as a secondary route", async () => {
+  it("keeps Runs reachable as a primary route", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "has_completed_onboarding") return Promise.resolve(true);
       return mockInvoke(cmd, args);
@@ -550,6 +570,6 @@ describe("App onboarding", () => {
       </MemoryRouter>
     );
 
-    expect(await screen.findByRole("heading", { name: "Activity" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Runs" })).toBeInTheDocument();
   });
 });

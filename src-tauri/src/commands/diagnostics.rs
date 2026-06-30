@@ -68,7 +68,7 @@ pub(crate) async fn get_system_diagnostics_with_state(
         prefer_local_model,
         cloud_api_configured,
         cloud_provider,
-        mut cloud_api_validated,
+        cloud_api_validated,
         mut cloud_api_last_error,
         mut cloud_api_validation_status,
         mut cloud_api_validated_at,
@@ -102,15 +102,15 @@ pub(crate) async fn get_system_diagnostics_with_state(
         )
     };
     let config_for_browser_dogfood = { state.config.lock().await.clone() };
-    if crate::main_chat_agent_stage1_dogfood::stage1_browser_dogfood_scripted_provider_ready(
-        state,
-        &config_for_browser_dogfood,
-    )
-    .await
-    {
-        cloud_api_validated = true;
+    let stage1_dogfood_ready =
+        crate::main_chat_agent_stage1_dogfood::stage1_browser_dogfood_scripted_provider_ready(
+            state,
+            &config_for_browser_dogfood,
+        )
+        .await;
+    if stage1_dogfood_ready {
         cloud_api_last_error = None;
-        cloud_api_validation_status = "stage1_browser_dogfood_scripted".into();
+        cloud_api_validation_status = "scripted_dogfood".into();
         cloud_api_validated_at.get_or_insert_with(|| chrono::Utc::now().to_rfc3339());
         cloud_api_failed_at = None;
         cloud_api_validation_source = Some("stage1_browser_dogfood_scripted".into());
@@ -268,7 +268,8 @@ pub(crate) async fn get_system_diagnostics_with_state(
             state.startup_warnings.join("；")
         ));
     }
-    let chat_ready = life_model_ready && (ollama_online || cloud_api_validated);
+    let cloud_chat_backend_available = cloud_api_validated || stage1_dogfood_ready;
+    let chat_ready = life_model_ready && (ollama_online || cloud_chat_backend_available);
 
     let mut beta_readiness_issues = Vec::new();
     if !chat_ready {
@@ -348,6 +349,13 @@ pub(crate) async fn get_system_diagnostics_with_state(
         && !(chat_session_count > 0 && memory_chunk_count == 0);
 
     let runtime_build_info = crate::runtime_build_info::collect_runtime_build_info().await;
+    let scheduler_for_route_evidence = { state.scheduler.lock().await.clone() };
+    let runtime_route_evidence =
+        crate::main_chat_runtime_facts::build_settings_runtime_route_evidence(
+            state,
+            &scheduler_for_route_evidence,
+        )
+        .await;
 
     Ok(SystemDiagnostics {
         router,
@@ -399,6 +407,7 @@ pub(crate) async fn get_system_diagnostics_with_state(
         high_risk_pending_proposal_count,
         proposal_store_status,
         runtime_build_info,
+        runtime_route_evidence,
     })
 }
 

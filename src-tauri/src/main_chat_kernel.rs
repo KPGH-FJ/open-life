@@ -1,8 +1,8 @@
 use crate::main_chat_runtime_facts::{
-    resolve_post_model_runtime_fact_answer, resolve_pre_model_runtime_fact_answer,
-    MainChatRuntimeFactAnswer, MainChatRuntimeFactPostModelRequest,
-    MainChatRuntimeFactPreModelRequest, RUNTIME_FACT_PROVIDER_GENERATION_PATH,
-    RUNTIME_FACT_PROVIDER_ROUTE_GENERATION_PATH,
+    provider_route_query_has_followup_task, resolve_post_model_runtime_fact_answer,
+    resolve_pre_model_runtime_fact_answer, MainChatRuntimeFactAnswer,
+    MainChatRuntimeFactPostModelRequest, MainChatRuntimeFactPreModelRequest,
+    RUNTIME_FACT_PROVIDER_GENERATION_PATH, RUNTIME_FACT_PROVIDER_ROUTE_GENERATION_PATH,
 };
 use async_trait::async_trait;
 use openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentStateSnapshot;
@@ -49,7 +49,8 @@ use crate::main_chat_react_tool_selection::{
 use crate::main_chat_runtime_support::{
     append_main_chat_agent_transcript, append_main_chat_direct_answer_contract_transcript,
     complete_main_chat_agent_turn_session, enqueue_main_chat_agent_action, fail_main_chat_action,
-    transition_main_chat_action, MainChatAgentTurn,
+    finalize_main_chat_task_failure, transition_main_chat_action, MainChatAgentTurn,
+    MainChatTaskFailureKind,
 };
 use crate::{AppState, SendMessageResult, ToolCallResult, ToolCallStatus};
 
@@ -2619,8 +2620,17 @@ async fn build_successful_kernel_command_surface_result(
     } else {
         None
     };
+    let generated_reply_before_route_fact = reply.clone();
     if let Some(answer) = provider_route_fact_answer.as_ref() {
-        reply = answer.reply.clone();
+        reply = if current_turn_model_generated && provider_route_query_has_followup_task(user_text)
+        {
+            format!(
+                "{}\n\n任务回答：{}",
+                answer.reply, generated_reply_before_route_fact
+            )
+        } else {
+            answer.reply.clone()
+        };
         assistant_message.content = reply.clone();
         if let Some(MainChatKernelEvent::FinalAnswer {
             content_preview,
@@ -3674,6 +3684,18 @@ async fn build_blocked_kernel_command_surface_result(
         if let Err(err) = store.create_run(&agent_run) {
             log::warn!("[MainChatKernel] create failed AgentRun failed: {}", err);
         }
+    }
+    if let Err(err) = finalize_main_chat_task_failure(
+        state,
+        Some(&agent_run.id),
+        Some(task_session_id),
+        MainChatTaskFailureKind::PolicyBlocker,
+        &blocker_summary,
+        "main_chat_kernel.blocked_command_surface",
+    )
+    .await
+    {
+        log::warn!("[MainChatKernel] finalize blocker evidence failed: {}", err);
     }
     let tool_calls = record_kernel_tool_call_evidence(
         state,

@@ -98,7 +98,7 @@ jobs:
         run: node --check frontend/scripts/step6-tauri-webdriver.mjs
 
       - name: Build debug Tauri app binary
-        run: cargo build -p openlife-tauri
+        run: cargo build -p openlife-tauri --locked
 
       - name: Run real Tauri Chat UI Step 6 local acceptance
         run: xvfb-run -a dbus-run-session -- corepack pnpm --dir frontend test:e2e:tauri:step6:local
@@ -193,7 +193,7 @@ jobs:
           '
 
       - name: Run Step 6 Rust final acceptance tests
-        run: cargo test -p openlife-tauri main_chat_final_acceptance -- --nocapture
+        run: cargo test -p openlife-tauri --locked main_chat_final_acceptance -- --nocapture
 
       - name: Upload Step 6 browser evidence report
         if: always()

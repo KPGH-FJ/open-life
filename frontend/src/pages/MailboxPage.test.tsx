@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import MailboxPage from "./MailboxPage";
 import { mockInvoke } from "@/test/mocks/tauri";
@@ -29,7 +29,8 @@ const lowRiskProposal: AgentProposal = {
   evidenceSummaries: [
     {
       id: "ev-low-1",
-      summary: "Builder confirmation supports the candidate.",
+      summary:
+        "用户在构建复盘里反复提到睡眠节律影响第二天专注度，并确认下周先把作息恢复作为短期目标。",
       sourceAssetIds: ["run-low-1"],
       contentDigest: "sha256:abcdef1234567890",
     },
@@ -62,6 +63,33 @@ const readableGoalProposal: AgentProposal = {
   whyOpenLifeThinksThis: "用户在对话中直接确认了新的短期目标。",
   createdAt: "2026-06-03T09:00:00.000Z",
   expiresAt: "2026-07-03T09:00:00.000Z",
+};
+
+const communicationStyleProposal: AgentProposal = {
+  id: "proposal-communication-1",
+  runId: "run-communication-1",
+  proposalType: "preference_update",
+  source: "feedback_evolution",
+  sourceDetail: "maturation:preference.communication",
+  affectedPath: "/preferences/communication",
+  before: "建议太绕",
+  after: "直接给结论，再解释原因",
+  reason: "用户确认希望 OpenLife 更直接。",
+  confidence: 0.91,
+  riskLevel: "low",
+  status: "pending",
+  whyOpenLifeThinksThis: "用户在复盘中明确接受了更直接的沟通偏好。",
+  evidenceSummaries: [
+    {
+      id: "ev-communication-1",
+      summary: "对话证据支持更直接的沟通偏好。",
+      sourceAssetIds: ["run-communication-1"],
+      contentDigest: "sha256:communication",
+    },
+  ],
+  behaviorChecks: [],
+  createdAt: "2026-06-04T09:00:00.000Z",
+  expiresAt: "2026-07-04T09:00:00.000Z",
 };
 
 const unsupportedProposal: AgentProposal = {
@@ -184,8 +212,9 @@ describe("MailboxPage", () => {
     render(<MailboxPage />);
 
     expect(await screen.findByTestId("mailbox-page")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Review Inbox" })).toBeInTheDocument();
-    expect(screen.getByText("待确认")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Review" })).toBeInTheDocument();
+    expect(screen.getByText("2 个待确认")).toBeInTheDocument();
+    expect(screen.getAllByText("待确认").length).toBeGreaterThan(0);
     expect(screen.getByText("已同意")).toBeInTheDocument();
     expect(screen.getByText("已处理")).toBeInTheDocument();
     expect(screen.getByText("草稿修改")).toBeInTheDocument();
@@ -213,17 +242,23 @@ describe("MailboxPage", () => {
   it("shows human reader sections with impact, confidence, and evidence summary", async () => {
     render(<MailboxPage />);
 
-    expect(await screen.findByText("Before / After")).toBeInTheDocument();
+    expect(await screen.findByText("变化对比")).toBeInTheDocument();
     expect(screen.getByText("为什么问你")).toBeInTheDocument();
     expect(screen.getByText("依据")).toBeInTheDocument();
+    expect(screen.getByText("来源摘要")).toBeInTheDocument();
     expect(screen.getByText("影响与风险")).toBeInTheDocument();
     expect(screen.getByText("你的回复")).toBeInTheDocument();
     expect(screen.getAllByText(/影响：低/).length).toBeGreaterThan(0);
     expect(screen.getByText(/把握：86%/)).toBeInTheDocument();
-    expect(await screen.findByTestId("mail-reader")).toHaveTextContent(
-      "Builder review produced a confirmed low-risk goal candidate."
-    );
-    expect(screen.getByText("Builder confirmation supports the candidate.")).toBeInTheDocument();
+    const primarySurface = await screen.findByTestId("review-primary-surface");
+    expect(primarySurface).toHaveTextContent("用户确认下周需要聚焦睡眠节律。");
+    expect(primarySurface).toHaveTextContent("构建形成了这条候选更新");
+    expect(
+      within(primarySurface).queryByText(
+        "Builder review produced a confirmed low-risk goal candidate."
+      )
+    ).not.toBeInTheDocument();
+    expect(within(primarySurface).queryByText(/睡眠节律影响第二天专注度/)).not.toBeInTheDocument();
     expect(screen.getByText(/为什么问你/)).toBeInTheDocument();
     expect(screen.queryByText("raw-sensitive-payload-should-not-render")).not.toBeInTheDocument();
     expect(screen.queryByText(/sha256:abcdef1234567890/)).not.toBeInTheDocument();
@@ -234,19 +269,66 @@ describe("MailboxPage", () => {
 
     render(<MailboxPage />);
 
-    expect(await screen.findByText("Before / After")).toBeInTheDocument();
-    expect(screen.getByText("字段")).toBeInTheDocument();
-    expect(screen.getByText("当前值")).toBeInTheDocument();
-    expect(screen.getByText("将变为")).toBeInTheDocument();
+    expect(await screen.findByText("变化对比")).toBeInTheDocument();
+    expect(screen.getAllByText("字段").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("当前值").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("将变为").length).toBeGreaterThan(0);
     expect(screen.getByText("name")).toBeInTheDocument();
     expect(screen.getByText("「睡前刷手机」")).toBeInTheDocument();
     expect(screen.getByText("「23 点前睡觉」")).toBeInTheDocument();
   });
 
+  it("shows communication style proposals with path-specific trace details", async () => {
+    mockProposals([communicationStyleProposal]);
+
+    render(<MailboxPage />);
+
+    expect((await screen.findAllByText("更新沟通偏好")).length).toBeGreaterThan(0);
+    expect(screen.getByText("沟通偏好")).toBeInTheDocument();
+    expect(screen.getByText("「建议太绕」")).toBeInTheDocument();
+    expect(screen.getByText("「直接给结论，再解释原因」")).toBeInTheDocument();
+    expect(screen.getByText("来源摘录：")).toBeInTheDocument();
+    expect(screen.getAllByText("用户在复盘中明确接受了更直接的沟通偏好。").length).toBeGreaterThan(
+      0
+    );
+    expect(screen.getByText("proposal-communication-1")).toBeInTheDocument();
+    expect(screen.getAllByText("preferences.communication_style").length).toBeGreaterThan(0);
+    expect(screen.getByRole("link", { name: "run-communication-1" })).toHaveAttribute(
+      "href",
+      "#/runs/run-communication-1"
+    );
+    expect(screen.getByText("91%")).toBeInTheDocument();
+    expect(screen.getByText("low")).toBeInTheDocument();
+  });
+
+  it("keeps long source text collapsed until expanded while main actions remain available", async () => {
+    render(<MailboxPage />);
+
+    expect(await screen.findByText("变化对比")).toBeInTheDocument();
+    const primarySurface = await screen.findByTestId("review-primary-surface");
+    expect(within(primarySurface).queryByText(/睡眠节律影响第二天专注度/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "展开" }));
+
+    expect(await screen.findByTestId("review-expanded-source-details")).toHaveTextContent(
+      "睡眠节律影响第二天专注度"
+    );
+    expect(screen.getByRole("button", { name: "同意" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "不同意" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "稍后再说" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "改一下" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "收起" }));
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("review-expanded-source-details")).not.toBeInTheDocument();
+    });
+  });
+
   it("redacts sensitive payload-like values from the main diff panel", async () => {
     render(<MailboxPage />);
 
-    expect(await screen.findByText("Before / After")).toBeInTheDocument();
+    expect(await screen.findByText("变化对比")).toBeInTheDocument();
     expect(
       screen.getAllByText("该字段可能包含敏感或原始内容，主面板只显示摘要。").length
     ).toBeGreaterThan(0);

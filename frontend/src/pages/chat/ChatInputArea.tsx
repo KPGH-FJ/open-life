@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import { Link } from "react-router-dom";
 import {
   Send,
@@ -10,6 +11,7 @@ import {
   Server,
   FileText,
   X,
+  Square,
 } from "lucide-react";
 import type { SystemDiagnostics } from "../../tauri";
 
@@ -24,6 +26,9 @@ interface ChatInputAreaProps {
   onSelectedSkillIdChange: (value: string) => void;
   onComposerFocus?: () => void;
   onSend: () => void;
+  canCancel?: boolean;
+  cancelBusy?: boolean;
+  onCancel?: () => void;
   onContinueStream: () => void;
   onRetryLastMessage: () => void;
   getFixSuggestion: (
@@ -84,16 +89,22 @@ export default function ChatInputArea({
   onSelectedSkillIdChange,
   onComposerFocus,
   onSend,
+  canCancel = false,
+  cancelBusy = false,
+  onCancel,
   onContinueStream,
   onRetryLastMessage,
   getFixSuggestion,
 }: ChatInputAreaProps) {
+  const isComposingRef = useRef(false);
+  const showCancelButton = sending && canCancel && Boolean(onCancel);
+
   return (
     <div
       className={
         companionMode
-          ? "border-t border-stone-200 bg-[#fffefa] px-5 py-4"
-          : "border-t bg-white px-6 py-4"
+          ? "border-t border-stone-200 bg-[#fffefa] px-4 py-4 sm:px-5"
+          : "border-t bg-white px-4 py-4 sm:px-6"
       }
     >
       <div className={companionMode ? "w-full space-y-3" : "mx-auto max-w-3xl space-y-2"}>
@@ -203,15 +214,29 @@ export default function ChatInputArea({
             </label>
           </div>
         )}
-        <div className="flex gap-3">
+        <div className="flex min-w-0 items-end gap-2 sm:gap-3">
           <textarea
             data-testid="chat-input"
             aria-label="消息输入"
             value={input}
             onChange={e => onInputChange(e.target.value)}
             onFocus={onComposerFocus}
+            onCompositionStart={() => {
+              isComposingRef.current = true;
+            }}
+            onCompositionEnd={() => {
+              isComposingRef.current = false;
+            }}
             onKeyDown={e => {
               if (e.key === "Enter" && !e.shiftKey) {
+                const nativeEvent = e.nativeEvent as KeyboardEvent;
+                if (
+                  isComposingRef.current ||
+                  nativeEvent.isComposing ||
+                  nativeEvent.keyCode === 229
+                ) {
+                  return;
+                }
                 e.preventDefault();
                 onSend();
               }
@@ -220,10 +245,31 @@ export default function ChatInputArea({
             placeholder={companionMode ? "输入消息" : "输入消息，按 Enter 发送..."}
             className={
               companionMode
-                ? "min-h-14 flex-1 resize-none rounded-lg border border-stone-300 bg-white px-4 py-4 text-sm text-stone-950 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-stone-900/20"
-                : "flex-1 resize-none rounded-lg border px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                ? "max-h-36 min-h-14 min-w-0 flex-1 resize-none overflow-y-auto rounded-lg border border-stone-300 bg-white px-4 py-4 text-sm text-stone-950 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-stone-900/20"
+                : "max-h-36 min-w-0 flex-1 resize-none overflow-y-auto rounded-lg border px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
             }
           />
+          {showCancelButton && (
+            <button
+              data-testid="cancel-send-button"
+              type="button"
+              aria-label="停止生成"
+              title="停止生成"
+              onClick={onCancel}
+              disabled={cancelBusy}
+              className={
+                companionMode
+                  ? "inline-flex h-14 w-14 shrink-0 items-center justify-center rounded-lg border border-stone-300 bg-white text-stone-800 hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  : "inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+              }
+            >
+              {cancelBusy ? (
+                <Loader2 size={18} className="animate-spin" aria-hidden="true" />
+              ) : (
+                <Square size={17} aria-hidden="true" />
+              )}
+            </button>
+          )}
           <button
             data-testid="send-button"
             type="button"
@@ -234,7 +280,7 @@ export default function ChatInputArea({
             className={
               companionMode
                 ? "flex h-14 w-14 shrink-0 items-center justify-center rounded-lg bg-stone-900 text-white hover:bg-stone-800 disabled:opacity-50"
-                : "rounded-lg bg-indigo-600 px-4 py-2 text-white hover:bg-indigo-700 disabled:opacity-50"
+                : "inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
             }
           >
             {sending ? (

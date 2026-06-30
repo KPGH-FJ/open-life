@@ -17,10 +17,10 @@ export default function ReviewMemoryTab({ config, setConfig, diagnostics }: Revi
     <>
       <section className="grid gap-3 md:grid-cols-3">
         <CapabilityCard
-          title="Review Inbox"
+          title="Review"
           description="记忆、Life Model 和权限建议在确认前不会生效。"
           tone={pendingCount > 0 ? "warning" : "ready"}
-          meta={`${pendingCount} 待确认`}
+          meta={`${pendingCount} pending proposals`}
         >
           <Link
             to="/mailbox"

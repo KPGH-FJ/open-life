@@ -3,6 +3,8 @@ import { useNavigate } from "react-router-dom";
 import {
   listAgentRuns,
   deleteAgentRun,
+  getDangerActionPreflight,
+  buildDangerActionConfirmationEvidence,
   listMainChatAgentTasks,
   resumeMainChatAgentTask,
   cancelMainChatAgentTask,
@@ -10,7 +12,9 @@ import {
   refreshMainChatAgentTaskContext,
   getMainChatAgentTaskDetail,
   type AgentRun,
+  type DangerActionPreflightView,
   type MainChatTaskSummary,
+  type RunEvidenceView,
 } from "../tauri";
 import { safePreviewText } from "../utils/safePreview";
 import {
@@ -22,6 +26,8 @@ import { getMultiStrategyPreviewAudit, previewWarningLabel } from "../utils/prev
 import { buildRunDisplaySummary } from "../utils/runDisplaySummary";
 import { buildRuntimeDisclosure } from "../utils/runtimeDisclosure";
 import RuntimeDisclosureStrip from "../components/RuntimeDisclosureStrip";
+import ConfirmDangerDialog from "../components/ConfirmDangerDialog";
+import DangerActionPreflightDetails from "../components/DangerActionPreflightDetails";
 import {
   Activity,
   Clock,
@@ -41,6 +47,10 @@ function statusIcon(status: string) {
   switch (status) {
     case "running":
       return <Activity size={16} className="text-blue-500 animate-pulse" />;
+    case "blocked":
+      return <AlertTriangle size={16} className="text-amber-500" />;
+    case "timed_out":
+      return <Clock size={16} className="text-red-500" />;
     case "completed":
       return <CheckCircle size={16} className="text-emerald-500" />;
     case "failed":
@@ -90,6 +100,7 @@ function taskStatusLabel(status: string): string {
     running: "运行中",
     waiting_permission: "等待确认",
     blocked: "已阻断",
+    timed_out: "已超时",
     completed: "已完成",
     failed: "失败",
     cancelled: "已取消",
@@ -107,6 +118,18 @@ function nextControlLabel(control: string): string {
     review_permission: "处理权限",
   };
   return labels[control] ?? control.replace(/_/g, " ");
+}
+
+function evidenceViewForSummary(summary?: MainChatTaskSummary): RunEvidenceView | null {
+  return summary?.evidenceView ?? null;
+}
+
+function lifecycleForRun(run: AgentRun, summary?: MainChatTaskSummary): string {
+  return evidenceViewForSummary(summary)?.lifecycleState ?? summary?.lifecycleState ?? run.status;
+}
+
+function allowedControlsForSummary(summary?: MainChatTaskSummary): string[] {
+  return evidenceViewForSummary(summary)?.allowedControls ?? summary?.allowedControls ?? [];
 }
 
 function reactTraceSearchText(run: AgentRun): string {
@@ -151,6 +174,9 @@ export default function RunsPage() {
   const [selectedRuns, setSelectedRuns] = useState<Set<string>>(new Set());
   const [showTrash, setShowTrash] = useState(false);
   const [page, setPage] = useState(0);
+  const [deletePreflight, setDeletePreflight] = useState<DangerActionPreflightView | null>(null);
+  const [deleteTargetIds, setDeleteTargetIds] = useState<string[]>([]);
+  const [deleteBusy, setDeleteBusy] = useState(false);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -208,6 +234,8 @@ export default function RunsPage() {
   const taskSummaryByRunId = new Map(taskSummaries.map(summary => [summary.runId, summary]));
 
   const filteredRuns = runs.filter(run => {
+    const taskSummary = taskSummaryByRunId.get(run.id);
+    const lifecycle = lifecycleForRun(run, taskSummary);
     // Trash filter
     if (showTrash) {
       return !!run.deletedAt;
@@ -216,7 +244,7 @@ export default function RunsPage() {
     }
 
     // Status filter
-    if (statusFilter !== "all" && run.status !== statusFilter) return false;
+    if (statusFilter !== "all" && lifecycle !== statusFilter) return false;
 
     // Kind filter
     if (kindFilter !== "all" && run.kind !== kindFilter) return false;
@@ -224,7 +252,7 @@ export default function RunsPage() {
     // Search
     if (searchQuery) {
       const query = searchQuery.toLowerCase();
-      const displaySummary = buildRunDisplaySummary(run, taskSummaryByRunId.get(run.id));
+      const displaySummary = buildRunDisplaySummary(run, taskSummary);
       const audit = getMultiStrategyPreviewAudit(run);
       const productTrace = getPlanExecuteProductTrace(run);
       const auditText = audit
@@ -263,21 +291,50 @@ export default function RunsPage() {
   }
 
   async function handleBatchDelete() {
-    if (!confirm(`确定要删除选中的 ${selectedRuns.size} 条记录吗？`)) return;
+    const targetIds = Array.from(selectedRuns);
+    if (targetIds.length === 0) return;
+    setDeleteBusy(true);
+    setError(null);
     try {
-      for (const runId of selectedRuns) {
-        await deleteAgentRun(runId);
+      const view = await getDangerActionPreflight(
+        targetIds.length === 1 ? "agent_run_delete" : "agent_run_bulk_delete",
+        false,
+        { targetIds, affectedCount: targetIds.length }
+      );
+      setDeleteTargetIds(targetIds);
+      setDeletePreflight(view);
+    } catch (e) {
+      setError(`删除预检失败: ${String(e)}`);
+    } finally {
+      setDeleteBusy(false);
+    }
+  }
+
+  async function continueBatchDelete() {
+    if (!deletePreflight || !deletePreflight.finalActionEnabled) return;
+    const evidence = buildDangerActionConfirmationEvidence(deletePreflight, deleteTargetIds);
+    setDeleteBusy(true);
+    setError(null);
+    try {
+      for (const runId of deleteTargetIds) {
+        await deleteAgentRun(runId, "user_confirmed_preflight", evidence);
       }
       setSelectedRuns(new Set());
+      setDeletePreflight(null);
+      setDeleteTargetIds([]);
       await loadRuns();
     } catch (e) {
       setError(String(e));
+    } finally {
+      setDeleteBusy(false);
     }
   }
 
   const statusOptions = [
     { value: "all", label: "全部状态" },
     { value: "running", label: "运行中" },
+    { value: "blocked", label: "已阻断" },
+    { value: "timed_out", label: "已超时" },
     { value: "completed", label: "已完成" },
     { value: "failed", label: "失败" },
     { value: "cancelled", label: "已取消" },
@@ -293,12 +350,38 @@ export default function RunsPage() {
 
   return (
     <div className="h-full overflow-auto p-6">
+      {deletePreflight && (
+        <ConfirmDangerDialog
+          open={Boolean(deletePreflight)}
+          title={
+            deletePreflight.actionType === "agent_run_bulk_delete"
+              ? "动作预检：批量删除运行记录"
+              : "动作预检：删除运行记录"
+          }
+          description={<DangerActionPreflightDetails view={deletePreflight} />}
+          confirmLabel={deletePreflight.finalActionEnabled ? "继续删除" : "Safe Mode 已阻断"}
+          cancelLabel="返回"
+          severity="danger"
+          confirmationText={
+            deletePreflight.confirmationRequired && deletePreflight.confirmationPhrase
+              ? deletePreflight.confirmationPhrase
+              : undefined
+          }
+          confirmDisabled={!deletePreflight.finalActionEnabled}
+          busy={deleteBusy}
+          onConfirm={() => void continueBatchDelete()}
+          onCancel={() => {
+            setDeletePreflight(null);
+            setDeleteTargetIds([]);
+          }}
+        />
+      )}
       <div className="max-w-5xl mx-auto">
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
           <div>
             <h1 className="text-2xl font-bold text-stone-900">
-              {showTrash ? "已删除记录" : "Activity"}
+              {showTrash ? "已删除记录" : "Runs"}
             </h1>
             <div className="text-sm text-stone-500">
               运行记录 · 共 {filteredRuns.length} 条{showTrash && " (当前版本不可恢复)"}
@@ -398,10 +481,11 @@ export default function RunsPage() {
               ) : (
                 <button
                   onClick={handleBatchDelete}
-                  className="flex items-center gap-1 px-3 py-1.5 bg-red-600 text-white rounded-lg text-sm hover:bg-red-700 transition"
+                  disabled={deleteBusy}
+                  className="flex items-center gap-1 px-3 py-1.5 bg-red-600 text-white rounded-lg text-sm hover:bg-red-700 transition disabled:opacity-50"
                 >
                   <Trash2 size={14} />
-                  删除
+                  {deleteBusy ? "预检中..." : "删除"}
                 </button>
               )}
               <button
@@ -414,14 +498,14 @@ export default function RunsPage() {
           )}
         </div>
 
-        {/* Activity List */}
+        {/* Runs List */}
         {loading ? (
           <div className="rounded-xl border border-stone-200 bg-white px-4 py-12 text-center text-stone-500">
-            正在加载 Activity...
+            正在加载 Runs...
           </div>
         ) : error ? (
           <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-6 text-rose-900">
-            <div className="text-sm font-semibold">Activity 暂不可用</div>
+            <div className="text-sm font-semibold">Runs 暂不可用</div>
             <div className="mt-1 text-xs leading-5 text-rose-800">{error}</div>
             <button
               onClick={loadRuns}
@@ -462,10 +546,16 @@ export default function RunsPage() {
                 const productTrace = getPlanExecuteProductTrace(run);
                 const warningCount = previewAudit?.warnings?.length ?? 0;
                 const taskSummary = taskSummaryByRunId.get(run.id);
+                const evidenceView = evidenceViewForSummary(taskSummary);
+                const lifecycle = lifecycleForRun(run, taskSummary);
+                const allowedControls = allowedControlsForSummary(taskSummary);
                 const displaySummary = buildRunDisplaySummary(run, taskSummary);
                 const subtitle =
                   productTrace || previewAudit ? runSubtitle(run) : displaySummary.subtitle;
                 const stale = isPossiblyStaleRun(run, taskSummary);
+                const actionControls = allowedControls.filter(control =>
+                  ["resume", "retry", "cancel", "refresh_context"].includes(control)
+                );
                 return (
                   <div
                     key={run.id}
@@ -488,7 +578,7 @@ export default function RunsPage() {
                       <div className="flex-1" onClick={() => navigate(`/runs/${run.id}`)}>
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-3">
-                            {statusIcon(run.status)}
+                            {statusIcon(lifecycle)}
                             <div>
                               <div className="font-medium text-stone-900">{runKindLabel(run)}</div>
                               <div className="text-xs text-stone-500 mt-0.5">{subtitle}</div>
@@ -508,7 +598,13 @@ export default function RunsPage() {
                         </div>
                         <div className="mt-3">
                           <RuntimeDisclosureStrip
-                            view={buildRuntimeDisclosure(run, { taskSummary })}
+                            view={buildRuntimeDisclosure(run, {
+                              taskSummary,
+                              evidenceView,
+                              runtimeRouteEvidence:
+                                evidenceView?.routeEvidence ?? taskSummary?.routeEvidence ?? null,
+                              strictRuntimeRouteEvidence: Boolean(evidenceView),
+                            })}
                             runId={run.id}
                             compact
                           />
@@ -516,51 +612,69 @@ export default function RunsPage() {
                         {taskSummary && (
                           <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs text-stone-600">
                             <span className="font-semibold text-stone-800">
-                              任务{taskStatusLabel(taskSummary.status)}
+                              任务{taskStatusLabel(lifecycle)}
                             </span>
                             <span>
-                              下一步：{nextControlLabel(taskSummary.nextRecommendedControl)}
+                              下一步：
+                              {nextControlLabel(
+                                evidenceView?.nextRecommendedControl ??
+                                  taskSummary.nextRecommendedControl
+                              )}
                             </span>
                             {stale && (
                               <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 font-medium text-amber-800">
-                                可能已卡住
+                                连续性需复核
                               </span>
                             )}
-                            <div className="ml-auto flex items-center gap-1">
-                              <button
-                                type="button"
-                                onClick={event => {
-                                  event.stopPropagation();
-                                  void handleTaskControl(taskSummary, "resume");
-                                }}
-                                disabled={taskActionBusy !== null}
-                                className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700 disabled:opacity-50"
-                              >
-                                继续
-                              </button>
-                              <button
-                                type="button"
-                                onClick={event => {
-                                  event.stopPropagation();
-                                  void handleTaskControl(taskSummary, "retry");
-                                }}
-                                disabled={taskActionBusy !== null}
-                                className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700 disabled:opacity-50"
-                              >
-                                重试
-                              </button>
-                              <button
-                                type="button"
-                                onClick={event => {
-                                  event.stopPropagation();
-                                  void handleTaskControl(taskSummary, "cancel");
-                                }}
-                                disabled={taskActionBusy !== null}
-                                className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700 disabled:opacity-50"
-                              >
-                                取消
-                              </button>
-                            </div>
+                            {evidenceView && (
+                              <>
+                                <span>
+                                  事件：
+                                  {evidenceView.eventTimeline[evidenceView.eventTimeline.length - 1]
+                                    ?.summary ?? "无"}
+                                </span>
+                                <span>
+                                  证据：{evidenceView.actionCount} action /{" "}
+                                  {evidenceView.observationCount} observation
+                                </span>
+                                {evidenceView.blockers.length > 0 && (
+                                  <span>阻断：{evidenceView.blockers.join(", ")}</span>
+                                )}
+                                {evidenceView.proposals.length > 0 && (
+                                  <span>提案：{evidenceView.proposals.join(", ")}</span>
+                                )}
+                                {evidenceView.planRefs.length > 0 && (
+                                  <span>Refs：{evidenceView.planRefs.slice(0, 2).join(", ")}</span>
+                                )}
+                                <span>脱敏：{evidenceView.redactionState}</span>
+                              </>
+                            )}
+                            {actionControls.length > 0 && (
+                              <div className="ml-auto flex items-center gap-1">
+                                {actionControls.map(control => (
+                                  <button
+                                    key={control}
+                                    type="button"
+                                    onClick={event => {
+                                      event.stopPropagation();
+                                      const command =
+                                        control === "refresh_context"
+                                          ? "refresh"
+                                          : control === "resume"
+                                            ? "resume"
+                                            : control === "retry"
+                                              ? "retry"
+                                              : "cancel";
+                                      void handleTaskControl(taskSummary, command);
+                                    }}
+                                    disabled={taskActionBusy !== null}
+                                    className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700 disabled:opacity-50"
+                                  >
+                                    {nextControlLabel(control)}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
                           </div>
                         )}
                         {!taskSummary && run.status === "running" && (
