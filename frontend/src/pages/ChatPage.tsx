@@ -5431,6 +5431,9 @@ export default function ChatPage({
           onSelectedSkillIdChange={setSelectedSkillId}
           onComposerFocus={() => emitCompanionStage("listening")}
           onSend={handleSend}
+          canCancel={canCancelCurrentMainChatTask}
+          cancelBusy={agentTaskControlBusy}
+          onCancel={handleCancelMainChatTask}
           onContinueStream={handleContinueStream}
           onRetryLastMessage={retryLastUserMessage}
           getFixSuggestion={getFixSuggestion}
