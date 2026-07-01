@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import { BoundaryChip, StatusChip, TechnicalDetails } from "./product/ProductPrimitives";
 import type { RuntimeDisclosureView } from "../utils/runtimeDisclosure";
+import { runDetailRoute } from "../productShellContract";
 
 export default function RuntimeDisclosureStrip({
   view,
@@ -40,7 +41,7 @@ export default function RuntimeDisclosureStrip({
       <div className="mt-2 flex flex-wrap items-center gap-2">
         {runId && (
           <Link
-            to={`/runs/${runId}`}
+            to={runDetailRoute(runId)}
             className="font-semibold text-stone-900 underline-offset-4 hover:underline"
           >
             查看 Runs 详情

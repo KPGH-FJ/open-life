@@ -1133,7 +1133,7 @@ fn runtime_memory_proposal_proof(
     append_final_result(
         &session_store,
         &session.id,
-        "Memory change is proposal-only and waiting for Review Center action.",
+        "Memory change is proposal-only and waiting for Mailbox action.",
         serde_json::json!({
             "proposalId": proposal.id,
             "directWritesExecuted": false

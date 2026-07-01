@@ -307,7 +307,10 @@ describe("LifeModelPage", () => {
     fireEvent.click(await screen.findByRole("tab", { name: "概览" }));
 
     expect(await screen.findByText("模型还没有形成稳定摘要")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "去构建" })).toHaveAttribute("href", "/builder");
+    expect(screen.getByRole("link", { name: "去构建" })).toHaveAttribute(
+      "href",
+      "/life-model/build"
+    );
   });
 
   it("keeps builder, memory, and mailbox reachable", async () => {
@@ -315,14 +318,17 @@ describe("LifeModelPage", () => {
 
     expect(await screen.findByRole("link", { name: "开始快速构建" })).toHaveAttribute(
       "href",
-      "/builder"
+      "/life-model/build"
     );
-    expect(screen.getByRole("link", { name: "开始对话构建" })).toHaveAttribute("href", "/builder");
+    expect(screen.getByRole("link", { name: "开始对话构建" })).toHaveAttribute(
+      "href",
+      "/life-model/build"
+    );
     expect(screen.getByRole("button", { name: "暂不可用" })).toBeDisabled();
 
     fireEvent.click(screen.getByRole("tab", { name: "依据" }));
     expect(screen.getByRole("link", { name: "查看记忆" })).toHaveAttribute("href", "/memory");
-    expect(screen.getByRole("link", { name: "打开 Review" })).toHaveAttribute("href", "/mailbox");
+    expect(screen.getByRole("link", { name: "打开 Mailbox" })).toHaveAttribute("href", "/mailbox");
   });
 
   it("uses product language instead of engineering readiness/proposal labels in the build tab", async () => {
@@ -330,7 +336,7 @@ describe("LifeModelPage", () => {
 
     expect((await screen.findAllByText("构建状态")).length).toBeGreaterThan(0);
     expect(
-      screen.getByText("构建产生候选，Review 确认后才会更新 Life Model。")
+      screen.getByText("构建产生候选，Mailbox 确认后才会更新 Life Model。")
     ).toBeInTheDocument();
     expect(screen.queryByText("Builder readiness")).not.toBeInTheDocument();
     expect(screen.queryByText(/Builder review/)).not.toBeInTheDocument();
@@ -387,7 +393,7 @@ describe("LifeModelPage", () => {
 
     expect(await screen.findByText("发现可能影响画像可信度的字段")).toBeInTheDocument();
     expect(
-      screen.getByText("本次视图处理，不会改写 Life Model；正式更新仍需 Review 确认。")
+      screen.getByText("本次视图处理，不会改写 Life Model；正式更新仍需 Mailbox 确认。")
     ).toBeInTheDocument();
     expect(screen.getByText("身份摘要过短")).toBeInTheDocument();
     expect(screen.getByText("目标里混入了状态或系统回执")).toBeInTheDocument();

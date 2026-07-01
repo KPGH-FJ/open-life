@@ -271,54 +271,48 @@ pub(crate) async fn get_system_diagnostics_with_state(
     let cloud_chat_backend_available = cloud_api_validated || stage1_dogfood_ready;
     let chat_ready = life_model_ready && (ollama_online || cloud_chat_backend_available);
 
-    let mut beta_readiness_issues = Vec::new();
+    let mut usage_readiness_issues = Vec::new();
     if !chat_ready {
-        beta_readiness_issues
-            .push("核心聊天链路未就绪，请先修复试用就绪检查中的问题。".to_string());
+        usage_readiness_issues
+            .push("核心聊天链路未就绪，请先修复使用准备检查中的问题。".to_string());
     }
     if model_empty && pending_builder_review_sessions > 0 {
-        beta_readiness_issues.push(format!(
-            "Builder 中仍有 {} 个待确认 Review：请先回到 Builder 审阅并应用结果，再验证个性化体验。",
+        usage_readiness_issues.push(format!(
+            "人生模型构建中仍有 {} 个待确认项：请先到 Mailbox 审阅并应用结果，再验证个性化体验。",
             pending_builder_review_sessions
         ));
     } else if model_empty && unfinished_builder_sessions > 0 {
-        beta_readiness_issues.push(
-            "Builder 中仍有未完成或待确认的构建会话：请先回到 Builder 完成 Review 并应用结果，再验证个性化体验。".to_string(),
+        usage_readiness_issues.push(
+            "人生模型构建中仍有未完成会话：请先回到 Life Model 构建流程完成确认，再验证个性化体验。".to_string(),
         );
     }
     if model_empty {
-        beta_readiness_issues.push(
-            "人生模型尚未构建：请通过「构建」模式创建初始模型，以便获得个性化体验。".to_string(),
+        usage_readiness_issues.push(
+            "人生模型尚未构建：请通过 Life Model 构建流程创建初始模型，以便获得个性化体验。"
+                .to_string(),
         );
     }
     if chat_session_count == 0 && !model_empty {
-        beta_readiness_issues
-            .push("尚未开始任何对话：建议到 Chat 页面进行一次对话，验证核心链路。".to_string());
+        usage_readiness_issues
+            .push("尚未开始任何对话：建议到 Companion 进行一次对话，验证核心链路。".to_string());
     }
-    if !cloud_api_configured {
-        beta_readiness_issues.push("未配置云端 API：试用期间建议至少配置 OpenRouter 或 OpenAI API Key，以获得更稳定的体验。".to_string());
-    } else if !cloud_api_validated {
-        beta_readiness_issues.push(format!(
-            "{} API 尚未通过真实连接验证：请先在 Settings 测试连接。",
+    if cloud_api_configured && !cloud_api_validated {
+        usage_readiness_issues.push(format!(
+            "{} API 尚未通过真实连接验证：如需使用云端模型，请先在 Settings 测试连接。",
             cloud_provider
         ));
     }
-    if !onboarding_completed {
-        beta_readiness_issues.push(
-            "首次启动引导尚未完成：请完成或跳过 Onboarding，以确保新用户路径可验证。".to_string(),
-        );
-    }
     if !state.startup_warnings.is_empty() {
-        beta_readiness_issues.push(
+        usage_readiness_issues.push(
             "数据存储曾在启动时降级：请先确认数据目录和数据库状态，再继续深度试用。".to_string(),
         );
     }
     if vector_corrupt_embedding_count > 0 {
-        beta_readiness_issues
+        usage_readiness_issues
             .push("向量记忆索引存在损坏记录：建议重建索引后再验证长期记忆体验。".to_string());
     }
     if chat_session_count > 0 && memory_chunk_count == 0 {
-        beta_readiness_issues.push(
+        usage_readiness_issues.push(
             "已有聊天记录，但语义记忆索引仍为空：建议先重建记忆索引，再验证长期记忆与校准体验。"
                 .to_string(),
         );
@@ -339,14 +333,14 @@ pub(crate) async fn get_system_diagnostics_with_state(
         }
     };
 
-    let beta_ready = chat_ready
+    let usage_ready = chat_ready
         && !model_empty
         && chat_session_count > 0
-        && cloud_api_validated
-        && onboarding_completed
         && state.startup_warnings.is_empty()
         && vector_corrupt_embedding_count == 0
         && !(chat_session_count > 0 && memory_chunk_count == 0);
+    let beta_ready = usage_ready;
+    let beta_readiness_issues = usage_readiness_issues.clone();
 
     let runtime_build_info = crate::runtime_build_info::collect_runtime_build_info().await;
     let scheduler_for_route_evidence = { state.scheduler.lock().await.clone() };
@@ -397,6 +391,8 @@ pub(crate) async fn get_system_diagnostics_with_state(
         model_empty,
         chat_session_count,
         onboarding_completed,
+        usage_ready,
+        usage_readiness_issues,
         beta_ready,
         beta_readiness_issues,
         builder_completion,

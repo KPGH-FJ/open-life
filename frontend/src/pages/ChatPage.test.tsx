@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, fireEvent, act } from "@testing-library/react";
 import { BrowserRouter, MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import ChatPage, { buildMainChatAgentStatusView } from "./ChatPage";
-import ProposalReviewPage from "./ProposalReviewPage";
+import MailboxPage from "./MailboxPage";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { mockInvoke, mockLifeModel } from "@/test/mocks/tauri";
@@ -898,7 +898,7 @@ describe("ChatPage", () => {
     );
 
     expect(await screen.findByText("先建立你的人生模型")).toBeInTheDocument();
-    expect(screen.getByText("先看仪表盘")).toBeInTheDocument();
+    expect(screen.getByText("先看今日页")).toBeInTheDocument();
     expect(screen.getByText(/也可以直接使用下面的场景卡开始一次通用对话/)).toBeInTheDocument();
   });
 
@@ -1424,7 +1424,7 @@ describe("ChatPage", () => {
     expect(screen.getByText("Execution evidence")).toBeInTheDocument();
     expect(screen.getByText("Final answer")).toBeInTheDocument();
     expect(screen.queryByText("Agent Control Plane")).not.toBeInTheDocument();
-    expect(screen.queryByText("Reviewer trace")).not.toBeInTheDocument();
+    expect(screen.queryByText("Audit trace")).not.toBeInTheDocument();
   });
 
   it("renders kernel-event thinking, tool running, and tool observation states", async () => {
@@ -1591,10 +1591,13 @@ describe("ChatPage", () => {
     expect(await screen.findByText("Proposal created")).toBeInTheDocument();
     expect(screen.getAllByText("Permission needed").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Blocked")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Open proposal" })).toHaveAttribute("href", "/review");
-    expect(screen.getByRole("link", { name: "Open Review Center" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Open proposal" })).toHaveAttribute(
       "href",
-      "/review"
+      "/mailbox?proposal=proposal-permission-k5-1"
+    );
+    expect(screen.getByRole("link", { name: "Open Mailbox" })).toHaveAttribute(
+      "href",
+      "/mailbox"
     );
     expect(screen.getByText(/Next:/)).toBeInTheDocument();
   });
@@ -2528,7 +2531,7 @@ describe("ChatPage", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Show Main Chat diagnostics" }));
     await screen.findAllByText("cancelled");
     expect(screen.getAllByText("cancelled").length).toBeGreaterThan(0);
-    expect(screen.getByText("Review summary")).toBeInTheDocument();
+    expect(screen.getByText("Plan summary")).toBeInTheDocument();
     expect(screen.getByText("Completed")).toBeInTheDocument();
     expect(screen.getByText("Observations used")).toBeInTheDocument();
     expect(screen.getByText("Unresolved")).toBeInTheDocument();
@@ -3266,9 +3269,9 @@ describe("ChatPage", () => {
     expect(screen.getByText("Proposal store unavailable")).toBeInTheDocument();
     expect(screen.getByText("Proposal required")).toBeInTheDocument();
     expect(screen.getByText("Permission required")).toBeInTheDocument();
-    expect(screen.getAllByRole("link", { name: "Open Review Center" })[0]).toHaveAttribute(
+    expect(screen.getAllByRole("link", { name: "Open Mailbox" })[0]).toHaveAttribute(
       "href",
-      "/review"
+      "/mailbox"
     );
     expect(screen.getByText("Pending blockers")).toBeInTheDocument();
     expect(screen.getAllByText("resumeBlockedByPendingPermission").length).toBeGreaterThanOrEqual(
@@ -3572,13 +3575,13 @@ describe("ChatPage", () => {
     const status = await screen.findByTestId("main-chat-agent-status");
     expect(status).toHaveAttribute("data-agent-product-status", "permission_pending");
     expect(screen.getByText("Permission pending")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Review proposal" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Open proposal in Mailbox" })).toHaveAttribute(
       "href",
-      "/review"
+      "/mailbox"
     );
-    expect(screen.getByRole("link", { name: "Review permission" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Open permission in Mailbox" })).toHaveAttribute(
       "href",
-      "/review"
+      "/mailbox"
     );
     expect(screen.getByRole("button", { name: "Resume current task" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Retry current action" })).toBeEnabled();
@@ -3735,7 +3738,7 @@ describe("ChatPage", () => {
       <MemoryRouter initialEntries={["/chat"]}>
         <Routes>
           <Route path="/chat" element={<ChatPage />} />
-          <Route path="/review" element={<ProposalReviewPage />} />
+          <Route path="/mailbox" element={<MailboxPage />} />
         </Routes>
       </MemoryRouter>
     );
@@ -3789,11 +3792,11 @@ describe("ChatPage", () => {
     });
 
     fireEvent.click(await screen.findByRole("button", { name: "Show Main Chat diagnostics" }));
-    fireEvent.click((await screen.findAllByRole("link", { name: "Open Review Center" }))[0]);
+    fireEvent.click((await screen.findAllByRole("link", { name: "Open Mailbox" }))[0]);
 
-    expect(await screen.findByText("Review Center")).toBeInTheDocument();
+    expect(await screen.findByTestId("mailbox-page")).toBeInTheDocument();
     expect(await screen.findByText("tools.permissions.file.read")).toBeInTheDocument();
-    fireEvent.click(screen.getByText("应用"));
+    fireEvent.click(screen.getByRole("button", { name: "同意" }));
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith(
@@ -4311,7 +4314,7 @@ describe("ChatPage", () => {
     await runControlledPilotFromChat();
     fireEvent.click(await screen.findByRole("button", { name: "Promote Pilot Response" }));
 
-    expect(screen.getByText("Review pilot promotion")).toBeInTheDocument();
+    expect(screen.getByText("Confirm pilot promotion")).toBeInTheDocument();
     expect(screen.getAllByText("Pilot-only answer")).toHaveLength(2);
     expect(screen.getAllByText("run-controlled-pilot-1")).toHaveLength(2);
     expect(screen.getByText("Source session")).toBeInTheDocument();
@@ -4323,7 +4326,7 @@ describe("ChatPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Cancel Promotion" }));
 
-    expect(screen.queryByText("Review pilot promotion")).not.toBeInTheDocument();
+    expect(screen.queryByText("Confirm pilot promotion")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Promote Pilot Response" })).toBeInTheDocument();
     expect(invoke).not.toHaveBeenCalledWith("save_chat_message", expect.anything());
   });

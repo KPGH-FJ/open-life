@@ -3026,13 +3026,13 @@ fn is_kernel_proposal_outcome(kind: MainChatKernelWriteOutcomeKind) -> bool {
 fn kernel_write_action_description(outcome: &MainChatKernelWriteOutcome) -> String {
     match outcome.kind {
         MainChatKernelWriteOutcomeKind::MemoryProposal => {
-            "Create a Review Center Memory proposal from MainChatKernel.".into()
+            "Create a Mailbox Memory proposal from MainChatKernel.".into()
         }
         MainChatKernelWriteOutcomeKind::LifeModelProposal => {
-            "Create a Review Center LifeModel proposal from MainChatKernel.".into()
+            "Create a Mailbox LifeModel proposal from MainChatKernel.".into()
         }
         MainChatKernelWriteOutcomeKind::FileWriteProposal => {
-            "Create a Review Center file write proposal from MainChatKernel.".into()
+            "Create a Mailbox file write proposal from MainChatKernel.".into()
         }
         MainChatKernelWriteOutcomeKind::ExternalConfirmationBlocker => {
             "External write requested from MainChatKernel; wait for explicit confirmation.".into()

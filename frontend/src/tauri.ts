@@ -2706,7 +2706,11 @@ export interface SystemDiagnostics {
   model_empty: boolean;
   chat_session_count: number;
   onboarding_completed: boolean;
+  usage_ready?: boolean;
+  usage_readiness_issues?: string[];
+  /** @deprecated Use usage_ready. Kept for backward-compatible diagnostics payloads only. */
   beta_ready: boolean;
+  /** @deprecated Use usage_readiness_issues. */
   beta_readiness_issues: string[];
   builder_completion: BuilderCompletion;
   data_files: DataFileStatus;
@@ -3739,14 +3743,6 @@ export async function getPrivacyPolicy(): Promise<PrivacyPolicy> {
 
 export async function setPrivacyPolicy(policy: PrivacyPolicy): Promise<void> {
   return safeInvoke("set_privacy_policy", { policy });
-}
-
-export async function hasCompletedOnboarding(): Promise<boolean> {
-  return safeInvoke<boolean>("has_completed_onboarding");
-}
-
-export async function markOnboardingCompleted(): Promise<void> {
-  return safeInvoke("mark_onboarding_completed");
 }
 
 export interface LastModelError {

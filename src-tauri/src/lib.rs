@@ -389,7 +389,11 @@ pub struct SystemDiagnostics {
     pub model_empty: bool,
     pub chat_session_count: usize,
     pub onboarding_completed: bool,
+    pub usage_ready: bool,
+    pub usage_readiness_issues: Vec<String>,
+    // Deprecated compatibility alias for diagnostics payloads; use usage_ready.
     pub beta_ready: bool,
+    // Deprecated compatibility alias for diagnostics payloads; use usage_readiness_issues.
     pub beta_readiness_issues: Vec<String>,
     pub builder_completion: BuilderCompletion,
     pub ollama_models: Vec<OllamaModelInfo>,

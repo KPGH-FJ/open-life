@@ -10,6 +10,7 @@ import {
   ShieldCheck,
   XCircle,
 } from "lucide-react";
+import { runDetailRoute } from "../../../productShellContract";
 import type {
   ControlledChatCutoverCandidateOutput,
   ControlledChatCutoverCandidateReviewDecisionKind,
@@ -691,7 +692,7 @@ export function RuntimePreviewPanel(props: MultiStrategyPanelProps) {
             </span>
           </span>
           <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800">
-            Preview/Beta
+            内部预览
           </span>
         </button>
 
@@ -818,7 +819,7 @@ export function RuntimePreviewPanel(props: MultiStrategyPanelProps) {
                   {result.runId && (
                     <button
                       type="button"
-                      onClick={() => navigate(`/runs/${result.runId}`)}
+                      onClick={() => navigate(runDetailRoute(result.runId!))}
                       className="inline-flex items-center gap-1.5 rounded-md bg-white px-3 py-1.5 text-xs font-medium text-stone-700 ring-1 ring-stone-200 hover:bg-stone-100"
                     >
                       <ExternalLink size={13} />

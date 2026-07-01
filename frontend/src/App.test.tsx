@@ -5,14 +5,39 @@ import { MemoryRouter } from "react-router-dom";
 import App from "./App";
 import { invoke } from "@tauri-apps/api/core";
 import { mockInvoke } from "@/test/mocks/tauri";
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
   ADVANCED_PRODUCT_ROUTE_GROUPS,
+  ADVANCED_PRODUCT_ROUTES,
   AGENT_STAGE_ASSET_ROOT,
+  LEGACY_PRODUCT_REDIRECTS,
   PRIMARY_PRODUCT_ROUTES,
   RETAINED_LEGACY_ROUTES,
+  RUN_DETAIL_ROUTE_PATTERN,
+  SECONDARY_PRODUCT_ROUTES,
+  mailboxLinkTarget,
+  mailboxRoute,
+  mailboxRouteState,
+  runDetailRoute,
+  runDetailRoutePattern,
 } from "./productShellContract";
+
+function productionSourceFiles(dir = join(process.cwd(), "src")): string[] {
+  const entries = readdirSync(dir);
+  const files: string[] = [];
+  for (const entry of entries) {
+    const fullPath = join(dir, entry);
+    const stat = statSync(fullPath);
+    if (stat.isDirectory()) {
+      if (entry === "test") continue;
+      files.push(...productionSourceFiles(fullPath));
+    } else if (/\.(ts|tsx)$/.test(entry) && !/\.test\.(ts|tsx)$/.test(entry)) {
+      files.push(fullPath);
+    }
+  }
+  return files;
+}
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -22,42 +47,13 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn().mockResolvedValue(() => {}),
 }));
 
-describe("App onboarding", () => {
+describe("App product surface routing", () => {
   beforeEach(() => {
     vi.mocked(invoke).mockImplementation(mockInvoke);
   });
 
   afterEach(() => {
     vi.clearAllMocks();
-  });
-
-  it("shows onboarding when first-run flag is not completed", async () => {
-    render(
-      <MemoryRouter>
-        <App />
-      </MemoryRouter>
-    );
-
-    expect(await screen.findByText("欢迎使用 OpenLife")).toBeInTheDocument();
-  });
-
-  it("hides onboarding after completion", async () => {
-    render(
-      <MemoryRouter>
-        <App />
-      </MemoryRouter>
-    );
-
-    expect(await screen.findByText("欢迎使用 OpenLife")).toBeInTheDocument();
-    fireEvent.click(screen.getByText("下一步"));
-    fireEvent.click(screen.getByText("下一步"));
-    fireEvent.click(screen.getByText("下一步"));
-    fireEvent.click(screen.getByText("关闭引导，稍后再探索"));
-
-    await waitFor(() => {
-      expect(screen.queryByText("欢迎使用 OpenLife")).not.toBeInTheDocument();
-    });
-    expect(invoke).toHaveBeenCalledWith("mark_onboarding_completed", undefined);
   });
 
   it("shows safe mode banner when diagnostics reports degraded storage", async () => {
@@ -136,7 +132,7 @@ describe("App onboarding", () => {
     expect(screen.getByText("打开恢复控制台")).toBeInTheDocument();
   });
 
-  it("shows beta progress banner when diagnostics is not beta ready but storage is healthy", async () => {
+  it("shows usage readiness banner when diagnostics is not usage ready but storage is healthy", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_system_diagnostics") {
         return Promise.resolve({
@@ -174,6 +170,8 @@ describe("App onboarding", () => {
           model_empty: false,
           chat_session_count: 0,
           onboarding_completed: false,
+          usage_ready: false,
+          usage_readiness_issues: ["还没有完成首轮真实对话验证。"],
           beta_ready: false,
           beta_readiness_issues: ["还没有完成首轮真实对话验证。"],
           builder_completion: {
@@ -207,7 +205,7 @@ describe("App onboarding", () => {
       </MemoryRouter>
     );
 
-    expect(await screen.findByText(/Beta 使用准备中/)).toBeInTheDocument();
+    expect(await screen.findByText(/使用准备中/)).toBeInTheDocument();
     expect(screen.getByText("查看准备状态")).toBeInTheDocument();
   });
 
@@ -238,28 +236,86 @@ describe("App onboarding", () => {
     expect(screen.queryByText("欢迎使用 OpenLife")).not.toBeInTheDocument();
   });
 
-  it("declares the W159 product route and label contract", () => {
+  it("declares the canonical product route registry", () => {
     expect(PRIMARY_PRODUCT_ROUTES).toEqual([
-      { label: "Today", path: "/today", legacyAlias: "/" },
-      { label: "Companion", path: "/companion", legacyAlias: "/chat" },
-      { label: "Review", path: "/mailbox", legacyAlias: "/review" },
-      { label: "Life Model", path: "/life-model", legacyAlias: "/builder" },
+      { label: "Today", path: "/today" },
+      { label: "Companion", path: "/companion" },
+      { label: "Mailbox", path: "/mailbox" },
+      { label: "Life Model", path: "/life-model" },
       { label: "Runs", path: "/runs" },
       { label: "Settings", path: "/settings" },
     ]);
+    expect(LEGACY_PRODUCT_REDIRECTS).toEqual([
+      { from: "/", to: "/today" },
+      { from: "/workspace", to: "/today" },
+      { from: "/dashboard", to: "/today" },
+      { from: "/chat", to: "/companion" },
+      { from: "/agent", to: "/companion" },
+      { from: "/review", to: "/mailbox" },
+      { from: "/builder", to: "/life-model/build" },
+      { from: "/life", to: "/life-model" },
+      { from: "/map", to: "/life-model" },
+    ]);
     expect(RETAINED_LEGACY_ROUTES).toEqual([
+      "/",
+      "/workspace",
+      "/dashboard",
       "/chat",
       "/agent",
       "/review",
       "/builder",
       "/life",
       "/map",
-      "/memory",
-      "/mcp",
-      "/a2a",
-      "/metrics",
-      "/versions",
-      "/calibration",
+    ]);
+    expect(RUN_DETAIL_ROUTE_PATTERN).toBe("/runs/:runId");
+    expect(runDetailRoutePattern()).toBe(RUN_DETAIL_ROUTE_PATTERN);
+    expect(runDetailRoute("run-product-1")).toBe("/runs/run-product-1");
+    expect(mailboxRoute()).toBe("/mailbox");
+    expect(mailboxRoute({ proposalId: "proposal-product-1" })).toBe(
+      "/mailbox?proposal=proposal-product-1"
+    );
+    expect(mailboxRoute({ proposalId: "  " })).toBe("/mailbox");
+    expect(mailboxRouteState({ mainChatTaskSessionId: " task-1 ", returnTo: " /companion " }))
+      .toEqual({
+        mainChatTaskSessionId: "task-1",
+        returnTo: "/companion",
+      });
+    expect(
+      mailboxRouteState({
+        mainChatTaskSessionId: " ",
+        returnTo: "\n",
+      })
+    ).toEqual({});
+    expect(
+      mailboxLinkTarget({
+        proposalId: " proposal-product-2 ",
+        mainChatTaskSessionId: " task-2 ",
+        returnTo: " /companion ",
+      })
+    ).toEqual({
+      to: "/mailbox?proposal=proposal-product-2",
+      state: {
+        mainChatTaskSessionId: "task-2",
+        returnTo: "/companion",
+      },
+    });
+    expect(
+      mailboxLinkTarget({
+        proposalId: " ",
+        mainChatTaskSessionId: " ",
+        returnTo: " ",
+      })
+    ).toEqual({ to: "/mailbox" });
+    expect(SECONDARY_PRODUCT_ROUTES).toEqual([
+      { label: "Life Model Build", key: "LifeModelBuild", path: "/life-model/build" },
+      { label: "Memory", key: "Memory", path: "/memory" },
+    ]);
+    expect(ADVANCED_PRODUCT_ROUTES).toEqual([
+      { label: "MCP / Tools", key: "McpTools", path: "/mcp" },
+      { label: "A2A", key: "A2A", path: "/a2a" },
+      { label: "Metrics", key: "Metrics", path: "/metrics" },
+      { label: "Calibration", key: "Calibration", path: "/calibration" },
+      { label: "Versions", key: "Versions", path: "/versions" },
     ]);
     expect(ADVANCED_PRODUCT_ROUTE_GROUPS).toEqual([
       {
@@ -398,6 +454,60 @@ describe("App onboarding", () => {
     }
   });
 
+  it("keeps retired product surfaces deleted and legacy routes quarantined to the registry", () => {
+    for (const retiredFile of [
+      "src/components/OnboardingWizard.tsx",
+      "src/components/WorkspaceOverview.tsx",
+      "src/pages/DashboardPage.tsx",
+      "src/pages/ProposalReviewPage.tsx",
+      "src/pages/LifeMapPage.tsx",
+    ]) {
+      expect(existsSync(join(process.cwd(), retiredFile)), `${retiredFile} must stay deleted`).toBe(
+        false
+      );
+    }
+
+    const appSource = readFileSync(join(process.cwd(), "src/App.tsx"), "utf8");
+    expect(appSource).not.toMatch(/OnboardingWizard|DashboardPage|ProposalReviewPage|LifeMapPage/);
+
+    const routeRegistryPath = join(process.cwd(), "src/productShellContract.ts");
+    const tauriTypesPath = join(process.cwd(), "src/tauri.ts");
+    const appTypesPath = join(process.cwd(), "src/types.ts");
+    for (const filePath of productionSourceFiles()) {
+      const source = readFileSync(filePath, "utf8");
+      if (filePath !== routeRegistryPath) {
+        expect(source, `${filePath} must not contain retired default routes`).not.toMatch(
+          /["'`]\/(?:chat|review|dashboard|workspace|builder|life|map)["'`]/
+        );
+        expect(source, `${filePath} must not contain retired hash routes`).not.toMatch(
+          /#\/(?:chat|review|dashboard|builder)/
+        );
+        expect(source, `${filePath} must use runDetailRoute for dynamic run links`).not.toMatch(
+          /\/runs\/:runId|\/runs\/\$\{/
+        );
+        expect(source, `${filePath} must use mailboxRoute for proposal deep links`).not.toMatch(
+          /\?proposal=/
+        );
+      }
+      expect(source, `${filePath} must not import retired pages`).not.toMatch(
+        /OnboardingWizard|DashboardPage|WorkspaceOverview|ProposalReviewPage|LifeMapPage/
+      );
+      if (filePath !== tauriTypesPath && filePath !== appTypesPath) {
+        expect(source, `${filePath} must not show retired default product copy`).not.toMatch(
+          /\b(?:Beta|Onboarding|Review Center|Dashboard|Workspace)\b|旧仪表盘|查看 Review|去 Review|打开 Review|待确认 Review|Review 待|Review 处理|Review 修正|Review 确认|Review 整理|Builder Review|仪表盘/
+        );
+      }
+      if (filePath !== routeRegistryPath && filePath !== tauriTypesPath) {
+        expect(source, `${filePath} must not read deprecated beta diagnostics aliases`).not.toMatch(
+          /\bbeta_ready\b|\bbeta_readiness_issues\b/
+        );
+      }
+      expect(source, `${filePath} must not expose Builder direct apply API`).not.toMatch(
+        /enableLegacyDirectApply|Legacy direct apply|绕过 Mailbox|onApply=\{/
+      );
+    }
+  });
+
   it("renders /companion as the W162 companion surface with AgentStage", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "has_completed_onboarding") return Promise.resolve(true);
@@ -415,7 +525,7 @@ describe("App onboarding", () => {
     expect(screen.getByRole("status", { name: /OpenLife Agent 状态/ })).toBeInTheDocument();
   });
 
-  it.each(["/chat", "/agent"])("keeps %s on the legacy ChatPage route", async path => {
+  it.each(["/chat", "/agent"])("redirects %s to the Companion product surface", async path => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "has_completed_onboarding") return Promise.resolve(true);
       return mockInvoke(cmd, args);
@@ -427,16 +537,15 @@ describe("App onboarding", () => {
       </MemoryRouter>
     );
 
-    expect(await screen.findByTestId("chat-page")).toBeInTheDocument();
-    expect(screen.queryByTestId("companion-page")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("agent-stage")).not.toBeInTheDocument();
+    expect(await screen.findByTestId("companion-page")).toBeInTheDocument();
+    expect(screen.getByTestId("agent-stage")).toHaveAttribute("data-state", "idle");
   });
 
   it.each([
     ["/companion", "Companion", "companion-page"],
     ["/today", "Today", "today-page"],
     ["/life-model", "Life Model", "life-model-page"],
-    ["/mailbox", "Review", "mailbox-page"],
+    ["/mailbox", "Mailbox", "mailbox-page"],
     ["/runs", "Runs", "Runs"],
     ["/settings", "Settings", "Settings"],
   ])("renders the %s product entry for %s", async (path, _label, expectedText) => {
@@ -458,7 +567,7 @@ describe("App onboarding", () => {
     }
   });
 
-  it.each(["/", "/workspace"])("keeps %s on the legacy DashboardPage route", async path => {
+  it.each(["/", "/workspace", "/dashboard"])("redirects %s to Today", async path => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "has_completed_onboarding") return Promise.resolve(true);
       return mockInvoke(cmd, args);
@@ -470,8 +579,8 @@ describe("App onboarding", () => {
       </MemoryRouter>
     );
 
-    expect(await screen.findByText("仪表盘")).toBeInTheDocument();
-    expect(screen.queryByTestId("today-page")).not.toBeInTheDocument();
+    expect(await screen.findByTestId("today-page")).toBeInTheDocument();
+    expect(screen.queryByText("仪表盘")).not.toBeInTheDocument();
   });
 
   it("keeps the completed product entries on their product pages", async () => {
@@ -495,7 +604,7 @@ describe("App onboarding", () => {
     }
   });
 
-  it.each(["/builder", "/life"])("keeps %s on the legacy BuilderPage route", async path => {
+  it.each(["/builder"])("redirects %s to the Life Model build subflow", async path => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "has_completed_onboarding") return Promise.resolve(true);
       return mockInvoke(cmd, args);
@@ -511,7 +620,22 @@ describe("App onboarding", () => {
     expect(screen.queryByTestId("life-model-page")).not.toBeInTheDocument();
   });
 
-  it("keeps /memory on the legacy MemorySearch route", async () => {
+  it.each(["/life", "/map"])("redirects %s to Life Model", async path => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter initialEntries={[path]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByTestId("life-model-page")).toBeInTheDocument();
+  });
+
+  it("keeps /memory reachable as a secondary Life Model route", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "has_completed_onboarding") return Promise.resolve(true);
       return mockInvoke(cmd, args);
@@ -527,20 +651,27 @@ describe("App onboarding", () => {
     expect(screen.queryByTestId("life-model-page")).not.toBeInTheDocument();
   });
 
-  it("keeps /review on the legacy ProposalReviewPage route", async () => {
+  it("redirects /review to Mailbox while preserving route state", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "has_completed_onboarding") return Promise.resolve(true);
       return mockInvoke(cmd, args);
     });
 
     render(
-      <MemoryRouter initialEntries={["/review"]}>
+      <MemoryRouter
+        initialEntries={[
+          {
+            pathname: "/review",
+            state: { mainChatTaskSessionId: "mainchat-task-product-ui-1" },
+          },
+        ]}
+      >
         <App />
       </MemoryRouter>
     );
 
-    expect(await screen.findByText("Review Center")).toBeInTheDocument();
-    expect(screen.queryByTestId("mailbox-page")).not.toBeInTheDocument();
+    expect(await screen.findByTestId("mailbox-page")).toBeInTheDocument();
+    expect(screen.queryByText("Review Center")).not.toBeInTheDocument();
   });
 
   it("keeps Settings reachable as a primary route", async () => {

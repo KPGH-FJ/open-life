@@ -131,7 +131,7 @@ export const STEP6_PRODUCT_ACCEPTANCE_JOURNEYS: Step6ProductAcceptanceJourney[] 
   journey(
     "S6-FILE",
     "deterministic_local",
-    "Workspace file read",
+    "Project file read",
     "Read file `dogfood/project_brief.md` and summarize the governed observation.",
     ["answer.file_summary"],
     ["tool.file_read", "observation.workspace_file"],

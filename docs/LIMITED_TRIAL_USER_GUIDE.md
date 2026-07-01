@@ -76,7 +76,7 @@ Main Chat live/provider-backed ReAct 路径会发送 bounded、metadata-safe 的
 - snapshot restore / data import；
 - dangerous shell 或高风险外部写入。
 
-这些动作必须进入 Review Center proposal、ToolPermission proposal、governed import/restore request，或显式 blocker/confirmation path。
+这些动作必须进入 Mailbox proposal、ToolPermission proposal、governed import/restore request，或显式 blocker/confirmation path。
 
 ## 建议 QA 流程
 
@@ -89,11 +89,11 @@ export OPENLIFE_DATA_DIR="$(mktemp -d /tmp/openlife-qa.XXXXXX)"
 
 最小 QA checklist：
 
-1. 完成 onboarding，确认 `hasCompletedOnboarding` 持久化。
+1. 打开应用后确认直接进入当前 ProductShell；旧 onboarding 不应出现，旧 URL 只应重定向到当前主入口。
 2. 配置 provider，运行连接测试，确认 UI 不把未验证 key 显示成 available。
 3. 发送首轮普通聊天，确认 Main Chat 产生 task session / run / final delivery evidence。
 4. 触发记忆或 LifeModel 更新请求，确认只创建 proposal，不静默写 durable truth。
-5. 在 Review Center 分别执行 accept / reject / postpone / edit 路径。
+5. 在 Mailbox 分别执行 accept / reject / postpone / edit 路径。
 6. 触发 Safe Mode 条件，确认写入口被禁用或转为只读提示。
 7. 执行 export，确认导出成功且不会自动导入。
 8. 执行 governed import / restore 前确认会创建 pre-change snapshot，并返回 metadata-safe audit。

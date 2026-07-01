@@ -18,10 +18,8 @@ import SuggestionContextPanel from "./SuggestionContextPanel";
 interface Props {
   signals: BuilderSignal[];
   summary: BuilderSummary;
-  onApply?: (decisions: BuilderSignalDecision[]) => void;
-  onCreateProposals?: (decisions: BuilderSignalDecision[]) => void;
+  onCreateProposals: (decisions: BuilderSignalDecision[]) => void;
   onReject: () => void;
-  enableLegacyDirectApply?: boolean;
 }
 
 interface SignalEditState {
@@ -130,10 +128,8 @@ function groupSignalsByDimension(signals: BuilderSignal[]): Record<string, Build
 export default function BuilderPatchReview({
   signals,
   summary,
-  onApply,
   onCreateProposals,
   onReject,
-  enableLegacyDirectApply = false,
 }: Props) {
   // Track which signals are selected (checked)
   const [selected, setSelected] = useState<Set<string>>(() => {
@@ -151,7 +147,6 @@ export default function BuilderPatchReview({
   const [editing, setEditing] = useState<string | null>(null);
   const [editValue, setEditValue] = useState<string>("");
   const [editErrors, setEditErrors] = useState<Record<string, string>>({});
-  const [showDirectApplyConfirm, setShowDirectApplyConfirm] = useState(false);
 
   const grouped = groupSignalsByDimension(signals);
   const dimensions = Object.keys(grouped);
@@ -220,21 +215,8 @@ export default function BuilderPatchReview({
     });
   };
 
-  const handleApply = () => {
-    if (!onApply) return;
-    // Check if any high risk signals are selected
-    const hasHighRiskSelected = signals.some(s => selected.has(s.id) && s.risk_level === "high");
-    if (hasHighRiskSelected && !showDirectApplyConfirm) {
-      setShowDirectApplyConfirm(true);
-      return;
-    }
-    setShowDirectApplyConfirm(false);
-    onApply(buildDecisions());
-  };
-
   const handleCreateProposals = () => {
-    setShowDirectApplyConfirm(false);
-    onCreateProposals?.(buildDecisions());
+    onCreateProposals(buildDecisions());
   };
 
   const acceptedCount = signals.filter(s => selected.has(s.id) && !(s.id in editedValues)).length;
@@ -242,7 +224,6 @@ export default function BuilderPatchReview({
   const rejectedCount = signals.length - acceptedCount - editedCount;
   // Merged count will be computed after backend returns actual merge results
   const mergedCount = 0;
-  const showLegacyDirectApply = enableLegacyDirectApply || !onCreateProposals;
 
   return (
     <div className="space-y-6">
@@ -254,7 +235,7 @@ export default function BuilderPatchReview({
         </div>
         <p className="text-sm text-indigo-700">
           基于我们的对话，我整理了对你的理解。
-          <strong>建议你发送到 Review Center 逐条审阅后再写入</strong>
+          <strong>建议你发送到 Mailbox 逐条审阅后再写入</strong>
           ，这样你可以清楚地看到每一项变更的前后对比。
         </p>
         <div className="mt-3 text-xs text-indigo-600 bg-indigo-100/50 px-3 py-1.5 rounded-full inline-flex items-center gap-1">
@@ -270,7 +251,7 @@ export default function BuilderPatchReview({
             <span>接受</span>
           </div>
           <div className="text-lg font-semibold text-green-600">{acceptedCount}</div>
-          <div className="text-xs text-gray-500">直接应用</div>
+          <div className="text-xs text-gray-500">发送确认</div>
         </div>
         <div className="bg-white border rounded-lg p-3">
           <div className="flex items-center gap-1.5 text-xs text-gray-500 mb-1">
@@ -278,7 +259,7 @@ export default function BuilderPatchReview({
             <span>编辑</span>
           </div>
           <div className="text-lg font-semibold text-amber-600">{editedCount}</div>
-          <div className="text-xs text-gray-500">修改后应用</div>
+          <div className="text-xs text-gray-500">修改后发送</div>
         </div>
         <div className="bg-white border rounded-lg p-3">
           <div className="flex items-center gap-1.5 text-xs text-gray-500 mb-1">
@@ -286,7 +267,7 @@ export default function BuilderPatchReview({
             <span>合并</span>
           </div>
           <div className="text-lg font-semibold text-indigo-600">{mergedCount}</div>
-          <div className="text-xs text-gray-500">与现有内容合并</div>
+          <div className="text-xs text-gray-500">由 Mailbox 审阅</div>
         </div>
         <div className="bg-white border rounded-lg p-3">
           <div className="flex items-center gap-1.5 text-xs text-gray-500 mb-1">
@@ -492,38 +473,6 @@ export default function BuilderPatchReview({
         </div>
       )}
 
-      {/* High Risk Direct Apply Warning */}
-      {showDirectApplyConfirm && (
-        <div className="rounded-xl border border-rose-200 bg-rose-50 p-4">
-          <div className="flex items-start gap-3">
-            <AlertTriangle size={20} className="text-rose-600 shrink-0 mt-0.5" />
-            <div className="flex-1">
-              <div className="font-semibold text-rose-900">高风险字段将直接写入</div>
-              <p className="mt-1 text-sm text-rose-700">
-                你选择了直接应用，其中包含高风险字段（如价值观、使命、长期目标）。这会自动更新你的人生模型且不可撤销。
-              </p>
-              <p className="mt-2 text-sm text-rose-700 font-medium">
-                建议改为「发送到 Review Center」，经你逐条审阅后再确认写入。
-              </p>
-              <div className="mt-3 flex gap-2">
-                <button
-                  onClick={() => setShowDirectApplyConfirm(false)}
-                  className="px-3 py-1.5 text-sm text-rose-700 bg-white border border-rose-200 rounded-lg hover:bg-rose-50"
-                >
-                  取消，改用 Review Center
-                </button>
-                <button
-                  onClick={handleApply}
-                  className="px-3 py-1.5 text-sm text-white bg-rose-600 rounded-lg hover:bg-rose-700"
-                >
-                  确认直接写入
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Actions */}
       <div className="flex flex-col gap-3 pt-4 border-t">
         <div className="flex items-center justify-between">
@@ -549,35 +498,17 @@ export default function BuilderPatchReview({
           </button>
         </div>
         <div className="flex items-center justify-end gap-3">
-          {onCreateProposals && (
-            <button
-              onClick={handleCreateProposals}
-              disabled={acceptedCount === 0 && editedCount === 0}
-              className="px-5 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-            >
-              <ShieldCheck size={18} />
-              发送到 Review Center
-            </button>
-          )}
-          {showLegacyDirectApply && onApply && (
-            <details className="text-right">
-              <summary className="cursor-pointer text-xs text-stone-400 hover:text-stone-600">
-                Legacy direct apply
-              </summary>
-              <button
-                onClick={handleApply}
-                disabled={acceptedCount === 0 && editedCount === 0}
-                className="mt-2 px-4 py-2 border border-rose-200 bg-white text-rose-700 rounded-lg hover:bg-rose-50 disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
-              >
-                <Check size={18} />
-                直接应用（legacy / 绕过 Review Center）
-              </button>
-            </details>
-          )}
+          <button
+            onClick={handleCreateProposals}
+            disabled={acceptedCount === 0 && editedCount === 0}
+            className="px-5 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+          >
+            <ShieldCheck size={18} />
+            发送到 Mailbox
+          </button>
         </div>
         <div className="text-xs text-gray-500 text-right">
-          「发送到 Review Center」是推荐路径，你可以在 Review Center 逐条审阅后再确认写入。 Legacy
-          direct apply 仅用于迁移和调试。
+          「发送到 Mailbox」会创建确认项，你可以在 Mailbox 逐条审阅后再确认写入。
         </div>
       </div>
 
@@ -586,7 +517,7 @@ export default function BuilderPatchReview({
         <div className="flex items-start gap-2 text-xs text-amber-600 bg-amber-50 p-3 rounded-lg">
           <AlertTriangle size={14} className="shrink-0 mt-0.5" />
           <span>
-            你有未勾选的高风险字段（如长期目标、核心价值观等）。建议勾选后发送到 Review Center
+            你有未勾选的高风险字段（如长期目标、核心价值观等）。建议勾选后发送到 Mailbox
             审阅。
           </span>
         </div>

@@ -3438,6 +3438,8 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         model_empty: false,
         chat_session_count: 3,
         onboarding_completed: true,
+        usage_ready: true,
+        usage_readiness_issues: [],
         beta_ready: true,
         beta_readiness_issues: [],
         builder_completion: {

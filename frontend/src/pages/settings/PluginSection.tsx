@@ -44,7 +44,7 @@ export default function PluginSection({
         <div>
           <h3 className="text-sm font-medium text-gray-700">本地 Plugins</h3>
           <p className="mt-1 text-xs text-gray-500">
-            Beta 阶段 Plugin 仅做声明展示，tools 不可执行，skills 仅注册声明。不执行远程代码。
+            预览能力：Plugin 当前仅做声明展示，tools 不可执行，skills 仅注册声明，不执行远程代码。
           </p>
         </div>
         <button

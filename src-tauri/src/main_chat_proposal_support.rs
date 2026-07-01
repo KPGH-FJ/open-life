@@ -90,9 +90,9 @@ pub(crate) async fn create_main_chat_agent_proposal(
         "proposal.create"
     };
     let queue_description = if knowledge_asset_edit {
-        "Create a Review Center proposal for a knowledge asset edit."
+        "Create a Mailbox proposal for a knowledge asset edit."
     } else {
-        "Create a Review Center proposal from Main Chat."
+        "Create a Mailbox proposal from Main Chat."
     };
     let queued = enqueue_main_chat_agent_action(
         state,

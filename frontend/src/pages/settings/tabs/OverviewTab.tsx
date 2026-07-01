@@ -2,6 +2,12 @@ import { Link } from "react-router-dom";
 import { runMemoryTierMaintenance, type SystemDiagnostics } from "../../../tauri";
 import { buildProviderReadinessView } from "../../../utils/providerReadiness";
 import { buildSafeModeBlockedMessage } from "../../../utils/runtimeMessages";
+import {
+  advancedRoutePath,
+  diagnosticsUsageReady,
+  productRoutePath,
+  secondaryRoutePath,
+} from "../../../productShellContract";
 
 function classNames(...classes: (string | false | undefined)[]) {
   return classes.filter(Boolean).join(" ");
@@ -47,6 +53,7 @@ export default function OverviewTab({
 }: OverviewTabProps) {
   const runtime = diagnostics?.runtime_build_info;
   const providerReadiness = buildProviderReadinessView(diagnostics);
+  const usageReady = diagnostics ? diagnosticsUsageReady(diagnostics) : undefined;
   // ---- Data file health ----
   const df = diagnostics?.data_files;
   const dataFileItems = df
@@ -88,7 +95,7 @@ export default function OverviewTab({
       ok: Boolean(diagnostics?.life_model_ready && !diagnostics?.model_empty),
       detail: diagnostics?.model_empty
         ? (diagnostics?.pending_builder_review_sessions ?? 0) > 0
-          ? `有 ${diagnostics?.pending_builder_review_sessions} 个待确认的 Builder Review`
+          ? `有 ${diagnostics?.pending_builder_review_sessions} 个 Builder 待确认项`
           : (diagnostics?.unfinished_builder_sessions ?? 0) > 0
             ? `有 ${diagnostics?.unfinished_builder_sessions} 个待继续的 Builder 会话`
             : "尚未完成初始构建"
@@ -102,7 +109,9 @@ export default function OverviewTab({
             ? "继续 Builder"
             : "去构建"
         : "查看模型",
-      href: diagnostics?.model_empty ? "#/builder" : "#/",
+      href: diagnostics?.model_empty
+        ? `#${secondaryRoutePath("LifeModelBuild")}`
+        : `#${productRoutePath("Today")}`,
     },
     {
       label: "数据文件",
@@ -124,11 +133,11 @@ export default function OverviewTab({
           ? `${diagnostics?.chat_session_count} 个会话`
           : "还没有完成过一轮对话",
       action: "去对话",
-      href: "#/chat",
+      href: `#${productRoutePath("Companion")}`,
     },
   ];
 
-  const betaFlow = [
+  const usageFlow = [
     {
       title: "1. 完成设置与诊断",
       done: Boolean(
@@ -145,12 +154,12 @@ export default function OverviewTab({
       done: Boolean(diagnostics && !diagnostics.model_empty && diagnostics.life_model_ready),
       detail: diagnostics?.model_empty
         ? (diagnostics?.pending_builder_review_sessions ?? 0) > 0
-          ? `Builder 里还有 ${diagnostics?.pending_builder_review_sessions} 个待确认 Review。先把这些建议应用掉，比重新开始更合适。`
+          ? `Builder 里还有 ${diagnostics?.pending_builder_review_sessions} 个待确认项。先处理这些建议，比重新开始更合适。`
           : (diagnostics?.unfinished_builder_sessions ?? 0) > 0
-            ? `Builder 里还有 ${diagnostics?.unfinished_builder_sessions} 个待继续或待确认的会话。先把 Review 应用掉，比重新开始更合适。`
+            ? `Builder 里还有 ${diagnostics?.unfinished_builder_sessions} 个待继续或待确认的会话。先处理确认建议，比重新开始更合适。`
             : "Builder 还没形成最小模型，当前很多建议仍会偏通用。"
         : "人生模型已可读取，个性化能力开始成立。",
-      to: "#/builder",
+      to: `#${secondaryRoutePath("LifeModelBuild")}`,
       action: diagnostics?.model_empty
         ? (diagnostics?.pending_builder_review_sessions ?? 0) > 0
           ? "去审阅"
@@ -166,7 +175,7 @@ export default function OverviewTab({
         (diagnostics?.chat_session_count ?? 0) > 0
           ? `已经完成 ${diagnostics?.chat_session_count ?? 0} 次对话验证。`
           : "至少完成一轮真实对话，才能确认主链路不是只在设置页看起来正常。",
-      to: "#/chat",
+      to: `#${productRoutePath("Companion")}`,
       action: "去对话",
     },
     {
@@ -176,7 +185,7 @@ export default function OverviewTab({
         (diagnostics?.snapshot_count ?? 0) > 0
           ? `已经有 ${diagnostics?.snapshot_count} 个快照，版本安全网已建立。`
           : "至少确认一次快照/回滚路径，使用闭环才算具备可恢复能力。",
-      to: "#/versions",
+      to: `#${advancedRoutePath("Versions")}`,
       action: "看版本控制",
     },
   ];
@@ -199,8 +208,8 @@ export default function OverviewTab({
     ...((diagnostics?.pending_builder_review_sessions ?? 0) > 0
       ? [
           {
-            title: "Builder 待确认 Review",
-            detail: `当前还有 ${diagnostics?.pending_builder_review_sessions} 个待确认 Review。建议先回到 Builder 审阅并应用，再验证对话与仪表盘。`,
+            title: "Builder 待确认项",
+            detail: `当前还有 ${diagnostics?.pending_builder_review_sessions} 个待确认项。建议先回到 Builder 审阅并应用，再验证对话与今日页。`,
             tone: "warning" as const,
           },
         ]
@@ -311,16 +320,16 @@ export default function OverviewTab({
             <span
               className={classNames(
                 "rounded-full px-2 py-1 text-xs font-medium",
-                diagnostics?.beta_ready
+                usageReady
                   ? "bg-emerald-100 text-emerald-700"
                   : "bg-blue-100 text-blue-700"
               )}
             >
-              {diagnostics?.beta_ready ? "已闭环" : "闭环中"}
+              {usageReady ? "已闭环" : "闭环中"}
             </span>
           </div>
           <div className="mt-4 grid gap-3 md:grid-cols-2">
-            {betaFlow.map(step => (
+            {usageFlow.map(step => (
               <div
                 key={step.title}
                 className="rounded-xl border border-white bg-white/80 px-4 py-3"
@@ -368,7 +377,7 @@ export default function OverviewTab({
             )}
             {diagnostics.model_empty && (
               <Link
-                to="/builder"
+                to={secondaryRoutePath("LifeModelBuild")}
                 className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700"
               >
                 2. 构建人生模型
@@ -376,7 +385,7 @@ export default function OverviewTab({
             )}
             {!diagnostics.model_empty && diagnostics.chat_session_count === 0 && (
               <Link
-                to="/chat"
+                to={productRoutePath("Companion")}
                 className="rounded-md bg-slate-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800"
               >
                 3. 开始一次对话

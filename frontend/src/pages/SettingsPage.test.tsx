@@ -413,7 +413,7 @@ describe("SettingsPage", () => {
 
     expect(await screen.findByText("恢复控制台")).toBeInTheDocument();
     expect(screen.getByText(/向量索引损坏/)).toBeInTheDocument();
-    expect(screen.getByText(/Builder 待确认 Review/)).toBeInTheDocument();
+    expect(screen.getByText(/Builder 待确认项/)).toBeInTheDocument();
     expect(screen.getByText(/语义记忆为空/)).toBeInTheDocument();
     expect(screen.getByText(/先导出完整备份/)).toBeInTheDocument();
   });
@@ -4073,7 +4073,7 @@ describe("SettingsPage", () => {
 
     expect(await screen.findByText(/有 1 个待继续的 Builder 会话/)).toBeInTheDocument();
     expect(screen.getAllByText("继续 Builder").length).toBeGreaterThan(0);
-    expect(screen.getByText(/先把 Review 应用掉，比重新开始更合适/)).toBeInTheDocument();
+    expect(screen.getByText(/先处理确认建议，比重新开始更合适/)).toBeInTheDocument();
   });
 
   it("routes vector rebuild through preflight and blocks final command in safe mode", async () => {

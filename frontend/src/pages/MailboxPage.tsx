@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useLocation } from "react-router-dom";
 import {
   AlertTriangle,
   Archive,
@@ -19,11 +20,13 @@ import {
   listProposals,
   postponeProposal,
   rejectProposal,
+  resumeMainChatAgentTask,
   type AgentProposal,
   type AppConfig,
   type ProposalStatus,
 } from "../tauri";
 import ReviewDecisionCard from "../components/ReviewDecisionCard";
+import type { MailboxRouteState } from "../productShellContract";
 import { canonicalLifeModelPath, proposalSubject } from "../utils/proposalDisplay";
 import {
   buildReviewDecisionView,
@@ -61,6 +64,13 @@ function folderMatches(proposal: AgentProposal, folder: FolderId): boolean {
     return ["rejected", "postponed", "expired"].includes(proposal.status);
   }
   return proposal.status === "edited";
+}
+
+function folderForProposal(proposal: AgentProposal): FolderId {
+  if (proposal.status === "accepted") return "accepted";
+  if (proposal.status === "edited") return "needs_edit";
+  if (["rejected", "postponed", "expired"].includes(proposal.status)) return "archived";
+  return "pending";
 }
 
 function senderFor(_proposal: AgentProposal): string {
@@ -137,7 +147,7 @@ function actionBlockedReason(
   safePaths: string[]
 ): string | null {
   if (safeModeActive) return "Safe Mode 下无法同意或编辑。";
-  if (proposal.status !== "pending") return "只有待确认的 Review 项可以同意。";
+  if (proposal.status !== "pending") return "只有待确认项可以同意。";
   if (isUnsupportedType(proposal.proposalType)) {
     return "这类确认当前尚未接入应用器，不能同意。";
   }
@@ -180,10 +190,19 @@ function statusLabel(status: ProposalStatus): string {
 }
 
 export default function MailboxPage() {
+  const location = useLocation();
+  const routeState = location.state as MailboxRouteState | null;
+  const mainChatTaskSessionId =
+    typeof routeState?.mainChatTaskSessionId === "string" ? routeState.mainChatTaskSessionId : null;
+  const proposalDeepLinkId = useMemo(() => {
+    const proposalId = new URLSearchParams(location.search).get("proposal")?.trim();
+    return proposalId || null;
+  }, [location.search]);
   const [proposals, setProposals] = useState<AgentProposal[]>([]);
   const [folder, setFolder] = useState<FolderId>("pending");
   const [groupFilter, setGroupFilter] = useState<ReviewGroupFilter>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [deepLinkMissingProposalId, setDeepLinkMissingProposalId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [actingId, setActingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -192,6 +211,8 @@ export default function MailboxPage() {
   const [safePaths, setSafePaths] = useState<string[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
+  const [mainChatResumeTaskId, setMainChatResumeTaskId] = useState<string | null>(null);
+  const [mainChatResumeBusy, setMainChatResumeBusy] = useState(false);
 
   const safeModeActive = isSafeMode(diagnostics);
   const safeModeReason = getSafeModeReason(diagnostics);
@@ -209,7 +230,7 @@ export default function MailboxPage() {
       setDiagnostics(diag);
       setSafePaths((config as AppConfig | null)?.system?.safe_paths ?? []);
     } catch (err) {
-      setError(`加载 Review 失败：${String(err)}`);
+      setError(`加载 Mailbox 失败：${String(err)}`);
     } finally {
       setLoading(false);
     }
@@ -270,6 +291,23 @@ export default function MailboxPage() {
     }
   }, [selectedId, visibleProposals]);
 
+  useEffect(() => {
+    if (loading) return;
+    if (!proposalDeepLinkId) {
+      setDeepLinkMissingProposalId(null);
+      return;
+    }
+    const matchedProposal = proposals.find(proposal => proposal.id === proposalDeepLinkId);
+    if (!matchedProposal) {
+      setDeepLinkMissingProposalId(proposalDeepLinkId);
+      return;
+    }
+    setDeepLinkMissingProposalId(null);
+    setFolder(folderForProposal(matchedProposal));
+    setGroupFilter("all");
+    setSelectedId(matchedProposal.id);
+  }, [loading, proposalDeepLinkId, proposals]);
+
   const selectedProposal =
     visibleProposals.find(proposal => proposal.id === selectedId) ?? visibleProposals[0] ?? null;
   const selectedDecision = selectedProposal ? buildReviewDecisionView(selectedProposal) : null;
@@ -278,6 +316,12 @@ export default function MailboxPage() {
     setActingId(proposal.id);
     setError(null);
     setNotice(null);
+    const linkedMainChatTaskId =
+      action === "accept" &&
+      mainChatTaskSessionId &&
+      proposal.sourceDetail === mainChatTaskSessionId
+        ? mainChatTaskSessionId
+        : null;
 
     if (action === "accept") {
       const blocker = actionBlockedReason(proposal, safeModeActive, safePaths);
@@ -292,6 +336,9 @@ export default function MailboxPage() {
       if (action === "accept") {
         await acceptProposal(proposal.id);
         setNotice(appliedNotice(proposal));
+        if (linkedMainChatTaskId) {
+          setMainChatResumeTaskId(linkedMainChatTaskId);
+        }
       } else if (action === "reject") {
         await rejectProposal(proposal.id);
         setNotice(`已不同意：${proposal.affectedPath}`);
@@ -313,6 +360,21 @@ export default function MailboxPage() {
       }
     } finally {
       setActingId(null);
+    }
+  };
+
+  const handleResumeMainChatTask = async () => {
+    if (!mainChatResumeTaskId) return;
+    setMainChatResumeBusy(true);
+    setError(null);
+    try {
+      const state = await resumeMainChatAgentTask(mainChatResumeTaskId);
+      const status = state.session?.status?.replace(/_/g, " ") || "running";
+      setNotice(`Main Chat task resumed: ${status}`);
+    } catch (err) {
+      setError(`恢复 Main Chat task 失败：${String(err)}`);
+    } finally {
+      setMainChatResumeBusy(false);
     }
   };
 
@@ -364,7 +426,7 @@ export default function MailboxPage() {
   return (
     <section
       data-testid="mailbox-page"
-      aria-label="Review"
+      aria-label="Mailbox"
       className="h-full min-h-0 overflow-hidden overflow-x-hidden bg-[#f5f6f2] px-3 py-3 sm:px-4"
     >
       <div className="mx-auto flex h-full min-h-0 w-full max-w-[1500px] flex-col gap-3">
@@ -374,7 +436,7 @@ export default function MailboxPage() {
               <ShieldCheck size={18} aria-hidden="true" />
             </div>
             <div>
-              <h2 className="text-xl font-bold tracking-normal text-stone-950">Review</h2>
+              <h2 className="text-xl font-bold tracking-normal text-stone-950">Mailbox</h2>
               <div className="text-xs text-stone-500">
                 记忆、权限与 Life Model 建议都需要你确认后才会生效。
               </div>
@@ -405,6 +467,33 @@ export default function MailboxPage() {
         {notice && (
           <div className="shrink-0 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
             {notice}
+          </div>
+        )}
+        {deepLinkMissingProposalId && (
+          <div className="shrink-0 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            <div className="font-medium">确认项不存在、已处理或不可见。</div>
+            <div className="mt-1 text-xs text-amber-800">
+              Mailbox 没有找到 {deepLinkMissingProposalId}，你仍可以继续处理当前列表中的确认项。
+            </div>
+          </div>
+        )}
+        {mainChatResumeTaskId && (
+          <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-lg border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700 shadow-sm">
+            <div>
+              <div className="font-semibold text-stone-950">Main Chat task ready to resume</div>
+              <div className="mt-1 text-xs text-stone-500">
+                Session {mainChatResumeTaskId.slice(-8)}
+              </div>
+            </div>
+            <button
+              type="button"
+              aria-label="Resume Main Chat task"
+              onClick={handleResumeMainChatTask}
+              disabled={mainChatResumeBusy}
+              className="inline-flex h-9 items-center gap-1.5 rounded-md bg-stone-900 px-3 text-xs font-medium text-white hover:bg-stone-800 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {mainChatResumeBusy ? "Resuming..." : "Resume Main Chat task"}
+            </button>
           </div>
         )}
         {error && (
@@ -719,7 +808,7 @@ export default function MailboxPage() {
                 <ListChecks size={42} className="text-stone-300" aria-hidden="true" />
                 <div className="mt-4 text-base font-semibold text-stone-800">选择一个确认项</div>
                 <div className="mt-1 text-sm text-stone-500">
-                  左侧列表中没有可阅读的 Review 项。
+                  左侧列表中没有可阅读的确认项。
                 </div>
               </div>
             )}

@@ -2091,7 +2091,7 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                                 || detail == format!("main_chat_agent_task_session:{task_session_id}")
                     )
             }) {
-                return Err("pending Review Center proposal not linked to task".into());
+                return Err("pending Mailbox proposal not linked to task".into());
             }
         }
         MainChatCommandSurfaceEvalScenario::WebPolicyBlocker => {
@@ -2896,7 +2896,7 @@ fn assert_mcp_tool_permission_proposal_action(
     let proposal = proposals
         .iter()
         .find(|proposal| proposal.id == proposal_id)
-        .ok_or_else(|| "MCP permission proposal is not pending in Review Center".to_string())?;
+        .ok_or_else(|| "MCP permission proposal is not pending in Mailbox".to_string())?;
     if proposal.proposal_type != openlife_core::agent::ProposalType::ToolPermission {
         return Err(format!(
             "MCP permission proposal type {:?}",

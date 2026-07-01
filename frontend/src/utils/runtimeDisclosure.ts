@@ -137,7 +137,7 @@ function nextAction(
   if (taskState?.canRetry || (run?.status === "failed" && run.error?.recoverable)) return "可重试";
   if (taskState?.canCancel || run?.status === "running") return "可取消";
   if (run?.status === "waiting_permission") return "需要确认";
-  if (proposalCount(run, taskSummary, evidenceView) > 0) return "去 Review 处理";
+  if (proposalCount(run, taskSummary, evidenceView) > 0) return "去 Mailbox 处理";
   return run?.status === "completed" ? "无需操作" : "查看详情";
 }
 

@@ -45,7 +45,7 @@ describe("RunTracePanel", () => {
     });
 
     expect(screen.getByText("AI collaboration rules used")).toBeInTheDocument();
-    expect(screen.getByText("Review before external writes")).toBeInTheDocument();
+    expect(screen.getByText("Confirm before external writes")).toBeInTheDocument();
     expect(screen.getByText("AI collaboration style")).toBeInTheDocument();
     expect(screen.getByText("Low-energy planning style")).toBeInTheDocument();
     expect(screen.getByText("behavior check")).toBeInTheDocument();
@@ -132,6 +132,10 @@ describe("RunTracePanel", () => {
     expect(screen.getByText("Risk: high")).toBeInTheDocument();
     expect(screen.getByText("Status: succeeded")).toBeInTheDocument();
     expect(screen.getByText("Proposal: proposal-1")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Proposal: proposal-1" })).toHaveAttribute(
+      "href",
+      "/mailbox?proposal=proposal-1"
+    );
     expect(screen.getByText("128 bytes redacted")).toBeInTheDocument();
     expect(screen.getByText("sha256:def456")).toBeInTheDocument();
     expect(screen.queryByText(/raw-file-secret/)).not.toBeInTheDocument();
@@ -213,6 +217,9 @@ describe("RunTracePanel", () => {
     expect(screen.getByText("Skipped: 1")).toBeInTheDocument();
     expect(screen.getAllByText("Warnings: 1").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Proposal: proposal-skill-1").length).toBeGreaterThan(0);
+    for (const link of screen.getAllByRole("link", { name: "Proposal: proposal-skill-1" })) {
+      expect(link).toHaveAttribute("href", "/mailbox?proposal=proposal-skill-1");
+    }
     expect(screen.getAllByText("sha256:context").length).toBeGreaterThan(0);
     expect(screen.queryByText(/raw private skill input/)).not.toBeInTheDocument();
     expect(screen.queryByText(/raw assistant output/)).not.toBeInTheDocument();
@@ -327,6 +334,10 @@ describe("RunTracePanel", () => {
     expect(screen.getByText("Direct writes: none")).toBeInTheDocument();
     expect(screen.getByText("External writes: none")).toBeInTheDocument();
     expect(screen.getByText("proposal-1")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "proposal-1" })).toHaveAttribute(
+      "href",
+      "/mailbox?proposal=proposal-1"
+    );
     expect(
       screen.queryByText("raw-sensitive-weekly-plan-should-not-render")
     ).not.toBeInTheDocument();

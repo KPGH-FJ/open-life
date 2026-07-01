@@ -824,7 +824,7 @@ describe("tauri command argument aliases", () => {
       scenarioId: "DBG5-04",
       reviewerId: "tester-alpha",
       uiEvidence: {
-        frontendRoute: "/chat",
+        frontendRoute: "/companion",
         surface: "AgentControlPlane",
         visibleControlLabels: ["Export debug bundle"],
         taskSessionId: "task-stage5",

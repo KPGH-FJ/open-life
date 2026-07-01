@@ -27,6 +27,14 @@ import {
 import type { ChatMessage, LifeModel } from "../types";
 import LoadingSpinner from "../components/LoadingSpinner";
 import {
+  diagnosticsUsageReady,
+  mailboxLinkTarget,
+  mailboxRoute,
+  productRoutePath,
+  runDetailRoute,
+  secondaryRoutePath,
+} from "../productShellContract";
+import {
   startStreamMessage,
   getChatHistory,
   getSystemDiagnostics,
@@ -144,7 +152,7 @@ function buildReadinessSummary(diagnostics: SystemDiagnostics | null): {
   status: string;
   tone: "ready" | "warning" | "error";
   detail: string;
-  betaReady?: boolean;
+  usageReady?: boolean;
 } {
   if (!diagnostics) {
     return {
@@ -162,7 +170,7 @@ function buildReadinessSummary(diagnostics: SystemDiagnostics | null): {
       status: "聊天就绪",
       tone: "ready",
       detail: `当前可使用 ${backend}。`,
-      betaReady: diagnostics.beta_ready,
+      usageReady: diagnosticsUsageReady(diagnostics),
     };
   }
   if (!diagnostics.ollama_online && !diagnostics.cloud_api_configured) {
@@ -322,14 +330,14 @@ function getFixSuggestion(
     return {
       text: "没有可用的模型后端。",
       action: "去设置页配置",
-      link: "/settings",
+      link: productRoutePath("Settings"),
     };
   }
   if (!diagnostics.life_model_ready) {
     return {
       text: "人生模型读取失败。",
       action: "去构建人生模型",
-      link: "/builder",
+      link: secondaryRoutePath("LifeModelBuild"),
     };
   }
   if (diagnostics.model_empty) {
@@ -337,27 +345,27 @@ function getFixSuggestion(
       return {
         text: `人生模型还没有真正写入，但你有 ${diagnostics.pending_builder_review_sessions} 个构建内容待确认。`,
         action: "回构建页查看",
-        link: "/builder",
+        link: secondaryRoutePath("LifeModelBuild"),
       };
     }
     if (diagnostics.unfinished_builder_sessions > 0) {
       return {
         text: `人生模型还没有真正写入，但你有 ${diagnostics.unfinished_builder_sessions} 个待继续的构建会话。`,
         action: "回 Builder 继续",
-        link: "/builder",
+        link: secondaryRoutePath("LifeModelBuild"),
       };
     }
     return {
       text: "人生模型尚未构建。",
       action: "去 Builder 创建",
-      link: "/builder",
+      link: secondaryRoutePath("LifeModelBuild"),
     };
   }
   if (!diagnostics.ollama_online && diagnostics.prefer_local_model) {
     return {
       text: `优先本地模型设置开启，但 ${diagnostics.local_model} 未运行。`,
       action: "切换云端模型",
-      link: "/settings",
+      link: productRoutePath("Settings"),
     };
   }
   return null;
@@ -833,9 +841,11 @@ function MainChatAgentStatusSurface({
           <div className="flex shrink-0 flex-wrap justify-end gap-1">
             {hasAction("review_proposal") && (
               <Link
-                to="/review"
-                state={{ mainChatTaskSessionId: view.taskSessionId, returnTo: "/chat" }}
-                aria-label="Review proposal"
+                {...mailboxLinkTarget({
+                  mainChatTaskSessionId: view.taskSessionId,
+                  returnTo: productRoutePath("Companion"),
+                })}
+                aria-label="Open proposal in Mailbox"
                 className="inline-flex min-h-7 items-center gap-1 rounded-md border border-white/80 bg-white px-2 font-semibold text-stone-800 hover:bg-stone-50"
               >
                 <FileText size={13} />
@@ -844,9 +854,11 @@ function MainChatAgentStatusSurface({
             )}
             {hasAction("review_permission") && (
               <Link
-                to="/review"
-                state={{ mainChatTaskSessionId: view.taskSessionId, returnTo: "/chat" }}
-                aria-label="Review permission"
+                {...mailboxLinkTarget({
+                  mainChatTaskSessionId: view.taskSessionId,
+                  returnTo: productRoutePath("Companion"),
+                })}
+                aria-label="Open permission in Mailbox"
                 className="inline-flex min-h-7 items-center gap-1 rounded-md border border-white/80 bg-white px-2 font-semibold text-stone-800 hover:bg-stone-50"
               >
                 <ShieldCheck size={13} />
@@ -934,7 +946,7 @@ function formatMainChatStrategy(
     case "life_model_proposal":
       return "LifeModel";
     case "review_maturation":
-      return "Review";
+      return "Mailbox";
     case "blocked_confirmation":
       return "Blocked";
     default:
@@ -1937,8 +1949,8 @@ export default function ChatPage({
       } catch (e) {
         const errMsg = String(e);
         // 如果是因为未授权，保持 pending 状态，不改为 error
-        if (errMsg.includes("not authorized") || errMsg.includes("Review Center")) {
-          // 保持 requires_confirmation: true，让用户去 Review Center 授权
+        if (errMsg.includes("not authorized") || errMsg.includes("Mailbox")) {
+          // 保持 requires_confirmation: true，让用户去 Mailbox 授权
           console.warn("Tool call still needs authorization:", errMsg);
           throw e; // 抛出错误让 ToolCallCard 显示提示
         }
@@ -2288,7 +2300,7 @@ export default function ChatPage({
 
   const buildStage5UiEvidence = useCallback(
     (taskSessionId: string) => ({
-      frontendRoute: "/chat",
+      frontendRoute: productRoutePath("Companion"),
       surface: "AgentControlPlane",
       visibleControlLabels: ["Preflight", "Export debug bundle", "Create issue report"],
       taskSessionId,
@@ -3031,7 +3043,7 @@ export default function ChatPage({
         await reviewPlanExecuteSession(target.planSessionId, target.baseRevision);
         await refreshMainChatSnapshot(taskSessionId);
       } catch (e) {
-        setAgentTaskControlError(`Review plan failed: ${readablePreviewError(e)}`);
+        setAgentTaskControlError(`Plan confirmation failed: ${readablePreviewError(e)}`);
       } finally {
         setAgentTaskControlBusy(false);
       }
@@ -3601,14 +3613,14 @@ export default function ChatPage({
               <div className={`text-sm border rounded-lg px-3 py-2 flex-1 ${readinessClass}`}>
                 <div className="flex items-center gap-2">
                   <span className="font-medium">{readiness.status}</span>
-                  {readiness.betaReady === true && (
+                  {readiness.usageReady === true && (
                     <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 font-medium">
-                      Beta 就绪
+                      使用准备就绪
                     </span>
                   )}
-                  {readiness.betaReady === false && readiness.tone === "ready" && (
+                  {readiness.usageReady === false && readiness.tone === "ready" && (
                     <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 font-medium">
-                      Beta 待完善
+                      使用准备待完善
                     </span>
                   )}
                 </div>
@@ -3649,7 +3661,7 @@ export default function ChatPage({
                 {getSafeModeReason(diagnostics)}
                 <span className="ml-2">普通对话仍可继续，但“加入记忆”等写入操作建议先暂停。</span>
               </div>
-              <Link to="/settings" className="underline font-medium">
+              <Link to={productRoutePath("Settings")} className="underline font-medium">
                 打开恢复控制台
               </Link>
             </div>
@@ -3666,8 +3678,8 @@ export default function ChatPage({
                   （{pendingProposals[0].affectedPath || pendingProposals[0].proposalType}）
                 </span>
               </div>
-              <Link to="/mailbox" className="underline font-medium">
-                去 Review 确认
+              <Link to={mailboxRoute()} className="underline font-medium">
+                去 Mailbox 确认
               </Link>
             </div>
           </div>
@@ -3715,12 +3727,12 @@ export default function ChatPage({
                     Governed Preview
                   </span>
                   <span className="block text-[11px] leading-4 text-amber-800">
-                    Preview/Beta · write-disabled runtime check, separate from normal Chat
+                    内部预览 · write-disabled runtime check, separate from normal Chat
                   </span>
                 </span>
               </span>
               <span className="shrink-0 rounded-full bg-white px-2 py-0.5 text-[10px] font-medium text-amber-800 ring-1 ring-amber-200">
-                Preview/Beta
+                内部预览
               </span>
             </button>
 
@@ -3902,7 +3914,7 @@ export default function ChatPage({
                           )}
                           {controlledPilotResult.runId && (
                             <Link
-                              to={`/runs/${controlledPilotResult.runId}`}
+                              to={runDetailRoute(controlledPilotResult.runId)}
                               className="inline-flex items-center gap-1.5 rounded-md bg-sky-50 px-3 py-1.5 text-xs font-medium text-sky-800 ring-1 ring-sky-100 hover:bg-sky-100"
                             >
                               <ExternalLink size={13} />
@@ -3964,7 +3976,7 @@ export default function ChatPage({
                         !controlledPilotPromoted && (
                           <div className="space-y-3 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-3 text-xs text-emerald-950">
                             <div>
-                              <div className="font-semibold">Review pilot promotion</div>
+                              <div className="font-semibold">Confirm pilot promotion</div>
                               <div className="mt-0.5 text-emerald-800">
                                 确认后将写入当前聊天历史，成为普通 assistant message。
                               </div>
@@ -4082,7 +4094,7 @@ export default function ChatPage({
                       </div>
                       {governedPreviewResult.runId && (
                         <Link
-                          to={`/runs/${governedPreviewResult.runId}`}
+                          to={runDetailRoute(governedPreviewResult.runId)}
                           className="inline-flex items-center gap-1.5 rounded-md bg-white px-3 py-1.5 text-xs font-medium text-stone-700 ring-1 ring-stone-200 hover:bg-stone-100"
                         >
                           <ExternalLink size={13} />
@@ -4192,7 +4204,10 @@ export default function ChatPage({
                   ) : (
                     <div className="mt-3 rounded-2xl border border-amber-100 bg-amber-50 px-3 py-2 text-xs text-amber-800">
                       人生模型还比较空，建议先完成一次构建，这样对话会更像“懂你的人”。
-                      <Link to="/builder" className="ml-2 font-semibold underline">
+                      <Link
+                        to={secondaryRoutePath("LifeModelBuild")}
+                        className="ml-2 font-semibold underline"
+                      >
                         去构建
                       </Link>
                     </div>
@@ -4324,16 +4339,16 @@ export default function ChatPage({
                 </p>
                 <div className="flex flex-wrap gap-2">
                   <Link
-                    to="/builder"
+                    to={secondaryRoutePath("LifeModelBuild")}
                     className="inline-flex items-center gap-1 bg-indigo-600 text-white px-3 py-1.5 rounded-md text-xs hover:bg-indigo-700"
                   >
                     去构建 <ArrowRight size={14} />
                   </Link>
                   <Link
-                    to="/dashboard"
+                    to={productRoutePath("Today")}
                     className="inline-flex items-center gap-1 border border-indigo-200 bg-white text-indigo-700 px-3 py-1.5 rounded-md text-xs hover:bg-indigo-50"
                   >
-                    先看仪表盘 <ArrowRight size={14} />
+                    先看今日页 <ArrowRight size={14} />
                   </Link>
                 </div>
                 <div className="mt-2 text-xs text-indigo-600">
@@ -4401,7 +4416,7 @@ export default function ChatPage({
                         <div className="rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600">
                           正在读取运行记录。
                           <Link
-                            to={`/runs/${m.run_id}`}
+                            to={runDetailRoute(m.run_id)}
                             className="ml-2 font-semibold text-stone-900 underline-offset-4 hover:underline"
                           >
                             打开 Runs
@@ -4784,17 +4799,16 @@ export default function ChatPage({
                                   )}
                                   {needsReview && (
                                     <Link
-                                      to="/review"
-                                      state={{
+                                      {...mailboxLinkTarget({
                                         mainChatTaskSessionId:
                                           currentAgentTaskState?.session?.id ??
                                           currentAgentIngress.agentTaskSessionId,
-                                        returnTo: "/chat",
-                                      }}
+                                        returnTo: productRoutePath("Companion"),
+                                      })}
                                       className="inline-flex h-5 items-center gap-1 rounded-md border border-stone-200 bg-white px-1.5 font-medium text-stone-800 hover:bg-stone-100"
                                     >
                                       <ExternalLink size={12} />
-                                      Open Review Center
+                                      Open Mailbox
                                     </Link>
                                   )}
                                 </div>

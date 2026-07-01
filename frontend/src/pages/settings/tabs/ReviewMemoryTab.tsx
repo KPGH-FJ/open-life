@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import type { AppConfig, SystemDiagnostics } from "../../../tauri";
 import { CapabilityCard, StatusChip } from "../../../components/product/ProductPrimitives";
+import { mailboxRoute } from "../../../productShellContract";
 
 interface ReviewMemoryTabProps {
   config: AppConfig;
@@ -17,16 +18,16 @@ export default function ReviewMemoryTab({ config, setConfig, diagnostics }: Revi
     <>
       <section className="grid gap-3 md:grid-cols-3">
         <CapabilityCard
-          title="Review"
+          title="Mailbox"
           description="记忆、Life Model 和权限建议在确认前不会生效。"
           tone={pendingCount > 0 ? "warning" : "ready"}
           meta={`${pendingCount} pending proposals`}
         >
           <Link
-            to="/mailbox"
+            to={mailboxRoute()}
             className="inline-flex rounded-md bg-stone-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-stone-800"
           >
-            打开 Review
+            打开 Mailbox
           </Link>
         </CapabilityCard>
         <CapabilityCard
@@ -49,7 +50,7 @@ export default function ReviewMemoryTab({ config, setConfig, diagnostics }: Revi
         <div>
           <h3 className="text-sm font-medium text-gray-700">记忆建议设置</h3>
           <p className="mt-1 text-xs leading-5 text-gray-500">
-            Chat 里抽取到的长期记忆只会进入 Review，不会静默写入 Life Model 或长期记忆。
+            Chat 里抽取到的长期记忆只会进入 Mailbox，不会静默写入 Life Model 或长期记忆。
           </p>
         </div>
         <div className="grid gap-4">

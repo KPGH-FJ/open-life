@@ -44,7 +44,7 @@ OpenLife 是一个**本地优先的个人 Agent 框架**，围绕用户私人 Li
        └── ProposalEngine    ← 生成待确认变更
        │
        ▼
-用户 Review (/review)
+用户 Mailbox (/mailbox)
        │
        ▼
 LifeModel / Memory / Snapshot / Audit  ← 应用并持久化
@@ -74,7 +74,7 @@ AgentProposal
   ├── 来源: Builder（构建理解）
   ├── 来源: Calibration（校准建议）
   ├── 来源: Chat（对话建议，未来）
-  └── 去向: ProposalStore → Review Center
+  └── 去向: ProposalStore → Mailbox
 
 LifeModel
   ├── 输入: Builder（构建）
@@ -120,7 +120,7 @@ LifeModel
               ▼
          BuilderPatchReview（用户审阅）
               │
-              ├── "发送到 Review Center"（推荐）
+              ├── "发送到 Mailbox"（推荐）
               │       │
               │       ▼
               │   AgentProposal 创建
@@ -140,7 +140,7 @@ LifeModel
 ### 3. Proposal 确认流
 
 ```
-Review Center (/review)
+Mailbox (/mailbox)
     │
     ├── 查看 Proposal（分类/风险筛选）
     ├── 编辑 after 值
@@ -155,7 +155,7 @@ Review Center (/review)
 .
 ├── frontend/                    # React 前端
 │   ├── src/
-│   │   ├── pages/               # 页面（Chat/Dashboard/Builder/Review Center）
+│   │   ├── pages/               # 页面（Today/Companion/Mailbox/Life Model/Runs/Settings）
 │   │   ├── components/          # 通用组件
 │   │   ├── tauri.ts             # Tauri Command 封装（所有后端调用入口）
 │   │   └── App.tsx              # 路由 + 导航
@@ -213,7 +213,7 @@ Review Center (/review)
 | `LifeModel` | 私人上下文 | 身份、目标、能力、状态、偏好 |
 | `Memory` | 长期记忆 | 消息历史、向量记忆、访问计数 |
 | `ModelRouter` | 模型调度 | 本地优先、隐私感知、成本优化 |
-| `Workspace` | 工作空间 | Dashboard、Review Center、Settings |
+| `ProductShell` | 当前产品入口壳 | Today、Companion、Mailbox、Life Model、Runs、Settings |
 
 ### 禁止
 

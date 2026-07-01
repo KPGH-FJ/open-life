@@ -29,6 +29,7 @@ import {
   REVIEW_PENDING_PROPOSAL_LIMIT,
 } from "../utils/reviewPendingCount";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
+import { mailboxRoute, productRoutePath } from "../productShellContract";
 
 type TodayPageState = {
   diagnostics: SystemDiagnostics | null;
@@ -221,7 +222,7 @@ export default function TodayPage() {
     id: "pending-review-proposals",
     title: "待确认入口",
     count: pendingCount,
-    href: "/mailbox",
+    href: mailboxRoute(),
   };
 
   return (
@@ -240,17 +241,17 @@ export default function TodayPage() {
           </div>
           <div className="flex flex-wrap gap-2">
             <Link
-              to="/companion"
+              to={productRoutePath("Companion")}
               className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-stone-900 px-3 text-sm font-semibold text-white hover:bg-stone-800"
             >
               和 OpenLife 说一下现在的状态
               <ArrowRight size={15} aria-hidden="true" />
             </Link>
             <Link
-              to="/mailbox"
+              to={mailboxRoute()}
               className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-stone-300 bg-white px-3 text-sm font-semibold text-stone-800 hover:bg-stone-50"
             >
-              查看 Review
+              查看待确认项
               <Inbox size={15} aria-hidden="true" />
             </Link>
           </div>
@@ -308,7 +309,7 @@ export default function TodayPage() {
                 可以先从一次对话开始，把今天最小的一步定下来。
               </p>
               <Link
-                to="/companion"
+                to={productRoutePath("Companion")}
                 className="mt-4 inline-flex h-9 items-center justify-center gap-2 rounded-md bg-stone-900 px-3 text-sm font-semibold text-white hover:bg-stone-800"
               >
                 和 OpenLife 说一下现在的状态
@@ -414,7 +415,7 @@ export default function TodayPage() {
           {!primaryGoal && (
             <div className="mt-3">
               <Link
-                to="/companion"
+                to={productRoutePath("Companion")}
                 className="text-sm font-semibold text-stone-700 underline-offset-4 hover:underline"
               >
                 和 OpenLife 说一下现在的状态
@@ -433,15 +434,15 @@ export default function TodayPage() {
               <div className="text-sm font-semibold text-stone-950">{pendingReviewCard.title}</div>
               <div className="mt-1 text-sm text-stone-600">
                 {pendingReviewCard.count > 0
-                  ? `${pendingReviewCard.count} 个 Review 待你确认。`
-                  : "现在没有需要处理的 Review。"}
+                  ? `${pendingReviewCard.count} 个待确认项需要你处理。`
+                  : "现在没有需要处理的待确认项。"}
               </div>
             </div>
             <Link
               to={pendingReviewCard.href}
               className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-stone-300 bg-white px-3 text-sm font-semibold text-stone-800 hover:bg-stone-50"
             >
-              查看 Review
+              查看待确认项
               <Inbox size={15} aria-hidden="true" />
             </Link>
           </div>

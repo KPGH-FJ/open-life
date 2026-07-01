@@ -1,12 +1,9 @@
 import React, { Component, ReactNode, Suspense, useEffect, useState } from "react";
-import { Routes, Route } from "react-router-dom";
+import { Navigate, Routes, Route, useLocation } from "react-router-dom";
 import LoadingSpinner from "./components/LoadingSpinner";
-import OnboardingWizard from "./components/OnboardingWizard";
 import ProductShell from "./components/ProductShell";
 
 // Lazy load page components for code splitting
-const LifeMapPage = React.lazy(() => import("./pages/LifeMapPage"));
-const ChatPage = React.lazy(() => import("./pages/ChatPage"));
 const CompanionPage = React.lazy(() => import("./pages/CompanionPage"));
 const VersionControl = React.lazy(() => import("./pages/VersionControl"));
 const MemorySearch = React.lazy(() => import("./pages/MemorySearch"));
@@ -15,16 +12,20 @@ const McpPage = React.lazy(() => import("./pages/McpPage"));
 const BuilderPage = React.lazy(() => import("./pages/BuilderPage"));
 const LifeModelPage = React.lazy(() => import("./pages/LifeModelPage"));
 const TodayPage = React.lazy(() => import("./pages/TodayPage"));
-const DashboardPage = React.lazy(() => import("./pages/DashboardPage"));
 const SettingsPage = React.lazy(() => import("./pages/SettingsPage"));
 const CalibrationPage = React.lazy(() => import("./pages/CalibrationPage"));
-const ProposalReviewPage = React.lazy(() => import("./pages/ProposalReviewPage"));
 const MailboxPage = React.lazy(() => import("./pages/MailboxPage"));
 const RunsPage = React.lazy(() => import("./pages/RunsPage"));
 const AgentRunDetail = React.lazy(() => import("./pages/AgentRunDetail"));
 const MetricsPage = React.lazy(() => import("./pages/MetricsPage"));
-import { getSystemDiagnostics, hasCompletedOnboarding, type SystemDiagnostics } from "./tauri";
-import { productRoutePath } from "./productShellContract";
+import { getSystemDiagnostics, type SystemDiagnostics } from "./tauri";
+import {
+  advancedRoutePath,
+  LEGACY_PRODUCT_REDIRECTS,
+  productRoutePath,
+  runDetailRoutePattern,
+  secondaryRoutePath,
+} from "./productShellContract";
 import { getSafeModeReason, isSafeMode } from "./utils/safeMode";
 import { initPerformanceMonitoring } from "./utils/performance";
 
@@ -127,7 +128,7 @@ class ErrorBoundary extends Component<
                   继续使用
                 </button>
                 <button
-                  onClick={() => (window.location.href = "#/")}
+                  onClick={() => (window.location.href = "#/today")}
                   className="flex-1 bg-white text-stone-700 border border-stone-300 px-4 py-2.5 rounded-lg text-sm font-medium hover:bg-stone-50 transition-colors"
                 >
                   返回首页
@@ -145,26 +146,19 @@ class ErrorBoundary extends Component<
   }
 }
 
-function isNativeBackendUnavailable(error: unknown): boolean {
-  return String(error).includes("当前不在 OpenLife 桌面应用环境中");
+function RedirectWithState({ to }: { to: string }) {
+  const location = useLocation();
+  return (
+    <Navigate
+      to={{ pathname: to, search: location.search, hash: location.hash }}
+      state={location.state}
+      replace
+    />
+  );
 }
 
 function App() {
-  const [showWizard, setShowWizard] = useState(false);
-  const [wizardReady, setWizardReady] = useState(false);
   const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
-
-  useEffect(() => {
-    hasCompletedOnboarding()
-      .then(done => {
-        setShowWizard(!done);
-        setWizardReady(true);
-      })
-      .catch(error => {
-        setShowWizard(!isNativeBackendUnavailable(error));
-        setWizardReady(true);
-      });
-  }, []);
 
   useEffect(() => {
     getSystemDiagnostics()
@@ -185,38 +179,31 @@ function App() {
         <ErrorBoundary>
           <Suspense fallback={<LoadingSpinner text="加载中..." />}>
             <Routes>
-              {/* W159 product route aliases; ProductShell and replacement pages start in W160+. */}
               <Route path={productRoutePath("Today")} element={<TodayPage />} />
               <Route path={productRoutePath("Companion")} element={<CompanionPage />} />
               <Route path={productRoutePath("Life Model")} element={<LifeModelPage />} />
-              <Route path={productRoutePath("Review")} element={<MailboxPage />} />
+              <Route path={productRoutePath("Mailbox")} element={<MailboxPage />} />
               <Route path={productRoutePath("Runs")} element={<RunsPage />} />
               <Route path={productRoutePath("Settings")} element={<SettingsPage />} />
-              <Route path="/" element={<DashboardPage />} />
-              <Route path="/workspace" element={<DashboardPage />} />
-              {/* Agent: Chat + Runs */}
-              <Route path="/agent" element={<ChatPage />} />
-              <Route path="/chat" element={<ChatPage />} />
-              <Route path="/runs/:runId" element={<AgentRunDetail />} />
-              {/* Life: Builder + LifeModel */}
-              <Route path="/life" element={<BuilderPage />} />
-              <Route path="/builder" element={<BuilderPage />} />
-              <Route path="/map" element={<LifeMapPage />} />
-              {/* Memory */}
-              <Route path="/memory" element={<MemorySearch />} />
-              {/* Review */}
-              <Route path="/review" element={<ProposalReviewPage />} />
-              {/* Settings + Experimental */}
-              <Route path="/versions" element={<VersionControl />} />
-              <Route path="/mcp" element={<McpPage />} />
-              <Route path="/a2a" element={<A2APage />} />
-              <Route path="/calibration" element={<CalibrationPage />} />
-              <Route path="/metrics" element={<MetricsPage />} />
+              {LEGACY_PRODUCT_REDIRECTS.map(route => (
+                <Route
+                  key={route.from}
+                  path={route.from}
+                  element={<RedirectWithState to={route.to} />}
+                />
+              ))}
+              <Route path={runDetailRoutePattern()} element={<AgentRunDetail />} />
+              <Route path={secondaryRoutePath("LifeModelBuild")} element={<BuilderPage />} />
+              <Route path={secondaryRoutePath("Memory")} element={<MemorySearch />} />
+              <Route path={advancedRoutePath("Versions")} element={<VersionControl />} />
+              <Route path={advancedRoutePath("McpTools")} element={<McpPage />} />
+              <Route path={advancedRoutePath("A2A")} element={<A2APage />} />
+              <Route path={advancedRoutePath("Calibration")} element={<CalibrationPage />} />
+              <Route path={advancedRoutePath("Metrics")} element={<MetricsPage />} />
             </Routes>
           </Suspense>
         </ErrorBoundary>
       </ProductShell>
-      {wizardReady && showWizard && <OnboardingWizard onComplete={() => setShowWizard(false)} />}
     </>
   );
 }

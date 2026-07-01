@@ -173,8 +173,8 @@ describe("TodayPage", () => {
       "data-card-type",
       "pending_proposal"
     );
-    expect(screen.getByText("1 个 Review 待你确认。")).toBeInTheDocument();
-    expect(screen.getAllByRole("link", { name: "查看 Review" })[0]).toHaveAttribute(
+    expect(screen.getByText("1 个待确认项需要你处理。")).toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: "查看待确认项" })[0]).toHaveAttribute(
       "href",
       "/mailbox"
     );
@@ -233,7 +233,7 @@ describe("TodayPage", () => {
     expect(screen.queryByTestId("today-card-task")).not.toBeInTheDocument();
   });
 
-  it("uses the same pending Review source as Review instead of diagnostics fallback", async () => {
+  it("uses the same pending proposal source as Mailbox instead of diagnostics fallback", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_system_diagnostics") {
         return Promise.resolve({ ...healthyDiagnostics, pending_proposal_count: 9 });
@@ -246,7 +246,7 @@ describe("TodayPage", () => {
     renderPage();
 
     expect(await screen.findByText("待确认 2")).toBeInTheDocument();
-    expect(screen.getByText("2 个 Review 待你确认。")).toBeInTheDocument();
+    expect(screen.getByText("2 个待确认项需要你处理。")).toBeInTheDocument();
     expect(screen.queryByText("待确认 9")).not.toBeInTheDocument();
     expect(vi.mocked(invoke)).toHaveBeenCalledWith(
       "list_proposals",

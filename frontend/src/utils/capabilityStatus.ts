@@ -1,4 +1,5 @@
 import type { AgentRun, SystemDiagnostics } from "../tauri";
+import { advancedRoutePath, productRoutePath } from "../productShellContract";
 
 export type CapabilityTone = "ready" | "warning" | "error" | "neutral";
 
@@ -164,7 +165,7 @@ export function buildCapabilityStatusViewModel(
       detail: "正在检查模型、Life Model 和工具权限。",
       tone: "neutral",
       primaryActionLabel: "查看设置",
-      primaryActionHref: "/settings",
+      primaryActionHref: productRoutePath("Settings"),
       chips: [
         { label: "模型检查中", tone: "neutral" },
         { label: "Life Model 检查中", tone: "neutral" },
@@ -194,7 +195,10 @@ export function buildCapabilityStatusViewModel(
     detail,
     tone: modelReady ? (tools.tone === "ready" ? "ready" : "warning") : "error",
     primaryActionLabel: modelReady && tools.tone !== "ready" ? "配置工具" : "查看能力设置",
-    primaryActionHref: modelReady && tools.tone !== "ready" ? "/mcp" : "/settings",
+    primaryActionHref:
+      modelReady && tools.tone !== "ready"
+        ? advancedRoutePath("McpTools")
+        : productRoutePath("Settings"),
     chips: [
       {
         label: modelRouteLabel,
@@ -260,7 +264,7 @@ export function explainGovernanceBlocker(
   if (reason === "tool_permission_required") {
     return [
       "这次操作需要你先确认权限。",
-      "请到 Review 或任务控制里处理待确认项；确认前不会执行外部操作。",
+      "请到 Mailbox 或任务控制里处理待确认项；确认前不会执行外部操作。",
     ].join("\n");
   }
 

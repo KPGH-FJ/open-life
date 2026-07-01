@@ -20,7 +20,7 @@ const KIND_LABELS: Record<string, string> = {
   tool_execution: "Tool",
   proactive: "Proactive",
   planning: "Planning",
-  review: "Review",
+  review: "Mailbox",
   writing: "Writing",
   memory_governance: "Memory",
   skill: "Skill",
