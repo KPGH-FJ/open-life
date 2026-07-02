@@ -76,6 +76,13 @@ function formatChatRuntimeError(error: unknown, diagnostics: SystemDiagnostics |
   return `${hint}\n\n请去设置页查看\u201c启动检查\u201d。`;
 }
 
+function formatStreamDoneFailure(payload: StreamMessageDonePayload): string {
+  const blockers = payload.blockers?.length
+    ? payload.blockers.map(blocker => `- ${blocker}`).join("\n")
+    : "- stream_failed";
+  return `Main Chat stream failed before producing a successful reply.\n\nBlockers:\n${blockers}\n\nRun id: ${payload.run_id}`;
+}
+
 interface UseChatStreamingOpts {
   currentSessionId: string;
   onSetMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
@@ -160,6 +167,32 @@ export function useChatStreaming(opts: UseChatStreamingOpts) {
       listen<StreamMessageDonePayload>("stream-message-done", async event => {
         if (event.payload.session_id === currentSessionId) {
           flushStreaming();
+          if (event.payload.status === "failed") {
+            onSetMessages(prev => [
+              ...prev,
+              {
+                role: "assistant",
+                content: formatStreamDoneFailure(event.payload),
+                run_id: event.payload.run_id,
+              },
+            ]);
+            setStreamingReply("");
+            setSending(false);
+            onSetReasoningTrace(event.payload.reasoning_trace ?? null);
+            onSetCurrentRunId(event.payload.run_id);
+            onSetToolCalls(
+              (event.payload.tool_calls ?? []).map(call => ({
+                ...call,
+                run_id: event.payload.run_id,
+              }))
+            );
+            onSetStreamInterrupted(true);
+            setStreamInterruptedLocal(true);
+            streamErrorHandledRef.current = true;
+            await loadAgentRunForSession(event.payload.run_id, event.payload.session_id);
+            refreshAgentRuns(event.payload.session_id);
+            return;
+          }
           onSetMessages(prev => [
             ...prev,
             { role: "assistant", content: event.payload.reply, run_id: event.payload.run_id },

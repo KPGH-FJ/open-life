@@ -161,8 +161,8 @@ export default function ProviderConfigSection({
                   desc: "保持现有用户行为和隐私边界。",
                 },
                 {
-                  id: "capability_first_beta" as const,
-                  label: "Capability-first beta",
+                  id: "capability_first" as const,
+                  label: "Capability-first",
                   desc: "普通上下文更完整，credentials 仍会被拦截。",
                 },
               ].map(item => (

@@ -615,9 +615,12 @@ pub(crate) async fn try_run_main_chat_agent_strategy(
     let agent_state =
         assemble_main_chat_agent_state_for_turn(state, Some(task_session_id), Some(&agent_run.id))
             .await;
+    let tool_invoked = !tool_calls.is_empty();
 
     Ok(Some(SendMessageResult {
         reply,
+        status: "completed".into(),
+        blockers: Vec::new(),
         reasoning_trace,
         tool_calls,
         run_id: Some(agent_run.id),
@@ -625,6 +628,9 @@ pub(crate) async fn try_run_main_chat_agent_strategy(
         agent_state,
         execution_transcript,
         legacy_fallback_used: false,
+        legacy_runtime_invoked: false,
+        model_invoked: true,
+        tool_invoked,
     }))
 }
 

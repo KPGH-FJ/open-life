@@ -557,7 +557,7 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
     if let Err(e) = heuristic_store.seed_mvp_heuristics() {
         startup_warnings
             .borrow_mut()
-            .push(format!("MVP heuristics seed failed: {}", e));
+            .push(format!("initial heuristics seed failed: {}", e));
     }
     let policy_store = openlife_core::agent::PolicyStore::mvp_builtin();
 
@@ -764,6 +764,7 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
         main_chat_action_queue_store: Some(Arc::new(Mutex::new(main_chat_action_queue_store))),
         main_chat_agent_event_store: Some(Arc::new(Mutex::new(main_chat_agent_event_store))),
         main_chat_selected_skill_ids: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        main_chat_runtime_state: crate::state::MainChatRuntimeState::shared(),
         patch_store: Some(Arc::new(Mutex::new(patch_store))),
         rollout_metrics_store,
         tool_permission_store: Arc::new(Mutex::new(tool_permission_store)),

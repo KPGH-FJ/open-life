@@ -166,7 +166,7 @@ fn evaluate_lifemodel_proposal_patch_source_mapping(
         contains_raw_tool_payload: false,
         default_chat_route_unchanged: true,
         default_chat_entrypoints_changed: false,
-        default_chat_route: "legacy_stream".into(),
+        default_chat_route: "main_chat_kernel".into(),
         proposal_first_convergence_complete: exact_source_mapping && fallback_reason.is_none(),
         required_follow_up,
         blocking_reasons,
@@ -1362,7 +1362,7 @@ async fn apply_proposal_to_state(
                 }
             }
 
-            // Beta policy: do NOT auto-create parent directories.
+            // Governance policy: do NOT auto-create parent directories.
             // is_path_in_safe_paths already requires the parent to exist.
             // If the parent was removed between proposal creation and acceptance,
             // std::fs::write will fail with a clear error and the Proposal stays pending.
@@ -2192,6 +2192,7 @@ mod tests {
             ))),
             main_chat_agent_event_store: None,
             main_chat_selected_skill_ids: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            main_chat_runtime_state: crate::state::MainChatRuntimeState::shared(),
             patch_store: Some(Arc::new(Mutex::new(
                 openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
             ))),
@@ -2566,12 +2567,12 @@ mod tests {
     }
 
     #[test]
-    fn w88_lifemodel_proposal_patch_source_mapping_keeps_default_chat_legacy_stream() {
+    fn w88_lifemodel_proposal_patch_source_mapping_keeps_default_chat_kernel_path() {
         let report = evaluate_lifemodel_proposal_patch_source_mapping(
             &test_lifemodel_source_proposal(ProposalSource::ChatConversation),
         );
         assert!(report.default_chat_route_unchanged);
-        assert_eq!(report.default_chat_route, "legacy_stream");
+        assert_eq!(report.default_chat_route, "main_chat_kernel");
         assert!(!report.default_chat_entrypoints_changed);
     }
 

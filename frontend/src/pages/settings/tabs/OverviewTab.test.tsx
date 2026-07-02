@@ -39,7 +39,6 @@ describe("OverviewTab", () => {
     readiness_issues: [],
     data_dir: "/tmp/openlife-test",
     active_data_dir: "/tmp/openlife-test",
-    legacy_data_dir: null,
     database_status: "ok",
     startup_warnings: [],
     snapshot_count: 3,

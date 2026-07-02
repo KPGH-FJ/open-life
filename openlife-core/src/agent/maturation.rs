@@ -29,7 +29,7 @@ use std::collections::{BTreeSet, HashSet};
 const DEFAULT_CONFIDENCE: f32 = 0.7;
 const MIN_CONFIDENCE: f32 = 0.55;
 const MIN_SUMMARY_CHARS: usize = 4;
-const DEFAULT_CHAT_LEGACY_PATH: &str = "legacy_stream";
+const DEFAULT_CHAT_KERNEL_PATH: &str = "main_chat_kernel";
 const MATURATION_NEXT_ALLOWED_STEP: &str = "non_default_maturation_invocation";
 const LOW_ENERGY_RULE_CANDIDATE_SOURCE_DETAIL: &str =
     "maturation:low_energy_collaboration_rule_candidate";
@@ -55,7 +55,7 @@ impl Default for LifeModelMaturationReadinessInput {
     fn default() -> Self {
         Self {
             candidate: None,
-            default_chat_selected_adapter_path: DEFAULT_CHAT_LEGACY_PATH.into(),
+            default_chat_selected_adapter_path: DEFAULT_CHAT_KERNEL_PATH.into(),
             ordinary_chat_auto_maturation_enabled: false,
             require_direct_life_model_write: false,
             require_direct_memory_write: false,
@@ -136,7 +136,7 @@ pub fn evaluate_lifemodel_maturation_readiness(
     let governor_present = type_available::<LifeModelGovernor>();
 
     let default_chat_unchanged =
-        input.default_chat_selected_adapter_path == DEFAULT_CHAT_LEGACY_PATH;
+        input.default_chat_selected_adapter_path == DEFAULT_CHAT_KERNEL_PATH;
     let ordinary_chat_entrypoint_unchanged = !input.ordinary_chat_auto_maturation_enabled;
     let mut blocking_reasons = Vec::new();
 
@@ -292,7 +292,7 @@ impl LifeModelMaturationNonDefaultInvocationInput {
     pub fn for_runtime_output(runtime_output: RuntimeOutput) -> Self {
         Self {
             runtime_output,
-            default_chat_selected_adapter_path: DEFAULT_CHAT_LEGACY_PATH.into(),
+            default_chat_selected_adapter_path: DEFAULT_CHAT_KERNEL_PATH.into(),
             ordinary_chat_auto_maturation_enabled: false,
             require_direct_life_model_write: false,
             require_direct_memory_write: false,
@@ -445,7 +445,7 @@ impl Default for LowEnergyCollaborationRuleCandidateInput {
         Self {
             outcome_evidence: Vec::new(),
             target_domain: "low_energy_planning".into(),
-            default_chat_selected_adapter_path: DEFAULT_CHAT_LEGACY_PATH.into(),
+            default_chat_selected_adapter_path: DEFAULT_CHAT_KERNEL_PATH.into(),
             ordinary_chat_auto_rule_candidate_enabled: false,
             require_direct_life_model_write: false,
             require_direct_memory_write: false,
@@ -524,7 +524,7 @@ pub fn evaluate_low_energy_collaboration_rule_candidate(
     let mut recognized_outcome_count = 0usize;
 
     let default_chat_unchanged =
-        input.default_chat_selected_adapter_path == DEFAULT_CHAT_LEGACY_PATH;
+        input.default_chat_selected_adapter_path == DEFAULT_CHAT_KERNEL_PATH;
     let ordinary_chat_entrypoint_unchanged = !input.ordinary_chat_auto_rule_candidate_enabled;
 
     if !default_chat_unchanged {
@@ -1128,7 +1128,7 @@ impl LowEnergyRuleTraceVisibilityInput {
         Self {
             selection_report,
             trace_payload: None,
-            default_chat_selected_adapter_path: DEFAULT_CHAT_LEGACY_PATH.into(),
+            default_chat_selected_adapter_path: DEFAULT_CHAT_KERNEL_PATH.into(),
             ordinary_chat_entrypoint_attached: false,
             runtime_executed: false,
             model_called: false,
@@ -1240,7 +1240,7 @@ pub fn evaluate_low_energy_rule_trace_visibility(
         && !selection_report.contains_raw_content;
     let mut contains_raw_content = selection_report.contains_raw_content;
     let default_chat_unchanged =
-        input.default_chat_selected_adapter_path == DEFAULT_CHAT_LEGACY_PATH;
+        input.default_chat_selected_adapter_path == DEFAULT_CHAT_KERNEL_PATH;
 
     if !selection_report.selected {
         push_unique_reason(&mut blocking_reasons, "w77_selection_not_selected");
@@ -1545,7 +1545,7 @@ impl MaturationEngineV1Input {
     pub fn from_graph_report(evidence_graph: EvidenceGraphReport) -> Self {
         Self {
             evidence_graph,
-            default_chat_selected_adapter_path: DEFAULT_CHAT_LEGACY_PATH.into(),
+            default_chat_selected_adapter_path: DEFAULT_CHAT_KERNEL_PATH.into(),
             ordinary_chat_auto_maturation_enabled: false,
             require_direct_life_model_write: false,
             require_direct_memory_write: false,
@@ -1645,7 +1645,7 @@ pub fn evaluate_maturation_engine_v1(input: MaturationEngineV1Input) -> Maturati
     let graph = &input.evidence_graph;
     let mut blocking_reasons = Vec::new();
     let default_chat_unchanged =
-        input.default_chat_selected_adapter_path == DEFAULT_CHAT_LEGACY_PATH;
+        input.default_chat_selected_adapter_path == DEFAULT_CHAT_KERNEL_PATH;
     let ordinary_chat_entrypoint_unchanged = !input.ordinary_chat_auto_maturation_enabled;
 
     if !graph.graph_ready {
@@ -3518,7 +3518,7 @@ fn trace_route_value_changes_default_chat(value: &Value) -> bool {
             !normalized.is_empty()
                 && !matches!(
                     normalized.as_str(),
-                    DEFAULT_CHAT_LEGACY_PATH
+                    DEFAULT_CHAT_KERNEL_PATH
                         | "legacy"
                         | "false"
                         | "none"

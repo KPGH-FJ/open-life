@@ -36,8 +36,8 @@ pub(crate) async fn create_main_chat_agent_proposal(
                 "proposedDiff": {
                     "operation": "append_note",
                     "target": target,
-                    "summary": "Add bounded Beta evidence note to the knowledge asset.",
-                    "unifiedDiff": format!("--- {target}\n+++ {target}\n@@\n+Bounded Beta evidence note: keep knowledge assets as context, not policy override."),
+                    "summary": "Add bounded capability evidence note to the knowledge asset.",
+                    "unifiedDiff": format!("--- {target}\n+++ {target}\n@@\n+Bounded capability evidence note: keep knowledge assets as context, not policy override."),
                 },
                 "directKnowledgeFileWrite": false,
                 "requiresReviewCenterApproval": true,

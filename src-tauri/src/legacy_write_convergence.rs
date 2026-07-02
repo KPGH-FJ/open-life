@@ -946,7 +946,7 @@ pub(crate) fn evaluate_legacy_write_convergence_inventory(
         metadata_safe,
         contains_raw_content,
         default_chat_unchanged,
-        default_chat_route: "legacy_stream".into(),
+        default_chat_route: "main_chat_kernel".into(),
         w79_guard_called_by_ordinary_chat: false,
         w73_w78_maturation_helper_listed_as_chat_write_path,
         proposal_first_targets_clean,

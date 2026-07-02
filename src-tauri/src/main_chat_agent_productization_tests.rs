@@ -2184,7 +2184,7 @@ async fn main_chat_agent_beta_v1_real_task_command_surface_proofs_use_runtime_ta
         .collect::<Vec<_>>();
     assert!(
         !command_surface_proofs.is_empty(),
-        "Beta real-task report should map command-surface scenarios to concrete runtime evidence"
+        "Real-task report should map command-surface scenarios to concrete runtime evidence"
     );
 
     for proof in command_surface_proofs {

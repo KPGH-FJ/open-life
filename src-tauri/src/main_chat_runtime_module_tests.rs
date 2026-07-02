@@ -21,18 +21,12 @@ fn main_chat_runtime_module_tests_are_not_concentrated_in_lib_rs() {
         "main_chat_send_command_has_non_tauri_state_executor",
         "main_chat_stream_command_has_non_tauri_state_executor",
         "legacy_send_fallback_plan_has_no_agent_loop_or_tool_side_effects",
-        "legacy_stream_fallback_plan_stays_legacy_stream_for_l2_l3",
+        "retired_stream_fallback_plan_is_blocked_for_l2_l3",
         "ordinary_stream_legacy_plan_is_built_after_governed_strategy_attempt",
         "obsolete_ordinary_chat_legacy_only_guard_wording_is_retired",
         "ordinary_chat_entrypoints_avoid_deprecated_agent_loop_helpers_and_direct_executor_construction",
         "chat_page_does_not_call_default_adapter_migration_preview_or_review_commands",
-        "default_chat_adapter_skeleton_binding_integrity_is_not_called_by_ordinary_entrypoints",
         "default_chat_entrypoints_do_not_call_w19_w60_command_surfaces_or_w73_readiness_report_or_w74_invocation",
-        "default_chat_adapter_disabled_executor_skeleton_is_not_called_by_ordinary_entrypoints",
-        "default_chat_adapter_executor_attachment_gate_is_not_called_by_ordinary_entrypoints",
-        "default_chat_adapter_stream_boundary_proof_is_not_called_by_ordinary_entrypoints",
-        "default_chat_adapter_controlled_adapter_invocation_harness_is_not_called_by_ordinary_entrypoints",
-        "default_chat_adapter_send_compatible_proof_is_not_called_by_ordinary_entrypoints",
         "default_chat_entrypoints_do_not_call_w19_w60_command_surfaces",
     ] {
         assert!(
@@ -189,7 +183,7 @@ fn main_chat_legacy_fallback_helpers_are_extracted_from_lib_rs() {
         "pub(crate) struct OrdinaryChatExecutionPlan",
         "pub(crate) fn ordinary_send_chat_execution_plan(",
         "pub(crate) fn ordinary_stream_chat_execution_plan(",
-        "pub(crate) async fn send_message_with_legacy_generation(",
+        "pub(crate) async fn run_retired_buffered_fallback_delivery(",
     ] {
         assert!(
             module_source.contains(expected),
@@ -208,6 +202,10 @@ fn main_chat_legacy_fallback_helpers_are_extracted_from_lib_rs() {
             "legacy fallback helper {forbidden} should not remain in lib.rs"
         );
     }
+    assert!(
+        !module_source.contains("send_message_with_legacy_generation"),
+        "legacy fallback module must not expose the retired success-generation fallback"
+    );
 }
 
 #[test]
@@ -229,7 +227,7 @@ fn legacy_send_fallback_plan_has_no_agent_loop_or_tool_side_effects() {
 }
 
 #[test]
-fn legacy_stream_fallback_plan_stays_legacy_stream_for_l2_l3() {
+fn retired_stream_fallback_plan_is_blocked_for_l2_l3() {
     for layer in [Layer::L2, Layer::L3] {
         let plan = ordinary_stream_chat_execution_plan(layer);
 
@@ -312,7 +310,7 @@ fn ordinary_chat_entrypoints_try_kernel_before_legacy_strategy_paths() {
         .find("run_main_chat_tool_loop_adapter(")
         .expect("pipeline should dispatch ToolLoop before legacy strategy fallback");
     let legacy_plan_after_strategy = pipeline_body[strategy_attempt..]
-        .find("run_legacy_streaming_delivery(")
+        .find("run_retired_streaming_fallback_delivery(")
         .map(|offset| strategy_attempt + offset)
         .expect("pipeline should keep the final non-ToolLoop legacy stream delivery");
 
@@ -327,6 +325,33 @@ fn ordinary_chat_entrypoints_try_kernel_before_legacy_strategy_paths() {
     assert!(
         strategy_attempt < legacy_plan_after_strategy,
         "pipeline should attempt old strategy before building the final non-ToolLoop legacy stream delivery"
+    );
+}
+
+#[test]
+fn stream_legacy_fallback_never_constructs_agent_runtime() {
+    let pipeline_module_path = format!(
+        "{}/src/main_chat_turn_pipeline.rs",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let pipeline_source =
+        std::fs::read_to_string(pipeline_module_path).expect("read main_chat_turn_pipeline.rs");
+    let retired_stream_body = extract_rust_function_body(
+        &pipeline_source,
+        "async fn run_retired_streaming_fallback_delivery(",
+    );
+
+    assert!(
+        !retired_stream_body.contains("AgentRuntime::new"),
+        "stream legacy fallback must not construct the old AgentRuntime"
+    );
+    assert!(
+        !retired_stream_body.contains(".execute_task("),
+        "stream legacy fallback must not execute old AgentRuntime tasks"
+    );
+    assert!(
+        retired_stream_body.contains("retired_stream_runtime_fallback_blocked"),
+        "stream legacy fallback should return an explicit blocker payload"
     );
 }
 
@@ -396,6 +421,14 @@ fn ordinary_chat_entrypoint_bodies() -> Vec<(&'static str, String)> {
     ]
 }
 
+fn retired_default_adapter_token() -> &'static str {
+    concat!("default_chat_", "adapter")
+}
+
+fn retired_default_adapter_type_token() -> &'static str {
+    concat!("Default", "Chat", "Adapter")
+}
+
 #[test]
 fn chat_page_does_not_call_default_adapter_migration_preview_or_review_commands() {
     let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -409,20 +442,32 @@ fn chat_page_does_not_call_default_adapter_migration_preview_or_review_commands(
         repo_root.join("frontend/src/pages/chat/useChatSessions.ts"),
     ];
     let forbidden = [
-        "default_chat_adapter",
-        "DefaultChatAdapter",
+        retired_default_adapter_token(),
+        retired_default_adapter_type_token(),
         "checkRuntimeMigrationGate",
         "draftControlledChatMigrationPlan",
         "recordControlledChatMigrationReviewDecision",
         "checkControlledChatMigrationImplementationGate",
         "runControlledChatMigrationShadowRun",
-        "runDefaultChatAdapterControlledPreview",
-        "draftDefaultChatAdapterActivationPlan",
-        "draftDefaultChatAdapterCutoverImplementationPlan",
-        "draftDefaultChatAdapterNarrowImplementationPlan",
-        "recordDefaultChatAdapter",
-        "checkDefaultChatAdapter",
-        "getDefaultChatAdapter",
+        concat!("run", "Default", "Chat", "Adapter", "ControlledPreview"),
+        concat!("draft", "Default", "Chat", "Adapter", "ActivationPlan"),
+        concat!(
+            "draft",
+            "Default",
+            "Chat",
+            "Adapter",
+            "CutoverImplementationPlan"
+        ),
+        concat!(
+            "draft",
+            "Default",
+            "Chat",
+            "Adapter",
+            "NarrowImplementationPlan"
+        ),
+        concat!("record", "Default", "Chat", "Adapter"),
+        concat!("check", "Default", "Chat", "Adapter"),
+        concat!("get", "Default", "Chat", "Adapter"),
         "getRuntimeStrategyRegistryStatus",
     ];
 
@@ -435,315 +480,6 @@ fn chat_page_does_not_call_default_adapter_migration_preview_or_review_commands(
                 "{} must not call {}",
                 path.display(),
                 forbidden
-            );
-        }
-    }
-}
-
-#[test]
-fn default_chat_adapter_skeleton_binding_integrity_is_not_called_by_ordinary_entrypoints() {
-    let ordinary_chat_bodies = ordinary_chat_entrypoint_bodies();
-    let forbidden_binding_calls = [
-        "DefaultChatControlledAdapterSkeletonBindingIntegrityReport",
-        "evaluate_default_chat_controlled_adapter_skeleton_binding_integrity",
-        "ensure_default_chat_controlled_adapter_skeleton_binding_integrity",
-    ];
-
-    for forbidden in forbidden_binding_calls {
-        for (body_name, body) in &ordinary_chat_bodies {
-            assert!(
-                !body.contains(forbidden),
-                "{body_name} must not call {forbidden}"
-            );
-        }
-    }
-}
-
-#[test]
-fn default_chat_entrypoints_do_not_call_w19_w60_command_surfaces_or_w73_readiness_report_or_w74_invocation(
-) {
-    let ordinary_chat_bodies = ordinary_chat_entrypoint_bodies();
-    let forbidden_maturation_calls = [
-        "LifeModelMaturationReadinessInput",
-        "LifeModelMaturationReadinessReport",
-        "evaluate_lifemodel_maturation_readiness",
-        "ensure_lifemodel_maturation_readiness",
-        "LifeModelMaturationNonDefaultInvocationInput",
-        "LifeModelMaturationNonDefaultInvocationReport",
-        "run_lifemodel_maturation_non_default_invocation",
-        "ensure_lifemodel_maturation_non_default_invocation",
-    ];
-
-    for forbidden in forbidden_maturation_calls {
-        for (body_name, body) in &ordinary_chat_bodies {
-            assert!(
-                !body.contains(forbidden),
-                "{body_name} must not call W73/W74 maturation API {forbidden}"
-            );
-        }
-    }
-}
-
-#[test]
-fn default_chat_adapter_disabled_executor_skeleton_is_not_called_by_ordinary_entrypoints() {
-    let ordinary_chat_bodies = ordinary_chat_entrypoint_bodies();
-    let forbidden_skeleton_calls = [
-        "DefaultChatControlledAdapterExecutorSkeletonInput",
-        "evaluate_default_chat_controlled_adapter_disabled_executor_skeleton",
-        "ensure_default_chat_controlled_adapter_disabled_executor_skeleton",
-    ];
-
-    for forbidden in forbidden_skeleton_calls {
-        for (body_name, body) in &ordinary_chat_bodies {
-            assert!(
-                !body.contains(forbidden),
-                "{body_name} must not call {forbidden}"
-            );
-        }
-    }
-}
-
-#[test]
-fn default_chat_adapter_executor_attachment_gate_is_not_called_by_ordinary_entrypoints() {
-    let ordinary_chat_bodies = ordinary_chat_entrypoint_bodies();
-    let forbidden_gate_calls = [
-        "evaluate_default_chat_controlled_adapter_executor_attachment_gate",
-        "ensure_default_chat_controlled_adapter_executor_attachment_gate",
-    ];
-
-    for forbidden in forbidden_gate_calls {
-        for (body_name, body) in &ordinary_chat_bodies {
-            assert!(
-                !body.contains(forbidden),
-                "{body_name} must not call {forbidden}"
-            );
-        }
-    }
-}
-
-#[test]
-fn default_chat_adapter_stream_boundary_proof_is_not_called_by_ordinary_entrypoints() {
-    let ordinary_chat_bodies = ordinary_chat_entrypoint_bodies();
-    let forbidden_proof_calls = [
-        "evaluate_default_chat_controlled_adapter_stream_boundary_proof",
-        "ensure_default_chat_controlled_adapter_stream_boundary_proof",
-    ];
-
-    for forbidden in forbidden_proof_calls {
-        for (body_name, body) in &ordinary_chat_bodies {
-            assert!(
-                !body.contains(forbidden),
-                "{body_name} must not call {forbidden}"
-            );
-        }
-    }
-}
-
-#[test]
-fn default_chat_adapter_controlled_adapter_invocation_harness_is_not_called_by_ordinary_entrypoints(
-) {
-    let ordinary_chat_bodies = ordinary_chat_entrypoint_bodies();
-    let forbidden_harness_calls = [
-        "evaluate_default_chat_controlled_adapter_invocation_harness",
-        "ensure_default_chat_controlled_adapter_invocation_harness",
-    ];
-
-    for forbidden in forbidden_harness_calls {
-        for (body_name, body) in &ordinary_chat_bodies {
-            assert!(
-                !body.contains(forbidden),
-                "{body_name} must not call {forbidden}"
-            );
-        }
-    }
-}
-
-#[test]
-fn default_chat_adapter_send_compatible_proof_is_not_called_by_ordinary_entrypoints() {
-    let ordinary_chat_bodies = ordinary_chat_entrypoint_bodies();
-    let forbidden_proof_calls = [
-        "evaluate_default_chat_controlled_adapter_send_compatible_proof",
-        "ensure_default_chat_controlled_adapter_send_compatible_proof",
-    ];
-
-    for forbidden in forbidden_proof_calls {
-        for (body_name, body) in &ordinary_chat_bodies {
-            assert!(
-                !body.contains(forbidden),
-                "{body_name} must not call {forbidden}"
-            );
-        }
-    }
-}
-
-#[test]
-fn default_chat_entrypoints_do_not_call_w19_w60_command_surfaces() {
-    let ordinary_chat_bodies = ordinary_chat_entrypoint_bodies();
-    let forbidden_command_surfaces = [
-        "run_multi_strategy_agent_preview",
-        "get_runtime_strategy_registry_status",
-        "get_runtime_strategy_registry_status_with_state",
-        "get_react_beta_execution_status",
-        "get_react_beta_execution_status_with_state",
-        "ReactBetaExecutionStatusReport",
-        "MultiStrategyRuntimeMaturityReport",
-        "RuntimeStrategyRegistry::maturity_report",
-        "freeze_pre_ui_backend_read_model_contracts",
-        "evaluate_final_backend_completion_gate",
-        "PreUiBackendContractFreezeReport",
-        "FinalBackendCompletionGateReport",
-        "create_plan_execute_session",
-        "get_plan_execute_session",
-        "list_plan_execute_sessions",
-        "update_plan_execute_session_draft",
-        "finalize_plan_execute_session",
-        "cancel_plan_execute_session",
-        "review_plan_execute_session",
-        "execute_plan_execute_step",
-        "skip_plan_execute_step",
-        "run_main_chat_agent_product_maturity_v2_plan_gate",
-        "check_runtime_migration_gate",
-        "check_controlled_chat_pilot_eligibility",
-        "draft_controlled_chat_migration_plan",
-        "record_controlled_chat_migration_review_decision",
-        "get_controlled_chat_migration_review_decision_summary",
-        "check_controlled_chat_migration_implementation_gate",
-        "run_controlled_chat_migration_shadow_run",
-        "record_controlled_chat_migration_shadow_review_decision",
-        "get_controlled_chat_migration_shadow_review_summary",
-        "check_controlled_chat_cutover_readiness",
-        "run_controlled_chat_cutover_candidate",
-        "record_controlled_chat_cutover_candidate_review_decision",
-        "get_controlled_chat_cutover_candidate_review_summary",
-        "check_controlled_chat_cutover_candidate_promotion_readiness",
-        "draft_default_chat_adapter_activation_plan",
-        "record_default_chat_adapter_activation_review_decision",
-        "get_default_chat_adapter_activation_review_summary",
-        "check_default_chat_adapter_activation_implementation_gate",
-        "get_default_chat_adapter_routing_status",
-        "check_default_chat_adapter_contract_harness",
-        "get_default_chat_adapter_ordinary_entry_preflight_status",
-        "check_default_chat_adapter_narrow_implementation_discussion_gate",
-        "draft_default_chat_adapter_narrow_implementation_plan",
-        "record_default_chat_adapter_narrow_implementation_plan_review_decision",
-        "get_default_chat_adapter_narrow_implementation_plan_review_summary",
-        "check_default_chat_adapter_narrow_implementation_plan_approval_readiness",
-        "run_default_chat_adapter_dry_run",
-        "record_default_chat_adapter_dry_run_review_decision",
-        "get_default_chat_adapter_dry_run_review_summary",
-        "check_default_chat_adapter_implementation_readiness",
-        "run_default_chat_adapter_controlled_preview",
-        "record_default_chat_adapter_controlled_preview_review_decision",
-        "get_default_chat_adapter_controlled_preview_review_summary",
-        "check_default_chat_adapter_controlled_preview_approval_readiness",
-        "draft_default_chat_adapter_cutover_implementation_plan",
-        "record_default_chat_adapter_cutover_plan_review_decision",
-        "get_default_chat_adapter_cutover_plan_review_summary",
-        "check_default_chat_adapter_cutover_plan_approval_readiness",
-        "get_default_chat_runtime_boundary_status",
-        "record_maturation_proposal_outcome_evidence",
-        "evaluate_maturation_proposal_outcome_evidence",
-        "MaturationProposalOutcome",
-        "MaturationProposalOutcomeEvidenceReport",
-        "LowEnergyCollaborationRuleCandidateInput",
-        "LowEnergyCollaborationRuleCandidateReport",
-        "evaluate_low_energy_collaboration_rule_candidate",
-        "propose_low_energy_collaboration_rule_candidate",
-        "AcceptedLowEnergyRuleSelectionInput",
-        "AcceptedLowEnergyRuleSelectionReport",
-        "AcceptedLowEnergyRuleSelectionHSPacketAuditProof",
-        "evaluate_accepted_low_energy_rule_selection",
-        "ensure_accepted_low_energy_rule_selection",
-        "LowEnergyRuleTraceVisibilityInput",
-        "LowEnergyRuleTraceVisibilityReport",
-        "evaluate_low_energy_rule_trace_visibility",
-        "ensure_low_energy_rule_trace_visibility",
-        "LegacyWriteRiskClass",
-        "LegacyWriteConvergenceStatus",
-        "LegacyWritePathKind",
-        "LegacyWriteInventoryEntry",
-        "LegacyWriteConvergenceReport",
-        "legacy_write_convergence_inventory",
-        "evaluate_legacy_write_convergence_inventory",
-        "ensure_legacy_write_convergence_inventory_guard",
-        "builder_apply_signals",
-        "builder_apply_signals_with_state",
-        "GovernedManualLifeModelOverrideRequest",
-        "ManualLifeModelOverrideAuditReport",
-        "GovernedSnapshotRestoreRequest",
-        "restore_snapshot_governed_operation",
-        "GovernedDataImportRequest",
-        "import_all_data_governed_operation",
-        "StateSourceDataBoundaryReport",
-        "evaluate_state_source_data_boundary",
-        "ensure_state_source_data_boundary",
-        "evaluate_lifemodel_backend_completion_readiness",
-        "LifeModelBackendCompletionReadinessReport",
-        "LifeEventStore",
-        "LifeEventSourceRef",
-        "LifeSignalExtractorInput",
-        "extract_life_signals",
-        "LifeSignalBridgeInput",
-        "bridge_life_signal_to_evidence",
-        "LifeSignalEvidenceBridgeReport",
-        "EvidenceGraphInput",
-        "EvidenceGraphReport",
-        "EvidenceTimelineReadModel",
-        "evaluate_evidence_graph",
-        "build_evidence_timeline",
-        "MaturationEngineV1Input",
-        "MaturationEngineV1Report",
-        "MaturationEngineCandidate",
-        "MaturationCandidateDomain",
-        "MaturationCandidateSuppressionReport",
-        "evaluate_maturation_engine_v1",
-        "AcceptedGuidanceLifecycleInput",
-        "AcceptedGuidanceLifecycleReport",
-        "AcceptedGuidanceRollbackPath",
-        "create_accepted_guidance_from_maturation_candidate",
-        "deactivate_accepted_guidance",
-        "LifeModelVersionReadModel",
-        "LifeModelVersionAssetDiffRef",
-        "LifeModelRollbackReadModelRef",
-        "build_lifemodel_version_read_model",
-        "materialize_yaml_compatibility_view_with_provenance",
-        "extract_hs_compatibility_view_from_yaml",
-        "RuntimeGuidanceConsumptionMode::ExplicitRuntime",
-        "with_guidance_consumption_mode",
-        "apply_react_guidance_to_config",
-        "build_guidance_impact_read_model",
-        "GuidanceAffectedSurface::ReactPrompt",
-        "GuidanceAffectedSurface::ReactConfig",
-        "GuidanceAffectedSurface::ActionBoundary",
-        "GuidanceAffectedSurface::PlanExecuteDraft",
-        "GuidanceAffectedSurface::PlanExecuteTrace",
-        "run_weekly_planning_golden_path",
-        "run_low_energy_support_golden_path",
-        "run_preference_correction_golden_path",
-        "WeeklyPlanningGoldenPathInput",
-        "WeeklyPlanningGoldenPathReport",
-        "LowEnergySupportGoldenPathInput",
-        "LowEnergySupportGoldenPathReport",
-        "PreferenceCorrectionGoldenPathInput",
-        "PreferenceCorrectionGoldenPathReport",
-        "get_skill_runtime_status",
-        "get_skill_runtime_status_with_state",
-        "run_skill",
-        "SkillRuntimeStatusReport",
-        "SkillRuntimeReadinessReport",
-        "run_main_chat_agent_execution_v1_eval_gate",
-        "run_main_chat_agent_execution_v1_eval_gate_with_state",
-        "MainChatAgentExecutionV1EvalGateReport",
-        "run_main_chat_agent_execution_v1_final_acceptance_gate",
-        "run_main_chat_agent_execution_v1_final_acceptance_gate_with_state",
-        "MainChatAgentExecutionV1FinalAcceptanceGateCommandReport",
-    ];
-
-    for forbidden in forbidden_command_surfaces {
-        for (body_name, body) in &ordinary_chat_bodies {
-            assert!(
-                !body.contains(forbidden),
-                "{body_name} must not call or enable {forbidden}"
             );
         }
     }

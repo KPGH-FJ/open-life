@@ -173,7 +173,7 @@ impl ProactiveEngine {
 
     /// Generate suggestions while consulting negative reminder evidence.
     ///
-    /// The MVP effect is deliberately narrow: a rejected reminder lowers the
+    /// The initial effect is deliberately narrow: a rejected reminder lowers the
     /// priority of future reminders in the same proactive category. It does not
     /// suppress all proactive help or persist a stable preference.
     pub fn generate_suggestions_with_evidence(

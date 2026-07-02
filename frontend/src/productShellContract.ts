@@ -69,16 +69,14 @@ export function mailboxLinkTarget(
 
 export function diagnosticsUsageReady(diagnostics: {
   usage_ready?: boolean;
-  beta_ready?: boolean;
 }): boolean {
-  return diagnostics.usage_ready ?? diagnostics.beta_ready ?? false;
+  return diagnostics.usage_ready ?? false;
 }
 
 export function diagnosticsUsageReadinessIssues(diagnostics: {
   usage_readiness_issues?: string[];
-  beta_readiness_issues?: string[];
 }): string[] {
-  return diagnostics.usage_readiness_issues ?? diagnostics.beta_readiness_issues ?? [];
+  return diagnostics.usage_readiness_issues ?? [];
 }
 
 export const LEGACY_PRODUCT_REDIRECTS = [

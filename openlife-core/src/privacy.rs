@@ -486,11 +486,11 @@ mod tests {
     #[test]
     fn secrets_only_preserves_ordinary_context_but_redacts_credentials() {
         let engine = PrivacyEngine::new();
-        let text = "我叫张三，目标是完成 OpenLife Beta。api key: sk-test-secret-123456";
+        let text = "我叫张三，目标是完成 OpenLife 能力版。api key: sk-test-secret-123456";
         let (masked, map) = engine.desensitize_secrets_only(text);
 
         assert!(masked.contains("张三"));
-        assert!(masked.contains("OpenLife Beta"));
+        assert!(masked.contains("OpenLife 能力版"));
         assert!(!masked.contains("sk-test-secret-123456"));
         assert!(masked.contains("<SECRET_0>"));
         assert_eq!(

@@ -1,12 +1,10 @@
 use std::sync::Arc;
 
-use futures::StreamExt;
 use openlife_core::agent::main_chat_agent_v1::MainChatAgentStrategy;
 use openlife_core::agent::ReasoningTrace;
 use openlife_core::layer_router::Layer;
 use openlife_core::llm::ChatMessage;
 use serde::{Deserialize, Serialize};
-use tokio::time::{timeout, Duration};
 
 use crate::legacy_write_convergence::{
     LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
@@ -16,10 +14,6 @@ use crate::main_chat_conversation_updates::{
     capture_conversation_signals, try_auto_checkin_daily_goals,
 };
 use crate::main_chat_event_stream::materialize_optional_main_chat_agent_events;
-use crate::main_chat_generation_support::{
-    finalize_chat_agent_run, generate_non_stream_fallback, preview_text,
-};
-use crate::main_chat_hs_runtime::{build_chat_runtime_hs_packet, included_life_model_sections};
 use crate::main_chat_kernel::{
     main_chat_kernel_support_disposition,
     main_chat_live_provider_eval_requires_provider_backed_react,
@@ -29,7 +23,7 @@ use crate::main_chat_kernel::{
 };
 use crate::main_chat_legacy_fallback::{
     ordinary_send_chat_execution_plan, ordinary_stream_chat_execution_plan,
-    send_message_with_legacy_generation,
+    run_retired_buffered_fallback_delivery,
 };
 use crate::main_chat_preprocess::{
     preprocess_chat_input_v2_with_options, preprocess_chat_input_with_options,
@@ -43,7 +37,6 @@ use crate::main_chat_runtime_support::{
     MainChatTaskFailureKind,
 };
 use crate::main_chat_strategy::try_run_main_chat_agent_strategy;
-use crate::main_chat_streaming::{STREAM_CHUNK_TIMEOUT_SECS, STREAM_INIT_TIMEOUT_SECS};
 use crate::main_chat_tool_loop::{
     run_main_chat_tool_loop_adapter, MainChatToolLoopInput, MainChatToolLoopOutcome,
 };
@@ -334,6 +327,20 @@ pub(crate) async fn run_main_chat_turn_pipeline_buffered(
             MainChatTurnStreamMode::Buffered.as_str(),
         )
         .await?;
+        crate::main_chat_runtime_status::record_main_chat_kernel_event_count(
+            state,
+            result.kernel_events.len(),
+        )
+        .await;
+        crate::main_chat_runtime_status::record_main_chat_turn_route_evidence(
+            state,
+            &route_decision,
+            MainChatTurnStreamMode::Buffered,
+            false,
+            false,
+            Some(result.kernel_events.len()),
+        )
+        .await;
         let mut result = result.into_send_message_result();
         attach_route_preview_trace(&mut result.reasoning_trace, &route_preview_trace);
         return Ok(MainChatTurnPipelineOutput {
@@ -431,6 +438,15 @@ pub(crate) async fn run_main_chat_turn_pipeline_buffered(
             | MainChatToolLoopOutcome::GovernedBlocker(mut result)
             | MainChatToolLoopOutcome::ToolPermissionProposal(mut result)
             | MainChatToolLoopOutcome::SingleStepFallback(mut result) => {
+                crate::main_chat_runtime_status::record_main_chat_turn_route_evidence(
+                    state,
+                    &route_decision,
+                    MainChatTurnStreamMode::Buffered,
+                    true,
+                    result.legacy_fallback_used,
+                    None,
+                )
+                .await;
                 attach_route_preview_trace(&mut result.reasoning_trace, &route_preview_trace);
                 materialize_optional_main_chat_agent_events(state, result.agent_state.as_ref())
                     .await?;
@@ -451,7 +467,7 @@ pub(crate) async fn run_main_chat_turn_pipeline_buffered(
                 let legacy_route_decision =
                     route_decision.legacy_compat_fallback_with_reason(reason_code);
                 let ordinary_plan = ordinary_send_chat_execution_plan(layer);
-                let result = send_message_with_legacy_generation(
+                let result = run_retired_buffered_fallback_delivery(
                     session_id,
                     user_msg,
                     life_model,
@@ -470,6 +486,15 @@ pub(crate) async fn run_main_chat_turn_pipeline_buffered(
                 )
                 .await?;
                 let mut result = result;
+                crate::main_chat_runtime_status::record_main_chat_turn_route_evidence(
+                    state,
+                    &legacy_route_decision,
+                    MainChatTurnStreamMode::Buffered,
+                    false,
+                    true,
+                    None,
+                )
+                .await;
                 attach_route_preview_trace(&mut result.reasoning_trace, &route_preview_trace);
                 materialize_optional_main_chat_agent_events(state, result.agent_state.as_ref())
                     .await?;
@@ -500,6 +525,15 @@ pub(crate) async fn run_main_chat_turn_pipeline_buffered(
     )
     .await?
     {
+        crate::main_chat_runtime_status::record_main_chat_turn_route_evidence(
+            state,
+            &route_decision,
+            MainChatTurnStreamMode::Buffered,
+            false,
+            result.legacy_fallback_used,
+            None,
+        )
+        .await;
         attach_route_preview_trace(&mut result.reasoning_trace, &route_preview_trace);
         materialize_optional_main_chat_agent_events(state, result.agent_state.as_ref()).await?;
         return Ok(MainChatTurnPipelineOutput {
@@ -512,7 +546,7 @@ pub(crate) async fn run_main_chat_turn_pipeline_buffered(
 
     let legacy_route_decision = route_decision.legacy_compat_fallback();
     let ordinary_plan = ordinary_send_chat_execution_plan(layer);
-    let result = send_message_with_legacy_generation(
+    let result = run_retired_buffered_fallback_delivery(
         session_id,
         user_msg,
         life_model,
@@ -531,6 +565,15 @@ pub(crate) async fn run_main_chat_turn_pipeline_buffered(
     )
     .await?;
     let mut result = result;
+    crate::main_chat_runtime_status::record_main_chat_turn_route_evidence(
+        state,
+        &legacy_route_decision,
+        MainChatTurnStreamMode::Buffered,
+        false,
+        true,
+        None,
+    )
+    .await;
     attach_route_preview_trace(&mut result.reasoning_trace, &route_preview_trace);
     materialize_optional_main_chat_agent_events(state, result.agent_state.as_ref()).await?;
     Ok(MainChatTurnPipelineOutput {
@@ -591,6 +634,20 @@ pub(crate) async fn run_main_chat_turn_pipeline_streaming(
             .await?
         };
         let kernel_event_count = result.kernel_events.len();
+        crate::main_chat_runtime_status::record_main_chat_kernel_event_count(
+            state,
+            kernel_event_count,
+        )
+        .await;
+        crate::main_chat_runtime_status::record_main_chat_turn_route_evidence(
+            state,
+            &route_decision,
+            MainChatTurnStreamMode::Streaming,
+            false,
+            false,
+            Some(kernel_event_count),
+        )
+        .await;
         let durable_events = result.durable_events.clone();
         let durable_event_count = durable_events.len();
         let run_id = result.run_id.clone();
@@ -746,6 +803,15 @@ pub(crate) async fn run_main_chat_turn_pipeline_streaming(
             | MainChatToolLoopOutcome::GovernedBlocker(mut result)
             | MainChatToolLoopOutcome::ToolPermissionProposal(mut result)
             | MainChatToolLoopOutcome::SingleStepFallback(mut result) => {
+                crate::main_chat_runtime_status::record_main_chat_turn_route_evidence(
+                    state,
+                    &route_decision,
+                    MainChatTurnStreamMode::Streaming,
+                    true,
+                    result.legacy_fallback_used,
+                    None,
+                )
+                .await;
                 attach_route_preview_trace(&mut result.reasoning_trace, &route_preview_trace);
                 let durable_events =
                     materialize_optional_main_chat_agent_events(state, result.agent_state.as_ref())
@@ -781,7 +847,7 @@ pub(crate) async fn run_main_chat_turn_pipeline_streaming(
                 }
                 let legacy_route_decision =
                     route_decision.legacy_compat_fallback_with_reason(reason_code);
-                return run_legacy_streaming_delivery(
+                return run_retired_streaming_fallback_delivery(
                     &session_id,
                     user_msg,
                     life_model,
@@ -822,6 +888,15 @@ pub(crate) async fn run_main_chat_turn_pipeline_streaming(
     )
     .await?
     {
+        crate::main_chat_runtime_status::record_main_chat_turn_route_evidence(
+            state,
+            &route_decision,
+            MainChatTurnStreamMode::Streaming,
+            false,
+            result.legacy_fallback_used,
+            None,
+        )
+        .await;
         attach_route_preview_trace(&mut result.reasoning_trace, &route_preview_trace);
         let durable_events =
             materialize_optional_main_chat_agent_events(state, result.agent_state.as_ref()).await?;
@@ -849,7 +924,7 @@ pub(crate) async fn run_main_chat_turn_pipeline_streaming(
     }
 
     let legacy_route_decision = route_decision.legacy_compat_fallback();
-    run_legacy_streaming_delivery(
+    run_retired_streaming_fallback_delivery(
         &session_id,
         user_msg,
         life_model,
@@ -905,6 +980,11 @@ fn emit_stream_send_message_result(
             }),
         );
     }
+    let result_status = result.status.clone();
+    let result_blockers = result.blockers.clone();
+    let legacy_runtime_invoked = result.legacy_runtime_invoked;
+    let model_invoked = result.model_invoked;
+    let tool_invoked = result.tool_invoked;
     let mut done_payload = serde_json::json!({
         "session_id": session_id,
         "run_id": run_id,
@@ -915,6 +995,11 @@ fn emit_stream_send_message_result(
         "agent_state": agent_state,
         "execution_transcript": result.execution_transcript,
         "legacy_fallback_used": result.legacy_fallback_used,
+        "status": result_status,
+        "blockers": result_blockers,
+        "legacy_runtime_invoked": legacy_runtime_invoked,
+        "model_invoked": model_invoked,
+        "tool_invoked": tool_invoked,
     });
     if let Some(count) = kernel_event_count {
         done_payload["kernel_event_count"] = serde_json::json!(count);
@@ -930,18 +1015,18 @@ fn emit_stream_send_message_result(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_legacy_streaming_delivery(
+pub(crate) async fn run_retired_streaming_fallback_delivery(
     session_id: &str,
-    user_msg: Option<ChatMessage>,
-    life_model: openlife_core::life_model::LifeModel,
-    tools_prompt: String,
-    privacy_engine: openlife_core::privacy::PrivacyEngine,
-    privacy_map: std::collections::HashMap<String, String>,
-    desensitized_messages: Vec<ChatMessage>,
+    _user_msg: Option<ChatMessage>,
+    _life_model: openlife_core::life_model::LifeModel,
+    _tools_prompt: String,
+    _privacy_engine: openlife_core::privacy::PrivacyEngine,
+    _privacy_map: std::collections::HashMap<String, String>,
+    _desensitized_messages: Vec<ChatMessage>,
     embed_err: Option<String>,
-    auto_checkin_msg_stream: Option<String>,
+    _auto_checkin_msg_stream: Option<String>,
     layer: Layer,
-    context_summary: openlife_core::agent::ContextSummary,
+    _context_summary: openlife_core::agent::ContextSummary,
     mut agent_run: openlife_core::agent::AgentRun,
     main_chat_agent_turn: crate::main_chat_runtime_support::MainChatAgentTurn,
     legacy_route_decision: MainChatTurnRouteDecision,
@@ -954,76 +1039,100 @@ async fn run_legacy_streaming_delivery(
     debug_assert!(!ordinary_plan.constructs_action_executor);
     debug_assert!(!ordinary_plan.tool_execution_allowed);
 
-    let scheduler_clone = state.scheduler.lock().await.clone();
-    let model_route = scheduler_clone
-        .preview_chat_route(Some(&tools_prompt))
-        .await;
-    let cfg = state.config.lock().await;
-    let agent_runtime =
-        openlife_core::agent::AgentRuntime::new(life_model.clone(), scheduler_clone.clone(), &cfg);
-    drop(cfg);
+    let legacy_fallback_used = true;
+    let fallback_reason_code = legacy_route_decision.reason_code.clone();
+    crate::main_chat_runtime_status::record_main_chat_legacy_fallback(
+        state,
+        fallback_reason_code.clone(),
+    )
+    .await;
+    crate::main_chat_runtime_status::record_main_chat_turn_route_evidence(
+        state,
+        &legacy_route_decision,
+        MainChatTurnStreamMode::Streaming,
+        false,
+        true,
+        None,
+    )
+    .await;
 
-    let task = openlife_core::agent::AgentTask {
-        kind: openlife_core::agent::AgentTaskKind::Conversation,
-        session_id: session_id.to_string(),
-        user_text: user_msg
-            .as_ref()
-            .map(|m| m.content.clone())
-            .unwrap_or_default(),
-        messages: desensitized_messages.clone(),
-        layer,
-    };
-
-    let hs_packet =
-        build_chat_runtime_hs_packet(state, &task, &life_model, &tools_prompt, None).await?;
-
+    let blocker_code = "retired_stream_runtime_fallback_blocked";
+    let reply = "Main Chat streaming retired runtime fallback is blocked. This turn did not invoke the old AgentRuntime, tools, or provider model.".to_string();
     let mut reasoning_trace = ReasoningTrace::default();
     if let Some(err) = embed_err {
         reasoning_trace.errors.push(err);
     }
-    let mut messages_with_reasoning = desensitized_messages.clone();
+    reasoning_trace.generation_result = Some(serde_json::json!({
+        "status": "blocked",
+        "blockerCode": blocker_code,
+        "legacyFallbackUsed": true,
+        "legacyFallbackReasonCode": fallback_reason_code.clone(),
+        "modelInvoked": false,
+        "toolInvoked": false,
+        "agentRuntimeInvoked": false,
+    }));
+    attach_route_preview_trace(&mut reasoning_trace, &route_preview_trace);
+    agent_run.reasoning_strategy = Some(format!(
+        "main_chat_agent_v1_{}_retired_stream_blocked",
+        main_chat_agent_turn.decision.selected_strategy.as_str()
+    ));
+    agent_run.reasoning_trace = Some(reasoning_trace.clone());
 
-    let _actual_layer = if layer == Layer::L3 {
-        let runtime_output = agent_runtime
-            .execute_task(
-                &task,
-                &life_model,
-                &tools_prompt,
-                None,
-                vec![],
-                privacy_engine.clone(),
-            )
-            .await;
-
-        match runtime_output {
-            Ok(output) => {
-                messages_with_reasoning = output.final_messages;
-                reasoning_trace = output.reasoning_trace;
-                agent_run.reasoning_strategy = Some("layered".to_string());
-                agent_run.reasoning_trace = Some(reasoning_trace.clone());
-                Layer::L3
-            }
-            Err(e) => {
-                log::warn!("[AgentRuntime] Reasoning failed: {}, falling back to L2", e);
-                agent_run.reasoning_strategy = Some("direct".to_string());
-                let lr = state.layer_router.lock().await;
-                lr.fallback(Layer::L3).unwrap_or(Layer::L2)
-            }
-        }
-    } else {
-        agent_run.reasoning_strategy = Some("direct".to_string());
-        layer
-    };
-    let legacy_fallback_used = main_chat_agent_turn.decision.selected_strategy
-        != openlife_core::agent::main_chat_agent_v1::MainChatAgentStrategy::DirectAnswer;
-    agent_run.reasoning_strategy = Some(if legacy_fallback_used {
-        format!(
-            "main_chat_agent_v1_{}_legacy_stream_fallback",
-            main_chat_agent_turn.decision.selected_strategy.as_str()
+    let task_session_id = main_chat_agent_turn
+        .decision
+        .agent_task_session_id
+        .as_deref();
+    let mut execution_transcript = main_chat_agent_turn.transcript_entries.clone();
+    execution_transcript.extend(
+        append_main_chat_agent_transcript(
+            state,
+            task_session_id,
+            openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Fallback,
+            "Retired streaming fallback was blocked for this Main Chat turn.",
+            serde_json::json!({
+                "runId": agent_run.id,
+                "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
+                "executionPath": legacy_route_decision.execution_path_label(),
+                "routeDecisionReasonCode": fallback_reason_code.clone(),
+                "fallbackReason": "retired_stream_runtime_fallback_blocked",
+                "fallbackVisible": true,
+                "legacyRuntimeInvoked": false,
+                "modelInvoked": false,
+                "toolInvoked": false,
+            }),
         )
-    } else {
-        "main_chat_agent_v1_direct_answer_stream".to_string()
-    });
+        .await,
+    );
+    execution_transcript.extend(
+        append_main_chat_agent_transcript(
+            state,
+            task_session_id,
+            openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Error,
+            "Main Chat stream fallback was blocked before invoking legacy runtime.",
+            serde_json::json!({
+                "runId": agent_run.id,
+                "blockerCode": blocker_code,
+                "legacyFallbackUsed": true,
+                "legacyFallbackReasonCode": fallback_reason_code.clone(),
+            }),
+        )
+        .await,
+    );
+
+    fail_stream_agent_run(
+        state,
+        &mut agent_run,
+        task_session_id,
+        MainChatTaskFailureKind::ProviderError,
+        blocker_code,
+    )
+    .await;
+    if let Some(ref store_arc) = state.agent_run_store {
+        let store = store_arc.lock().await;
+        if let Err(e) = store.update_run(&agent_run) {
+            log::warn!("[AgentRun] legacy stream blocker update failed: {}", e);
+        }
+    }
 
     emit_stream_event(
         "stream-message-start",
@@ -1034,390 +1143,16 @@ async fn run_legacy_streaming_delivery(
             "tool_calls": Vec::<ToolCallResult>::new(),
             "agent_ingress": main_chat_agent_turn.decision.clone(),
             "execution_transcript": main_chat_agent_turn.transcript_entries.clone(),
-            "legacy_fallback_used": legacy_fallback_used,
+            "legacy_fallback_used": true,
+            "status": "failed",
+            "blockers": [blocker_code],
+            "legacy_fallback_reason_code": fallback_reason_code.clone(),
+            "legacy_runtime_invoked": false,
+            "model_invoked": false,
+            "tool_invoked": false,
         }),
     );
-
-    let mut full_reply = String::new();
-    if let Some(ref ex) = reasoning_trace.generation_result {
-        if let Some(text) = ex.get("text").and_then(|t| t.as_str()) {
-            full_reply = text.to_string();
-            emit_stream_event(
-                "stream-message-chunk",
-                serde_json::json!({
-                    "session_id": session_id,
-                    "chunk": text,
-                }),
-            );
-        }
-    }
-
-    if full_reply.is_empty() {
-        let stream_init = if let Some(ref packet) = hs_packet {
-            timeout(
-                Duration::from_secs(STREAM_INIT_TIMEOUT_SECS),
-                scheduler_clone.generate_stream_with_hs_packet(
-                    messages_with_reasoning.clone(),
-                    &life_model,
-                    Some(&tools_prompt),
-                    packet,
-                ),
-            )
-            .await
-        } else {
-            timeout(
-                Duration::from_secs(STREAM_INIT_TIMEOUT_SECS),
-                scheduler_clone.generate_stream(
-                    messages_with_reasoning.clone(),
-                    &life_model,
-                    Some(&tools_prompt),
-                ),
-            )
-            .await
-        };
-
-        match stream_init
-            .map_err(|_| format!("流式响应初始化超时（{} 秒）", STREAM_INIT_TIMEOUT_SECS))
-            .and_then(|result| result.map_err(|e| e.to_string()))
-        {
-            Ok(mut stream) => loop {
-                let next_chunk = match timeout(
-                    Duration::from_secs(STREAM_CHUNK_TIMEOUT_SECS),
-                    stream.next(),
-                )
-                .await
-                {
-                    Ok(next) => next,
-                    Err(_) => {
-                        let stream_error =
-                            format!("超过 {} 秒没有收到模型输出", STREAM_CHUNK_TIMEOUT_SECS);
-                        match generate_non_stream_fallback(
-                            &scheduler_clone,
-                            messages_with_reasoning.clone(),
-                            &life_model,
-                            &tools_prompt,
-                            hs_packet.clone(),
-                        )
-                        .await
-                        {
-                            Ok(reply) => {
-                                let fallback_text = if full_reply.is_empty() {
-                                    reply
-                                } else {
-                                    format!(
-                                        "\n\n[系统] 流式连接长时间无输出，已自动用非流式请求重试并补全回复：\n\n{}",
-                                        reply
-                                    )
-                                };
-                                reasoning_trace.errors.push(format!(
-                                    "流式响应超时，已降级为非流式响应：{}",
-                                    stream_error
-                                ));
-                                full_reply.push_str(&fallback_text);
-                                emit_stream_event(
-                                    "stream-message-chunk",
-                                    serde_json::json!({
-                                        "session_id": session_id,
-                                        "chunk": fallback_text,
-                                    }),
-                                );
-                                break;
-                            }
-                            Err(fallback_error) => {
-                                let message = format!(
-                                    "流式响应超时，非流式重试也失败：{}；重试错误：{}",
-                                    stream_error, fallback_error
-                                );
-                                emit_stream_error(
-                                    session_id,
-                                    &agent_run.id,
-                                    &message,
-                                    emit_stream_event,
-                                );
-                                fail_stream_agent_run(
-                                    state,
-                                    &mut agent_run,
-                                    main_chat_agent_turn
-                                        .decision
-                                        .agent_task_session_id
-                                        .as_deref(),
-                                    MainChatTaskFailureKind::Timeout,
-                                    &message,
-                                )
-                                .await;
-                                return Err(message);
-                            }
-                        }
-                    }
-                };
-                let Some(chunk_result) = next_chunk else {
-                    break;
-                };
-                match chunk_result {
-                    Ok(chunk) => {
-                        if !chunk.is_empty() {
-                            full_reply.push_str(&chunk);
-                            emit_stream_event(
-                                "stream-message-chunk",
-                                serde_json::json!({
-                                    "session_id": session_id,
-                                    "chunk": chunk,
-                                }),
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        let stream_error = e.to_string();
-                        match generate_non_stream_fallback(
-                            &scheduler_clone,
-                            messages_with_reasoning.clone(),
-                            &life_model,
-                            &tools_prompt,
-                            hs_packet.clone(),
-                        )
-                        .await
-                        {
-                            Ok(reply) => {
-                                let fallback_text = if full_reply.is_empty() {
-                                    reply
-                                } else {
-                                    format!(
-                                        "\n\n[系统] 流式连接中断，已自动用非流式请求重试并补全回复：\n\n{}",
-                                        reply
-                                    )
-                                };
-                                reasoning_trace.errors.push(format!(
-                                    "流式响应中断，已降级为非流式响应：{}",
-                                    stream_error
-                                ));
-                                full_reply.push_str(&fallback_text);
-                                emit_stream_event(
-                                    "stream-message-chunk",
-                                    serde_json::json!({
-                                        "session_id": session_id,
-                                        "chunk": fallback_text,
-                                    }),
-                                );
-                                break;
-                            }
-                            Err(fallback_error) => {
-                                let message = format!(
-                                    "流式响应失败，非流式重试也失败：{}；重试错误：{}",
-                                    stream_error, fallback_error
-                                );
-                                emit_stream_error(
-                                    session_id,
-                                    &agent_run.id,
-                                    &message,
-                                    emit_stream_event,
-                                );
-                                fail_stream_agent_run(
-                                    state,
-                                    &mut agent_run,
-                                    main_chat_agent_turn
-                                        .decision
-                                        .agent_task_session_id
-                                        .as_deref(),
-                                    MainChatTaskFailureKind::ProviderError,
-                                    &message,
-                                )
-                                .await;
-                                return Err(message);
-                            }
-                        }
-                    }
-                }
-            },
-            Err(stream_error) => {
-                let stream_error = stream_error.to_string();
-                match generate_non_stream_fallback(
-                    &scheduler_clone,
-                    messages_with_reasoning.clone(),
-                    &life_model,
-                    &tools_prompt,
-                    hs_packet.clone(),
-                )
-                .await
-                {
-                    Ok(reply) => {
-                        reasoning_trace.errors.push(format!(
-                            "流式响应初始化失败，已降级为非流式响应：{}",
-                            stream_error
-                        ));
-                        full_reply = reply.clone();
-                        emit_stream_event(
-                            "stream-message-chunk",
-                            serde_json::json!({
-                                "session_id": session_id,
-                                "chunk": reply,
-                            }),
-                        );
-                    }
-                    Err(fallback_error) => {
-                        let message = format!(
-                            "流式响应初始化失败，非流式重试也失败：{}；重试错误：{}",
-                            stream_error, fallback_error
-                        );
-                        emit_stream_error(session_id, &agent_run.id, &message, emit_stream_event);
-                        let failure_kind = if stream_error.contains("超时") {
-                            MainChatTaskFailureKind::Timeout
-                        } else {
-                            MainChatTaskFailureKind::ProviderError
-                        };
-                        fail_stream_agent_run(
-                            state,
-                            &mut agent_run,
-                            main_chat_agent_turn
-                                .decision
-                                .agent_task_session_id
-                                .as_deref(),
-                            failure_kind,
-                            &message,
-                        )
-                        .await;
-                        return Err(message);
-                    }
-                }
-            }
-        }
-        if full_reply.trim().is_empty() {
-            let stream_error = "流式响应已结束，但没有收到可显示内容".to_string();
-            match generate_non_stream_fallback(
-                &scheduler_clone,
-                messages_with_reasoning.clone(),
-                &life_model,
-                &tools_prompt,
-                hs_packet.clone(),
-            )
-            .await
-            {
-                Ok(reply) => {
-                    reasoning_trace.errors.push(format!(
-                        "流式响应为空，已降级为非流式响应：{}",
-                        stream_error
-                    ));
-                    full_reply = reply.clone();
-                    emit_stream_event(
-                        "stream-message-chunk",
-                        serde_json::json!({
-                            "session_id": session_id,
-                            "chunk": reply,
-                        }),
-                    );
-                }
-                Err(fallback_error) => {
-                    let message = format!(
-                        "流式响应为空，非流式重试也失败：{}；重试错误：{}",
-                        stream_error, fallback_error
-                    );
-                    emit_stream_error(session_id, &agent_run.id, &message, emit_stream_event);
-                    fail_stream_agent_run(
-                        state,
-                        &mut agent_run,
-                        main_chat_agent_turn
-                            .decision
-                            .agent_task_session_id
-                            .as_deref(),
-                        MainChatTaskFailureKind::ProviderError,
-                        &message,
-                    )
-                    .await;
-                    return Err(message);
-                }
-            }
-        }
-    }
-
-    let mut first_reply = privacy_engine.reconstruct(&full_reply, &privacy_map);
-    if let Some(msg) = auto_checkin_msg_stream {
-        if !first_reply.contains(&msg) {
-            first_reply = format!("{}\n\n[系统] {}", first_reply, msg);
-        }
-    }
-
-    let reply = first_reply;
     let tool_calls: Vec<ToolCallResult> = vec![];
-
-    let assistant_message = ChatMessage {
-        role: "assistant".into(),
-        content: reply.clone(),
-    };
-
-    let context_summary = openlife_core::agent::ContextSummary {
-        life_model_empty: life_model.is_effectively_empty(),
-        included_life_model_sections: included_life_model_sections(&life_model),
-        memory_hit_count: context_summary.memory_hit_count,
-        memory_sources: context_summary.memory_sources,
-        used_tools_prompt: !tools_prompt.is_empty(),
-        redaction_applied: !privacy_map.is_empty(),
-        redaction_level: if privacy_map.is_empty() {
-            openlife_core::agent::types::RedactionLevel::None
-        } else {
-            openlife_core::agent::types::RedactionLevel::Light
-        },
-    };
-    let preview = preview_text(&reply, 200);
-    agent_run.complete(&preview, model_route, context_summary);
-    attach_route_preview_trace(&mut reasoning_trace, &route_preview_trace);
-    if let Err(e) = finalize_chat_agent_run(
-        session_id,
-        &assistant_message,
-        &reply,
-        &mut reasoning_trace,
-        &mut agent_run,
-        &life_model,
-        state,
-    )
-    .await
-    {
-        log::warn!("[Stream] finalize_chat_agent_run failed: {}", e);
-        emit_stream_error(
-            session_id,
-            &agent_run.id,
-            &format!("AgentRun 持久化失败: {}", e),
-            emit_stream_event,
-        );
-        return Err(e);
-    }
-    let mut execution_transcript = main_chat_agent_turn.transcript_entries.clone();
-    if legacy_fallback_used {
-        execution_transcript.extend(
-            append_main_chat_agent_transcript(
-                state,
-                main_chat_agent_turn
-                    .decision
-                    .agent_task_session_id
-                    .as_deref(),
-                openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Fallback,
-                "Legacy streaming fallback was used for this Main Chat turn.",
-                serde_json::json!({
-                    "runId": agent_run.id,
-                    "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
-                    "executionPath": legacy_route_decision.execution_path_label(),
-                    "routeDecisionReasonCode": legacy_route_decision.reason_code,
-                    "fallbackReason": "strategy_stream_executor_not_yet_available_for_this_path",
-                    "fallbackVisible": true,
-                }),
-            )
-            .await,
-        );
-    }
-    execution_transcript.extend(
-        append_main_chat_agent_transcript(
-            state,
-            main_chat_agent_turn
-                .decision
-                .agent_task_session_id
-                .as_deref(),
-            openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::FinalResult,
-            "Assistant response was delivered.",
-            serde_json::json!({
-                "runId": agent_run.id,
-                "legacyFallbackUsed": legacy_fallback_used,
-            }),
-        )
-        .await,
-    );
 
     let agent_state =
         crate::main_chat_agent_state_payload::assemble_main_chat_agent_state_for_turn(
@@ -1442,7 +1177,13 @@ async fn run_legacy_streaming_delivery(
             "agent_ingress": main_chat_agent_turn.decision.clone(),
             "agent_state": agent_state,
             "execution_transcript": execution_transcript,
-            "legacy_fallback_used": legacy_fallback_used,
+            "legacy_fallback_used": true,
+            "status": "failed",
+            "blockers": [blocker_code],
+            "legacy_fallback_reason_code": fallback_reason_code,
+            "legacy_runtime_invoked": false,
+            "model_invoked": false,
+            "tool_invoked": false,
     });
     emit_stream_event("stream-message-done", done_payload.clone());
     for event in durable_events {
@@ -1462,22 +1203,6 @@ async fn run_legacy_streaming_delivery(
             done_payload,
         },
     })
-}
-
-fn emit_stream_error(
-    session_id: &str,
-    run_id: &str,
-    message: &str,
-    emit_stream_event: &mut (impl FnMut(&str, serde_json::Value) + Send),
-) {
-    emit_stream_event(
-        "stream-message-error",
-        serde_json::json!({
-            "session_id": session_id,
-            "run_id": run_id,
-            "error": message,
-        }),
-    );
 }
 
 async fn fail_stream_agent_run(

@@ -22,7 +22,7 @@ const MEMORY_LIFECYCLE_CONTEXT_LIMIT: usize = 5;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CapabilityPrivacyMode {
     ExistingDefault,
-    CapabilityFirstBeta,
+    CapabilityFirst,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,7 +43,7 @@ impl MainChatPreprocessOptions {
         Self {
             capability_privacy_mode: match mode {
                 AgentRuntimeMode::LocalFirstDefault => CapabilityPrivacyMode::ExistingDefault,
-                AgentRuntimeMode::CapabilityFirstBeta => CapabilityPrivacyMode::CapabilityFirstBeta,
+                AgentRuntimeMode::CapabilityFirst => CapabilityPrivacyMode::CapabilityFirst,
             },
         }
     }
@@ -666,7 +666,7 @@ pub(crate) async fn preprocess_chat_input_v2_with_options(
 
     let mut privacy_map = output.privacy_map.clone();
     let mut desensitized_messages =
-        if options.capability_privacy_mode == CapabilityPrivacyMode::CapabilityFirstBeta {
+        if options.capability_privacy_mode == CapabilityPrivacyMode::CapabilityFirst {
             let mut messages_out = Vec::new();
             let mut map_out = HashMap::new();
             for message in messages {
@@ -819,7 +819,7 @@ fn sanitize_for_capability_privacy_mode(
     mode: CapabilityPrivacyMode,
     hs_local_only: bool,
 ) -> (String, HashMap<String, String>) {
-    if mode == CapabilityPrivacyMode::CapabilityFirstBeta && !hs_local_only {
+    if mode == CapabilityPrivacyMode::CapabilityFirst && !hs_local_only {
         privacy_engine.desensitize_secrets_only(content)
     } else {
         privacy_engine.desensitize(content)
@@ -928,7 +928,7 @@ mod tests {
     #[test]
     fn capability_privacy_mode_preserves_ordinary_personal_context() {
         let engine = PrivacyEngine::new();
-        let text = "我叫张三，偏好深度工作，项目目标是完成 OpenLife Beta。";
+        let text = "我叫张三，偏好深度工作，项目目标是完成 OpenLife 能力版。";
 
         let (existing_default, _) = sanitize_for_capability_privacy_mode(
             &engine,
@@ -939,14 +939,14 @@ mod tests {
         let (capability_first, map) = sanitize_for_capability_privacy_mode(
             &engine,
             text,
-            CapabilityPrivacyMode::CapabilityFirstBeta,
+            CapabilityPrivacyMode::CapabilityFirst,
             false,
         );
 
         assert!(!existing_default.contains("张三"));
         assert!(capability_first.contains("张三"));
         assert!(capability_first.contains("深度工作"));
-        assert!(capability_first.contains("OpenLife Beta"));
+        assert!(capability_first.contains("OpenLife 能力版"));
         assert!(map.is_empty());
     }
 
@@ -964,7 +964,7 @@ mod tests {
         let (masked, map) = sanitize_for_capability_privacy_mode(
             &engine,
             &text,
-            CapabilityPrivacyMode::CapabilityFirstBeta,
+            CapabilityPrivacyMode::CapabilityFirst,
             false,
         );
 
@@ -995,7 +995,7 @@ mod tests {
         let (masked, map) = sanitize_for_capability_privacy_mode(
             &engine,
             text,
-            CapabilityPrivacyMode::CapabilityFirstBeta,
+            CapabilityPrivacyMode::CapabilityFirst,
             true,
         );
 

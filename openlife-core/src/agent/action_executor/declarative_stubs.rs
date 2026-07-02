@@ -6,7 +6,7 @@ use super::ActionExecutionResult;
 use super::AgentActionRequest;
 
 impl super::ActionExecutor {
-    /// For declarative-only stub tools (calendar, email), create a Proposal instead of blocking.
+    /// For manifest-only provider-gated tools, create a Proposal instead of blocking.
     #[allow(clippy::too_many_arguments)]
     pub fn create_declarative_stub_proposal(
         &self,

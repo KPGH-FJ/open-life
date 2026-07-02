@@ -167,6 +167,8 @@ pub(crate) async fn send_message_with_agent_loop(
 
             return Ok(SendMessageResult {
                 reply: fallback_reply,
+                status: "completed".into(),
+                blockers: Vec::new(),
                 reasoning_trace: ReasoningTrace::default(),
                 tool_calls: Vec::new(),
                 run_id: Some(agent_run.id),
@@ -174,6 +176,9 @@ pub(crate) async fn send_message_with_agent_loop(
                 agent_state: None,
                 execution_transcript: Vec::new(),
                 legacy_fallback_used: true,
+                legacy_runtime_invoked: true,
+                model_invoked: true,
+                tool_invoked: false,
             });
         }
     };
@@ -213,6 +218,8 @@ pub(crate) async fn send_message_with_agent_loop(
 
     Ok(SendMessageResult {
         reply,
+        status: "completed".into(),
+        blockers: Vec::new(),
         reasoning_trace,
         tool_calls,
         run_id: Some(agent_run.id.clone()),
@@ -220,6 +227,9 @@ pub(crate) async fn send_message_with_agent_loop(
         agent_state: None,
         execution_transcript: Vec::new(),
         legacy_fallback_used: false,
+        legacy_runtime_invoked: false,
+        model_invoked: true,
+        tool_invoked: !agent_run.actions.is_empty(),
     })
 }
 

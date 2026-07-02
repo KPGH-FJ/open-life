@@ -425,17 +425,11 @@ export default function OverviewTab({
               </div>
             ))}
           </div>
-          <div className="grid gap-2 md:grid-cols-2">
+          <div className="grid gap-2">
             <div className="rounded-xl border border-white bg-white/80 px-3 py-3">
               <div className="text-xs font-medium text-stone-700">活跃数据目录</div>
               <div className="mt-1 break-all text-xs text-stone-500">
                 {diagnostics?.active_data_dir ?? diagnostics?.data_dir ?? "-"}
-              </div>
-            </div>
-            <div className="rounded-xl border border-white bg-white/80 px-3 py-3">
-              <div className="text-xs font-medium text-stone-700">兼容旧目录</div>
-              <div className="mt-1 break-all text-xs text-stone-500">
-                {diagnostics?.legacy_data_dir ?? "未检测到旧目录"}
               </div>
             </div>
           </div>

@@ -38,7 +38,6 @@ const safeDiagnostics = {
   readiness_issues: [],
   data_dir: "/tmp/openlife-test",
   active_data_dir: "/tmp/openlife-test",
-  legacy_data_dir: "/tmp/openlife-legacy",
   database_status: "ok",
   startup_warnings: [],
   snapshot_count: 2,
@@ -46,9 +45,6 @@ const safeDiagnostics = {
   app_version: "0.1.0",
   model_empty: false,
   chat_session_count: 3,
-  onboarding_completed: true,
-  beta_ready: true,
-  beta_readiness_issues: [],
   builder_completion: {
     identity: 80,
     goals: 75,

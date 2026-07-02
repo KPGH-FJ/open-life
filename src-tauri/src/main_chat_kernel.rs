@@ -1271,6 +1271,8 @@ impl MainChatKernelCommandSurfaceResult {
     pub(crate) fn into_send_message_result(self) -> SendMessageResult {
         SendMessageResult {
             reply: self.reply,
+            status: "completed".into(),
+            blockers: Vec::new(),
             reasoning_trace: self.reasoning_trace,
             tool_calls: self.tool_calls,
             run_id: self.run_id,
@@ -1278,6 +1280,9 @@ impl MainChatKernelCommandSurfaceResult {
             agent_state: self.agent_state,
             execution_transcript: self.execution_transcript,
             legacy_fallback_used: self.legacy_fallback_used,
+            legacy_runtime_invoked: false,
+            model_invoked: true,
+            tool_invoked: false,
         }
     }
 }

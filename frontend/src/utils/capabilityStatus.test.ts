@@ -33,7 +33,6 @@ function diagnostics(overrides: Partial<SystemDiagnostics> = {}): SystemDiagnost
     readiness_issues: [],
     data_dir: "/tmp/openlife-test",
     active_data_dir: "/tmp/openlife-test",
-    legacy_data_dir: null,
     database_status: "ok",
     startup_warnings: [],
     snapshot_count: 1,
@@ -41,9 +40,6 @@ function diagnostics(overrides: Partial<SystemDiagnostics> = {}): SystemDiagnost
     app_version: "0.1.0",
     model_empty: false,
     chat_session_count: 1,
-    onboarding_completed: true,
-    beta_ready: true,
-    beta_readiness_issues: [],
     builder_completion: {
       identity: 80,
       goals: 80,

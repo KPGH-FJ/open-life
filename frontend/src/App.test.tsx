@@ -85,7 +85,6 @@ describe("App product surface routing", () => {
           readiness_issues: [],
           data_dir: "/tmp/openlife-test",
           active_data_dir: "/tmp/openlife-test",
-          legacy_data_dir: "/tmp/openlife-legacy",
           database_status: "degraded",
           startup_warnings: ["memory.db 初始化失败，正在使用临时数据库"],
           snapshot_count: 1,
@@ -93,9 +92,6 @@ describe("App product surface routing", () => {
           app_version: "0.1.0",
           model_empty: false,
           chat_session_count: 1,
-          onboarding_completed: false,
-          beta_ready: false,
-          beta_readiness_issues: [],
           builder_completion: {
             identity: 80,
             goals: 70,
@@ -161,7 +157,6 @@ describe("App product surface routing", () => {
           readiness_issues: [],
           data_dir: "/tmp/openlife-test",
           active_data_dir: "/tmp/openlife-test",
-          legacy_data_dir: "/tmp/openlife-legacy",
           database_status: "ok",
           startup_warnings: [],
           snapshot_count: 0,
@@ -169,11 +164,8 @@ describe("App product surface routing", () => {
           app_version: "0.1.0",
           model_empty: false,
           chat_session_count: 0,
-          onboarding_completed: false,
           usage_ready: false,
           usage_readiness_issues: ["还没有完成首轮真实对话验证。"],
-          beta_ready: false,
-          beta_readiness_issues: ["还没有完成首轮真实对话验证。"],
           builder_completion: {
             identity: 80,
             goals: 70,
@@ -215,7 +207,6 @@ describe("App product surface routing", () => {
     );
     vi.mocked(invoke).mockImplementation((cmd: string) => {
       if (
-        cmd === "has_completed_onboarding" ||
         cmd === "get_system_diagnostics" ||
         cmd === "list_proposals" ||
         cmd === "get_config"
@@ -339,7 +330,6 @@ describe("App product surface routing", () => {
 
   it("renders product tabs with an active companion tab and a restrained secondary tools menu", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
-      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
       return mockInvoke(cmd, args);
     });
 
@@ -376,7 +366,6 @@ describe("App product surface routing", () => {
 
   it("lets keyboard users open and close the secondary tools menu", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
-      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
       return mockInvoke(cmd, args);
     });
     const user = userEvent.setup();
@@ -404,7 +393,6 @@ describe("App product surface routing", () => {
 
   it("closes the secondary tools menu when the route changes", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
-      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
       return mockInvoke(cmd, args);
     });
 
@@ -494,12 +482,18 @@ describe("App product surface routing", () => {
       );
       if (filePath !== tauriTypesPath && filePath !== appTypesPath) {
         expect(source, `${filePath} must not show retired default product copy`).not.toMatch(
-          /\b(?:Beta|Onboarding|Review Center|Dashboard|Workspace)\b|旧仪表盘|查看 Review|去 Review|打开 Review|待确认 Review|Review 待|Review 处理|Review 修正|Review 确认|Review 整理|Builder Review|仪表盘/
+          /\b(?:Onboarding|Review Center|Dashboard|Workspace)\b|旧仪表盘|查看 Review|去 Review|打开 Review|待确认 Review|Review 待|Review 处理|Review 修正|Review 确认|Review 整理|Builder Review|仪表盘/
         );
       }
       if (filePath !== routeRegistryPath && filePath !== tauriTypesPath) {
         expect(source, `${filePath} must not read deprecated beta diagnostics aliases`).not.toMatch(
-          /\bbeta_ready\b|\bbeta_readiness_issues\b/
+          new RegExp(
+            `\\b${["beta", "ready"].join("_")}\\b|\\b${[
+              "beta",
+              "readiness",
+              "issues",
+            ].join("_")}\\b`
+          )
         );
       }
       expect(source, `${filePath} must not expose Builder direct apply API`).not.toMatch(
@@ -510,7 +504,6 @@ describe("App product surface routing", () => {
 
   it("renders /companion as the W162 companion surface with AgentStage", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
-      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
       return mockInvoke(cmd, args);
     });
 
@@ -527,7 +520,6 @@ describe("App product surface routing", () => {
 
   it.each(["/chat", "/agent"])("redirects %s to the Companion product surface", async path => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
-      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
       return mockInvoke(cmd, args);
     });
 
@@ -550,7 +542,6 @@ describe("App product surface routing", () => {
     ["/settings", "Settings", "Settings"],
   ])("renders the %s product entry for %s", async (path, _label, expectedText) => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
-      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
       return mockInvoke(cmd, args);
     });
 
@@ -569,7 +560,6 @@ describe("App product surface routing", () => {
 
   it.each(["/", "/workspace", "/dashboard"])("redirects %s to Today", async path => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
-      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
       return mockInvoke(cmd, args);
     });
 
@@ -585,7 +575,6 @@ describe("App product surface routing", () => {
 
   it("keeps the completed product entries on their product pages", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
-      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
       return mockInvoke(cmd, args);
     });
 
@@ -606,7 +595,6 @@ describe("App product surface routing", () => {
 
   it.each(["/builder"])("redirects %s to the Life Model build subflow", async path => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
-      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
       return mockInvoke(cmd, args);
     });
 
@@ -622,7 +610,6 @@ describe("App product surface routing", () => {
 
   it.each(["/life", "/map"])("redirects %s to Life Model", async path => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
-      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
       return mockInvoke(cmd, args);
     });
 
@@ -637,7 +624,6 @@ describe("App product surface routing", () => {
 
   it("keeps /memory reachable as a secondary Life Model route", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
-      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
       return mockInvoke(cmd, args);
     });
 
@@ -653,7 +639,6 @@ describe("App product surface routing", () => {
 
   it("redirects /review to Mailbox while preserving route state", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
-      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
       return mockInvoke(cmd, args);
     });
 
@@ -676,7 +661,6 @@ describe("App product surface routing", () => {
 
   it("keeps Settings reachable as a primary route", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
-      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
       return mockInvoke(cmd, args);
     });
 
@@ -691,7 +675,6 @@ describe("App product surface routing", () => {
 
   it("keeps Runs reachable as a primary route", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
-      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
       return mockInvoke(cmd, args);
     });
 

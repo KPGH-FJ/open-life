@@ -322,6 +322,13 @@ function isStreamDonePayload(value: unknown): value is StreamMessageDonePayload 
   );
 }
 
+function formatStreamDoneFailure(payload: StreamMessageDonePayload): string {
+  const blockers = payload.blockers?.length
+    ? payload.blockers.map(blocker => `- ${blocker}`).join("\n")
+    : "- stream_failed";
+  return `Main Chat stream failed before producing a successful reply.\n\nBlockers:\n${blockers}\n\nRun id: ${payload.run_id}`;
+}
+
 function getFixSuggestion(
   diagnostics: SystemDiagnostics | null
 ): { text: string; action: string; link: string } | null {
@@ -1780,6 +1787,41 @@ export default function ChatPage({
             const oldestKey = handledStreamDoneKeysRef.current.values().next().value;
             if (oldestKey) handledStreamDoneKeysRef.current.delete(oldestKey);
           }
+          if (event.payload.status === "failed") {
+            flushStreaming();
+            setMessages(prev => [
+              ...prev,
+              {
+                role: "assistant",
+                content: formatStreamDoneFailure(event.payload),
+                run_id: event.payload.run_id,
+              },
+            ]);
+            setStreamingReply("");
+            setSending(false);
+            setReasoningTrace(event.payload.reasoning_trace ?? null);
+            setCurrentRunId(event.payload.run_id);
+            setToolCalls(
+              (event.payload.tool_calls ?? []).map(call => ({
+                ...call,
+                run_id: event.payload.run_id,
+              }))
+            );
+            setCurrentAgentIngress(event.payload.agent_ingress ?? null);
+            applyMainChatAgentStateSnapshot(event.payload.agent_state ?? null);
+            setCurrentExecutionTranscript(event.payload.execution_transcript ?? []);
+            setLegacyFallbackUsed(Boolean(event.payload.legacy_fallback_used));
+            setStreamInterrupted(true);
+            streamErrorHandledRef.current = true;
+            emitCompanionStage("error");
+            await loadMainChatTaskState(
+              event.payload.agent_ingress?.agentTaskSessionId,
+              event.payload.session_id
+            );
+            await loadAgentRunForSession(event.payload.run_id, event.payload.session_id);
+            refreshAgentRuns(event.payload.session_id);
+            return;
+          }
           const nextStage =
             inferStageFromToolCalls(event.payload.tool_calls ?? []) ??
             inferStageFromText(event.payload.reply) ??
@@ -2131,6 +2173,42 @@ export default function ChatPage({
         selectedSkillId: selectedSkillOption,
       });
       if (isStreamDonePayload(browserE2eDone) && browserE2eDone.session_id === currentSessionId) {
+        if (browserE2eDone.status === "failed") {
+          flushStreaming();
+          setMessages(prev => [
+            ...prev,
+            {
+              role: "assistant",
+              content: formatStreamDoneFailure(browserE2eDone),
+              run_id: browserE2eDone.run_id,
+            },
+          ]);
+          setStreamingReply("");
+          setSending(false);
+          setReasoningTrace(browserE2eDone.reasoning_trace ?? null);
+          setCurrentRunId(browserE2eDone.run_id);
+          setToolCalls(
+            (browserE2eDone.tool_calls ?? []).map(call => ({
+              ...call,
+              run_id: browserE2eDone.run_id,
+            }))
+          );
+          setCurrentAgentIngress(browserE2eDone.agent_ingress ?? null);
+          applyMainChatAgentStateSnapshot(browserE2eDone.agent_state ?? null);
+          setCurrentExecutionTranscript(browserE2eDone.execution_transcript ?? []);
+          setLegacyFallbackUsed(Boolean(browserE2eDone.legacy_fallback_used));
+          setStreamInterrupted(true);
+          streamErrorHandledRef.current = true;
+          emitCompanionStage("error");
+          await loadMainChatTaskState(
+            browserE2eDone.agent_ingress?.agentTaskSessionId,
+            browserE2eDone.session_id
+          );
+          await loadAgentRunForSession(browserE2eDone.run_id, browserE2eDone.session_id);
+          refreshAgentRuns(browserE2eDone.session_id);
+          await loadSessions();
+          return;
+        }
         const nextStage =
           inferStageFromToolCalls(browserE2eDone.tool_calls ?? []) ??
           inferStageFromText(browserE2eDone.reply) ??
@@ -3854,7 +3932,7 @@ export default function ChatPage({
                       <div className="rounded-md border border-amber-100 bg-amber-50 px-3 py-2 text-amber-900">
                         <div className="font-medium">Blocking reasons</div>
                         <ul className="mt-1 list-disc space-y-1 pl-4">
-                          {controlledPilotEligibility.blockingReasons.map(reason => (
+                          {controlledPilotEligibility.blockingReasons.map((reason: string) => (
                             <li key={reason}>{reason}</li>
                           ))}
                         </ul>

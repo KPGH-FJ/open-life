@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use uuid::Uuid;
 
-const DEFAULT_CHAT_LEGACY_PATH: &str = "legacy_stream";
+const DEFAULT_CHAT_KERNEL_PATH: &str = "main_chat_kernel";
 const BACKEND_COMPLETION_REPORT_KIND: &str = "lifemodel_governed_backend_completion_readiness";
 const SIGNAL_EXTRACTOR_ID: &str = "deterministic.low_energy_planning";
 const SIGNAL_EXTRACTOR_VERSION: &str = "1";
@@ -53,7 +53,7 @@ pub struct LifeModelBackendCompletionReadinessReport {
 pub struct LifeModelBackendPrerequisites {
     pub w123_react_beta_execution_hardening_complete: bool,
     pub legacy_direct_write_convergence_complete: bool,
-    pub default_chat_legacy_stream: bool,
+    pub default_chat_kernel_path: bool,
     pub evidence_store_present: bool,
     pub evidence_graph_present: bool,
     pub heuristic_store_present: bool,
@@ -95,7 +95,7 @@ pub fn evaluate_lifemodel_backend_completion_readiness() -> LifeModelBackendComp
     let current_prerequisites = LifeModelBackendPrerequisites {
         w123_react_beta_execution_hardening_complete: true,
         legacy_direct_write_convergence_complete: true,
-        default_chat_legacy_stream: true,
+        default_chat_kernel_path: true,
         evidence_store_present: type_available::<EvidenceStore>(),
         evidence_graph_present: type_available::<EvidenceGraphReport>(),
         heuristic_store_present: type_available::<crate::agent::heuristic_store::HeuristicStore>(),
@@ -129,7 +129,7 @@ pub fn evaluate_lifemodel_backend_completion_readiness() -> LifeModelBackendComp
         metadata_safe: true,
         contains_raw_content: false,
         default_chat_isolated: true,
-        default_chat_selected_adapter_path: DEFAULT_CHAT_LEGACY_PATH.to_string(),
+        default_chat_selected_adapter_path: DEFAULT_CHAT_KERNEL_PATH.to_string(),
         ordinary_chat_route_unchanged: true,
         migration_permission: false,
         runtime_execution_allowed: false,

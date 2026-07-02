@@ -1923,7 +1923,7 @@ async fn seed_mcp_manifest_snapshot(state: &Arc<AppState>, manifest: ToolManifes
     let mut registry = state.mcp_registry.lock().await;
     registry.register_builtin(
         manifest,
-        Box::new(|_args| Ok("MCP snapshot stub should not execute".into())),
+        Box::new(|_args| Ok("MCP snapshot placeholder should not execute".into())),
     );
 }
 

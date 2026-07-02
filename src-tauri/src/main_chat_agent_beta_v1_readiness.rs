@@ -361,7 +361,7 @@ fn workstreams(
         ),
         workstream(
             "phase_5",
-            "Beta Hardening",
+            "Capability Hardening",
             hardening_ready,
             &["structured readiness report and release notes"],
             hardening_blockers,

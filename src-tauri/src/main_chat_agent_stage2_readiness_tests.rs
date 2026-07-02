@@ -1807,7 +1807,7 @@ fn main_chat_stage2_final_delivery_uses_real_overclaim_guard_contract() {
 
     assert!(
         !final_delivery_collector.contains("trait Stage2RealTaskProofExt"),
-        "Stage 2 final delivery must not hide Beta forbidden-evidence checks behind a placeholder trait"
+        "Stage 2 final delivery must not hide forbidden-evidence checks behind a placeholder trait"
     );
     assert!(
         !final_delivery_collector.contains("final_done_overclaim_count: 0"),

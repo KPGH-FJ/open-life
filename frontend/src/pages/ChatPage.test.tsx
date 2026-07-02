@@ -933,7 +933,6 @@ describe("ChatPage", () => {
           readiness_issues: [],
           data_dir: "/tmp/openlife-test",
           active_data_dir: "/tmp/openlife-test",
-          legacy_data_dir: "/tmp/openlife-legacy",
           database_status: "ok",
           startup_warnings: [],
           snapshot_count: 0,
@@ -941,9 +940,6 @@ describe("ChatPage", () => {
           app_version: "0.1.0",
           model_empty: true,
           chat_session_count: 0,
-          onboarding_completed: true,
-          beta_ready: false,
-          beta_readiness_issues: [],
           builder_completion: {
             identity: 0,
             goals: 0,
@@ -1010,9 +1006,6 @@ describe("ChatPage", () => {
           app_version: "0.1.0",
           model_empty: false,
           chat_session_count: 0,
-          onboarding_completed: true,
-          beta_ready: false,
-          beta_readiness_issues: [],
         } as any);
       }
       return mockInvoke(cmd, args);
@@ -1095,7 +1088,6 @@ describe("ChatPage", () => {
           readiness_issues: ["当前设置为优先本地模型，但未找到可用模型：llama3。"],
           data_dir: "/tmp/openlife-test",
           active_data_dir: "/tmp/openlife-test",
-          legacy_data_dir: "/tmp/openlife-legacy",
           database_status: "ok",
           startup_warnings: [],
           snapshot_count: 0,
@@ -1103,9 +1095,6 @@ describe("ChatPage", () => {
           app_version: "0.1.0",
           model_empty: false,
           chat_session_count: 1,
-          onboarding_completed: true,
-          beta_ready: false,
-          beta_readiness_issues: [],
           builder_completion: {
             identity: 80,
             goals: 75,
@@ -1272,6 +1261,65 @@ describe("ChatPage", () => {
     });
 
     expect(screen.getAllByText("今天是星期一。")).toHaveLength(1);
+  });
+
+  it("treats failed stream completion as an error instead of a successful reply", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "触发失败流式完成" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "start_stream_message",
+        expect.objectContaining({
+          sessionId: "session-1",
+          session_id: "session-1",
+        })
+      );
+    });
+
+    const doneHandler = listeners.get("stream-message-done");
+    expect(doneHandler).toBeDefined();
+
+    await act(async () => {
+      await doneHandler?.({
+        payload: {
+          session_id: "session-1",
+          run_id: "run-failed-done",
+          reply: "THIS SUCCESS REPLY MUST NOT RENDER",
+          status: "failed",
+          blockers: ["retired_stream_runtime_fallback_blocked"],
+          legacy_fallback_used: true,
+          legacy_runtime_invoked: false,
+          model_invoked: false,
+          tool_invoked: false,
+          reasoning_trace: null,
+          tool_calls: [],
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText("THIS SUCCESS REPLY MUST NOT RENDER")).not.toBeInTheDocument();
+    expect(screen.getByText(/Main Chat stream failed before producing a successful reply/)).toBeInTheDocument();
+    expect(screen.getByText(/retired_stream_runtime_fallback_blocked/)).toBeInTheDocument();
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "log_analytics_event")).toBe(
+      false
+    );
   });
 
   it("renders the productized agent control plane from stream agent_state evidence", async () => {
@@ -4743,7 +4791,6 @@ describe("ChatPage", () => {
           readiness_issues: [],
           data_dir: "/tmp/openlife-test",
           active_data_dir: "/tmp/openlife-test",
-          legacy_data_dir: "/tmp/openlife-legacy",
           database_status: "degraded",
           startup_warnings: ["memory.db 初始化失败，正在使用临时数据库"],
           snapshot_count: 1,
@@ -4751,9 +4798,6 @@ describe("ChatPage", () => {
           app_version: "0.1.0",
           model_empty: false,
           chat_session_count: 1,
-          onboarding_completed: true,
-          beta_ready: false,
-          beta_readiness_issues: [],
           builder_completion: {
             identity: 80,
             goals: 75,

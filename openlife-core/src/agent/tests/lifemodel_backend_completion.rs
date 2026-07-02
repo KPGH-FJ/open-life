@@ -37,7 +37,10 @@ fn backend_completion_readiness_reports_w149_contract_freeze_complete() {
     assert!(report.metadata_safe);
     assert!(!report.contains_raw_content);
     assert!(report.default_chat_isolated);
-    assert_eq!(report.default_chat_selected_adapter_path, "legacy_stream");
+    assert_eq!(
+        report.default_chat_selected_adapter_path,
+        "main_chat_kernel"
+    );
     assert!(!report.runtime_execution_allowed);
     assert!(!report.model_execution_allowed);
     assert!(!report.tool_execution_allowed);

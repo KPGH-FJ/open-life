@@ -838,7 +838,7 @@ pub(crate) fn main_chat_command_surface_eval_user_text(
             "Inspect loaded knowledge assets."
         }
         MainChatCommandSurfaceEvalScenario::KnowledgeAssetEditProposal => {
-            "Propose an edit to AGENTS.md knowledge asset: add a bounded Beta evidence note."
+            "Propose an edit to AGENTS.md knowledge asset: add a bounded capability evidence note."
         }
         MainChatCommandSurfaceEvalScenario::ProposalPath => {
             "Please remember that I prefer morning writing blocks."

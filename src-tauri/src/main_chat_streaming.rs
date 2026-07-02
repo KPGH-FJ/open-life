@@ -1,5 +1,6 @@
 use openlife_core::llm::ChatMessage;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::main_chat_turn_pipeline::{
     run_main_chat_turn_pipeline_streaming, MainChatTurnDelivery, MainChatTurnPipelineInput,
@@ -7,8 +8,8 @@ use crate::main_chat_turn_pipeline::{
 };
 use crate::AppState;
 
-pub(crate) const STREAM_INIT_TIMEOUT_SECS: u64 = 45;
-pub(crate) const STREAM_CHUNK_TIMEOUT_SECS: u64 = 90;
+const STREAM_INIT_TIMEOUT_SECS: u64 = 45;
+const STREAM_CHUNK_TIMEOUT_SECS: u64 = 90;
 
 pub(crate) async fn start_stream_message_with_state(
     session_id: String,
@@ -17,17 +18,21 @@ pub(crate) async fn start_stream_message_with_state(
     state: &Arc<AppState>,
     mut emit_stream_event: impl FnMut(&str, serde_json::Value) + Send,
 ) -> Result<serde_json::Value, String> {
-    let output = run_main_chat_turn_pipeline_streaming(
-        MainChatTurnPipelineInput {
-            session_id,
-            messages,
-            selected_skill_id,
-            stream_mode: MainChatTurnStreamMode::Streaming,
-        },
-        state,
-        &mut emit_stream_event,
+    let output = tokio::time::timeout(
+        Duration::from_secs(STREAM_INIT_TIMEOUT_SECS + STREAM_CHUNK_TIMEOUT_SECS),
+        run_main_chat_turn_pipeline_streaming(
+            MainChatTurnPipelineInput {
+                session_id,
+                messages,
+                selected_skill_id,
+                stream_mode: MainChatTurnStreamMode::Streaming,
+            },
+            state,
+            &mut emit_stream_event,
+        ),
     )
-    .await?;
+    .await
+    .map_err(|_| "start_stream_message timed out before stream completion".to_string())??;
     debug_assert!(!output.route_decision.reason_code.is_empty());
 
     match output.delivery {

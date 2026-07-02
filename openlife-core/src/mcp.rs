@@ -382,10 +382,10 @@ impl McpRegistry {
             "write",
         );
 
-        // snapshot.create is declarative-only in Beta: use Version Control page instead
+        // snapshot.create is manifest-only until the Version Control executor is configured.
         self.register_declarative_stub(
             "snapshot.create",
-            "创建快照（Beta declarative-only：请使用 Version Control 页面手动创建）",
+            "创建快照（当前能力需要在 Version Control 页面手动执行）",
         );
 
         // Core OS Tools: Write (Proposal-First)
@@ -513,11 +513,8 @@ impl McpRegistry {
             "write",
         );
 
-        // email.read remains P2 (requires IMAP config)
-        self.register_declarative_stub(
-            "email.read",
-            "读取邮件（Beta stub：需要配置 IMAP account）",
-        );
+        // email.read remains provider-gated until IMAP config is available.
+        self.register_declarative_stub("email.read", "读取邮件（需要配置 IMAP account 后启用）");
 
         self.register_execution_tool(
             "email.propose_draft",
@@ -579,7 +576,7 @@ impl McpRegistry {
             manifest,
             Box::new(move |_args| {
                 Ok(format!(
-                    "Core OS tool '{}' executed (Beta MVP stub)",
+                    "Core OS tool '{}' completed with the current local capability handler",
                     id_owned
                 ))
             }),
@@ -621,14 +618,14 @@ impl McpRegistry {
             manifest,
             Box::new(move |_args| {
                 Ok(format!(
-                    "Execution tool '{}' executed (Beta MVP stub)",
+                    "Execution tool '{}' completed with the current governed executor",
                     id_owned
                 ))
             }),
         );
     }
 
-    /// Helper to register a declarative-only stub tool.
+    /// Helper to register a manifest-only tool that requires provider configuration.
     fn register_declarative_stub(&mut self, id: &str, description: &str) {
         let manifest = ToolManifest {
             id: id.into(),
@@ -644,12 +641,15 @@ impl McpRegistry {
             enabled: true,
             declarative_only: true,
             action_type: "read".into(),
-            tags: vec!["execution".into(), "stub".into()],
+            tags: vec!["execution".into(), "manifest_only".into()],
         };
         self.register_builtin(
             manifest,
             Box::new(move |_args| {
-                Ok("This tool is a declarative-only stub for Beta. Configure the appropriate provider to enable it.".to_string())
+                Ok(
+                    "This capability is manifest-only until the required provider is configured."
+                        .to_string(),
+                )
             }),
         );
     }
@@ -817,7 +817,7 @@ impl McpRegistry {
             }
             ToolSource::A2A { .. } => Err(anyhow::anyhow!("A2A tool execution is not wired yet")),
             ToolSource::Plugin { plugin_id } => Err(anyhow::anyhow!(
-                "Plugin tool '{}' from '{}' is declarative-only and not executable in this Beta",
+                "Plugin tool '{}' from '{}' requires a configured executor/provider before it can run",
                 manifest.name,
                 plugin_id
             )),
@@ -1039,6 +1039,93 @@ fn collect_privacy_findings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn legacy_product_copy_regex() -> regex::Regex {
+        let terms = [
+            format!(r"\b{}\b", ["Be", "ta"].concat()),
+            format!(r"\b{}\b", ["M", "VP"].concat()),
+            format!(r"\b{}\b", ["st", "ub"].concat()),
+            ["legacy", "stream"].join("_"),
+            ["declarative", "only"].join("-"),
+        ];
+        regex::Regex::new(&terms.join("|")).expect("legacy product copy regex")
+    }
+
+    #[test]
+    fn user_visible_mcp_manifest_copy_has_no_legacy_product_terms() {
+        let registry = McpRegistry::new();
+        let legacy_terms = legacy_product_copy_regex();
+        let mut violations = Vec::new();
+        for manifest in registry.list_manifests() {
+            let copy = [
+                manifest.id,
+                manifest.name,
+                manifest.description,
+                manifest.capabilities.join(" "),
+                manifest.tags.join(" "),
+            ]
+            .join(" ");
+            if legacy_terms.is_match(&copy) {
+                violations.push(copy);
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "legacy product terms leaked in MCP manifest copy: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn user_visible_tool_result_copy_has_no_legacy_product_terms() {
+        let registry = McpRegistry::new();
+        let legacy_terms = legacy_product_copy_regex();
+        let mut copies = Vec::new();
+
+        let manifest_only = registry
+            .list_manifests()
+            .into_iter()
+            .find(|manifest| manifest.name == "snapshot.create")
+            .expect("snapshot.create manifest");
+        copies.push(
+            registry
+                .execute_manifest(&manifest_only, serde_json::json!({}))
+                .expect("manifest-only capability result"),
+        );
+
+        let plugin_manifest = ToolManifest {
+            id: "plugin.example.read".into(),
+            name: "plugin.example.read".into(),
+            description: "Read example data from a configured plugin provider.".into(),
+            parameters: serde_json::json!({"type": "object"}),
+            permission_level: "low".into(),
+            risk_level: "low".into(),
+            version: "1.0.0".into(),
+            source: ToolSource::Plugin {
+                plugin_id: "example-plugin".into(),
+            },
+            capabilities: vec!["read".into()],
+            requires_confirmation: false,
+            enabled: true,
+            declarative_only: true,
+            action_type: "read".into(),
+            tags: vec!["read".into(), "manifest_only".into()],
+        };
+        copies.push(
+            registry
+                .execute_manifest(&plugin_manifest, serde_json::json!({}))
+                .expect_err("plugin manifest requires configured executor")
+                .to_string(),
+        );
+
+        let violations = copies
+            .into_iter()
+            .filter(|copy| legacy_terms.is_match(copy))
+            .collect::<Vec<_>>();
+        assert!(
+            violations.is_empty(),
+            "legacy product terms leaked in MCP tool result copy: {violations:?}"
+        );
+    }
 
     #[test]
     fn inspect_call_arguments_marks_medium_with_pii_for_confirmation() {

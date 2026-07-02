@@ -1,5 +1,5 @@
 use crate::errors::AppError;
-use crate::storage::{app_data_dir, load_onboarding_status_from_path, onboarding_status_path};
+use crate::storage::app_data_dir;
 use crate::{AppState, BuilderCompletion, OllamaModelInfo, SystemDiagnostics};
 use openlife_core::ollama::inspect_ollama_status;
 use openlife_core::router::RouterStatus;
@@ -196,8 +196,6 @@ pub(crate) async fn get_system_diagnostics_with_state(
             (0, "disabled".to_string())
         }
     };
-    let onboarding_completed =
-        load_onboarding_status_from_path(&onboarding_status_path()).completed;
     let mut readiness_issues = Vec::new();
     if !ollama_online && !cloud_api_configured {
         readiness_issues
@@ -339,9 +337,6 @@ pub(crate) async fn get_system_diagnostics_with_state(
         && state.startup_warnings.is_empty()
         && vector_corrupt_embedding_count == 0
         && !(chat_session_count > 0 && memory_chunk_count == 0);
-    let beta_ready = usage_ready;
-    let beta_readiness_issues = usage_readiness_issues.clone();
-
     let runtime_build_info = crate::runtime_build_info::collect_runtime_build_info().await;
     let scheduler_for_route_evidence = { state.scheduler.lock().await.clone() };
     let runtime_route_evidence =
@@ -378,7 +373,6 @@ pub(crate) async fn get_system_diagnostics_with_state(
         readiness_issues,
         data_dir: app_data_dir().display().to_string(),
         active_data_dir: app_data_dir().display().to_string(),
-        legacy_data_dir: None, // 已统一为 ai.openlife.app
         database_status: if state.startup_warnings.is_empty() {
             "ok".to_string()
         } else {
@@ -390,11 +384,8 @@ pub(crate) async fn get_system_diagnostics_with_state(
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         model_empty,
         chat_session_count,
-        onboarding_completed,
         usage_ready,
         usage_readiness_issues,
-        beta_ready,
-        beta_readiness_issues,
         builder_completion,
         ollama_models,
         agent_run_count,
