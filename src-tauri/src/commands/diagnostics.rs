@@ -336,7 +336,7 @@ pub(crate) async fn get_system_diagnostics_with_state(
         && chat_session_count > 0
         && state.startup_warnings.is_empty()
         && vector_corrupt_embedding_count == 0
-        && !(chat_session_count > 0 && memory_chunk_count == 0);
+        && memory_chunk_count != 0;
     let runtime_build_info = crate::runtime_build_info::collect_runtime_build_info().await;
     let scheduler_for_route_evidence = { state.scheduler.lock().await.clone() };
     let runtime_route_evidence =
