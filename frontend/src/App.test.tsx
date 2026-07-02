@@ -528,6 +528,21 @@ describe("App product surface routing", () => {
     expect(screen.getByTestId("agent-stage")).toHaveAttribute("data-state", "idle");
   });
 
+  it("keeps the Stage 1 dogfood route dev-only and off the legacy /chat surface", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/__stage1-dogfood-chat"]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByTestId("chat-page")).toBeInTheDocument();
+    expect(screen.queryByTestId("companion-page")).not.toBeInTheDocument();
+  });
+
   it.each([
     ["/companion", "Companion", "companion-page"],
     ["/today", "Today", "today-page"],

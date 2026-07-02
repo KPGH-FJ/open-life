@@ -32,6 +32,7 @@ const macosBlocker = "tauri_webdriver_macos_not_supported_by_tauri_driver";
 const reportPath = "frontend/test-results/main-chat-stage1-dogfood-report.json";
 const webdriverUrl = "http://127.0.0.1:4444";
 const frontendDevUrl = "http://127.0.0.1:5173";
+const stage1DogfoodChatHash = "#/__stage1-dogfood-chat";
 const D23_WEB_BLOCKER_SCRIPTED_RESPONSE = JSON.stringify({
   final: "I will run the governed web read first.",
   actions: [
@@ -555,8 +556,8 @@ async function navigateToChat(sessionId) {
   await webdriverRequest(`/session/${encodeURIComponent(sessionId)}/execute/sync`, {
     method: "POST",
     body: {
-      script: "window.location.hash = '#/chat'; return window.location.hash;",
-      args: [],
+      script: "window.location.hash = arguments[0]; return window.location.hash;",
+      args: [stage1DogfoodChatHash],
     },
   });
   await waitForScript(

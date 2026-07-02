@@ -18,6 +18,7 @@ const MailboxPage = React.lazy(() => import("./pages/MailboxPage"));
 const RunsPage = React.lazy(() => import("./pages/RunsPage"));
 const AgentRunDetail = React.lazy(() => import("./pages/AgentRunDetail"));
 const MetricsPage = React.lazy(() => import("./pages/MetricsPage"));
+const ChatPage = React.lazy(() => import("./pages/ChatPage"));
 import { getSystemDiagnostics, type SystemDiagnostics } from "./tauri";
 import {
   advancedRoutePath,
@@ -185,6 +186,9 @@ function App() {
               <Route path={productRoutePath("Mailbox")} element={<MailboxPage />} />
               <Route path={productRoutePath("Runs")} element={<RunsPage />} />
               <Route path={productRoutePath("Settings")} element={<SettingsPage />} />
+              {import.meta.env.DEV && (
+                <Route path="/__stage1-dogfood-chat" element={<ChatPage />} />
+              )}
               {LEGACY_PRODUCT_REDIRECTS.map(route => (
                 <Route
                   key={route.from}

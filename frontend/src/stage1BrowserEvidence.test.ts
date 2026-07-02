@@ -518,6 +518,8 @@ describe("stage1 browser evidence report builder", () => {
     expect(script).toContain("run_main_chat_agent_stage1_dogfood_gate");
     expect(script).toContain("executeChatScenarioWithWebDriver");
     expect(script).toContain("executeSeededControlScenarioWithWebDriver");
+    expect(script).toContain("#/__stage1-dogfood-chat");
+    expect(script).toContain("webdriver_chat_composer_not_ready");
     expect(script).toContain("chat-input");
     expect(script).toContain("send-button");
     expect(script).toContain("webdriver_selected_skill_not_applied");
