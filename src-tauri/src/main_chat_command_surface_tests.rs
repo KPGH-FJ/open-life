@@ -206,12 +206,19 @@ async fn main_chat_runtime_status_reports_kernel_truth() {
     assert!(!empty_status.kernel_evidence.final_gate_evidence_present);
     assert!(!empty_status.kernel_evidence.final_gate_ready);
     assert!(!empty_status.kernel_evidence.latest_kernel_route_observed);
-    assert!(empty_status.kernel_evidence.legacy_fallback_free_since_startup);
+    assert!(
+        empty_status
+            .kernel_evidence
+            .legacy_fallback_free_since_startup
+    );
     assert_eq!(empty_status.latest_route_evidence.status, "not_observed");
     assert!(!empty_status.latest_route_evidence.direct_answer_observed);
     assert!(!empty_status.latest_route_evidence.governed_blocker_observed);
     assert!(!empty_status.latest_route_evidence.agent_loop_observed);
-    assert_eq!(empty_status.latest_route_evidence.last_kernel_event_count, None);
+    assert_eq!(
+        empty_status.latest_route_evidence.last_kernel_event_count,
+        None
+    );
 
     let route_decision = MainChatTurnRouteDecision {
         path: MainChatExecutionPath::KernelDirect,
@@ -252,13 +259,17 @@ async fn main_chat_runtime_status_reports_kernel_truth() {
     assert!(status.latest_route_evidence.direct_answer_observed);
     assert!(!status.latest_route_evidence.governed_blocker_observed);
     assert!(!status.latest_route_evidence.agent_loop_observed);
-    assert!(status
-        .latest_route_evidence
-        .kernel_backed_default_observed);
+    assert!(status.latest_route_evidence.kernel_backed_default_observed);
     assert!(!status.latest_route_evidence.legacy_fallback_used);
-    assert_eq!(status.latest_route_evidence.last_kernel_event_count, Some(4));
     assert_eq!(
-        status.latest_route_evidence.last_route_reason_code.as_deref(),
+        status.latest_route_evidence.last_kernel_event_count,
+        Some(4)
+    );
+    assert_eq!(
+        status
+            .latest_route_evidence
+            .last_route_reason_code
+            .as_deref(),
         Some("kernel_supported_direct_answer")
     );
     assert_eq!(
@@ -459,7 +470,9 @@ async fn send_legacy_fallback_never_invokes_model_or_runtime() {
     assert_eq!(generation["legacyRuntimeInvoked"], false);
     assert_eq!(generation["modelInvoked"], false);
     assert_eq!(generation["toolInvoked"], false);
-    assert!(!result.reply.contains("legacy model success must not appear"));
+    assert!(!result
+        .reply
+        .contains("legacy model success must not appear"));
 }
 
 #[tokio::test]

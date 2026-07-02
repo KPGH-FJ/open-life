@@ -670,7 +670,7 @@ pub async fn save_config(
     // ModelRouter is now on the graduated runtime path.
     let router = openlife_core::agent::ModelRouter::new();
     new_scheduler = new_scheduler.with_model_router(router);
-        eprintln!("[Scheduler] ModelRouter enabled (graduated runtime path)");
+    eprintln!("[Scheduler] ModelRouter enabled (graduated runtime path)");
 
     *scheduler = new_scheduler;
     Ok(())

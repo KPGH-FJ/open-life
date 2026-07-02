@@ -153,7 +153,10 @@ pub(crate) async fn run_retired_buffered_fallback_delivery(
     if let Some(ref store_arc) = state.agent_run_store {
         let store = store_arc.lock().await;
         if let Err(e) = store.create_run(&agent_run) {
-            log::warn!("[AgentRun] retired buffered fallback run create failed: {}", e);
+            log::warn!(
+                "[AgentRun] retired buffered fallback run create failed: {}",
+                e
+            );
         }
     }
 
@@ -213,12 +216,8 @@ pub(crate) async fn run_retired_buffered_fallback_delivery(
         );
     }
 
-    let agent_state = assemble_main_chat_agent_state_for_turn(
-        state,
-        task_session_id,
-        Some(&agent_run.id),
-    )
-    .await;
+    let agent_state =
+        assemble_main_chat_agent_state_for_turn(state, task_session_id, Some(&agent_run.id)).await;
 
     Ok(SendMessageResult {
         reply,

@@ -408,7 +408,9 @@ fn legacy_surface_registry_covers_cross_layer_categories() {
         LegacySurfaceKind::InternalImplementationName,
     ] {
         assert!(
-            entries.iter().any(|entry| entry.surface_kind == surface_kind),
+            entries
+                .iter()
+                .any(|entry| entry.surface_kind == surface_kind),
             "missing registry surface kind: {surface_kind:?}"
         );
     }
