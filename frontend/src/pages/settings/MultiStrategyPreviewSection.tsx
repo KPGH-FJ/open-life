@@ -146,7 +146,10 @@ function MultiStrategyPreviewSectionInner() {
       {open ? (
         <div className="mt-4 space-y-4">
           <form className="space-y-3" onSubmit={handlePreviewSubmit}>
-            <label className="block text-xs font-medium text-stone-600" htmlFor="runtime-preview-input">
+            <label
+              className="block text-xs font-medium text-stone-600"
+              htmlFor="runtime-preview-input"
+            >
               Preview input
             </label>
             <textarea

@@ -979,9 +979,7 @@ export default function AgentRunDetail() {
                                 </div>
                                 <div className="text-blue-700">{proposalId}</div>
                                 <button
-                                  onClick={() =>
-                                    navigate(mailboxRoute({ proposalId }))
-                                  }
+                                  onClick={() => navigate(mailboxRoute({ proposalId }))}
                                   className="mt-1 text-blue-600 hover:text-blue-800 underline"
                                 >
                                   查看 Proposal

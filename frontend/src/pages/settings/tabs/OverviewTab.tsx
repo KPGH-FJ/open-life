@@ -320,9 +320,7 @@ export default function OverviewTab({
             <span
               className={classNames(
                 "rounded-full px-2 py-1 text-xs font-medium",
-                usageReady
-                  ? "bg-emerald-100 text-emerald-700"
-                  : "bg-blue-100 text-blue-700"
+                usageReady ? "bg-emerald-100 text-emerald-700" : "bg-blue-100 text-blue-700"
               )}
             >
               {usageReady ? "已闭环" : "闭环中"}

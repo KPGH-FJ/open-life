@@ -517,8 +517,7 @@ export default function BuilderPatchReview({
         <div className="flex items-start gap-2 text-xs text-amber-600 bg-amber-50 p-3 rounded-lg">
           <AlertTriangle size={14} className="shrink-0 mt-0.5" />
           <span>
-            你有未勾选的高风险字段（如长期目标、核心价值观等）。建议勾选后发送到 Mailbox
-            审阅。
+            你有未勾选的高风险字段（如长期目标、核心价值观等）。建议勾选后发送到 Mailbox 审阅。
           </span>
         </div>
       )}

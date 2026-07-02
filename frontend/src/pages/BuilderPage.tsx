@@ -657,7 +657,8 @@ export default function BuilderPage() {
                   Safe Mode：构建写入已暂停
                 </div>
                 <div className="mt-1 text-sm text-amber-800">
-                  {safeModeReason} 你仍然可以查看当前构建页面，但新的构建会话、继续回答和确认建议应用都会被拦截。
+                  {safeModeReason}{" "}
+                  你仍然可以查看当前构建页面，但新的构建会话、继续回答和确认建议应用都会被拦截。
                 </div>
               </div>
               <a

@@ -206,11 +206,7 @@ describe("App product surface routing", () => {
       "当前不在 OpenLife 桌面应用环境中，无法调用原生功能。请在桌面窗口内操作。"
     );
     vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (
-        cmd === "get_system_diagnostics" ||
-        cmd === "list_proposals" ||
-        cmd === "get_config"
-      ) {
+      if (cmd === "get_system_diagnostics" || cmd === "list_proposals" || cmd === "get_config") {
         return Promise.reject(noBackendError);
       }
       return Promise.resolve({});
@@ -266,11 +262,12 @@ describe("App product surface routing", () => {
       "/mailbox?proposal=proposal-product-1"
     );
     expect(mailboxRoute({ proposalId: "  " })).toBe("/mailbox");
-    expect(mailboxRouteState({ mainChatTaskSessionId: " task-1 ", returnTo: " /companion " }))
-      .toEqual({
-        mainChatTaskSessionId: "task-1",
-        returnTo: "/companion",
-      });
+    expect(
+      mailboxRouteState({ mainChatTaskSessionId: " task-1 ", returnTo: " /companion " })
+    ).toEqual({
+      mainChatTaskSessionId: "task-1",
+      returnTo: "/companion",
+    });
     expect(
       mailboxRouteState({
         mainChatTaskSessionId: " ",
@@ -488,11 +485,9 @@ describe("App product surface routing", () => {
       if (filePath !== routeRegistryPath && filePath !== tauriTypesPath) {
         expect(source, `${filePath} must not read deprecated beta diagnostics aliases`).not.toMatch(
           new RegExp(
-            `\\b${["beta", "ready"].join("_")}\\b|\\b${[
-              "beta",
-              "readiness",
-              "issues",
-            ].join("_")}\\b`
+            `\\b${["beta", "ready"].join("_")}\\b|\\b${["beta", "readiness", "issues"].join(
+              "_"
+            )}\\b`
           )
         );
       }

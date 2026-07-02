@@ -48,11 +48,7 @@ import {
   countPendingReviewProposals,
   REVIEW_PENDING_PROPOSAL_LIMIT,
 } from "../utils/reviewPendingCount";
-import {
-  mailboxRoute,
-  runDetailRoute,
-  secondaryRoutePath,
-} from "../productShellContract";
+import { mailboxRoute, runDetailRoute, secondaryRoutePath } from "../productShellContract";
 
 type LifeModelSection = "build" | "overview" | "evidence";
 

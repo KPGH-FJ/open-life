@@ -807,9 +807,7 @@ export default function MailboxPage() {
               <div className="flex h-full min-h-[420px] flex-col items-center justify-center p-8 text-center">
                 <ListChecks size={42} className="text-stone-300" aria-hidden="true" />
                 <div className="mt-4 text-base font-semibold text-stone-800">选择一个确认项</div>
-                <div className="mt-1 text-sm text-stone-500">
-                  左侧列表中没有可阅读的确认项。
-                </div>
+                <div className="mt-1 text-sm text-stone-500">左侧列表中没有可阅读的确认项。</div>
               </div>
             )}
           </main>

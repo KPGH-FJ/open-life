@@ -2567,6 +2567,4 @@ describe("tauri command argument aliases", () => {
     expect(result.legacyFallback.allowedByDefault).toBe(false);
     expect(result.finalGateReadiness.authority).toBe("main_chat_final_acceptance_gate");
   });
-
-
 });

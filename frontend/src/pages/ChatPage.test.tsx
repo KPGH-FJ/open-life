@@ -1315,11 +1315,11 @@ describe("ChatPage", () => {
     });
 
     expect(screen.queryByText("THIS SUCCESS REPLY MUST NOT RENDER")).not.toBeInTheDocument();
-    expect(screen.getByText(/Main Chat stream failed before producing a successful reply/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Main Chat stream failed before producing a successful reply/)
+    ).toBeInTheDocument();
     expect(screen.getByText(/retired_stream_runtime_fallback_blocked/)).toBeInTheDocument();
-    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "log_analytics_event")).toBe(
-      false
-    );
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "log_analytics_event")).toBe(false);
   });
 
   it("renders the productized agent control plane from stream agent_state evidence", async () => {
@@ -1643,10 +1643,7 @@ describe("ChatPage", () => {
       "href",
       "/mailbox?proposal=proposal-permission-k5-1"
     );
-    expect(screen.getByRole("link", { name: "Open Mailbox" })).toHaveAttribute(
-      "href",
-      "/mailbox"
-    );
+    expect(screen.getByRole("link", { name: "Open Mailbox" })).toHaveAttribute("href", "/mailbox");
     expect(screen.getByText(/Next:/)).toBeInTheDocument();
   });
 

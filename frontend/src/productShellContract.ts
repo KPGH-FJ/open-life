@@ -57,9 +57,10 @@ export function mailboxRouteState(options: MailboxRouteState): MailboxRouteState
   return state;
 }
 
-export function mailboxLinkTarget(
-  options: MailboxLinkOptions = {}
-): { to: string; state?: MailboxRouteState } {
+export function mailboxLinkTarget(options: MailboxLinkOptions = {}): {
+  to: string;
+  state?: MailboxRouteState;
+} {
   const state = mailboxRouteState(options);
   if (Object.keys(state).length === 0) {
     return { to: mailboxRoute(options) };
@@ -67,9 +68,7 @@ export function mailboxLinkTarget(
   return { to: mailboxRoute(options), state };
 }
 
-export function diagnosticsUsageReady(diagnostics: {
-  usage_ready?: boolean;
-}): boolean {
+export function diagnosticsUsageReady(diagnostics: { usage_ready?: boolean }): boolean {
   return diagnostics.usage_ready ?? false;
 }
 
