@@ -559,6 +559,19 @@ async function navigateToChat(sessionId) {
       args: [],
     },
   });
+  await waitForScript(
+    sessionId,
+    `
+      const input = document.querySelector('[data-testid="chat-input"]');
+      const sendButton = document.querySelector('[data-testid="send-button"]');
+      const selectedSkillControl = document.querySelector('[data-testid="skill-context-control"]');
+      const selectedSkillInput = document.querySelector('[data-testid="skill-context-input"]');
+      return Boolean(input && sendButton && selectedSkillControl && selectedSkillInput);
+    `,
+    [],
+    30_000,
+    "webdriver_chat_composer_not_ready"
+  );
 }
 
 async function readCurrentTaskIdWithWebDriver(sessionId) {
