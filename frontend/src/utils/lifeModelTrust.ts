@@ -84,7 +84,7 @@ export function splitLifeModelItemsByDisplayQuality(items: string[]): {
       suppressed.push({
         value: item,
         reason: guard.reason ?? "这看起来像原始抽取文本。",
-        recoveryAction: guard.recoveryAction ?? "请在 Review 中确认后再进入正式摘要。",
+        recoveryAction: guard.recoveryAction ?? "请在 Mailbox 中确认后再进入正式摘要。",
       });
     }
   });

@@ -14,6 +14,7 @@ import {
   Info,
 } from "lucide-react";
 import type { ToolCallResult } from "../tauri";
+import { mailboxRoute } from "../productShellContract";
 
 interface Props {
   call: ToolCallResult;
@@ -129,8 +130,8 @@ export default function ToolCallCard({ call, onExecute, onReplay }: Props) {
       await onExecute();
     } catch (e) {
       const errMsg = String(e);
-      if (errMsg.includes("not authorized") || errMsg.includes("Review Center")) {
-        setError("请在 Review Center 授权后重新执行");
+      if (errMsg.includes("not authorized") || errMsg.includes("Mailbox")) {
+        setError("请在 Mailbox 授权后重新执行");
       } else {
         setError(errMsg);
       }
@@ -153,7 +154,7 @@ export default function ToolCallCard({ call, onExecute, onReplay }: Props) {
   };
 
   const openReviewCenter = () => {
-    window.location.hash = "/review";
+    window.location.hash = mailboxRoute();
   };
 
   // Result preview (truncated)
@@ -239,7 +240,7 @@ export default function ToolCallCard({ call, onExecute, onReplay }: Props) {
               onClick={openReviewCenter}
               className="px-3 py-1.5 rounded border border-orange-300 text-orange-700 text-xs hover:bg-orange-100 inline-flex items-center gap-1"
             >
-              <ExternalLink size={12} />去 Review Center 授权
+              <ExternalLink size={12} />去 Mailbox 授权
             </button>
           </div>
         </div>

@@ -36,6 +36,7 @@ import {
 import LoadingSpinner from "../components/LoadingSpinner";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
 import { buildRuntimeActionError, buildSafeModeBlockedMessage } from "../utils/runtimeMessages";
+import { advancedRoutePath, productRoutePath, secondaryRoutePath } from "../productShellContract";
 
 function emptyModel(): LifeModel {
   const now = new Date().toISOString();
@@ -268,7 +269,7 @@ export default function LifeModelEditor() {
                 新建空模型
               </button>
               <a
-                href="#/settings"
+                href={`#${productRoutePath("Settings")}`}
                 className="px-4 py-2 rounded-md bg-white border text-sm hover:bg-rose-50"
               >
                 去 Settings 查看数据目录
@@ -397,7 +398,7 @@ export default function LifeModelEditor() {
                   </div>
                 </div>
                 <a
-                  href="#/settings"
+                  href={`#${productRoutePath("Settings")}`}
                   className="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-white px-4 py-2 text-sm font-medium text-amber-900 hover:bg-amber-100"
                 >
                   去恢复控制台 <ArrowRight size={15} />
@@ -430,7 +431,7 @@ export default function LifeModelEditor() {
                   {safeMode ? "只读查看" : "编辑模型"}
                 </button>
                 <a
-                  href="#/builder"
+                  href={`#${secondaryRoutePath("LifeModelBuild")}`}
                   className="inline-flex items-center gap-2 rounded-full border border-stone-200 bg-white/80 px-4 py-2 text-sm font-medium text-stone-700 hover:bg-white"
                 >
                   继续构建 <ArrowRight size={15} />
@@ -627,7 +628,7 @@ export default function LifeModelEditor() {
 
           <div className="grid gap-4 md:grid-cols-3">
             <a
-              href="#/chat"
+              href={`#${productRoutePath("Companion")}`}
               className="rounded-2xl border border-stone-200 bg-white/80 p-4 transition hover:-translate-y-0.5 hover:shadow-sm"
             >
               <Sparkles size={18} className="text-stone-700" />
@@ -637,7 +638,7 @@ export default function LifeModelEditor() {
               </div>
             </a>
             <a
-              href="#/builder"
+              href={`#${secondaryRoutePath("LifeModelBuild")}`}
               className="rounded-2xl border border-stone-200 bg-white/80 p-4 transition hover:-translate-y-0.5 hover:shadow-sm"
             >
               <ShieldCheck size={18} className="text-stone-700" />
@@ -647,7 +648,7 @@ export default function LifeModelEditor() {
               </div>
             </a>
             <a
-              href="#/versions"
+              href={`#${advancedRoutePath("Versions")}`}
               className="rounded-2xl border border-stone-200 bg-white/80 p-4 transition hover:-translate-y-0.5 hover:shadow-sm"
             >
               <Map size={18} className="text-stone-700" />
@@ -695,7 +696,7 @@ export default function LifeModelEditor() {
               {safeModeReason} 你可以继续检查当前模型，但所有字段写入、自动保存和手动保存都已暂停。
             </div>
             <a
-              href="#/settings"
+              href={`#${productRoutePath("Settings")}`}
               className="mt-2 inline-flex items-center gap-1 font-medium text-amber-900 underline"
             >
               去 Settings 的恢复控制台 <ArrowRight size={14} />

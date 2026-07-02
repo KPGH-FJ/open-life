@@ -315,8 +315,8 @@ fn evaluate_route_preview_gate(
     route_decision: &MainChatTurnRouteDecision,
     stream_mode: MainChatTurnStreamMode,
 ) -> Result<String, &'static str> {
-    if config.runtime_mode != AgentRuntimeMode::CapabilityFirstBeta {
-        return Err("runtime_mode_not_capability_first_beta");
+    if config.runtime_mode != AgentRuntimeMode::CapabilityFirst {
+        return Err("runtime_mode_not_capability_first");
     }
     if !validation_summary.configured {
         return Err("provider_unconfigured");
@@ -704,7 +704,7 @@ mod tests {
 
     fn configured_capability_config() -> AppConfig {
         let mut config = AppConfig::default();
-        config.runtime_mode = AgentRuntimeMode::CapabilityFirstBeta;
+        config.runtime_mode = AgentRuntimeMode::CapabilityFirst;
         config.llm.provider = "openai".into();
         config.llm.openai_base = "https://api.openai.com/v1".into();
         config.llm.openai_key = "sk-route-preview-test".into();
@@ -1000,7 +1000,7 @@ mod tests {
             );
             assert_eq!(
                 preview.get("ignoredReason").and_then(Value::as_str),
-                Some("runtime_mode_not_capability_first_beta")
+                Some("runtime_mode_not_capability_first")
             );
             assert_eq!(
                 generation

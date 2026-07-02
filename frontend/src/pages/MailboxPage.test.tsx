@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
+import { MemoryRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import MailboxPage from "./MailboxPage";
 import { mockInvoke } from "@/test/mocks/tauri";
@@ -140,7 +141,6 @@ function mockProposals(proposals: AgentProposal[], safeMode = false) {
         readiness_issues: [],
         data_dir: "/tmp/openlife-test",
         active_data_dir: "/tmp/openlife-test",
-        legacy_data_dir: null,
         database_status: safeMode ? "degraded" : "ok",
         startup_warnings: safeMode ? ["memory.db 初始化失败，正在使用临时数据库"] : [],
         snapshot_count: 1,
@@ -148,9 +148,6 @@ function mockProposals(proposals: AgentProposal[], safeMode = false) {
         app_version: "0.1.0",
         model_empty: false,
         chat_session_count: 1,
-        onboarding_completed: true,
-        beta_ready: true,
-        beta_readiness_issues: [],
         builder_completion: {
           identity: 80,
           goals: 70,
@@ -199,6 +196,42 @@ function mockProposals(proposals: AgentProposal[], safeMode = false) {
   });
 }
 
+function renderMailboxPage(
+  initialEntries: Array<string | { pathname: string; state?: unknown }> = ["/mailbox"]
+) {
+  return render(
+    <MemoryRouter initialEntries={initialEntries}>
+      <MailboxPage />
+    </MemoryRouter>
+  );
+}
+
+function ReviewRedirect() {
+  const location = useLocation();
+  return (
+    <Navigate
+      to={{ pathname: "/mailbox", search: location.search, hash: location.hash }}
+      state={location.state}
+      replace
+    />
+  );
+}
+
+function renderMailboxRoutes(
+  initialEntries: Array<string | { pathname: string; search?: string; state?: unknown }> = [
+    "/mailbox",
+  ]
+) {
+  return render(
+    <MemoryRouter initialEntries={initialEntries}>
+      <Routes>
+        <Route path="/review" element={<ReviewRedirect />} />
+        <Route path="/mailbox" element={<MailboxPage />} />
+      </Routes>
+    </MemoryRouter>
+  );
+}
+
 describe("MailboxPage", () => {
   beforeEach(() => {
     mockProposals([lowRiskProposal, unsupportedProposal]);
@@ -209,10 +242,10 @@ describe("MailboxPage", () => {
   });
 
   it("renders the mailbox layout with proposal rows", async () => {
-    render(<MailboxPage />);
+    renderMailboxPage();
 
     expect(await screen.findByTestId("mailbox-page")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Review" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Mailbox" })).toBeInTheDocument();
     expect(screen.getByText("2 个待确认")).toBeInTheDocument();
     expect(screen.getAllByText("待确认").length).toBeGreaterThan(0);
     expect(screen.getByText("已同意")).toBeInTheDocument();
@@ -223,8 +256,46 @@ describe("MailboxPage", () => {
     expect(screen.getAllByText("确认外部能力").length).toBeGreaterThan(0);
   });
 
+  it("selects the matching proposal from /mailbox deep links", async () => {
+    mockProposals([
+      lowRiskProposal,
+      { ...communicationStyleProposal, status: "accepted" },
+      unsupportedProposal,
+    ]);
+
+    renderMailboxRoutes(["/mailbox?proposal=proposal-communication-1"]);
+
+    expect(await screen.findByTestId("mailbox-page")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByTestId("mail-reader")).toHaveTextContent("更新沟通偏好");
+    });
+    expect(screen.getByTestId("mail-reader")).toHaveTextContent("直接给结论，再解释原因");
+    expect(screen.getByRole("button", { name: /已同意 1/ })).toHaveClass("bg-stone-900");
+  });
+
+  it("keeps proposal selection after /review deep links redirect to Mailbox", async () => {
+    mockProposals([lowRiskProposal, communicationStyleProposal, unsupportedProposal]);
+
+    renderMailboxRoutes(["/review?proposal=proposal-communication-1#trace"]);
+
+    expect(await screen.findByTestId("mailbox-page")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByTestId("mail-reader")).toHaveTextContent("更新沟通偏好");
+    });
+    expect(screen.queryByText("Review Center")).not.toBeInTheDocument();
+  });
+
+  it("shows a non-blocking not-found notice when a proposal deep link is unavailable", async () => {
+    renderMailboxRoutes(["/mailbox?proposal=proposal-missing-1"]);
+
+    expect(await screen.findByTestId("mailbox-page")).toBeInTheDocument();
+    expect(await screen.findByText("确认项不存在、已处理或不可见。")).toBeInTheDocument();
+    expect(screen.getByText(/proposal-missing-1/)).toBeInTheDocument();
+    expect(screen.getAllByText("新增目标").length).toBeGreaterThan(0);
+  });
+
   it("selects rows and renders the selected proposal reader", async () => {
-    render(<MailboxPage />);
+    renderMailboxPage();
 
     expect((await screen.findAllByText("新增目标")).length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: /确认外部能力/ }));
@@ -240,7 +311,7 @@ describe("MailboxPage", () => {
   });
 
   it("shows human reader sections with impact, confidence, and evidence summary", async () => {
-    render(<MailboxPage />);
+    renderMailboxPage();
 
     expect(await screen.findByText("变化对比")).toBeInTheDocument();
     expect(screen.getByText("为什么问你")).toBeInTheDocument();
@@ -267,7 +338,7 @@ describe("MailboxPage", () => {
   it("shows readable before and after diff rows for ordinary low-risk updates", async () => {
     mockProposals([readableGoalProposal]);
 
-    render(<MailboxPage />);
+    renderMailboxPage();
 
     expect(await screen.findByText("变化对比")).toBeInTheDocument();
     expect(screen.getAllByText("字段").length).toBeGreaterThan(0);
@@ -281,7 +352,7 @@ describe("MailboxPage", () => {
   it("shows communication style proposals with path-specific trace details", async () => {
     mockProposals([communicationStyleProposal]);
 
-    render(<MailboxPage />);
+    renderMailboxPage();
 
     expect((await screen.findAllByText("更新沟通偏好")).length).toBeGreaterThan(0);
     expect(screen.getByText("沟通偏好")).toBeInTheDocument();
@@ -302,7 +373,7 @@ describe("MailboxPage", () => {
   });
 
   it("keeps long source text collapsed until expanded while main actions remain available", async () => {
-    render(<MailboxPage />);
+    renderMailboxPage();
 
     expect(await screen.findByText("变化对比")).toBeInTheDocument();
     const primarySurface = await screen.findByTestId("review-primary-surface");
@@ -326,7 +397,7 @@ describe("MailboxPage", () => {
   });
 
   it("redacts sensitive payload-like values from the main diff panel", async () => {
-    render(<MailboxPage />);
+    renderMailboxPage();
 
     expect(await screen.findByText("变化对比")).toBeInTheDocument();
     expect(
@@ -336,7 +407,7 @@ describe("MailboxPage", () => {
   });
 
   it("accepts a low-risk proposal through the existing acceptProposal command", async () => {
-    render(<MailboxPage />);
+    renderMailboxPage();
 
     fireEvent.click(await screen.findByRole("button", { name: "同意" }));
 
@@ -351,8 +422,35 @@ describe("MailboxPage", () => {
     });
   });
 
+  it("resumes a Main Chat task after accepting the matching proposal route state", async () => {
+    const taskId = "mainchat-task-resume-1";
+    mockProposals([{ ...lowRiskProposal, sourceDetail: taskId }]);
+
+    renderMailboxPage([
+      {
+        pathname: "/mailbox",
+        state: { mainChatTaskSessionId: taskId, returnTo: "/companion" },
+      },
+    ]);
+
+    fireEvent.click(await screen.findByRole("button", { name: "同意" }));
+
+    expect(await screen.findByText("Main Chat task ready to resume")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Resume Main Chat task" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "resume_main_chat_agent_task",
+        expect.objectContaining({
+          taskSessionId: taskId,
+          task_session_id: taskId,
+        })
+      );
+    });
+  });
+
   it("does not allow unsupported proposal types to be accepted", async () => {
-    render(<MailboxPage />);
+    renderMailboxPage();
 
     fireEvent.click(await screen.findByRole("button", { name: /确认外部能力/ }));
 
@@ -366,7 +464,7 @@ describe("MailboxPage", () => {
   });
 
   it("rejects through an existing quick reply command", async () => {
-    render(<MailboxPage />);
+    renderMailboxPage();
 
     fireEvent.click(await screen.findByRole("button", { name: "不同意" }));
 
@@ -382,7 +480,7 @@ describe("MailboxPage", () => {
   });
 
   it("postpones and starts edits through existing quick reply commands", async () => {
-    render(<MailboxPage />);
+    renderMailboxPage();
 
     fireEvent.click(await screen.findByRole("button", { name: "稍后再说" }));
 
@@ -407,7 +505,7 @@ describe("MailboxPage", () => {
   it("keeps Safe Mode protection on accept and edit quick replies", async () => {
     mockProposals([lowRiskProposal], true);
 
-    render(<MailboxPage />);
+    renderMailboxPage();
 
     expect(await screen.findByText("系统处于 Safe Mode")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "同意" })).toBeDisabled();

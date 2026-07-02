@@ -1,4 +1,5 @@
 import type { AgentProposal } from "../tauri";
+import { runDetailRoute } from "../productShellContract";
 
 export type ProposalDisplayModel = {
   title: string;
@@ -325,7 +326,11 @@ export function buildProposalDisplayModel(proposal: AgentProposal): ProposalDisp
     technicalRows.push({ label: "来源详情", value: metadataValueSummary(proposal.sourceDetail) });
   }
   if (proposal.runId) {
-    technicalRows.push({ label: "Run", value: proposal.runId, href: `#/runs/${proposal.runId}` });
+    technicalRows.push({
+      label: "Run",
+      value: proposal.runId,
+      href: `#${runDetailRoute(proposal.runId)}`,
+    });
   }
   appendCommunicationStyleTechnicalRows(technicalRows, proposal);
   appendExternalWriteTechnicalRows(technicalRows, proposal);

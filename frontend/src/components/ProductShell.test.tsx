@@ -25,7 +25,7 @@ describe("ProductShell navigation IA", () => {
     expect(links.map(link => link.textContent)).toEqual([
       "Today",
       "Companion",
-      "Review",
+      "Mailbox",
       "Life Model",
       "Runs",
       "Settings",
@@ -38,15 +38,26 @@ describe("ProductShell navigation IA", () => {
       "/runs",
       "/settings",
     ]);
-    expect(screen.queryByRole("link", { name: "Mailbox" })).not.toBeInTheDocument();
   });
 
-  it.each(["/mailbox", "/review"])("marks Review active for %s compatibility", path => {
+  it.each(["/mailbox"])("marks Mailbox active for %s", path => {
     renderShell(path);
 
-    expect(screen.getByRole("link", { name: "Review" })).toHaveAttribute("href", "/mailbox");
-    expect(screen.getByRole("link", { name: "Review" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "Mailbox" })).toHaveAttribute("href", "/mailbox");
+    expect(screen.getByRole("link", { name: "Mailbox" })).toHaveAttribute("aria-current", "page");
   });
+
+  it.each(["/life-model", "/life-model/build", "/memory"])(
+    "marks Life Model active for %s secondary surfaces",
+    path => {
+      renderShell(path);
+
+      expect(screen.getByRole("link", { name: "Life Model" })).toHaveAttribute(
+        "aria-current",
+        "page"
+      );
+    }
+  );
 
   it("keeps MCP, A2A, metrics, calibration, and stage/debug/eval surfaces in Advanced", () => {
     renderShell("/companion");

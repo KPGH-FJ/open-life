@@ -1271,6 +1271,8 @@ impl MainChatKernelCommandSurfaceResult {
     pub(crate) fn into_send_message_result(self) -> SendMessageResult {
         SendMessageResult {
             reply: self.reply,
+            status: "completed".into(),
+            blockers: Vec::new(),
             reasoning_trace: self.reasoning_trace,
             tool_calls: self.tool_calls,
             run_id: self.run_id,
@@ -1278,6 +1280,9 @@ impl MainChatKernelCommandSurfaceResult {
             agent_state: self.agent_state,
             execution_transcript: self.execution_transcript,
             legacy_fallback_used: self.legacy_fallback_used,
+            legacy_runtime_invoked: false,
+            model_invoked: true,
+            tool_invoked: false,
         }
     }
 }
@@ -3026,13 +3031,13 @@ fn is_kernel_proposal_outcome(kind: MainChatKernelWriteOutcomeKind) -> bool {
 fn kernel_write_action_description(outcome: &MainChatKernelWriteOutcome) -> String {
     match outcome.kind {
         MainChatKernelWriteOutcomeKind::MemoryProposal => {
-            "Create a Review Center Memory proposal from MainChatKernel.".into()
+            "Create a Mailbox Memory proposal from MainChatKernel.".into()
         }
         MainChatKernelWriteOutcomeKind::LifeModelProposal => {
-            "Create a Review Center LifeModel proposal from MainChatKernel.".into()
+            "Create a Mailbox LifeModel proposal from MainChatKernel.".into()
         }
         MainChatKernelWriteOutcomeKind::FileWriteProposal => {
-            "Create a Review Center file write proposal from MainChatKernel.".into()
+            "Create a Mailbox file write proposal from MainChatKernel.".into()
         }
         MainChatKernelWriteOutcomeKind::ExternalConfirmationBlocker => {
             "External write requested from MainChatKernel; wait for explicit confirmation.".into()

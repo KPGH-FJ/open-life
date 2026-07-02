@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
-const DEFAULT_CHAT_LEGACY_PATH: &str = "legacy_stream";
+const DEFAULT_CHAT_KERNEL_PATH: &str = "main_chat_kernel";
 const LOW_ENERGY_RULE_CANDIDATE_SCHEMA: &str = "w76.lowEnergyCollaborationRuleCandidate.v1";
 
 #[derive(Clone)]
@@ -33,7 +33,7 @@ impl Default for AcceptedGuidanceLifecycleInput {
         Self {
             candidate_proposal: None,
             target_status: HeuristicLifecycleStatus::Trial,
-            default_chat_selected_adapter_path: DEFAULT_CHAT_LEGACY_PATH.into(),
+            default_chat_selected_adapter_path: DEFAULT_CHAT_KERNEL_PATH.into(),
             ordinary_chat_entrypoint_attached: false,
             runtime_executed: false,
             model_called: false,
@@ -263,7 +263,7 @@ fn evaluate_accepted_guidance_lifecycle(
     let mut source_evidence_ids = Vec::new();
     let mut source_agent_run_ids = Vec::new();
     let default_chat_unchanged =
-        input.default_chat_selected_adapter_path == DEFAULT_CHAT_LEGACY_PATH;
+        input.default_chat_selected_adapter_path == DEFAULT_CHAT_KERNEL_PATH;
 
     if !default_chat_unchanged {
         push_unique(

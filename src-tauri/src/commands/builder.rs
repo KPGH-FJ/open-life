@@ -384,7 +384,7 @@ pub async fn builder_get_pending_signals(
 /// Legacy direct apply path for migration/dev diagnostics.
 ///
 /// Normal product flow should call `builder_create_proposals` and apply changes through
-/// Review Center so LifeModel writes remain reviewable, traceable, and reversible.
+/// Mailbox so LifeModel writes remain reviewable, traceable, and reversible.
 #[cfg(test)]
 async fn builder_apply_signals_with_state(
     session_id: String,
@@ -400,7 +400,7 @@ async fn builder_apply_signals_with_state_gated(
     _state: &Arc<AppState>,
 ) -> Result<serde_json::Value, AppError> {
     Err(AppError::permission(
-        "builder_apply_signals has been retired as a legacy direct-write compatibility surface; use builder_create_proposals and Review Center for Builder LifeModel updates.",
+        "builder_apply_signals has been retired as a legacy direct-write compatibility surface; use builder_create_proposals and Mailbox for Builder LifeModel updates.",
     ))
 }
 
@@ -702,6 +702,7 @@ mod tests {
             main_chat_selected_skill_ids: Arc::new(tokio::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            main_chat_runtime_state: crate::state::MainChatRuntimeState::shared(),
             patch_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
             ))),
@@ -870,6 +871,7 @@ mod tests {
         assert!(err.message().contains("builder_apply_signals"));
         assert!(err.message().contains("retired"));
         assert!(err.message().contains("builder_create_proposals"));
+        assert!(!err.message().contains("Review Center"));
 
         let model = state.life_model_manager.lock().await.load().unwrap();
         assert!(model.is_effectively_empty());

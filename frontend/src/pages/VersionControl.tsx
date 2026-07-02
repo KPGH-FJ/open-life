@@ -13,6 +13,7 @@ import LoadingSpinner from "../components/LoadingSpinner";
 import EmptyState from "../components/EmptyState";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
 import { buildRuntimeActionError, buildSafeModeBlockedMessage } from "../utils/runtimeMessages";
+import { productRoutePath } from "../productShellContract";
 
 type DiffLine = {
   sign: "+" | "-" | " ";
@@ -314,7 +315,7 @@ export default function VersionControl() {
                 </div>
               </div>
               <Link
-                to="/settings"
+                to={productRoutePath("Settings")}
                 className="inline-flex items-center gap-2 rounded-md border border-amber-300 bg-white px-3 py-2 text-sm font-medium text-amber-900 hover:bg-amber-100"
               >
                 去恢复控制台

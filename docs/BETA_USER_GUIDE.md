@@ -1,10 +1,13 @@
-# OpenLife Beta 用户试用指南
+# OpenLife Historical Beta 用户试用指南
 
-> Historical/draft user guide. OpenLife has not been declared full Beta by the
-> current W123 authority docs.
+> Historical/draft user guide. This file is not a current product entrypoint or
+> onboarding contract.
 >
-> Use this file only for product-language reference. Current release status,
-> Beta blockers, tool capabilities, and development order are governed by
+> Current product entrypoints are `Today`, `Companion`, `Mailbox`, `Life Model`,
+> `Runs`, and `Settings`. Legacy URLs only redirect to those current surfaces.
+> OpenLife has not been declared full Beta by the current authority docs. Use
+> this file only for historical product-language reference. Current release
+> status, blockers, tool capabilities, and development order are governed by
 > `AGENTS.md`, `plans/README.md`,
 > `plans/openlife_lifemodel_governed_agent_runtime.md`, and
 > `plans/openlife_react_beta_roadmap.md`.
@@ -28,20 +31,13 @@ OpenLife 的所有建议都基于这四个维度的信息。信息越完整，AI
 
 ---
 
-## 2. 首次启动（3 步走）
+## 2. 历史首次启动设想（已退役）
 
-### 第 1 步：完成启动向导
+早期草案曾设计全屏「欢迎使用 OpenLife」启动向导。该向导已经退役；当前产品不再用
+blocking onboarding 截断默认路径。首次进入应直接落在当前 ProductShell，并通过 Today
+或 Settings 的非阻塞使用准备状态提示后续配置。
 
-首次打开应用时会弹出「欢迎使用 OpenLife」向导，共 4 页：
-
-1. **欢迎** — 了解 OpenLife 的定位
-2. **配置对话后端** — 选择使用云端模型（推荐）或本地模型
-3. **构建人生模型** — 通过向导快速生成你的初始人生模型
-4. **隐私说明** — 了解数据如何存储和保护
-
-> 💡 你也可以随时点击向导内的按钮直接跳转到对应的设置页面。
-
-### 第 2 步：配置 API Key（至少配置一个后端）
+### 当前建议：配置至少一个模型后端
 
 OpenLife 需要至少一个 LLM 后端才能对话。推荐方式：
 
@@ -55,36 +51,36 @@ OpenLife 需要至少一个 LLM 后端才能对话。推荐方式：
 - 运行 `ollama run qwen2.5:7b`
 - OpenLife 会自动检测本地模型状态
 
-> ⚠️ 如果没有配置任何后端，打开「对话」页面时会看到提示，且无法发送消息。
+> ⚠️ 如果没有配置任何后端，当前 `Companion` 会显示配置提示，且无法发送消息。
 
-### 第 3 步：构建你的人生模型
+### 历史第 3 步：构建你的人生模型（当前入口是 Life Model → Build）
 
-- 前往「构建」页面
+- 前往当前 `Life Model` 页面中的 build 二级流程
 - 选择「快速构建」模式（约 3-5 分钟）
 - 回答几个引导性问题，AI 会自动提取你的价值观、目标和能力
-- 完成后点击「去人生模型」检查并补充细节
+- 完成后回到 `Life Model` 检查，并在 `Mailbox` 中确认候选更新
 
-> 💡 人生模型是 OpenLife 理解你的核心。即使只完成一次快速构建，对话质量也会显著提升。
+> 💡 人生模型是 OpenLife 理解你的核心。即使只完成一次快速构建，`Companion` 的对话质量也会显著提升。
 
 ---
 
 ## 3. 日常使用流程
 
-### 3.1 对话（最常用）
+### 3.1 历史对话草案（当前入口是 Companion）
 
-- 在「对话」页面输入任何想法、困惑或目标
+- 在 `Companion` 输入任何想法、困惑或目标
 - AI 会根据你的人生模型和对话历史给出建议
 - 支持快捷指令：
   - `/goal 名称` — 添加每日目标
   - `/done 名称` — 完成每日目标
   - `/state 维度名 数值 [备注]` — 记录状态
 
-### 3.2 仪表盘（查看整体状态）
+### 3.2 历史仪表盘草案（当前由 Today / Life Model / Runs / Settings 分担）
 
-- 查看四维完成度雷达图
-- 管理每日目标打卡
-- 查看状态趋势和预警
-- 查看能力缺口与身份-目标对齐分析
+- `Today` 查看当前状态、建议和待处理确认项
+- `Life Model` 查看四维摘要、可信度和待确认更新
+- `Runs` 查看 AgentRun 和 trace evidence
+- `Settings` 查看诊断、Provider 和高级配置
 
 ### 3.3 人生模型（手动编辑）
 

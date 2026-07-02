@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, fireEvent, act } from "@testing-library/react";
 import { BrowserRouter, MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import ChatPage, { buildMainChatAgentStatusView } from "./ChatPage";
-import ProposalReviewPage from "./ProposalReviewPage";
+import MailboxPage from "./MailboxPage";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { mockInvoke, mockLifeModel } from "@/test/mocks/tauri";
@@ -898,7 +898,7 @@ describe("ChatPage", () => {
     );
 
     expect(await screen.findByText("先建立你的人生模型")).toBeInTheDocument();
-    expect(screen.getByText("先看仪表盘")).toBeInTheDocument();
+    expect(screen.getByText("先看今日页")).toBeInTheDocument();
     expect(screen.getByText(/也可以直接使用下面的场景卡开始一次通用对话/)).toBeInTheDocument();
   });
 
@@ -933,7 +933,6 @@ describe("ChatPage", () => {
           readiness_issues: [],
           data_dir: "/tmp/openlife-test",
           active_data_dir: "/tmp/openlife-test",
-          legacy_data_dir: "/tmp/openlife-legacy",
           database_status: "ok",
           startup_warnings: [],
           snapshot_count: 0,
@@ -941,9 +940,6 @@ describe("ChatPage", () => {
           app_version: "0.1.0",
           model_empty: true,
           chat_session_count: 0,
-          onboarding_completed: true,
-          beta_ready: false,
-          beta_readiness_issues: [],
           builder_completion: {
             identity: 0,
             goals: 0,
@@ -1010,9 +1006,6 @@ describe("ChatPage", () => {
           app_version: "0.1.0",
           model_empty: false,
           chat_session_count: 0,
-          onboarding_completed: true,
-          beta_ready: false,
-          beta_readiness_issues: [],
         } as any);
       }
       return mockInvoke(cmd, args);
@@ -1095,7 +1088,6 @@ describe("ChatPage", () => {
           readiness_issues: ["当前设置为优先本地模型，但未找到可用模型：llama3。"],
           data_dir: "/tmp/openlife-test",
           active_data_dir: "/tmp/openlife-test",
-          legacy_data_dir: "/tmp/openlife-legacy",
           database_status: "ok",
           startup_warnings: [],
           snapshot_count: 0,
@@ -1103,9 +1095,6 @@ describe("ChatPage", () => {
           app_version: "0.1.0",
           model_empty: false,
           chat_session_count: 1,
-          onboarding_completed: true,
-          beta_ready: false,
-          beta_readiness_issues: [],
           builder_completion: {
             identity: 80,
             goals: 75,
@@ -1274,6 +1263,65 @@ describe("ChatPage", () => {
     expect(screen.getAllByText("今天是星期一。")).toHaveLength(1);
   });
 
+  it("treats failed stream completion as an error instead of a successful reply", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "触发失败流式完成" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "start_stream_message",
+        expect.objectContaining({
+          sessionId: "session-1",
+          session_id: "session-1",
+        })
+      );
+    });
+
+    const doneHandler = listeners.get("stream-message-done");
+    expect(doneHandler).toBeDefined();
+
+    await act(async () => {
+      await doneHandler?.({
+        payload: {
+          session_id: "session-1",
+          run_id: "run-failed-done",
+          reply: "THIS SUCCESS REPLY MUST NOT RENDER",
+          status: "failed",
+          blockers: ["retired_stream_runtime_fallback_blocked"],
+          legacy_fallback_used: true,
+          legacy_runtime_invoked: false,
+          model_invoked: false,
+          tool_invoked: false,
+          reasoning_trace: null,
+          tool_calls: [],
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByText("THIS SUCCESS REPLY MUST NOT RENDER")).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/Main Chat stream failed before producing a successful reply/)
+    ).toBeInTheDocument();
+    expect(screen.getByText(/retired_stream_runtime_fallback_blocked/)).toBeInTheDocument();
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "log_analytics_event")).toBe(false);
+  });
+
   it("renders the productized agent control plane from stream agent_state evidence", async () => {
     type StreamListener = (event: { payload: any }) => void | Promise<void>;
     const listeners = new Map<string, StreamListener>();
@@ -1424,7 +1472,7 @@ describe("ChatPage", () => {
     expect(screen.getByText("Execution evidence")).toBeInTheDocument();
     expect(screen.getByText("Final answer")).toBeInTheDocument();
     expect(screen.queryByText("Agent Control Plane")).not.toBeInTheDocument();
-    expect(screen.queryByText("Reviewer trace")).not.toBeInTheDocument();
+    expect(screen.queryByText("Audit trace")).not.toBeInTheDocument();
   });
 
   it("renders kernel-event thinking, tool running, and tool observation states", async () => {
@@ -1591,11 +1639,11 @@ describe("ChatPage", () => {
     expect(await screen.findByText("Proposal created")).toBeInTheDocument();
     expect(screen.getAllByText("Permission needed").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Blocked")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Open proposal" })).toHaveAttribute("href", "/review");
-    expect(screen.getByRole("link", { name: "Open Review Center" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Open proposal" })).toHaveAttribute(
       "href",
-      "/review"
+      "/mailbox?proposal=proposal-permission-k5-1"
     );
+    expect(screen.getByRole("link", { name: "Open Mailbox" })).toHaveAttribute("href", "/mailbox");
     expect(screen.getByText(/Next:/)).toBeInTheDocument();
   });
 
@@ -2528,7 +2576,7 @@ describe("ChatPage", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Show Main Chat diagnostics" }));
     await screen.findAllByText("cancelled");
     expect(screen.getAllByText("cancelled").length).toBeGreaterThan(0);
-    expect(screen.getByText("Review summary")).toBeInTheDocument();
+    expect(screen.getByText("Plan summary")).toBeInTheDocument();
     expect(screen.getByText("Completed")).toBeInTheDocument();
     expect(screen.getByText("Observations used")).toBeInTheDocument();
     expect(screen.getByText("Unresolved")).toBeInTheDocument();
@@ -3266,9 +3314,9 @@ describe("ChatPage", () => {
     expect(screen.getByText("Proposal store unavailable")).toBeInTheDocument();
     expect(screen.getByText("Proposal required")).toBeInTheDocument();
     expect(screen.getByText("Permission required")).toBeInTheDocument();
-    expect(screen.getAllByRole("link", { name: "Open Review Center" })[0]).toHaveAttribute(
+    expect(screen.getAllByRole("link", { name: "Open Mailbox" })[0]).toHaveAttribute(
       "href",
-      "/review"
+      "/mailbox"
     );
     expect(screen.getByText("Pending blockers")).toBeInTheDocument();
     expect(screen.getAllByText("resumeBlockedByPendingPermission").length).toBeGreaterThanOrEqual(
@@ -3572,13 +3620,13 @@ describe("ChatPage", () => {
     const status = await screen.findByTestId("main-chat-agent-status");
     expect(status).toHaveAttribute("data-agent-product-status", "permission_pending");
     expect(screen.getByText("Permission pending")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Review proposal" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Open proposal in Mailbox" })).toHaveAttribute(
       "href",
-      "/review"
+      "/mailbox"
     );
-    expect(screen.getByRole("link", { name: "Review permission" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Open permission in Mailbox" })).toHaveAttribute(
       "href",
-      "/review"
+      "/mailbox"
     );
     expect(screen.getByRole("button", { name: "Resume current task" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Retry current action" })).toBeEnabled();
@@ -3735,7 +3783,7 @@ describe("ChatPage", () => {
       <MemoryRouter initialEntries={["/chat"]}>
         <Routes>
           <Route path="/chat" element={<ChatPage />} />
-          <Route path="/review" element={<ProposalReviewPage />} />
+          <Route path="/mailbox" element={<MailboxPage />} />
         </Routes>
       </MemoryRouter>
     );
@@ -3789,11 +3837,11 @@ describe("ChatPage", () => {
     });
 
     fireEvent.click(await screen.findByRole("button", { name: "Show Main Chat diagnostics" }));
-    fireEvent.click((await screen.findAllByRole("link", { name: "Open Review Center" }))[0]);
+    fireEvent.click((await screen.findAllByRole("link", { name: "Open Mailbox" }))[0]);
 
-    expect(await screen.findByText("Review Center")).toBeInTheDocument();
+    expect(await screen.findByTestId("mailbox-page")).toBeInTheDocument();
     expect(await screen.findByText("tools.permissions.file.read")).toBeInTheDocument();
-    fireEvent.click(screen.getByText("应用"));
+    fireEvent.click(screen.getByRole("button", { name: "同意" }));
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith(
@@ -4311,7 +4359,7 @@ describe("ChatPage", () => {
     await runControlledPilotFromChat();
     fireEvent.click(await screen.findByRole("button", { name: "Promote Pilot Response" }));
 
-    expect(screen.getByText("Review pilot promotion")).toBeInTheDocument();
+    expect(screen.getByText("Confirm pilot promotion")).toBeInTheDocument();
     expect(screen.getAllByText("Pilot-only answer")).toHaveLength(2);
     expect(screen.getAllByText("run-controlled-pilot-1")).toHaveLength(2);
     expect(screen.getByText("Source session")).toBeInTheDocument();
@@ -4323,7 +4371,7 @@ describe("ChatPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Cancel Promotion" }));
 
-    expect(screen.queryByText("Review pilot promotion")).not.toBeInTheDocument();
+    expect(screen.queryByText("Confirm pilot promotion")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Promote Pilot Response" })).toBeInTheDocument();
     expect(invoke).not.toHaveBeenCalledWith("save_chat_message", expect.anything());
   });
@@ -4740,7 +4788,6 @@ describe("ChatPage", () => {
           readiness_issues: [],
           data_dir: "/tmp/openlife-test",
           active_data_dir: "/tmp/openlife-test",
-          legacy_data_dir: "/tmp/openlife-legacy",
           database_status: "degraded",
           startup_warnings: ["memory.db 初始化失败，正在使用临时数据库"],
           snapshot_count: 1,
@@ -4748,9 +4795,6 @@ describe("ChatPage", () => {
           app_version: "0.1.0",
           model_empty: false,
           chat_session_count: 1,
-          onboarding_completed: true,
-          beta_ready: false,
-          beta_readiness_issues: [],
           builder_completion: {
             identity: 80,
             goals: 75,

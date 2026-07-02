@@ -28,6 +28,7 @@ import { buildRuntimeDisclosure } from "../utils/runtimeDisclosure";
 import RuntimeDisclosureStrip from "../components/RuntimeDisclosureStrip";
 import ConfirmDangerDialog from "../components/ConfirmDangerDialog";
 import DangerActionPreflightDetails from "../components/DangerActionPreflightDetails";
+import { runDetailRoute } from "../productShellContract";
 import {
   Activity,
   Clock,
@@ -71,7 +72,7 @@ function kindLabel(kind: string): string {
     tool_execution: "Tool",
     proactive: "Proactive",
     planning: "Planning",
-    review: "Review",
+    review: "Mailbox",
     writing: "Writing",
     memory_governance: "Memory",
   };
@@ -575,7 +576,7 @@ export default function RunsPage() {
                         }}
                         className="mt-1 rounded border-stone-300"
                       />
-                      <div className="flex-1" onClick={() => navigate(`/runs/${run.id}`)}>
+                      <div className="flex-1" onClick={() => navigate(runDetailRoute(run.id))}>
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-3">
                             {statusIcon(lifecycle)}

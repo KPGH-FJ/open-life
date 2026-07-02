@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import React from "react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import AgentControlPlane from "./AgentControlPlane";
 import type { MainChatAgentStateSnapshot } from "../tauri";
@@ -142,7 +142,45 @@ function renderPanel(state: MainChatAgentStateSnapshot) {
   );
 }
 
+function LocationProbe() {
+  const location = useLocation();
+  return (
+    <div
+      data-testid="location-probe"
+      data-path={`${location.pathname}${location.search}`}
+      data-state={JSON.stringify(location.state ?? null)}
+    />
+  );
+}
+
+function renderPanelWithRoutes(state: MainChatAgentStateSnapshot) {
+  return render(
+    <MemoryRouter initialEntries={["/"]}>
+      <Routes>
+        <Route path="/" element={<AgentControlPlane state={state} />} />
+        <Route path="/mailbox" element={<LocationProbe />} />
+      </Routes>
+    </MemoryRouter>
+  );
+}
+
 describe("AgentControlPlane", () => {
+  it("links proposal confirmation to the canonical Mailbox deep link and preserves resume state", () => {
+    renderPanelWithRoutes(agentState());
+
+    const link = screen.getByRole("link", { name: "Open Mailbox" });
+    expect(link).toHaveAttribute("href", "/mailbox?proposal=proposal-1");
+
+    fireEvent.click(link);
+
+    const probe = screen.getByTestId("location-probe");
+    expect(probe).toHaveAttribute("data-path", "/mailbox?proposal=proposal-1");
+    expect(JSON.parse(probe.getAttribute("data-state") ?? "null")).toEqual({
+      mainChatTaskSessionId: "task-agent-control-plane-1",
+      returnTo: "/companion",
+    });
+  });
+
   it("renders reviewer trace identifiers from runtime state", () => {
     renderPanel(
       agentState({
@@ -571,9 +609,9 @@ describe("AgentControlPlane", () => {
     expect(screen.queryByText("reject_proposal")).not.toBeInTheDocument();
     expect(screen.queryByText("edit_proposal")).not.toBeInTheDocument();
     expect(screen.queryByText("rollback")).not.toBeInTheDocument();
-    expect(screen.getAllByRole("link", { name: "Open Review Center" })[0]).toHaveAttribute(
+    expect(screen.getAllByRole("link", { name: "Open Mailbox" })[0]).toHaveAttribute(
       "href",
-      "/review"
+      "/mailbox"
     );
   });
 
@@ -717,9 +755,9 @@ describe("AgentControlPlane", () => {
 
     expect(screen.queryByRole("button", { name: "Approve once" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Deny" })).not.toBeInTheDocument();
-    expect(screen.getAllByRole("link", { name: "Open Review Center" })[0]).toHaveAttribute(
+    expect(screen.getAllByRole("link", { name: "Open Mailbox" })[0]).toHaveAttribute(
       "href",
-      "/review"
+      "/mailbox"
     );
   });
 
@@ -742,9 +780,9 @@ describe("AgentControlPlane", () => {
     );
 
     expect(screen.queryByRole("button", { name: /rollback/i })).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Open Review Center" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Open Mailbox" })).toHaveAttribute(
       "href",
-      "/review"
+      "/mailbox?proposal=proposal-accepted-1"
     );
   });
 

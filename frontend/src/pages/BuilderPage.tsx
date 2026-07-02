@@ -37,6 +37,12 @@ import {
 import BuilderPatchReview from "../components/BuilderPatchReview";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
 import { buildRuntimeActionError, buildSafeModeBlockedMessage } from "../utils/runtimeMessages";
+import {
+  advancedRoutePath,
+  mailboxRoute,
+  productRoutePath,
+  secondaryRoutePath,
+} from "../productShellContract";
 
 function CompletionBar({
   label,
@@ -126,7 +132,7 @@ function quickStepDim(stepIndex: number): { dim: string; color: string } {
   if (stepIndex === 3) return { dim: "Goals", color: "green" };
   if (stepIndex === 4) return { dim: "Capabilities", color: "yellow" };
   if (stepIndex === 5) return { dim: "State", color: "purple" };
-  return { dim: "Review", color: "gray" };
+  return { dim: "Confirm", color: "gray" };
 }
 
 function ModeStepper({ mode, progress }: { mode: string; progress: BuilderProgress }) {
@@ -503,10 +509,10 @@ export default function BuilderPage() {
             </div>
             <div>
               <button
-                onClick={() => navigate("/review")}
+                onClick={() => navigate(mailboxRoute())}
                 className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-3 py-1.5 text-xs text-white hover:bg-indigo-700"
               >
-                去 Review Center 确认 →
+                去 Mailbox 确认 →
               </button>
             </div>
           </div>
@@ -601,17 +607,17 @@ export default function BuilderPage() {
     {
       title: "去人生模型核对结果",
       detail: "先确认这次提取的身份、目标和能力是否贴近你的真实状态。",
-      to: "/",
+      to: productRoutePath("Life Model"),
     },
     {
-      title: "去仪表盘查看下一步",
+      title: "去今日页查看下一步",
       detail: "看 4D 完成度、今日行动和推荐路线，决定接下来补哪一块。",
-      to: "/dashboard",
+      to: productRoutePath("Today"),
     },
     {
       title: "开始第一次个性化对话",
       detail: "让 OpenLife 基于刚建立的模型做今日规划、复盘或决策陪跑。",
-      to: "/chat",
+      to: productRoutePath("Companion"),
     },
     {
       title: mode === "incremental" ? "继续补下一个维度" : "去校准查看建议",
@@ -619,7 +625,10 @@ export default function BuilderPage() {
         mode === "incremental"
           ? "回到构建页继续补强下一个薄弱维度，让模型更完整。"
           : "如果你想继续精修模型，可以在周期校准里查看建议变更。",
-      to: mode === "incremental" ? "/builder" : "/calibration",
+      to:
+        mode === "incremental"
+          ? secondaryRoutePath("LifeModelBuild")
+          : advancedRoutePath("Calibration"),
     },
   ];
 
@@ -648,12 +657,12 @@ export default function BuilderPage() {
                   Safe Mode：构建写入已暂停
                 </div>
                 <div className="mt-1 text-sm text-amber-800">
-                  {safeModeReason} 你仍然可以查看当前构建页面，但新的构建会话、继续回答和 Review
-                  应用都会被拦截。
+                  {safeModeReason}{" "}
+                  你仍然可以查看当前构建页面，但新的构建会话、继续回答和确认建议应用都会被拦截。
                 </div>
               </div>
               <a
-                href="#/settings"
+                href={`#${productRoutePath("Settings")}`}
                 className="inline-flex items-center gap-2 rounded-md border border-amber-300 bg-white px-3 py-2 text-sm font-medium text-amber-900 hover:bg-amber-100"
               >
                 去恢复控制台 <ArrowRight size={15} />
@@ -723,7 +732,7 @@ export default function BuilderPage() {
                             </div>
                             {isPendingReview && (
                               <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-800">
-                                待确认 Review
+                                待确认项
                               </span>
                             )}
                           </div>
@@ -828,7 +837,7 @@ export default function BuilderPage() {
                     icon: <RefreshCw size={18} />,
                     tone: "from-stone-900 to-stone-700 text-amber-50",
                     detail: "少量高密度问题，先生成一个能用的人生模型。适合首次使用。",
-                    bullets: ["建立四维轮廓", "低风险字段默认确认", "结束后进入 Review"],
+                    bullets: ["建立四维轮廓", "低风险字段默认确认", "结束后进入 Mailbox"],
                     action: () => start("quick", crypto.randomUUID()),
                   },
                   {

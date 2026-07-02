@@ -1518,7 +1518,7 @@ async fn main_chat_stage1_d30_read_plus_memory_proposal_uses_real_read_and_revie
             .proposals
             .iter()
             .any(|proposal| proposal.proposal_type == "memory"),
-        "D30 should create a Review Center memory proposal after the read: {:?}",
+        "D30 should create a Mailbox memory proposal after the read: {:?}",
         agent_state.proposals
     );
     assert!(
@@ -2184,7 +2184,7 @@ async fn main_chat_agent_beta_v1_real_task_command_surface_proofs_use_runtime_ta
         .collect::<Vec<_>>();
     assert!(
         !command_surface_proofs.is_empty(),
-        "Beta real-task report should map command-surface scenarios to concrete runtime evidence"
+        "Real-task report should map command-surface scenarios to concrete runtime evidence"
     );
 
     for proof in command_surface_proofs {
@@ -2627,7 +2627,7 @@ async fn main_chat_agent_beta_v1_b28_knowledge_asset_edit_creates_review_proposa
     );
     assert!(
         proof.proposals_created >= 1,
-        "B28 should create a Review Center proposal: {:?}",
+        "B28 should create a Mailbox proposal: {:?}",
         proof
     );
     assert!(

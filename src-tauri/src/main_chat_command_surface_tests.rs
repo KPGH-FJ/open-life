@@ -1,4 +1,8 @@
 use crate::main_chat_final_acceptance_tests::run_main_chat_command_surface_eval_gate;
+use crate::main_chat_route_preview::MainChatRoutePreviewTrace;
+use crate::main_chat_turn_pipeline::{
+    MainChatExecutionPath, MainChatTurnRouteDecision, MainChatTurnStreamMode,
+};
 
 #[test]
 fn main_chat_command_surface_ipc_tests_are_not_concentrated_in_lib_rs() {
@@ -190,6 +194,408 @@ async fn start_stream_message_returns_final_done_payload_for_browser_fallback() 
         "stream response must include agent control-plane state: {response}"
     );
     assert_eq!(response["legacy_fallback_used"], false);
+}
+
+#[tokio::test]
+async fn main_chat_runtime_status_reports_kernel_truth() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+
+    let empty_status =
+        crate::main_chat_runtime_status::get_main_chat_runtime_status_with_state(&state).await;
+    assert!(!empty_status.kernel_evidence.kernel_backed_default);
+    assert!(!empty_status.kernel_evidence.final_gate_evidence_present);
+    assert!(!empty_status.kernel_evidence.final_gate_ready);
+    assert!(!empty_status.kernel_evidence.latest_kernel_route_observed);
+    assert!(
+        empty_status
+            .kernel_evidence
+            .legacy_fallback_free_since_startup
+    );
+    assert_eq!(empty_status.latest_route_evidence.status, "not_observed");
+    assert!(!empty_status.latest_route_evidence.direct_answer_observed);
+    assert!(!empty_status.latest_route_evidence.governed_blocker_observed);
+    assert!(!empty_status.latest_route_evidence.agent_loop_observed);
+    assert_eq!(
+        empty_status.latest_route_evidence.last_kernel_event_count,
+        None
+    );
+
+    let route_decision = MainChatTurnRouteDecision {
+        path: MainChatExecutionPath::KernelDirect,
+        strategy_label: "direct_answer".into(),
+        reason_code: "kernel_supported_direct_answer".into(),
+        kernel_supported: true,
+        kernel_support_disposition: "supported".into(),
+        fallback_allowed: false,
+        requires_provider: false,
+        requires_tool_loop: false,
+        live_provider_backed_react_required: false,
+        governed_agent_loop_candidate_selection_required: false,
+    };
+    crate::main_chat_runtime_status::record_main_chat_turn_route_evidence(
+        &state,
+        &route_decision,
+        MainChatTurnStreamMode::Buffered,
+        false,
+        false,
+        Some(4),
+    )
+    .await;
+
+    let status =
+        crate::main_chat_runtime_status::get_main_chat_runtime_status_with_state(&state).await;
+
+    assert_eq!(status.status_version, 2);
+    assert_eq!(status.authoritative_runtime, "main_chat_kernel");
+    assert_eq!(status.default_send_path, "main_chat_kernel");
+    assert_eq!(status.start_stream_path, "main_chat_kernel");
+    assert_eq!(status.source_of_truth, "main_chat_turn_pipeline");
+    assert!(!status.kernel_evidence.kernel_backed_default);
+    assert!(!status.kernel_evidence.final_gate_evidence_present);
+    assert!(!status.kernel_evidence.final_gate_ready);
+    assert!(status.kernel_evidence.latest_kernel_route_observed);
+    assert!(status.kernel_evidence.legacy_fallback_free_since_startup);
+    assert_eq!(status.latest_route_evidence.status, "observed");
+    assert!(status.latest_route_evidence.direct_answer_observed);
+    assert!(!status.latest_route_evidence.governed_blocker_observed);
+    assert!(!status.latest_route_evidence.agent_loop_observed);
+    assert!(status.latest_route_evidence.kernel_backed_default_observed);
+    assert!(!status.latest_route_evidence.legacy_fallback_used);
+    assert_eq!(
+        status.latest_route_evidence.last_kernel_event_count,
+        Some(4)
+    );
+    assert_eq!(
+        status
+            .latest_route_evidence
+            .last_route_reason_code
+            .as_deref(),
+        Some("kernel_supported_direct_answer")
+    );
+    assert_eq!(
+        status
+            .latest_route_evidence
+            .last_kernel_support_disposition
+            .as_deref(),
+        Some("supported")
+    );
+    assert_eq!(status.legacy_fallback.mode, "explicit_only");
+    assert!(!status.legacy_fallback.allowed_by_default);
+    assert_eq!(status.legacy_fallback.used_count_since_startup, 0);
+    assert_eq!(status.final_gate_readiness.status, "not_run");
+}
+
+#[tokio::test]
+async fn main_chat_runtime_status_tracks_legacy_fallback_counter() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let mut acceptance =
+        openlife_core::agent::main_chat_agent_v1::MainChatAgentExecutionV1AcceptanceReport {
+            ready: true,
+            status: "ready".into(),
+            blockers: Vec::new(),
+            required_evidence: Vec::new(),
+            runtime_gate_ready: true,
+            command_surface_gate_ready: true,
+            live_provider_gate_ready: true,
+            direct_writes_executed: false,
+        };
+    crate::main_chat_runtime_status::record_main_chat_final_gate_readiness(
+        &state,
+        &acceptance,
+        "main-chat-final-gate-test-run".into(),
+    )
+    .await;
+
+    crate::main_chat_runtime_status::record_main_chat_legacy_fallback(
+        &state,
+        "legacy_compat_after_strategy_no_result",
+    )
+    .await;
+    crate::main_chat_runtime_status::apply_startup_legacy_fallback_blocker(&mut acceptance, 1);
+    let status =
+        crate::main_chat_runtime_status::get_main_chat_runtime_status_with_state(&state).await;
+
+    assert!(!acceptance.ready);
+    assert_eq!(acceptance.status, "blocked");
+    assert!(acceptance
+        .blockers
+        .contains(&"legacy_fallback_used_since_startup".to_string()));
+    assert_eq!(status.legacy_fallback.used_count_since_startup, 1);
+    assert_eq!(
+        status.legacy_fallback.last_reason_code.as_deref(),
+        Some("legacy_compat_after_strategy_no_result")
+    );
+    assert_eq!(status.final_gate_readiness.status, "blocked");
+    assert_eq!(
+        status.final_gate_readiness.last_report_run_id.as_deref(),
+        Some("main-chat-final-gate-test-run")
+    );
+    assert!(status
+        .final_gate_readiness
+        .blockers
+        .contains(&"legacy_fallback_used_since_startup".to_string()));
+}
+
+fn legacy_fallback_route_decision(reason_code: &str) -> MainChatTurnRouteDecision {
+    MainChatTurnRouteDecision {
+        path: MainChatExecutionPath::LegacyCompatFallback,
+        strategy_label: "react_tool_execution".into(),
+        reason_code: reason_code.into(),
+        kernel_supported: false,
+        kernel_support_disposition: "governed_blocker".into(),
+        fallback_allowed: true,
+        requires_provider: false,
+        requires_tool_loop: false,
+        live_provider_backed_react_required: false,
+        governed_agent_loop_candidate_selection_required: false,
+    }
+}
+
+fn test_context_summary() -> openlife_core::agent::ContextSummary {
+    openlife_core::agent::ContextSummary {
+        life_model_empty: true,
+        included_life_model_sections: Vec::new(),
+        memory_hit_count: 0,
+        memory_sources: Vec::new(),
+        used_tools_prompt: false,
+        redaction_applied: false,
+        redaction_level: openlife_core::agent::types::RedactionLevel::None,
+    }
+}
+
+async fn run_retired_buffered_fallback_for_test(
+    state: &std::sync::Arc<crate::AppState>,
+    session_id: &str,
+    user_text: &str,
+) -> crate::SendMessageResult {
+    let user_msg = openlife_core::llm::ChatMessage {
+        role: "user".into(),
+        content: user_text.into(),
+    };
+    let main_chat_agent_turn = crate::main_chat_runtime_support::start_main_chat_agent_turn(
+        session_id,
+        Some(&user_msg),
+        openlife_core::agent::AgentTaskKind::Conversation,
+        state,
+    )
+    .await
+    .expect("start test turn");
+
+    crate::main_chat_legacy_fallback::run_retired_buffered_fallback_delivery(
+        session_id.into(),
+        Some(user_msg),
+        openlife_core::life_model::LifeModel::default(),
+        "test tools prompt".into(),
+        openlife_core::privacy::PrivacyEngine::new(),
+        std::collections::HashMap::new(),
+        Vec::new(),
+        None,
+        None,
+        openlife_core::layer_router::Layer::L2,
+        test_context_summary(),
+        crate::main_chat_legacy_fallback::ordinary_send_chat_execution_plan(
+            openlife_core::layer_router::Layer::L2,
+        ),
+        main_chat_agent_turn,
+        legacy_fallback_route_decision("legacy_compat_after_strategy_no_result"),
+        state,
+    )
+    .await
+    .expect("retired buffered fallback result")
+}
+
+#[tokio::test]
+async fn send_legacy_fallback_never_delivers_success_reply() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let result =
+        run_retired_buffered_fallback_for_test(&state, "retired-buffered-session", "Use fallback")
+            .await;
+
+    assert_eq!(result.status, "failed");
+    assert_eq!(
+        result.blockers,
+        vec!["retired_buffered_runtime_fallback_blocked".to_string()]
+    );
+    assert!(result.legacy_fallback_used);
+    assert!(!result.legacy_runtime_invoked);
+    assert!(!result.model_invoked);
+    assert!(!result.tool_invoked);
+    assert!(!result.execution_transcript.iter().any(|entry| {
+        entry.summary == "Assistant response was delivered."
+            || entry.kind
+                == openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::FinalResult
+    }));
+    let stored_messages = state
+        .memory_store
+        .lock()
+        .await
+        .load_recent_messages("retired-buffered-session", 10)
+        .expect("load chat messages");
+    assert!(
+        stored_messages
+            .iter()
+            .all(|message| message.role != "assistant"),
+        "retired buffered fallback must not persist a normal assistant reply"
+    );
+}
+
+#[tokio::test]
+async fn send_legacy_fallback_never_invokes_model_or_runtime() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    {
+        let mut scheduler = state.scheduler.lock().await;
+        *scheduler = scheduler
+            .clone()
+            .with_scripted_generation_response("legacy model success must not appear");
+    }
+
+    let result = run_retired_buffered_fallback_for_test(
+        &state,
+        "retired-buffered-no-model-session",
+        "Force the retired fallback path",
+    )
+    .await;
+    let generation = result
+        .reasoning_trace
+        .generation_result
+        .as_ref()
+        .expect("fallback generation metadata");
+
+    assert_eq!(result.status, "failed");
+    assert_eq!(generation["status"], "failed");
+    assert_eq!(
+        generation["blockerCode"],
+        "retired_buffered_runtime_fallback_blocked"
+    );
+    assert_eq!(generation["legacyRuntimeInvoked"], false);
+    assert_eq!(generation["modelInvoked"], false);
+    assert_eq!(generation["toolInvoked"], false);
+    assert!(!result
+        .reply
+        .contains("legacy model success must not appear"));
+}
+
+#[tokio::test]
+async fn ordinary_send_stream_legacy_fallback_count_blocks_final_gate() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let _send_result = run_retired_buffered_fallback_for_test(
+        &state,
+        "retired-buffered-count-session",
+        "Count buffered fallback",
+    )
+    .await;
+
+    let stream_user_msg = openlife_core::llm::ChatMessage {
+        role: "user".into(),
+        content: "Count stream fallback".into(),
+    };
+    let stream_turn = crate::main_chat_runtime_support::start_main_chat_agent_turn(
+        "retired-stream-count-session",
+        Some(&stream_user_msg),
+        openlife_core::agent::AgentTaskKind::Conversation,
+        &state,
+    )
+    .await
+    .expect("start stream fallback test turn");
+    let stream_reason = format!(
+        "{}_compat_after_strategy_no_result",
+        ["legacy", "stream"].join("_")
+    );
+    let stream_route = legacy_fallback_route_decision(&stream_reason);
+    let agent_run = openlife_core::agent::AgentRun::new_chat_run(
+        "retired-stream-count-session",
+        "Count stream fallback",
+    );
+    if let Some(store_arc) = state.agent_run_store.as_ref() {
+        store_arc
+            .lock()
+            .await
+            .create_run(&agent_run)
+            .expect("create stream fallback run");
+    }
+    let preview_trace = MainChatRoutePreviewTrace {
+        attempted: false,
+        provider: None,
+        model: None,
+        deterministic_route: "tool_loop".into(),
+        deterministic_execution_path: "LegacyCompatFallback".into(),
+        accepted_route: None,
+        effective_route: "tool_loop".into(),
+        accepted_reason: None,
+        ignored_reason: Some("test_retired_stream_fallback".into()),
+        parser_status: "not_attempted".into(),
+        response_digest: None,
+        confidence: None,
+        requires_tools: None,
+        requires_write: None,
+        advisory_reason: None,
+    };
+    let mut emitted_events = Vec::<(String, serde_json::Value)>::new();
+    let stream_output = crate::main_chat_turn_pipeline::run_retired_streaming_fallback_delivery(
+        "retired-stream-count-session",
+        Some(stream_user_msg),
+        openlife_core::life_model::LifeModel::default(),
+        "test tools prompt".into(),
+        openlife_core::privacy::PrivacyEngine::new(),
+        std::collections::HashMap::new(),
+        Vec::new(),
+        None,
+        None,
+        openlife_core::layer_router::Layer::L2,
+        test_context_summary(),
+        agent_run,
+        stream_turn,
+        stream_route,
+        &state,
+        preview_trace,
+        &mut |event, payload| emitted_events.push((event.to_string(), payload)),
+    )
+    .await
+    .expect("retired stream fallback result");
+    let stream_done = emitted_events
+        .iter()
+        .rev()
+        .find(|(event, _)| event == "stream-message-done")
+        .map(|(_, payload)| payload)
+        .expect("retired stream done payload");
+
+    assert_eq!(stream_done["status"], "failed");
+    assert_eq!(
+        stream_done["blockers"][0],
+        "retired_stream_runtime_fallback_blocked"
+    );
+    assert_eq!(stream_done["legacy_runtime_invoked"], false);
+    assert_eq!(stream_done["model_invoked"], false);
+    assert_eq!(stream_done["tool_invoked"], false);
+    assert!(matches!(
+        stream_output.delivery,
+        crate::main_chat_turn_pipeline::MainChatTurnDelivery::Streamed {
+            legacy_fallback_used: true,
+            ..
+        }
+    ));
+
+    let status =
+        crate::main_chat_runtime_status::get_main_chat_runtime_status_with_state(&state).await;
+    assert_eq!(status.legacy_fallback.used_count_since_startup, 2);
+    assert_eq!(status.final_gate_readiness.status, "not_run");
+
+    let mut acceptance =
+        openlife_core::agent::main_chat_agent_v1::MainChatAgentExecutionV1AcceptanceReport {
+            ready: true,
+            status: "ready".into(),
+            blockers: Vec::new(),
+            required_evidence: Vec::new(),
+            runtime_gate_ready: true,
+            command_surface_gate_ready: true,
+            live_provider_gate_ready: true,
+            direct_writes_executed: false,
+        };
+    crate::main_chat_runtime_status::apply_startup_legacy_fallback_blocker(&mut acceptance, 2);
+    assert_eq!(acceptance.status, "blocked");
+    assert!(acceptance
+        .blockers
+        .contains(&"legacy_fallback_used_since_startup".to_string()));
 }
 
 fn expected_task_session_id(session_id: &str, user_text: &str) -> String {

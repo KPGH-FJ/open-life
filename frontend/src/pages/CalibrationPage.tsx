@@ -24,6 +24,12 @@ import LoadingSpinner from "../components/LoadingSpinner";
 import EmptyState from "../components/EmptyState";
 import ErrorBanner from "../components/ErrorBanner";
 import SuggestionContextPanel from "../components/SuggestionContextPanel";
+import {
+  advancedRoutePath,
+  mailboxRoute,
+  productRoutePath,
+  secondaryRoutePath,
+} from "../productShellContract";
 
 interface CalibrationData {
   report: {
@@ -316,7 +322,7 @@ export default function CalibrationPage() {
       } else {
         setPageError(`${result.message}${runInfo}`);
       }
-      setTimeout(() => navigate("/review"), 1500);
+      setTimeout(() => navigate(mailboxRoute()), 1500);
     } catch (e: any) {
       setPageError(String(e?.message ?? e));
     } finally {
@@ -326,11 +332,11 @@ export default function CalibrationPage() {
 
   const handleRejectAll = async () => {
     if (data.changes.length === 0) {
-      navigate("/today");
+      navigate(productRoutePath("Today"));
       return;
     }
     await markCalibrationShown("weekly");
-    navigate("/dashboard");
+    navigate(productRoutePath("Today"));
   };
 
   if (loading) {
@@ -357,7 +363,7 @@ export default function CalibrationPage() {
               稍后重试
             </button>
             <Link
-              to="/settings"
+              to={productRoutePath("Settings")}
               className="rounded-md bg-white px-4 py-2 text-sm font-medium text-amber-700 border border-amber-100 hover:bg-amber-50"
             >
               去设置页检查模型
@@ -436,13 +442,13 @@ export default function CalibrationPage() {
           </div>
           <div className="flex flex-wrap gap-3">
             <Link
-              to="/memory"
+              to={secondaryRoutePath("Memory")}
               className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
             >
               先去检查记忆
             </Link>
             <Link
-              to="/versions"
+              to={advancedRoutePath("Versions")}
               className="inline-flex items-center gap-2 rounded-full border border-indigo-200 bg-indigo-50 px-4 py-2 text-xs font-medium text-indigo-700 hover:bg-indigo-100"
             >
               去版本控制看回滚路径
@@ -700,7 +706,7 @@ export default function CalibrationPage() {
         {data.changes.length === 0 ? (
           <div className="flex items-center justify-end bg-white rounded-xl shadow p-4">
             <button
-              onClick={() => navigate("/today")}
+              onClick={() => navigate(productRoutePath("Today"))}
               className="px-4 py-2 rounded-md text-sm font-medium text-gray-600 hover:bg-gray-100"
             >
               返回今日
@@ -725,11 +731,11 @@ export default function CalibrationPage() {
                 disabled={applyLoading || selected.size === 0}
                 className="px-5 py-2 rounded-md text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
               >
-                {applyLoading ? "发送中…" : "发送到 Review Center"}
+                {applyLoading ? "发送中…" : "发送到 Mailbox"}
               </button>
             </div>
             <div className="text-xs text-gray-500 text-right">
-              所选变更会进入 Review Center，确认后再写入人生模型。
+              所选变更会进入 Mailbox，确认后再写入人生模型。
             </div>
           </div>
         )}

@@ -39,6 +39,47 @@ impl ProviderHealthCache {
     }
 }
 
+/// In-memory Main Chat route evidence for the current app process.
+#[derive(Clone, Debug, Default)]
+pub struct MainChatRuntimeState {
+    pub legacy_fallback_used_count: u64,
+    pub last_legacy_fallback_reason_code: Option<String>,
+    pub last_legacy_fallback_at: Option<String>,
+    pub last_kernel_event_count: Option<usize>,
+    pub latest_turn_route_evidence: Option<MainChatTurnRouteEvidenceSnapshot>,
+    pub latest_final_gate_readiness: Option<MainChatFinalGateReadinessSnapshot>,
+}
+
+impl MainChatRuntimeState {
+    pub fn shared() -> Arc<Mutex<Self>> {
+        Arc::new(Mutex::new(Self::default()))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct MainChatFinalGateReadinessSnapshot {
+    pub status: String,
+    pub blockers: Vec<String>,
+    pub last_report_run_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct MainChatTurnRouteEvidenceSnapshot {
+    pub stream_mode: String,
+    pub execution_path: String,
+    pub strategy_label: String,
+    pub reason_code: String,
+    pub kernel_supported: bool,
+    pub kernel_support_disposition: String,
+    pub fallback_allowed: bool,
+    pub requires_tool_loop: bool,
+    pub observed_agent_loop: bool,
+    pub observed_agent_loop_without_fallback: bool,
+    pub legacy_fallback_used: bool,
+    pub kernel_event_count: Option<usize>,
+    pub recorded_at: String,
+}
+
 /// Central application state shared across all Tauri commands.
 #[derive(Clone)]
 pub struct AppState {
@@ -73,6 +114,7 @@ pub struct AppState {
     pub main_chat_agent_event_store:
         Option<Arc<Mutex<crate::main_chat_event_stream::MainChatAgentEventStore>>>,
     pub main_chat_selected_skill_ids: Arc<Mutex<HashMap<String, String>>>,
+    pub main_chat_runtime_state: Arc<Mutex<MainChatRuntimeState>>,
     pub patch_store: Option<Arc<Mutex<openlife_core::life_model::patch_store::PatchStore>>>,
     pub rollout_metrics_store: Option<Arc<Mutex<openlife_core::agent::RolloutMetricsStore>>>,
     pub tool_permission_store: Arc<Mutex<openlife_core::tool_permissions::ToolPermissionStore>>,

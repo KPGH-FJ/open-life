@@ -521,6 +521,8 @@ pub(crate) async fn run_main_chat_tool_loop_adapter(
 
     Ok(outcome_kind.wrap_result(SendMessageResult {
         reply,
+        status: "completed".into(),
+        blockers: Vec::new(),
         reasoning_trace,
         tool_calls,
         run_id: Some(agent_run.id),
@@ -528,6 +530,9 @@ pub(crate) async fn run_main_chat_tool_loop_adapter(
         agent_state,
         execution_transcript,
         legacy_fallback_used: false,
+        legacy_runtime_invoked: false,
+        model_invoked: true,
+        tool_invoked: true,
     }))
 }
 

@@ -30,11 +30,8 @@ const baseProps = {
     cloud_api_last_error: null,
     chat_ready: true,
     readiness_issues: [],
-    beta_ready: true,
-    beta_readiness_issues: [],
     data_dir: "/tmp/openlife-test",
     active_data_dir: "/tmp/openlife-test",
-    legacy_data_dir: null,
     database_status: "ok",
     startup_warnings: [],
     snapshot_count: 2,
@@ -42,7 +39,6 @@ const baseProps = {
     app_version: "0.1.0",
     model_empty: false,
     chat_session_count: 3,
-    onboarding_completed: true,
     builder_completion: {
       identity: 80,
       goals: 75,
@@ -101,8 +97,6 @@ describe("OverviewTab readiness smoke", () => {
     const blockedDiagnostics = {
       ...baseProps.diagnostics,
       chat_ready: false,
-      beta_ready: false,
-      beta_readiness_issues: ["核心聊天链路未就绪"],
       readiness_issues: ["聊天不可用：未配置模型"],
     };
     render(
@@ -119,8 +113,6 @@ describe("OverviewTab readiness smoke", () => {
     const safeModeDiagnostics = {
       ...baseProps.diagnostics,
       startup_warnings: ["数据库降级启动"],
-      beta_ready: false,
-      beta_readiness_issues: ["数据存储曾在启动时降级"],
     };
     render(
       <MemoryRouter>
@@ -132,12 +124,10 @@ describe("OverviewTab readiness smoke", () => {
     expect(screen.getByText(/恢复控制台/)).toBeInTheDocument();
   });
 
-  it("shows partial state when chat_ready but not beta_ready", () => {
+  it("shows partial state when chat_ready but not usage ready", () => {
     const partialDiagnostics = {
       ...baseProps.diagnostics,
       chat_ready: true,
-      beta_ready: false,
-      beta_readiness_issues: ["尚未开始任何对话"],
     };
     render(
       <MemoryRouter>

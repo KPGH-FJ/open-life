@@ -405,6 +405,7 @@ mod tests {
             main_chat_selected_skill_ids: Arc::new(tokio::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            main_chat_runtime_state: crate::state::MainChatRuntimeState::shared(),
             patch_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
             ))),

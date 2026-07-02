@@ -34,7 +34,7 @@ import {
   type PluginRecord,
   type ToolManifest,
 } from "../tauri";
-import { LayoutDashboard, Cpu, Shield, Wrench, Inbox, SlidersHorizontal } from "lucide-react";
+import { Cpu, Shield, Wrench, Inbox, SlidersHorizontal } from "lucide-react";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, readTextFile } from "@tauri-apps/plugin-fs";
 import LoadingSpinner from "../components/LoadingSpinner";
@@ -544,11 +544,11 @@ export default function SettingsPage() {
         {/* Tab Navigation */}
         <div className="flex gap-1 border-b border-gray-200 pb-1 overflow-x-auto">
           {[
-            { id: "overview", label: "General", icon: LayoutDashboard },
+            { id: "overview", label: "General", icon: SlidersHorizontal },
             { id: "provider", label: "Models", icon: Cpu },
             { id: "privacy_data", label: "Privacy & Data", icon: Shield },
             { id: "tools", label: "Tools & Permissions", icon: Wrench },
-            { id: "review_memory", label: "Review & Memory", icon: Inbox },
+            { id: "review_memory", label: "Mailbox & Memory", icon: Inbox },
             { id: "advanced", label: "Advanced", icon: SlidersHorizontal },
           ].map(tab => (
             <button

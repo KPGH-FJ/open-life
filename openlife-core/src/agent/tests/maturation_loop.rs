@@ -107,12 +107,12 @@ fn duplicate_candidates_are_deduplicated_within_run() {
     let output = service.mature(input_with_candidates(vec![
         draft(
             "goal.short_term",
-            "User wants to finish the LifeModel maturation MVP.",
+            "User wants to finish the LifeModel maturation capability release.",
             0.86,
         ),
         draft(
             "goal.short_term",
-            "User wants to finish the LifeModel maturation MVP.",
+            "User wants to finish the LifeModel maturation capability release.",
             0.86,
         ),
     ]));

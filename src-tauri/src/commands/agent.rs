@@ -201,7 +201,7 @@ pub async fn replay_agent_action(
     };
     if !peek_decision.allowed {
         return Err(AppError::permission(format!(
-            "Action is not authorized yet. Please accept the ToolPermission proposal in Review Center first. Decision: {} ({})",
+            "Action is not authorized yet. Please accept the ToolPermission proposal in Mailbox first. Decision: {} ({})",
             peek_decision.decision, peek_decision.reason
         )));
     }

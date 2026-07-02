@@ -259,7 +259,8 @@ fn default_search_provider() -> String {
 pub enum AgentRuntimeMode {
     #[default]
     LocalFirstDefault,
-    CapabilityFirstBeta,
+    #[serde(rename = "capability_first", alias = "capability_first_beta")]
+    CapabilityFirst,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -277,7 +278,7 @@ pub struct AppConfig {
     #[serde(default)]
     pub experimental_context_assembler: bool,
     /// Use AgentLoop for chat execution instead of inline logic.
-    /// Beta feature: dual-track with legacy fallback.
+    /// Capability-first runtime path with governed fallback reporting.
     #[serde(default)]
     pub use_agent_loop: bool,
     #[serde(default)]
@@ -440,7 +441,7 @@ mod tests {
                 chat_model: "gpt-4".into(),
                 embedding_enabled: false,
             },
-            runtime_mode: AgentRuntimeMode::CapabilityFirstBeta,
+            runtime_mode: AgentRuntimeMode::CapabilityFirst,
             prefer_local_model: true,
             local_model: "qwen2.5".into(),
             chat_proposal: ChatProposalConfig::default(),
@@ -459,10 +460,31 @@ mod tests {
         assert_eq!(loaded.llm.embedding_enabled, config.llm.embedding_enabled);
         assert!(matches!(
             loaded.runtime_mode,
-            AgentRuntimeMode::CapabilityFirstBeta
+            AgentRuntimeMode::CapabilityFirst
         ));
         assert_eq!(loaded.prefer_local_model, config.prefer_local_model);
         assert_eq!(loaded.local_model, config.local_model);
+    }
+
+    #[test]
+    fn config_reads_legacy_capability_first_beta_alias_but_saves_new_value() {
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            "runtime_mode: capability_first_beta\nprefer_local_model: false\n",
+        )
+        .unwrap();
+
+        let loaded = AppConfig::load(file.path()).unwrap();
+        assert!(matches!(
+            loaded.runtime_mode,
+            AgentRuntimeMode::CapabilityFirst
+        ));
+
+        loaded.save(file.path()).unwrap();
+        let saved = std::fs::read_to_string(file.path()).unwrap();
+        assert!(saved.contains("runtime_mode: capability_first"));
+        assert!(!saved.contains("runtime_mode: capability_first_beta"));
     }
 
     #[test]

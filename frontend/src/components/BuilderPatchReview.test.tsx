@@ -53,12 +53,10 @@ const mockSummary: BuilderSummary = {
 };
 
 describe("BuilderPatchReview", () => {
-  const mockApply = vi.fn();
   const mockCreateProposals = vi.fn();
   const mockReject = vi.fn();
 
   beforeEach(() => {
-    mockApply.mockClear();
     mockCreateProposals.mockClear();
     mockReject.mockClear();
   });
@@ -68,7 +66,7 @@ describe("BuilderPatchReview", () => {
       <BuilderPatchReview
         signals={mockSignals}
         summary={mockSummary}
-        onApply={mockApply}
+        onCreateProposals={mockCreateProposals}
         onReject={mockReject}
       />
     );
@@ -83,7 +81,7 @@ describe("BuilderPatchReview", () => {
       <BuilderPatchReview
         signals={mockSignals}
         summary={mockSummary}
-        onApply={mockApply}
+        onCreateProposals={mockCreateProposals}
         onReject={mockReject}
       />
     );
@@ -98,7 +96,7 @@ describe("BuilderPatchReview", () => {
       <BuilderPatchReview
         signals={mockSignals}
         summary={mockSummary}
-        onApply={mockApply}
+        onCreateProposals={mockCreateProposals}
         onReject={mockReject}
       />
     );
@@ -112,7 +110,7 @@ describe("BuilderPatchReview", () => {
       <BuilderPatchReview
         signals={mockSignals}
         summary={mockSummary}
-        onApply={mockApply}
+        onCreateProposals={mockCreateProposals}
         onReject={mockReject}
       />
     );
@@ -128,7 +126,7 @@ describe("BuilderPatchReview", () => {
       <BuilderPatchReview
         signals={mockSignals}
         summary={mockSummary}
-        onApply={mockApply}
+        onCreateProposals={mockCreateProposals}
         onReject={mockReject}
       />
     );
@@ -144,21 +142,21 @@ describe("BuilderPatchReview", () => {
     expect(checkboxes[2]).toBeChecked();
   });
 
-  it("calls onApply with BuilderSignalDecision[] when clicking save", () => {
+  it("sends BuilderSignalDecision[] to Mailbox when clicking the primary action", () => {
     render(
       <BuilderPatchReview
         signals={mockSignals}
         summary={mockSummary}
-        onApply={mockApply}
+        onCreateProposals={mockCreateProposals}
         onReject={mockReject}
       />
     );
 
-    const saveButton = screen.getByText("直接应用（legacy / 绕过 Review Center）");
+    const saveButton = screen.getByText("发送到 Mailbox");
     fireEvent.click(saveButton);
 
     // 低风险的已默认选中，高风险的未选中 → rejected
-    const decisions: BuilderSignalDecision[] = mockApply.mock.calls[0][0];
+    const decisions: BuilderSignalDecision[] = mockCreateProposals.mock.calls[0][0];
     expect(decisions).toHaveLength(3);
 
     const accepted = decisions.filter(d => d.status === "accepted");
@@ -170,24 +168,25 @@ describe("BuilderPatchReview", () => {
     expect(rejected.map(d => d.id)).toContain("sig_long_term");
   });
 
-  it("uses Review Center as the default submission path when available", () => {
+  it("only exposes Mailbox as the submission path", () => {
     render(
       <BuilderPatchReview
         signals={mockSignals}
         summary={mockSummary}
-        onApply={mockApply}
         onCreateProposals={mockCreateProposals}
         onReject={mockReject}
       />
     );
 
-    expect(screen.getByText("发送到 Review Center")).toBeInTheDocument();
-    expect(screen.queryByText("直接应用（legacy / 绕过 Review Center）")).not.toBeInTheDocument();
+    expect(screen.getByText("发送到 Mailbox")).toBeInTheDocument();
+    expect(screen.queryByText("直接应用（legacy / 绕过 Mailbox）")).not.toBeInTheDocument();
+    expect(screen.queryByText("Legacy direct apply")).not.toBeInTheDocument();
+    expect(screen.queryByText(/绕过 Mailbox/)).not.toBeInTheDocument();
+    expect(screen.queryByText("直接应用")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByText("发送到 Review Center"));
+    fireEvent.click(screen.getByText("发送到 Mailbox"));
 
     expect(mockCreateProposals).toHaveBeenCalledTimes(1);
-    expect(mockApply).not.toHaveBeenCalled();
   });
 
   it("calls onReject when clicking reject button", () => {
@@ -195,7 +194,7 @@ describe("BuilderPatchReview", () => {
       <BuilderPatchReview
         signals={mockSignals}
         summary={mockSummary}
-        onApply={mockApply}
+        onCreateProposals={mockCreateProposals}
         onReject={mockReject}
       />
     );
@@ -211,7 +210,7 @@ describe("BuilderPatchReview", () => {
       <BuilderPatchReview
         signals={mockSignals}
         summary={mockSummary}
-        onApply={mockApply}
+        onCreateProposals={mockCreateProposals}
         onReject={mockReject}
       />
     );
@@ -219,17 +218,40 @@ describe("BuilderPatchReview", () => {
     expect(screen.getByText(/你有未勾选的高风险字段/)).toBeInTheDocument();
   });
 
+  it("sends selected high-risk items to Mailbox proposals without any direct write path", () => {
+    render(
+      <BuilderPatchReview
+        signals={mockSignals}
+        summary={mockSummary}
+        onCreateProposals={mockCreateProposals}
+        onReject={mockReject}
+      />
+    );
+
+    const checkboxes = screen.getAllByRole("checkbox");
+    fireEvent.click(checkboxes[2]);
+    fireEvent.click(screen.getByText("发送到 Mailbox"));
+
+    expect(screen.queryByText("确认直接写入")).not.toBeInTheDocument();
+    expect(mockCreateProposals).toHaveBeenCalledTimes(1);
+    const decisions: BuilderSignalDecision[] = mockCreateProposals.mock.calls[0][0];
+    expect(decisions.find(decision => decision.id === "sig_long_term")).toMatchObject({
+      id: "sig_long_term",
+      status: "accepted",
+    });
+  });
+
   it("disables save button when no signals selected", () => {
     render(
       <BuilderPatchReview
         signals={[mockSignals[2]]} // Only high risk, unchecked by default
         summary={mockSummary}
-        onApply={mockApply}
+        onCreateProposals={mockCreateProposals}
         onReject={mockReject}
       />
     );
 
-    const saveButton = screen.getByText("直接应用（legacy / 绕过 Review Center）");
+    const saveButton = screen.getByText("发送到 Mailbox");
     expect(saveButton).toBeDisabled();
   });
 
@@ -238,7 +260,7 @@ describe("BuilderPatchReview", () => {
       <BuilderPatchReview
         signals={mockSignals}
         summary={mockSummary}
-        onApply={mockApply}
+        onCreateProposals={mockCreateProposals}
         onReject={mockReject}
       />
     );
@@ -259,7 +281,7 @@ describe("BuilderPatchReview", () => {
       <BuilderPatchReview
         signals={mockSignals}
         summary={mockSummary}
-        onApply={mockApply}
+        onCreateProposals={mockCreateProposals}
         onReject={mockReject}
       />
     );
@@ -274,7 +296,7 @@ describe("BuilderPatchReview", () => {
       <BuilderPatchReview
         signals={mockSignals}
         summary={mockSummary}
-        onApply={mockApply}
+        onCreateProposals={mockCreateProposals}
         onReject={mockReject}
       />
     );
@@ -295,11 +317,11 @@ describe("BuilderPatchReview", () => {
     fireEvent.click(saveEditButton);
 
     // Click main save button
-    const saveButton = screen.getByText("直接应用（legacy / 绕过 Review Center）");
+    const saveButton = screen.getByText("发送到 Mailbox");
     fireEvent.click(saveButton);
 
     await waitFor(() => {
-      const decisions: BuilderSignalDecision[] = mockApply.mock.calls[0][0];
+      const decisions: BuilderSignalDecision[] = mockCreateProposals.mock.calls[0][0];
       const editedDecision = decisions.find(d => d.id === "sig_name");
       expect(editedDecision).toBeDefined();
       expect(editedDecision!.status).toBe("edited");
@@ -312,7 +334,7 @@ describe("BuilderPatchReview", () => {
       <BuilderPatchReview
         signals={mockSignals}
         summary={mockSummary}
-        onApply={mockApply}
+        onCreateProposals={mockCreateProposals}
         onReject={mockReject}
       />
     );
@@ -328,7 +350,7 @@ describe("BuilderPatchReview", () => {
       <BuilderPatchReview
         signals={mockSignals}
         summary={mockSummary}
-        onApply={mockApply}
+        onCreateProposals={mockCreateProposals}
         onReject={mockReject}
       />
     );
@@ -355,7 +377,7 @@ describe("BuilderPatchReview", () => {
       <BuilderPatchReview
         signals={mockSignals}
         summary={mockSummary}
-        onApply={mockApply}
+        onCreateProposals={mockCreateProposals}
         onReject={mockReject}
       />
     );
@@ -370,16 +392,11 @@ describe("BuilderPatchReview", () => {
       },
     });
     fireEvent.click(screen.getByText("保存"));
-    fireEvent.click(screen.getByText("直接应用（legacy / 绕过 Review Center）"));
-
-    // Confirm direct apply for high-risk signal
-    await waitFor(() => {
-      expect(screen.getByText("确认直接写入")).toBeInTheDocument();
-    });
-    fireEvent.click(screen.getByText("确认直接写入"));
+    fireEvent.click(screen.getByText("发送到 Mailbox"));
+    expect(screen.queryByText("确认直接写入")).not.toBeInTheDocument();
 
     await waitFor(() => {
-      const decisions: BuilderSignalDecision[] = mockApply.mock.calls[0][0];
+      const decisions: BuilderSignalDecision[] = mockCreateProposals.mock.calls[0][0];
       const editedDecision = decisions.find(d => d.id === "sig_long_term");
       expect(editedDecision).toMatchObject({
         id: "sig_long_term",
@@ -394,7 +411,7 @@ describe("BuilderPatchReview", () => {
       <BuilderPatchReview
         signals={mockSignals}
         summary={mockSummary}
-        onApply={mockApply}
+        onCreateProposals={mockCreateProposals}
         onReject={mockReject}
       />
     );
@@ -407,7 +424,7 @@ describe("BuilderPatchReview", () => {
     fireEvent.click(screen.getByText("保存"));
 
     expect(await screen.findByText("JSON 格式无效，请修正后再保存。")).toBeInTheDocument();
-    expect(mockApply).not.toHaveBeenCalled();
+    expect(mockCreateProposals).not.toHaveBeenCalled();
   });
 
   it("does not include rejected signals in apply payload", async () => {
@@ -415,7 +432,7 @@ describe("BuilderPatchReview", () => {
       <BuilderPatchReview
         signals={mockSignals}
         summary={mockSummary}
-        onApply={mockApply}
+        onCreateProposals={mockCreateProposals}
         onReject={mockReject}
       />
     );
@@ -425,11 +442,11 @@ describe("BuilderPatchReview", () => {
     const checkboxes = screen.getAllByRole("checkbox");
     fireEvent.click(checkboxes[0]); // uncheck sig_name (low risk)
 
-    const saveButton = screen.getByText("直接应用（legacy / 绕过 Review Center）");
+    const saveButton = screen.getByText("发送到 Mailbox");
     fireEvent.click(saveButton);
 
     await waitFor(() => {
-      const decisions: BuilderSignalDecision[] = mockApply.mock.calls[0][0];
+      const decisions: BuilderSignalDecision[] = mockCreateProposals.mock.calls[0][0];
       expect(decisions).toHaveLength(3);
 
       const rejected = decisions.filter(d => d.status === "rejected");
@@ -473,7 +490,7 @@ describe("BuilderPatchReview", () => {
           },
         ]}
         summary={mockSummary}
-        onApply={mockApply}
+        onCreateProposals={mockCreateProposals}
         onReject={mockReject}
       />
     );
@@ -489,7 +506,7 @@ describe("BuilderPatchReview", () => {
       <BuilderPatchReview
         signals={mockSignals}
         summary={mockSummary}
-        onApply={mockApply}
+        onCreateProposals={mockCreateProposals}
         onReject={mockReject}
       />
     );
@@ -504,7 +521,7 @@ describe("BuilderPatchReview", () => {
       <BuilderPatchReview
         signals={mockSignals}
         summary={mockSummary}
-        onApply={mockApply}
+        onCreateProposals={mockCreateProposals}
         onReject={mockReject}
       />
     );
@@ -521,7 +538,7 @@ describe("BuilderPatchReview", () => {
       <BuilderPatchReview
         signals={mockSignals}
         summary={mockSummary}
-        onApply={mockApply}
+        onCreateProposals={mockCreateProposals}
         onReject={mockReject}
       />
     );

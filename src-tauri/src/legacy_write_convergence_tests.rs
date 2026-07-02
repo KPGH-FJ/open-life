@@ -106,7 +106,7 @@ fn legacy_write_convergence_w97_inventory_reports_final_convergence() {
     assert!(report.metadata_safe);
     assert!(!report.contains_raw_content);
     assert!(report.default_chat_unchanged);
-    assert_eq!(report.default_chat_route, "legacy_stream");
+    assert_eq!(report.default_chat_route, "main_chat_kernel");
     assert_eq!(report.high_risk_legacy_direct_write_count, 0);
     assert!(report.convergence_blockers.is_empty());
     assert!(report.guard_blocking_reasons.is_empty());
@@ -583,7 +583,7 @@ fn legacy_write_convergence_w97_default_chat_and_ordinary_entrypoints_remain_iso
     let entries = legacy_write_convergence_inventory();
     let report = evaluate_legacy_write_convergence_inventory(&entries);
     assert!(report.default_chat_unchanged);
-    assert_eq!(report.default_chat_route, "legacy_stream");
+    assert_eq!(report.default_chat_route, "main_chat_kernel");
     assert!(!report.w79_guard_called_by_ordinary_chat);
 
     let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));

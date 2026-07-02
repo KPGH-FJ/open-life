@@ -48,6 +48,7 @@ import {
   countPendingReviewProposals,
   REVIEW_PENDING_PROPOSAL_LIMIT,
 } from "../utils/reviewPendingCount";
+import { mailboxRoute, runDetailRoute, secondaryRoutePath } from "../productShellContract";
 
 type LifeModelSection = "build" | "overview" | "evidence";
 
@@ -203,14 +204,14 @@ function reviewProposalSummary(proposal: AgentProposal): string {
   const evidenceCount = proposal.evidenceSummaries?.length ?? 0;
   const checkCount = proposal.behaviorChecks?.length ?? 0;
   if (evidenceCount > 0 || checkCount > 0) {
-    return `有 ${evidenceCount} 条依据摘要和 ${checkCount} 条检查记录，进入 Review 后可展开查看。`;
+    return `有 ${evidenceCount} 条依据摘要和 ${checkCount} 条检查记录，进入 Mailbox 后可展开查看。`;
   }
-  return "OpenLife 发现一条候选更新，需要你在 Review 中确认后才会写入。";
+  return "OpenLife 发现一条候选更新，需要你在 Mailbox 中确认后才会写入。";
 }
 
 function reviewProposalTraceRows(proposal: AgentProposal): Array<{ label: string; value: string }> {
   const rows: Array<{ label: string; value: string }> = [
-    { label: "Review 记录", value: proposal.id },
+    { label: "确认记录", value: proposal.id },
     { label: "位置", value: proposal.affectedPath },
     { label: "状态", value: proposal.status },
     { label: "把握", value: `${Math.round(proposal.confidence * 100)}%` },
@@ -375,7 +376,7 @@ function BuildSection({
         <div>
           <h2 className="text-sm font-semibold text-stone-950">构建状态</h2>
           <p className="mt-1 text-sm text-stone-600">
-            构建产生候选，Review 确认后才会更新 Life Model。
+            构建产生候选，Mailbox 确认后才会更新 Life Model。
           </p>
         </div>
       </div>
@@ -387,7 +388,7 @@ function BuildSection({
             少量问题，先形成可用轮廓。
           </p>
           <Link
-            to="/builder"
+            to={secondaryRoutePath("LifeModelBuild")}
             className="mt-4 inline-flex h-9 items-center justify-center gap-2 rounded-md bg-stone-900 px-3 text-sm font-semibold text-white hover:bg-stone-800"
           >
             开始快速构建
@@ -398,7 +399,7 @@ function BuildSection({
           <div className="text-base font-semibold text-stone-950">对话构建</div>
           <p className="mt-2 min-h-10 text-sm leading-5 text-stone-600">像聊天一样慢慢补全。</p>
           <Link
-            to="/builder"
+            to={secondaryRoutePath("LifeModelBuild")}
             className="mt-4 inline-flex h-9 items-center justify-center gap-2 rounded-md border border-stone-300 bg-white px-3 text-sm font-semibold text-stone-800 hover:bg-stone-50"
           >
             开始对话构建
@@ -439,7 +440,7 @@ function BuildSection({
           <div className="p-4">
             <div className="text-xs font-medium text-stone-500">待确认更新</div>
             <div className="mt-1 text-lg font-semibold text-stone-950">{builderReviewCount}</div>
-            <div className="mt-1 text-xs text-stone-500">通过 Review 处理</div>
+            <div className="mt-1 text-xs text-stone-500">通过 Mailbox 处理</div>
           </div>
         </div>
       </div>
@@ -449,14 +450,14 @@ function BuildSection({
           <div>
             <div className="text-sm font-semibold text-amber-950">有构建内容等待确认</div>
             <div className="mt-0.5 text-xs text-amber-800">
-              这里不直接应用更新；请在 Review 中逐项处理。
+              这里不直接应用更新；请在 Mailbox 中逐项处理。
             </div>
           </div>
           <Link
-            to="/mailbox"
+            to={mailboxRoute()}
             className="inline-flex h-8 items-center gap-2 rounded-md bg-amber-900 px-3 text-xs font-semibold text-white hover:bg-amber-950"
           >
-            打开 Review
+            打开 Mailbox
             <Inbox size={14} aria-hidden="true" />
           </Link>
         </div>
@@ -513,7 +514,7 @@ function CommunicationStyleCurrentView({
               </span>
             </div>
             <div>
-              <span className="text-stone-400">Review 记录：</span>
+              <span className="text-stone-400">确认记录：</span>
               <span className="break-all">
                 {traceValue(change?.proposalId, "accepted_proposal_missing")}
               </span>
@@ -529,7 +530,7 @@ function CommunicationStyleCurrentView({
               {change?.proposalRunId ? (
                 <a
                   className="break-all text-stone-900 underline"
-                  href={`#/runs/${change.proposalRunId}`}
+                  href={`#${runDetailRoute(change.proposalRunId)}`}
                 >
                   {change.proposalRunId}
                 </a>
@@ -636,7 +637,7 @@ function OverviewSection({
           先用 Builder 形成首轮结构，再回到这里查看四维摘要。
         </p>
         <Link
-          to="/builder"
+          to={secondaryRoutePath("LifeModelBuild")}
           className="mt-4 inline-flex h-9 items-center justify-center gap-2 rounded-md bg-stone-900 px-3 text-sm font-semibold text-white hover:bg-stone-800"
         >
           去构建
@@ -651,7 +652,7 @@ function OverviewSection({
       <div>
         <h2 className="text-sm font-semibold text-stone-950">四维摘要</h2>
         <p className="mt-1 text-sm text-stone-600">
-          只显示短摘要；完整构建和确认仍在 Builder 与 Review 中完成。
+          只显示短摘要；完整构建和确认仍在 Builder 与 Mailbox 中完成。
         </p>
       </div>
       {visibleQualityIssues.length > 0 && (
@@ -689,7 +690,7 @@ function OverviewSection({
               <div className="mt-0.5 text-xs text-stone-500">{dimension.items.length} 条摘要</div>
               <div className="mt-2 flex flex-wrap gap-1">
                 {trustViews[dimension.key].pendingProposalCount > 0 && (
-                  <ProductStatusChip label="Review 待确认" tone="warning" />
+                  <ProductStatusChip label="Mailbox 待确认" tone="warning" />
                 )}
                 {dimension.suppressedIssues.length > 0 && (
                   <ProductStatusChip label="原始抽取已降级" tone="warning" />
@@ -745,13 +746,13 @@ function OverviewSection({
                 )}
                 <div className="mt-3 flex flex-wrap gap-2">
                   <Link
-                    to="/mailbox"
+                    to={mailboxRoute()}
                     className="rounded-md bg-stone-900 px-2.5 py-1 text-xs font-semibold text-white hover:bg-stone-800"
                   >
-                    Open Review
+                    Open Mailbox
                   </Link>
                   <Link
-                    to="/builder"
+                    to={secondaryRoutePath("LifeModelBuild")}
                     className="rounded-md border border-stone-200 bg-white px-2.5 py-1 text-xs font-semibold text-stone-700 hover:bg-stone-50"
                   >
                     Correct
@@ -791,7 +792,7 @@ function QualityIssuePanel({
         <div>
           <div className="text-sm font-semibold text-amber-950">发现可能影响画像可信度的字段</div>
           <div className="mt-0.5 text-xs text-amber-800">
-            本次视图处理，不会改写 Life Model；正式更新仍需 Review 确认。
+            本次视图处理，不会改写 Life Model；正式更新仍需 Mailbox 确认。
           </div>
         </div>
       </div>
@@ -867,17 +868,17 @@ function EvidenceSection({
         </div>
         <div className="flex flex-wrap gap-2">
           <Link
-            to="/memory"
+            to={secondaryRoutePath("Memory")}
             className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-stone-300 bg-white px-3 text-sm font-semibold text-stone-800 hover:bg-stone-50"
           >
             查看记忆
             <Database size={15} aria-hidden="true" />
           </Link>
           <Link
-            to="/mailbox"
+            to={mailboxRoute()}
             className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-stone-900 px-3 text-sm font-semibold text-white hover:bg-stone-800"
           >
-            打开 Review
+            打开 Mailbox
             <Inbox size={15} aria-hidden="true" />
           </Link>
         </div>
@@ -897,7 +898,7 @@ function EvidenceSection({
           <div className="p-4">
             <div className="text-xs font-medium text-stone-500">待确认更新</div>
             <div className="mt-1 text-lg font-semibold text-stone-950">{pendingCount}</div>
-            <div className="mt-1 text-xs text-stone-500">进入 Review 确认</div>
+            <div className="mt-1 text-xs text-stone-500">进入 Mailbox 确认</div>
           </div>
           <div className="p-4">
             <div className="text-xs font-medium text-stone-500">最近依据来源</div>
@@ -943,10 +944,10 @@ function EvidenceSection({
                 </div>
               </div>
               <Link
-                to="/mailbox"
+                to={mailboxRoute()}
                 className="text-xs font-semibold text-stone-700 underline-offset-4 hover:underline"
               >
-                去 Review 处理
+                去 Mailbox 处理
               </Link>
             </div>
           ))}

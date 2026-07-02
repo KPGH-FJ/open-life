@@ -24,6 +24,7 @@ import type {
   MainChatStage5PreflightReport,
 } from "../tauri";
 import type { PlanExecuteReviewItem } from "../types";
+import { mailboxLinkTarget, productRoutePath } from "../productShellContract";
 
 type ControlTarget = {
   proposalId?: string;
@@ -198,17 +199,20 @@ function shouldShowReviewCenterLink(controls: string[]): boolean {
   );
 }
 
-function reviewCenterLink(controls: string[], keyPrefix: string, reviewState?: unknown) {
+function reviewCenterLink(
+  controls: string[],
+  keyPrefix: string,
+  reviewState?: { proposalId?: string; mainChatTaskSessionId?: string; returnTo?: string }
+) {
   if (!shouldShowReviewCenterLink(controls)) return null;
   return (
     <div className="mt-2 flex flex-wrap gap-1">
       <Link
         key={`${keyPrefix}-open-review-center`}
-        to="/review"
-        state={reviewState}
+        {...mailboxLinkTarget(reviewState)}
         className="inline-flex min-h-6 items-center rounded-md border border-stone-200 bg-white px-2 font-medium text-stone-800 hover:bg-stone-100"
       >
-        Open Review Center
+        Open Mailbox
       </Link>
     </div>
   );
@@ -544,7 +548,7 @@ export default function AgentControlPlane({
         data-blocker-codes={blockerCodes.join("|")}
         className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 border-l border-stone-300 bg-stone-50/80 px-2 py-1 text-stone-600"
       >
-        <span className="font-semibold text-stone-950">Reviewer trace</span>
+        <span className="font-semibold text-stone-950">Audit trace</span>
         <span className="min-w-0 break-all">
           task <span className="font-mono text-stone-800">{state.task.taskId}</span>
         </span>
@@ -788,7 +792,7 @@ export default function AgentControlPlane({
                 planArtifactControls.includes("review_plan") &&
                 onReviewPlan &&
                 inlineControlButton({
-                  label: "Review plan",
+                  label: "Confirm plan",
                   icon: <CheckCircle2 size={13} />,
                   disabled: busy,
                   onClick: () =>
@@ -1060,7 +1064,7 @@ export default function AgentControlPlane({
                 {planControls.includes("review_plan") &&
                   onReviewPlan &&
                   inlineControlButton({
-                    label: "Review plan",
+                    label: "Confirm plan",
                     icon: <CheckCircle2 size={13} />,
                     disabled: busy,
                     onClick: () =>
@@ -1170,7 +1174,7 @@ export default function AgentControlPlane({
           {reviewSummary && (
             <div className="mt-3 border-t border-emerald-200 pt-2">
               <div className="flex flex-wrap items-center gap-2">
-                <div className="font-semibold text-stone-950">Review summary</div>
+                <div className="font-semibold text-stone-950">Plan summary</div>
                 <span
                   className={`inline-flex h-5 items-center rounded-md border px-1.5 font-medium ${statusClass(
                     reviewSummary.planStatus
@@ -1377,7 +1381,7 @@ export default function AgentControlPlane({
                 </div>
                 {reviewCenterLink(blocker.controls, blocker.blockerId, {
                   mainChatTaskSessionId: state.task.taskId,
-                  returnTo: "/chat",
+                  returnTo: productRoutePath("Companion"),
                 })}
               </div>
             ))}
@@ -1458,7 +1462,11 @@ export default function AgentControlPlane({
                       ? proposal.controls
                       : [...proposal.controls, "open_review_center"],
                     proposal.proposalId,
-                    { mainChatTaskSessionId: state.task.taskId, returnTo: "/chat" }
+                    {
+                      proposalId: proposal.proposalId,
+                      mainChatTaskSessionId: state.task.taskId,
+                      returnTo: productRoutePath("Companion"),
+                    }
                   )}
                 </div>
               </div>

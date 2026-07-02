@@ -1,6 +1,11 @@
 import { Link } from "react-router-dom";
 import type { ReactNode } from "react";
 import type { AppConfig, ModelRouterStatus, RouterStatus, SystemDiagnostics } from "../../../tauri";
+import {
+  advancedRoutePath,
+  diagnosticsUsageReadinessIssues,
+  diagnosticsUsageReady,
+} from "../../../productShellContract";
 
 function classNames(...classes: (string | false | undefined)[]) {
   return classes.filter(Boolean).join(" ");
@@ -15,6 +20,16 @@ interface AdvancedTabProps {
   showInternalDebug: boolean;
   pluginSection: ReactNode;
   experimentalSection?: ReactNode;
+}
+
+function usageReady(diagnostics: SystemDiagnostics | null): boolean {
+  if (!diagnostics) return false;
+  return diagnosticsUsageReady(diagnostics);
+}
+
+function usageReadinessIssues(diagnostics: SystemDiagnostics | null): string[] {
+  if (!diagnostics) return [];
+  return diagnosticsUsageReadinessIssues(diagnostics);
 }
 
 export default function AdvancedTab({
@@ -39,7 +54,7 @@ export default function AdvancedTab({
         </div>
         <div className="grid gap-3 md:grid-cols-3">
           <Link
-            to="/mcp"
+            to={advancedRoutePath("McpTools")}
             className="rounded-lg border border-stone-200 bg-white p-4 text-sm hover:bg-stone-50"
           >
             <div className="font-semibold text-stone-950">MCP / Tools</div>
@@ -49,7 +64,7 @@ export default function AdvancedTab({
             </div>
           </Link>
           <Link
-            to="/a2a"
+            to={advancedRoutePath("A2A")}
             className="rounded-lg border border-stone-200 bg-white p-4 text-sm hover:bg-stone-50"
           >
             <div className="font-semibold text-stone-950">A2A</div>
@@ -174,26 +189,26 @@ export default function AdvancedTab({
       )}
 
       <section className="space-y-4 border-t pt-4">
-        <h3 className="text-sm font-medium text-gray-700">Beta 诊断</h3>
+        <h3 className="text-sm font-medium text-gray-700">使用准备诊断</h3>
         <div
           className={classNames(
             "rounded-xl border p-4",
-            diagnostics?.beta_ready
+            usageReady(diagnostics)
               ? "border-blue-100 bg-blue-50 text-blue-900"
               : "border-amber-100 bg-amber-50 text-amber-900"
           )}
         >
           <div className="flex items-center justify-between gap-3">
             <div>
-              <div className="text-sm font-semibold">Beta 就绪状态</div>
+              <div className="text-sm font-semibold">使用准备状态</div>
               <div className="mt-1 text-xs">
-                {diagnostics?.beta_ready
-                  ? "Beta 就绪：核心链路、人生模型、对话验证、云端 API 均已通过。"
-                  : "距离 Beta 发布还有以下事项需要完善。"}
+                {usageReady(diagnostics)
+                  ? "使用准备就绪：核心链路、人生模型、对话验证和模型后端均已通过当前检查。"
+                  : "继续处理以下事项后，默认体验会更稳定。"}
               </div>
             </div>
             <span className="shrink-0 rounded-full bg-white/70 px-2 py-1 text-xs font-medium">
-              {diagnostics?.beta_ready ? "Beta 就绪" : "待完善"}
+              {usageReady(diagnostics) ? "已就绪" : "待完善"}
             </span>
           </div>
           <div className="mt-3 grid gap-2 text-xs md:grid-cols-2">
@@ -206,13 +221,12 @@ export default function AdvancedTab({
                 : "未验证"}
             </div>
             <div>云端 API：{diagnostics?.cloud_api_configured ? "已配置" : "未配置"}</div>
-            <div>首次引导：{diagnostics?.onboarding_completed ? "已完成" : "未完成"}</div>
           </div>
-          {diagnostics?.beta_readiness_issues?.length ? (
+          {usageReadinessIssues(diagnostics).length ? (
             <div className="mt-3 rounded-lg bg-white/70 p-3">
-              <div className="text-xs font-medium">Beta 前建议处理：</div>
+              <div className="text-xs font-medium">建议处理：</div>
               <ul className="mt-1 list-disc space-y-1 pl-4 text-xs">
-                {diagnostics.beta_readiness_issues.map(issue => (
+                {usageReadinessIssues(diagnostics).map(issue => (
                   <li key={issue}>{issue}</li>
                 ))}
               </ul>

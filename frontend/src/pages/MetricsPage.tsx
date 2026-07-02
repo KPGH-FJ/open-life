@@ -73,7 +73,7 @@ const MetricsPage: React.FC = () => {
   return (
     <div className="p-6 max-w-7xl mx-auto">
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">灰度监控 Dashboard</h1>
+        <h1 className="text-2xl font-bold text-gray-900">灰度监控</h1>
         <div className="flex items-center gap-3">
           {lastRefreshedAt && (
             <span className="text-xs text-gray-500">

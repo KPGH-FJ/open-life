@@ -481,6 +481,7 @@ describe("Step6 product acceptance evidence", () => {
     expect(script).toContain("executeStep6LiveJourneyWithWebDriver");
     expect(script).toContain("executeStep6SeededControlJourneyWithWebDriver");
     expect(script).toContain("executeStep6PermissionAcceptanceJourneyWithWebDriver");
+    expect(script).toContain("#/__stage1-dogfood-chat");
     expect(script).toContain("openDiagnosticsIfPossible");
     expect(script).toContain("Show Main Chat diagnostics");
     expect(script).toContain("schemaVersion");

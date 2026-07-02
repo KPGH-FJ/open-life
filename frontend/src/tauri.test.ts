@@ -16,33 +16,9 @@ import {
   checkControlledChatCutoverCandidatePromotionReadiness,
   checkControlledChatMigrationImplementationGate,
   checkControlledPilotPromotionReadiness,
-  checkDefaultChatAdapterActivationImplementationGate,
-  checkDefaultChatAdapterContractHarness,
-  checkDefaultChatAdapterImplementationReadiness,
-  checkDefaultChatAdapterNarrowImplementationDiscussionGate,
-  checkDefaultChatAdapterNarrowImplementationPlanApprovalReadiness,
-  checkDefaultChatAdapterControlledPreviewApprovalReadiness,
-  checkDefaultChatAdapterCutoverPlanApprovalReadiness,
-  draftDefaultChatAdapterNarrowImplementationPlan,
-  draftDefaultChatAdapterCutoverImplementationPlan,
-  getDefaultChatAdapterNarrowImplementationPlanReviewSummary,
-  getDefaultChatAdapterCutoverPlanReviewSummary,
-  recordDefaultChatAdapterNarrowImplementationPlanReviewDecision,
-  recordDefaultChatAdapterCutoverPlanReviewDecision,
   checkRuntimeMigrationGate,
-  getDefaultChatAdapterRoutingStatus,
-  getDefaultChatAdapterOrdinaryEntryPreflightStatus,
-  getDefaultChatRuntimeBoundaryStatus,
+  getMainChatRuntimeStatus,
   getRuntimeStrategyRegistryStatus,
-  runDefaultChatAdapterControlledPreview,
-  getDefaultChatAdapterControlledPreviewReviewSummary,
-  recordDefaultChatAdapterControlledPreviewReviewDecision,
-  runDefaultChatAdapterDryRun,
-  getDefaultChatAdapterDryRunReviewSummary,
-  recordDefaultChatAdapterDryRunReviewDecision,
-  draftDefaultChatAdapterActivationPlan,
-  getDefaultChatAdapterActivationReviewSummary,
-  recordDefaultChatAdapterActivationReviewDecision,
   draftControlledChatMigrationPlan,
   getControlledChatCutoverCandidateReviewSummary,
   getControlledChatMigrationReviewDecisionSummary,
@@ -824,7 +800,7 @@ describe("tauri command argument aliases", () => {
       scenarioId: "DBG5-04",
       reviewerId: "tester-alpha",
       uiEvidence: {
-        frontendRoute: "/chat",
+        frontendRoute: "/companion",
         surface: "AgentControlPlane",
         visibleControlLabels: ["Export debug bundle"],
         taskSessionId: "task-stage5",
@@ -1350,7 +1326,7 @@ describe("tauri command argument aliases", () => {
     expect(result.phaseCounts[1]?.blocked).toBe(6);
   });
 
-  it("invokes Main Chat Agent Beta v1 readiness gate with deterministic and live sections", async () => {
+  it("invokes Main Chat Agent readiness gate with deterministic and live sections", async () => {
     vi.mocked(invoke).mockResolvedValue({
       reportKind: "main_chat_agent_beta_v1_readiness_gate",
       readinessSemantics: "beta_v1_execution_first_default_deterministic_live_opt_in_separate",
@@ -1368,7 +1344,7 @@ describe("tauri command argument aliases", () => {
       workstreams: [
         {
           workstreamId: "phase_5",
-          label: "Beta Hardening",
+          label: "Capability Hardening",
           status: "ready",
           ready: true,
           evidence: ["structured readiness report and release notes"],
@@ -1976,7 +1952,6 @@ describe("tauri command argument aliases", () => {
     vi.mocked(invoke).mockResolvedValue({
       reportKind: "multi_strategy_runtime_maturity",
       maturityReady: true,
-      defaultChatUnchanged: true,
       migrationPermission: false,
       noRuntimeModelToolExecution: true,
       noBusinessWrites: true,
@@ -2001,13 +1976,11 @@ describe("tauri command argument aliases", () => {
 
     expect(invoke).toHaveBeenCalledWith("get_runtime_strategy_registry_status", undefined);
     expect(result.maturityReady).toBe(true);
-    expect(result.defaultChatUnchanged).toBe(true);
     expect(result.migrationPermission).toBe(false);
   });
 
   it("invokes runtime migration gate as explicit read-only diagnostic", async () => {
     vi.mocked(invoke).mockResolvedValue({
-      defaultChatUnchanged: true,
       previewPathHealthy: true,
       metadataSafeTraceReady: true,
       fallbackAvailable: true,
@@ -2027,7 +2000,8 @@ describe("tauri command argument aliases", () => {
         sessionId: "session-preview",
       },
     });
-    expect(result.defaultChatUnchanged).toBe(true);
+    expect(result.previewPathHealthy).toBe(true);
+    expect(result.blockingReasons).toEqual([]);
   });
 
   it("invokes controlled Chat pilot eligibility as explicit read-only diagnostic", async () => {
@@ -2038,7 +2012,6 @@ describe("tauri command argument aliases", () => {
       checkedRunIds: ["run-preview-clean-3", "run-preview-clean-2", "run-preview-clean-1"],
       blockingReasons: [],
       lastGateReport: {
-        defaultChatUnchanged: true,
         previewPathHealthy: true,
         metadataSafeTraceReady: true,
         fallbackAvailable: true,
@@ -2046,7 +2019,6 @@ describe("tauri command argument aliases", () => {
         proposalFirstPreserved: true,
         blockingReasons: [],
       },
-      defaultChatUnchanged: true,
     });
 
     const result = await checkControlledChatPilotEligibility();
@@ -2071,7 +2043,6 @@ describe("tauri command argument aliases", () => {
       latestPromotionTimestamp: "2026-05-30T03:04:05Z",
       sourceTargetMismatchBlockCount: 0,
       metadataSafeEvidenceReady: true,
-      defaultChatUnchanged: true,
       blockingReasons: [],
     });
 
@@ -2101,7 +2072,6 @@ describe("tauri command argument aliases", () => {
         latestPromotionTimestamp: "2026-05-30T03:04:05Z",
         sourceTargetMismatchBlockCount: 0,
         metadataSafeEvidenceReady: true,
-        defaultChatUnchanged: true,
         blockingReasons: [],
       },
       migrationScope: ["default Chat remains unchanged"],
@@ -2204,7 +2174,6 @@ describe("tauri command argument aliases", () => {
         latestPromotionTimestamp: "2026-05-30T03:04:05Z",
         sourceTargetMismatchBlockCount: 0,
         metadataSafeEvidenceReady: true,
-        defaultChatUnchanged: true,
         blockingReasons: [],
       },
       draftHashMatched: true,
@@ -2249,7 +2218,6 @@ describe("tauri command argument aliases", () => {
           latestPromotionTimestamp: "2026-05-30T03:04:05Z",
           sourceTargetMismatchBlockCount: 0,
           metadataSafeEvidenceReady: true,
-          defaultChatUnchanged: true,
           blockingReasons: [],
         },
         draftHashMatched: true,
@@ -2363,7 +2331,6 @@ describe("tauri command argument aliases", () => {
           latestPromotionTimestamp: "2026-05-30T03:04:05Z",
           sourceTargetMismatchBlockCount: 0,
           metadataSafeEvidenceReady: true,
-          defaultChatUnchanged: true,
           blockingReasons: [],
         },
         draftHashMatched: true,
@@ -2382,7 +2349,6 @@ describe("tauri command argument aliases", () => {
       },
       verifiedShadowRunId: "run-shadow-2",
       readinessSummaryDigest: "sha256:shadow-readiness-2",
-      defaultChatUnchanged: true,
       requiredEvidenceReady: true,
       blockingReasons: [],
       metadataSafeSummary: {
@@ -2531,7 +2497,6 @@ describe("tauri command argument aliases", () => {
           blockingReasons: [],
         },
       ],
-      defaultChatUnchanged: true,
       blockingReasons: [],
       metadataSafeSummary: {
         metadataSafe: true,
@@ -2557,1159 +2522,49 @@ describe("tauri command argument aliases", () => {
     expect(result.approvedCandidates[0].candidateRunId).toBe("run-candidate-3");
   });
 
-  it("invokes default chat runtime boundary status as read-only", async () => {
+  it("invokes Main Chat runtime status as kernel truth", async () => {
     vi.mocked(invoke).mockResolvedValue({
-      currentMode: "legacy_stream",
-      controlledCandidateAvailable: false,
-      defaultChatUnchanged: true,
-      candidatePromotionReadinessRequired: true,
-      automaticMigrationEnabled: false,
-      blockingReasons: [],
-      metadataSafeSummary: {
-        runtimeBoundary: "default_chat",
-        metadataSafe: true,
-        readOnly: true,
-        currentMode: "legacy_stream",
-        automaticMigrationEnabled: false,
+      statusVersion: 2,
+      authoritativeRuntime: "main_chat_kernel",
+      defaultSendPath: "main_chat_kernel",
+      startStreamPath: "main_chat_kernel",
+      sourceOfTruth: "main_chat_turn_pipeline",
+      kernelEvidence: {
+        kernelBackedDefault: false,
+        finalGateEvidencePresent: false,
+        finalGateReady: false,
+        latestKernelRouteObserved: true,
+        legacyFallbackFreeSinceStartup: true,
+      },
+      latestRouteEvidence: {
+        status: "observed",
+        directAnswerObserved: true,
+        governedBlockerObserved: false,
+        agentLoopObserved: false,
+        kernelBackedDefaultObserved: true,
+        legacyFallbackUsed: false,
+        lastKernelEventCount: 3,
+      },
+      legacyFallback: {
+        mode: "explicit_only",
+        allowedByDefault: false,
+        usedCountSinceStartup: 0,
+        lastUsedAt: null,
+        lastReasonCode: null,
+      },
+      finalGateReadiness: {
+        authority: "main_chat_final_acceptance_gate",
+        status: "not_run",
+        blockers: [],
+        lastReportRunId: null,
       },
     });
 
-    const result = await getDefaultChatRuntimeBoundaryStatus();
-
-    expect(invoke).toHaveBeenCalledWith("get_default_chat_runtime_boundary_status", undefined);
-    expect(result.currentMode).toBe("legacy_stream");
-    expect(result.controlledCandidateAvailable).toBe(false);
-    expect(result.automaticMigrationEnabled).toBe(false);
-  });
-
-  it("invokes default chat adapter activation plan draft as read-only", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      draftReady: true,
-      candidatePromotionReadinessReport: {
-        ready: true,
-        cutoverReadinessEligible: true,
-        requiredApprovedCandidates: 1,
-        approvedCandidateCount: 1,
-        latestDecision: null,
-        approvedCandidates: [],
-        defaultChatUnchanged: true,
-        blockingReasons: [],
-        metadataSafeSummary: {
-          metadataSafe: true,
-          readOnly: true,
-        },
-        checkedAt: "2026-05-31T08:10:00Z",
-      },
-      runtimeBoundaryStatus: {
-        currentMode: "legacy_stream",
-        controlledCandidateAvailable: false,
-        defaultChatUnchanged: true,
-        candidatePromotionReadinessRequired: true,
-        automaticMigrationEnabled: false,
-        blockingReasons: [],
-        metadataSafeSummary: {
-          runtimeBoundary: "default_chat",
-          metadataSafe: true,
-          readOnly: true,
-        },
-      },
-      activationScope: ["human review only"],
-      requiredPreconditions: ["W33 ready"],
-      adapterContractChecks: ["send_message-compatible"],
-      fallbackPlan: ["use legacy stream"],
-      rollbackPlan: ["revert separate implementation"],
-      observabilityPlan: ["metadata-safe counters"],
-      testPlan: ["verify send_message and start_stream_message"],
-      manualReviewRequired: true,
-      notAutomaticMigration: true,
-      requiresSeparateImplementation: true,
-      blockingReasons: [],
-      metadataSafeSummary: {
-        activationPlan: "default_chat_adapter_activation",
-        metadataSafe: true,
-        readOnly: true,
-      },
-    });
-
-    const result = await draftDefaultChatAdapterActivationPlan({
-      requiredApprovedCandidates: 2,
-    });
-
-    expect(invoke).toHaveBeenCalledWith("draft_default_chat_adapter_activation_plan", {
-      input: {
-        requiredApprovedCandidates: 2,
-      },
-    });
-    expect(result.draftReady).toBe(true);
-    expect(result.manualReviewRequired).toBe(true);
-    expect(result.requiresSeparateImplementation).toBe(true);
-    expect(result.activationScope[0]).toContain("human review");
-  });
-
-  it("invokes default chat adapter activation review decision explicitly", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      recorded: true,
-      evidenceId: "ev_activation_review_1",
-      decisionKind: "approve",
-      draftReady: true,
-      activationPlanDigest: "sha256:activation-plan",
-      createdAt: "2026-05-31T10:11:12Z",
-      blockingReasons: [],
-    });
-
-    const result = await recordDefaultChatAdapterActivationReviewDecision({
-      decisionKind: "approve",
-      requiredApprovedCandidates: 1,
-      optionalReviewerNote: "Reviewed manually.",
-    });
-
-    expect(invoke).toHaveBeenCalledWith("record_default_chat_adapter_activation_review_decision", {
-      input: {
-        decisionKind: "approve",
-        requiredApprovedCandidates: 1,
-        optionalReviewerNote: "Reviewed manually.",
-      },
-    });
-    expect(result.recorded).toBe(true);
-    expect(result.activationPlanDigest).toBe("sha256:activation-plan");
-  });
-
-  it("invokes default chat adapter activation review summary as read-only", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      latestDecision: {
-        evidenceId: "ev_activation_review_2",
-        decisionKind: "request_rework",
-        draftReady: true,
-        activationPlanDigest: "sha256:activation-plan-2",
-        candidatePromotionReady: true,
-        currentMode: "legacy_stream",
-        automaticMigrationEnabled: false,
-        reviewerNoteChecksum: "sha256:reviewer-note",
-        reviewerNoteLength: 18,
-        reviewerNoteCategory: "brief",
-        createdAt: "2026-05-31T11:12:13Z",
-      },
-      approvedCount: 1,
-      rejectOrReworkCount: 1,
-      latestTimestamp: "2026-05-31T11:12:13Z",
-      blockingReasons: [],
-      metadataSafeSummary: {
-        activationReview: "default_chat_adapter_activation",
-        readOnly: true,
-      },
-    });
-
-    const result = await getDefaultChatAdapterActivationReviewSummary();
-
-    expect(invoke).toHaveBeenCalledWith(
-      "get_default_chat_adapter_activation_review_summary",
-      undefined
-    );
-    expect(result.latestDecision?.decisionKind).toBe("request_rework");
-    expect(result.rejectOrReworkCount).toBe(1);
-  });
-
-  it("invokes default chat adapter activation implementation gate as read-only", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      implementationGateEligible: true,
-      draftReady: true,
-      latestDecision: {
-        evidenceId: "ev_activation_review_3",
-        decisionKind: "approve",
-        draftReady: true,
-        activationPlanDigest: "sha256:activation-plan-3",
-        candidatePromotionReady: true,
-        currentMode: "legacy_stream",
-        automaticMigrationEnabled: false,
-        reviewerNoteChecksum: null,
-        reviewerNoteLength: 0,
-        reviewerNoteCategory: "none",
-        createdAt: "2026-05-31T12:13:14Z",
-      },
-      currentActivationPlanDigest: "sha256:activation-plan-3",
-      activationPlanDigestMatched: true,
-      defaultChatUnchanged: true,
-      automaticMigrationEnabled: false,
-      currentMode: "legacy_stream",
-      blockingReasons: [],
-      metadataSafeSummary: {
-        activationImplementationGate: "default_chat_adapter_activation",
-        metadataSafe: true,
-        readOnly: true,
-      },
-    });
-
-    const result = await checkDefaultChatAdapterActivationImplementationGate({
-      requiredApprovedCandidates: 1,
-      sessionId: "session-1",
-    });
-
-    expect(invoke).toHaveBeenCalledWith(
-      "check_default_chat_adapter_activation_implementation_gate",
-      {
-        input: {
-          requiredApprovedCandidates: 1,
-          sessionId: "session-1",
-        },
-      }
-    );
-    expect(result.implementationGateEligible).toBe(true);
-    expect(result.activationPlanDigestMatched).toBe(true);
-    expect(result.latestDecision?.decisionKind).toBe("approve");
-  });
-
-  it("invokes default chat adapter routing status as read-only disabled scaffold", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      currentMode: "legacy_stream",
-      adapterScaffoldPresent: true,
-      controlledAdapterEnabled: false,
-      defaultSendPath: "legacy_stream",
-      startStreamPath: "legacy_stream",
-      activationImplementationGateEligible: true,
-      requiresSeparateCutoverImplementation: true,
-      blockingReasons: [],
-      metadataSafeSummary: {
-        defaultChatAdapterRouting: "disabled_scaffold",
-        metadataSafe: true,
-        readOnly: true,
-        routingMode: "legacy_stream",
-      },
-    });
-
-    const result = await getDefaultChatAdapterRoutingStatus({
-      requiredApprovedCandidates: 1,
-      sessionId: "session-1",
-    });
-
-    expect(invoke).toHaveBeenCalledWith("get_default_chat_adapter_routing_status", {
-      input: {
-        requiredApprovedCandidates: 1,
-        sessionId: "session-1",
-      },
-    });
-    expect(result.currentMode).toBe("legacy_stream");
-    expect(result.adapterScaffoldPresent).toBe(true);
-    expect(result.controlledAdapterEnabled).toBe(false);
-    expect(result.defaultSendPath).toBe("legacy_stream");
-    expect(result.startStreamPath).toBe("legacy_stream");
-  });
-
-  it("invokes default chat adapter ordinary entry preflight status as read-only", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      statusReady: true,
-      defaultChatUnchanged: true,
-      currentMode: "legacy_stream",
-      controlledAdapterEnabled: false,
-      automaticMigrationEnabled: false,
-      defaultSendPath: "legacy_stream",
-      startStreamPath: "legacy_stream",
-      sendMessagePreflight: {
-        callsite: "send_message",
-        preflightReady: true,
-        contractReady: true,
-        legacyEntryAllowed: true,
-        ordinaryEntryPath: "legacy_stream",
-        requiredEntryPath: "legacy_stream",
-        contractShape: "send_message_compatible",
-        sideEffectLockEngaged: true,
-        defaultChatMigrationAllowed: false,
-        controlledAdapterExecutorAttached: false,
-        runtimeCallEnabled: false,
-        modelCallEnabled: false,
-        toolCallEnabled: false,
-        allowWrites: false,
-        maxToolCalls: 0,
-        chatMessageSaved: false,
-        agentRunRecorded: false,
-        evidenceRecorded: false,
-        blockingReasons: [],
-      },
-      streamMessagePreflight: {
-        callsite: "start_stream_message",
-        preflightReady: true,
-        contractReady: true,
-        legacyEntryAllowed: true,
-        ordinaryEntryPath: "legacy_stream",
-        requiredEntryPath: "legacy_stream",
-        contractShape: "stream_message_compatible",
-        sideEffectLockEngaged: true,
-        defaultChatMigrationAllowed: false,
-        controlledAdapterExecutorAttached: false,
-        runtimeCallEnabled: false,
-        modelCallEnabled: false,
-        toolCallEnabled: false,
-        allowWrites: false,
-        maxToolCalls: 0,
-        chatMessageSaved: false,
-        agentRunRecorded: false,
-        evidenceRecorded: false,
-        blockingReasons: [],
-      },
-      blockingReasons: [],
-      metadataSafeSummary: {
-        ordinaryEntryPreflight: "default_chat_adapter",
-        metadataSafe: true,
-        readOnly: true,
-        statusReady: true,
-      },
-    });
-
-    const result = await getDefaultChatAdapterOrdinaryEntryPreflightStatus();
-
-    expect(invoke).toHaveBeenCalledWith(
-      "get_default_chat_adapter_ordinary_entry_preflight_status",
-      undefined
-    );
-    expect(result.statusReady).toBe(true);
-    expect(result.sendMessagePreflight.callsite).toBe("send_message");
-    expect(result.streamMessagePreflight.callsite).toBe("start_stream_message");
-    expect(result.metadataSafeSummary.readOnly).toBe(true);
-  });
-
-  it("checks default chat adapter narrow implementation discussion gate as read-only", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      eligible: true,
-      defaultChatUnchanged: true,
-      cutoverPlanApprovalReady: true,
-      ordinaryEntryPreflightStatusReady: true,
-      sendPreflightReady: true,
-      streamPreflightReady: true,
-      controlledAdapterEnabled: false,
-      automaticMigrationEnabled: false,
-      defaultSendPath: "legacy_stream",
-      startStreamPath: "legacy_stream",
-      blockingReasons: [],
-      metadataSafeSummary: {
-        narrowImplementationDiscussionGate: "default_chat_adapter",
-        metadataSafe: true,
-        readOnly: true,
-        eligible: true,
-        notAutomaticMigration: true,
-      },
-    });
-
-    const result = await checkDefaultChatAdapterNarrowImplementationDiscussionGate({
-      sourceSessionId: "session-1",
-      message: "settings probe",
-      requiredApprovedPreviews: 1,
-      requiredApprovedCandidates: 1,
-      requiredPromotions: 3,
-    });
-
-    expect(invoke).toHaveBeenCalledWith(
-      "check_default_chat_adapter_narrow_implementation_discussion_gate",
-      {
-        input: {
-          sourceSessionId: "session-1",
-          message: "settings probe",
-          requiredApprovedPreviews: 1,
-          requiredApprovedCandidates: 1,
-          requiredPromotions: 3,
-        },
-      }
-    );
-    expect(result.eligible).toBe(true);
-    expect(result.cutoverPlanApprovalReady).toBe(true);
-    expect(result.ordinaryEntryPreflightStatusReady).toBe(true);
-    expect(result.metadataSafeSummary.notAutomaticMigration).toBe(true);
-  });
-
-  it("drafts default chat adapter narrow implementation plan", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      draftReady: true,
-      discussionGate: {
-        eligible: true,
-        defaultChatUnchanged: true,
-        cutoverPlanApprovalReady: true,
-        ordinaryEntryPreflightStatusReady: true,
-        sendPreflightReady: true,
-        streamPreflightReady: true,
-        controlledAdapterEnabled: false,
-        automaticMigrationEnabled: false,
-        defaultSendPath: "legacy_stream",
-        startStreamPath: "legacy_stream",
-        blockingReasons: [],
-        metadataSafeSummary: {
-          narrowImplementationDiscussionGate: "default_chat_adapter",
-          metadataSafe: true,
-          readOnly: true,
-        },
-      },
-      manualReviewRequired: true,
-      notAutomaticMigration: true,
-      requiresSeparateImplementation: true,
-      requiresSeparateCutoverReview: true,
-      sourceSessionId: "session-1",
-      inputMessageLength: 22,
-      inputMessageHash: "sha256:message123",
-      stablePlanDigest: "sha256:narrow-plan123",
-      planSections: [
-        {
-          sectionKey: "implementationScope",
-          title: "Implementation Scope",
-          items: ["Keep default Chat unchanged."],
-        },
-      ],
-      blockingReasons: [],
-      metadataSafeSummary: {
-        narrowImplementationPlan: "default_chat_adapter",
-        metadataSafe: true,
-        readOnly: true,
-        notAutomaticMigration: true,
-      },
-    });
-
-    const result = await draftDefaultChatAdapterNarrowImplementationPlan({
-      sourceSessionId: "session-1",
-      message: "narrow plan probe",
-      requiredApprovedPreviews: 1,
-      requiredApprovedCandidates: 1,
-      requiredPromotions: 3,
-    });
-
-    expect(invoke).toHaveBeenCalledWith("draft_default_chat_adapter_narrow_implementation_plan", {
-      input: {
-        sourceSessionId: "session-1",
-        message: "narrow plan probe",
-        requiredApprovedPreviews: 1,
-        requiredApprovedCandidates: 1,
-        requiredPromotions: 3,
-      },
-    });
-    expect(result.draftReady).toBe(true);
-    expect(result.discussionGate.eligible).toBe(true);
-    expect(result.planSections[0]?.sectionKey).toBe("implementationScope");
-  });
-
-  it("records default chat adapter narrow implementation plan review decisions", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      recorded: true,
-      evidenceId: "evidence-narrow-plan-review",
-      decisionKind: "approve",
-      sourceSessionId: "session-1",
-      draftReady: true,
-      narrowPlanDigest: "sha256:narrow-plan123",
-      planSectionCount: 8,
-      createdAt: "2026-06-02T00:00:00Z",
-      blockingReasons: [],
-    });
-
-    const result = await recordDefaultChatAdapterNarrowImplementationPlanReviewDecision({
-      decisionKind: "approve",
-      sourceSessionId: "session-1",
-      message: "narrow plan review probe",
-      requiredApprovedPreviews: 1,
-      requiredApprovedCandidates: 1,
-      requiredPromotions: 3,
-      optionalReviewerNote: "approved after review",
-    });
-
-    expect(invoke).toHaveBeenCalledWith(
-      "record_default_chat_adapter_narrow_implementation_plan_review_decision",
-      {
-        input: {
-          decisionKind: "approve",
-          sourceSessionId: "session-1",
-          message: "narrow plan review probe",
-          requiredApprovedPreviews: 1,
-          requiredApprovedCandidates: 1,
-          requiredPromotions: 3,
-          optionalReviewerNote: "approved after review",
-        },
-      }
-    );
-    expect(result.recorded).toBe(true);
-    expect(result.narrowPlanDigest).toBe("sha256:narrow-plan123");
-  });
-
-  it("loads default chat adapter narrow implementation plan review summary", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      latestDecision: {
-        evidenceId: "evidence-narrow-plan-review",
-        decisionKind: "approve",
-        sourceSessionId: "session-1",
-        draftReady: true,
-        narrowPlanDigest: "sha256:narrow-plan123",
-        planSectionCount: 8,
-        w57Eligible: true,
-        reviewerNoteChecksum: "sha256:note",
-        reviewerNoteLength: 21,
-        reviewerNoteCategory: "brief",
-        createdAt: "2026-06-02T00:00:00Z",
-      },
-      approvedCount: 1,
-      rejectedCount: 0,
-      requestReworkCount: 0,
-      latestApprovedPlanDigest: "sha256:narrow-plan123",
-      latestTimestamp: "2026-06-02T00:00:00Z",
-      blockingReasons: [],
-      metadataSafeSummary: {
-        narrowImplementationPlanReview: "default_chat_adapter",
-        metadataSafe: true,
-        readOnly: true,
-      },
-    });
-
-    const result = await getDefaultChatAdapterNarrowImplementationPlanReviewSummary();
-
-    expect(invoke).toHaveBeenCalledWith(
-      "get_default_chat_adapter_narrow_implementation_plan_review_summary",
-      undefined
-    );
-    expect(result.approvedCount).toBe(1);
-    expect(result.latestDecision?.decisionKind).toBe("approve");
-  });
-
-  it("checks default chat adapter narrow implementation plan approval readiness", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      ready: true,
-      draftReady: true,
-      discussionGateEligible: true,
-      narrowPlanReviewApproved: true,
-      narrowPlanDigestMatched: true,
-      currentPlanDigest: "sha256:narrow-plan123",
-      latestApprovedPlanDigest: "sha256:narrow-plan123",
-      latestDecision: {
-        evidenceId: "evidence-narrow-plan-review",
-        decisionKind: "approve",
-        sourceSessionId: "session-1",
-        draftReady: true,
-        narrowPlanDigest: "sha256:narrow-plan123",
-        planSectionCount: 8,
-        w57Eligible: true,
-        reviewerNoteChecksum: "sha256:note",
-        reviewerNoteLength: 21,
-        reviewerNoteCategory: "brief",
-        createdAt: "2026-06-02T00:00:00Z",
-      },
-      defaultChatUnchanged: true,
-      controlledAdapterEnabled: false,
-      automaticMigrationEnabled: false,
-      defaultSendPath: "legacy_stream",
-      startStreamPath: "legacy_stream",
-      blockingReasons: [],
-      metadataSafeSummary: {
-        narrowImplementationPlanApprovalReadiness: "default_chat_adapter",
-        metadataSafe: true,
-        readOnly: true,
-        notAutomaticMigration: true,
-      },
-    });
-
-    const result = await checkDefaultChatAdapterNarrowImplementationPlanApprovalReadiness({
-      sourceSessionId: "session-1",
-      message: "narrow plan approval readiness probe",
-      requiredApprovedPreviews: 1,
-      requiredApprovedCandidates: 1,
-      requiredPromotions: 3,
-    });
-
-    expect(invoke).toHaveBeenCalledWith(
-      "check_default_chat_adapter_narrow_implementation_plan_approval_readiness",
-      {
-        input: {
-          sourceSessionId: "session-1",
-          message: "narrow plan approval readiness probe",
-          requiredApprovedPreviews: 1,
-          requiredApprovedCandidates: 1,
-          requiredPromotions: 3,
-        },
-      }
-    );
-    expect(result.ready).toBe(true);
-    expect(result.narrowPlanDigestMatched).toBe(true);
-    expect(result.metadataSafeSummary.notAutomaticMigration).toBe(true);
-  });
-
-  it("invokes default chat adapter contract harness as read-only", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      contractHarnessReady: true,
-      contractShape: "disabled_adapter_legacy_stream_contract",
-      adapterDisabled: true,
-      activationImplementationGateEligible: true,
-      routingStatus: {
-        currentMode: "legacy_stream",
-        adapterScaffoldPresent: true,
-        controlledAdapterEnabled: false,
-        defaultSendPath: "legacy_stream",
-        startStreamPath: "legacy_stream",
-        activationImplementationGateEligible: true,
-        requiresSeparateCutoverImplementation: true,
-        blockingReasons: [],
-        metadataSafeSummary: {},
-      },
-      sendMessageContract: {
-        name: "send_message",
-        ready: true,
-        expectedPath: "legacy_stream",
-        actualPath: "legacy_stream",
-        blockingReasons: [],
-      },
-      streamMessageContract: {
-        name: "start_stream_message",
-        ready: true,
-        expectedPath: "legacy_stream",
-        actualPath: "legacy_stream",
-        blockingReasons: [],
-      },
-      blockingReasons: [],
-      metadataSafeSummary: {
-        contractHarness: "default_chat_adapter",
-        metadataSafe: true,
-        readOnly: true,
-      },
-    });
-
-    const result = await checkDefaultChatAdapterContractHarness({
-      requiredApprovedCandidates: 1,
-      sessionId: "session-1",
-    });
-
-    expect(invoke).toHaveBeenCalledWith("check_default_chat_adapter_contract_harness", {
-      input: {
-        requiredApprovedCandidates: 1,
-        sessionId: "session-1",
-      },
-    });
-    expect(result.contractHarnessReady).toBe(true);
-    expect(result.adapterDisabled).toBe(true);
-    expect(result.sendMessageContract.actualPath).toBe("legacy_stream");
-    expect(result.streamMessageContract.actualPath).toBe("legacy_stream");
-  });
-
-  it("invokes default chat adapter dry run as write-disabled", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      dryRunReady: true,
-      blocked: false,
-      contractShape: "default_chat_adapter_dry_run_contract",
-      sourceSessionId: "session-1",
-      adapterPath: "controlled_adapter_dry_run",
-      allowWrites: false,
-      maxToolCalls: 0,
-      defaultChatPathUnchanged: true,
-      chatMessageSaved: false,
-      agentRunRecorded: false,
-      contractHarnessReady: true,
-      inputMessageLength: 13,
-      inputMessageHash: "abc123",
-      blockingReasons: [],
-      metadataSafeSummary: {
-        adapterDryRun: "default_chat_adapter",
-        metadataSafe: true,
-        readOnly: true,
-      },
-    });
-
-    const result = await runDefaultChatAdapterDryRun({
-      sessionId: "session-1",
-      message: "dry run probe",
-      requiredApprovedCandidates: 1,
-    });
-
-    expect(invoke).toHaveBeenCalledWith("run_default_chat_adapter_dry_run", {
-      input: {
-        sessionId: "session-1",
-        message: "dry run probe",
-        requiredApprovedCandidates: 1,
-      },
-    });
-    expect(result.dryRunReady).toBe(true);
-    expect(result.allowWrites).toBe(false);
-    expect(result.maxToolCalls).toBe(0);
-    expect(result.chatMessageSaved).toBe(false);
-  });
-
-  it("records default chat adapter dry-run review decision", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      recorded: true,
-      evidenceId: "ev_dry_run_review_1",
-      decisionKind: "approve",
-      sourceSessionId: "session-1",
-      contractShape: "default_chat_adapter_dry_run_contract",
-      dryRunReady: true,
-      dryRunSummaryDigest: "sha256:abc123",
-      createdAt: "2026-05-31T00:00:00Z",
-      blockingReasons: [],
-    });
-
-    const result = await recordDefaultChatAdapterDryRunReviewDecision({
-      decisionKind: "approve",
-      sourceSessionId: "session-1",
-      message: "dry run probe",
-      dryRunSummaryDigest: "sha256:abc123",
-      requiredApprovedCandidates: 1,
-      optionalReviewerNote: "reviewed",
-    });
-
-    expect(invoke).toHaveBeenCalledWith("record_default_chat_adapter_dry_run_review_decision", {
-      input: {
-        decisionKind: "approve",
-        sourceSessionId: "session-1",
-        message: "dry run probe",
-        dryRunSummaryDigest: "sha256:abc123",
-        requiredApprovedCandidates: 1,
-        optionalReviewerNote: "reviewed",
-      },
-    });
-    expect(result.recorded).toBe(true);
-    expect(result.dryRunReady).toBe(true);
-    expect(result.evidenceId).toBe("ev_dry_run_review_1");
-  });
-
-  it("reads default chat adapter dry-run review summary", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      latestDecision: {
-        evidenceId: "ev_dry_run_review_1",
-        decisionKind: "approve",
-        sourceSessionId: "session-1",
-        contractShape: "default_chat_adapter_dry_run_contract",
-        dryRunReady: true,
-        dryRunSummaryDigest: "sha256:abc123",
-        reviewerNoteChecksum: "sha256:def456",
-        reviewerNoteLength: 8,
-        reviewerNoteCategory: "short",
-        createdAt: "2026-05-31T00:00:00Z",
-      },
-      approvedCount: 1,
-      rejectOrReworkCount: 0,
-      latestTimestamp: "2026-05-31T00:00:00Z",
-      blockingReasons: [],
-      metadataSafeSummary: {
-        dryRunReview: "default_chat_adapter",
-        metadataSafe: true,
-        readOnly: true,
-      },
-    });
-
-    const result = await getDefaultChatAdapterDryRunReviewSummary();
-
-    expect(invoke).toHaveBeenCalledWith(
-      "get_default_chat_adapter_dry_run_review_summary",
-      undefined
-    );
-    expect(result.latestDecision?.decisionKind).toBe("approve");
-    expect(result.approvedCount).toBe(1);
-  });
-
-  it("checks default chat adapter implementation readiness", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      implementationReady: true,
-      latestDryRunReviewDecision: {
-        evidenceId: "ev_dry_run_review_1",
-        decisionKind: "approve",
-        sourceSessionId: "session-1",
-        contractShape: "default_chat_adapter_dry_run_contract",
-        dryRunReady: true,
-        dryRunSummaryDigest: "sha256:abc123",
-        reviewerNoteChecksum: "sha256:def456",
-        reviewerNoteLength: 8,
-        reviewerNoteCategory: "short",
-        createdAt: "2026-05-31T00:00:00Z",
-      },
-      activationImplementationGateEligible: true,
-      contractHarnessReady: true,
-      dryRunReady: true,
-      dryRunReviewApproved: true,
-      dryRunDigestMatched: true,
-      defaultChatUnchanged: true,
-      controlledAdapterEnabled: false,
-      automaticMigrationEnabled: false,
-      blockingReasons: [],
-      metadataSafeSummary: {
-        implementationReadiness: "default_chat_adapter",
-        metadataSafe: true,
-        readOnly: true,
-        implementationReady: true,
-      },
-    });
-
-    const result = await checkDefaultChatAdapterImplementationReadiness({
-      sourceSessionId: "session-1",
-      message: "implementation probe",
-      requiredApprovedCandidates: 1,
-    });
-
-    expect(invoke).toHaveBeenCalledWith("check_default_chat_adapter_implementation_readiness", {
-      input: {
-        sourceSessionId: "session-1",
-        message: "implementation probe",
-        requiredApprovedCandidates: 1,
-      },
-    });
-    expect(result.implementationReady).toBe(true);
-    expect(result.dryRunReviewApproved).toBe(true);
-  });
-
-  it("runs default chat adapter controlled preview", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      previewReady: true,
-      blocked: false,
-      contractShape: "send_message_compatible",
-      sourceSessionId: "session-1",
-      adapterPath: "controlled_adapter_preview",
-      reply: "Controlled adapter preview reply",
-      reasoningTrace: {
-        strategyResult: {
-          adapterPreview: "default_chat_adapter_controlled_preview",
-          metadataSafe: true,
-        },
-      },
-      toolCalls: [],
-      runId: "run-adapter-preview-1",
-      allowWrites: false,
-      maxToolCalls: 0,
-      defaultChatPathUnchanged: true,
-      chatMessageSaved: false,
-      agentRunRecorded: true,
-      implementationReady: true,
-      warnings: [],
-      blockingReasons: [],
-      metadataSafeSummary: {
-        adapterPreview: "default_chat_adapter_controlled_preview",
-        metadataSafe: true,
-        allowWrites: false,
-        maxToolCalls: 0,
-      },
-    });
-
-    const result = await runDefaultChatAdapterControlledPreview({
-      sourceSessionId: "session-1",
-      message: "implementation preview probe",
-      requiredApprovedCandidates: 1,
-    });
-
-    expect(invoke).toHaveBeenCalledWith("run_default_chat_adapter_controlled_preview", {
-      input: {
-        sourceSessionId: "session-1",
-        message: "implementation preview probe",
-        requiredApprovedCandidates: 1,
-      },
-    });
-    expect(result.previewReady).toBe(true);
-    expect(result.reply).toBe("Controlled adapter preview reply");
-    expect(result.metadataSafeSummary.adapterPreview).toBe(
-      "default_chat_adapter_controlled_preview"
-    );
-  });
-
-  it("records default chat adapter controlled preview review decisions", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      recorded: true,
-      evidenceId: "ev_adapter_preview_review_1",
-      previewRunId: "run-adapter-preview-1",
-      decisionKind: "approve",
-      contractShape: "send_message_compatible",
-      previewSummaryDigest: "sha256:preview123",
-      createdAt: "2026-05-31T00:00:00Z",
-      blockingReasons: [],
-    });
-
-    const result = await recordDefaultChatAdapterControlledPreviewReviewDecision({
-      previewRunId: "run-adapter-preview-1",
-      decisionKind: "approve",
-      optionalReviewerNote: "Looks safe.",
-    });
-
-    expect(invoke).toHaveBeenCalledWith(
-      "record_default_chat_adapter_controlled_preview_review_decision",
-      {
-        input: {
-          previewRunId: "run-adapter-preview-1",
-          decisionKind: "approve",
-          optionalReviewerNote: "Looks safe.",
-        },
-      }
-    );
-    expect(result.recorded).toBe(true);
-    expect(result.previewRunId).toBe("run-adapter-preview-1");
-  });
-
-  it("loads default chat adapter controlled preview review summary", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      latestDecision: {
-        evidenceId: "ev_adapter_preview_review_1",
-        previewRunId: "run-adapter-preview-1",
-        decisionKind: "approve",
-        contractShape: "send_message_compatible",
-        previewSummaryDigest: "sha256:preview123",
-        reviewerNoteChecksum: "sha256:note123",
-        reviewerNoteLength: 11,
-        reviewerNoteCategory: "brief",
-        createdAt: "2026-05-31T00:00:00Z",
-      },
-      approvedCount: 1,
-      rejectOrReworkCount: 0,
-      latestTimestamp: "2026-05-31T00:00:00Z",
-      blockingReasons: [],
-      metadataSafeSummary: {
-        controlledPreviewReview: "default_chat_adapter",
-        metadataSafe: true,
-        readOnly: true,
-      },
-    });
-
-    const result = await getDefaultChatAdapterControlledPreviewReviewSummary();
-
-    expect(invoke).toHaveBeenCalledWith(
-      "get_default_chat_adapter_controlled_preview_review_summary",
-      undefined
-    );
-    expect(result.approvedCount).toBe(1);
-    expect(result.latestDecision?.previewRunId).toBe("run-adapter-preview-1");
-  });
-
-  it("checks default chat adapter controlled preview approval readiness", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      ready: true,
-      requiredApprovedPreviews: 1,
-      approvedPreviewCount: 1,
-      latestDecision: {
-        evidenceId: "ev_adapter_preview_review_1",
-        previewRunId: "run-adapter-preview-1",
-        decisionKind: "approve",
-        contractShape: "send_message_compatible",
-        previewSummaryDigest: "sha256:preview123",
-        reviewerNoteChecksum: "sha256:note123",
-        reviewerNoteLength: 11,
-        reviewerNoteCategory: "brief",
-        createdAt: "2026-05-31T00:00:00Z",
-      },
-      verifiedPreviewRunIds: ["run-adapter-preview-1"],
-      implementationReadinessReady: true,
-      previewReviewApproved: true,
-      previewDigestMatched: true,
-      defaultChatUnchanged: true,
-      controlledAdapterEnabled: false,
-      automaticMigrationEnabled: false,
-      defaultSendPath: "legacy_stream",
-      startStreamPath: "legacy_stream",
-      blockingReasons: [],
-      metadataSafeSummary: {
-        controlledPreviewApprovalReadiness: "default_chat_adapter",
-        metadataSafe: true,
-        readOnly: true,
-      },
-    });
-
-    const result = await checkDefaultChatAdapterControlledPreviewApprovalReadiness({
-      sourceSessionId: "session-1",
-      message: "approval readiness probe",
-      requiredApprovedPreviews: 1,
-      requiredApprovedCandidates: 1,
-    });
-
-    expect(invoke).toHaveBeenCalledWith(
-      "check_default_chat_adapter_controlled_preview_approval_readiness",
-      {
-        input: {
-          sourceSessionId: "session-1",
-          message: "approval readiness probe",
-          requiredApprovedPreviews: 1,
-          requiredApprovedCandidates: 1,
-        },
-      }
-    );
-    expect(result.ready).toBe(true);
-    expect(result.previewReviewApproved).toBe(true);
-    expect(result.verifiedPreviewRunIds).toEqual(["run-adapter-preview-1"]);
-  });
-
-  it("drafts default chat adapter cutover implementation plan", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      draftReady: true,
-      controlledPreviewApprovalReadiness: {
-        ready: true,
-        requiredApprovedPreviews: 1,
-        approvedPreviewCount: 1,
-        latestDecision: null,
-        verifiedPreviewRunIds: ["run-adapter-preview-1"],
-        implementationReadinessReady: true,
-        previewReviewApproved: true,
-        previewDigestMatched: true,
-        defaultChatUnchanged: true,
-        controlledAdapterEnabled: false,
-        automaticMigrationEnabled: false,
-        defaultSendPath: "legacy_stream",
-        startStreamPath: "legacy_stream",
-        blockingReasons: [],
-        metadataSafeSummary: {
-          controlledPreviewApprovalReadiness: "default_chat_adapter",
-          metadataSafe: true,
-        },
-      },
-      manualReviewRequired: true,
-      notAutomaticMigration: true,
-      requiresSeparateImplementation: true,
-      requiresSeparateCutoverReview: true,
-      sourceSessionId: "session-1",
-      inputMessageLength: 22,
-      inputMessageHash: "sha256:message123",
-      stablePlanDigest: "sha256:plan123",
-      planSections: [
-        {
-          sectionKey: "implementationScope",
-          title: "Implementation Scope",
-          items: ["Keep default Chat unchanged."],
-        },
-      ],
-      blockingReasons: [],
-      metadataSafeSummary: {
-        cutoverImplementationPlan: "default_chat_adapter",
-        metadataSafe: true,
-        readOnly: true,
-      },
-    });
-
-    const result = await draftDefaultChatAdapterCutoverImplementationPlan({
-      sourceSessionId: "session-1",
-      message: "cutover plan probe",
-      requiredApprovedPreviews: 1,
-      requiredApprovedCandidates: 1,
-    });
-
-    expect(invoke).toHaveBeenCalledWith("draft_default_chat_adapter_cutover_implementation_plan", {
-      input: {
-        sourceSessionId: "session-1",
-        message: "cutover plan probe",
-        requiredApprovedPreviews: 1,
-        requiredApprovedCandidates: 1,
-      },
-    });
-    expect(result.draftReady).toBe(true);
-    expect(result.stablePlanDigest).toBe("sha256:plan123");
-    expect(result.planSections[0].sectionKey).toBe("implementationScope");
-  });
-
-  it("records and reads default chat adapter cutover plan review decisions", async () => {
-    vi.mocked(invoke).mockClear();
-    vi.mocked(invoke)
-      .mockResolvedValueOnce({
-        recorded: true,
-        evidenceId: "ev_cutover_plan_review_1",
-        decisionKind: "approve",
-        sourceSessionId: "session-1",
-        draftReady: true,
-        cutoverPlanDigest: "sha256:plan123",
-        planSectionCount: 9,
-        createdAt: "2026-06-01T00:00:00Z",
-        blockingReasons: [],
-      })
-      .mockResolvedValueOnce({
-        latestDecision: {
-          evidenceId: "ev_cutover_plan_review_1",
-          decisionKind: "approve",
-          sourceSessionId: "session-1",
-          draftReady: true,
-          cutoverPlanDigest: "sha256:plan123",
-          planSectionCount: 9,
-          reviewerNoteChecksum: "sha256:note123",
-          reviewerNoteLength: 12,
-          reviewerNoteCategory: "brief",
-          createdAt: "2026-06-01T00:00:00Z",
-        },
-        approvedCount: 1,
-        rejectedCount: 0,
-        requestReworkCount: 0,
-        latestApprovedPlanDigest: "sha256:plan123",
-        latestTimestamp: "2026-06-01T00:00:00Z",
-        blockingReasons: [],
-        metadataSafeSummary: {
-          cutoverPlanReview: "default_chat_adapter",
-          metadataSafe: true,
-          readOnly: true,
-        },
-      });
-
-    const result = await recordDefaultChatAdapterCutoverPlanReviewDecision({
-      decisionKind: "approve",
-      sourceSessionId: "session-1",
-      message: "cutover plan probe",
-      requiredApprovedPreviews: 1,
-      requiredApprovedCandidates: 1,
-      optionalReviewerNote: "review note",
-    });
-    const summary = await getDefaultChatAdapterCutoverPlanReviewSummary();
-
-    expect(invoke).toHaveBeenNthCalledWith(
-      1,
-      "record_default_chat_adapter_cutover_plan_review_decision",
-      {
-        input: {
-          decisionKind: "approve",
-          sourceSessionId: "session-1",
-          message: "cutover plan probe",
-          requiredApprovedPreviews: 1,
-          requiredApprovedCandidates: 1,
-          optionalReviewerNote: "review note",
-        },
-      }
-    );
-    expect(invoke).toHaveBeenNthCalledWith(
-      2,
-      "get_default_chat_adapter_cutover_plan_review_summary",
-      undefined
-    );
-    expect(result.recorded).toBe(true);
-    expect(result.cutoverPlanDigest).toBe("sha256:plan123");
-    expect(summary.latestApprovedPlanDigest).toBe("sha256:plan123");
-  });
-
-  it("checks default chat adapter cutover plan approval readiness", async () => {
-    vi.mocked(invoke).mockClear();
-    vi.mocked(invoke).mockResolvedValueOnce({
-      ready: true,
-      draftReady: true,
-      w45Ready: true,
-      cutoverPlanReviewApproved: true,
-      cutoverPlanDigestMatched: true,
-      currentPlanDigest: "sha256:plan123",
-      latestApprovedPlanDigest: "sha256:plan123",
-      latestDecision: {
-        evidenceId: "ev_cutover_plan_review_1",
-        decisionKind: "approve",
-        sourceSessionId: "session-1",
-        draftReady: true,
-        cutoverPlanDigest: "sha256:plan123",
-        planSectionCount: 9,
-        w45Ready: true,
-        reviewerNoteChecksum: "sha256:note123",
-        reviewerNoteLength: 12,
-        reviewerNoteCategory: "brief",
-        createdAt: "2026-06-01T00:00:00Z",
-      },
-      defaultChatUnchanged: true,
-      controlledAdapterEnabled: false,
-      automaticMigrationEnabled: false,
-      defaultSendPath: "legacy_stream",
-      startStreamPath: "legacy_stream",
-      blockingReasons: [],
-      metadataSafeSummary: {
-        cutoverPlanApprovalReadiness: "default_chat_adapter",
-        metadataSafe: true,
-        readOnly: true,
-      },
-    });
-
-    const report = await checkDefaultChatAdapterCutoverPlanApprovalReadiness({
-      sourceSessionId: "session-1",
-      message: "cutover approval probe",
-      requiredApprovedPreviews: 1,
-      requiredApprovedCandidates: 1,
-    });
-
-    expect(invoke).toHaveBeenCalledWith(
-      "check_default_chat_adapter_cutover_plan_approval_readiness",
-      {
-        input: {
-          sourceSessionId: "session-1",
-          message: "cutover approval probe",
-          requiredApprovedPreviews: 1,
-          requiredApprovedCandidates: 1,
-        },
-      }
-    );
-    expect(report.ready).toBe(true);
-    expect(report.cutoverPlanDigestMatched).toBe(true);
-    expect(report.currentPlanDigest).toBe("sha256:plan123");
+    const result = await getMainChatRuntimeStatus();
+
+    expect(invoke).toHaveBeenCalledWith("get_main_chat_runtime_status", undefined);
+    expect(result.authoritativeRuntime).toBe("main_chat_kernel");
+    expect(result.legacyFallback.allowedByDefault).toBe(false);
+    expect(result.finalGateReadiness.authority).toBe("main_chat_final_acceptance_gate");
   });
 });

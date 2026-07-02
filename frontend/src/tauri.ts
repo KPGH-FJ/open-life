@@ -37,49 +37,6 @@ import type {
   ControlledChatMigrationShadowReviewDecisionInput,
   ControlledChatMigrationShadowReviewDecisionResult,
   ControlledChatMigrationShadowReviewSummary,
-  DefaultChatAdapterActivationPlanDraftInput,
-  DefaultChatAdapterActivationPlanDraft,
-  DefaultChatAdapterActivationReviewDecisionInput,
-  DefaultChatAdapterActivationReviewDecisionResult,
-  DefaultChatAdapterActivationReviewSummary,
-  DefaultChatAdapterActivationImplementationGateInput,
-  DefaultChatAdapterActivationImplementationGateReport,
-  DefaultChatAdapterRoutingStatusInput,
-  DefaultChatAdapterRoutingStatus,
-  DefaultChatAdapterContractHarnessInput,
-  DefaultChatAdapterContractHarnessReport,
-  DefaultChatAdapterOrdinaryEntryPreflightStatus,
-  DefaultChatAdapterNarrowImplementationDiscussionGateInput,
-  DefaultChatAdapterNarrowImplementationDiscussionGateReport,
-  DefaultChatAdapterNarrowImplementationPlanInput,
-  DefaultChatAdapterNarrowImplementationPlanDraft,
-  DefaultChatAdapterNarrowImplementationPlanApprovalReadinessInput,
-  DefaultChatAdapterNarrowImplementationPlanApprovalReadinessReport,
-  DefaultChatAdapterNarrowImplementationPlanReviewDecisionInput,
-  DefaultChatAdapterNarrowImplementationPlanReviewDecisionResult,
-  DefaultChatAdapterNarrowImplementationPlanReviewSummary,
-  DefaultChatAdapterDryRunInput,
-  DefaultChatAdapterDryRunReport,
-  DefaultChatAdapterDryRunReviewDecisionInput,
-  DefaultChatAdapterDryRunReviewDecisionResult,
-  DefaultChatAdapterDryRunReviewSummary,
-  DefaultChatAdapterControlledPreviewInput,
-  DefaultChatAdapterControlledPreviewReport,
-  DefaultChatAdapterControlledPreviewApprovalReadinessInput,
-  DefaultChatAdapterControlledPreviewApprovalReadinessReport,
-  DefaultChatAdapterCutoverImplementationPlanInput,
-  DefaultChatAdapterCutoverImplementationPlanDraft,
-  DefaultChatAdapterCutoverPlanReviewDecisionInput,
-  DefaultChatAdapterCutoverPlanReviewDecisionResult,
-  DefaultChatAdapterCutoverPlanReviewSummary,
-  DefaultChatAdapterCutoverPlanApprovalReadinessInput,
-  DefaultChatAdapterCutoverPlanApprovalReadinessReport,
-  DefaultChatAdapterControlledPreviewReviewDecisionInput,
-  DefaultChatAdapterControlledPreviewReviewDecisionResult,
-  DefaultChatAdapterControlledPreviewReviewSummary,
-  DefaultChatAdapterImplementationReadinessInput,
-  DefaultChatAdapterImplementationReadinessReport,
-  DefaultChatRuntimeBoundaryStatus,
   RuntimeMigrationGateCheckInput,
   RuntimeMigrationGateReport,
   CreatePlanExecuteSessionInput,
@@ -327,7 +284,7 @@ export interface ChatProposalConfig {
   cooldown_seconds?: number;
 }
 
-export type AgentRuntimeMode = "local_first_default" | "capability_first_beta";
+export type AgentRuntimeMode = "local_first_default" | "capability_first";
 export type CloudApiValidationStatus =
   | "unconfigured"
   | "unvalidated"
@@ -524,6 +481,8 @@ export interface HSEvidenceSummary {
 
 export interface SendMessageResult {
   reply: string;
+  status?: "completed" | "failed";
+  blockers?: string[];
   reasoning_trace: ReasoningTrace;
   tool_calls: ToolCallResult[];
   run_id?: string;
@@ -531,23 +490,36 @@ export interface SendMessageResult {
   agent_state?: MainChatAgentStateSnapshot;
   execution_transcript?: MainChatExecutionTranscriptEntry[];
   legacy_fallback_used?: boolean;
+  legacy_runtime_invoked?: boolean;
+  model_invoked?: boolean;
+  tool_invoked?: boolean;
 }
 
 export interface StreamMessageStartPayload {
   session_id: string;
   run_id: string;
+  status?: "completed" | "failed";
+  blockers?: string[];
   reasoning_trace: ReasoningTrace;
   tool_calls: ToolCallResult[];
   agent_ingress?: MainChatAgentIngressDecision;
   agent_state?: MainChatAgentStateSnapshot;
   execution_transcript?: MainChatExecutionTranscriptEntry[];
   legacy_fallback_used?: boolean;
+  legacy_runtime_invoked?: boolean;
+  model_invoked?: boolean;
+  tool_invoked?: boolean;
 }
 
 export interface StreamMessageDonePayload {
   session_id: string;
   run_id: string;
   reply: string;
+  status?: "completed" | "failed";
+  blockers?: string[];
+  legacy_runtime_invoked?: boolean;
+  model_invoked?: boolean;
+  tool_invoked?: boolean;
   reasoning_trace: ReasoningTrace;
   tool_calls: ToolCallResult[];
   agent_ingress?: MainChatAgentIngressDecision;
@@ -1101,6 +1073,45 @@ export interface MainChatAgentExecutionV1AcceptanceReport {
   commandSurfaceGateReady: boolean;
   liveProviderGateReady: boolean;
   directWritesExecuted: boolean;
+}
+
+export interface MainChatRuntimeStatus {
+  statusVersion: 2;
+  authoritativeRuntime: "main_chat_kernel";
+  defaultSendPath: "main_chat_kernel";
+  startStreamPath: "main_chat_kernel";
+  sourceOfTruth: "main_chat_turn_pipeline";
+  kernelEvidence: {
+    kernelBackedDefault: boolean;
+    finalGateEvidencePresent: boolean;
+    finalGateReady: boolean;
+    latestKernelRouteObserved: boolean;
+    legacyFallbackFreeSinceStartup: boolean;
+  };
+  latestRouteEvidence: {
+    status: "observed" | "not_observed";
+    directAnswerObserved: boolean;
+    governedBlockerObserved: boolean;
+    agentLoopObserved: boolean;
+    kernelBackedDefaultObserved: boolean;
+    legacyFallbackUsed: boolean;
+    lastKernelEventCount?: number;
+    lastRouteReasonCode?: string | null;
+    lastKernelSupportDisposition?: string | null;
+  };
+  legacyFallback: {
+    mode: "explicit_only";
+    allowedByDefault: false;
+    usedCountSinceStartup: number;
+    lastUsedAt?: string | null;
+    lastReasonCode?: string | null;
+  };
+  finalGateReadiness: {
+    authority: "main_chat_final_acceptance_gate";
+    status: "ready" | "blocked" | "not_run";
+    blockers: string[];
+    lastReportRunId?: string | null;
+  };
 }
 
 export interface MainChatLiveProviderEvalPreflightReport {
@@ -2161,8 +2172,8 @@ export async function checkRuntimeMigrationGate(
   return safeInvoke<RuntimeMigrationGateReport>("check_runtime_migration_gate", { input });
 }
 
-export async function getDefaultChatRuntimeBoundaryStatus(): Promise<DefaultChatRuntimeBoundaryStatus> {
-  return safeInvoke<DefaultChatRuntimeBoundaryStatus>("get_default_chat_runtime_boundary_status");
+export async function getMainChatRuntimeStatus(): Promise<MainChatRuntimeStatus> {
+  return safeInvoke<MainChatRuntimeStatus>("get_main_chat_runtime_status");
 }
 
 export async function checkControlledChatPilotEligibility(
@@ -2291,202 +2302,6 @@ export async function checkControlledChatCutoverCandidatePromotionReadiness(
 ): Promise<ControlledChatCutoverCandidatePromotionReadinessReport> {
   return safeInvoke<ControlledChatCutoverCandidatePromotionReadinessReport>(
     "check_controlled_chat_cutover_candidate_promotion_readiness",
-    { input }
-  );
-}
-
-export async function draftDefaultChatAdapterActivationPlan(
-  input: DefaultChatAdapterActivationPlanDraftInput = {}
-): Promise<DefaultChatAdapterActivationPlanDraft> {
-  return safeInvoke<DefaultChatAdapterActivationPlanDraft>(
-    "draft_default_chat_adapter_activation_plan",
-    { input }
-  );
-}
-
-export async function recordDefaultChatAdapterActivationReviewDecision(
-  input: DefaultChatAdapterActivationReviewDecisionInput
-): Promise<DefaultChatAdapterActivationReviewDecisionResult> {
-  return safeInvoke<DefaultChatAdapterActivationReviewDecisionResult>(
-    "record_default_chat_adapter_activation_review_decision",
-    { input }
-  );
-}
-
-export async function getDefaultChatAdapterActivationReviewSummary(): Promise<DefaultChatAdapterActivationReviewSummary> {
-  return safeInvoke<DefaultChatAdapterActivationReviewSummary>(
-    "get_default_chat_adapter_activation_review_summary"
-  );
-}
-
-export async function checkDefaultChatAdapterActivationImplementationGate(
-  input: DefaultChatAdapterActivationImplementationGateInput = {}
-): Promise<DefaultChatAdapterActivationImplementationGateReport> {
-  return safeInvoke<DefaultChatAdapterActivationImplementationGateReport>(
-    "check_default_chat_adapter_activation_implementation_gate",
-    { input }
-  );
-}
-
-export async function getDefaultChatAdapterRoutingStatus(
-  input: DefaultChatAdapterRoutingStatusInput = {}
-): Promise<DefaultChatAdapterRoutingStatus> {
-  return safeInvoke<DefaultChatAdapterRoutingStatus>("get_default_chat_adapter_routing_status", {
-    input,
-  });
-}
-
-export async function checkDefaultChatAdapterContractHarness(
-  input: DefaultChatAdapterContractHarnessInput = {}
-): Promise<DefaultChatAdapterContractHarnessReport> {
-  return safeInvoke<DefaultChatAdapterContractHarnessReport>(
-    "check_default_chat_adapter_contract_harness",
-    { input }
-  );
-}
-
-export async function getDefaultChatAdapterOrdinaryEntryPreflightStatus(): Promise<DefaultChatAdapterOrdinaryEntryPreflightStatus> {
-  return safeInvoke<DefaultChatAdapterOrdinaryEntryPreflightStatus>(
-    "get_default_chat_adapter_ordinary_entry_preflight_status"
-  );
-}
-
-export async function checkDefaultChatAdapterNarrowImplementationDiscussionGate(
-  input: DefaultChatAdapterNarrowImplementationDiscussionGateInput
-): Promise<DefaultChatAdapterNarrowImplementationDiscussionGateReport> {
-  return safeInvoke<DefaultChatAdapterNarrowImplementationDiscussionGateReport>(
-    "check_default_chat_adapter_narrow_implementation_discussion_gate",
-    { input }
-  );
-}
-
-export async function draftDefaultChatAdapterNarrowImplementationPlan(
-  input: DefaultChatAdapterNarrowImplementationPlanInput
-): Promise<DefaultChatAdapterNarrowImplementationPlanDraft> {
-  return safeInvoke<DefaultChatAdapterNarrowImplementationPlanDraft>(
-    "draft_default_chat_adapter_narrow_implementation_plan",
-    { input }
-  );
-}
-
-export async function recordDefaultChatAdapterNarrowImplementationPlanReviewDecision(
-  input: DefaultChatAdapterNarrowImplementationPlanReviewDecisionInput
-): Promise<DefaultChatAdapterNarrowImplementationPlanReviewDecisionResult> {
-  return safeInvoke<DefaultChatAdapterNarrowImplementationPlanReviewDecisionResult>(
-    "record_default_chat_adapter_narrow_implementation_plan_review_decision",
-    { input }
-  );
-}
-
-export async function getDefaultChatAdapterNarrowImplementationPlanReviewSummary(): Promise<DefaultChatAdapterNarrowImplementationPlanReviewSummary> {
-  return safeInvoke<DefaultChatAdapterNarrowImplementationPlanReviewSummary>(
-    "get_default_chat_adapter_narrow_implementation_plan_review_summary"
-  );
-}
-
-export async function checkDefaultChatAdapterNarrowImplementationPlanApprovalReadiness(
-  input: DefaultChatAdapterNarrowImplementationPlanApprovalReadinessInput
-): Promise<DefaultChatAdapterNarrowImplementationPlanApprovalReadinessReport> {
-  return safeInvoke<DefaultChatAdapterNarrowImplementationPlanApprovalReadinessReport>(
-    "check_default_chat_adapter_narrow_implementation_plan_approval_readiness",
-    { input }
-  );
-}
-
-export async function runDefaultChatAdapterDryRun(
-  input: DefaultChatAdapterDryRunInput
-): Promise<DefaultChatAdapterDryRunReport> {
-  return safeInvoke<DefaultChatAdapterDryRunReport>("run_default_chat_adapter_dry_run", {
-    input,
-  });
-}
-
-export async function recordDefaultChatAdapterDryRunReviewDecision(
-  input: DefaultChatAdapterDryRunReviewDecisionInput
-): Promise<DefaultChatAdapterDryRunReviewDecisionResult> {
-  return safeInvoke<DefaultChatAdapterDryRunReviewDecisionResult>(
-    "record_default_chat_adapter_dry_run_review_decision",
-    { input }
-  );
-}
-
-export async function getDefaultChatAdapterDryRunReviewSummary(): Promise<DefaultChatAdapterDryRunReviewSummary> {
-  return safeInvoke<DefaultChatAdapterDryRunReviewSummary>(
-    "get_default_chat_adapter_dry_run_review_summary"
-  );
-}
-
-export async function checkDefaultChatAdapterImplementationReadiness(
-  input: DefaultChatAdapterImplementationReadinessInput
-): Promise<DefaultChatAdapterImplementationReadinessReport> {
-  return safeInvoke<DefaultChatAdapterImplementationReadinessReport>(
-    "check_default_chat_adapter_implementation_readiness",
-    { input }
-  );
-}
-
-export async function runDefaultChatAdapterControlledPreview(
-  input: DefaultChatAdapterControlledPreviewInput
-): Promise<DefaultChatAdapterControlledPreviewReport> {
-  return safeInvoke<DefaultChatAdapterControlledPreviewReport>(
-    "run_default_chat_adapter_controlled_preview",
-    { input }
-  );
-}
-
-export async function recordDefaultChatAdapterControlledPreviewReviewDecision(
-  input: DefaultChatAdapterControlledPreviewReviewDecisionInput
-): Promise<DefaultChatAdapterControlledPreviewReviewDecisionResult> {
-  return safeInvoke<DefaultChatAdapterControlledPreviewReviewDecisionResult>(
-    "record_default_chat_adapter_controlled_preview_review_decision",
-    { input }
-  );
-}
-
-export async function getDefaultChatAdapterControlledPreviewReviewSummary(): Promise<DefaultChatAdapterControlledPreviewReviewSummary> {
-  return safeInvoke<DefaultChatAdapterControlledPreviewReviewSummary>(
-    "get_default_chat_adapter_controlled_preview_review_summary"
-  );
-}
-
-export async function checkDefaultChatAdapterControlledPreviewApprovalReadiness(
-  input: DefaultChatAdapterControlledPreviewApprovalReadinessInput
-): Promise<DefaultChatAdapterControlledPreviewApprovalReadinessReport> {
-  return safeInvoke<DefaultChatAdapterControlledPreviewApprovalReadinessReport>(
-    "check_default_chat_adapter_controlled_preview_approval_readiness",
-    { input }
-  );
-}
-
-export async function draftDefaultChatAdapterCutoverImplementationPlan(
-  input: DefaultChatAdapterCutoverImplementationPlanInput
-): Promise<DefaultChatAdapterCutoverImplementationPlanDraft> {
-  return safeInvoke<DefaultChatAdapterCutoverImplementationPlanDraft>(
-    "draft_default_chat_adapter_cutover_implementation_plan",
-    { input }
-  );
-}
-
-export async function recordDefaultChatAdapterCutoverPlanReviewDecision(
-  input: DefaultChatAdapterCutoverPlanReviewDecisionInput
-): Promise<DefaultChatAdapterCutoverPlanReviewDecisionResult> {
-  return safeInvoke<DefaultChatAdapterCutoverPlanReviewDecisionResult>(
-    "record_default_chat_adapter_cutover_plan_review_decision",
-    { input }
-  );
-}
-
-export async function getDefaultChatAdapterCutoverPlanReviewSummary(): Promise<DefaultChatAdapterCutoverPlanReviewSummary> {
-  return safeInvoke<DefaultChatAdapterCutoverPlanReviewSummary>(
-    "get_default_chat_adapter_cutover_plan_review_summary"
-  );
-}
-
-export async function checkDefaultChatAdapterCutoverPlanApprovalReadiness(
-  input: DefaultChatAdapterCutoverPlanApprovalReadinessInput
-): Promise<DefaultChatAdapterCutoverPlanApprovalReadinessReport> {
-  return safeInvoke<DefaultChatAdapterCutoverPlanApprovalReadinessReport>(
-    "check_default_chat_adapter_cutover_plan_approval_readiness",
     { input }
   );
 }
@@ -2697,7 +2512,6 @@ export interface SystemDiagnostics {
   readiness_issues: string[];
   data_dir: string;
   active_data_dir?: string;
-  legacy_data_dir?: string | null;
   database_status?: string;
   startup_warnings?: string[];
   snapshot_count: number;
@@ -2705,9 +2519,8 @@ export interface SystemDiagnostics {
   app_version: string;
   model_empty: boolean;
   chat_session_count: number;
-  onboarding_completed: boolean;
-  beta_ready: boolean;
-  beta_readiness_issues: string[];
+  usage_ready?: boolean;
+  usage_readiness_issues?: string[];
   builder_completion: BuilderCompletion;
   data_files: DataFileStatus;
   ollama_models: OllamaModelInfo[];
@@ -3739,14 +3552,6 @@ export async function getPrivacyPolicy(): Promise<PrivacyPolicy> {
 
 export async function setPrivacyPolicy(policy: PrivacyPolicy): Promise<void> {
   return safeInvoke("set_privacy_policy", { policy });
-}
-
-export async function hasCompletedOnboarding(): Promise<boolean> {
-  return safeInvoke<boolean>("has_completed_onboarding");
-}
-
-export async function markOnboardingCompleted(): Promise<void> {
-  return safeInvoke("mark_onboarding_completed");
 }
 
 export interface LastModelError {

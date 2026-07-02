@@ -7,6 +7,7 @@ import type {
   ReactActionTraceEnvelope,
   ReasoningTrace,
 } from "../tauri";
+import { mailboxRoute, productRoutePath } from "../productShellContract";
 import { getPlanExecuteProductTrace } from "../utils/planExecuteProduct";
 import { getMultiStrategyPreviewAudit } from "../utils/previewAudit";
 
@@ -63,7 +64,7 @@ function tokenText(audit?: HSSelectionAudit): string | null {
 }
 
 function policyLabel(id: string): string {
-  if (id.includes("external_writes.proposal_first")) return "Review before external writes";
+  if (id.includes("external_writes.proposal_first")) return "Confirm before external writes";
   if (id.includes("sensitive_topics.local_only")) return "Local-only for sensitive topics";
   return id
     .replace(/^policy\./, "")
@@ -204,7 +205,7 @@ export default function RunTracePanel({ run, trace }: Props) {
                     {trace.generatedProposalIds.map(proposalId => (
                       <Link
                         key={proposalId}
-                        to="/review"
+                        to={mailboxRoute({ proposalId })}
                         className="rounded border border-blue-100 bg-blue-50 px-2 py-0.5 text-blue-700 hover:bg-blue-100"
                       >
                         Proposal: {proposalId}
@@ -252,7 +253,10 @@ export default function RunTracePanel({ run, trace }: Props) {
                   {trace.outputPreview && <span>{trace.outputPreview}</span>}
                   {trace.outputHash && <span>{trace.outputHash}</span>}
                   {trace.proposalId && (
-                    <Link to="/review" className="text-blue-700 hover:text-blue-900">
+                    <Link
+                      to={mailboxRoute({ proposalId: trace.proposalId })}
+                      className="text-blue-700 hover:text-blue-900"
+                    >
                       Proposal: {trace.proposalId}
                     </Link>
                   )}
@@ -297,7 +301,7 @@ export default function RunTracePanel({ run, trace }: Props) {
             )}
             {productTrace.planSessionId && (
               <Link
-                to="/workspace"
+                to={productRoutePath("Today")}
                 className="rounded border border-stone-200 bg-stone-50 px-2 py-0.5 text-stone-700 hover:bg-stone-100"
               >
                 Session: {productTrace.planSessionId}
@@ -364,7 +368,7 @@ export default function RunTracePanel({ run, trace }: Props) {
               {productTrace.generatedProposalIds.map(proposalId => (
                 <Link
                   key={proposalId}
-                  to="/review"
+                  to={mailboxRoute({ proposalId })}
                   className="rounded border border-blue-100 bg-blue-50 px-2 py-0.5 text-blue-700 hover:bg-blue-100"
                 >
                   {proposalId}

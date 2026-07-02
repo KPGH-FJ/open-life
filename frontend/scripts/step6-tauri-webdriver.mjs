@@ -12,6 +12,7 @@ const repoRoot = path.resolve(frontendRoot, "..");
 
 const webdriverUrl = "http://127.0.0.1:4444";
 const frontendDevUrl = "http://127.0.0.1:5173";
+const stage1DogfoodChatHash = "#/__stage1-dogfood-chat";
 const reportPath = "frontend/test-results/main-chat-step6-product-acceptance-report.json";
 const schemaVersion = "step6-product-acceptance-v1";
 const readinessSemantics = "step6_local_deterministic_required_external_live_opt_in_separate";
@@ -921,8 +922,8 @@ async function navigateToChat(sessionId) {
   await webdriverRequest(`/session/${encodeURIComponent(sessionId)}/execute/sync`, {
     method: "POST",
     body: {
-      script: "window.location.hash = '#/chat'; return window.location.hash;",
-      args: [],
+      script: "window.location.hash = arguments[0]; return window.location.hash;",
+      args: [stage1DogfoodChatHash],
     },
   });
   await waitForElementPresent(sessionId, "chat-input", 30_000);

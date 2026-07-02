@@ -25,6 +25,7 @@ import DangerActionPreflightDetails from "../components/DangerActionPreflightDet
 import { DangerZone, StatusChip } from "../components/product/ProductPrimitives";
 import { buildRuntimeDisclosure } from "../utils/runtimeDisclosure";
 import { safePreviewText } from "../utils/safePreview";
+import { mailboxRoute, productRoutePath } from "../productShellContract";
 import {
   ArrowLeft,
   Activity,
@@ -73,7 +74,7 @@ function kindLabel(kind: string): string {
     tool_execution: "Tool",
     proactive: "Proactive",
     planning: "Planning",
-    review: "Review",
+    review: "Mailbox",
     writing: "Writing",
     memory_governance: "Memory",
     skill: "Skill Runtime",
@@ -98,7 +99,7 @@ function transcriptTitle(kind: string): string {
     action: "执行动作",
     observation: "观察结果",
     permission_request: "需要权限",
-    proposal_request: "创建 Review 建议",
+    proposal_request: "创建确认建议",
     error: "发生错误",
     retry: "重试",
     final_result: "最终结果",
@@ -222,7 +223,7 @@ function buildActivityTimeline(
 
   const proposalItems = run.generatedProposals.map(proposalId => ({
     id: `proposal-${proposalId}`,
-    title: "创建 Review 建议",
+    title: "创建确认建议",
     body: `已创建待确认建议 ${proposalId}`,
     timestamp: run.finishedAt ?? run.startedAt,
     tone: "warning" as const,
@@ -351,7 +352,7 @@ export default function AgentRunDetail() {
     try {
       await deleteAgentRun(runId, "user_confirmed_preflight", evidence);
       setDeletePreflight(null);
-      navigate("/runs");
+      navigate(productRoutePath("Runs"));
     } catch (e) {
       setError(`删除失败: ${e}`);
     } finally {
@@ -439,7 +440,7 @@ export default function AgentRunDetail() {
       <div className="max-w-4xl mx-auto">
         <div className="flex items-center justify-between mb-6">
           <button
-            onClick={() => navigate("/runs")}
+            onClick={() => navigate(productRoutePath("Runs"))}
             className="flex items-center gap-2 text-stone-600 hover:text-stone-900"
           >
             <ArrowLeft size={20} />
@@ -978,7 +979,7 @@ export default function AgentRunDetail() {
                                 </div>
                                 <div className="text-blue-700">{proposalId}</div>
                                 <button
-                                  onClick={() => navigate(`/review?proposal=${proposalId}`)}
+                                  onClick={() => navigate(mailboxRoute({ proposalId }))}
                                   className="mt-1 text-blue-600 hover:text-blue-800 underline"
                                 >
                                   查看 Proposal

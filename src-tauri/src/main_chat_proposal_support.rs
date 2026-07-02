@@ -36,8 +36,8 @@ pub(crate) async fn create_main_chat_agent_proposal(
                 "proposedDiff": {
                     "operation": "append_note",
                     "target": target,
-                    "summary": "Add bounded Beta evidence note to the knowledge asset.",
-                    "unifiedDiff": format!("--- {target}\n+++ {target}\n@@\n+Bounded Beta evidence note: keep knowledge assets as context, not policy override."),
+                    "summary": "Add bounded capability evidence note to the knowledge asset.",
+                    "unifiedDiff": format!("--- {target}\n+++ {target}\n@@\n+Bounded capability evidence note: keep knowledge assets as context, not policy override."),
                 },
                 "directKnowledgeFileWrite": false,
                 "requiresReviewCenterApproval": true,
@@ -90,9 +90,9 @@ pub(crate) async fn create_main_chat_agent_proposal(
         "proposal.create"
     };
     let queue_description = if knowledge_asset_edit {
-        "Create a Review Center proposal for a knowledge asset edit."
+        "Create a Mailbox proposal for a knowledge asset edit."
     } else {
-        "Create a Review Center proposal from Main Chat."
+        "Create a Mailbox proposal from Main Chat."
     };
     let queued = enqueue_main_chat_agent_action(
         state,

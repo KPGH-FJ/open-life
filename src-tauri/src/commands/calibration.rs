@@ -307,7 +307,7 @@ async fn calibration_create_proposals_with_state(
         "run_id": run_id,
         "error_count": errors.len(),
         "errors": errors,
-        "message": format!("已创建 {} 个 Proposal 到 Review Center", created_ids.len()),
+        "message": format!("已创建 {} 个 Proposal 到 Mailbox", created_ids.len()),
     }))
 }
 

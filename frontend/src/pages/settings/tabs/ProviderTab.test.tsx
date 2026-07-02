@@ -191,10 +191,10 @@ describe("ProviderTab", () => {
     });
 
     expect(screen.getByRole("button", { name: /Local-first default/ })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /Capability-first beta/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Capability-first/ }));
     expect(setConfig).toHaveBeenCalledWith({
       ...mockConfig,
-      runtime_mode: "capability_first_beta",
+      runtime_mode: "capability_first",
     });
   });
 

@@ -302,7 +302,7 @@ fn w148_final_backend_completion_gate_passes_with_explicit_beta_blockers_only() 
     assert!(report.default_chat_isolation.default_chat_isolated);
     assert_eq!(
         report.default_chat_isolation.selected_adapter_path,
-        "legacy_stream"
+        "main_chat_kernel"
     );
     assert!(!report.default_chat_isolation.migration_permission);
     assert!(report.proposal_first_boundaries.proposal_first_preserved);

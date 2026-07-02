@@ -26,6 +26,7 @@ import {
 import EmptyState from "../components/EmptyState";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
 import { buildRuntimeActionError, buildSafeModeBlockedMessage } from "../utils/runtimeMessages";
+import { productRoutePath } from "../productShellContract";
 
 interface MemoryResult {
   chunk: {
@@ -180,7 +181,7 @@ export default function MemorySearch() {
                 </div>
               </div>
               <Link
-                to="/settings"
+                to={productRoutePath("Settings")}
                 className="inline-flex shrink-0 items-center justify-center rounded-full bg-amber-900 px-3 py-1.5 text-xs font-medium text-amber-50 hover:bg-amber-950"
               >
                 打开恢复控制台

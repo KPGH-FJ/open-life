@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 
 const CONTRACT_REPORT_KIND: &str = "w147.preUiBackendContractFreeze.v1";
 const FINAL_GATE_REPORT_KIND: &str = "w148.finalBackendCompletionGate.v1";
-const DEFAULT_CHAT_LEGACY_PATH: &str = "legacy_stream";
+const DEFAULT_CHAT_KERNEL_PATH: &str = "main_chat_kernel";
 const REQUIRED_SURFACES: [&str; 7] = [
     "learning_inbox",
     "evidence_timeline",
@@ -475,7 +475,7 @@ pub fn freeze_pre_ui_backend_read_model_contracts(
         command_surface_added: false,
         tauri_command_required: false,
         default_chat_unchanged: true,
-        default_chat_selected_adapter_path: DEFAULT_CHAT_LEGACY_PATH.into(),
+        default_chat_selected_adapter_path: DEFAULT_CHAT_KERNEL_PATH.into(),
         ordinary_chat_route_unchanged: true,
         migration_permission: false,
         surface_count,
@@ -498,7 +498,7 @@ pub fn evaluate_final_backend_completion_gate(
     let evidence = input.evidence;
     let default_chat_isolation = DefaultChatIsolationProof {
         default_chat_isolated: evidence.default_chat_isolated,
-        selected_adapter_path: DEFAULT_CHAT_LEGACY_PATH.into(),
+        selected_adapter_path: DEFAULT_CHAT_KERNEL_PATH.into(),
         ordinary_chat_route_unchanged: evidence.ordinary_chat_route_unchanged,
         migration_permission: false,
         ordinary_chat_calls_goal8_helpers: false,

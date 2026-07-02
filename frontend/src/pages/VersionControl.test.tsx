@@ -50,8 +50,6 @@ describe("VersionControl", () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_system_diagnostics") {
         return Promise.resolve({
-          beta_ready: false,
-          beta_ready_issues: ["memory degraded"],
           chat_ready: true,
           readiness_issues: [],
           local_model: "qwen2.5:7b",
@@ -62,7 +60,6 @@ describe("VersionControl", () => {
           memory_chunk_count: 10,
           vector_corrupt_embedding_count: 2,
           active_data_dir: "/tmp/openlife",
-          legacy_data_dir: "/tmp/openlife-legacy",
           database_status: "degraded",
           startup_warnings: ["memory.db 初始化失败，正在使用临时数据库"],
         });

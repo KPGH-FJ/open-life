@@ -18,9 +18,8 @@ use crate::legacy_write_convergence::{
 };
 use crate::persist_life_model;
 use crate::storage::{
-    app_data_dir, load_onboarding_status_from_path, mcp_audit_keyring_path, onboarding_status_path,
-    privacy_policy_path, save_mcp_audit_keyring_to_path, save_onboarding_status_to_path,
-    save_privacy_policy_to_path, OnboardingStatus,
+    app_data_dir, mcp_audit_keyring_path, privacy_policy_path, save_mcp_audit_keyring_to_path,
+    save_privacy_policy_to_path,
 };
 use crate::AppState;
 
@@ -668,10 +667,10 @@ pub async fn save_config(
         config.llm.embedding_enabled,
     );
 
-    // ModelRouter is now graduated from experimental (Beta)
+    // ModelRouter is now on the graduated runtime path.
     let router = openlife_core::agent::ModelRouter::new();
     new_scheduler = new_scheduler.with_model_router(router);
-    eprintln!("[Scheduler] ModelRouter enabled (Beta)");
+    eprintln!("[Scheduler] ModelRouter enabled (graduated runtime path)");
 
     *scheduler = new_scheduler;
     Ok(())
@@ -1141,20 +1140,6 @@ pub async fn set_privacy_policy(
     let mut engine = state.privacy_engine.lock().await;
     engine.set_policy(policy);
     Ok(())
-}
-
-#[tauri::command]
-pub async fn has_completed_onboarding() -> Result<bool, AppError> {
-    Ok(load_onboarding_status_from_path(&onboarding_status_path()).completed)
-}
-
-#[tauri::command]
-pub async fn mark_onboarding_completed() -> Result<(), AppError> {
-    let status = OnboardingStatus {
-        completed: true,
-        completed_at: Some(chrono::Utc::now().to_rfc3339()),
-    };
-    save_onboarding_status_to_path(&onboarding_status_path(), &status)
 }
 
 #[cfg(test)]

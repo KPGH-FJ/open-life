@@ -225,7 +225,7 @@ pub async fn run_skill(
         && manifest.execution_status == SkillExecutionStatus::DisabledDeclarativeOnly
     {
         return Err(AppError::permission(format!(
-            "plugin skill is declarative-only in Beta: {}",
+            "plugin skill requires a configured executor/provider before it can run: {}",
             skill_id
         )));
     }
@@ -699,7 +699,7 @@ pub async fn reload_plugins(
     let mut registry = state.plugin_registry.lock().await;
     let records = registry.reload().map_err(AppError::from)?;
 
-    // Plugin tools are declarative-only in Beta; do not register them to McpRegistry.
+    // Plugin tools require a configured executor/provider; do not register them to McpRegistry.
     // They remain visible in PluginRegistry for manifest inspection only.
     {
         let mut mcp = state.mcp_registry.lock().await;
@@ -750,7 +750,7 @@ pub async fn enable_plugin(
             .find(|r| r.manifest.id == plugin_id)
         {
             if record.enabled && record.error.is_none() {
-                // Plugin tools are declarative-only in Beta; do not register to McpRegistry.
+                // Plugin tools require a configured executor/provider; do not register to McpRegistry.
                 // Register skills only
                 let mut skill_reg = state.skill_registry.lock().await;
                 for skill in &record.manifest.skills {

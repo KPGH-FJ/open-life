@@ -18,6 +18,7 @@ import type {
   MainChatKernelEvent,
   ToolCallResult,
 } from "../tauri";
+import { mailboxLinkTarget, productRoutePath } from "../productShellContract";
 
 type EvidenceTone = "active" | "success" | "warning" | "blocked" | "neutral";
 
@@ -370,12 +371,11 @@ export default function MainChatExecutionEvidence({
           >
             <div className="mt-2">
               <Link
-                to="/review"
-                state={{
+                {...mailboxLinkTarget({
                   proposalId: proposal.proposalId,
                   mainChatTaskSessionId: state.task.taskId,
-                  returnTo: "/chat",
-                }}
+                  returnTo: productRoutePath("Companion"),
+                })}
                 className="inline-flex min-h-6 items-center gap-1 rounded-md border border-stone-200 bg-white px-2 font-medium text-stone-900 hover:bg-stone-100"
               >
                 <ExternalLink size={12} />
@@ -395,15 +395,14 @@ export default function MainChatExecutionEvidence({
           >
             <div className="mt-2">
               <Link
-                to="/review"
-                state={{
+                {...mailboxLinkTarget({
                   mainChatTaskSessionId: state?.task.taskId ?? taskState?.session?.id,
-                  returnTo: "/chat",
-                }}
+                  returnTo: productRoutePath("Companion"),
+                })}
                 className="inline-flex min-h-6 items-center gap-1 rounded-md border border-stone-200 bg-white px-2 font-medium text-stone-900 hover:bg-stone-100"
               >
                 <ExternalLink size={12} />
-                <span>Open Review Center</span>
+                <span>Open Mailbox</span>
               </Link>
             </div>
           </EvidenceRow>

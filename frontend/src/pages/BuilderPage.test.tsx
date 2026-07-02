@@ -333,7 +333,7 @@ describe("BuilderPage", () => {
     );
 
     expect(await screen.findByText("继续未完成的会话")).toBeInTheDocument();
-    expect(screen.getByText("待确认 Review")).toBeInTheDocument();
+    expect(screen.getByText("待确认项")).toBeInTheDocument();
     expect(screen.getByText("已完成问题收集，等待你确认并应用模型建议")).toBeInTheDocument();
     expect(screen.getByText("待确认内容：请审阅以下建议")).toBeInTheDocument();
     fireEvent.click(screen.getByText("去审阅"));
@@ -347,8 +347,6 @@ describe("BuilderPage", () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_system_diagnostics") {
         return Promise.resolve({
-          beta_ready: false,
-          beta_ready_issues: ["memory degraded"],
           chat_ready: true,
           readiness_issues: [],
           local_model: "qwen2.5:7b",
@@ -359,7 +357,6 @@ describe("BuilderPage", () => {
           memory_chunk_count: 10,
           vector_corrupt_embedding_count: 2,
           active_data_dir: "/tmp/openlife",
-          legacy_data_dir: "/tmp/openlife-legacy",
           database_status: "degraded",
           startup_warnings: ["memory.db 初始化失败，正在使用临时数据库"],
         });
@@ -485,8 +482,8 @@ describe("BuilderPage", () => {
 
     // Wait for review mode (BuilderPatchReview save button)
     await waitFor(() => {
-      expect(screen.getByText("发送到 Review Center")).toBeInTheDocument();
-      expect(screen.queryByText("直接应用（legacy / 绕过 Review Center）")).not.toBeInTheDocument();
+      expect(screen.getByText("发送到 Mailbox")).toBeInTheDocument();
+      expect(screen.queryByText("直接应用（legacy / 绕过 Mailbox）")).not.toBeInTheDocument();
     });
 
     // Ensure the checkbox is checked so save is enabled
@@ -508,7 +505,7 @@ describe("BuilderPage", () => {
     fireEvent.click(saveEditButton);
 
     // Click main save
-    const saveButton = screen.getByText("发送到 Review Center");
+    const saveButton = screen.getByText("发送到 Mailbox");
     fireEvent.click(saveButton);
 
     await waitFor(() => {
@@ -594,7 +591,7 @@ describe("BuilderPage", () => {
 
     // Wait for review mode (BuilderPatchReview save button)
     await waitFor(() => {
-      expect(screen.getByText("发送到 Review Center")).toBeInTheDocument();
+      expect(screen.getByText("发送到 Mailbox")).toBeInTheDocument();
     });
 
     // Ensure checkboxes are checked so save is enabled
@@ -606,7 +603,7 @@ describe("BuilderPage", () => {
     });
 
     // Click save without editing — accepted by default
-    const saveButton = screen.getByText("发送到 Review Center");
+    const saveButton = screen.getByText("发送到 Mailbox");
     fireEvent.click(saveButton);
 
     await waitFor(() => {
@@ -638,7 +635,7 @@ describe("BuilderPage", () => {
     });
   });
 
-  it("shows Review Center notice after proposal creation succeeds", async () => {
+  it("shows Mailbox notice after proposal creation succeeds", async () => {
     const customMock = vi.fn((cmd: string, args?: Record<string, any>): Promise<any> => {
       if (cmd === "builder_start") {
         return Promise.resolve({
@@ -700,21 +697,21 @@ describe("BuilderPage", () => {
     fireEvent.click(screen.getByText("下一步"));
 
     await waitFor(() => {
-      expect(screen.getByText("发送到 Review Center")).toBeInTheDocument();
+      expect(screen.getByText("发送到 Mailbox")).toBeInTheDocument();
     });
 
     const checkboxes = screen.getAllByRole("checkbox");
     checkboxes.forEach(cb => {
       if (!(cb as HTMLInputElement).checked) fireEvent.click(cb);
     });
-    fireEvent.click(screen.getByText("发送到 Review Center"));
+    fireEvent.click(screen.getByText("发送到 Mailbox"));
 
     await waitFor(() => {
       expect(screen.getByText(/已创建/)).toBeInTheDocument();
     });
 
     expect(screen.getByText(/条待确认 Proposal/)).toBeInTheDocument();
-    expect(screen.getByText("去 Review Center 确认 →")).toBeInTheDocument();
+    expect(screen.getByText("去 Mailbox 确认 →")).toBeInTheDocument();
     expect(screen.queryByText("本轮写入结果")).not.toBeInTheDocument();
   });
 
@@ -782,7 +779,7 @@ describe("BuilderPage", () => {
     fireEvent.click(screen.getByText("下一步"));
 
     await waitFor(() => {
-      expect(screen.getByText("发送到 Review Center")).toBeInTheDocument();
+      expect(screen.getByText("发送到 Mailbox")).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByText("暂不保存"));

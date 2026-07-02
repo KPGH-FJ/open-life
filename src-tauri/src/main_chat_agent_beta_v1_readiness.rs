@@ -96,6 +96,38 @@ pub(crate) async fn run_main_chat_agent_beta_v1_readiness_report(
 pub(crate) async fn run_main_chat_agent_beta_v1_readiness_report_with_live_opt_in(
     explicit_live_eval_requested: bool,
 ) -> Result<MainChatAgentBetaV1ReadinessReport, String> {
+    tokio::task::spawn_blocking(move || {
+        run_main_chat_agent_beta_v1_readiness_report_on_dedicated_stack(
+            explicit_live_eval_requested,
+        )
+    })
+    .await
+    .map_err(|err| format!("join beta v1 readiness gate worker: {err}"))?
+}
+
+fn run_main_chat_agent_beta_v1_readiness_report_on_dedicated_stack(
+    explicit_live_eval_requested: bool,
+) -> Result<MainChatAgentBetaV1ReadinessReport, String> {
+    std::thread::Builder::new()
+        .name("beta-v1-readiness-gate".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|err| format!("build beta v1 readiness gate runtime: {err}"))?;
+            runtime.block_on(run_main_chat_agent_beta_v1_readiness_report_inner(
+                explicit_live_eval_requested,
+            ))
+        })
+        .map_err(|err| format!("spawn beta v1 readiness gate worker: {err}"))?
+        .join()
+        .map_err(|_| "beta v1 readiness gate worker panicked".to_string())?
+}
+
+async fn run_main_chat_agent_beta_v1_readiness_report_inner(
+    explicit_live_eval_requested: bool,
+) -> Result<MainChatAgentBetaV1ReadinessReport, String> {
     let foundation_inventory_exists = foundation_inventory_path().is_file();
     let default_experience =
         crate::main_chat_agent_beta_v1_default_experience::run_main_chat_agent_beta_v1_default_experience_report()
@@ -361,7 +393,7 @@ fn workstreams(
         ),
         workstream(
             "phase_5",
-            "Beta Hardening",
+            "Capability Hardening",
             hardening_ready,
             &["structured readiness report and release notes"],
             hardening_blockers,
