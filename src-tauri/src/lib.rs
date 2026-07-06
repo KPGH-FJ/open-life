@@ -42,7 +42,6 @@ pub(crate) mod main_chat_hs_runtime;
 #[allow(dead_code)]
 pub(crate) mod main_chat_kernel;
 pub(crate) mod main_chat_legacy_agent_loop;
-pub(crate) mod main_chat_legacy_fallback;
 #[allow(dead_code)]
 pub(crate) mod main_chat_live_productization_eval;
 pub(crate) mod main_chat_live_provider_harness;
@@ -582,17 +581,63 @@ async fn inspect_mcp_call(
     Ok(reg.inspect_call_arguments(&name, &arguments))
 }
 
+fn runtime_dev_url() -> Option<tauri::Url> {
+    let value = std::env::var("OPENLIFE_DEV_URL").ok()?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let Ok(url) = tauri::Url::parse(trimmed) else {
+        log::warn!("[setup] ignoring invalid OPENLIFE_DEV_URL value");
+        return None;
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        log::warn!("[setup] ignoring OPENLIFE_DEV_URL with unsupported scheme");
+        return None;
+    }
+    if !matches!(url.host_str(), Some("127.0.0.1" | "localhost")) {
+        log::warn!("[setup] ignoring OPENLIFE_DEV_URL with non-loopback host");
+        return None;
+    }
+    Some(url)
+}
+
 fn ensure_main_window_visible<R: tauri::Runtime, M: Manager<R>>(manager: &M) -> tauri::Result<()> {
-    let window = if let Some(window) = manager.get_webview_window("main") {
+    let main_window_config = manager
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|config| config.label == "main")
+        .ok_or_else(|| anyhow::anyhow!("tauri config is missing the main window"))?;
+    let dev_url = runtime_dev_url().and_then(|url| {
+        if manager.config().build.dev_url.as_ref() == Some(&url) {
+            Some(url)
+        } else {
+            log::warn!("[setup] ignoring OPENLIFE_DEV_URL that does not match tauri build.devUrl");
+            None
+        }
+    });
+
+    let window = if let Some(dev_url) = dev_url {
+        if let Some(window) = manager.get_webview_window("main") {
+            if window
+                .url()
+                .map(|current_url| current_url != dev_url)
+                .unwrap_or(false)
+            {
+                window.navigate(dev_url)?;
+            }
+            window
+        } else {
+            let mut dev_window_config = main_window_config.clone();
+            dev_window_config.url = tauri::WebviewUrl::External(dev_url);
+            tauri::WebviewWindowBuilder::from_config(manager, &dev_window_config)?.build()?
+        }
+    } else if let Some(window) = manager.get_webview_window("main") {
         window
     } else {
-        let main_window_config = manager
-            .config()
-            .app
-            .windows
-            .iter()
-            .find(|config| config.label == "main")
-            .ok_or_else(|| anyhow::anyhow!("tauri config is missing the main window"))?;
         tauri::WebviewWindowBuilder::from_config(manager, main_window_config)?.build()?
     };
 

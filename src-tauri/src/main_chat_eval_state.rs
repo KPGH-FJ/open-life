@@ -43,6 +43,7 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
         vector_store: Arc::new(Mutex::new(
             openlife_core::vectors::VectorStore::new_in_memory().unwrap(),
         )),
+        vector_persistence_mode: crate::state::VectorPersistenceMode::EvalDisabled,
         builder_sessions: Arc::new(Mutex::new(HashMap::new())),
         builder_session_store: Arc::new(Mutex::new(
             openlife_core::builder::BuilderSessionStore::new(base.join("builder_sessions.json")),
@@ -60,6 +61,9 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
         evidence_store: Arc::new(Mutex::new(
             openlife_core::agent::EvidenceStore::new_in_memory().unwrap(),
         )),
+        life_event_store: Some(Arc::new(Mutex::new(
+            openlife_core::agent::LifeEventStore::new_in_memory().unwrap(),
+        ))),
         heuristic_store: Arc::new(Mutex::new({
             let store = openlife_core::agent::HeuristicStore::new_in_memory().unwrap();
             store.seed_mvp_heuristics().unwrap();

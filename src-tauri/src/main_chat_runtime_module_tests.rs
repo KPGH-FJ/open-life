@@ -1,9 +1,3 @@
-use openlife_core::layer_router::Layer;
-
-use crate::main_chat_legacy_fallback::{
-    ordinary_send_chat_execution_plan, ordinary_stream_chat_execution_plan, OrdinaryChatRouteKind,
-};
-
 #[test]
 fn main_chat_runtime_module_tests_are_not_concentrated_in_lib_rs() {
     let lib_rs_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
@@ -40,12 +34,66 @@ fn main_chat_runtime_module_tests_are_not_concentrated_in_lib_rs() {
 fn main_window_visibility_uses_tauri_window_config_not_hardcoded_index_asset() {
     let lib_rs_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs");
     let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
+    let config_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tauri.conf.json");
+    let config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(config_path).expect("read tauri.conf.json"))
+            .expect("parse tauri.conf.json");
+    let capability_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities/default.json");
+    let capability: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(capability_path).expect("read default capability"),
+    )
+    .expect("parse default capability");
+    let main_window = config
+        .get("app")
+        .and_then(|app| app.get("windows"))
+        .and_then(|windows| windows.as_array())
+        .and_then(|windows| {
+            windows
+                .iter()
+                .find(|window| window.get("label").and_then(|label| label.as_str()) == Some("main"))
+        })
+        .expect("main window config");
     let helper = source
         .split("fn ensure_main_window_visible")
         .nth(1)
         .and_then(|rest| rest.split("#[cfg_attr").next())
         .expect("ensure_main_window_visible helper body");
 
+    assert!(
+        source.contains("fn runtime_dev_url()") && source.contains("OPENLIFE_DEV_URL"),
+        "main window setup must preserve the runtime dev-server override used by native UI dogfood"
+    );
+    assert!(
+        source.contains("url.host_str()")
+            && source.contains("127.0.0.1")
+            && source.contains("localhost")
+            && helper.contains("manager.config().build.dev_url"),
+        "runtime dev URL override must stay constrained to the configured local dev origin"
+    );
+    assert!(
+        helper.contains("runtime_dev_url()")
+            && helper.contains("WebviewUrl::External(dev_url)")
+            && helper.contains("WebviewWindowBuilder::from_config"),
+        "main window setup must create the window with the runtime dev URL instead of starting on stale bundled assets"
+    );
+    assert_eq!(
+        main_window.get("create").and_then(|create| create.as_bool()),
+        Some(false),
+        "main window must be created in setup so runtime dev URL overrides can be applied before first load"
+    );
+    let remote_urls = capability
+        .get("remote")
+        .and_then(|remote| remote.get("urls"))
+        .and_then(|urls| urls.as_array())
+        .expect("default capability remote urls");
+    assert!(
+        remote_urls.iter().all(|url| matches!(
+            url.as_str(),
+            Some("http://127.0.0.1:*" | "http://localhost:*")
+        )),
+        "remote IPC capability must stay limited to loopback dev server origins"
+    );
     assert!(
         helper.contains("WebviewWindowBuilder::from_config"),
         "main fallback window must be recreated from tauri.conf.json so devUrl and frontendDist stay authoritative"
@@ -165,89 +213,51 @@ fn main_chat_legacy_agent_loop_helpers_are_extracted_from_lib_rs() {
     }
 }
 
+fn retired_delivery_marker(prefix: &str) -> String {
+    [prefix, "_fallback_delivery"].join("")
+}
+
 #[test]
-fn main_chat_legacy_fallback_helpers_are_extracted_from_lib_rs() {
-    let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
-    let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
-    let module_path =
+fn main_chat_retired_fallback_delivery_is_absent_from_product_modules() {
+    let legacy_module_path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_legacy_fallback.rs");
     assert!(
-        module_path.exists(),
-        "Main Chat legacy fallback helper module file must exist outside lib.rs"
+        !legacy_module_path.exists(),
+        "retired ordinary fallback delivery must not remain as a production module"
     );
-    let module_source =
-        std::fs::read_to_string(&module_path).expect("read main_chat_legacy_fallback.rs");
 
-    for expected in [
-        "pub(crate) enum OrdinaryChatRouteKind",
-        "pub(crate) struct OrdinaryChatExecutionPlan",
-        "pub(crate) fn ordinary_send_chat_execution_plan(",
-        "pub(crate) fn ordinary_stream_chat_execution_plan(",
-        "pub(crate) async fn run_retired_buffered_fallback_delivery(",
-    ] {
-        assert!(
-            module_source.contains(expected),
-            "legacy fallback module must expose {expected}"
-        );
-    }
-    for forbidden in [
-        "\nenum OrdinaryChatRouteKind",
-        "\nstruct OrdinaryChatExecutionPlan",
-        "\nfn ordinary_send_chat_execution_plan(",
-        "\nfn ordinary_stream_chat_execution_plan(",
-        "\nasync fn send_message_with_legacy_generation(",
-    ] {
-        assert!(
-            !source.contains(forbidden),
-            "legacy fallback helper {forbidden} should not remain in lib.rs"
-        );
-    }
+    let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+    let lib_source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
     assert!(
-        !module_source.contains("send_message_with_legacy_generation"),
-        "legacy fallback module must not expose the retired success-generation fallback"
+        !lib_source.contains("main_chat_legacy_fallback"),
+        "lib.rs must not register a retired ordinary fallback module"
+    );
+
+    let pipeline_path = format!(
+        "{}/src/main_chat_turn_pipeline.rs",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let pipeline_source = std::fs::read_to_string(pipeline_path).expect("read pipeline");
+    for forbidden in [
+        ["Legacy", "CompatFallback"].join(""),
+        ["legacy_compat", "_fallback"].join(""),
+        retired_delivery_marker("run_retired_buffered"),
+        retired_delivery_marker("run_retired_streaming"),
+    ] {
+        assert!(
+            !pipeline_source.contains(&forbidden),
+            "ordinary turn pipeline must not contain {forbidden}"
+        );
+    }
+    let legacy_true_assignment = ["legacy_fallback_used = ", "true"].join("");
+    assert!(
+        !pipeline_source.contains(&legacy_true_assignment),
+        "ordinary turn pipeline must not record blocked retired fallback as used"
     );
 }
 
 #[test]
-fn legacy_send_fallback_plan_has_no_agent_loop_or_tool_side_effects() {
-    let plan = ordinary_send_chat_execution_plan(Layer::L2);
-
-    assert_eq!(plan.route_kind, OrdinaryChatRouteKind::LegacyNonStream);
-    assert!(!plan.constructs_agent_loop);
-    assert!(!plan.constructs_action_executor);
-    assert!(!plan.tool_execution_allowed);
-    assert!(!plan.agent_actions_allowed);
-    assert!(!plan.agent_observations_allowed);
-    assert!(!plan.mcp_audit_write_allowed);
-    assert!(!plan.external_write_allowed);
-    assert!(!plan.plan_execute_allowed);
-    assert!(!plan.golden_path_allowed);
-    assert!(!plan.final_gate_allowed);
-    assert!(!plan.guidance_consumption_enabled);
-}
-
-#[test]
-fn retired_stream_fallback_plan_is_blocked_for_l2_l3() {
-    for layer in [Layer::L2, Layer::L3] {
-        let plan = ordinary_stream_chat_execution_plan(layer);
-
-        assert_eq!(plan.route_kind, OrdinaryChatRouteKind::LegacyStream);
-        assert!(!plan.constructs_agent_loop);
-        assert!(!plan.constructs_action_executor);
-        assert!(!plan.tool_execution_allowed);
-        assert!(!plan.agent_actions_allowed);
-        assert!(!plan.agent_observations_allowed);
-        assert!(!plan.mcp_audit_write_allowed);
-        assert!(!plan.external_write_allowed);
-        assert!(!plan.plan_execute_allowed);
-        assert!(!plan.golden_path_allowed);
-        assert!(!plan.final_gate_allowed);
-        assert!(!plan.guidance_consumption_enabled);
-    }
-}
-
-#[test]
-fn ordinary_chat_entrypoints_try_kernel_before_legacy_strategy_paths() {
+fn ordinary_chat_entrypoints_try_kernel_before_unsupported_blocker_paths() {
     let send_module_path = format!("{}/src/main_chat_send.rs", env!("CARGO_MANIFEST_DIR"));
     let send_source = std::fs::read_to_string(send_module_path).expect("read main_chat_send.rs");
     let send_body =
@@ -282,8 +292,8 @@ fn ordinary_chat_entrypoints_try_kernel_before_legacy_strategy_paths() {
         "start_stream_message must not own strategy fallback after the turn pipeline wrapper lands"
     );
     assert!(
-        !stream_body.contains("ordinary_stream_chat_execution_plan(layer)"),
-        "start_stream_message must not own fallback selection after the turn pipeline wrapper lands"
+        !stream_body.contains("main_chat_unsupported_turn_governed_blocker"),
+        "start_stream_message must not own unsupported-route blocker construction after the turn pipeline wrapper lands"
     );
     assert!(
         !stream_body.contains("main_chat_kernel_supports_turn("),
@@ -305,14 +315,14 @@ fn ordinary_chat_entrypoints_try_kernel_before_legacy_strategy_paths() {
         .expect("pipeline should call the shared route decision helper first");
     let strategy_attempt = pipeline_body
         .find("try_run_main_chat_agent_strategy(")
-        .expect("pipeline should keep the explicit legacy strategy fallback");
+        .expect("pipeline should keep the final strategy attempt before unsupported blocker");
     let tool_loop_attempt = pipeline_body
         .find("run_main_chat_tool_loop_adapter(")
-        .expect("pipeline should dispatch ToolLoop before legacy strategy fallback");
-    let legacy_plan_after_strategy = pipeline_body[strategy_attempt..]
-        .find("run_retired_streaming_fallback_delivery(")
+        .expect("pipeline should dispatch ToolLoop before final strategy attempt");
+    let blocker_after_strategy = pipeline_body[strategy_attempt..]
+        .find("build_main_chat_unsupported_turn_blocker_result(")
         .map(|offset| strategy_attempt + offset)
-        .expect("pipeline should keep the final non-ToolLoop legacy stream delivery");
+        .expect("pipeline should turn no-result into a governed blocker");
 
     assert!(
         route_decision < tool_loop_attempt,
@@ -320,38 +330,38 @@ fn ordinary_chat_entrypoints_try_kernel_before_legacy_strategy_paths() {
     );
     assert!(
         tool_loop_attempt < strategy_attempt,
-        "ToolLoop adapter should handle ToolLoop route decisions before old strategy fallback"
+        "ToolLoop adapter should handle ToolLoop route decisions before final strategy attempt"
     );
     assert!(
-        strategy_attempt < legacy_plan_after_strategy,
-        "pipeline should attempt old strategy before building the final non-ToolLoop legacy stream delivery"
+        strategy_attempt < blocker_after_strategy,
+        "pipeline should attempt final strategy before building the unsupported governed blocker"
     );
 }
 
 #[test]
-fn stream_legacy_fallback_never_constructs_agent_runtime() {
+fn unsupported_turn_blocker_never_constructs_agent_runtime() {
     let pipeline_module_path = format!(
         "{}/src/main_chat_turn_pipeline.rs",
         env!("CARGO_MANIFEST_DIR")
     );
     let pipeline_source =
         std::fs::read_to_string(pipeline_module_path).expect("read main_chat_turn_pipeline.rs");
-    let retired_stream_body = extract_rust_function_body(
+    let blocker_body = extract_rust_function_body(
         &pipeline_source,
-        "async fn run_retired_streaming_fallback_delivery(",
+        "async fn build_main_chat_unsupported_turn_blocker_result(",
     );
 
     assert!(
-        !retired_stream_body.contains("AgentRuntime::new"),
-        "stream legacy fallback must not construct the old AgentRuntime"
+        !blocker_body.contains("AgentRuntime::new"),
+        "unsupported blocker must not construct the old AgentRuntime"
     );
     assert!(
-        !retired_stream_body.contains(".execute_task("),
-        "stream legacy fallback must not execute old AgentRuntime tasks"
+        !blocker_body.contains(".execute_task("),
+        "unsupported blocker must not execute old AgentRuntime tasks"
     );
     assert!(
-        retired_stream_body.contains("retired_stream_runtime_fallback_blocked"),
-        "stream legacy fallback should return an explicit blocker payload"
+        blocker_body.contains("main_chat_unsupported_turn_governed_blocker"),
+        "unsupported no-result path should return an explicit blocker payload"
     );
 }
 
@@ -991,7 +1001,6 @@ fn main_chat_stream_command_has_non_tauri_state_executor() {
 #[test]
 fn focused_main_chat_modules_import_helpers_from_owning_modules_not_lib_rs_root() {
     for module_name in [
-        "main_chat_legacy_fallback.rs",
         "main_chat_legacy_agent_loop.rs",
         "main_chat_react_runtime.rs",
         "main_chat_react_execution.rs",

@@ -1,3 +1,7 @@
+use crate::agent::main_chat_governance_intent::{
+    classify_main_chat_governance_intent, MainChatBlockerRequirement,
+    MainChatDurableWriteRequirement,
+};
 use crate::agent::types::AgentTaskKind;
 use crate::agent::{
     ActionExecutionContext, ActionExecutionStatus, ActionExecutor, ActionExecutorConfig,
@@ -311,28 +315,42 @@ impl StrategyRouter {
     pub fn route(&self, user_message: &str) -> StrategyRouteDecision {
         let lower = user_message.to_ascii_lowercase();
         let privacy_risk = classify_privacy_risk(&lower);
+        let governance_intent = classify_main_chat_governance_intent(user_message);
 
-        if is_blocked_confirmation_intent(&lower) {
+        if let Some(blocker_requirement) = governance_intent.blocker_requirement {
+            let reason = match blocker_requirement {
+                MainChatBlockerRequirement::DangerousLocalWrite => {
+                    "dangerous local write requires a hard blocker before execution"
+                }
+                MainChatBlockerRequirement::ExternalWriteConfirmation => {
+                    "external write requires confirmation before execution"
+                }
+            };
             return StrategyRouteDecision::new(
                 MainChatAgentStrategy::BlockedConfirmation,
                 0.95,
-                "external or high-risk private write requires confirmation before execution",
+                reason,
                 privacy_risk,
             );
         }
-        if is_memory_proposal_intent(&lower) {
-            return StrategyRouteDecision::new(
-                MainChatAgentStrategy::MemoryProposal,
-                0.93,
-                "explicit memory request must create a governed Memory proposal",
-                privacy_risk,
-            );
+        if let Some(write_requirement) = governance_intent.durable_write_requirement {
+            let (strategy, reason) = match write_requirement {
+                MainChatDurableWriteRequirement::MemoryProposal => (
+                    MainChatAgentStrategy::MemoryProposal,
+                    "durable memory request must create a governed Memory proposal",
+                ),
+                MainChatDurableWriteRequirement::LifeModelProposal => (
+                    MainChatAgentStrategy::LifeModelProposal,
+                    "durable preference or LifeModel request must create a governed LifeModel proposal",
+                ),
+            };
+            return StrategyRouteDecision::new(strategy, 0.93, reason, privacy_risk);
         }
-        if is_lifemodel_proposal_intent(&lower) {
+        if governance_intent.external_read_requirement.is_some() {
             return StrategyRouteDecision::new(
-                MainChatAgentStrategy::LifeModelProposal,
-                0.93,
-                "explicit LifeModel change must create a governed LifeModel proposal",
+                MainChatAgentStrategy::ReActToolExecution,
+                0.9,
+                "current external fact request must use governed read-only tool evidence",
                 privacy_risk,
             );
         }
@@ -5750,62 +5768,6 @@ fn classify_privacy_risk(lower: &str) -> MainChatPrivacyRiskSummary {
     }
 }
 
-fn is_blocked_confirmation_intent(lower: &str) -> bool {
-    if contains_any(
-        lower,
-        &[
-            "skill that is not selected",
-            "unselected skill",
-            "not selected skill",
-        ],
-    ) {
-        return true;
-    }
-    contains_any(lower, &["send", "email", "calendar", "external"])
-        && contains_any(
-            lower,
-            &["private", "medical", "health", "coworker", "sensitive"],
-        )
-}
-
-fn is_memory_proposal_intent(lower: &str) -> bool {
-    contains_any(
-        lower,
-        &[
-            "remember",
-            "记住",
-            "加入记忆",
-            "long-term memory",
-            "prefer short",
-            "i prefer",
-        ],
-    )
-}
-
-fn is_lifemodel_proposal_intent(lower: &str) -> bool {
-    contains_any(
-        lower,
-        &[
-            "knowledge asset edit",
-            "edit a knowledge asset",
-            "edit agents.md",
-            "edit soul.md",
-            "edit user.md",
-            "edit memory.md",
-            "propose an edit to agents.md",
-            "propose an edit to soul.md",
-            "propose an edit to user.md",
-            "propose an edit to memory.md",
-            "lifemodel",
-            "life model",
-            "switching careers",
-            "update my life",
-            "update my identity",
-            "design lead",
-        ],
-    )
-}
-
 fn is_review_maturation_intent(lower: &str) -> bool {
     contains_any(
         lower,
@@ -5833,7 +5795,39 @@ fn is_plan_execute_intent(lower: &str) -> bool {
             "计划",
             "拆解",
         ],
-    )
+    ) || is_current_work_arrangement_intent(lower)
+}
+
+fn is_current_work_arrangement_intent(lower: &str) -> bool {
+    contains_any(lower, &["安排", "规划", "计划"])
+        && contains_any(
+            lower,
+            &[
+                "今天",
+                "下午",
+                "明天",
+                "本周",
+                "today",
+                "tomorrow",
+                "this week",
+            ],
+        )
+        && contains_any(lower, &["工作", "任务", "日程", "work", "task", "schedule"])
+        && !contains_any(
+            lower,
+            &[
+                "以后",
+                "下次",
+                "往后",
+                "长期",
+                "以后都",
+                "优先",
+                "按这个",
+                "记住",
+                "remember",
+                "prefer",
+            ],
+        )
 }
 
 fn is_tool_observation_intent(lower: &str) -> bool {

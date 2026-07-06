@@ -422,6 +422,21 @@ describe("MailboxPage", () => {
     });
   });
 
+  it("notifies the shell to refresh diagnostics after accepting a proposal", async () => {
+    const listener = vi.fn();
+    window.addEventListener("openlife:diagnostics-refresh", listener);
+
+    renderMailboxPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "同意" }));
+
+    await waitFor(() => {
+      expect(listener).toHaveBeenCalledTimes(1);
+    });
+
+    window.removeEventListener("openlife:diagnostics-refresh", listener);
+  });
+
   it("resumes a Main Chat task after accepting the matching proposal route state", async () => {
     const taskId = "mainchat-task-resume-1";
     mockProposals([{ ...lowRiskProposal, sourceDetail: taskId }]);

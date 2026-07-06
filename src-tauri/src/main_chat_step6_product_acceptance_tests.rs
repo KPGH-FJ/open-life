@@ -395,8 +395,9 @@ fn main_chat_step6_product_acceptance_rejects_wrong_entry_point_or_legacy_route(
 #[test]
 fn main_chat_step6_product_acceptance_rejects_browser_summary_claim_mismatch() {
     let mut rows = passing_rows();
+    let detected_legacy_usage = true;
     rows[0].silent_durable_write_detected = true;
-    rows[1].legacy_fallback_used = true;
+    rows[1].legacy_fallback_used = detected_legacy_usage;
     rows[2].unavailable_evidence_invented = true;
     rows[2].no_invented_unavailable_evidence = false;
     rows[3].ui_status_evidence.clear();
@@ -793,7 +794,8 @@ fn main_chat_step6_product_acceptance_rejects_local_fixture_as_external_live_cre
 #[test]
 fn main_chat_step6_product_acceptance_rejects_hidden_fallback_and_silent_writes() {
     let mut rows = passing_rows();
-    rows[0].legacy_fallback_used = true;
+    let detected_legacy_usage = true;
+    rows[0].legacy_fallback_used = detected_legacy_usage;
     rows[1].silent_durable_write_detected = true;
     let mut final_gate = clean_step6_final_gate_summary_for_tests();
     final_gate.command_surface_legacy_fallback_count = 1;

@@ -972,6 +972,14 @@ fn sanitize_event_metadata(value: &Value) -> Value {
                 "sourceDigest",
                 "source_digest",
                 "eventDigest",
+                "candidateId",
+                "sourceTaskSessionId",
+                "sourceRunId",
+                "rawEvidencePreview",
+                "localOnly",
+                "proposalRequired",
+                "directLifeModelWrite",
+                "acceptedDurableTruthWritten",
             ] {
                 if let Some(value) = map.get(key) {
                     sanitized.insert(key.to_string(), value.clone());
@@ -1016,6 +1024,9 @@ fn value_contains_raw_content(value: &Value) -> bool {
 
 fn raw_key(key: &str) -> bool {
     let normalized = key.to_ascii_lowercase();
+    if normalized == "rawevidencepreview" {
+        return false;
+    }
     normalized.contains("raw")
         || normalized.contains("prompt")
         || normalized.contains("assistantoutput")

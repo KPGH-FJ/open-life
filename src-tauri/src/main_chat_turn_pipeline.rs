@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use openlife_core::agent::main_chat_agent_v1::MainChatAgentStrategy;
 use openlife_core::agent::ReasoningTrace;
-use openlife_core::layer_router::Layer;
 use openlife_core::llm::ChatMessage;
 use serde::{Deserialize, Serialize};
 
@@ -21,10 +20,6 @@ use crate::main_chat_kernel::{
     run_main_chat_kernel_direct_answer_with_state, BufferedMainChatEventSink,
     MainChatKernelSupportDisposition, StreamingMainChatEventSink,
 };
-use crate::main_chat_legacy_fallback::{
-    ordinary_send_chat_execution_plan, ordinary_stream_chat_execution_plan,
-    run_retired_buffered_fallback_delivery,
-};
 use crate::main_chat_preprocess::{
     preprocess_chat_input_v2_with_options, preprocess_chat_input_with_options,
     MainChatPreprocessOptions,
@@ -40,7 +35,7 @@ use crate::main_chat_strategy::try_run_main_chat_agent_strategy;
 use crate::main_chat_tool_loop::{
     run_main_chat_tool_loop_adapter, MainChatToolLoopInput, MainChatToolLoopOutcome,
 };
-use crate::{persist_life_model, AppState, SendMessageResult, ToolCallResult};
+use crate::{persist_life_model, AppState, SendMessageResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum MainChatExecutionPath {
@@ -50,7 +45,6 @@ pub(crate) enum MainChatExecutionPath {
     ToolLoop,
     PlanExecute,
     GovernedBlocker,
-    LegacyCompatFallback,
 }
 
 impl MainChatExecutionPath {
@@ -62,7 +56,6 @@ impl MainChatExecutionPath {
             Self::ToolLoop => "ToolLoop",
             Self::PlanExecute => "PlanExecute",
             Self::GovernedBlocker => "GovernedBlocker",
-            Self::LegacyCompatFallback => "LegacyCompatFallback",
         }
     }
 
@@ -140,29 +133,6 @@ impl MainChatTurnRouteDecision {
     pub(crate) fn execution_path_label(&self) -> &'static str {
         self.path.as_str()
     }
-
-    pub(crate) fn legacy_compat_fallback(&self) -> Self {
-        self.legacy_compat_fallback_with_reason("legacy_compat_after_strategy_no_result")
-    }
-
-    pub(crate) fn legacy_compat_fallback_with_reason(
-        &self,
-        reason_code: impl Into<String>,
-    ) -> Self {
-        Self {
-            path: MainChatExecutionPath::LegacyCompatFallback,
-            strategy_label: self.strategy_label.clone(),
-            reason_code: reason_code.into(),
-            kernel_supported: self.kernel_supported,
-            kernel_support_disposition: self.kernel_support_disposition.clone(),
-            fallback_allowed: true,
-            requires_provider: false,
-            requires_tool_loop: false,
-            live_provider_backed_react_required: self.live_provider_backed_react_required,
-            governed_agent_loop_candidate_selection_required: self
-                .governed_agent_loop_candidate_selection_required,
-        }
-    }
 }
 
 pub(crate) async fn decide_main_chat_turn_route(
@@ -212,14 +182,14 @@ pub(crate) fn decide_main_chat_turn_route_from_disposition(
             } else {
                 "governed_agent_loop_candidate_selection_required"
             },
-            true,
+            false,
             live_provider_backed_react_required,
         )
     } else if !kernel_supported {
         (
-            MainChatExecutionPath::LegacyCompatFallback,
+            MainChatExecutionPath::GovernedBlocker,
             "kernel_support_unavailable",
-            true,
+            false,
             false,
         )
     } else {
@@ -351,24 +321,6 @@ pub(crate) async fn run_main_chat_turn_pipeline_buffered(
         });
     }
 
-    let intent = if let Some(ref m) = user_msg {
-        if m.role == "user" {
-            let router = state.intent_router.lock().await;
-            Some(router.classify(&m.content))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let layer = if let (Some(ref i), Some(ref m)) = (&intent, &user_msg) {
-        let lr = state.layer_router.lock().await;
-        lr.resolve(i, &m.content)
-    } else {
-        Layer::L2
-    };
-
     let (use_v2, preprocess_options) = {
         let cfg = state.config.lock().await;
         (
@@ -379,7 +331,7 @@ pub(crate) async fn run_main_chat_turn_pipeline_buffered(
 
     let (
         mut life_model,
-        tools_prompt,
+        _tools_prompt,
         privacy_engine,
         privacy_map,
         desensitized_messages,
@@ -459,47 +411,24 @@ pub(crate) async fn run_main_chat_turn_pipeline_buffered(
             }
             MainChatToolLoopOutcome::ExplicitFallbackAvailable { reason_code }
             | MainChatToolLoopOutcome::NoResult { reason_code } => {
-                if !route_decision.fallback_allowed {
-                    return Err(format!(
-                        "ToolLoop adapter returned {reason_code}, but legacy fallback is not allowed"
-                    ));
-                }
-                let legacy_route_decision =
-                    route_decision.legacy_compat_fallback_with_reason(reason_code);
-                let ordinary_plan = ordinary_send_chat_execution_plan(layer);
-                let result = run_retired_buffered_fallback_delivery(
-                    session_id,
-                    user_msg,
-                    life_model,
-                    tools_prompt,
-                    privacy_engine,
-                    privacy_map,
-                    desensitized_messages,
+                let result = build_main_chat_unsupported_turn_blocker_result(
+                    &session_id,
+                    user_msg.as_ref(),
                     embed_err,
-                    auto_checkin_msg,
-                    layer,
-                    context_summary,
-                    ordinary_plan,
-                    main_chat_agent_turn,
-                    legacy_route_decision.clone(),
+                    &main_chat_agent_turn,
+                    None,
+                    &route_decision,
+                    MainChatTurnStreamMode::Buffered,
+                    true,
                     state,
+                    &route_preview_trace,
+                    &reason_code,
                 )
                 .await?;
-                let mut result = result;
-                crate::main_chat_runtime_status::record_main_chat_turn_route_evidence(
-                    state,
-                    &legacy_route_decision,
-                    MainChatTurnStreamMode::Buffered,
-                    false,
-                    true,
-                    None,
-                )
-                .await;
-                attach_route_preview_trace(&mut result.reasoning_trace, &route_preview_trace);
                 materialize_optional_main_chat_agent_events(state, result.agent_state.as_ref())
                     .await?;
                 return Ok(MainChatTurnPipelineOutput {
-                    route_decision: legacy_route_decision,
+                    route_decision,
                     delivery: MainChatTurnDelivery::Buffered {
                         result: Box::new(result),
                     },
@@ -544,40 +473,23 @@ pub(crate) async fn run_main_chat_turn_pipeline_buffered(
         });
     }
 
-    let legacy_route_decision = route_decision.legacy_compat_fallback();
-    let ordinary_plan = ordinary_send_chat_execution_plan(layer);
-    let result = run_retired_buffered_fallback_delivery(
-        session_id,
-        user_msg,
-        life_model,
-        tools_prompt,
-        privacy_engine,
-        privacy_map,
-        desensitized_messages,
+    let result = build_main_chat_unsupported_turn_blocker_result(
+        &session_id,
+        user_msg.as_ref(),
         embed_err,
-        auto_checkin_msg,
-        layer,
-        context_summary,
-        ordinary_plan,
-        main_chat_agent_turn,
-        legacy_route_decision.clone(),
-        state,
-    )
-    .await?;
-    let mut result = result;
-    crate::main_chat_runtime_status::record_main_chat_turn_route_evidence(
-        state,
-        &legacy_route_decision,
+        &main_chat_agent_turn,
+        None,
+        &route_decision,
         MainChatTurnStreamMode::Buffered,
         false,
-        true,
-        None,
+        state,
+        &route_preview_trace,
+        "strategy_no_result",
     )
-    .await;
-    attach_route_preview_trace(&mut result.reasoning_trace, &route_preview_trace);
+    .await?;
     materialize_optional_main_chat_agent_events(state, result.agent_state.as_ref()).await?;
     Ok(MainChatTurnPipelineOutput {
-        route_decision: legacy_route_decision,
+        route_decision,
         delivery: MainChatTurnDelivery::Buffered {
             result: Box::new(result),
         },
@@ -674,23 +586,6 @@ pub(crate) async fn run_main_chat_turn_pipeline_streaming(
         });
     }
 
-    let intent = if let Some(ref m) = user_msg {
-        if m.role == "user" {
-            let router = state.intent_router.lock().await;
-            Some(router.classify(&m.content))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let layer = if let (Some(ref i), Some(ref m)) = (&intent, &user_msg) {
-        let lr = state.layer_router.lock().await;
-        lr.resolve(i, &m.content)
-    } else {
-        Layer::L2
-    };
     let user_input_text = messages
         .last()
         .map(|m| m.content.clone())
@@ -713,7 +608,7 @@ pub(crate) async fn run_main_chat_turn_pipeline_streaming(
 
     let (
         mut life_model,
-        tools_prompt,
+        _tools_prompt,
         privacy_engine,
         privacy_map,
         desensitized_messages,
@@ -840,33 +735,44 @@ pub(crate) async fn run_main_chat_turn_pipeline_streaming(
             }
             MainChatToolLoopOutcome::ExplicitFallbackAvailable { reason_code }
             | MainChatToolLoopOutcome::NoResult { reason_code } => {
-                if !route_decision.fallback_allowed {
-                    return Err(format!(
-                        "ToolLoop adapter returned {reason_code}, but legacy fallback is not allowed"
-                    ));
-                }
-                let legacy_route_decision =
-                    route_decision.legacy_compat_fallback_with_reason(reason_code);
-                return run_retired_streaming_fallback_delivery(
+                let result = build_main_chat_unsupported_turn_blocker_result(
                     &session_id,
-                    user_msg,
-                    life_model,
-                    tools_prompt,
-                    privacy_engine,
-                    privacy_map,
-                    desensitized_messages,
+                    user_msg.as_ref(),
                     embed_err,
-                    auto_checkin_msg_stream,
-                    layer,
-                    context_summary,
-                    agent_run,
-                    main_chat_agent_turn,
-                    legacy_route_decision,
+                    &main_chat_agent_turn,
+                    Some(agent_run),
+                    &route_decision,
+                    MainChatTurnStreamMode::Streaming,
+                    true,
                     state,
-                    route_preview_trace.clone(),
-                    emit_stream_event,
+                    &route_preview_trace,
+                    &reason_code,
                 )
-                .await;
+                .await?;
+                let durable_events =
+                    materialize_optional_main_chat_agent_events(state, result.agent_state.as_ref())
+                        .await?;
+                let durable_event_count = durable_events.len();
+                let run_id = result.run_id.clone();
+                let legacy_fallback_used = result.legacy_fallback_used;
+                let done_payload = emit_stream_send_message_result(
+                    &session_id,
+                    result,
+                    None,
+                    durable_events,
+                    true,
+                    emit_stream_event,
+                )?;
+                return Ok(MainChatTurnPipelineOutput {
+                    route_decision,
+                    delivery: MainChatTurnDelivery::Streamed {
+                        run_id,
+                        legacy_fallback_used,
+                        kernel_event_count: None,
+                        durable_event_count,
+                        done_payload,
+                    },
+                });
             }
         }
     }
@@ -923,27 +829,185 @@ pub(crate) async fn run_main_chat_turn_pipeline_streaming(
         });
     }
 
-    let legacy_route_decision = route_decision.legacy_compat_fallback();
-    run_retired_streaming_fallback_delivery(
+    let result = build_main_chat_unsupported_turn_blocker_result(
         &session_id,
-        user_msg,
-        life_model,
-        tools_prompt,
-        privacy_engine,
-        privacy_map,
-        desensitized_messages,
+        user_msg.as_ref(),
         embed_err,
-        auto_checkin_msg_stream,
-        layer,
-        context_summary,
-        agent_run,
-        main_chat_agent_turn,
-        legacy_route_decision,
+        &main_chat_agent_turn,
+        Some(agent_run),
+        &route_decision,
+        MainChatTurnStreamMode::Streaming,
+        false,
         state,
-        route_preview_trace,
-        emit_stream_event,
+        &route_preview_trace,
+        "strategy_no_result",
     )
-    .await
+    .await?;
+    let durable_events =
+        materialize_optional_main_chat_agent_events(state, result.agent_state.as_ref()).await?;
+    let durable_event_count = durable_events.len();
+    let run_id = result.run_id.clone();
+    let legacy_fallback_used = result.legacy_fallback_used;
+    let done_payload = emit_stream_send_message_result(
+        &session_id,
+        result,
+        None,
+        durable_events,
+        true,
+        emit_stream_event,
+    )?;
+    Ok(MainChatTurnPipelineOutput {
+        route_decision,
+        delivery: MainChatTurnDelivery::Streamed {
+            run_id,
+            legacy_fallback_used,
+            kernel_event_count: None,
+            durable_event_count,
+            done_payload,
+        },
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_main_chat_unsupported_turn_blocker_result(
+    session_id: &str,
+    user_msg: Option<&ChatMessage>,
+    embed_err: Option<String>,
+    main_chat_agent_turn: &crate::main_chat_runtime_support::MainChatAgentTurn,
+    agent_run: Option<openlife_core::agent::AgentRun>,
+    route_decision: &MainChatTurnRouteDecision,
+    stream_mode: MainChatTurnStreamMode,
+    observed_agent_loop: bool,
+    state: &Arc<AppState>,
+    route_preview_trace: &MainChatRoutePreviewTrace,
+    no_result_reason_code: &str,
+) -> Result<SendMessageResult, String> {
+    let user_input_text = user_msg
+        .map(|message| message.content.clone())
+        .unwrap_or_default();
+    let existing_agent_run = agent_run.is_some();
+    let mut agent_run = agent_run.unwrap_or_else(|| {
+        openlife_core::agent::AgentRun::new_chat_run(session_id, &user_input_text)
+    });
+    let blocker_code = "main_chat_unsupported_turn_governed_blocker";
+    let reply = "Main Chat could not produce a governed result for this route. Retired fallback delivery is blocked; no legacy runtime, tools, or provider model were invoked.".to_string();
+    let mut reasoning_trace = ReasoningTrace {
+        generation_result: Some(serde_json::json!({
+            "status": "failed",
+            "blockerCode": blocker_code,
+            "routeDecisionReasonCode": route_decision.reason_code,
+            "noResultReasonCode": no_result_reason_code,
+            "retiredFallbackBlocked": true,
+            "legacyFallbackUsed": false,
+            "legacyRuntimeInvoked": false,
+            "agentRuntimeInvoked": false,
+            "modelInvoked": false,
+            "toolInvoked": false,
+        })),
+        ..Default::default()
+    };
+    if let Some(err) = embed_err {
+        reasoning_trace.errors.push(err);
+    }
+    attach_route_preview_trace(&mut reasoning_trace, route_preview_trace);
+
+    agent_run.reasoning_strategy = Some(format!(
+        "main_chat_agent_v1_{}_unsupported_governed_blocker",
+        main_chat_agent_turn.decision.selected_strategy.as_str()
+    ));
+    agent_run.output_preview = Some(reply.clone());
+    agent_run.reasoning_trace = Some(reasoning_trace.clone());
+    agent_run.fail(openlife_core::agent::AgentRunError {
+        message: blocker_code.into(),
+        phase: "route".into(),
+        recoverable: true,
+    });
+    if let Some(ref store_arc) = state.agent_run_store {
+        let store = store_arc.lock().await;
+        let write_result = if existing_agent_run {
+            store.update_run(&agent_run)
+        } else {
+            store.create_run(&agent_run)
+        };
+        if let Err(err) = write_result {
+            log::warn!(
+                "[AgentRun] unsupported governed blocker run persistence failed: {}",
+                err
+            );
+        }
+    }
+
+    crate::main_chat_runtime_status::record_main_chat_turn_route_evidence(
+        state,
+        route_decision,
+        stream_mode,
+        observed_agent_loop,
+        false,
+        None,
+    )
+    .await;
+
+    let task_session_id = main_chat_agent_turn
+        .decision
+        .agent_task_session_id
+        .as_deref();
+    let mut execution_transcript = main_chat_agent_turn.transcript_entries.clone();
+    execution_transcript.extend(
+        append_main_chat_agent_transcript(
+            state,
+            task_session_id,
+            openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Error,
+            "Main Chat route produced no governed result and retired fallback delivery was blocked.",
+            serde_json::json!({
+                "runId": agent_run.id.clone(),
+                "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
+                "executionPath": route_decision.execution_path_label(),
+                "routeDecisionReasonCode": route_decision.reason_code,
+                "noResultReasonCode": no_result_reason_code,
+                "blockerCode": blocker_code,
+                "retiredFallbackBlocked": true,
+                "legacyFallbackUsed": false,
+                "legacyRuntimeInvoked": false,
+                "modelInvoked": false,
+                "toolInvoked": false,
+            }),
+        )
+        .await,
+    );
+
+    finalize_main_chat_task_failure(
+        state,
+        Some(&agent_run.id),
+        task_session_id,
+        MainChatTaskFailureKind::PolicyBlocker,
+        blocker_code,
+        "main_chat_turn_pipeline.unsupported_governed_blocker",
+    )
+    .await?;
+
+    let agent_state =
+        crate::main_chat_agent_state_payload::assemble_main_chat_agent_state_for_turn(
+            state,
+            task_session_id,
+            Some(&agent_run.id),
+        )
+        .await;
+
+    Ok(SendMessageResult {
+        reply,
+        status: "failed".into(),
+        blockers: vec![blocker_code.into()],
+        reasoning_trace,
+        tool_calls: Vec::new(),
+        run_id: Some(agent_run.id),
+        agent_ingress: Some(main_chat_agent_turn.decision.clone()),
+        agent_state,
+        execution_transcript,
+        legacy_fallback_used: false,
+        legacy_runtime_invoked: false,
+        model_invoked: false,
+        tool_invoked: false,
+    })
 }
 
 fn emit_stream_send_message_result(
@@ -1014,224 +1078,6 @@ fn emit_stream_send_message_result(
     Ok(done_payload)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_retired_streaming_fallback_delivery(
-    session_id: &str,
-    _user_msg: Option<ChatMessage>,
-    _life_model: openlife_core::life_model::LifeModel,
-    _tools_prompt: String,
-    _privacy_engine: openlife_core::privacy::PrivacyEngine,
-    _privacy_map: std::collections::HashMap<String, String>,
-    _desensitized_messages: Vec<ChatMessage>,
-    embed_err: Option<String>,
-    _auto_checkin_msg_stream: Option<String>,
-    layer: Layer,
-    _context_summary: openlife_core::agent::ContextSummary,
-    mut agent_run: openlife_core::agent::AgentRun,
-    main_chat_agent_turn: crate::main_chat_runtime_support::MainChatAgentTurn,
-    legacy_route_decision: MainChatTurnRouteDecision,
-    state: &Arc<AppState>,
-    route_preview_trace: MainChatRoutePreviewTrace,
-    emit_stream_event: &mut (impl FnMut(&str, serde_json::Value) + Send),
-) -> Result<MainChatTurnPipelineOutput, String> {
-    let ordinary_plan = ordinary_stream_chat_execution_plan(layer);
-    debug_assert!(!ordinary_plan.constructs_agent_loop);
-    debug_assert!(!ordinary_plan.constructs_action_executor);
-    debug_assert!(!ordinary_plan.tool_execution_allowed);
-
-    let legacy_fallback_used = true;
-    let fallback_reason_code = legacy_route_decision.reason_code.clone();
-    crate::main_chat_runtime_status::record_main_chat_legacy_fallback(
-        state,
-        fallback_reason_code.clone(),
-    )
-    .await;
-    crate::main_chat_runtime_status::record_main_chat_turn_route_evidence(
-        state,
-        &legacy_route_decision,
-        MainChatTurnStreamMode::Streaming,
-        false,
-        true,
-        None,
-    )
-    .await;
-
-    let blocker_code = "retired_stream_runtime_fallback_blocked";
-    let reply = "Main Chat streaming retired runtime fallback is blocked. This turn did not invoke the old AgentRuntime, tools, or provider model.".to_string();
-    let mut reasoning_trace = ReasoningTrace::default();
-    if let Some(err) = embed_err {
-        reasoning_trace.errors.push(err);
-    }
-    reasoning_trace.generation_result = Some(serde_json::json!({
-        "status": "blocked",
-        "blockerCode": blocker_code,
-        "legacyFallbackUsed": true,
-        "legacyFallbackReasonCode": fallback_reason_code.clone(),
-        "modelInvoked": false,
-        "toolInvoked": false,
-        "agentRuntimeInvoked": false,
-    }));
-    attach_route_preview_trace(&mut reasoning_trace, &route_preview_trace);
-    agent_run.reasoning_strategy = Some(format!(
-        "main_chat_agent_v1_{}_retired_stream_blocked",
-        main_chat_agent_turn.decision.selected_strategy.as_str()
-    ));
-    agent_run.reasoning_trace = Some(reasoning_trace.clone());
-
-    let task_session_id = main_chat_agent_turn
-        .decision
-        .agent_task_session_id
-        .as_deref();
-    let mut execution_transcript = main_chat_agent_turn.transcript_entries.clone();
-    execution_transcript.extend(
-        append_main_chat_agent_transcript(
-            state,
-            task_session_id,
-            openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Fallback,
-            "Retired streaming fallback was blocked for this Main Chat turn.",
-            serde_json::json!({
-                "runId": agent_run.id,
-                "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
-                "executionPath": legacy_route_decision.execution_path_label(),
-                "routeDecisionReasonCode": fallback_reason_code.clone(),
-                "fallbackReason": "retired_stream_runtime_fallback_blocked",
-                "fallbackVisible": true,
-                "legacyRuntimeInvoked": false,
-                "modelInvoked": false,
-                "toolInvoked": false,
-            }),
-        )
-        .await,
-    );
-    execution_transcript.extend(
-        append_main_chat_agent_transcript(
-            state,
-            task_session_id,
-            openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Error,
-            "Main Chat stream fallback was blocked before invoking legacy runtime.",
-            serde_json::json!({
-                "runId": agent_run.id,
-                "blockerCode": blocker_code,
-                "legacyFallbackUsed": true,
-                "legacyFallbackReasonCode": fallback_reason_code.clone(),
-            }),
-        )
-        .await,
-    );
-
-    fail_stream_agent_run(
-        state,
-        &mut agent_run,
-        task_session_id,
-        MainChatTaskFailureKind::ProviderError,
-        blocker_code,
-    )
-    .await;
-    if let Some(ref store_arc) = state.agent_run_store {
-        let store = store_arc.lock().await;
-        if let Err(e) = store.update_run(&agent_run) {
-            log::warn!("[AgentRun] legacy stream blocker update failed: {}", e);
-        }
-    }
-
-    emit_stream_event(
-        "stream-message-start",
-        serde_json::json!({
-            "session_id": session_id,
-            "run_id": agent_run.id,
-            "reasoning_trace": reasoning_trace.clone(),
-            "tool_calls": Vec::<ToolCallResult>::new(),
-            "agent_ingress": main_chat_agent_turn.decision.clone(),
-            "execution_transcript": main_chat_agent_turn.transcript_entries.clone(),
-            "legacy_fallback_used": true,
-            "status": "failed",
-            "blockers": [blocker_code],
-            "legacy_fallback_reason_code": fallback_reason_code.clone(),
-            "legacy_runtime_invoked": false,
-            "model_invoked": false,
-            "tool_invoked": false,
-        }),
-    );
-    let tool_calls: Vec<ToolCallResult> = vec![];
-
-    let agent_state =
-        crate::main_chat_agent_state_payload::assemble_main_chat_agent_state_for_turn(
-            state,
-            main_chat_agent_turn
-                .decision
-                .agent_task_session_id
-                .as_deref(),
-            Some(&agent_run.id),
-        )
-        .await;
-    let durable_events =
-        materialize_optional_main_chat_agent_events(state, agent_state.as_ref()).await?;
-    let durable_event_count = durable_events.len();
-
-    let done_payload = serde_json::json!({
-            "session_id": session_id,
-            "run_id": agent_run.id,
-            "reply": reply,
-            "reasoning_trace": reasoning_trace,
-            "tool_calls": tool_calls,
-            "agent_ingress": main_chat_agent_turn.decision.clone(),
-            "agent_state": agent_state,
-            "execution_transcript": execution_transcript,
-            "legacy_fallback_used": true,
-            "status": "failed",
-            "blockers": [blocker_code],
-            "legacy_fallback_reason_code": fallback_reason_code,
-            "legacy_runtime_invoked": false,
-            "model_invoked": false,
-            "tool_invoked": false,
-    });
-    emit_stream_event("stream-message-done", done_payload.clone());
-    for event in durable_events {
-        emit_stream_event(
-            "main-chat-agent-event",
-            serde_json::to_value(event).map_err(|err| err.to_string())?,
-        );
-    }
-
-    Ok(MainChatTurnPipelineOutput {
-        route_decision: legacy_route_decision,
-        delivery: MainChatTurnDelivery::Streamed {
-            run_id: Some(agent_run.id),
-            legacy_fallback_used,
-            kernel_event_count: None,
-            durable_event_count,
-            done_payload,
-        },
-    })
-}
-
-async fn fail_stream_agent_run(
-    state: &Arc<AppState>,
-    agent_run: &mut openlife_core::agent::AgentRun,
-    task_session_id: Option<&str>,
-    failure_kind: MainChatTaskFailureKind,
-    message: &str,
-) {
-    let error = openlife_core::agent::AgentRunError {
-        message: message.to_string(),
-        phase: failure_kind.as_str().to_string(),
-        recoverable: true,
-    };
-    agent_run.fail(error);
-    if let Err(e) = finalize_main_chat_task_failure(
-        state,
-        Some(&agent_run.id),
-        task_session_id,
-        failure_kind,
-        message,
-        "main_chat_streaming.fail_stream_agent_run",
-    )
-    .await
-    {
-        log::warn!("[AgentRun] stream failure finalizer failed: {}", e);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1292,6 +1138,12 @@ mod tests {
                 "kernel_supported_write_outcome",
             ),
             (
+                "今天空腹喝咖啡后赶路时心慌，香蕉酸奶有缓解，帮我记下来。以后早上安排工作前先确认我有没有吃东西。",
+                MainChatAgentStrategy::LifeModelProposal,
+                MainChatExecutionPath::KernelWriteOutcome,
+                "kernel_supported_write_outcome",
+            ),
+            (
                 "Send this private medical update to my coworker.",
                 MainChatAgentStrategy::BlockedConfirmation,
                 MainChatExecutionPath::KernelWriteOutcome,
@@ -1312,7 +1164,7 @@ mod tests {
     }
 
     #[test]
-    fn main_chat_turn_route_decision_keeps_tool_loop_and_legacy_explicit() {
+    fn main_chat_turn_route_decision_keeps_tool_loop_without_legacy_fallback() {
         let provider_backed = decide_main_chat_turn_route_from_disposition(
             MainChatAgentStrategy::ReActToolExecution,
             MainChatKernelSupportDisposition::KernelSupported,
@@ -1324,7 +1176,7 @@ mod tests {
             provider_backed.reason_code,
             "provider_backed_react_required"
         );
-        assert!(provider_backed.fallback_allowed);
+        assert!(!provider_backed.fallback_allowed);
         assert!(provider_backed.requires_provider);
         assert!(provider_backed.requires_tool_loop);
 
@@ -1339,19 +1191,9 @@ mod tests {
             governed_selection.reason_code,
             "governed_agent_loop_candidate_selection_required"
         );
-        assert!(governed_selection.fallback_allowed);
+        assert!(!governed_selection.fallback_allowed);
         assert!(!governed_selection.requires_provider);
         assert!(governed_selection.requires_tool_loop);
-
-        let legacy = governed_selection.legacy_compat_fallback();
-        assert_eq!(legacy.path, MainChatExecutionPath::LegacyCompatFallback);
-        assert_eq!(
-            legacy.execution_path_label(),
-            MainChatExecutionPath::LegacyCompatFallback.as_str()
-        );
-        assert_eq!(legacy.reason_code, "legacy_compat_after_strategy_no_result");
-        assert!(legacy.fallback_allowed);
-        assert!(!legacy.requires_tool_loop);
     }
 
     #[test]
@@ -1408,18 +1250,15 @@ mod tests {
             assert!(!send_decision.fallback_allowed, "{label}");
         }
 
-        let legacy_eligible = decide_main_chat_turn_route_from_disposition(
+        let tool_loop_decision = decide_main_chat_turn_route_from_disposition(
             MainChatAgentStrategy::ReActToolExecution,
             MainChatKernelSupportDisposition::KernelSupported,
             false,
             true,
         );
-        assert_eq!(legacy_eligible.path, MainChatExecutionPath::ToolLoop);
-        assert!(legacy_eligible.fallback_allowed);
-        assert_eq!(
-            legacy_eligible.legacy_compat_fallback().path,
-            MainChatExecutionPath::LegacyCompatFallback
-        );
+        assert_eq!(tool_loop_decision.path, MainChatExecutionPath::ToolLoop);
+        assert!(!tool_loop_decision.fallback_allowed);
+        assert!(tool_loop_decision.requires_tool_loop);
     }
 
     #[test]
@@ -1442,11 +1281,6 @@ mod tests {
                 source.matches("try_run_main_chat_agent_strategy(").count(),
                 0,
                 "{label} must not own strategy fallback selection after Phase 3"
-            );
-            assert_eq!(
-                source.matches("legacy_compat_fallback()").count(),
-                0,
-                "{label} must not own explicit legacy fallback selection after Phase 3"
             );
             assert_eq!(
                 source.matches("main_chat_kernel_supports_turn(").count(),
@@ -1508,11 +1342,11 @@ mod tests {
         assert!(
             pipeline_source.contains("MainChatToolLoopOutcome::ExplicitFallbackAvailable")
                 && pipeline_source.contains("MainChatToolLoopOutcome::NoResult"),
-            "legacy fallback after ToolLoop must be explicit outcome handling"
+            "ToolLoop no-result handling must stay explicit"
         );
         assert!(
-            pipeline_source.contains("route_decision: legacy_route_decision"),
-            "explicit legacy fallback must be reflected in the pipeline output route evidence"
+            pipeline_source.contains("main_chat_unsupported_turn_governed_blocker"),
+            "ToolLoop or strategy no-result must become a governed blocker"
         );
     }
 }

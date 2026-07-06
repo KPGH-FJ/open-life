@@ -217,6 +217,7 @@ pub(crate) async fn record_main_chat_kernel_event_count(
     runtime.last_kernel_event_count = Some(kernel_event_count);
 }
 
+#[allow(dead_code)]
 pub(crate) async fn record_main_chat_legacy_fallback(
     state: &Arc<AppState>,
     reason_code: impl Into<String>,

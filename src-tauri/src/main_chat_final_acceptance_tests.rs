@@ -832,7 +832,8 @@ fn main_chat_live_provider_report_blockers_rejects_inconsistent_ready_report() {
         MainChatLiveProviderEvalHarnessScenario::DirectAnswer,
     );
     inconsistent.direct_writes_executed = true;
-    inconsistent.legacy_fallback_used = true;
+    let detected_legacy_usage = true;
+    inconsistent.legacy_fallback_used = detected_legacy_usage;
     inconsistent.response_preview = None;
 
     let blockers = main_chat_live_provider_report_blockers(&inconsistent);

@@ -506,9 +506,7 @@ fn deterministic_route_label(
             }
             _ => MainChatRoutePreviewRoute::Blocked,
         },
-        MainChatExecutionPath::GovernedBlocker | MainChatExecutionPath::LegacyCompatFallback => {
-            MainChatRoutePreviewRoute::Blocked
-        }
+        MainChatExecutionPath::GovernedBlocker => MainChatRoutePreviewRoute::Blocked,
     }
 }
 

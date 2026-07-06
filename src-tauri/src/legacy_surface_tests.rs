@@ -173,7 +173,7 @@ fn registry() -> Vec<LegacySurfaceRegistryEntry> {
         LegacySurfaceRegistryEntry {
             token: snake(&["send", "message", "with", "legacy", "generation"]),
             status: LegacySurfaceStatus::Retired,
-            replacement: "run_retired_buffered_fallback_delivery",
+            replacement: "main_chat_unsupported_turn_governed_blocker",
             allowed_locations: vec!["src-tauri/src/main_chat_runtime_module_tests.rs"],
             surface_kind: LegacySurfaceKind::RustTauriCommand,
             enforcement_mode: LegacySurfaceEnforcementMode::AllowlistOnly,

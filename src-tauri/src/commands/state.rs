@@ -361,6 +361,7 @@ mod tests {
             vector_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::vectors::VectorStore::new_in_memory().unwrap(),
             )),
+            vector_persistence_mode: crate::state::VectorPersistenceMode::Enabled,
             builder_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             builder_session_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::builder::BuilderSessionStore::new(
@@ -378,6 +379,9 @@ mod tests {
             evidence_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::EvidenceStore::new_in_memory().unwrap(),
             )),
+            life_event_store: Some(Arc::new(tokio::sync::Mutex::new(
+                openlife_core::agent::LifeEventStore::new_in_memory().unwrap(),
+            ))),
             heuristic_store: Arc::new(tokio::sync::Mutex::new({
                 let store = openlife_core::agent::HeuristicStore::new_in_memory().unwrap();
                 store.seed_mvp_heuristics().unwrap();

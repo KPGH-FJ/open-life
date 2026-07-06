@@ -56,6 +56,22 @@ impl MainChatRuntimeState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VectorPersistenceMode {
+    #[default]
+    Enabled,
+    EvalDisabled,
+}
+
+impl VectorPersistenceMode {
+    pub fn skip_reason(self) -> Option<&'static str> {
+        match self {
+            Self::Enabled => None,
+            Self::EvalDisabled => Some("eval_disabled"),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct MainChatFinalGateReadinessSnapshot {
     pub status: String,
@@ -94,6 +110,7 @@ pub struct AppState {
     pub version_manager: Arc<Mutex<VersionManager>>,
     pub feedback_store: Arc<Mutex<FeedbackStore>>,
     pub vector_store: Arc<Mutex<VectorStore>>,
+    pub vector_persistence_mode: VectorPersistenceMode,
     pub builder_sessions: Arc<Mutex<HashMap<String, BuilderSession>>>,
     pub builder_session_store: Arc<Mutex<BuilderSessionStore>>,
     pub a2a_sidecar: Arc<Mutex<a2a_sidecar::A2ASidecar>>,
@@ -101,6 +118,7 @@ pub struct AppState {
     pub mcp_audit_store: Arc<Mutex<McpAuditStore>>,
     pub agent_run_store: Option<Arc<Mutex<openlife_core::agent::AgentRunStore>>>,
     pub evidence_store: Arc<Mutex<openlife_core::agent::EvidenceStore>>,
+    pub life_event_store: Option<Arc<Mutex<openlife_core::agent::LifeEventStore>>>,
     pub heuristic_store: Arc<Mutex<openlife_core::agent::HeuristicStore>>,
     pub policy_store: Arc<openlife_core::agent::PolicyStore>,
     pub proposal_store: Option<Arc<Mutex<openlife_core::agent::ProposalStore>>>,

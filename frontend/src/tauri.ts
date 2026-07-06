@@ -407,7 +407,7 @@ export interface ReasoningTrace {
   input?: string;
   meaning_result?: any;
   strategy_result?: any;
-  generation_result?: any;
+  generation_result?: MainChatGenerationResult;
   output?: string;
   errors?: string[];
   tool_plan?: string[];
@@ -420,6 +420,41 @@ export interface ReasoningTrace {
   stable_steps?: string[];
   hsSelectionAudit?: HSSelectionAudit;
   behaviorChecks?: HSBehaviorCheckSummary[];
+}
+
+export interface MainChatMemoryCandidateTrace {
+  candidateId?: string;
+  kind?: string;
+  destination?: string;
+  sourcePreview?: string;
+  normalizedClaim?: string;
+  sensitivity?: string;
+  stability?: string;
+  explicitness?: string;
+  futureActionability?: string;
+  confidence?: number;
+  reasonCodes?: string[];
+}
+
+export interface MainChatMemoryGovernanceEvidence {
+  candidateCount?: number;
+  candidateTrace?: MainChatMemoryCandidateTrace[];
+  lifeEventIds?: string[];
+  memoryProposalIds?: string[];
+  lifeModelProposalIds?: string[];
+  sessionOnlyCandidateIds?: string[];
+  noOpCandidateIds?: string[];
+  blockers?: string[];
+  directWritesExecuted?: boolean;
+  directLifeModelWrite?: boolean;
+  directMemoryWrite?: boolean;
+  acceptedDurableTruthWritten?: boolean;
+  localLifeEventCaptureExecuted?: boolean;
+}
+
+export interface MainChatGenerationResult {
+  memoryGovernance?: MainChatMemoryGovernanceEvidence;
+  [key: string]: any;
 }
 
 export interface HSAssetExclusion {

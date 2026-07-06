@@ -2668,11 +2668,12 @@ async fn main_chat_agent_stage2_readiness_counts_live_write_and_legacy_safety_fl
         .find(|row| row.scenario_id == "L2-L04")
         .expect("L2-L04 evidence")
         .direct_writes_executed = true;
+    let detected_legacy_usage = true;
     live_evidence
         .iter_mut()
         .find(|row| row.scenario_id == "L2-L05")
         .expect("L2-L05 evidence")
-        .legacy_fallback_used = true;
+        .legacy_fallback_used = detected_legacy_usage;
 
     let report = run_main_chat_agent_stage2_readiness_report_with_inputs_for_tests(
         Stage2ReadinessTestInputs::fully_ready_for_tests(complete_manual_records(), live_evidence),

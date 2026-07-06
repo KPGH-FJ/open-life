@@ -87,6 +87,15 @@ export function sourceLabel(source: string): string {
 
 export function proposalDomainLabel(proposal: AgentProposal): string {
   const path = canonicalLifeModelPath(proposal.affectedPath).toLowerCase();
+  if (proposal.proposalType === "memory_write") return "用户事实/经验";
+  if (
+    proposal.proposalType === "life_model_update" &&
+    isRecord(proposal.after) &&
+    typeof proposal.after.candidateKind === "string" &&
+    ["procedural_rule", "preference", "identity_or_role"].includes(proposal.after.candidateKind)
+  ) {
+    return "未来行为规则/偏好";
+  }
   if (path === COMMUNICATION_STYLE_CANONICAL_PATH) return "沟通偏好";
   if (path.startsWith("identity.voice_style")) return "陪伴语气";
   if (path.startsWith("identity.name")) return "称呼";
@@ -140,7 +149,7 @@ export function metadataValueSummary(value: unknown): string {
   if (value === null || value === undefined) return "空";
   if (typeof value === "string") return value.trim() ? `文本 ${value.trim().length} 字` : "空文本";
   if (typeof value === "number" || typeof value === "boolean") return `${typeof value}: ${value}`;
-  if (Array.isArray(value)) return `数组 ${value.length} 项`;
+  if (Array.isArray(value)) return arrayValueSummary(value);
   if (typeof value === "object") {
     const keys = Object.keys(value as Record<string, unknown>).sort();
     return keys.length > 0 ? `对象字段：${keys.slice(0, 6).join(", ")}` : "空对象";
@@ -165,6 +174,44 @@ function shortPreview(value: string, maxLength = 72): string {
   return compact.length > maxLength ? `「${compact.slice(0, maxLength - 1)}…」` : `「${compact}」`;
 }
 
+function compactInline(value: string, maxLength = 48): string {
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (!compact) return "";
+  return compact.length > maxLength ? `${compact.slice(0, maxLength - 1)}…` : compact;
+}
+
+function arrayItemPreview(value: unknown): string | null {
+  if (typeof value === "string") {
+    if (SENSITIVE_VALUE_RE.test(value)) return metadataValueSummary(value);
+    return compactInline(value);
+  }
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (!isRecord(value)) return null;
+
+  for (const key of ["name", "title", "label", "value", "content", "text", "description"]) {
+    const field = value[key];
+    if (typeof field === "string" && field.trim()) {
+      if (SENSITIVE_KEY_RE.test(key) || SENSITIVE_VALUE_RE.test(field)) {
+        return `${key}: ${metadataValueSummary(field)}`;
+      }
+      return compactInline(field);
+    }
+  }
+
+  const keys = Object.keys(value)
+    .filter(key => !TECHNICAL_PATH_KEY_RE.test(key))
+    .sort();
+  return keys.length > 0 ? `对象字段：${keys.slice(0, 3).join(", ")}` : null;
+}
+
+function arrayValueSummary(value: unknown[], maxItems = 4): string {
+  if (value.length === 0) return "空数组";
+  const previews = value.slice(0, maxItems).map(arrayItemPreview).filter(Boolean) as string[];
+  if (previews.length === 0) return `数组 ${value.length} 项`;
+  const suffix = value.length > previews.length ? `，另 ${value.length - previews.length} 项` : "";
+  return `数组 ${value.length} 项：${previews.join("；")}${suffix}`;
+}
+
 function safeDisplayValue(value: unknown, fieldPath: string): { text: string; redacted: boolean } {
   const keySensitive = SENSITIVE_KEY_RE.test(fieldPath) || TECHNICAL_PATH_KEY_RE.test(fieldPath);
   if (typeof value === "string") {
@@ -181,7 +228,10 @@ function safeDisplayValue(value: unknown, fieldPath: string): { text: string; re
     return { text: `${value}`, redacted: false };
   }
   if (Array.isArray(value)) {
-    return { text: `数组 ${value.length} 项`, redacted: keySensitive };
+    return {
+      text: keySensitive ? `数组 ${value.length} 项` : arrayValueSummary(value),
+      redacted: keySensitive,
+    };
   }
   if (typeof value === "object") {
     return { text: metadataValueSummary(value), redacted: keySensitive };
@@ -229,6 +279,10 @@ function buildDiffRows(proposal: AgentProposal): ProposalDisplayDiffRow[] {
 }
 
 function evidenceSummary(proposal: AgentProposal): string {
+  if (isRecord(proposal.after) && typeof proposal.after.sourceEvidence === "string") {
+    const source = compactSourceExcerpt(proposal.after.sourceEvidence);
+    if (source) return `Source evidence：${source}`;
+  }
   if (isCommunicationStylePath(proposal.affectedPath)) {
     const sourceExcerpt = communicationStyleSourceExcerpt(proposal);
     if (sourceExcerpt) return `来源摘录：${sourceExcerpt}`;
@@ -244,6 +298,10 @@ function evidenceSummary(proposal: AgentProposal): string {
 }
 
 function impactText(proposal: AgentProposal): string {
+  if (isRecord(proposal.after) && typeof proposal.after.impactPreview === "string") {
+    const impact = proposal.after.impactPreview.replace(/\s+/g, " ").trim();
+    if (impact) return impact;
+  }
   const domain = proposalDomainLabel(proposal);
   if (proposal.riskLevel === "high" || proposal.riskLevel === "critical") {
     return `会改变 OpenLife 对「${domain}」的核心理解，请确认它确实稳定。`;
@@ -311,6 +369,19 @@ function appendExternalWriteTechnicalRows(
   if (contentHash) rows.push({ label: "内容摘要", value: contentHash });
 }
 
+function appendMemoryGovernanceTechnicalRows(
+  rows: Array<{ label: string; value: string; href?: string }>,
+  proposal: AgentProposal
+) {
+  if (!isRecord(proposal.after)) return;
+  const candidateKind = technicalString(proposal.after.candidateKind);
+  const sourceEvidence = technicalString(proposal.after.sourceEvidence);
+  const impactPreview = technicalString(proposal.after.impactPreview);
+  if (candidateKind) rows.push({ label: "Candidate kind", value: candidateKind });
+  if (sourceEvidence) rows.push({ label: "Source evidence", value: sourceEvidence });
+  if (impactPreview) rows.push({ label: "Impact preview", value: impactPreview });
+}
+
 export function buildProposalDisplayModel(proposal: AgentProposal): ProposalDisplayModel {
   const domain = proposalDomainLabel(proposal);
   const type = proposalTypeLabel(proposal);
@@ -334,6 +405,7 @@ export function buildProposalDisplayModel(proposal: AgentProposal): ProposalDisp
   }
   appendCommunicationStyleTechnicalRows(technicalRows, proposal);
   appendExternalWriteTechnicalRows(technicalRows, proposal);
+  appendMemoryGovernanceTechnicalRows(technicalRows, proposal);
 
   return {
     title: proposalSubject(proposal),

@@ -347,6 +347,7 @@ export default function MailboxPage() {
         setNotice(`已标记稍后再说：${proposal.affectedPath}`);
       }
       await load();
+      window.dispatchEvent(new Event("openlife:diagnostics-refresh"));
     } catch (err) {
       const message = String(err);
       if (message.includes("no_such_field") || message.includes("不包含字段路径")) {

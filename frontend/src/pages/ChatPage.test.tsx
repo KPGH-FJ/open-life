@@ -1152,6 +1152,47 @@ describe("ChatPage", () => {
     expect(saveCalls).toHaveLength(0);
   });
 
+  it("fails closed and unlocks the composer when the native stream command returns malformed completion", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "start_stream_message") {
+        return Promise.resolve({});
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "今天早餐喝了咖啡，帮我记一下" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+
+    expect(
+      await screen.findByText(/Main Chat stream did not return a completed response/)
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/native bridge returned an invalid completion payload/)
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("send-button")).toHaveAttribute("aria-label", "发送消息");
+    expect(screen.getByText(/对话被中断/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "继续生成" }));
+
+    await waitFor(() => {
+      expect(
+        vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "start_stream_message")
+      ).toHaveLength(2);
+    });
+    expect(
+      screen.getAllByText(/Main Chat stream did not return a completed response/)
+    ).toHaveLength(2);
+    expect(screen.getByTestId("send-button")).toHaveAttribute("aria-label", "发送消息");
+  });
+
   it("renders returned stream completion payload when the done event is missed", async () => {
     const base = buildMainChatAgentStateSnapshot();
     const returnedState = buildMainChatAgentStateSnapshot({
@@ -1222,6 +1263,12 @@ describe("ChatPage", () => {
       listeners.set(event, handler as StreamListener);
       return Promise.resolve(() => {});
     });
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "start_stream_message") {
+        return new Promise(() => {});
+      }
+      return mockInvoke(cmd, args);
+    });
 
     render(
       <BrowserRouter>
@@ -1269,6 +1316,12 @@ describe("ChatPage", () => {
     vi.mocked(listen).mockImplementation((event, handler) => {
       listeners.set(event, handler as StreamListener);
       return Promise.resolve(() => {});
+    });
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "start_stream_message") {
+        return new Promise(() => {});
+      }
+      return mockInvoke(cmd, args);
     });
 
     render(
@@ -1481,6 +1534,12 @@ describe("ChatPage", () => {
     vi.mocked(listen).mockImplementation((event, handler) => {
       listeners.set(event, handler as StreamListener);
       return Promise.resolve(() => {});
+    });
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "start_stream_message") {
+        return new Promise(() => {});
+      }
+      return mockInvoke(cmd, args);
     });
 
     render(
@@ -3371,6 +3430,20 @@ describe("ChatPage", () => {
               finalDeliveryEvidence: true,
               taskStatus: "completed",
               safeNextControls: [],
+              memoryGovernance: {
+                candidateCount: 3,
+                candidateTrace: [],
+                lifeEventIds: ["life-event-ui-1"],
+                memoryProposalIds: ["memory-proposal-ui-1"],
+                lifeModelProposalIds: ["lifemodel-proposal-ui-1"],
+                sessionOnlyCandidateIds: [],
+                noOpCandidateIds: [],
+                directWritesExecuted: false,
+                directLifeModelWrite: false,
+                directMemoryWrite: false,
+                acceptedDurableTruthWritten: false,
+                localLifeEventCaptureExecuted: true,
+              },
             },
           },
           tool_calls: [],
@@ -3403,6 +3476,9 @@ describe("ChatPage", () => {
     expect(status).toHaveAttribute("data-agent-product-status", "completed");
     expect(screen.getByText("Completed")).toBeInTheDocument();
     expect(screen.getByText("Local runtime")).toBeInTheDocument();
+    expect(screen.getByText("已记录到本地生活事件")).toBeInTheDocument();
+    expect(screen.getByText("待确认记忆")).toBeInTheDocument();
+    expect(screen.getByText("待确认 LifeModel 更新")).toBeInTheDocument();
     expect(screen.queryByText("Diagnostic task shell")).not.toBeInTheDocument();
     expect(screen.queryByText("为什么这样回答")).not.toBeInTheDocument();
 

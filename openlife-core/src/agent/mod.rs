@@ -12,6 +12,8 @@ pub mod hs_selector;
 pub mod lifemodel_backend_completion;
 pub mod main_chat_agent_productization_v1;
 pub mod main_chat_agent_v1;
+pub mod main_chat_governance_intent;
+pub mod main_chat_memory_candidate;
 pub mod maturation;
 mod maturation_domain;
 pub mod memory_lifecycle;
@@ -110,6 +112,14 @@ pub use lifemodel_backend_completion::{
     LifeModelBackendGovernanceReadiness, LifeModelBackendPrerequisites, LifeSignal,
     LifeSignalBridgeInput, LifeSignalEvidenceBridgeReport, LifeSignalExtractorInput,
     LifeSignalExtractorReport, LifeSignalPolarity, LifeSignalType,
+};
+pub use main_chat_governance_intent::{
+    classify_main_chat_governance_intent, MainChatBlockerRequirement,
+    MainChatDurableWriteRequirement, MainChatExternalReadRequirement, MainChatGovernanceIntent,
+};
+pub use main_chat_memory_candidate::{
+    extract_main_chat_memory_candidates, plan_main_chat_memory_routing, route_memory_candidates,
+    MainChatMemoryCandidate, MainChatMemoryRoutingResult, MemoryCandidateKind, MemoryDestination,
 };
 pub use maturation::{
     ensure_accepted_low_energy_rule_selection, ensure_lifemodel_maturation_non_default_invocation,

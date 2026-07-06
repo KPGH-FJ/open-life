@@ -116,6 +116,7 @@ import type {
   MainChatStage5DebugBundle,
   MainChatStage5IssueReport,
   MainChatStage5PreflightReport,
+  MainChatMemoryGovernanceEvidence,
 } from "../tauri";
 import type {
   ControlledPilotPromotionEvidenceInput,
@@ -129,6 +130,7 @@ import {
   explainGovernanceBlocker,
   userFacingAssistantContent,
   type CapabilityTone,
+  type CapabilityStatusViewModel,
 } from "../utils/capabilityStatus";
 import { inspectDailyGoalName } from "../utils/dailyGoalDisplayGuard";
 import { listen } from "@tauri-apps/api/event";
@@ -198,6 +200,59 @@ function companionCapabilityChipClass(tone: CapabilityTone): string {
   if (tone === "warning") return "border-amber-200 bg-amber-50 text-amber-900";
   if (tone === "error") return "border-rose-200 bg-rose-50 text-rose-800";
   return "border-stone-200 bg-white text-stone-700";
+}
+
+function buildCompanionInitialAssistantMessage(
+  diagnostics: SystemDiagnostics | null,
+  loadState: "normal" | "history_unavailable" = "normal"
+): string {
+  const status: CapabilityStatusViewModel = buildCapabilityStatusViewModel(
+    diagnostics,
+    diagnostics?.pending_proposal_count ?? 0,
+    null
+  );
+
+  if (loadState === "history_unavailable") {
+    return [
+      "你好，我是 OpenLife。",
+      "当前无法确认会话历史或运行状态，可能处于浏览器预览或 Tauri bridge 不可用。",
+      "在能力恢复前，我不会声称 Life Model 已加载；请以顶部能力状态和设置页诊断为准。",
+    ].join("\n");
+  }
+
+  if (!diagnostics) {
+    return [
+      "你好，我是 OpenLife。",
+      "我正在检查模型、Life Model 和工具权限；确认前不会声称 Life Model 已加载。",
+      "请以顶部能力状态和设置页诊断为准。",
+    ].join("\n");
+  }
+
+  const lifeModelReady = diagnostics.life_model_ready && !diagnostics.model_empty;
+  const modelReady = diagnostics.chat_ready;
+
+  if (modelReady && lifeModelReady) {
+    return [
+      "你好，我是 OpenLife。",
+      "当前对话能力和 Life Model 已通过本地状态检查；我会基于已确认的信息陪你交流。",
+      `当前状态：${status.headline}。`,
+    ].join("\n");
+  }
+
+  if (!modelReady) {
+    return [
+      "你好，我是 OpenLife。",
+      "当前对话能力还未通过检查；我不会声称 Life Model 已加载或完整可用。",
+      `状态详情：${status.detail}`,
+      `下一步：${status.primaryActionLabel}。`,
+    ].join("\n");
+  }
+
+  return [
+    "你好，我是 OpenLife。",
+    "对话入口可用，但 Life Model 仍是待补全或未确认状态；我会先依赖你当前输入。",
+    `当前状态：${status.headline}。`,
+  ].join("\n");
 }
 
 function CompanionTaskControlStrip({
@@ -327,6 +382,17 @@ function formatStreamDoneFailure(payload: StreamMessageDonePayload): string {
     ? payload.blockers.map(blocker => `- ${blocker}`).join("\n")
     : "- stream_failed";
   return `Main Chat stream failed before producing a successful reply.\n\nBlockers:\n${blockers}\n\nRun id: ${payload.run_id}`;
+}
+
+function formatMalformedStreamCompletion(expectedSessionId: string): string {
+  return [
+    "Main Chat stream did not return a completed response.",
+    "",
+    "OpenLife stopped waiting because the native bridge returned an invalid completion payload.",
+    `Expected session: ${expectedSessionId}`,
+    "",
+    "The message was not treated as successful. Check Runs for any completed backend run, then retry.",
+  ].join("\n");
 }
 
 function getFixSuggestion(
@@ -491,6 +557,7 @@ type MainChatAgentStatusView = {
   blockerLabels: string[];
   pendingProposalCount: number;
   pendingPermissionCount: number;
+  memoryGovernanceLabels: string[];
   actions: MainChatAgentProductAction[];
   taskSessionId?: string;
 };
@@ -543,6 +610,26 @@ function productCount(value: unknown): number {
     if (Number.isFinite(parsed)) return Math.max(0, parsed);
   }
   return 0;
+}
+
+function memoryGovernanceStatusLabels(
+  governance: MainChatMemoryGovernanceEvidence | null | undefined
+): string[] {
+  if (!governance || typeof governance !== "object") return [];
+  const labels: string[] = [];
+  if (
+    governance.localLifeEventCaptureExecuted === true ||
+    productStringArray(governance.lifeEventIds).length > 0
+  ) {
+    labels.push("已记录到本地生活事件");
+  }
+  if (productStringArray(governance.memoryProposalIds).length > 0) {
+    labels.push("待确认记忆");
+  }
+  if (productStringArray(governance.lifeModelProposalIds).length > 0) {
+    labels.push("待确认 LifeModel 更新");
+  }
+  return labels;
 }
 
 function includesAnyControl(controls: string[], candidates: string[]): boolean {
@@ -657,6 +744,7 @@ export function buildMainChatAgentStatusView({
       proposal => proposal.status === "pending" && proposal.proposalType === "tool_permission"
     ).length ?? 0
   );
+  const memoryGovernanceLabels = memoryGovernanceStatusLabels(generation?.memoryGovernance);
   const safeNextControls = productStringArray(generation?.safeNextControls);
   const taskControls = [
     ...(agentState?.task.controls ?? []),
@@ -748,6 +836,7 @@ export function buildMainChatAgentStatusView({
     blockerLabels,
     pendingProposalCount,
     pendingPermissionCount,
+    memoryGovernanceLabels,
     actions: Array.from(new Set(actions)),
     taskSessionId,
   };
@@ -825,6 +914,14 @@ function MainChatAgentStatusSurface({
                   {view.pendingPermissionCount} permission
                 </span>
               )}
+              {view.memoryGovernanceLabels.map(label => (
+                <span
+                  key={label}
+                  className="inline-flex min-h-6 items-center rounded-md border border-white/70 bg-white/60 px-2 font-medium"
+                >
+                  {label}
+                </span>
+              ))}
             </div>
             <div className="mt-1 leading-5">{view.detail}</div>
             {view.blockerLabels.length > 0 && (
@@ -1261,6 +1358,10 @@ export default function ChatPage({
   const promotedControlledPilotKeysRef = useRef<Record<string, boolean>>({});
   const savedControlledPilotPromotionKeysRef = useRef<Record<string, boolean>>({});
   const inFlightControlledPilotPromotionKeysRef = useRef<Set<string>>(new Set());
+  const initialAssistantMessage = useMemo(
+    () => buildCompanionInitialAssistantMessage(diagnostics),
+    [diagnostics]
+  );
 
   const applyMainChatAgentStateSnapshot = useCallback(
     (
@@ -1696,8 +1797,7 @@ export default function ChatPage({
           setMessages([
             {
               role: "assistant",
-              content:
-                "你好，我是 OpenLife。我已经加载了你的人生模型，随时可以从你的价值观和目标出发进行交流。",
+              content: initialAssistantMessage,
             },
           ]);
         } else {
@@ -1709,13 +1809,18 @@ export default function ChatPage({
         setMessages([
           {
             role: "assistant",
-            content:
-              "你好，我是 OpenLife。我已经加载了你的人生模型，随时可以从你的价值观和目标出发进行交流。",
+            content: buildCompanionInitialAssistantMessage(diagnostics, "history_unavailable"),
           },
         ]);
       })
       .finally(() => setLoadingHistory(false));
-  }, [currentSessionId, applyMainChatAgentStateSnapshot, loadTaskContinuityList]);
+  }, [
+    currentSessionId,
+    applyMainChatAgentStateSnapshot,
+    diagnostics,
+    initialAssistantMessage,
+    loadTaskContinuityList,
+  ]);
 
   // Scroll on significant changes only; avoid smooth scroll during streaming
   useEffect(() => {
@@ -2172,65 +2277,31 @@ export default function ChatPage({
       const browserE2eDone = await startStreamMessage(currentSessionId, nextMessages, {
         selectedSkillId: selectedSkillOption,
       });
-      if (isStreamDonePayload(browserE2eDone) && browserE2eDone.session_id === currentSessionId) {
-        if (browserE2eDone.status === "failed") {
-          flushStreaming();
-          setMessages(prev => [
-            ...prev,
-            {
-              role: "assistant",
-              content: formatStreamDoneFailure(browserE2eDone),
-              run_id: browserE2eDone.run_id,
-            },
-          ]);
-          setStreamingReply("");
-          setSending(false);
-          setReasoningTrace(browserE2eDone.reasoning_trace ?? null);
-          setCurrentRunId(browserE2eDone.run_id);
-          setToolCalls(
-            (browserE2eDone.tool_calls ?? []).map(call => ({
-              ...call,
-              run_id: browserE2eDone.run_id,
-            }))
-          );
-          setCurrentAgentIngress(browserE2eDone.agent_ingress ?? null);
-          applyMainChatAgentStateSnapshot(browserE2eDone.agent_state ?? null);
-          setCurrentExecutionTranscript(browserE2eDone.execution_transcript ?? []);
-          setLegacyFallbackUsed(Boolean(browserE2eDone.legacy_fallback_used));
-          setStreamInterrupted(true);
-          streamErrorHandledRef.current = true;
-          emitCompanionStage("error");
-          await loadMainChatTaskState(
-            browserE2eDone.agent_ingress?.agentTaskSessionId,
-            browserE2eDone.session_id
-          );
-          await loadAgentRunForSession(browserE2eDone.run_id, browserE2eDone.session_id);
-          refreshAgentRuns(browserE2eDone.session_id);
-          await loadSessions();
-          return;
-        }
-        const nextStage =
-          inferStageFromToolCalls(browserE2eDone.tool_calls ?? []) ??
-          inferStageFromText(browserE2eDone.reply) ??
-          "idle";
+      if (!isStreamDonePayload(browserE2eDone) || browserE2eDone.session_id !== currentSessionId) {
         flushStreaming();
-        setMessages(prev => {
-          if (
-            prev.some(
-              message => message.role === "assistant" && message.run_id === browserE2eDone.run_id
-            )
-          ) {
-            return prev;
-          }
-          return [
-            ...prev,
-            {
-              role: "assistant",
-              content: browserE2eDone.reply,
-              run_id: browserE2eDone.run_id,
-            },
-          ];
-        });
+        setMessages(prev => [
+          ...prev,
+          { role: "assistant", content: formatMalformedStreamCompletion(currentSessionId) },
+        ]);
+        setStreamingReply("");
+        setSending(false);
+        setStreamInterrupted(true);
+        streamErrorHandledRef.current = true;
+        emitCompanionStage("error");
+        refreshAgentRuns(currentSessionId);
+        await loadSessions();
+        return;
+      }
+      if (browserE2eDone.status === "failed") {
+        flushStreaming();
+        setMessages(prev => [
+          ...prev,
+          {
+            role: "assistant",
+            content: formatStreamDoneFailure(browserE2eDone),
+            run_id: browserE2eDone.run_id,
+          },
+        ]);
         setStreamingReply("");
         setSending(false);
         setReasoningTrace(browserE2eDone.reasoning_trace ?? null);
@@ -2245,16 +2316,63 @@ export default function ChatPage({
         applyMainChatAgentStateSnapshot(browserE2eDone.agent_state ?? null);
         setCurrentExecutionTranscript(browserE2eDone.execution_transcript ?? []);
         setLegacyFallbackUsed(Boolean(browserE2eDone.legacy_fallback_used));
-        setStreamInterrupted(false);
-        emitCompanionStage(nextStage);
+        setStreamInterrupted(true);
+        streamErrorHandledRef.current = true;
+        emitCompanionStage("error");
         await loadMainChatTaskState(
           browserE2eDone.agent_ingress?.agentTaskSessionId,
           browserE2eDone.session_id
         );
         await loadAgentRunForSession(browserE2eDone.run_id, browserE2eDone.session_id);
         refreshAgentRuns(browserE2eDone.session_id);
-        logAnalyticsEvent("send_message", currentSessionId, undefined).catch(() => {});
+        await loadSessions();
+        return;
       }
+      const nextStage =
+        inferStageFromToolCalls(browserE2eDone.tool_calls ?? []) ??
+        inferStageFromText(browserE2eDone.reply) ??
+        "idle";
+      flushStreaming();
+      setMessages(prev => {
+        if (
+          prev.some(
+            message => message.role === "assistant" && message.run_id === browserE2eDone.run_id
+          )
+        ) {
+          return prev;
+        }
+        return [
+          ...prev,
+          {
+            role: "assistant",
+            content: browserE2eDone.reply,
+            run_id: browserE2eDone.run_id,
+          },
+        ];
+      });
+      setStreamingReply("");
+      setSending(false);
+      setReasoningTrace(browserE2eDone.reasoning_trace ?? null);
+      setCurrentRunId(browserE2eDone.run_id);
+      setToolCalls(
+        (browserE2eDone.tool_calls ?? []).map(call => ({
+          ...call,
+          run_id: browserE2eDone.run_id,
+        }))
+      );
+      setCurrentAgentIngress(browserE2eDone.agent_ingress ?? null);
+      applyMainChatAgentStateSnapshot(browserE2eDone.agent_state ?? null);
+      setCurrentExecutionTranscript(browserE2eDone.execution_transcript ?? []);
+      setLegacyFallbackUsed(Boolean(browserE2eDone.legacy_fallback_used));
+      setStreamInterrupted(false);
+      emitCompanionStage(nextStage);
+      await loadMainChatTaskState(
+        browserE2eDone.agent_ingress?.agentTaskSessionId,
+        browserE2eDone.session_id
+      );
+      await loadAgentRunForSession(browserE2eDone.run_id, browserE2eDone.session_id);
+      refreshAgentRuns(browserE2eDone.session_id);
+      logAnalyticsEvent("send_message", currentSessionId, undefined).catch(() => {});
       await loadSessions();
     } catch (e) {
       flushStreaming();
@@ -2311,9 +2429,103 @@ export default function ChatPage({
     emitCompanionStage("sorting");
     try {
       const selectedSkillOption = selectedSkillId.trim() || undefined;
-      await startStreamMessage(currentSessionId, retryMessages, {
+      const retryDone = await startStreamMessage(currentSessionId, retryMessages, {
         selectedSkillId: selectedSkillOption,
       });
+      if (!isStreamDonePayload(retryDone) || retryDone.session_id !== currentSessionId) {
+        flushStreaming();
+        setMessages(prev => [
+          ...prev,
+          { role: "assistant", content: formatMalformedStreamCompletion(currentSessionId) },
+        ]);
+        setStreamingReply("");
+        setSending(false);
+        setStreamInterrupted(true);
+        streamErrorHandledRef.current = true;
+        emitCompanionStage("error");
+        refreshAgentRuns(currentSessionId);
+        await loadSessions();
+        return;
+      }
+      if (retryDone.status === "failed") {
+        flushStreaming();
+        setMessages(prev => [
+          ...prev,
+          {
+            role: "assistant",
+            content: formatStreamDoneFailure(retryDone),
+            run_id: retryDone.run_id,
+          },
+        ]);
+        setStreamingReply("");
+        setSending(false);
+        setReasoningTrace(retryDone.reasoning_trace ?? null);
+        setCurrentRunId(retryDone.run_id);
+        setToolCalls(
+          (retryDone.tool_calls ?? []).map(call => ({
+            ...call,
+            run_id: retryDone.run_id,
+          }))
+        );
+        setCurrentAgentIngress(retryDone.agent_ingress ?? null);
+        applyMainChatAgentStateSnapshot(retryDone.agent_state ?? null);
+        setCurrentExecutionTranscript(retryDone.execution_transcript ?? []);
+        setLegacyFallbackUsed(Boolean(retryDone.legacy_fallback_used));
+        setStreamInterrupted(true);
+        streamErrorHandledRef.current = true;
+        emitCompanionStage("error");
+        await loadMainChatTaskState(
+          retryDone.agent_ingress?.agentTaskSessionId,
+          retryDone.session_id
+        );
+        await loadAgentRunForSession(retryDone.run_id, retryDone.session_id);
+        refreshAgentRuns(retryDone.session_id);
+        await loadSessions();
+        return;
+      }
+      const nextStage =
+        inferStageFromToolCalls(retryDone.tool_calls ?? []) ??
+        inferStageFromText(retryDone.reply) ??
+        "idle";
+      flushStreaming();
+      setMessages(prev => {
+        if (
+          prev.some(message => message.role === "assistant" && message.run_id === retryDone.run_id)
+        ) {
+          return prev;
+        }
+        return [
+          ...prev,
+          {
+            role: "assistant",
+            content: retryDone.reply,
+            run_id: retryDone.run_id,
+          },
+        ];
+      });
+      setStreamingReply("");
+      setSending(false);
+      setReasoningTrace(retryDone.reasoning_trace ?? null);
+      setCurrentRunId(retryDone.run_id);
+      setToolCalls(
+        (retryDone.tool_calls ?? []).map(call => ({
+          ...call,
+          run_id: retryDone.run_id,
+        }))
+      );
+      setCurrentAgentIngress(retryDone.agent_ingress ?? null);
+      applyMainChatAgentStateSnapshot(retryDone.agent_state ?? null);
+      setCurrentExecutionTranscript(retryDone.execution_transcript ?? []);
+      setLegacyFallbackUsed(Boolean(retryDone.legacy_fallback_used));
+      setStreamInterrupted(false);
+      emitCompanionStage(nextStage);
+      await loadMainChatTaskState(
+        retryDone.agent_ingress?.agentTaskSessionId,
+        retryDone.session_id
+      );
+      await loadAgentRunForSession(retryDone.run_id, retryDone.session_id);
+      refreshAgentRuns(retryDone.session_id);
+      await loadSessions();
     } catch (e) {
       flushStreaming();
       if (!streamErrorHandledRef.current) {

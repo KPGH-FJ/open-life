@@ -66,6 +66,38 @@ async fn generate_and_persist_chat_proposals(
     }
 }
 
+fn should_generate_chat_proposals(
+    agent_run: &openlife_core::agent::AgentRun,
+    reasoning_trace: &ReasoningTrace,
+) -> bool {
+    if !agent_run.generated_proposals.is_empty() || agent_run.tool_call_count > 0 {
+        return false;
+    }
+
+    let Some(metadata) = reasoning_trace.generation_result.as_ref() else {
+        return true;
+    };
+    let selected_strategy = metadata
+        .get("selectedStrategy")
+        .and_then(serde_json::Value::as_str);
+    let kernel_read_only = metadata
+        .get("kernelBackedReadOnlyToolLoop")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    let proposal_only_write = metadata
+        .get("kernelBackedProposalOnlyWrite")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+
+    if kernel_read_only || proposal_only_write {
+        return false;
+    }
+
+    selected_strategy
+        .map(|strategy| strategy == "direct_answer")
+        .unwrap_or(true)
+}
+
 pub(crate) async fn persist_chat_message_if_needed(
     session_id: &str,
     msg: &ChatMessage,
@@ -94,6 +126,16 @@ pub(crate) async fn persist_vector_memory_for_message(
     msg: &ChatMessage,
     state: &Arc<AppState>,
 ) {
+    if let Some(reason) = state.vector_persistence_mode.skip_reason() {
+        log::debug!(
+            "[memory] vector persistence skipped for {} message in session {}: {}",
+            msg.role,
+            session_id,
+            reason
+        );
+        return;
+    }
+
     let content = msg.content.trim();
     if content.is_empty() {
         return;
@@ -126,9 +168,11 @@ pub(crate) async fn persist_vector_memory_for_message(
         Ok(embedding) if !embedding.is_empty() => embedding,
         Ok(_) => return,
         Err(e) => {
-            eprintln!(
+            log::warn!(
                 "[memory] embedding generation failed for {} message in session {}: {}",
-                msg.role, session_id, e
+                msg.role,
+                session_id,
+                e
             );
             return;
         }
@@ -145,10 +189,28 @@ pub(crate) async fn persist_vector_memory_for_message(
         },
     };
     if let Err(e) = store.insert_batch(&[item]) {
-        eprintln!(
+        log::warn!(
             "[memory] vector insert failed for {} message in session {}: {}",
-            msg.role, session_id, e
+            msg.role,
+            session_id,
+            e
         );
+    }
+}
+
+fn mark_vector_persistence_skipped(reasoning_trace: &mut ReasoningTrace, reason: &str) {
+    match reasoning_trace.generation_result.as_mut() {
+        Some(serde_json::Value::Object(metadata)) => {
+            metadata.insert(
+                "vectorPersistenceSkipped".into(),
+                serde_json::Value::String(reason.to_string()),
+            );
+        }
+        _ => {
+            reasoning_trace.generation_result = Some(serde_json::json!({
+                "vectorPersistenceSkipped": reason,
+            }));
+        }
     }
 }
 
@@ -171,6 +233,11 @@ pub(crate) async fn finalize_chat_agent_run(
         }
         _ => serde_json::json!({ "text": reply }),
     });
+    if inserted {
+        if let Some(reason) = state.vector_persistence_mode.skip_reason() {
+            mark_vector_persistence_skipped(reasoning_trace, reason);
+        }
+    }
     agent_run.output_preview = Some(preview_text(reply, 200));
     if agent_run.status == openlife_core::agent::AgentRunStatus::Running {
         agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
@@ -201,6 +268,7 @@ pub(crate) async fn finalize_chat_agent_run(
     }
 
     if inserted
+        && state.vector_persistence_mode.skip_reason().is_none()
         && timeout(
             Duration::from_secs(CHAT_VECTOR_PERSIST_TIMEOUT_SECS),
             persist_vector_memory_for_message(session_id, assistant_message, state),
@@ -208,23 +276,26 @@ pub(crate) async fn finalize_chat_agent_run(
         .await
         .is_err()
     {
-        eprintln!(
+        log::warn!(
             "[memory] vector persistence timed out after {}s for assistant message in session {}",
-            CHAT_VECTOR_PERSIST_TIMEOUT_SECS, session_id
+            CHAT_VECTOR_PERSIST_TIMEOUT_SECS,
+            session_id
         );
     }
 
-    if timeout(
-        Duration::from_secs(CHAT_PROPOSAL_GENERATION_TIMEOUT_SECS),
-        generate_and_persist_chat_proposals(state, agent_run, reply, life_model),
-    )
-    .await
-    .is_err()
-    {
-        eprintln!(
-            "[ChatProposal] Proposal generation timed out after {}s for run {}",
-            CHAT_PROPOSAL_GENERATION_TIMEOUT_SECS, agent_run.id
-        );
+    if should_generate_chat_proposals(agent_run, reasoning_trace) {
+        if timeout(
+            Duration::from_secs(CHAT_PROPOSAL_GENERATION_TIMEOUT_SECS),
+            generate_and_persist_chat_proposals(state, agent_run, reply, life_model),
+        )
+        .await
+        .is_err()
+        {
+            eprintln!(
+                "[ChatProposal] Proposal generation timed out after {}s for run {}",
+                CHAT_PROPOSAL_GENERATION_TIMEOUT_SECS, agent_run.id
+            );
+        }
     }
     Ok(())
 }
