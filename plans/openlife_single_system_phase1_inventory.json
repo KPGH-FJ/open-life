@@ -660,246 +660,623 @@
       "reason": "Monolithic frontend bridge exposes product, dev, migration, and eval commands together."
     }
   ],
-  "stage_beta_migration_command_surfaces": [
+  "product_command_allowlist": [
+    {
+      "id": "product_allowlist_goal_capability_gap_analysis",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 1,
+      "disposition": "keep",
+      "reason": "Read-only product command: returns user-facing LifeModel goal/capability gap analysis for Builder and growth workflows; it does not run evals, migrations, debug tooling, or writes.",
+      "command": "goal_capability_gap_analysis",
+      "matched_tokens": [
+        "capability"
+      ]
+    },
+    {
+      "id": "product_allowlist_goal_capability_gap_report",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 1,
+      "disposition": "keep",
+      "reason": "Read-only product command: returns structured user-facing LifeModel capability gaps for product growth workflows; it does not run evals, migrations, debug tooling, or writes.",
+      "command": "goal_capability_gap_report",
+      "matched_tokens": [
+        "capability"
+      ]
+    }
+  ],
+  "legacy_development_command_surfaces": [
+    {
+      "id": "command_run_multi_strategy_agent_preview",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_multi_strategy_agent_preview",
+      "matched_tokens": [
+        "strategy",
+        "preview"
+      ]
+    },
     {
       "id": "command_run_main_chat_agent_execution_v1_eval_gate",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Eval command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "run_main_chat_agent_execution_v1_eval_gate"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_agent_execution_v1_eval_gate",
+      "matched_tokens": [
+        "eval"
+      ]
     },
     {
       "id": "command_run_main_chat_capability_eval_gate",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Eval command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "run_main_chat_capability_eval_gate"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_capability_eval_gate",
+      "matched_tokens": [
+        "eval",
+        "capability"
+      ]
+    },
+    {
+      "id": "command_run_main_chat_agent_productization_v1_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_agent_productization_v1_gate",
+      "matched_tokens": [
+        "productization"
+      ]
+    },
+    {
+      "id": "command_run_main_chat_external_live_productization_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_external_live_productization_gate",
+      "matched_tokens": [
+        "productization"
+      ]
+    },
+    {
+      "id": "command_run_main_chat_agent_product_maturity_v2_event_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_agent_product_maturity_v2_event_gate",
+      "matched_tokens": [
+        "maturity"
+      ]
+    },
+    {
+      "id": "command_run_main_chat_agent_product_maturity_v2_plan_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_agent_product_maturity_v2_plan_gate",
+      "matched_tokens": [
+        "maturity"
+      ]
+    },
+    {
+      "id": "command_run_main_chat_agent_product_maturity_v2_skills_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_agent_product_maturity_v2_skills_gate",
+      "matched_tokens": [
+        "maturity"
+      ]
+    },
+    {
+      "id": "command_run_main_chat_agent_product_maturity_v2_final_readiness_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_agent_product_maturity_v2_final_readiness_gate",
+      "matched_tokens": [
+        "maturity",
+        "readiness"
+      ]
     },
     {
       "id": "command_run_main_chat_agent_beta_v1_readiness_gate",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Beta command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "run_main_chat_agent_beta_v1_readiness_gate"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_agent_beta_v1_readiness_gate",
+      "matched_tokens": [
+        "beta",
+        "readiness"
+      ]
     },
     {
       "id": "command_run_main_chat_agent_stage1_dogfood_gate",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Stage dogfood command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "run_main_chat_agent_stage1_dogfood_gate"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_agent_stage1_dogfood_gate",
+      "matched_tokens": [
+        "stage",
+        "dogfood"
+      ]
     },
     {
       "id": "command_run_main_chat_agent_stage2_readiness_gate",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Stage command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "run_main_chat_agent_stage2_readiness_gate"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_agent_stage2_readiness_gate",
+      "matched_tokens": [
+        "stage",
+        "readiness"
+      ]
+    },
+    {
+      "id": "command_run_main_chat_agent_step6_product_acceptance_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_agent_step6_product_acceptance_gate",
+      "matched_tokens": [
+        "acceptance",
+        "step6"
+      ]
     },
     {
       "id": "command_prepare_main_chat_step6_live_provider_eval_state",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Eval setup command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "prepare_main_chat_step6_live_provider_eval_state"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "prepare_main_chat_step6_live_provider_eval_state",
+      "matched_tokens": [
+        "eval",
+        "step6"
+      ]
     },
     {
       "id": "command_run_main_chat_stage3_execution_ux_report",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Stage command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "run_main_chat_stage3_execution_ux_report"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_stage3_execution_ux_report",
+      "matched_tokens": [
+        "stage"
+      ]
     },
     {
       "id": "command_validate_main_chat_agent_stage2_manual_dogfood_artifact",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Stage dogfood command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "validate_main_chat_agent_stage2_manual_dogfood_artifact"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "validate_main_chat_agent_stage2_manual_dogfood_artifact",
+      "matched_tokens": [
+        "stage",
+        "dogfood"
+      ]
     },
     {
       "id": "command_prepare_main_chat_agent_stage1_browser_dogfood_state",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Stage dogfood command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "prepare_main_chat_agent_stage1_browser_dogfood_state"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "prepare_main_chat_agent_stage1_browser_dogfood_state",
+      "matched_tokens": [
+        "stage",
+        "dogfood"
+      ]
     },
     {
       "id": "command_set_main_chat_agent_stage1_browser_network_policy",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Stage dogfood command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "set_main_chat_agent_stage1_browser_network_policy"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "set_main_chat_agent_stage1_browser_network_policy",
+      "matched_tokens": [
+        "stage"
+      ]
     },
     {
       "id": "command_set_main_chat_agent_stage1_browser_scripted_response",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Stage dogfood command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "set_main_chat_agent_stage1_browser_scripted_response"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "set_main_chat_agent_stage1_browser_scripted_response",
+      "matched_tokens": [
+        "stage"
+      ]
     },
     {
       "id": "command_set_main_chat_agent_stage1_browser_web_fixture_output",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Stage dogfood command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "set_main_chat_agent_stage1_browser_web_fixture_output"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "set_main_chat_agent_stage1_browser_web_fixture_output",
+      "matched_tokens": [
+        "stage"
+      ]
+    },
+    {
+      "id": "command_run_main_chat_agent_execution_v1_final_acceptance_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_agent_execution_v1_final_acceptance_gate",
+      "matched_tokens": [
+        "acceptance",
+        "final_acceptance"
+      ]
+    },
+    {
+      "id": "command_get_runtime_strategy_registry_status",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "get_runtime_strategy_registry_status",
+      "matched_tokens": [
+        "strategy"
+      ]
     },
     {
       "id": "command_get_react_beta_execution_status",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Beta command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "get_react_beta_execution_status"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "get_react_beta_execution_status",
+      "matched_tokens": [
+        "beta"
+      ]
     },
     {
       "id": "command_check_runtime_migration_gate",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Migration command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "check_runtime_migration_gate"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "check_runtime_migration_gate",
+      "matched_tokens": [
+        "migration"
+      ]
+    },
+    {
+      "id": "command_check_controlled_chat_pilot_eligibility",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "check_controlled_chat_pilot_eligibility",
+      "matched_tokens": [
+        "pilot"
+      ]
+    },
+    {
+      "id": "command_check_controlled_pilot_promotion_readiness",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "check_controlled_pilot_promotion_readiness",
+      "matched_tokens": [
+        "readiness",
+        "pilot"
+      ]
     },
     {
       "id": "command_draft_controlled_chat_migration_plan",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Migration command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "draft_controlled_chat_migration_plan"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "draft_controlled_chat_migration_plan",
+      "matched_tokens": [
+        "migration"
+      ]
     },
     {
       "id": "command_record_controlled_chat_migration_review_decision",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Migration command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "record_controlled_chat_migration_review_decision"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "record_controlled_chat_migration_review_decision",
+      "matched_tokens": [
+        "migration"
+      ]
     },
     {
       "id": "command_get_controlled_chat_migration_review_decision_summary",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Migration command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "get_controlled_chat_migration_review_decision_summary"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "get_controlled_chat_migration_review_decision_summary",
+      "matched_tokens": [
+        "migration"
+      ]
     },
     {
       "id": "command_check_controlled_chat_migration_implementation_gate",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Migration command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "check_controlled_chat_migration_implementation_gate"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "check_controlled_chat_migration_implementation_gate",
+      "matched_tokens": [
+        "migration"
+      ]
     },
     {
       "id": "command_run_controlled_chat_migration_shadow_run",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Migration command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "run_controlled_chat_migration_shadow_run"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_controlled_chat_migration_shadow_run",
+      "matched_tokens": [
+        "migration"
+      ]
     },
     {
       "id": "command_record_controlled_chat_migration_shadow_review_decision",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Migration command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "record_controlled_chat_migration_shadow_review_decision"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "record_controlled_chat_migration_shadow_review_decision",
+      "matched_tokens": [
+        "migration"
+      ]
     },
     {
       "id": "command_get_controlled_chat_migration_shadow_review_summary",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Migration command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "get_controlled_chat_migration_shadow_review_summary"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "get_controlled_chat_migration_shadow_review_summary",
+      "matched_tokens": [
+        "migration"
+      ]
     },
     {
       "id": "command_check_controlled_chat_cutover_readiness",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Cutover command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "check_controlled_chat_cutover_readiness"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "check_controlled_chat_cutover_readiness",
+      "matched_tokens": [
+        "cutover",
+        "readiness"
+      ]
     },
     {
       "id": "command_run_controlled_chat_cutover_candidate",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Cutover command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "run_controlled_chat_cutover_candidate"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_controlled_chat_cutover_candidate",
+      "matched_tokens": [
+        "cutover"
+      ]
     },
     {
       "id": "command_record_controlled_chat_cutover_candidate_review_decision",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Cutover command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "record_controlled_chat_cutover_candidate_review_decision"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "record_controlled_chat_cutover_candidate_review_decision",
+      "matched_tokens": [
+        "cutover"
+      ]
     },
     {
       "id": "command_get_controlled_chat_cutover_candidate_review_summary",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Cutover command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "get_controlled_chat_cutover_candidate_review_summary"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "get_controlled_chat_cutover_candidate_review_summary",
+      "matched_tokens": [
+        "cutover"
+      ]
     },
     {
       "id": "command_check_controlled_chat_cutover_candidate_promotion_readiness",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Cutover command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "check_controlled_chat_cutover_candidate_promotion_readiness"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "check_controlled_chat_cutover_candidate_promotion_readiness",
+      "matched_tokens": [
+        "cutover",
+        "readiness"
+      ]
+    },
+    {
+      "id": "command_record_controlled_pilot_promotion_evidence",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "record_controlled_pilot_promotion_evidence",
+      "matched_tokens": [
+        "pilot"
+      ]
+    },
+    {
+      "id": "command_get_controlled_pilot_promotion_evidence_summary",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "get_controlled_pilot_promotion_evidence_summary",
+      "matched_tokens": [
+        "pilot"
+      ]
     },
     {
       "id": "command_list_stage4_knowledge_asset_inventory",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Stage command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "list_stage4_knowledge_asset_inventory"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "list_stage4_knowledge_asset_inventory",
+      "matched_tokens": [
+        "stage"
+      ]
     },
     {
       "id": "command_run_main_chat_stage4_memory_knowledge_report",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Stage command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "run_main_chat_stage4_memory_knowledge_report"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_stage4_memory_knowledge_report",
+      "matched_tokens": [
+        "stage"
+      ]
     },
     {
       "id": "command_evaluate_main_chat_stage5_release_debug_preflight",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Stage command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "evaluate_main_chat_stage5_release_debug_preflight"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "evaluate_main_chat_stage5_release_debug_preflight",
+      "matched_tokens": [
+        "stage",
+        "eval",
+        "debug"
+      ]
+    },
+    {
+      "id": "command_export_main_chat_agent_debug_bundle",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "export_main_chat_agent_debug_bundle",
+      "matched_tokens": [
+        "debug"
+      ]
+    },
+    {
+      "id": "command_list_main_chat_debug_bundles",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "list_main_chat_debug_bundles",
+      "matched_tokens": [
+        "debug"
+      ]
+    },
+    {
+      "id": "command_get_main_chat_debug_bundle",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "get_main_chat_debug_bundle",
+      "matched_tokens": [
+        "debug"
+      ]
+    },
+    {
+      "id": "command_delete_main_chat_debug_bundle",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "delete_main_chat_debug_bundle",
+      "matched_tokens": [
+        "debug"
+      ]
+    },
+    {
+      "id": "command_create_main_chat_internal_issue_report",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Stage 5 release debug/internal issue report shipped handler surface; Phase 1 inventories it only, and Phase 7 must remove it from the product handler.",
+      "command": "create_main_chat_internal_issue_report",
+      "matched_tokens": [
+        "internal_issue_report",
+        "issue_report"
+      ]
+    },
+    {
+      "id": "command_list_main_chat_internal_issue_reports",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Stage 5 release debug/internal issue report shipped handler surface; Phase 1 inventories it only, and Phase 7 must remove it from the product handler.",
+      "command": "list_main_chat_internal_issue_reports",
+      "matched_tokens": [
+        "internal_issue_report",
+        "issue_report"
+      ]
+    },
+    {
+      "id": "command_get_main_chat_internal_issue_report",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Stage 5 release debug/internal issue report shipped handler surface; Phase 1 inventories it only, and Phase 7 must remove it from the product handler.",
+      "command": "get_main_chat_internal_issue_report",
+      "matched_tokens": [
+        "internal_issue_report",
+        "issue_report"
+      ]
+    },
+    {
+      "id": "command_delete_main_chat_internal_issue_report",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Stage 5 release debug/internal issue report shipped handler surface; Phase 1 inventories it only, and Phase 7 must remove it from the product handler.",
+      "command": "delete_main_chat_internal_issue_report",
+      "matched_tokens": [
+        "internal_issue_report",
+        "issue_report"
+      ]
     },
     {
       "id": "command_run_main_chat_stage5_release_debug_report",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Stage command remains registered in shipped handler for Phase 1 inventory only.",
-      "command": "run_main_chat_stage5_release_debug_report"
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_stage5_release_debug_report",
+      "matched_tokens": [
+        "stage",
+        "debug"
+      ]
     }
   ]
 }

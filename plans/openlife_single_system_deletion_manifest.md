@@ -144,7 +144,7 @@ Disposition values:
 | No direct product memory/LifeModel write outside gateways. | 5 |
 | No executable tool manifest credit from inferred capability/risk/action type. | 6 |
 | Product frontend pages cannot assemble readiness/pending state from raw sources covered by LifeStateProjection. | 6 |
-| Shipped Tauri handler contains no migration/cutover/stage/beta/dev dogfood command. | 7 |
+| Shipped Tauri handler contains no legacy/development/eval-like command unless it is explicitly product-allowlisted. | 7 |
 | Active docs cannot declare legacy fallback as acceptable product behavior. | 7 |
 
 ## 11. Phase 1 Inventory Crosswalk
@@ -165,7 +165,8 @@ guarded so later phases cannot add unregistered parallel systems.
 | `direct_proposal_write_surfaces` | Section 4 | route through `ReviewWorkflow`; `ProposalStore` remains storage only |
 | `direct_memory_lifemodel_write_surfaces` | Section 5 | route through `MemoryGateway` / `LifeModelWriteGateway`; storage stays storage only |
 | `frontend_multi_source_state_surfaces` | Section 7 | migrate product pages to `LifeStateProjection`; split product bridge from dev/test bridge |
-| `stage_beta_migration_command_surfaces` | Section 8 and table below | delete from shipped product handler in Phase 7 |
+| `product_command_allowlist` | Product allowlist table below | keep product commands that match broad guard tokens but are not development/eval surfaces |
+| `legacy_development_command_surfaces` | Section 8 and table below | delete legacy/development/eval-like commands from shipped product handler in Phase 7 |
 
 Phase 1 old-route marker inventory:
 
@@ -183,37 +184,66 @@ Phase 1 old-route marker inventory:
 | `stage4` | 5 | absorb_then_delete |
 | `stage5` | 7 | delete |
 
-Phase 1 shipped handler command inventory:
+Phase 1 product allowlist:
 
-| Command | Phase | Disposition |
+| Command | Classification | Reason |
 | --- | --- | --- |
-| `run_main_chat_agent_execution_v1_eval_gate` | 7 | delete |
-| `run_main_chat_capability_eval_gate` | 7 | delete |
-| `run_main_chat_agent_beta_v1_readiness_gate` | 7 | delete |
-| `run_main_chat_agent_stage1_dogfood_gate` | 7 | delete |
-| `run_main_chat_agent_stage2_readiness_gate` | 7 | delete |
-| `prepare_main_chat_step6_live_provider_eval_state` | 7 | delete |
-| `run_main_chat_stage3_execution_ux_report` | 7 | delete |
-| `validate_main_chat_agent_stage2_manual_dogfood_artifact` | 7 | delete |
-| `prepare_main_chat_agent_stage1_browser_dogfood_state` | 7 | delete |
-| `set_main_chat_agent_stage1_browser_network_policy` | 7 | delete |
-| `set_main_chat_agent_stage1_browser_scripted_response` | 7 | delete |
-| `set_main_chat_agent_stage1_browser_web_fixture_output` | 7 | delete |
-| `get_react_beta_execution_status` | 7 | delete |
-| `check_runtime_migration_gate` | 7 | delete |
-| `draft_controlled_chat_migration_plan` | 7 | delete |
-| `record_controlled_chat_migration_review_decision` | 7 | delete |
-| `get_controlled_chat_migration_review_decision_summary` | 7 | delete |
-| `check_controlled_chat_migration_implementation_gate` | 7 | delete |
-| `run_controlled_chat_migration_shadow_run` | 7 | delete |
-| `record_controlled_chat_migration_shadow_review_decision` | 7 | delete |
-| `get_controlled_chat_migration_shadow_review_summary` | 7 | delete |
-| `check_controlled_chat_cutover_readiness` | 7 | delete |
-| `run_controlled_chat_cutover_candidate` | 7 | delete |
-| `record_controlled_chat_cutover_candidate_review_decision` | 7 | delete |
-| `get_controlled_chat_cutover_candidate_review_summary` | 7 | delete |
-| `check_controlled_chat_cutover_candidate_promotion_readiness` | 7 | delete |
-| `list_stage4_knowledge_asset_inventory` | 7 | delete |
-| `run_main_chat_stage4_memory_knowledge_report` | 7 | delete |
-| `evaluate_main_chat_stage5_release_debug_preflight` | 7 | delete |
-| `run_main_chat_stage5_release_debug_report` | 7 | delete |
+| `goal_capability_gap_analysis` | product allowlist | Read-only product command: returns user-facing LifeModel goal/capability gap analysis for Builder and growth workflows; it does not run evals, migrations, debug tooling, or writes. |
+| `goal_capability_gap_report` | product allowlist | Read-only product command: returns structured user-facing LifeModel capability gaps for product growth workflows; it does not run evals, migrations, debug tooling, or writes. |
+
+Phase 1 legacy/development shipped handler command inventory:
+
+| Command | Phase | Disposition | Matched guard tokens |
+| --- | --- | --- | --- |
+| `run_multi_strategy_agent_preview` | 7 | delete | `strategy`, `preview` |
+| `run_main_chat_agent_execution_v1_eval_gate` | 7 | delete | `eval` |
+| `run_main_chat_capability_eval_gate` | 7 | delete | `eval`, `capability` |
+| `run_main_chat_agent_productization_v1_gate` | 7 | delete | `productization` |
+| `run_main_chat_external_live_productization_gate` | 7 | delete | `productization` |
+| `run_main_chat_agent_product_maturity_v2_event_gate` | 7 | delete | `maturity` |
+| `run_main_chat_agent_product_maturity_v2_plan_gate` | 7 | delete | `maturity` |
+| `run_main_chat_agent_product_maturity_v2_skills_gate` | 7 | delete | `maturity` |
+| `run_main_chat_agent_product_maturity_v2_final_readiness_gate` | 7 | delete | `maturity`, `readiness` |
+| `run_main_chat_agent_beta_v1_readiness_gate` | 7 | delete | `beta`, `readiness` |
+| `run_main_chat_agent_stage1_dogfood_gate` | 7 | delete | `stage`, `dogfood` |
+| `run_main_chat_agent_stage2_readiness_gate` | 7 | delete | `stage`, `readiness` |
+| `run_main_chat_agent_step6_product_acceptance_gate` | 7 | delete | `acceptance`, `step6` |
+| `prepare_main_chat_step6_live_provider_eval_state` | 7 | delete | `eval`, `step6` |
+| `run_main_chat_stage3_execution_ux_report` | 7 | delete | `stage` |
+| `validate_main_chat_agent_stage2_manual_dogfood_artifact` | 7 | delete | `stage`, `dogfood` |
+| `prepare_main_chat_agent_stage1_browser_dogfood_state` | 7 | delete | `stage`, `dogfood` |
+| `set_main_chat_agent_stage1_browser_network_policy` | 7 | delete | `stage` |
+| `set_main_chat_agent_stage1_browser_scripted_response` | 7 | delete | `stage` |
+| `set_main_chat_agent_stage1_browser_web_fixture_output` | 7 | delete | `stage` |
+| `run_main_chat_agent_execution_v1_final_acceptance_gate` | 7 | delete | `acceptance`, `final_acceptance` |
+| `get_runtime_strategy_registry_status` | 7 | delete | `strategy` |
+| `get_react_beta_execution_status` | 7 | delete | `beta` |
+| `check_runtime_migration_gate` | 7 | delete | `migration` |
+| `check_controlled_chat_pilot_eligibility` | 7 | delete | `pilot` |
+| `check_controlled_pilot_promotion_readiness` | 7 | delete | `readiness`, `pilot` |
+| `draft_controlled_chat_migration_plan` | 7 | delete | `migration` |
+| `record_controlled_chat_migration_review_decision` | 7 | delete | `migration` |
+| `get_controlled_chat_migration_review_decision_summary` | 7 | delete | `migration` |
+| `check_controlled_chat_migration_implementation_gate` | 7 | delete | `migration` |
+| `run_controlled_chat_migration_shadow_run` | 7 | delete | `migration` |
+| `record_controlled_chat_migration_shadow_review_decision` | 7 | delete | `migration` |
+| `get_controlled_chat_migration_shadow_review_summary` | 7 | delete | `migration` |
+| `check_controlled_chat_cutover_readiness` | 7 | delete | `cutover`, `readiness` |
+| `run_controlled_chat_cutover_candidate` | 7 | delete | `cutover` |
+| `record_controlled_chat_cutover_candidate_review_decision` | 7 | delete | `cutover` |
+| `get_controlled_chat_cutover_candidate_review_summary` | 7 | delete | `cutover` |
+| `check_controlled_chat_cutover_candidate_promotion_readiness` | 7 | delete | `cutover`, `readiness` |
+| `record_controlled_pilot_promotion_evidence` | 7 | delete | `pilot` |
+| `get_controlled_pilot_promotion_evidence_summary` | 7 | delete | `pilot` |
+| `list_stage4_knowledge_asset_inventory` | 7 | delete | `stage` |
+| `run_main_chat_stage4_memory_knowledge_report` | 7 | delete | `stage` |
+| `evaluate_main_chat_stage5_release_debug_preflight` | 7 | delete | `stage`, `eval`, `debug` |
+| `export_main_chat_agent_debug_bundle` | 7 | delete | `debug` |
+| `list_main_chat_debug_bundles` | 7 | delete | `debug` |
+| `get_main_chat_debug_bundle` | 7 | delete | `debug` |
+| `delete_main_chat_debug_bundle` | 7 | delete | `debug` |
+| `create_main_chat_internal_issue_report` | 7 | delete | `internal_issue_report`, `issue_report` |
+| `list_main_chat_internal_issue_reports` | 7 | delete | `internal_issue_report`, `issue_report` |
+| `get_main_chat_internal_issue_report` | 7 | delete | `internal_issue_report`, `issue_report` |
+| `delete_main_chat_internal_issue_report` | 7 | delete | `internal_issue_report`, `issue_report` |
+| `run_main_chat_stage5_release_debug_report` | 7 | delete | `stage`, `debug` |

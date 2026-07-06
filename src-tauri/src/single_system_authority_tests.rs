@@ -104,6 +104,30 @@ fn expected_count_map(category: &str) -> BTreeMap<String, usize> {
         .collect()
 }
 
+fn legacy_development_command_tokens() -> Vec<&'static str> {
+    vec![
+        "stage",
+        "beta",
+        "migration",
+        "cutover",
+        "dogfood",
+        "eval",
+        "productization",
+        "maturity",
+        "readiness",
+        "acceptance",
+        "final_acceptance",
+        "step6",
+        "pilot",
+        "debug",
+        "capability",
+        "strategy",
+        "preview",
+        "internal_issue_report",
+        "issue_report",
+    ]
+}
+
 #[test]
 fn single_system_readme_declares_active_authority_before_historical_plans() {
     let readme = read_repo_file("plans/README.md");
@@ -159,7 +183,8 @@ fn single_system_phase1_inventory_has_required_categories_and_contract_fields() 
         "direct_proposal_write_surfaces",
         "direct_memory_lifemodel_write_surfaces",
         "frontend_multi_source_state_surfaces",
-        "stage_beta_migration_command_surfaces",
+        "product_command_allowlist",
+        "legacy_development_command_surfaces",
     ];
     let allowed_dispositions = BTreeSet::from([
         "keep",
@@ -220,39 +245,123 @@ fn single_system_phase1_inventory_has_required_categories_and_contract_fields() 
 }
 
 #[test]
-fn single_system_handler_old_commands_match_inventory_and_manifest() {
+fn single_system_handler_legacy_development_commands_match_inventory_or_allowlist() {
     let lib = read_repo_file("src-tauri/src/lib.rs");
     let handler = lib
         .split("tauri::generate_handler![")
         .nth(1)
         .and_then(|rest| rest.split("])").next())
         .expect("Tauri generate_handler body");
-    let old_tokens = ["stage", "beta", "migration", "cutover", "dogfood", "eval"];
+    let tokens = legacy_development_command_tokens();
+    for required in [
+        "stage",
+        "beta",
+        "migration",
+        "cutover",
+        "dogfood",
+        "eval",
+        "productization",
+        "maturity",
+        "readiness",
+        "acceptance",
+        "final_acceptance",
+        "step6",
+        "pilot",
+        "debug",
+        "capability",
+        "internal_issue_report",
+        "issue_report",
+    ] {
+        assert!(
+            tokens.contains(&required),
+            "legacy/development command token set must include {required}"
+        );
+    }
+
     let actual: BTreeSet<String> = handler
         .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
         .filter(|token| !token.is_empty())
-        .filter(|token| old_tokens.iter().any(|old| token.contains(old)))
+        .filter(|token| tokens.iter().any(|old| token.contains(old)))
         .map(str::to_string)
         .collect();
 
     let inventory = inventory();
-    let expected: BTreeSet<String> =
-        inventory_entries(&inventory, "stage_beta_migration_command_surfaces")
+    let legacy_inventory: BTreeSet<String> =
+        inventory_entries(&inventory, "legacy_development_command_surfaces")
             .into_iter()
             .map(|entry| entry_str(entry, "command").to_string())
             .collect();
+    let product_allowlist: BTreeSet<String> =
+        inventory_entries(&inventory, "product_command_allowlist")
+            .into_iter()
+            .map(|entry| entry_str(entry, "command").to_string())
+            .collect();
+    let expected: BTreeSet<String> = legacy_inventory
+        .union(&product_allowlist)
+        .cloned()
+        .collect();
     assert_eq!(
         actual, expected,
-        "stage/beta/migration/cutover/dogfood/eval shipped handler commands must match Phase 1 inventory"
+        "legacy/development/eval-like shipped handler commands must be in inventory or product allowlist"
     );
 
     let manifest = read_repo_file("plans/openlife_single_system_deletion_manifest.md");
-    for command in actual {
+    for command in &legacy_inventory {
         assert!(
             manifest.contains(&format!("`{command}`")),
-            "deletion manifest must classify shipped old command {command}"
+            "deletion manifest must classify shipped legacy/development command {command}"
         );
     }
+    for command in &product_allowlist {
+        assert!(
+            manifest.contains(&format!("`{command}`")) && manifest.contains("product allowlist"),
+            "deletion manifest must explain product allowlist command {command}"
+        );
+    }
+
+    let stage5_imports: BTreeSet<String> = lib
+        .split("use main_chat_stage5_release_debug::{")
+        .nth(1)
+        .and_then(|rest| rest.split("};").next())
+        .expect("main_chat_stage5_release_debug import block")
+        .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .collect();
+    let handler_commands: BTreeSet<String> = handler
+        .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+        .collect();
+    let registered_stage5_debug: BTreeSet<String> = stage5_imports
+        .intersection(&handler_commands)
+        .cloned()
+        .collect();
+    for expected_stage5_debug_command in [
+        "evaluate_main_chat_stage5_release_debug_preflight",
+        "export_main_chat_agent_debug_bundle",
+        "create_main_chat_internal_issue_report",
+        "list_main_chat_debug_bundles",
+        "get_main_chat_debug_bundle",
+        "delete_main_chat_debug_bundle",
+        "list_main_chat_internal_issue_reports",
+        "get_main_chat_internal_issue_report",
+        "delete_main_chat_internal_issue_report",
+        "run_main_chat_stage5_release_debug_report",
+    ] {
+        assert!(
+            registered_stage5_debug.contains(expected_stage5_debug_command),
+            "Stage 5 debug command {expected_stage5_debug_command} must stay visible to the module-origin guard"
+        );
+    }
+    let stage5_missing: BTreeSet<String> = registered_stage5_debug
+        .difference(&legacy_inventory)
+        .cloned()
+        .collect();
+    assert!(
+        stage5_missing.is_empty(),
+        "all registered main_chat_stage5_release_debug commands must be in legacy inventory: {stage5_missing:?}"
+    );
 }
 
 #[test]
