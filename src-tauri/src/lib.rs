@@ -112,6 +112,9 @@ mod main_chat_context_loader_tests;
 mod main_chat_runtime_module_tests;
 
 #[cfg(test)]
+mod single_system_authority_tests;
+
+#[cfg(test)]
 mod legacy_surface_tests;
 
 #[cfg(test)]

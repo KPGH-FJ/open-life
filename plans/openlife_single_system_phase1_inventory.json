@@ -1,0 +1,905 @@
+{
+  "schema_version": 1,
+  "last_updated": "2026-07-06",
+  "status": "phase1_inventory_not_deletion_completion",
+  "product_authorities": [
+    {
+      "id": "agents_md",
+      "path": "AGENTS.md",
+      "phase": 1,
+      "disposition": "keep",
+      "reason": "Project-wide agent context remains the top authority."
+    },
+    {
+      "id": "plans_readme",
+      "path": "plans/README.md",
+      "phase": 1,
+      "disposition": "keep",
+      "reason": "Active authority map for plan precedence."
+    },
+    {
+      "id": "single_system_development_preparation",
+      "path": "plans/openlife_single_system_development_preparation.md",
+      "phase": 1,
+      "disposition": "keep",
+      "reason": "Current active development entry for the single-system round."
+    },
+    {
+      "id": "single_system_deletion_manifest",
+      "path": "plans/openlife_single_system_deletion_manifest.md",
+      "phase": 1,
+      "disposition": "keep",
+      "reason": "Current deletion contract for old systems and direct-write surfaces."
+    }
+  ],
+  "old_runtime_surfaces": [
+    {
+      "id": "main_chat_turn_pipeline",
+      "path": "src-tauri/src/main_chat_turn_pipeline.rs",
+      "phase": 2,
+      "disposition": "absorb_then_delete",
+      "reason": "Dispatches among kernel, tool loop, strategy helper, route preview, and blockers."
+    },
+    {
+      "id": "main_chat_kernel",
+      "path": "src-tauri/src/main_chat_kernel.rs",
+      "phase": 2,
+      "disposition": "absorb_then_delete",
+      "reason": "Large product runtime with embedded branches and compatibility terms."
+    },
+    {
+      "id": "main_chat_strategy",
+      "path": "src-tauri/src/main_chat_strategy.rs",
+      "phase": 2,
+      "disposition": "delete",
+      "reason": "Separate strategy execution path after pipeline routing."
+    },
+    {
+      "id": "main_chat_tool_loop",
+      "path": "src-tauri/src/main_chat_tool_loop.rs",
+      "phase": 2,
+      "disposition": "absorb_then_delete",
+      "reason": "Separate tool-loop adapter with single-step fallback-shaped outcome."
+    },
+    {
+      "id": "main_chat_legacy_agent_loop",
+      "path": "src-tauri/src/main_chat_legacy_agent_loop.rs",
+      "phase": 2,
+      "disposition": "delete",
+      "reason": "Deprecated non-default product-shaped loop remains compiled."
+    },
+    {
+      "id": "main_chat_route_preview",
+      "path": "src-tauri/src/main_chat_route_preview.rs",
+      "phase": 3,
+      "disposition": "delete",
+      "reason": "Advisory route preview remains a product-shaped routing surface."
+    },
+    {
+      "id": "core_main_chat_agent_v1_strategy_router",
+      "path": "openlife-core/src/agent/main_chat_agent_v1.rs",
+      "phase": 3,
+      "disposition": "absorb_then_delete",
+      "reason": "Keyword/rule product routing must be absorbed into IntentFrame construction."
+    },
+    {
+      "id": "core_strategy_selector",
+      "path": "openlife-core/src/agent/strategy.rs",
+      "phase": 3,
+      "disposition": "delete",
+      "reason": "Older runtime selector duplicates route authority."
+    },
+    {
+      "id": "core_multi_strategy_runtime",
+      "path": "openlife-core/src/agent/multi_strategy_runtime.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Historical multi-strategy runtime should not remain in product paths."
+    },
+    {
+      "id": "core_strategy_runtime",
+      "path": "openlife-core/src/agent/strategy_runtime.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Strategy runtime is part of the old multi-strategy surface."
+    },
+    {
+      "id": "core_react_beta",
+      "path": "openlife-core/src/agent/react_beta.rs",
+      "phase": 6,
+      "disposition": "absorb_then_delete",
+      "reason": "Beta terminology and helper surface must be absorbed or renamed under ToolGateway/runtime."
+    },
+    {
+      "id": "main_chat_beta_default_experience",
+      "path": "src-tauri/src/main_chat_agent_beta_v1_default_experience.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Beta readiness module remains compiled in product crate."
+    },
+    {
+      "id": "main_chat_beta_readiness",
+      "path": "src-tauri/src/main_chat_agent_beta_v1_readiness.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Beta readiness module remains compiled in product crate."
+    },
+    {
+      "id": "main_chat_beta_real_tasks",
+      "path": "src-tauri/src/main_chat_agent_beta_v1_real_tasks.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Beta real-task harness remains compiled in product crate."
+    },
+    {
+      "id": "main_chat_stage1_dogfood",
+      "path": "src-tauri/src/main_chat_agent_stage1_dogfood.rs",
+      "phase": 7,
+      "disposition": "test_fixture_only",
+      "reason": "Stage dogfood setup is still compiled and exposed."
+    },
+    {
+      "id": "main_chat_stage2_readiness",
+      "path": "src-tauri/src/main_chat_agent_stage2_readiness.rs",
+      "phase": 7,
+      "disposition": "archive_reference",
+      "reason": "Stage readiness report is historical and should not be a product authority."
+    },
+    {
+      "id": "main_chat_stage3_execution_ux",
+      "path": "src-tauri/src/main_chat_stage3_execution_ux.rs",
+      "phase": 7,
+      "disposition": "archive_reference",
+      "reason": "Stage report system remains exposed as product-like status."
+    },
+    {
+      "id": "main_chat_stage4_memory_knowledge",
+      "path": "src-tauri/src/main_chat_stage4_memory_knowledge.rs",
+      "phase": 5,
+      "disposition": "absorb_then_delete",
+      "reason": "Stage managed-knowledge writes must be absorbed into MemoryGateway and ReviewWorkflow."
+    },
+    {
+      "id": "main_chat_stage5_release_debug",
+      "path": "src-tauri/src/main_chat_stage5_release_debug.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Debug/report surface should not remain in the shipped product handler."
+    },
+    {
+      "id": "main_chat_productization_eval",
+      "path": "src-tauri/src/main_chat_agent_productization_eval.rs",
+      "phase": 7,
+      "disposition": "archive_reference",
+      "reason": "Productization eval surface is historical evidence, not a product runtime authority."
+    },
+    {
+      "id": "main_chat_product_maturity_v2_final_readiness",
+      "path": "src-tauri/src/main_chat_product_maturity_v2_final_readiness.rs",
+      "phase": 7,
+      "disposition": "archive_reference",
+      "reason": "Maturity readiness surface is not the single-system product readiness source."
+    }
+  ],
+  "old_router_surfaces": [
+    {
+      "id": "intent_router",
+      "path": "openlife-core/src/router.rs",
+      "phase": 3,
+      "disposition": "absorb_then_delete",
+      "reason": "Separate router is held in AppState and duplicates future PolicyRouter authority."
+    },
+    {
+      "id": "layer_router",
+      "path": "openlife-core/src/layer_router.rs",
+      "phase": 3,
+      "disposition": "absorb_then_delete",
+      "reason": "Separate layer router duplicates future PolicyRouter authority."
+    },
+    {
+      "id": "diagnostics_get_router_status",
+      "path": "src-tauri/src/commands/diagnostics.rs",
+      "phase": 3,
+      "disposition": "delete",
+      "reason": "Old router status remains exposed as diagnostics."
+    },
+    {
+      "id": "frontend_multi_strategy_preview_section",
+      "path": "frontend/src/pages/settings/MultiStrategyPreviewSection.tsx",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Frontend UI exposes old multi-strategy preview/status."
+    },
+    {
+      "id": "frontend_tauri_multi_strategy_exports",
+      "path": "frontend/src/tauri.ts",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Frontend bridge keeps old routing concepts callable."
+    }
+  ],
+  "product_old_route_markers": [
+    {
+      "id": "marker_legacy_agent_loop",
+      "path": "src-tauri/src",
+      "phase": 2,
+      "disposition": "delete",
+      "reason": "Old legacy AgentLoop marker must remain registered until deleted.",
+      "marker": "legacy_agent_loop",
+      "expected_file_count": 4
+    },
+    {
+      "id": "marker_main_chat_strategy",
+      "path": "src-tauri/src",
+      "phase": 2,
+      "disposition": "delete",
+      "reason": "Old strategy marker must remain registered until deleted.",
+      "marker": "main_chat_strategy",
+      "expected_file_count": 3
+    },
+    {
+      "id": "marker_route_preview",
+      "path": "src-tauri/src",
+      "phase": 3,
+      "disposition": "delete",
+      "reason": "Old route preview marker must remain registered until deleted.",
+      "marker": "route_preview",
+      "expected_file_count": 5
+    },
+    {
+      "id": "marker_single_step_fallback",
+      "path": "src-tauri/src",
+      "phase": 2,
+      "disposition": "delete",
+      "reason": "Single-step fallback marker must remain registered until deleted.",
+      "marker": "single_step_fallback",
+      "expected_file_count": 9
+    },
+    {
+      "id": "marker_multi_strategy",
+      "path": "frontend/src",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "MultiStrategy marker must remain registered until deleted.",
+      "marker": "MultiStrategy",
+      "expected_file_count": 19
+    },
+    {
+      "id": "marker_beta_v1",
+      "path": "src-tauri/src",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Beta v1 marker must remain registered until deleted.",
+      "marker": "beta_v1",
+      "expected_file_count": 12
+    },
+    {
+      "id": "marker_stage1",
+      "path": "src-tauri/src",
+      "phase": 7,
+      "disposition": "archive_reference",
+      "reason": "Stage 1 marker must remain registered until archived or deleted.",
+      "marker": "stage1",
+      "expected_file_count": 24
+    },
+    {
+      "id": "marker_stage2",
+      "path": "src-tauri/src",
+      "phase": 7,
+      "disposition": "archive_reference",
+      "reason": "Stage 2 marker must remain registered until archived or deleted.",
+      "marker": "stage2",
+      "expected_file_count": 18
+    },
+    {
+      "id": "marker_stage3",
+      "path": "src-tauri/src",
+      "phase": 7,
+      "disposition": "archive_reference",
+      "reason": "Stage 3 marker must remain registered until archived or deleted.",
+      "marker": "stage3",
+      "expected_file_count": 9
+    },
+    {
+      "id": "marker_stage4",
+      "path": "src-tauri/src",
+      "phase": 5,
+      "disposition": "absorb_then_delete",
+      "reason": "Stage 4 marker must remain registered until memory knowledge writes move behind gateways.",
+      "marker": "stage4",
+      "expected_file_count": 8
+    },
+    {
+      "id": "marker_stage5",
+      "path": "src-tauri/src",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Stage 5 marker must remain registered until debug/report surfaces leave product handler.",
+      "marker": "stage5",
+      "expected_file_count": 9
+    }
+  ],
+  "direct_proposal_write_surfaces": [
+    {
+      "id": "proposal_write_action_executor_core_os_tools",
+      "path": "openlife-core/src/agent/action_executor/core_os_tools.rs",
+      "phase": 4,
+      "disposition": "absorb_then_delete",
+      "reason": "Tool path creates proposals directly instead of ReviewWorkflow.",
+      "match": ".create_proposal(",
+      "expected_count": 1
+    },
+    {
+      "id": "proposal_write_action_executor_declarative_stubs",
+      "path": "openlife-core/src/agent/action_executor/declarative_stubs.rs",
+      "phase": 4,
+      "disposition": "absorb_then_delete",
+      "reason": "Declarative tool stub creates proposals directly instead of ReviewWorkflow.",
+      "match": ".create_proposal(",
+      "expected_count": 1
+    },
+    {
+      "id": "proposal_write_action_executor_execution_tools",
+      "path": "openlife-core/src/agent/action_executor/execution_tools.rs",
+      "phase": 4,
+      "disposition": "absorb_then_delete",
+      "reason": "Execution tools create proposals directly instead of ReviewWorkflow.",
+      "match": ".create_proposal(",
+      "expected_count": 4
+    },
+    {
+      "id": "proposal_write_action_executor_tool_executor",
+      "path": "openlife-core/src/agent/action_executor/tool_executor.rs",
+      "phase": 4,
+      "disposition": "absorb_then_delete",
+      "reason": "Tool executor creates proposals directly instead of ReviewWorkflow.",
+      "match": ".create_proposal(",
+      "expected_count": 2
+    },
+    {
+      "id": "proposal_write_maturation",
+      "path": "openlife-core/src/agent/maturation.rs",
+      "phase": 4,
+      "disposition": "absorb_then_delete",
+      "reason": "Maturation engine creates proposals directly instead of ReviewWorkflow.",
+      "match": ".create_proposal(",
+      "expected_count": 2
+    },
+    {
+      "id": "proposal_write_plan_execute",
+      "path": "openlife-core/src/agent/plan_execute.rs",
+      "phase": 4,
+      "disposition": "absorb_then_delete",
+      "reason": "PlanExecute creates proposals directly instead of ReviewWorkflow.",
+      "match": ".create_proposal(",
+      "expected_count": 1
+    },
+    {
+      "id": "proposal_write_agent_commands",
+      "path": "src-tauri/src/commands/agent.rs",
+      "phase": 4,
+      "disposition": "absorb_then_delete",
+      "reason": "Agent command path creates proposals directly instead of ReviewWorkflow.",
+      "match": ".create_proposal(",
+      "expected_count": 1
+    },
+    {
+      "id": "proposal_write_builder",
+      "path": "src-tauri/src/commands/builder.rs",
+      "phase": 4,
+      "disposition": "absorb_then_delete",
+      "reason": "Builder command creates proposals directly instead of ReviewWorkflow.",
+      "match": ".create_proposal(",
+      "expected_count": 1
+    },
+    {
+      "id": "proposal_write_calibration",
+      "path": "src-tauri/src/commands/calibration.rs",
+      "phase": 4,
+      "disposition": "absorb_then_delete",
+      "reason": "Calibration command creates proposals directly instead of ReviewWorkflow.",
+      "match": ".create_proposal(",
+      "expected_count": 1
+    },
+    {
+      "id": "proposal_write_execution_command",
+      "path": "src-tauri/src/commands/execution.rs",
+      "phase": 4,
+      "disposition": "absorb_then_delete",
+      "reason": "Skill/tool execution command creates proposals directly instead of ReviewWorkflow.",
+      "match": ".create_proposal(",
+      "expected_count": 1
+    },
+    {
+      "id": "proposal_write_productization_eval",
+      "path": "src-tauri/src/main_chat_agent_productization_eval.rs",
+      "phase": 7,
+      "disposition": "archive_reference",
+      "reason": "Productization eval creates proposals directly and must not become product authority.",
+      "match": ".create_proposal(",
+      "expected_count": 5
+    },
+    {
+      "id": "proposal_write_stage1_dogfood",
+      "path": "src-tauri/src/main_chat_agent_stage1_dogfood.rs",
+      "phase": 7,
+      "disposition": "test_fixture_only",
+      "reason": "Stage dogfood seeds proposals directly and must become fixture-only or be deleted.",
+      "match": ".create_proposal(",
+      "expected_count": 4
+    },
+    {
+      "id": "proposal_write_generation_support",
+      "path": "src-tauri/src/main_chat_generation_support.rs",
+      "phase": 4,
+      "disposition": "absorb_then_delete",
+      "reason": "Main Chat generation support creates proposals directly instead of ReviewWorkflow.",
+      "match": ".create_proposal(",
+      "expected_count": 1
+    },
+    {
+      "id": "proposal_write_main_chat_kernel",
+      "path": "src-tauri/src/main_chat_kernel.rs",
+      "phase": 4,
+      "disposition": "absorb_then_delete",
+      "reason": "Main Chat kernel creates proposals directly instead of ReviewWorkflow.",
+      "match": ".create_proposal(",
+      "expected_count": 2
+    },
+    {
+      "id": "proposal_write_main_chat_proposal_support",
+      "path": "src-tauri/src/main_chat_proposal_support.rs",
+      "phase": 4,
+      "disposition": "absorb_then_delete",
+      "reason": "Main Chat proposal helper creates proposals directly instead of ReviewWorkflow.",
+      "match": ".create_proposal(",
+      "expected_count": 3
+    },
+    {
+      "id": "proposal_write_stage4_memory_knowledge",
+      "path": "src-tauri/src/main_chat_stage4_memory_knowledge.rs",
+      "phase": 5,
+      "disposition": "absorb_then_delete",
+      "reason": "Stage 4 managed knowledge creates proposals directly instead of ReviewWorkflow.",
+      "match": ".create_proposal(",
+      "expected_count": 1
+    },
+    {
+      "id": "proposal_write_task_continuity_eval",
+      "path": "src-tauri/src/main_chat_task_continuity_eval.rs",
+      "phase": 7,
+      "disposition": "archive_reference",
+      "reason": "Task continuity eval creates proposals directly and must remain non-product evidence.",
+      "match": ".create_proposal(",
+      "expected_count": 1
+    }
+  ],
+  "direct_memory_lifemodel_write_surfaces": [
+    {
+      "id": "memory_write_core_memory_lifecycle_store",
+      "path": "openlife-core/src/agent/memory_lifecycle.rs",
+      "phase": 5,
+      "disposition": "storage_only",
+      "reason": "Storage implementation remains valid only behind MemoryGateway.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 1
+    },
+    {
+      "id": "memory_write_core_memory_store",
+      "path": "openlife-core/src/memory.rs",
+      "phase": 5,
+      "disposition": "storage_only",
+      "reason": "MemoryStore remains valid only behind MemoryGateway.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 2
+    },
+    {
+      "id": "memory_write_core_vector_store",
+      "path": "openlife-core/src/vectors.rs",
+      "phase": 5,
+      "disposition": "storage_only",
+      "reason": "VectorStore remains valid only behind MemoryGateway.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 2
+    },
+    {
+      "id": "lifemodel_write_manual_editor",
+      "path": "src-tauri/src/commands/life_model.rs",
+      "phase": 5,
+      "disposition": "absorb_then_delete",
+      "reason": "Manual LifeModel save must move behind LifeModelWriteGateway with explicit override policy.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 1
+    },
+    {
+      "id": "memory_write_memory_commands",
+      "path": "src-tauri/src/commands/memory.rs",
+      "phase": 5,
+      "disposition": "absorb_then_delete",
+      "reason": "Memory command writes directly to vector and memory stores.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 7
+    },
+    {
+      "id": "memory_lifemodel_write_proposal_application",
+      "path": "src-tauri/src/commands/proposal.rs",
+      "phase": 5,
+      "disposition": "absorb_then_delete",
+      "reason": "Proposal acceptance materializes Memory and LifeModel directly.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 6
+    },
+    {
+      "id": "memory_lifemodel_write_settings_import",
+      "path": "src-tauri/src/commands/settings.rs",
+      "phase": 5,
+      "disposition": "absorb_then_delete",
+      "reason": "Import/restore path writes LifeModel and memory stores directly.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 3
+    },
+    {
+      "id": "memory_lifemodel_write_state_commands",
+      "path": "src-tauri/src/commands/state.rs",
+      "phase": 5,
+      "disposition": "absorb_then_delete",
+      "reason": "State and daily-goal commands write MemoryStore and LifeModel directly.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 6
+    },
+    {
+      "id": "lifemodel_write_version_restore",
+      "path": "src-tauri/src/commands/version.rs",
+      "phase": 5,
+      "disposition": "absorb_then_delete",
+      "reason": "Snapshot restore writes LifeModel directly.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 1
+    },
+    {
+      "id": "lifemodel_write_lib_persist_helper",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 5,
+      "disposition": "absorb_then_delete",
+      "reason": "Shared persist helper is a direct LifeModel write choke point until gateway replacement.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 2
+    },
+    {
+      "id": "memory_lifemodel_write_productization_eval",
+      "path": "src-tauri/src/main_chat_agent_productization_eval.rs",
+      "phase": 7,
+      "disposition": "archive_reference",
+      "reason": "Productization eval writes directly and must not become product authority.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 1
+    },
+    {
+      "id": "lifemodel_write_legacy_agent_loop",
+      "path": "src-tauri/src/main_chat_legacy_agent_loop.rs",
+      "phase": 2,
+      "disposition": "delete",
+      "reason": "Legacy agent loop can persist LifeModel directly.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 1
+    },
+    {
+      "id": "memory_write_memory_lifecycle_eval",
+      "path": "src-tauri/src/main_chat_memory_lifecycle_eval.rs",
+      "phase": 7,
+      "disposition": "archive_reference",
+      "reason": "Memory lifecycle eval writes directly and must stay non-product evidence.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 3
+    },
+    {
+      "id": "lifemodel_write_turn_pipeline",
+      "path": "src-tauri/src/main_chat_turn_pipeline.rs",
+      "phase": 2,
+      "disposition": "absorb_then_delete",
+      "reason": "Turn pipeline can persist LifeModel directly while still routing among old systems.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 2
+    }
+  ],
+  "frontend_multi_source_state_surfaces": [
+    {
+      "id": "frontend_today_multi_source_state",
+      "path": "frontend/src/pages/TodayPage.tsx",
+      "phase": 6,
+      "disposition": "absorb_then_delete",
+      "reason": "Today assembles product state from diagnostics, daily goals, and proposals."
+    },
+    {
+      "id": "frontend_mailbox_multi_source_state",
+      "path": "frontend/src/pages/MailboxPage.tsx",
+      "phase": 6,
+      "disposition": "absorb_then_delete",
+      "reason": "Mailbox assembles review state from proposals, config, and diagnostics."
+    },
+    {
+      "id": "frontend_chat_multi_source_state",
+      "path": "frontend/src/pages/ChatPage.tsx",
+      "phase": 6,
+      "disposition": "absorb_then_delete",
+      "reason": "Chat composes diagnostics, scheduler config, LifeModel, daily goals, task state, skills, and snapshots."
+    },
+    {
+      "id": "frontend_companion_multi_source_state",
+      "path": "frontend/src/pages/CompanionPage.tsx",
+      "phase": 6,
+      "disposition": "absorb_then_delete",
+      "reason": "Companion state should be folded into the product projection where shared."
+    },
+    {
+      "id": "frontend_lifemodel_multi_source_state",
+      "path": "frontend/src/pages/LifeModelPage.tsx",
+      "phase": 6,
+      "disposition": "absorb_then_delete",
+      "reason": "LifeModel page combines current view, diagnostics, and proposal state."
+    },
+    {
+      "id": "frontend_settings_multi_source_state",
+      "path": "frontend/src/pages/SettingsPage.tsx",
+      "phase": 6,
+      "disposition": "absorb_then_delete",
+      "reason": "Settings presents readiness from diagnostics, runtime, router, permissions, provider config, and cache state."
+    },
+    {
+      "id": "frontend_lifemodel_editor_direct_save",
+      "path": "frontend/src/pages/LifeModelEditor.tsx",
+      "phase": 5,
+      "disposition": "absorb_then_delete",
+      "reason": "LifeModel editor calls manual save and must remain an explicit governed override."
+    },
+    {
+      "id": "frontend_tauri_monolithic_bridge",
+      "path": "frontend/src/tauri.ts",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Monolithic frontend bridge exposes product, dev, migration, and eval commands together."
+    }
+  ],
+  "stage_beta_migration_command_surfaces": [
+    {
+      "id": "command_run_main_chat_agent_execution_v1_eval_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Eval command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_agent_execution_v1_eval_gate"
+    },
+    {
+      "id": "command_run_main_chat_capability_eval_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Eval command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_capability_eval_gate"
+    },
+    {
+      "id": "command_run_main_chat_agent_beta_v1_readiness_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Beta command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_agent_beta_v1_readiness_gate"
+    },
+    {
+      "id": "command_run_main_chat_agent_stage1_dogfood_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Stage dogfood command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_agent_stage1_dogfood_gate"
+    },
+    {
+      "id": "command_run_main_chat_agent_stage2_readiness_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Stage command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_agent_stage2_readiness_gate"
+    },
+    {
+      "id": "command_prepare_main_chat_step6_live_provider_eval_state",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Eval setup command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "prepare_main_chat_step6_live_provider_eval_state"
+    },
+    {
+      "id": "command_run_main_chat_stage3_execution_ux_report",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Stage command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_stage3_execution_ux_report"
+    },
+    {
+      "id": "command_validate_main_chat_agent_stage2_manual_dogfood_artifact",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Stage dogfood command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "validate_main_chat_agent_stage2_manual_dogfood_artifact"
+    },
+    {
+      "id": "command_prepare_main_chat_agent_stage1_browser_dogfood_state",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Stage dogfood command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "prepare_main_chat_agent_stage1_browser_dogfood_state"
+    },
+    {
+      "id": "command_set_main_chat_agent_stage1_browser_network_policy",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Stage dogfood command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "set_main_chat_agent_stage1_browser_network_policy"
+    },
+    {
+      "id": "command_set_main_chat_agent_stage1_browser_scripted_response",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Stage dogfood command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "set_main_chat_agent_stage1_browser_scripted_response"
+    },
+    {
+      "id": "command_set_main_chat_agent_stage1_browser_web_fixture_output",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Stage dogfood command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "set_main_chat_agent_stage1_browser_web_fixture_output"
+    },
+    {
+      "id": "command_get_react_beta_execution_status",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Beta command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "get_react_beta_execution_status"
+    },
+    {
+      "id": "command_check_runtime_migration_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Migration command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "check_runtime_migration_gate"
+    },
+    {
+      "id": "command_draft_controlled_chat_migration_plan",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Migration command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "draft_controlled_chat_migration_plan"
+    },
+    {
+      "id": "command_record_controlled_chat_migration_review_decision",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Migration command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "record_controlled_chat_migration_review_decision"
+    },
+    {
+      "id": "command_get_controlled_chat_migration_review_decision_summary",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Migration command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "get_controlled_chat_migration_review_decision_summary"
+    },
+    {
+      "id": "command_check_controlled_chat_migration_implementation_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Migration command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "check_controlled_chat_migration_implementation_gate"
+    },
+    {
+      "id": "command_run_controlled_chat_migration_shadow_run",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Migration command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_controlled_chat_migration_shadow_run"
+    },
+    {
+      "id": "command_record_controlled_chat_migration_shadow_review_decision",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Migration command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "record_controlled_chat_migration_shadow_review_decision"
+    },
+    {
+      "id": "command_get_controlled_chat_migration_shadow_review_summary",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Migration command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "get_controlled_chat_migration_shadow_review_summary"
+    },
+    {
+      "id": "command_check_controlled_chat_cutover_readiness",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Cutover command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "check_controlled_chat_cutover_readiness"
+    },
+    {
+      "id": "command_run_controlled_chat_cutover_candidate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Cutover command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_controlled_chat_cutover_candidate"
+    },
+    {
+      "id": "command_record_controlled_chat_cutover_candidate_review_decision",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Cutover command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "record_controlled_chat_cutover_candidate_review_decision"
+    },
+    {
+      "id": "command_get_controlled_chat_cutover_candidate_review_summary",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Cutover command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "get_controlled_chat_cutover_candidate_review_summary"
+    },
+    {
+      "id": "command_check_controlled_chat_cutover_candidate_promotion_readiness",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Cutover command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "check_controlled_chat_cutover_candidate_promotion_readiness"
+    },
+    {
+      "id": "command_list_stage4_knowledge_asset_inventory",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Stage command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "list_stage4_knowledge_asset_inventory"
+    },
+    {
+      "id": "command_run_main_chat_stage4_memory_knowledge_report",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Stage command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_stage4_memory_knowledge_report"
+    },
+    {
+      "id": "command_evaluate_main_chat_stage5_release_debug_preflight",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Stage command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "evaluate_main_chat_stage5_release_debug_preflight"
+    },
+    {
+      "id": "command_run_main_chat_stage5_release_debug_report",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Stage command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_stage5_release_debug_report"
+    }
+  ]
+}

@@ -45,7 +45,7 @@ Disposition values:
 | `openlife-core/src/agent/main_chat_agent_v1.rs` `StrategyRouter` | Keyword/rule product router. | absorb useful labels into IntentFrame, then remove route authority | 3 |
 | `openlife-core/src/agent/strategy.rs` `StrategySelector` | Older runtime selector using keywords and planning fallback. | remove product dependency, migrate useful assertions, then delete module | 3 |
 | `openlife-core/src/agent/multi_strategy_runtime.rs` | Historical multi-strategy runtime. | delete from product path | 7 |
-| `openlife-core/src/agent/react_beta.rs` | Beta terminology and helper surface. | absorb metadata-safe helpers if still needed, then rename/delete beta surface | 6, 7 |
+| `openlife-core/src/agent/react_beta.rs` | Beta terminology and helper surface. | absorb metadata-safe helpers into ToolGateway/runtime, then delete beta surface | 6, 7 |
 
 ## 3. Router And Intent Systems
 
@@ -92,7 +92,7 @@ Disposition values:
 | --- | --- | --- | --- |
 | `openlife-core/src/agent/action_executor/mod.rs` | Very broad context and domain ownership. | shrink behind ToolGateway | 6 |
 | `openlife-core/src/agent/action_executor/**` | Mixed tool execution, memory, proposal, permission behavior. | split into ToolGateway adapters, delete direct write behavior | 6 |
-| `openlife-core/src/tool_manifest.rs` inference helpers | Infers capability/risk/action type from tool name. | remove execution credit; keep only warning/migration lint if needed | 6 |
+| `openlife-core/src/tool_manifest.rs` inference helpers | Infers capability/risk/action type from tool name. | remove execution credit; any migration lint must be non-executable and developer-only | 6 |
 | `openlife-core/src/mcp.rs` manifest registration | External MCP may rely on inferred permission/capability. | require explicit executable contract | 6 |
 | `src-tauri/src/main_chat_react_*` | Useful candidate/selection logic but tied to old runtime path. | absorb into ToolGateway/runtime | 6 |
 | `grant_tool_permission` direct command | Useful user-controlled permission path. | keep only through ToolGateway/ReviewWorkflow policy | 6 |
@@ -114,12 +114,12 @@ Disposition values:
 | Current object | Current issue | Disposition | Phase |
 | --- | --- | --- | --- |
 | `src-tauri/src/main_chat_agent_beta_v1_*` | Beta readiness systems compiled in product crate. | migrate useful assertions to single-system tests, then delete product modules | 7 |
-| `src-tauri/src/main_chat_agent_stage1_dogfood.rs` | Stage dogfood setup compiled and exposed. | remove from product handler; keep only non-product test fixture if still needed | 7 |
+| `src-tauri/src/main_chat_agent_stage1_dogfood.rs` | Stage dogfood setup compiled and exposed. | remove from product handler; convert remaining value to non-product test fixture or delete | 7 |
 | `src-tauri/src/main_chat_agent_stage2_readiness.rs` | Stage readiness compiled and exposed. | archive/test only after final trial plan replaces it | 7 |
 | `src-tauri/src/main_chat_stage3_execution_ux.rs` | Stage report system compiled and exposed. | archive/test only | 7 |
 | `src-tauri/src/main_chat_stage4_memory_knowledge.rs` | Stage managed knowledge command surface. | absorb valid memory operations into MemoryGateway/ReviewWorkflow | 5, 7 |
 | `src-tauri/src/main_chat_stage5_release_debug.rs` | Debug/report product-like surface. | developer-only, not product handler | 7 |
-| `src-tauri/src/commands/agent_runtime/migration_ladder.rs` | Controlled pilot/migration/cutover commands exposed. | delete from product handler; archive historical evidence outside product runtime if needed | 7 |
+| `src-tauri/src/commands/agent_runtime/migration_ladder.rs` | Controlled pilot/migration/cutover commands exposed. | delete from product handler; archive historical evidence outside product runtime | 7 |
 | `frontend/e2e/main-chat-stage1-dogfood.spec.ts` | Old stage-specific e2e. | rewrite as final Computer Use/product trial; old script may only remain as historical archive outside active gates | 7 |
 | `frontend/e2e/main-chat-step6-product-acceptance.spec.ts` | Useful concepts but stage/step-specific. | rewrite under single-system acceptance | 7 |
 
@@ -146,3 +146,74 @@ Disposition values:
 | Product frontend pages cannot assemble readiness/pending state from raw sources covered by LifeStateProjection. | 6 |
 | Shipped Tauri handler contains no migration/cutover/stage/beta/dev dogfood command. | 7 |
 | Active docs cannot declare legacy fallback as acceptable product behavior. | 7 |
+
+## 11. Phase 1 Inventory Crosswalk
+
+Machine-readable inventory:
+
+- `plans/openlife_single_system_phase1_inventory.json`
+
+Phase 1 does not delete these systems. It makes them explicit, classified, and
+guarded so later phases cannot add unregistered parallel systems.
+
+| Inventory category | Manifest section | Phase rule |
+| --- | --- | --- |
+| `product_authorities` | Sections 1 and 9 | keep only `AGENTS.md`, `plans/README.md`, and the two single-system docs as active authority |
+| `old_runtime_surfaces` | Sections 2, 6, and 8 | absorb/delete/archive according to each entry's phase and disposition |
+| `old_router_surfaces` | Section 3 | replace with `IntentFrame` + `PolicyRouter`, then delete old router surfaces |
+| `product_old_route_markers` | Sections 2, 3, and 8 | every old marker is counted until the owning phase removes it |
+| `direct_proposal_write_surfaces` | Section 4 | route through `ReviewWorkflow`; `ProposalStore` remains storage only |
+| `direct_memory_lifemodel_write_surfaces` | Section 5 | route through `MemoryGateway` / `LifeModelWriteGateway`; storage stays storage only |
+| `frontend_multi_source_state_surfaces` | Section 7 | migrate product pages to `LifeStateProjection`; split product bridge from dev/test bridge |
+| `stage_beta_migration_command_surfaces` | Section 8 and table below | delete from shipped product handler in Phase 7 |
+
+Phase 1 old-route marker inventory:
+
+| Marker | Phase | Disposition |
+| --- | --- | --- |
+| `legacy_agent_loop` | 2 | delete |
+| `main_chat_strategy` | 2 | delete |
+| `route_preview` | 3 | delete |
+| `single_step_fallback` | 2 | delete |
+| `MultiStrategy` | 7 | delete |
+| `beta_v1` | 7 | delete |
+| `stage1` | 7 | archive_reference |
+| `stage2` | 7 | archive_reference |
+| `stage3` | 7 | archive_reference |
+| `stage4` | 5 | absorb_then_delete |
+| `stage5` | 7 | delete |
+
+Phase 1 shipped handler command inventory:
+
+| Command | Phase | Disposition |
+| --- | --- | --- |
+| `run_main_chat_agent_execution_v1_eval_gate` | 7 | delete |
+| `run_main_chat_capability_eval_gate` | 7 | delete |
+| `run_main_chat_agent_beta_v1_readiness_gate` | 7 | delete |
+| `run_main_chat_agent_stage1_dogfood_gate` | 7 | delete |
+| `run_main_chat_agent_stage2_readiness_gate` | 7 | delete |
+| `prepare_main_chat_step6_live_provider_eval_state` | 7 | delete |
+| `run_main_chat_stage3_execution_ux_report` | 7 | delete |
+| `validate_main_chat_agent_stage2_manual_dogfood_artifact` | 7 | delete |
+| `prepare_main_chat_agent_stage1_browser_dogfood_state` | 7 | delete |
+| `set_main_chat_agent_stage1_browser_network_policy` | 7 | delete |
+| `set_main_chat_agent_stage1_browser_scripted_response` | 7 | delete |
+| `set_main_chat_agent_stage1_browser_web_fixture_output` | 7 | delete |
+| `get_react_beta_execution_status` | 7 | delete |
+| `check_runtime_migration_gate` | 7 | delete |
+| `draft_controlled_chat_migration_plan` | 7 | delete |
+| `record_controlled_chat_migration_review_decision` | 7 | delete |
+| `get_controlled_chat_migration_review_decision_summary` | 7 | delete |
+| `check_controlled_chat_migration_implementation_gate` | 7 | delete |
+| `run_controlled_chat_migration_shadow_run` | 7 | delete |
+| `record_controlled_chat_migration_shadow_review_decision` | 7 | delete |
+| `get_controlled_chat_migration_shadow_review_summary` | 7 | delete |
+| `check_controlled_chat_cutover_readiness` | 7 | delete |
+| `run_controlled_chat_cutover_candidate` | 7 | delete |
+| `record_controlled_chat_cutover_candidate_review_decision` | 7 | delete |
+| `get_controlled_chat_cutover_candidate_review_summary` | 7 | delete |
+| `check_controlled_chat_cutover_candidate_promotion_readiness` | 7 | delete |
+| `list_stage4_knowledge_asset_inventory` | 7 | delete |
+| `run_main_chat_stage4_memory_knowledge_report` | 7 | delete |
+| `evaluate_main_chat_stage5_release_debug_preflight` | 7 | delete |
+| `run_main_chat_stage5_release_debug_report` | 7 | delete |

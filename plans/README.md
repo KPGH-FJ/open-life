@@ -1,11 +1,28 @@
 # OpenLife Plans Document Governance
 
-> Last updated: 2026-06-25
-> Status: authoritative document index for Agents; Main Chat kernel rescue Goal 8 remains the current runtime entry point, and Runtime Facts / Agent Self-State is the current post-Goal-8 preparation track
+> Last updated: 2026-07-06
+> Status: authoritative document index for Agents; Single-System Development Preparation Phase 1 is the current active development entry point
 
 This file prevents old planning documents from steering new Agent work. If two
 documents disagree, use the precedence below and treat lower-priority stale text
 as reference only.
+
+The current highest-priority development entry, below only `AGENTS.md` and this
+authority map, is:
+
+- `plans/openlife_single_system_development_preparation.md`
+- `plans/openlife_single_system_deletion_manifest.md`
+
+All older Goal, Stage, Beta, Migration, cutover, dogfood, and eval planning
+documents are historical reference unless a future task explicitly names one as
+input and keeps it subordinate to the single-system contract.
+
+Single-system hard rules:
+
+- no new system without deletion
+- no product-visible legacy/beta/stage/migration/cutover route
+- no direct durable write outside gateway
+- no frontend independent product readiness source
 
 ## 1. Precedence
 
@@ -13,10 +30,23 @@ as reference only.
    - Project-wide Agent instructions, current constraints, and Tool Taxonomy.
 2. `plans/README.md`
    - This authority map and current entry point.
-3. `plans/main_chat_agent_kernel_rescue_goal_8_cleanup_final_gate.md`,
+3. `plans/openlife_single_system_development_preparation.md` and
+   `plans/openlife_single_system_deletion_manifest.md`
+   - Current active development authority for the single-system cleanup round.
+     The implementation rule is no new system without deletion, no
+     product-visible legacy/beta/stage/migration/cutover route, no direct
+     durable write outside the future gateway path, and no frontend independent
+     product readiness source.
+4. Historical Goal/Stage/Beta/Migration/Cutover/Dogfood/Eval plans
+   - These documents can provide audit history and acceptance evidence, but
+     they cannot set current task order, authorize product-visible legacy
+     routes, or justify adding a parallel system. The active deletion contract
+     is the single-system manifest above.
+5. Historical Main Chat kernel rescue documents:
+   `plans/main_chat_agent_kernel_rescue_goal_8_cleanup_final_gate.md`,
    `plans/main_chat_agent_kernel_rescue_goal_mode_index.md`, and
    `plans/main_chat_agent_kernel_rescue_acceptance_matrix.md`
-   - Current rescue entry point. Goal 8 treats `MainChatKernel` as the product
+   - Historical rescue entry point. Goal 8 treated `MainChatKernel` as the product
      default for ordinary Main Chat, keeps legacy fallback explicit and counted,
      and realigns final/readiness gates to consume kernel evidence fields
      instead of old over-orchestrated strategy-path proof. The supporting
@@ -45,16 +75,18 @@ as reference only.
      that RF-20/RF-21, external live-provider credit, legacy fallback
      containment, Runtime Facts refactor, product UI, or E2E product acceptance
      has completed.
-4. `plans/main_chat_stage2_preparation_index.md` and
+6. Historical Stage 2 planning documents:
+   `plans/main_chat_stage2_preparation_index.md` and
    `plans/main_chat_agent_stage2_internal_trial_goal_spec.md`
-   - Current Stage 2 planning and Goal-mode entry point. Stage 2 targets
+   - Historical Stage 2 planning and Goal-mode entry point. Stage 2 targets
      limited internal trial readiness, not public beta and not another
      engineering-only dogfood pass. It must build on Stage 1 automated
      engineering dogfood evidence and add manual dogfood, live-provider P0
      evidence, AgentControlPlane product states, memory
      proposal trial flow, failure recovery coverage, and a fail-closed
      `ready_for_limited_internal_trial` readiness report.
-5. `plans/main_chat_stage1_preparation_index.md` and
+7. Historical Stage 1 planning documents:
+   `plans/main_chat_stage1_preparation_index.md` and
    `plans/main_chat_agent_stage1_dogfood_goal_spec.md`
    - Completed Stage 1 Real End-to-End Dogfood implementation and acceptance
      audit trail. Linux CI run `27807633105` produced real
@@ -62,7 +94,7 @@ as reference only.
      scenarios, 36 passed journeys, 0 failed journeys, and no blockers. Manual
      dogfood / internal-trial approval and external live-provider proof remain
      opt-in and separate from default deterministic readiness.
-6. `plans/main_chat_agent_v1_stabilization_goal_spec.md`
+8. `plans/main_chat_agent_v1_stabilization_goal_spec.md`
    - Previous Goal-mode entry for the stabilization / acceptance-blocker
      remediation pass after checkpoint `d8e415f`. This Goal does not restart
      the previous broad migration Goal and does not expand the product roadmap.
@@ -72,7 +104,7 @@ as reference only.
      knowledge-format context surfaces, and `src-tauri/src/lib.rs` module
      cleanup. It must fail closed and must not claim completion without real
      evidence.
-7. `plans/main_chat_agent_migration_v1_goal_spec.md`
+9. `plans/main_chat_agent_migration_v1_goal_spec.md`
    - Main Chat Agent Execution v1 remediation spec / audit trail and capability
      target.
      Ordinary Main Chat now enters AgentIngress and a governed task session,
@@ -356,15 +388,23 @@ as reference only.
 
 ## 2. Current Position
 
-Current latest status is **Stage 2 Internal Trial Readiness preparation is the
-active planning entry point**. Stage 1 automated engineering dogfood is complete
-for default deterministic readiness: Linux CI run `27807633105` passed the real
-Tauri Chat UI D01-D36 dogfood gate with
-`evidenceSource=tauri_command_surface_browser_observed`, 36 observed scenarios,
-36 passed journeys, 0 failed journeys, and `blockers=[]`. Current PR-level
-merge readiness still depends on the live CI status: `CI / Rust Check`,
-`CI / Rust Check (macOS)`, and `Stage 1 Tauri Dogfood` must be green before
-the Step 6 evidence can be treated as merge-ready.
+Current latest status is **Single-System Development Preparation Phase 1**. The
+active development standard is defined by
+`plans/openlife_single_system_development_preparation.md` and
+`plans/openlife_single_system_deletion_manifest.md`. The goal is to establish
+one product authority graph, a machine-readable old-system inventory, and
+static guards before any Main Chat runtime refactor.
+
+The old Goal/Stage/Beta/Migration readiness records below are retained as
+historical evidence only. They do not authorize a product-visible
+legacy/beta/stage/migration/cutover route, a direct durable write outside the
+future gateway path, a new system without deleting the old one, or a frontend
+readiness source independent of the eventual product projection.
+
+Historical baseline: Stage 1 automated engineering dogfood produced default
+deterministic readiness evidence in Linux CI run `27807633105`, but that is not
+the current development authority and it is not a single-system completion
+claim.
 
 Do not use stale local macOS fail-closed browser reports as Stage 1 pass
 evidence; macOS remains unsupported for the official Tauri WebDriver desktop
@@ -1196,13 +1236,25 @@ metadata-safe safety, default Chat impact, and next dependency.
 | Main Chat Kernel Rescue Goal 8 | Current Main Chat default realignment | Ordinary send/stream command-surface cases are expected to be MainChatKernel-backed for DirectAnswer, read-only tools, proposal-only writes, PlanExecute draft, blockers, HS context, web, and MCP; legacy fallback must stay explicit/countable and final/readiness gates consume kernel evidence counters |
 | Main Chat Agent Execution v1 | Main Chat Agent remediation | Ordinary `send_message` / `start_stream_message` enter AgentIngress and governed task sessions; DirectAnswer, ReAct read/tool paths, proposal paths, command-surface gates, runtime-facts slices, and Step 6 local plus external live-provider evidence now have typed, auditable coverage. The Step 6 proof rejects local/scripted/fixture/synthetic/loopback/local-test HTTP credit for external live acceptance. Main Chat Agent Execution v1 is still not a Stage 2 completion claim: PR merge readiness depends on green CI, and limited internal trial readiness remains separately governed. |
 
-## 4. Current Authoritative Entry Points
+## 4. Current Active Entry Points
 
 | Document | Use for |
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, and current hard constraints. |
-| `plans/main_chat_capability_first_preparation.md` | Capability-first Main Chat preparation-only entrypoint: defines the 1-7 development route, minimum governance backstop, industry cross-check, PR sequence, and real capability eval seed set. It does not supersede K8/runtime acceptance until implementation lands. |
-| `plans/main_chat_agent_kernel_rescue_goal_8_cleanup_final_gate.md` | Current Goal-mode target for kernel-backed default Main Chat cleanup and final/readiness gate realignment. |
+| `plans/README.md` | This authority map and precedence contract. |
+| `plans/openlife_single_system_development_preparation.md` | Current highest-priority development entry for the single-system cleanup round. |
+| `plans/openlife_single_system_deletion_manifest.md` | Current deletion contract for old systems, command surfaces, direct-write paths, frontend state surfaces, and historical docs. |
+| `plans/openlife_single_system_phase1_inventory.json` | Machine-readable Phase 1 inventory that static guards use to prevent unregistered old systems, old commands, and direct-write callsites. |
+
+## 5. Historical Or Scoped Reference Entry Points
+
+These files are useful context, but they are not current execution authority and
+cannot override the single-system contract.
+
+| Document | Use for |
+| --- | --- |
+| `plans/main_chat_capability_first_preparation.md` | Historical capability-first Main Chat preparation entrypoint. |
+| `plans/main_chat_agent_kernel_rescue_goal_8_cleanup_final_gate.md` | Historical Goal-mode target for kernel-backed default Main Chat cleanup and final/readiness gate realignment. |
 | `plans/main_chat_agent_kernel_rescue_goal_mode_index.md` | Eight-goal Main Chat kernel rescue sequence and cross-goal rules. |
 | `plans/main_chat_agent_kernel_rescue_acceptance_matrix.md` | K1-K8 acceptance rows; K8 is authoritative for default kernel path, legacy fallback isolation, final/readiness gate evidence, docs, and safety regression checks. |
 | `plans/main_chat_stage1_preparation_index.md` | Completed Stage 1 preparation / implementation entrypoint and post-pass evidence summary. Keep as Stage 1 audit trail. |
@@ -1214,8 +1266,8 @@ metadata-safe safety, default Chat impact, and next dependency.
 | `plans/main_chat_runtime_to_ui_evidence_mapping_v1.md` | Contract mapping runtime evidence to UI task, action, observation, blocker, proposal, and final delivery objects. |
 | `plans/main_chat_permission_proposal_memory_ux_contract_v1.md` | Permission, ToolPermission proposal, memory proposal, conflict, rollback, and Review Center UX contract. |
 | `plans/main_chat_final_delivery_contract_v1.md` | Final delivery object, completion statuses, section requirements, and negative assertions for task completion. |
-| `plans/main_chat_agent_v1_stabilization_goal_spec.md` | Previous stabilization / acceptance-blocker remediation entry. Keep as audit trail, not the current Goal-mode entry. |
-| `plans/main_chat_agent_migration_v1_goal_spec.md` | Main Chat Agent Execution v1 capability target and audit trail. Do not directly restart it as the next broad Goal unless explicitly requested. |
+| `plans/main_chat_agent_v1_stabilization_goal_spec.md` | Historical stabilization / acceptance-blocker remediation entry. Keep as audit trail, not the current Goal-mode entry. |
+| `plans/main_chat_agent_migration_v1_goal_spec.md` | Historical Main Chat Agent Execution v1 capability target and audit trail. Do not directly restart it as the next broad Goal unless explicitly requested. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Current LifeModel-Governed Runtime program and post-W149 implementation options. |
 | `plans/lifemodel_governed_backend_completion_goal_spec.md` | Completed Backend Completion master spec through Goal 8 / W147-W149. |
 | `plans/lifemodel_governed_runtime_progress.md` | W1-W158 structured status index and compressed guardrail map. |
@@ -1231,7 +1283,7 @@ metadata-safe safety, default Chat impact, and next dependency.
 | `plans/openlife_development_plan.md` | Current execution route, already aligned to the LifeModel-Governed program. |
 | `plans/openlife_codex_execution_playbook.md` | How to slice and verify individual Codex tasks. |
 
-## 5. Historical Or Scoped Reference Documents
+## 6. Historical Or Scoped Reference Documents
 
 These files are useful context, but they are not current execution authority:
 
@@ -1255,7 +1307,7 @@ These files are useful context, but they are not current execution authority:
 | `docs/decisions/0002-proposal-unified.md` | Historical ADR for Proposal intent; current Proposal semantics are governed by W90-W123 docs. |
 | `docs/decisions/0003-agent-run-tracking.md` | Historical ADR for AgentRun intent; current trace semantics include W10, W98-W105, W106-W113, and W114-W123. |
 
-## 6. Tool Status Guardrail
+## 7. Tool Status Guardrail
 
 `calendar.propose_event` and `email.propose_draft` are P1 proposal-only
 governed executors. They create `ScheduledTask` / `DataExport` proposals and
@@ -1351,11 +1403,20 @@ apply-path bound. This is still not full convergence: W89 does not retire
 legacy paths, alter default Chat routing, grant migration/runtime authority, or
 resolve the fallback source policy blocker.
 
-## 7. Agent Rules
+## 8. Agent Rules
 
 - Always read `AGENTS.md`, this file, and
-  `plans/openlife_lifemodel_governed_agent_runtime.md` before starting a new
+  `plans/openlife_single_system_development_preparation.md` plus
+  `plans/openlife_single_system_deletion_manifest.md` before starting a new
   architecture/runtime/LifeModel/tool task.
+- Do not add a new product system without updating the deletion manifest and
+  inventory for the old system it replaces.
+- Do not introduce product-visible legacy, beta, stage, migration, cutover, or
+  dogfood routes.
+- Do not add direct durable writes outside the future gateway path; until those
+  gateways exist, every direct write callsite must stay inventoried.
+- Do not let frontend product pages become independent readiness or pending
+  state authorities.
 - Use `plans/lifemodel_governed_runtime_progress.md` for W1-W105 status, not as
   an implementation roadmap.
 - Do not use historical plans to override current ordering, current Tool
@@ -1365,7 +1426,19 @@ resolve the fallback source policy blocker.
   routing, update the relevant docs in the same task and run the implementation
   verification gate.
 
-## 8. Next Recommended Sequence
+## 9. Next Recommended Sequence
+
+Current development sequence:
+
+```text
+Single-System Phase 1 authority/inventory/guards -> Phase 2 Main Chat single
+turn runtime -> Phase 3 IntentFrame/PolicyRouter -> Phase 4 ReviewWorkflow and
+DurableWritePolicy -> Phase 5 MemoryGateway/LifeModelWriteGateway -> Phase 6
+ToolGateway/FinalDelivery/LifeStateProjection -> Phase 7 old-system removal and
+real product trial.
+```
+
+Historical W-sequence retained for audit only:
 
 ```text
 W63 complete -> W64 authority compression validated -> W65 backend-only
