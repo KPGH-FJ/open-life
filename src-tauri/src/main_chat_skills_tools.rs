@@ -1,4 +1,4 @@
-use crate::main_chat_react_execution::execute_main_chat_react_action_with_executor;
+use crate::main_chat_react_execution::execute_main_chat_react_action_with_tool_gateway;
 use crate::main_chat_react_tool_selection::{
     main_chat_governed_mcp_read_tool_candidates, main_chat_manifest_has_write_like_surface,
     main_chat_manifest_is_governed_read_candidate, main_chat_surface_contains_write_like_term,
@@ -831,7 +831,7 @@ async fn execute_eval_safe_read(
         uses_ephemeral_mcp_wrapper_permission: false,
         tool_candidates: Vec::new(),
     };
-    execute_main_chat_react_action_with_executor(state, &plan, false).await
+    execute_main_chat_react_action_with_tool_gateway(state, &plan, false).await
 }
 
 async fn seed_failed_tool_action(

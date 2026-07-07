@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use tauri::State;
 
-use crate::main_chat_react_execution::execute_main_chat_react_action_with_executor;
+use crate::main_chat_react_execution::execute_main_chat_react_action_with_tool_gateway;
 use crate::main_chat_react_tool_selection::{
     build_main_chat_react_action_plan, resolve_main_chat_mcp_read_target,
 };
@@ -2009,7 +2009,7 @@ async fn replay_main_chat_agent_action(
         .privacy_risk
         .local_only_required;
 
-    let observation = match execute_main_chat_react_action_with_executor(
+    let observation = match execute_main_chat_react_action_with_tool_gateway(
         state,
         &action_plan,
         local_only_required,

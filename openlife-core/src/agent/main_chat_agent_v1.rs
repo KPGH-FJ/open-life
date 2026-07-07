@@ -4,8 +4,7 @@ use crate::agent::main_chat_governance_intent::{
 };
 use crate::agent::types::AgentTaskKind;
 use crate::agent::{
-    ActionExecutionContext, ActionExecutionStatus, ActionExecutor, ActionExecutorConfig,
-    AgentActionRequest,
+    ActionExecutionContext, ActionExecutionStatus, ActionExecutorConfig, AgentActionRequest,
 };
 use crate::llm::ChatMessage;
 use anyhow::{Context, Result};
@@ -4561,7 +4560,7 @@ fn runtime_eval_formal_executor_observation(
     if let Some(proposal_store) = proposal_store.as_ref() {
         action_ctx = action_ctx.with_proposal_store(proposal_store);
     }
-    let result = ActionExecutor::new(ActionExecutorConfig {
+    let result = crate::agent::ToolGateway::from_executor_config(ActionExecutorConfig {
         allow_writes: false,
         ..Default::default()
     })
@@ -4788,7 +4787,7 @@ fn runtime_eval_multi_step_agent_loop_observation(
         crate::agent::AgentRuntime::new(life_model.clone(), scheduler.clone(), &Default::default());
     let agent_loop = crate::agent::AgentLoop::new(
         runtime,
-        ActionExecutor::new(ActionExecutorConfig {
+        crate::agent::ToolGateway::from_executor_config(ActionExecutorConfig {
             allow_writes: false,
             ..Default::default()
         }),

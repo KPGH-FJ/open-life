@@ -99,15 +99,6 @@ impl ToolManifest {
         if self.id.is_empty() {
             self.id = self.name.clone();
         }
-        if self.risk_level.is_empty() {
-            self.risk_level = self.permission_level.clone();
-        }
-        if self.permission_level.is_empty() {
-            self.permission_level = self.risk_level.clone();
-        }
-        if self.capabilities.is_empty() {
-            self.capabilities = Self::infer_capabilities(&self.name);
-        }
         self.requires_confirmation = self.requires_confirmation
             || self.risk_level == "high"
             || self.capabilities.iter().any(|c| {
@@ -286,6 +277,23 @@ mod tests {
 
         assert!(m.declarative_only);
         assert!(!m.enabled);
+    }
+
+    #[test]
+    fn normalized_does_not_grant_inferred_execution_contract() {
+        let m = ToolManifest::new(
+            "write_file",
+            "A tool without an explicit Phase6 contract",
+            serde_json::json!({}),
+            "low",
+            "1.0.0",
+            ToolSource::BuiltIn,
+        )
+        .normalized();
+
+        assert!(m.capabilities.is_empty());
+        assert!(m.action_type.is_empty());
+        assert_eq!(m.risk_level, "low");
     }
 
     #[test]

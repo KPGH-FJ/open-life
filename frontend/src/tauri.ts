@@ -2574,6 +2574,86 @@ export async function getSystemDiagnostics(): Promise<SystemDiagnostics> {
   return safeInvoke<SystemDiagnostics>("get_system_diagnostics");
 }
 
+export interface LifePendingProjection {
+  pendingProposalCount: number;
+  editedProposalCount: number;
+  totalReviewRequiredCount: number;
+  highRiskReviewRequiredCount: number;
+  proposalStoreStatus: string;
+  requiresUserAction: boolean;
+}
+
+export interface LifeReadinessProjection {
+  chatReady: boolean;
+  usageReady: boolean;
+  lifeModelReady: boolean;
+  modelEmpty: boolean;
+  pendingBuilderReviewSessions: number;
+  unfinishedBuilderSessions: number;
+  databaseStatus: string;
+  readinessIssues: string[];
+  usageReadinessIssues: string[];
+}
+
+export interface LifeTaskStateProjection {
+  taskStoreStatus: string;
+  latestTaskId?: string | null;
+  latestTaskStatus?: string | null;
+  runningCount: number;
+  waitingPermissionCount: number;
+  blockedCount: number;
+  failedCount: number;
+  cancelledCount: number;
+  completedCount: number;
+  activeCount: number;
+}
+
+export interface LifeSafeModeProjection {
+  active: boolean;
+  reason: string;
+  sourceRefs: string[];
+}
+
+export interface LifeToolPermissionProjection {
+  totalCount: number;
+  activeCount: number;
+  consumedCount: number;
+  allowCount: number;
+  denyCount: number;
+  askEveryTimeCount: number;
+  allowOnceCount: number;
+  allowUntilRevokedCount: number;
+}
+
+export interface LifeSurfaceProjection {
+  surface: "today" | "mailbox" | "chat" | "companion" | "life_model" | "settings" | string;
+  pendingReviewCount: number;
+  editedReviewCount: number;
+  totalReviewRequiredCount: number;
+  readinessStatus: "ready" | "partial" | "blocked" | string;
+  taskStatus: string;
+  safeModeActive: boolean;
+  waitingPermissionCount: number;
+  activeToolPermissionCount: number;
+}
+
+export interface LifeStateProjection {
+  version: string;
+  generatedAt: string;
+  pending: LifePendingProjection;
+  readiness: LifeReadinessProjection;
+  taskState: LifeTaskStateProjection;
+  safeMode: LifeSafeModeProjection;
+  toolPermissions: LifeToolPermissionProjection;
+  safePaths: string[];
+  surfaces: LifeSurfaceProjection[];
+  sourceRefs: string[];
+}
+
+export async function getLifeStateProjection(): Promise<LifeStateProjection> {
+  return safeInvoke<LifeStateProjection>("get_life_state_projection");
+}
+
 export async function getRuntimeBuildInfo(): Promise<RuntimeBuildInfo> {
   return safeInvoke<RuntimeBuildInfo>("get_runtime_build_info");
 }

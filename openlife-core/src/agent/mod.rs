@@ -37,6 +37,7 @@ pub mod runtime_migration_gate;
 mod runtime_strategy_contract;
 pub mod store;
 pub mod strategy_runtime;
+pub mod tool_gateway;
 pub mod types;
 
 #[cfg(test)]
@@ -224,5 +225,8 @@ pub use strategy_runtime::{
     RuntimeStrategyExecutionReport, RuntimeStrategyInput, RuntimeStrategyOutput,
     RuntimeStrategyPayload, RuntimeStrategyPayloadKind, RuntimeStrategyRegistry,
     RuntimeStrategyRegistryReadinessReport, RuntimeStrategySideEffectBudget,
+};
+pub use tool_gateway::{
+    validate_manifest_execution_contract, ToolGateway, ToolGatewayContractEvidence,
 };
 pub use types::*;

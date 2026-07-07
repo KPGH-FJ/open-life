@@ -154,7 +154,7 @@ function toolAccess(diagnostics: SystemDiagnostics | null): {
 
 export function buildCapabilityStatusViewModel(
   diagnostics: SystemDiagnostics | null,
-  pendingProposalCount: number,
+  pendingProposalCount: number | null,
   currentRun?: AgentRun | null
 ): CapabilityStatusViewModel {
   const tools = toolAccess(diagnostics);
@@ -214,8 +214,13 @@ export function buildCapabilityStatusViewModel(
         detail: tools.detail,
       },
       {
-        label: pendingProposalCount > 0 ? `待确认 ${pendingProposalCount}` : "无待确认",
-        tone: pendingProposalCount > 0 ? "warning" : "neutral",
+        label:
+          pendingProposalCount == null
+            ? "待确认状态读取中"
+            : pendingProposalCount > 0
+              ? `待确认 ${pendingProposalCount}`
+              : "无待确认",
+        tone: pendingProposalCount == null ? "neutral" : pendingProposalCount > 0 ? "warning" : "neutral",
       },
     ],
     modelRouteLabel,

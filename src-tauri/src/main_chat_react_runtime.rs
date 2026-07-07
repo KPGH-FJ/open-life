@@ -423,15 +423,16 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             blocker_reason: Some("network_policy_blocked".into()),
         });
     }
-    let action_executor =
-        openlife_core::agent::ActionExecutor::new(openlife_core::agent::ActionExecutorConfig {
+    let tool_gateway = openlife_core::agent::ToolGateway::from_executor_config(
+        openlife_core::agent::ActionExecutorConfig {
             allow_writes: false,
             allow_cloud,
             ..Default::default()
-        });
+        },
+    );
     let agent_loop = openlife_core::agent::AgentLoop::new(
         agent_runtime,
-        action_executor,
+        tool_gateway,
         scheduler.clone(),
         loop_config,
     );

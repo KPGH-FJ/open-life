@@ -909,6 +909,250 @@ fn single_system_phase5_product_memory_lifemodel_writes_use_gateways() {
 }
 
 #[test]
+fn single_system_phase6_product_tool_execution_uses_tool_gateway() {
+    let mut direct_executor_files = BTreeSet::new();
+    for file in source_files(&["src-tauri/src", "openlife-core/src"]) {
+        let rel = to_repo_path(&file);
+        if rel.ends_with("_tests.rs") || rel.contains("/tests/") {
+            continue;
+        }
+        let source = fs::read_to_string(&file).unwrap_or_else(|err| panic!("read {rel}: {err}"));
+        let stripped = strip_cfg_test_module(&source);
+        if stripped.contains("ActionExecutor::new(") {
+            direct_executor_files.insert(rel);
+        }
+    }
+
+    let expected = BTreeSet::from(["openlife-core/src/agent/tool_gateway.rs".to_string()]);
+    assert_eq!(
+        direct_executor_files, expected,
+        "Phase6 product execution must instantiate ActionExecutor only behind ToolGateway"
+    );
+
+    let gateway = read_repo_file("openlife-core/src/agent/tool_gateway.rs");
+    for marker in [
+        "validate_manifest_execution_contract",
+        "tool_gateway_capability_contract_missing",
+        "tool_gateway_risk_contract_missing",
+        "tool_gateway_action_type_contract_missing",
+        "tool_gateway_permission_contract_missing",
+        "tool_gateway_manifest_disabled",
+        "tool_gateway_manifest_declarative_only",
+        "migration:name_inferred_contract",
+    ] {
+        assert!(
+            gateway.contains(marker),
+            "Phase6 ToolGateway must fail closed for explicit manifest contract marker {marker}"
+        );
+    }
+
+    let lib_source = read_repo_file("src-tauri/src/lib.rs");
+    let lib = strip_cfg_test_module(&lib_source);
+    assert!(
+        !source_between(lib, "tauri::generate_handler![", "])").contains("grant_tool_permission"),
+        "Phase6 direct grant_tool_permission IPC must not stay mounted as product authority"
+    );
+}
+
+#[test]
+fn single_system_phase6_final_delivery_is_canonical_and_non_overclaiming() {
+    let runtime_source = read_repo_file("src-tauri/src/main_chat_turn_runtime.rs");
+    let source = strip_cfg_test_module(&runtime_source);
+
+    assert!(
+        source.contains("pub struct CanonicalFinalDeliveryView"),
+        "Phase6 final delivery must expose CanonicalFinalDeliveryView"
+    );
+    for status in [
+        "\"completed\"",
+        "\"completed_with_pending_items\"",
+        "\"blocked\"",
+        "\"failed\"",
+        "\"cancelled\"",
+    ] {
+        assert!(
+            source.contains(status),
+            "CanonicalFinalDeliveryView must preserve allowed status {status}"
+        );
+    }
+    for retired_status in ["\"delivered\"", "\"pending_user_action\""] {
+        assert!(
+            !source.contains(retired_status),
+            "CanonicalFinalDeliveryView must not emit retired overclaim status {retired_status}"
+        );
+    }
+    assert!(
+        source.contains("!proposals.is_empty()")
+            && source.contains("\"completed_with_pending_items\""),
+        "Phase6 proposals must produce completed_with_pending_items instead of completed"
+    );
+    assert!(
+        source.contains("pending_user_actions")
+            && source.contains("completed_actions")
+            && source.contains("observations_used")
+            && source.contains("durable_changes")
+            && source.contains("next_steps"),
+        "CanonicalFinalDeliveryView must include actions, observations, proposals/blockers, pending actions, durable changes, and next steps"
+    );
+}
+
+#[test]
+fn single_system_phase6_frontend_product_status_reads_life_state_projection() {
+    let projection_helper = read_repo_file("frontend/src/utils/lifeStateProjection.ts");
+    for marker in [
+        "findLifeStateSurface",
+        "reviewRequiredCountFromProjection",
+        "totalReviewRequiredCount",
+    ] {
+        assert!(
+            projection_helper.contains(marker),
+            "Phase6 projection helper must centralize product pending state marker {marker}"
+        );
+    }
+
+    let product_status_files = [
+        "frontend/src/pages/TodayPage.tsx",
+        "frontend/src/pages/MailboxPage.tsx",
+        "frontend/src/pages/ChatPage.tsx",
+        "frontend/src/pages/CompanionPage.tsx",
+        "frontend/src/pages/LifeModelPage.tsx",
+        "frontend/src/pages/SettingsPage.tsx",
+        "frontend/src/pages/settings/tabs/OverviewTab.tsx",
+        "frontend/src/pages/settings/tabs/ReviewMemoryTab.tsx",
+        "frontend/src/pages/settings/tabs/ToolsPermissionsTab.tsx",
+        "frontend/src/pages/settings/tabs/AdvancedTab.tsx",
+    ];
+    let forbidden_raw_status_markers = [
+        "pending_proposal_count",
+        "high_risk_pending_proposal_count",
+        "pending_builder_review_sessions",
+        "unfinished_builder_sessions",
+        "isSafeMode(",
+        "getSafeModeReason(",
+        "diagnosticsUsageReady",
+        "diagnosticsUsageReadinessIssues",
+    ];
+
+    for path in product_status_files {
+        let source = read_repo_file(path);
+        if path == "frontend/src/pages/CompanionPage.tsx" {
+            assert!(
+                source.contains("<ChatPage companionMode"),
+                "CompanionPage must inherit ChatPage projection-backed status"
+            );
+        } else {
+            assert!(
+                source.contains("LifeStateProjection") || source.contains("getLifeStateProjection"),
+                "Phase6 product status file {path} must use LifeStateProjection"
+            );
+        }
+        if matches!(
+            path,
+            "frontend/src/pages/TodayPage.tsx"
+                | "frontend/src/pages/MailboxPage.tsx"
+                | "frontend/src/pages/ChatPage.tsx"
+                | "frontend/src/pages/LifeModelPage.tsx"
+        ) {
+            assert!(
+                source.contains("reviewRequiredCountFromProjection"),
+                "Phase6 product pending state in {path} must use the LifeStateProjection helper"
+            );
+        }
+        for marker in forbidden_raw_status_markers {
+            assert!(
+                !source.contains(marker),
+                "Phase6 product status file {path} must not derive covered state from raw marker {marker}"
+            );
+        }
+    }
+
+    let chat = read_repo_file("frontend/src/pages/ChatPage.tsx");
+    let chat_pending_alert = source_between(
+        &chat,
+        "{/* Pending Proposals Alert */}",
+        "{/* Chat mode selector */}",
+    );
+    assert!(
+        chat.contains("const projectionPendingReviewCount = reviewRequiredCountFromProjection("),
+        "Chat product pending state must be named and sourced from LifeStateProjection"
+    );
+    assert!(
+        chat_pending_alert.contains("projectionPendingReviewCount"),
+        "Chat pending banner must render from projection-backed count"
+    );
+    for forbidden in [
+        "?? pendingProposals.length",
+        "|| pendingProposals.length",
+        "pendingProposals.length > 0",
+    ] {
+        assert!(
+            !chat.contains(forbidden),
+            "Chat must not use raw pendingProposals length as product pending authority: {forbidden}"
+        );
+    }
+
+    let mailbox = read_repo_file("frontend/src/pages/MailboxPage.tsx");
+    assert!(
+        mailbox.contains("const mailboxReviewRequiredCount = reviewRequiredCountFromProjection("),
+        "Mailbox top-level pending state must be named and sourced from LifeStateProjection"
+    );
+    assert!(
+        !mailbox.contains("folderCounts.pending"),
+        "Mailbox global pending badge must not use folderCounts.pending; folderCounts are list-filter details only"
+    );
+
+    let lifemodel = read_repo_file("frontend/src/pages/LifeModelPage.tsx");
+    let builder_review_counter = source_between(
+        &lifemodel,
+        "function countBuilderReviewItems",
+        "function formatProjectionCount",
+    );
+    assert!(
+        lifemodel.contains(
+            "const pendingCount = reviewRequiredCountFromProjection(state.projection, \"life_model\")"
+        ),
+        "LifeModel product pending count must come from LifeStateProjection helper"
+    );
+    assert!(
+        builder_review_counter.contains("projection.readiness.pendingBuilderReviewSessions"),
+        "LifeModel builder review state must come from projection readiness"
+    );
+    for forbidden in ["pendingProposals", "Math.max", "proposalCount"] {
+        assert!(
+            !builder_review_counter.contains(forbidden),
+            "LifeModel builder review state must not fallback to raw proposal data: {forbidden}"
+        );
+    }
+
+    let today = read_repo_file("frontend/src/pages/TodayPage.tsx");
+    assert!(
+        today.contains(
+            "const pendingCount = reviewRequiredCountFromProjection(state.projection, \"today\")"
+        ),
+        "Today pending state must come from LifeStateProjection helper"
+    );
+    for (path, source) in [
+        ("ChatPage", chat.as_str()),
+        ("MailboxPage", mailbox.as_str()),
+        ("LifeModelPage", lifemodel.as_str()),
+        ("TodayPage", today.as_str()),
+    ] {
+        for forbidden in [
+            "?? pendingProposals.length",
+            "|| pendingProposals.length",
+            "?? folderCounts.pending",
+            "|| folderCounts.pending",
+            "pending.totalReviewRequiredCount ?? 0",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{path} must not turn projection-missing pending state into a raw or fake definite count: {forbidden}"
+            );
+        }
+    }
+}
+
+#[test]
 fn single_system_direct_memory_lifemodel_write_callsites_match_inventory() {
     let expected = expected_count_map("direct_memory_lifemodel_write_surfaces");
     let needles = [

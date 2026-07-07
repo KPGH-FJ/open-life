@@ -15,14 +15,13 @@ import {
 import {
   acceptProposal,
   editProposal,
-  getConfig,
-  getSystemDiagnostics,
+  getLifeStateProjection,
   listProposals,
   postponeProposal,
   rejectProposal,
   resumeMainChatAgentTask,
   type AgentProposal,
-  type AppConfig,
+  type LifeStateProjection,
   type ProposalStatus,
 } from "../tauri";
 import ReviewDecisionCard from "../components/ReviewDecisionCard";
@@ -33,7 +32,7 @@ import {
   reviewGroupLabel,
   type ReviewDecisionGroup,
 } from "../utils/reviewDecision";
-import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
+import { reviewRequiredCountFromProjection } from "../utils/lifeStateProjection";
 
 type FolderId = "pending" | "accepted" | "archived" | "needs_edit";
 type QuickAction = "accept" | "reject" | "postpone";
@@ -43,7 +42,7 @@ const FOLDERS: Array<{ id: FolderId; label: string; icon: LucideIcon }> = [
   { id: "pending", label: "待确认", icon: ListChecks },
   { id: "accepted", label: "已同意", icon: Check },
   { id: "archived", label: "已处理", icon: Archive },
-  { id: "needs_edit", label: "草稿修改", icon: Edit2 },
+  { id: "needs_edit", label: "已修改待处理", icon: Edit2 },
 ];
 
 function isUnsupportedType(type: string): boolean {
@@ -207,28 +206,28 @@ export default function MailboxPage() {
   const [actingId, setActingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [diagnostics, setDiagnostics] = useState<any>(null);
+  const [projection, setProjection] = useState<LifeStateProjection | null>(null);
   const [safePaths, setSafePaths] = useState<string[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const [mainChatResumeTaskId, setMainChatResumeTaskId] = useState<string | null>(null);
   const [mainChatResumeBusy, setMainChatResumeBusy] = useState(false);
 
-  const safeModeActive = isSafeMode(diagnostics);
-  const safeModeReason = getSafeModeReason(diagnostics);
+  const safeModeActive = projection?.safeMode.active ?? false;
+  const safeModeReason = projection?.safeMode.reason ?? "系统当前处于 Safe Mode。";
+  const mailboxReviewRequiredCount = reviewRequiredCountFromProjection(projection, "mailbox");
 
   const load = async () => {
     setLoading(true);
     setError(null);
     try {
-      const [data, diag, config] = await Promise.all([
+      const [data, lifeState] = await Promise.all([
         listProposals(undefined, undefined, undefined, 100),
-        getSystemDiagnostics().catch(() => null),
-        getConfig().catch(() => null),
+        getLifeStateProjection().catch(() => null),
       ]);
       setProposals(data);
-      setDiagnostics(diag);
-      setSafePaths((config as AppConfig | null)?.system?.safe_paths ?? []);
+      setProjection(lifeState);
+      setSafePaths(lifeState?.safePaths ?? []);
     } catch (err) {
       setError(`加载 Mailbox 失败：${String(err)}`);
     } finally {
@@ -443,7 +442,9 @@ export default function MailboxPage() {
               </div>
             </div>
             <span className="rounded-md border border-stone-200 bg-white px-2.5 py-1 text-xs text-stone-600">
-              {folderCounts.pending} 个待确认
+              {mailboxReviewRequiredCount == null
+                ? "待处理状态读取中"
+                : `${mailboxReviewRequiredCount} 个待确认/已修改`}
             </span>
           </div>
           <button

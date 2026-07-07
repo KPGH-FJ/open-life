@@ -12,6 +12,7 @@ pub mod commands;
 pub mod errors;
 pub(crate) mod legacy_write_convergence;
 pub(crate) mod life_model_write_gateway;
+pub(crate) mod life_state_projection;
 #[allow(dead_code)]
 pub(crate) mod main_chat_agent_beta_v1_default_experience;
 #[allow(dead_code)]
@@ -210,8 +211,8 @@ use commands::diagnostics::{
 };
 use commands::execution::{
     check_tool_permission, disable_plugin, enable_plugin, get_skill_run_status,
-    get_skill_runtime_status, grant_tool_permission, list_plugins, list_skills,
-    list_tool_permissions, reload_plugins, revoke_tool_permission, run_skill,
+    get_skill_runtime_status, list_plugins, list_skills, list_tool_permissions, reload_plugins,
+    revoke_tool_permission, run_skill,
 };
 use commands::feedback::{
     apply_feedback_evolution, generate_evolution_report, get_feedback_summary, log_analytics_event,
@@ -250,6 +251,7 @@ use commands::state::{
     record_state, toggle_daily_goal, update_daily_goal,
 };
 use commands::version::{create_snapshot, diff_snapshots, list_snapshots, restore_snapshot};
+use life_state_projection::get_life_state_projection;
 use main_chat_event_stream::{get_main_chat_agent_state_snapshot, list_main_chat_agent_events};
 use main_chat_runtime_status::get_main_chat_runtime_status;
 use main_chat_stage4_memory_knowledge::{
@@ -474,7 +476,7 @@ async fn execute_tool_call(
         None
     };
 
-    let executor = openlife_core::agent::ActionExecutor::new(
+    let tool_gateway = openlife_core::agent::ToolGateway::from_executor_config(
         openlife_core::agent::ActionExecutorConfig::default(),
     );
     let ctx = openlife_core::agent::ActionExecutionContext::new(
@@ -498,7 +500,9 @@ async fn execute_tool_call(
         step_index: 0,
     };
 
-    let result = executor.execute(request, &ctx).map_err(|e| e.to_string())?;
+    let result = tool_gateway
+        .execute(request, &ctx)
+        .map_err(|e| e.to_string())?;
 
     // Persist the AgentRun
     run.actions.push(result.action.clone());
@@ -708,6 +712,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_life_model,
             get_life_model_current_view,
+            get_life_state_projection,
             save_life_model,
             get_config,
             save_config,
@@ -905,7 +910,6 @@ pub fn run() {
             get_rollout_errors,
             get_proactive_suggestions,
             list_tool_permissions,
-            grant_tool_permission,
             revoke_tool_permission,
             check_tool_permission,
             list_skills,

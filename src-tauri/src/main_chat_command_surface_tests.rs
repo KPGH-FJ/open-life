@@ -4124,7 +4124,8 @@ async fn main_chat_kernel_direct_answer_send_stream_success_metadata_parity() {
     assert_eq!(send_terminal.runtime_owner, "OpenLifeTurnRuntime");
     assert_eq!(send_terminal.status, "completed");
     assert_eq!(send_terminal.state, "DirectAnswer");
-    assert_eq!(send_terminal.final_delivery.status, "delivered");
+    assert_eq!(send_terminal.final_delivery.status, "completed");
+    assert!(send_terminal.final_delivery.completed_actions.is_empty());
     assert!(!send_terminal.legacy_fallback_used);
     assert!(!send_terminal.legacy_runtime_invoked);
     assert!(!send_terminal.single_step_fallback_used);
@@ -4245,16 +4246,25 @@ async fn openlife_turn_runtime_terminal_models_blocker_and_proposal_without_fall
         .turn_terminal
         .as_ref()
         .expect("proposal terminal");
-    assert_eq!(proposal_result.status, "waiting_for_user");
+    assert_eq!(proposal_result.status, "completed_with_pending_items");
     assert_eq!(proposal_terminal.runtime_owner, "OpenLifeTurnRuntime");
-    assert_eq!(proposal_terminal.status, "waiting_for_user");
+    assert_eq!(proposal_terminal.status, "completed_with_pending_items");
     assert_eq!(proposal_terminal.state, "WriteOutcome");
     assert_eq!(
         proposal_terminal.final_delivery.status,
-        "pending_user_action"
+        "completed_with_pending_items"
     );
     assert!(!proposal_terminal.proposals.is_empty());
+    assert_ne!(proposal_terminal.final_delivery.status, "completed");
     assert!(proposal_terminal.final_delivery.proposal_count > 0);
+    assert!(!proposal_terminal
+        .final_delivery
+        .proposals_created
+        .is_empty());
+    assert!(!proposal_terminal
+        .final_delivery
+        .pending_user_actions
+        .is_empty());
     assert!(!proposal_terminal.legacy_fallback_used);
     assert!(!proposal_terminal.legacy_runtime_invoked);
     assert!(!proposal_terminal.single_step_fallback_used);

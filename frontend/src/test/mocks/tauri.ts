@@ -2896,6 +2896,83 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         ],
         config_source: "env+default",
       } as T);
+    case "get_life_state_projection":
+      return Promise.resolve({
+        version: "life_state_projection_v1",
+        generatedAt: new Date().toISOString(),
+        pending: {
+          pendingProposalCount: 0,
+          editedProposalCount: 0,
+          totalReviewRequiredCount: 0,
+          highRiskReviewRequiredCount: 0,
+          proposalStoreStatus: "ok",
+          requiresUserAction: false,
+        },
+        readiness: {
+          chatReady: true,
+          usageReady: true,
+          lifeModelReady: true,
+          modelEmpty: false,
+          pendingBuilderReviewSessions: 0,
+          unfinishedBuilderSessions: 0,
+          databaseStatus: "ok",
+          readinessIssues: [],
+          usageReadinessIssues: [],
+        },
+        taskState: {
+          taskStoreStatus: "ok",
+          latestTaskId: null,
+          latestTaskStatus: null,
+          runningCount: 0,
+          waitingPermissionCount: 0,
+          blockedCount: 0,
+          failedCount: 0,
+          cancelledCount: 0,
+          completedCount: 0,
+          activeCount: 0,
+        },
+        safeMode: {
+          active: false,
+          reason: "系统当前未处于 Safe Mode。",
+          sourceRefs: [],
+        },
+        toolPermissions: {
+          totalCount: 0,
+          activeCount: 0,
+          consumedCount: 0,
+          allowCount: 0,
+          denyCount: 0,
+          askEveryTimeCount: 0,
+          allowOnceCount: 0,
+          allowUntilRevokedCount: 0,
+        },
+        safePaths: [],
+        surfaces: [
+          "today",
+          "mailbox",
+          "chat",
+          "companion",
+          "life_model",
+          "settings",
+        ].map(surface => ({
+          surface,
+          pendingReviewCount: 0,
+          editedReviewCount: 0,
+          totalReviewRequiredCount: 0,
+          readinessStatus: "ready",
+          taskStatus: "idle",
+          safeModeActive: false,
+          waitingPermissionCount: 0,
+          activeToolPermissionCount: 0,
+        })),
+        sourceRefs: [
+          "diagnostics",
+          "proposal_store:pending_and_edited",
+          "main_chat_agent_session_store",
+          "tool_permission_store",
+          "config:safe_paths",
+        ],
+      } as T);
     case "get_scheduler_config":
       return Promise.resolve({ localModel: "llama3", preferLocal: true } as T);
     case "save_chat_message":

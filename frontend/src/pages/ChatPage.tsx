@@ -27,7 +27,6 @@ import {
 import type { ChatMessage, LifeModel } from "../types";
 import LoadingSpinner from "../components/LoadingSpinner";
 import {
-  diagnosticsUsageReady,
   mailboxLinkTarget,
   mailboxRoute,
   productRoutePath,
@@ -38,6 +37,7 @@ import {
   startStreamMessage,
   getChatHistory,
   getSystemDiagnostics,
+  getLifeStateProjection,
   getSchedulerConfig,
   setSchedulerConfig,
   saveFeedback,
@@ -117,6 +117,7 @@ import type {
   MainChatStage5IssueReport,
   MainChatStage5PreflightReport,
   MainChatMemoryGovernanceEvidence,
+  LifeStateProjection,
 } from "../tauri";
 import type {
   ControlledPilotPromotionEvidenceInput,
@@ -133,6 +134,7 @@ import {
   type CapabilityStatusViewModel,
 } from "../utils/capabilityStatus";
 import { inspectDailyGoalName } from "../utils/dailyGoalDisplayGuard";
+import { reviewRequiredCountFromProjection } from "../utils/lifeStateProjection";
 import { listen } from "@tauri-apps/api/event";
 import ReasoningTracePanel from "../components/ReasoningTracePanel";
 import ToolCallCard from "../components/ToolCallCard";
@@ -141,7 +143,6 @@ import AgentControlPlane from "../components/AgentControlPlane";
 import MainChatExecutionEvidence from "../components/MainChatExecutionEvidence";
 import type { AgentStageState } from "../components/AgentStage";
 import RuntimeDisclosureStrip from "../components/RuntimeDisclosureStrip";
-import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
 import { buildRuntimeDisclosure } from "../utils/runtimeDisclosure";
 import ChatSidebar from "./chat/ChatSidebar";
 import ChatInputArea from "./chat/ChatInputArea";
@@ -150,13 +151,16 @@ function generateSessionId() {
   return "sess_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
-function buildReadinessSummary(diagnostics: SystemDiagnostics | null): {
+function buildReadinessSummary(
+  diagnostics: SystemDiagnostics | null,
+  projection: LifeStateProjection | null
+): {
   status: string;
   tone: "ready" | "warning" | "error";
   detail: string;
   usageReady?: boolean;
 } {
-  if (!diagnostics) {
+  if (!diagnostics && !projection) {
     return {
       status: "检测中",
       tone: "warning",
@@ -164,32 +168,32 @@ function buildReadinessSummary(diagnostics: SystemDiagnostics | null): {
     };
   }
 
-  if (diagnostics.chat_ready) {
-    const backend = diagnostics.ollama_online
+  if (projection?.readiness.chatReady) {
+    const backend = diagnostics?.ollama_online
       ? `本地模型 ${diagnostics.resolved_local_model || diagnostics.local_model}`
       : "云端模型";
     return {
       status: "聊天就绪",
       tone: "ready",
       detail: `当前可使用 ${backend}。`,
-      usageReady: diagnosticsUsageReady(diagnostics),
+      usageReady: projection.readiness.usageReady,
     };
   }
-  if (!diagnostics.ollama_online && !diagnostics.cloud_api_configured) {
+  if (diagnostics && !diagnostics.ollama_online && !diagnostics.cloud_api_configured) {
     return {
       status: "需要配置",
       tone: "error",
       detail: "本地模型离线，云端 API 也未配置。无法开始聊天。",
     };
   }
-  if (!diagnostics.ollama_online) {
+  if (diagnostics && !diagnostics.ollama_online) {
     return {
       status: "本地模型离线",
       tone: "warning",
       detail: `未检测到 ${diagnostics.local_model}，将依赖云端 API。`,
     };
   }
-  if (!diagnostics.cloud_api_configured) {
+  if (diagnostics && !diagnostics.cloud_api_configured) {
     return { status: "云端 API 未配置", tone: "warning", detail: "复杂任务可能只能使用本地模型。" };
   }
   return { status: "需要检查", tone: "warning", detail: "部分运行状态异常，请查看设置页诊断。" };
@@ -204,11 +208,12 @@ function companionCapabilityChipClass(tone: CapabilityTone): string {
 
 function buildCompanionInitialAssistantMessage(
   diagnostics: SystemDiagnostics | null,
+  pendingReviewCount: number | null = null,
   loadState: "normal" | "history_unavailable" = "normal"
 ): string {
   const status: CapabilityStatusViewModel = buildCapabilityStatusViewModel(
     diagnostics,
-    diagnostics?.pending_proposal_count ?? 0,
+    pendingReviewCount,
     null
   );
 
@@ -396,7 +401,8 @@ function formatMalformedStreamCompletion(expectedSessionId: string): string {
 }
 
 function getFixSuggestion(
-  diagnostics: SystemDiagnostics | null
+  diagnostics: SystemDiagnostics | null,
+  projection: LifeStateProjection | null
 ): { text: string; action: string; link: string } | null {
   if (!diagnostics) return null;
   if (!diagnostics.ollama_online && !diagnostics.cloud_api_configured) {
@@ -414,16 +420,19 @@ function getFixSuggestion(
     };
   }
   if (diagnostics.model_empty) {
-    if ((diagnostics.pending_builder_review_sessions ?? 0) > 0) {
+    const pendingBuilderReviewSessions =
+      projection?.readiness.pendingBuilderReviewSessions ?? 0;
+    const unfinishedBuilderSessions = projection?.readiness.unfinishedBuilderSessions ?? 0;
+    if (pendingBuilderReviewSessions > 0) {
       return {
-        text: `人生模型还没有真正写入，但你有 ${diagnostics.pending_builder_review_sessions} 个构建内容待确认。`,
+        text: `人生模型还没有真正写入，但你有 ${pendingBuilderReviewSessions} 个构建内容待确认。`,
         action: "回构建页查看",
         link: secondaryRoutePath("LifeModelBuild"),
       };
     }
-    if (diagnostics.unfinished_builder_sessions > 0) {
+    if (unfinishedBuilderSessions > 0) {
       return {
-        text: `人生模型还没有真正写入，但你有 ${diagnostics.unfinished_builder_sessions} 个待继续的构建会话。`,
+        text: `人生模型还没有真正写入，但你有 ${unfinishedBuilderSessions} 个待继续的构建会话。`,
         action: "回 Builder 继续",
         link: secondaryRoutePath("LifeModelBuild"),
       };
@@ -1259,6 +1268,7 @@ export default function ChatPage({
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [preferLocal, setPreferLocal] = useState<boolean>(true);
   const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
+  const [lifeStateProjection, setLifeStateProjection] = useState<LifeStateProjection | null>(null);
   const [reasoningTrace, setReasoningTrace] = useState<ReasoningTrace | null>(null);
   const [showReasoningTrace, setShowReasoningTrace] = useState(false);
   const [toolCalls, setToolCalls] = useState<ToolCallResult[]>([]);
@@ -1358,9 +1368,18 @@ export default function ChatPage({
   const promotedControlledPilotKeysRef = useRef<Record<string, boolean>>({});
   const savedControlledPilotPromotionKeysRef = useRef<Record<string, boolean>>({});
   const inFlightControlledPilotPromotionKeysRef = useRef<Set<string>>(new Set());
+  const projectionSurface = companionMode ? "companion" : "chat";
+  const projectionPendingReviewCount = reviewRequiredCountFromProjection(
+    lifeStateProjection,
+    projectionSurface
+  );
   const initialAssistantMessage = useMemo(
-    () => buildCompanionInitialAssistantMessage(diagnostics),
-    [diagnostics]
+    () =>
+      buildCompanionInitialAssistantMessage(
+        diagnostics,
+        projectionPendingReviewCount
+      ),
+    [diagnostics, projectionPendingReviewCount]
   );
 
   const applyMainChatAgentStateSnapshot = useCallback(
@@ -1646,6 +1665,15 @@ export default function ChatPage({
     }
   };
 
+  const refreshLifeStateProjection = async () => {
+    try {
+      const projection = await getLifeStateProjection();
+      setLifeStateProjection(projection);
+    } catch {
+      setLifeStateProjection(null);
+    }
+  };
+
   const flushStreaming = () => {
     if (streamingRafRef.current !== null) {
       cancelAnimationFrame(streamingRafRef.current);
@@ -1673,16 +1701,16 @@ export default function ChatPage({
   }, [diagnostics]);
 
   useEffect(() => {
-    if (diagnostics && isSafeMode(diagnostics)) {
+    if (lifeStateProjection?.safeMode.active) {
       emitCompanionStage("privacy");
     }
-  }, [diagnostics, emitCompanionStage]);
+  }, [lifeStateProjection?.safeMode.active, emitCompanionStage]);
 
   useEffect(() => {
-    if (pendingProposals.length > 0) {
+    if (projectionPendingReviewCount != null && projectionPendingReviewCount > 0) {
       emitCompanionStage("review");
     }
-  }, [pendingProposals.length, emitCompanionStage]);
+  }, [projectionPendingReviewCount, emitCompanionStage]);
 
   useEffect(() => {
     const toolStage = inferStageFromToolCalls(toolCalls);
@@ -1716,8 +1744,13 @@ export default function ChatPage({
   useEffect(() => {
     (async () => {
       try {
-        const [diag, cfg] = await Promise.all([getSystemDiagnostics(), getSchedulerConfig()]);
+        const [diag, cfg, projection] = await Promise.all([
+          getSystemDiagnostics(),
+          getSchedulerConfig(),
+          getLifeStateProjection().catch(() => null),
+        ]);
         setDiagnostics(diag);
+        setLifeStateProjection(projection);
         setPreferLocal(cfg.preferLocal);
       } catch {
         // silently ignore
@@ -1730,6 +1763,7 @@ export default function ChatPage({
       .then(setModel)
       .catch(() => {});
     refreshPendingProposals();
+    refreshLifeStateProjection();
     loadTaskContinuityList();
   }, [loadTaskContinuityList]);
 
@@ -1741,6 +1775,7 @@ export default function ChatPage({
       getSystemDiagnostics()
         .then(setDiagnostics)
         .catch(() => {});
+      refreshLifeStateProjection();
       loadSessions(currentSessionIdRef.current);
       refreshPendingProposals();
       loadTaskContinuityList();
@@ -1766,6 +1801,7 @@ export default function ChatPage({
     getSystemDiagnostics()
       .then(setDiagnostics)
       .catch(() => {});
+    refreshLifeStateProjection();
     loadSessions();
   }, [location.state]);
 
@@ -1809,7 +1845,11 @@ export default function ChatPage({
         setMessages([
           {
             role: "assistant",
-            content: buildCompanionInitialAssistantMessage(diagnostics, "history_unavailable"),
+            content: buildCompanionInitialAssistantMessage(
+              diagnostics,
+              projectionPendingReviewCount,
+              "history_unavailable"
+            ),
           },
         ]);
       })
@@ -1819,6 +1859,7 @@ export default function ChatPage({
     applyMainChatAgentStateSnapshot,
     diagnostics,
     initialAssistantMessage,
+    projectionPendingReviewCount,
     loadTaskContinuityList,
   ]);
 
@@ -3341,15 +3382,18 @@ export default function ChatPage({
     [agentTaskControlBusy, currentMainChatTaskSessionId, refreshMainChatSnapshot]
   );
 
-  const readiness = useMemo(() => buildReadinessSummary(diagnostics), [diagnostics]);
+  const readiness = useMemo(
+    () => buildReadinessSummary(diagnostics, lifeStateProjection),
+    [diagnostics, lifeStateProjection]
+  );
   const capabilityStatus = useMemo(
     () =>
       buildCapabilityStatusViewModel(
         diagnostics,
-        pendingProposals.length || diagnostics?.pending_proposal_count || 0,
+        projectionPendingReviewCount,
         currentRun
       ),
-    [currentRun, diagnostics, pendingProposals.length]
+    [currentRun, diagnostics, projectionPendingReviewCount]
   );
   const governedPreviewSummaryEntries = useMemo(
     () => safeSummaryEntries(governedPreviewResult?.metadataSafeSummary ?? {}),
@@ -3729,13 +3773,13 @@ export default function ChatPage({
 
   const handleIndexMemory = useCallback(
     async (content: string) => {
-      emitCompanionStage(isSafeMode(diagnostics) ? "privacy" : "memory");
-      if (isSafeMode(diagnostics)) {
+      emitCompanionStage(lifeStateProjection?.safeMode.active ? "privacy" : "memory");
+      if (lifeStateProjection?.safeMode.active) {
         setMessages(prev => [
           ...prev,
           {
             role: "assistant",
-            content: `当前处于 Safe Mode，${getSafeModeReason(diagnostics)} 建议先去设置页恢复控制台处理数据风险，再执行"加入记忆"。`,
+            content: `当前处于 Safe Mode，${lifeStateProjection.safeMode.reason} 建议先去设置页恢复控制台处理数据风险，再执行"加入记忆"。`,
           },
         ]);
         return;
@@ -3746,7 +3790,7 @@ export default function ChatPage({
         console.error("加入记忆失败", e);
       }
     },
-    [diagnostics, currentSessionId, emitCompanionStage]
+    [lifeStateProjection?.safeMode.active, lifeStateProjection?.safeMode.reason, currentSessionId, emitCompanionStage]
   );
 
   const handleInputChange = useCallback(
@@ -3943,12 +3987,12 @@ export default function ChatPage({
             </div>
           </>
         )}
-        {!companionMode && diagnostics && isSafeMode(diagnostics) && (
+        {!companionMode && lifeStateProjection?.safeMode.active && (
           <div className="border-b border-amber-200 bg-amber-50 px-6 py-2">
             <div className="max-w-3xl text-xs text-amber-800 flex flex-wrap items-center justify-between gap-2">
               <div>
                 <span className="font-medium">Safe Mode：</span>
-                {getSafeModeReason(diagnostics)}
+                {lifeStateProjection.safeMode.reason}
                 <span className="ml-2">普通对话仍可继续，但“加入记忆”等写入操作建议先暂停。</span>
               </div>
               <Link to={productRoutePath("Settings")} className="underline font-medium">
@@ -3958,14 +4002,30 @@ export default function ChatPage({
           </div>
         )}
         {/* Pending Proposals Alert */}
-        {!companionMode && pendingProposals.length > 0 && (
+        {!companionMode && projectionPendingReviewCount == null && (
+          <div className="border-b border-stone-200 bg-stone-50 px-6 py-2">
+            <div className="max-w-3xl text-xs text-stone-700 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <ShieldCheck size={14} />
+                <span className="font-medium">待确认状态读取中</span>
+                <span className="text-stone-500">暂不显示确定数量。</span>
+              </div>
+              <Link to={mailboxRoute()} className="underline font-medium">
+                打开 Mailbox
+              </Link>
+            </div>
+          </div>
+        )}
+        {!companionMode && projectionPendingReviewCount != null && projectionPendingReviewCount > 0 && (
           <div className="border-b border-indigo-100 bg-indigo-50 px-6 py-2">
             <div className="max-w-3xl text-xs text-indigo-800 flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <ShieldCheck size={14} />
-                <span className="font-medium">{pendingProposals.length} 个待确认</span>
+                <span className="font-medium">{projectionPendingReviewCount} 个待确认/已修改</span>
                 <span className="text-indigo-600">
-                  （{pendingProposals[0].affectedPath || pendingProposals[0].proposalType}）
+                  {pendingProposals[0]
+                    ? `（${pendingProposals[0].affectedPath || pendingProposals[0].proposalType}）`
+                    : "（进入 Mailbox 处理）"}
                 </span>
               </div>
               <Link to={mailboxRoute()} className="underline font-medium">
@@ -5740,7 +5800,7 @@ export default function ChatPage({
           onCancel={handleCancelMainChatTask}
           onContinueStream={handleContinueStream}
           onRetryLastMessage={retryLastUserMessage}
-          getFixSuggestion={getFixSuggestion}
+          getFixSuggestion={diag => getFixSuggestion(diag, lifeStateProjection)}
           companionMode={companionMode}
         />
       </div>

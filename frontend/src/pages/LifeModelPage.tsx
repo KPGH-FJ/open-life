@@ -14,6 +14,7 @@ import type { LifeModel } from "../types";
 import {
   builderListUnfinished,
   countMemoryChunks,
+  getLifeStateProjection,
   getLifeModel,
   getLifeModelCurrentView,
   getMemoryTierStats,
@@ -21,6 +22,7 @@ import {
   getSystemDiagnostics,
   listProposals,
   type AgentProposal,
+  type LifeStateProjection,
   type LifeModelCurrentView,
   type Model4DCompletion,
   type SystemDiagnostics,
@@ -38,17 +40,14 @@ import {
   type LifeModelDimensionKey,
   type LifeModelDisplayQualityIssue,
 } from "../utils/lifeModelTrust";
-import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
 import {
   StatusChip as ProductStatusChip,
   TechnicalDetails,
   TrustDrawer,
 } from "../components/product/ProductPrimitives";
-import {
-  countPendingReviewProposals,
-  REVIEW_PENDING_PROPOSAL_LIMIT,
-} from "../utils/reviewPendingCount";
+import { REVIEW_PENDING_PROPOSAL_LIMIT } from "../utils/reviewPendingCount";
 import { mailboxRoute, runDetailRoute, secondaryRoutePath } from "../productShellContract";
+import { reviewRequiredCountFromProjection } from "../utils/lifeStateProjection";
 
 type LifeModelSection = "build" | "overview" | "evidence";
 
@@ -67,6 +66,7 @@ type ModelDimension = {
 type LifeModelPageState = {
   lifeModel: LifeModel | null;
   diagnostics: SystemDiagnostics | null;
+  projection: LifeStateProjection | null;
   completion: Model4DCompletion | null;
   unfinishedSessions: UnfinishedBuilderSession[];
   memoryCount: number | null;
@@ -86,6 +86,7 @@ const SECTIONS: SectionConfig[] = [
 const INITIAL_STATE: LifeModelPageState = {
   lifeModel: null,
   diagnostics: null,
+  projection: null,
   completion: null,
   unfinishedSessions: [],
   memoryCount: null,
@@ -243,9 +244,9 @@ function completionOverall(
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
-function isModelEmpty(model: LifeModel | null, diagnostics: SystemDiagnostics | null): boolean {
+function isModelEmpty(model: LifeModel | null, projection: LifeStateProjection | null): boolean {
   if (!model) return true;
-  if (diagnostics?.model_empty) return true;
+  if (projection?.readiness.modelEmpty) return true;
   const dimensions = buildDimensions(model);
   return dimensions.every(dimension => dimension.items.length === 0);
 }
@@ -294,15 +295,13 @@ function buildDimensions(model: LifeModel): ModelDimension[] {
   ];
 }
 
-function countBuilderReviewItems(
-  diagnostics: SystemDiagnostics | null,
-  pendingProposals: AgentProposal[]
-): number {
-  const diagnosticCount = diagnostics?.pending_builder_review_sessions ?? 0;
-  const proposalCount = pendingProposals.filter(
-    proposal => proposal.source === "builder_review"
-  ).length;
-  return Math.max(diagnosticCount, proposalCount);
+function countBuilderReviewItems(projection: LifeStateProjection | null): number | null {
+  if (!projection) return null;
+  return projection.readiness.pendingBuilderReviewSessions;
+}
+
+function formatProjectionCount(value: number | null): string {
+  return value == null ? "状态未读取" : String(value);
 }
 
 function StatusChip({ label }: { label: string }) {
@@ -351,24 +350,24 @@ function SectionTabs({
 
 function BuildSection({
   diagnostics,
+  projection,
   completion,
   unfinishedSessions,
-  pendingProposals,
 }: {
   diagnostics: SystemDiagnostics | null;
+  projection: LifeStateProjection | null;
   completion: Model4DCompletion | null;
   unfinishedSessions: UnfinishedBuilderSession[];
-  pendingProposals: AgentProposal[];
 }) {
   const overall = completionOverall(diagnostics, completion);
-  const builderReviewCount = countBuilderReviewItems(diagnostics, pendingProposals);
-  const unfinishedCount = Math.max(
-    diagnostics?.unfinished_builder_sessions ?? 0,
-    unfinishedSessions.filter(session => !session.finished).length
-  );
-  const reviewReadyCount = unfinishedSessions.filter(
-    session => session.finished && (session.pending_signals?.length ?? 0) > 0
-  ).length;
+  const builderReviewCount = countBuilderReviewItems(projection);
+  const unfinishedCount = projection?.readiness.unfinishedBuilderSessions ?? null;
+  const reviewReadyCount =
+    projection == null
+      ? null
+      : unfinishedSessions.filter(
+          session => session.finished && (session.pending_signals?.length ?? 0) > 0
+        ).length;
 
   return (
     <section id="life-model-build" role="tabpanel" className="space-y-5">
@@ -432,20 +431,28 @@ function BuildSection({
           </div>
           <div className="p-4">
             <div className="text-xs font-medium text-stone-500">未完成会话</div>
-            <div className="mt-1 text-lg font-semibold text-stone-950">{unfinishedCount}</div>
+            <div className="mt-1 text-lg font-semibold text-stone-950">
+              {formatProjectionCount(unfinishedCount)}
+            </div>
             <div className="mt-1 text-xs text-stone-500">
-              {reviewReadyCount > 0 ? `${reviewReadyCount} 个已可确认` : "可继续构建"}
+              {reviewReadyCount == null
+                ? "状态暂不可用"
+                : reviewReadyCount > 0
+                  ? `${reviewReadyCount} 个已可确认`
+                  : "可继续构建"}
             </div>
           </div>
           <div className="p-4">
             <div className="text-xs font-medium text-stone-500">待确认更新</div>
-            <div className="mt-1 text-lg font-semibold text-stone-950">{builderReviewCount}</div>
+            <div className="mt-1 text-lg font-semibold text-stone-950">
+              {formatProjectionCount(builderReviewCount)}
+            </div>
             <div className="mt-1 text-xs text-stone-500">通过 Mailbox 处理</div>
           </div>
         </div>
       </div>
 
-      {builderReviewCount > 0 && (
+      {builderReviewCount != null && builderReviewCount > 0 && (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
           <div>
             <div className="text-sm font-semibold text-amber-950">有构建内容等待确认</div>
@@ -576,12 +583,14 @@ function CommunicationStyleCurrentView({
 function OverviewSection({
   lifeModel,
   diagnostics,
+  projection,
   completion,
   pendingProposals,
   currentView,
 }: {
   lifeModel: LifeModel | null;
   diagnostics: SystemDiagnostics | null;
+  projection: LifeStateProjection | null;
   completion: Model4DCompletion | null;
   pendingProposals: AgentProposal[];
   currentView: LifeModelCurrentView | null;
@@ -589,7 +598,7 @@ function OverviewSection({
   const [ignoredIssueIds, setIgnoredIssueIds] = useState<Set<string>>(new Set());
   const [deferredIssueIds, setDeferredIssueIds] = useState<Set<string>>(new Set());
   const hasCommunicationStyle = Boolean(currentView?.value?.trim());
-  const empty = isModelEmpty(lifeModel, diagnostics) && !hasCommunicationStyle;
+  const empty = isModelEmpty(lifeModel, projection) && !hasCommunicationStyle;
   const dimensions = useMemo(() => (lifeModel ? buildDimensions(lifeModel) : []), [lifeModel]);
   const suppressedByDimension = useMemo(
     () =>
@@ -843,14 +852,16 @@ function EvidenceSection({
   memoryCount,
   tierStats,
   pendingProposals,
+  pendingReviewCount,
 }: {
   diagnostics: SystemDiagnostics | null;
   memoryCount: number | null;
   tierStats: TierStats | null;
   pendingProposals: AgentProposal[];
+  pendingReviewCount: number | null;
 }) {
   const effectiveMemoryCount = memoryCount ?? diagnostics?.memory_chunk_count ?? 0;
-  const pendingCount = countPendingReviewProposals(pendingProposals);
+  const pendingCount = pendingReviewCount;
   const sourceLabels = uniqueShortItems(
     pendingProposals.map(proposal => sourceLabel(proposal.source)),
     3
@@ -897,8 +908,12 @@ function EvidenceSection({
           </div>
           <div className="p-4">
             <div className="text-xs font-medium text-stone-500">待确认更新</div>
-            <div className="mt-1 text-lg font-semibold text-stone-950">{pendingCount}</div>
-            <div className="mt-1 text-xs text-stone-500">进入 Mailbox 确认</div>
+            <div className="mt-1 text-lg font-semibold text-stone-950">
+              {formatProjectionCount(pendingCount)}
+            </div>
+            <div className="mt-1 text-xs text-stone-500">
+              {pendingCount == null ? "状态暂不可用" : "进入 Mailbox 确认"}
+            </div>
           </div>
           <div className="p-4">
             <div className="text-xs font-medium text-stone-500">最近依据来源</div>
@@ -971,6 +986,7 @@ export default function LifeModelPage() {
           lifeModel,
           currentView,
           diagnostics,
+          projection,
           completion,
           unfinishedSessions,
           memoryCount,
@@ -980,6 +996,7 @@ export default function LifeModelPage() {
           getLifeModel().catch(() => null),
           getLifeModelCurrentView().catch(() => null),
           getSystemDiagnostics().catch(() => null),
+          getLifeStateProjection().catch(() => null),
           getModel4DCompletion().catch(() => null),
           builderListUnfinished().catch(() => []),
           countMemoryChunks().catch(() => null),
@@ -993,6 +1010,7 @@ export default function LifeModelPage() {
         setState({
           lifeModel,
           diagnostics,
+          projection,
           completion,
           unfinishedSessions,
           memoryCount,
@@ -1020,11 +1038,11 @@ export default function LifeModelPage() {
   }, []);
 
   const overall = completionOverall(state.diagnostics, state.completion);
-  const safeMode = isSafeMode(state.diagnostics);
-  const safeModeReason = getSafeModeReason(state.diagnostics);
-  const pendingCount = countPendingReviewProposals(state.pendingProposals);
+  const safeMode = state.projection?.safeMode.active ?? false;
+  const safeModeReason = state.projection?.safeMode.reason ?? "系统当前处于 Safe Mode。";
+  const pendingCount = reviewRequiredCountFromProjection(state.projection, "life_model");
   const topStatus =
-    state.diagnostics?.life_model_ready && !state.diagnostics?.model_empty
+    state.projection?.readiness.lifeModelReady && !state.projection?.readiness.modelEmpty
       ? "Life Model 本地可读"
       : "待构建";
 
@@ -1042,7 +1060,9 @@ export default function LifeModelPage() {
             </div>
             <div className="mt-3 flex flex-wrap gap-2">
               <StatusChip label={topStatus} />
-              <StatusChip label={`待确认 ${pendingCount}`} />
+              <StatusChip
+                label={pendingCount == null ? "待确认状态读取中" : `待确认 ${pendingCount}`}
+              />
               <StatusChip label={formatUpdatedAt(state.lifeModel?.metadata.updated_at)} />
             </div>
           </div>
@@ -1085,15 +1105,16 @@ export default function LifeModelPage() {
           {activeSection === "build" && (
             <BuildSection
               diagnostics={state.diagnostics}
+              projection={state.projection}
               completion={state.completion}
               unfinishedSessions={state.unfinishedSessions}
-              pendingProposals={state.pendingProposals}
             />
           )}
           {activeSection === "overview" && (
             <OverviewSection
               lifeModel={state.lifeModel}
               diagnostics={state.diagnostics}
+              projection={state.projection}
               completion={state.completion}
               pendingProposals={state.pendingProposals}
               currentView={state.currentView}
@@ -1105,6 +1126,7 @@ export default function LifeModelPage() {
               memoryCount={state.memoryCount}
               tierStats={state.tierStats}
               pendingProposals={state.pendingProposals}
+              pendingReviewCount={pendingCount}
             />
           )}
         </div>

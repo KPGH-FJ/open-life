@@ -1160,6 +1160,9 @@ fn main_chat_generic_selection_term(term: &str) -> bool {
 pub(crate) fn main_chat_manifest_is_governed_read_candidate(
     manifest: &openlife_core::tool_manifest::ToolManifest,
 ) -> bool {
+    if openlife_core::agent::validate_manifest_execution_contract(manifest).is_err() {
+        return false;
+    }
     if manifest.name == "mcp.call_tool" || !manifest.enabled || manifest.declarative_only {
         return false;
     }
@@ -1201,6 +1204,9 @@ pub(crate) fn main_chat_manifest_is_governed_read_candidate(
 fn main_chat_manifest_is_explicit_read_target_candidate(
     manifest: &openlife_core::tool_manifest::ToolManifest,
 ) -> bool {
+    if openlife_core::agent::validate_manifest_execution_contract(manifest).is_err() {
+        return false;
+    }
     if manifest.name == "mcp.call_tool" || !manifest.enabled || manifest.declarative_only {
         return false;
     }

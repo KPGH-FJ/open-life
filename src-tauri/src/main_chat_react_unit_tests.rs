@@ -67,7 +67,7 @@ fn main_chat_mcp_read_resolves_registered_tool_instead_of_wrapper_only() {
         std::fs::read_to_string(module_path).expect("read src/main_chat_react_execution.rs");
     let executor_body = extract_rust_function_body(
         &source,
-        "pub(crate) async fn execute_main_chat_react_action_with_executor(",
+        "pub(crate) async fn execute_main_chat_react_action_with_tool_gateway(",
     );
 
     assert!(
@@ -1102,20 +1102,21 @@ fn main_chat_react_execution_helper_is_extracted_from_lib_rs() {
         std::fs::read_to_string(&module_path).expect("read src/main_chat_react_execution.rs");
 
     assert!(
-        module_source.contains("pub(crate) async fn execute_main_chat_react_action_with_executor("),
-        "ReAct execution module must expose the governed read ActionExecutor helper"
+        module_source
+            .contains("pub(crate) async fn execute_main_chat_react_action_with_tool_gateway("),
+        "ReAct execution module must expose the governed read ToolGateway helper"
     );
     assert!(
-        module_source.contains("ActionExecutor::new("),
-        "ReAct execution module must own ActionExecutor read construction"
+        module_source.contains("ToolGateway::new("),
+        "ReAct execution module must route governed reads through ToolGateway"
     );
     assert!(
         module_source.contains("resolve_main_chat_mcp_read_target("),
         "ReAct execution module must preserve registered MCP read resolution"
     );
     assert!(
-        !source.contains("\npub(crate) async fn execute_main_chat_react_action_with_executor("),
-        "ActionExecutor read helper should not remain in lib.rs"
+        !source.contains("\npub(crate) async fn execute_main_chat_react_action_with_tool_gateway("),
+        "ToolGateway read helper should not remain in lib.rs"
     );
 }
 

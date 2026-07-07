@@ -14,12 +14,12 @@ use openlife_core::agent::main_chat_agent_v1::{
 };
 use openlife_core::agent::{
     classify_main_chat_governance_intent, plan_main_chat_memory_routing, ActionExecutionContext,
-    ActionExecutionResult, ActionExecutionStatus, ActionExecutor, ActionExecutorConfig,
-    AgentActionRequest, AgentRun, AgentRunError, AgentTask, ContextSummary, LifeDomain,
-    LifeEventDraft, LifeEventPrivacyLevel, LifeEventSourceRef, LifeEventSourceType,
-    MainChatBlockerRequirement, MainChatDurableWriteRequirement, MainChatMemoryCandidate,
-    MainChatMemoryRoutingResult, MemoryCandidateKind, MemoryDestination, ModelRoutePolicy,
-    ModelRouteTrace, ReasoningTrace, RedactionLevel, RiskLevel, RuntimeHSPacket,
+    ActionExecutionResult, ActionExecutionStatus, ActionExecutorConfig, AgentActionRequest,
+    AgentRun, AgentRunError, AgentTask, ContextSummary, LifeDomain, LifeEventDraft,
+    LifeEventPrivacyLevel, LifeEventSourceRef, LifeEventSourceType, MainChatBlockerRequirement,
+    MainChatDurableWriteRequirement, MainChatMemoryCandidate, MainChatMemoryRoutingResult,
+    MemoryCandidateKind, MemoryDestination, ModelRoutePolicy, ModelRouteTrace, ReasoningTrace,
+    RedactionLevel, RiskLevel, RuntimeHSPacket,
 };
 use openlife_core::layer::Layer;
 use openlife_core::life_model::LifeModel;
@@ -597,7 +597,7 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
                 .map(str::to_string),
             step_index: 0,
         };
-        match ActionExecutor::new(ActionExecutorConfig {
+        match openlife_core::agent::ToolGateway::from_executor_config(ActionExecutorConfig {
             allow_writes: false,
             allow_cloud: false,
             ..Default::default()
@@ -607,8 +607,8 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
             Ok(result) => kernel_read_tool_execution_from_action_result(decision, result),
             Err(error) => blocked_kernel_read_tool_execution(
                 decision,
-                "read_tool_executor_failed",
-                &format!("ActionExecutor failed: {error}"),
+                "read_tool_gateway_failed",
+                &format!("ToolGateway failed: {error}"),
                 None,
             ),
         }
@@ -871,6 +871,9 @@ fn kernel_mcp_candidate_from_manifest(
 fn kernel_manifest_is_explicit_read_target_candidate(
     manifest: &openlife_core::tool_manifest::ToolManifest,
 ) -> bool {
+    if openlife_core::agent::validate_manifest_execution_contract(manifest).is_err() {
+        return false;
+    }
     if manifest.name == "mcp.call_tool" || !manifest.enabled || manifest.declarative_only {
         return false;
     }

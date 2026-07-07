@@ -6,7 +6,7 @@ import MailboxPage from "./MailboxPage";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { mockInvoke, mockLifeModel } from "@/test/mocks/tauri";
-import type { MainChatAgentStateSnapshot, SystemDiagnostics } from "../tauri";
+import type { LifeStateProjection, MainChatAgentStateSnapshot, SystemDiagnostics } from "../tauri";
 import { FORBIDDEN_ORDINARY_CHAT_COMMANDS } from "@/test/ordinaryChatForbiddenCommands";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -139,6 +139,137 @@ function buildMainChatAgentStateSnapshot(
   return { ...base, ...overrides };
 }
 
+function projectionWithEditedOnlyReview(): LifeStateProjection {
+  return {
+    version: "life_state_projection_v1",
+    generatedAt: "2026-07-07T05:00:00.000Z",
+    pending: {
+      pendingProposalCount: 0,
+      editedProposalCount: 1,
+      totalReviewRequiredCount: 1,
+      highRiskReviewRequiredCount: 0,
+      proposalStoreStatus: "ok",
+      requiresUserAction: true,
+    },
+    readiness: {
+      chatReady: true,
+      usageReady: true,
+      lifeModelReady: true,
+      modelEmpty: false,
+      pendingBuilderReviewSessions: 0,
+      unfinishedBuilderSessions: 0,
+      databaseStatus: "ok",
+      readinessIssues: [],
+      usageReadinessIssues: [],
+    },
+    taskState: {
+      taskStoreStatus: "ok",
+      latestTaskId: null,
+      latestTaskStatus: null,
+      runningCount: 0,
+      waitingPermissionCount: 0,
+      blockedCount: 0,
+      failedCount: 0,
+      cancelledCount: 0,
+      completedCount: 0,
+      activeCount: 0,
+    },
+    safeMode: {
+      active: false,
+      reason: "系统当前未处于 Safe Mode。",
+      sourceRefs: [],
+    },
+    toolPermissions: {
+      totalCount: 0,
+      activeCount: 0,
+      consumedCount: 0,
+      allowCount: 0,
+      denyCount: 0,
+      askEveryTimeCount: 0,
+      allowOnceCount: 0,
+      allowUntilRevokedCount: 0,
+    },
+    safePaths: [],
+    surfaces: ["today", "mailbox", "chat", "companion", "life_model", "settings"].map(
+      surface => ({
+        surface,
+        pendingReviewCount: 0,
+        editedReviewCount: 1,
+        totalReviewRequiredCount: 1,
+        readinessStatus: "ready",
+        taskStatus: "idle",
+        safeModeActive: false,
+        waitingPermissionCount: 0,
+        activeToolPermissionCount: 0,
+      })
+    ),
+    sourceRefs: ["proposal_store:pending_and_edited"],
+  };
+}
+
+function projectionWithProductState(
+  overrides: Partial<{
+    pendingProposalCount: number;
+    editedProposalCount: number;
+    totalReviewRequiredCount: number;
+    highRiskReviewRequiredCount: number;
+    chatReady: boolean;
+    usageReady: boolean;
+    lifeModelReady: boolean;
+    modelEmpty: boolean;
+    pendingBuilderReviewSessions: number;
+    unfinishedBuilderSessions: number;
+    safeModeActive: boolean;
+    safeModeReason: string;
+  }> = {}
+): LifeStateProjection {
+  const base = projectionWithEditedOnlyReview();
+  const pendingProposalCount = overrides.pendingProposalCount ?? base.pending.pendingProposalCount;
+  const editedProposalCount = overrides.editedProposalCount ?? base.pending.editedProposalCount;
+  const totalReviewRequiredCount =
+    overrides.totalReviewRequiredCount ?? pendingProposalCount + editedProposalCount;
+  const highRiskReviewRequiredCount =
+    overrides.highRiskReviewRequiredCount ?? base.pending.highRiskReviewRequiredCount;
+  const safeModeActive = overrides.safeModeActive ?? base.safeMode.active;
+  return {
+    ...base,
+    pending: {
+      pendingProposalCount,
+      editedProposalCount,
+      totalReviewRequiredCount,
+      highRiskReviewRequiredCount,
+      proposalStoreStatus: "ok",
+      requiresUserAction: totalReviewRequiredCount > 0,
+    },
+    readiness: {
+      ...base.readiness,
+      chatReady: overrides.chatReady ?? base.readiness.chatReady,
+      usageReady: overrides.usageReady ?? base.readiness.usageReady,
+      lifeModelReady: overrides.lifeModelReady ?? base.readiness.lifeModelReady,
+      modelEmpty: overrides.modelEmpty ?? base.readiness.modelEmpty,
+      pendingBuilderReviewSessions:
+        overrides.pendingBuilderReviewSessions ?? base.readiness.pendingBuilderReviewSessions,
+      unfinishedBuilderSessions:
+        overrides.unfinishedBuilderSessions ?? base.readiness.unfinishedBuilderSessions,
+    },
+    safeMode: {
+      active: safeModeActive,
+      reason:
+        overrides.safeModeReason ??
+        (safeModeActive ? "memory.db 初始化失败，正在使用临时数据库" : base.safeMode.reason),
+      sourceRefs: safeModeActive ? ["diagnostics:startup_warnings"] : [],
+    },
+    surfaces: base.surfaces.map(surface => ({
+      ...surface,
+      pendingReviewCount: pendingProposalCount,
+      editedReviewCount: editedProposalCount,
+      totalReviewRequiredCount,
+      safeModeActive,
+      readinessStatus: overrides.chatReady === false ? "blocked" : surface.readinessStatus,
+    })),
+  };
+}
+
 describe("ChatPage", () => {
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -192,6 +323,27 @@ describe("ChatPage", () => {
     });
 
     expect(screen.getByText("会话 2")).toBeInTheDocument();
+  });
+
+  it("uses LifeStateProjection total review count when only edited proposals need review", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: any) => {
+      if (cmd === "get_life_state_projection") {
+        return Promise.resolve(projectionWithEditedOnlyReview());
+      }
+      if (cmd === "get_pending_proposals") {
+        return Promise.resolve([]);
+      }
+      return mockInvoke(cmd, args as Record<string, any>);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    expect(await screen.findByText("1 个待确认/已修改")).toBeInTheDocument();
+    expect(screen.queryByText("0 个待确认")).not.toBeInTheDocument();
   });
 
   it("renders evidence-backed task continuity list and gated controls", async () => {
@@ -907,6 +1059,17 @@ describe("ChatPage", () => {
       if (cmd === "get_life_model") {
         return Promise.resolve(createEmptyModel());
       }
+      if (cmd === "get_life_state_projection") {
+        return Promise.resolve(
+          projectionWithProductState({
+            pendingProposalCount: 0,
+            editedProposalCount: 0,
+            totalReviewRequiredCount: 0,
+            modelEmpty: true,
+            unfinishedBuilderSessions: 1,
+          })
+        );
+      }
       if (cmd === "get_system_diagnostics") {
         return Promise.resolve({
           policy_router: { activeAuthority: "IntentFrame + PolicyRouter", authorityChain: ["user_input", "IntentFrame", "PolicyRouter", "AgentIngressDecision", "OpenLifeTurnRuntime", "MainChatKernel"], routeOutputs: ["direct_answer", "read_only_tool", "proposal_only_write", "plan_draft", "ask_clarification", "governed_blocker", "confirmation_request"], appStateOldRoutersPresent: false, diagnosticsSurface: "policy_router_status" },
@@ -997,6 +1160,18 @@ describe("ChatPage", () => {
           model_empty: false,
           chat_session_count: 0,
         } as any);
+      }
+      if (cmd === "get_life_state_projection") {
+        return Promise.resolve(
+          projectionWithProductState({
+            pendingProposalCount: 0,
+            editedProposalCount: 0,
+            totalReviewRequiredCount: 0,
+            chatReady: false,
+            usageReady: false,
+            modelEmpty: false,
+          })
+        );
       }
       return mockInvoke(cmd, args);
     });
@@ -4872,6 +5047,17 @@ describe("ChatPage", () => {
           ollama_models: [],
           config_source: "default",
         });
+      }
+      if (cmd === "get_life_state_projection") {
+        return Promise.resolve(
+          projectionWithProductState({
+            pendingProposalCount: 0,
+            editedProposalCount: 0,
+            totalReviewRequiredCount: 0,
+            safeModeActive: true,
+            safeModeReason: "memory.db 初始化失败，正在使用临时数据库",
+          })
+        );
       }
       return mockInvoke(cmd, args);
     });

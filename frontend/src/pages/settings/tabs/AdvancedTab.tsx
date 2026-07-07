@@ -2,15 +2,12 @@ import { Link } from "react-router-dom";
 import type { ReactNode } from "react";
 import type {
   AppConfig,
+  LifeStateProjection,
   ModelRouterStatus,
   PolicyRouterStatus,
   SystemDiagnostics,
 } from "../../../tauri";
-import {
-  advancedRoutePath,
-  diagnosticsUsageReadinessIssues,
-  diagnosticsUsageReady,
-} from "../../../productShellContract";
+import { advancedRoutePath } from "../../../productShellContract";
 
 function classNames(...classes: (string | false | undefined)[]) {
   return classes.filter(Boolean).join(" ");
@@ -20,6 +17,7 @@ interface AdvancedTabProps {
   config: AppConfig;
   setConfig: React.Dispatch<React.SetStateAction<AppConfig>>;
   diagnostics: SystemDiagnostics | null;
+  projection?: LifeStateProjection | null;
   policyRouterStatus: PolicyRouterStatus | null;
   modelRouterStatus: ModelRouterStatus | null;
   showInternalDebug: boolean;
@@ -27,26 +25,20 @@ interface AdvancedTabProps {
   experimentalSection?: ReactNode;
 }
 
-function usageReady(diagnostics: SystemDiagnostics | null): boolean {
-  if (!diagnostics) return false;
-  return diagnosticsUsageReady(diagnostics);
-}
-
-function usageReadinessIssues(diagnostics: SystemDiagnostics | null): string[] {
-  if (!diagnostics) return [];
-  return diagnosticsUsageReadinessIssues(diagnostics);
-}
-
 export default function AdvancedTab({
   config,
   setConfig,
   diagnostics,
+  projection,
   policyRouterStatus,
   modelRouterStatus,
   showInternalDebug,
   pluginSection,
   experimentalSection,
 }: AdvancedTabProps) {
+  const usageReady = projection?.readiness.usageReady ?? false;
+  const usageReadinessIssues = projection?.readiness.usageReadinessIssues ?? [];
+
   return (
     <>
       <section className="space-y-4 border-t pt-4">
@@ -196,7 +188,7 @@ export default function AdvancedTab({
         <div
           className={classNames(
             "rounded-xl border p-4",
-            usageReady(diagnostics)
+            usageReady
               ? "border-blue-100 bg-blue-50 text-blue-900"
               : "border-amber-100 bg-amber-50 text-amber-900"
           )}
@@ -205,18 +197,18 @@ export default function AdvancedTab({
             <div>
               <div className="text-sm font-semibold">使用准备状态</div>
               <div className="mt-1 text-xs">
-                {usageReady(diagnostics)
+                {usageReady
                   ? "使用准备就绪：核心链路、人生模型、对话验证和模型后端均已通过当前检查。"
                   : "继续处理以下事项后，默认体验会更稳定。"}
               </div>
             </div>
             <span className="shrink-0 rounded-full bg-white/70 px-2 py-1 text-xs font-medium">
-              {usageReady(diagnostics) ? "已就绪" : "待完善"}
+              {usageReady ? "已就绪" : "待完善"}
             </span>
           </div>
           <div className="mt-3 grid gap-2 text-xs md:grid-cols-2">
-            <div>核心链路：{diagnostics?.chat_ready ? "就绪" : "未就绪"}</div>
-            <div>人生模型：{diagnostics?.model_empty ? "未构建" : "已构建"}</div>
+            <div>核心链路：{projection?.readiness.chatReady ? "就绪" : "未就绪"}</div>
+            <div>人生模型：{projection?.readiness.modelEmpty ? "未构建" : "已构建"}</div>
             <div>
               对话验证：
               {diagnostics?.chat_session_count && diagnostics.chat_session_count > 0
@@ -225,11 +217,11 @@ export default function AdvancedTab({
             </div>
             <div>云端 API：{diagnostics?.cloud_api_configured ? "已配置" : "未配置"}</div>
           </div>
-          {usageReadinessIssues(diagnostics).length ? (
+          {usageReadinessIssues.length ? (
             <div className="mt-3 rounded-lg bg-white/70 p-3">
               <div className="text-xs font-medium">建议处理：</div>
               <ul className="mt-1 list-disc space-y-1 pl-4 text-xs">
-                {usageReadinessIssues(diagnostics).map(issue => (
+                {usageReadinessIssues.map(issue => (
                   <li key={issue}>{issue}</li>
                 ))}
               </ul>

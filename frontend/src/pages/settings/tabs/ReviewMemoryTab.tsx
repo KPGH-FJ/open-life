@@ -1,18 +1,19 @@
 import { Link } from "react-router-dom";
-import type { AppConfig, SystemDiagnostics } from "../../../tauri";
+import type { AppConfig, LifeStateProjection } from "../../../tauri";
 import { CapabilityCard, StatusChip } from "../../../components/product/ProductPrimitives";
 import { mailboxRoute } from "../../../productShellContract";
+import { reviewRequiredCountFromProjection } from "../../../utils/lifeStateProjection";
 
 interface ReviewMemoryTabProps {
   config: AppConfig;
   setConfig: React.Dispatch<React.SetStateAction<AppConfig>>;
-  diagnostics: SystemDiagnostics | null;
+  projection: LifeStateProjection | null;
 }
 
-export default function ReviewMemoryTab({ config, setConfig, diagnostics }: ReviewMemoryTabProps) {
+export default function ReviewMemoryTab({ config, setConfig, projection }: ReviewMemoryTabProps) {
   const proposalEnabled = config.chat_proposal?.enabled ?? true;
-  const pendingCount = diagnostics?.pending_proposal_count ?? 0;
-  const highRiskCount = diagnostics?.high_risk_pending_proposal_count ?? 0;
+  const pendingCount = reviewRequiredCountFromProjection(projection, "settings");
+  const highRiskCount = projection?.pending.highRiskReviewRequiredCount ?? 0;
 
   return (
     <>
@@ -20,8 +21,8 @@ export default function ReviewMemoryTab({ config, setConfig, diagnostics }: Revi
         <CapabilityCard
           title="Mailbox"
           description="记忆、Life Model 和权限建议在确认前不会生效。"
-          tone={pendingCount > 0 ? "warning" : "ready"}
-          meta={`${pendingCount} pending proposals`}
+          tone={pendingCount == null ? "neutral" : pendingCount > 0 ? "warning" : "ready"}
+          meta={pendingCount == null ? "pending status loading" : `${pendingCount} pending proposals`}
         >
           <Link
             to={mailboxRoute()}

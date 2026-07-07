@@ -1,7 +1,8 @@
 use crate::agent::action_executor::{
-    ActionExecutionContext, ActionExecutionStatus, ActionExecutor, AgentActionRequest,
+    ActionExecutionContext, ActionExecutionStatus, AgentActionRequest,
 };
 use crate::agent::runtime::{AgentRuntime, AgentRuntimeOutput};
+use crate::agent::tool_gateway::ToolGateway;
 use crate::agent::types::{AgentObservation, AgentRun, AgentRunError, AgentRunStatus, AgentTask};
 use crate::agent::{RuntimeGuidanceConsumptionMode, RuntimeHSPacket, RuntimeInput, RuntimeOutput};
 use crate::layer::Layer;
@@ -207,7 +208,7 @@ struct StepContext<'a> {
 /// Configurable via AgentLoopConfig (max_steps default: 4, max_tool_calls default: 6).
 pub struct AgentLoop {
     runtime: AgentRuntime,
-    action_executor: ActionExecutor,
+    tool_gateway: ToolGateway,
     scheduler: InferenceScheduler,
     config: AgentLoopConfig,
     scripted_replies: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
@@ -216,13 +217,13 @@ pub struct AgentLoop {
 impl AgentLoop {
     pub fn new(
         runtime: AgentRuntime,
-        action_executor: ActionExecutor,
+        tool_gateway: ToolGateway,
         scheduler: InferenceScheduler,
         config: AgentLoopConfig,
     ) -> Self {
         Self {
             runtime,
-            action_executor,
+            tool_gateway,
             scheduler,
             config,
             scripted_replies: std::sync::Arc::new(std::sync::Mutex::new(
@@ -1309,7 +1310,7 @@ impl AgentLoop {
             }
 
             let exec_result = match self
-                .action_executor
+                .tool_gateway
                 .execute(action_request.clone(), action_ctx)
             {
                 Ok(r) => r,
@@ -1636,8 +1637,9 @@ fn preview_text(text: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::action_executor::{ActionExecutor, ActionExecutorConfig};
+    use crate::agent::action_executor::ActionExecutorConfig;
     use crate::agent::runtime::AgentRuntime;
+    use crate::agent::tool_gateway::ToolGateway;
     use crate::agent::types::{AgentObservation, AgentRun};
     use crate::config::AppConfig;
     use crate::life_model::LifeModel;
@@ -1664,9 +1666,9 @@ mod tests {
         );
         let app_config = AppConfig::default();
         let runtime = AgentRuntime::new(life_model, scheduler.clone(), &app_config);
-        let executor = ActionExecutor::new(ActionExecutorConfig::default());
+        let gateway = ToolGateway::from_executor_config(ActionExecutorConfig::default());
         let config = AgentLoopConfig::default();
-        AgentLoop::new(runtime, executor, scheduler, config)
+        AgentLoop::new(runtime, gateway, scheduler, config)
     }
 
     /// Create a minimal ActionExecutionContext backed by tempfile-based stores.
