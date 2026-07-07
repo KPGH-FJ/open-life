@@ -27,7 +27,7 @@ fn main_chat_command_surface_ipc_tests_are_not_concentrated_in_lib_rs() {
         "start_stream_message_registered_mcp_read_completes_through_agent_loop_not_fallback",
         "send_message_web_policy_blocker_completes_through_agent_loop_not_fallback",
         "start_stream_message_web_policy_blocker_completes_through_agent_loop_not_fallback",
-        "send_message_registered_mcp_multi_candidate_agent_loop_selects_allowed_manifest",
+        "send_message_registered_mcp_multi_candidate_kernel_read_loop_selects_allowed_manifest",
         "send_message_missing_workspace_file_source_records_kernel_blocked_read_evidence",
         "main_chat_kernel_goal_3_review_maturation_send_stream_returns_governed_blocker_without_legacy",
         "main_chat_command_surface_eval_gate_covers_send_stream_runtime_matrix",
@@ -296,9 +296,9 @@ async fn main_chat_runtime_status_reports_kernel_truth() {
     );
 
     let route_decision = MainChatTurnRouteDecision {
-        path: MainChatExecutionPath::KernelDirect,
+        path: MainChatExecutionPath::DirectAnswer,
         strategy_label: "direct_answer".into(),
-        reason_code: "kernel_supported_direct_answer".into(),
+        reason_code: "openlife_runtime_direct_answer".into(),
         kernel_supported: true,
         kernel_support_disposition: "supported".into(),
         fallback_allowed: false,
@@ -321,10 +321,10 @@ async fn main_chat_runtime_status_reports_kernel_truth() {
         crate::main_chat_runtime_status::get_main_chat_runtime_status_with_state(&state).await;
 
     assert_eq!(status.status_version, 2);
-    assert_eq!(status.authoritative_runtime, "main_chat_kernel");
-    assert_eq!(status.default_send_path, "main_chat_kernel");
-    assert_eq!(status.start_stream_path, "main_chat_kernel");
-    assert_eq!(status.source_of_truth, "main_chat_turn_pipeline");
+    assert_eq!(status.authoritative_runtime, "OpenLifeTurnRuntime");
+    assert_eq!(status.default_send_path, "OpenLifeTurnRuntime");
+    assert_eq!(status.start_stream_path, "OpenLifeTurnRuntime");
+    assert_eq!(status.source_of_truth, "main_chat_turn_runtime");
     assert!(!status.kernel_evidence.kernel_backed_default);
     assert!(!status.kernel_evidence.final_gate_evidence_present);
     assert!(!status.kernel_evidence.final_gate_ready);
@@ -345,7 +345,7 @@ async fn main_chat_runtime_status_reports_kernel_truth() {
             .latest_route_evidence
             .last_route_reason_code
             .as_deref(),
-        Some("kernel_supported_direct_answer")
+        Some("openlife_runtime_direct_answer")
     );
     assert_eq!(
         status
@@ -444,13 +444,20 @@ fn ordinary_send_stream_have_no_legacy_fallback_delivery_source() {
         !pipeline_source.contains(&legacy_true_assignment),
         "ordinary Main Chat pipeline must not assign legacy fallback usage to true"
     );
+    let runtime_source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_turn_runtime.rs"),
+    )
+    .expect("read OpenLifeTurnRuntime source");
+    let single_step_true_marker = ["singleStepFallbackUsed", "\": true"].join("");
+    let legacy_true_marker = ["legacyFallbackUsed", "\": true"].join("");
     assert!(
-        pipeline_source.contains("main_chat_unsupported_turn_governed_blocker"),
-        "unsupported/no-result turns should surface a governed blocker"
+        runtime_source.contains("OpenLifeTurnTerminal"),
+        "ordinary Main Chat runtime must produce a structured terminal object"
     );
     assert!(
-        pipeline_source.contains("\"retiredFallbackBlocked\": true"),
-        "blocked retired fallback should be a separate evidence field"
+        !runtime_source.contains(&single_step_true_marker)
+            && !runtime_source.contains(&legacy_true_marker),
+        "OpenLifeTurnRuntime must not mark retired fallback paths as successful"
     );
 }
 
@@ -536,6 +543,145 @@ async fn list_command_surface_proposals(
     store
         .list_all_proposals(100, 0)
         .expect("list command-surface proposals")
+}
+
+#[tokio::test]
+async fn phase4_main_chat_proposal_support_records_reused_outcome_id() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let task_session_id = "phase4-main-chat-reuse";
+    let user_text = "请记住 我喜欢边走边想";
+
+    let first = crate::main_chat_proposal_support::create_main_chat_agent_proposal(
+        &state,
+        task_session_id,
+        openlife_core::agent::main_chat_agent_v1::MainChatAgentStrategy::MemoryProposal,
+        user_text,
+    )
+    .await
+    .expect("first proposal");
+    let second = crate::main_chat_proposal_support::create_main_chat_agent_proposal(
+        &state,
+        task_session_id,
+        openlife_core::agent::main_chat_agent_v1::MainChatAgentStrategy::MemoryProposal,
+        user_text,
+    )
+    .await
+    .expect("second proposal reuses pending");
+
+    assert_eq!(second.id, first.id);
+    let proposals = list_command_surface_proposals(&state).await;
+    assert_eq!(proposals.len(), 1);
+    assert_eq!(proposals[0].id, first.id);
+
+    let observed_action_ids: Vec<String> = list_command_surface_actions(&state, task_session_id)
+        .await
+        .into_iter()
+        .filter_map(|action| {
+            action.observation_metadata.and_then(|metadata| {
+                metadata
+                    .get("proposalId")
+                    .and_then(|id| id.as_str())
+                    .map(str::to_string)
+            })
+        })
+        .collect();
+    assert_eq!(
+        observed_action_ids,
+        vec![first.id.clone(), first.id.clone()],
+        "queued action metadata must use the authoritative ReviewWorkflowOutcome id"
+    );
+
+    let transcript_proposal_ids: Vec<String> =
+        list_command_surface_transcript(&state, task_session_id)
+            .await
+            .into_iter()
+            .filter_map(|entry| {
+                entry
+                    .metadata
+                    .get("proposalId")
+                    .and_then(|id| id.as_str())
+                    .map(str::to_string)
+            })
+            .collect();
+    assert_eq!(
+        transcript_proposal_ids,
+        vec![first.id.clone(), first.id],
+        "transcript metadata must use the reused pending proposal id"
+    );
+}
+
+#[tokio::test]
+async fn phase4_main_chat_generated_proposals_record_reused_outcome_id() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    {
+        let mut engine = state.proposal_engine.lock().await;
+        engine.register(Box::new(
+            openlife_core::agent::ChatProposalGeneratorAdapter::new(),
+        ));
+    }
+
+    let session_id = "phase4-generated-session";
+    let user_text = "记住 我喜欢喝乌龙茶";
+    let mut existing = openlife_core::agent::AgentProposal::new(
+        openlife_core::agent::ProposalType::MemoryWrite,
+        "/memory/explicit",
+        serde_json::json!({
+            "content": "我喜欢喝乌龙茶",
+            "source": "chat_explicit",
+            "session_id": session_id,
+        }),
+        "用户明确要求记住: 我喜欢喝乌龙茶",
+        0.95,
+        openlife_core::agent::RiskLevel::Medium,
+        openlife_core::agent::ProposalSource::ProactiveAgent,
+    );
+    existing.source_detail = Some(format!("session:{session_id}"));
+    let reused_id = existing.id.clone();
+    {
+        let proposal_arc = state.proposal_store.as_ref().expect("proposal store");
+        let store = proposal_arc.lock().await;
+        store
+            .create_proposal(&existing)
+            .expect("seed existing pending proposal fixture");
+    }
+
+    let assistant_message = openlife_core::llm::ChatMessage {
+        role: "assistant".into(),
+        content: "我会先放到 Review Center，等待你确认后再写入长期记忆。".into(),
+    };
+    let mut reasoning_trace = openlife_core::agent::ReasoningTrace::default();
+    let mut agent_run = openlife_core::agent::AgentRun::new_chat_run(session_id, user_text);
+    agent_run.id = "phase4-generated-run".into();
+
+    crate::main_chat_generation_support::finalize_chat_agent_run(
+        session_id,
+        &assistant_message,
+        &assistant_message.content,
+        &mut reasoning_trace,
+        &mut agent_run,
+        &openlife_core::life_model::LifeModel::default(),
+        &state,
+    )
+    .await
+    .expect("finalize chat run");
+
+    let stored_run = state
+        .agent_run_store
+        .as_ref()
+        .expect("agent run store")
+        .lock()
+        .await
+        .get_run(&agent_run.id)
+        .expect("load run")
+        .expect("run exists");
+    assert_eq!(
+        stored_run.generated_proposals,
+        vec![reused_id.clone()],
+        "AgentRun generated proposals must record the ReviewWorkflowOutcome id"
+    );
+    let proposals = list_command_surface_proposals(&state).await;
+    assert_eq!(proposals.len(), 1);
+    assert_eq!(proposals[0].id, reused_id);
 }
 
 async fn find_command_surface_proposal_for_task(
@@ -3971,6 +4117,18 @@ async fn main_chat_kernel_direct_answer_send_stream_success_metadata_parity() {
     )
     .await
     .expect("send kernel parity result");
+    let send_terminal = send_result
+        .turn_terminal
+        .as_ref()
+        .expect("send OpenLifeTurnRuntime terminal");
+    assert_eq!(send_terminal.runtime_owner, "OpenLifeTurnRuntime");
+    assert_eq!(send_terminal.status, "completed");
+    assert_eq!(send_terminal.state, "DirectAnswer");
+    assert_eq!(send_terminal.final_delivery.status, "delivered");
+    assert!(!send_terminal.legacy_fallback_used);
+    assert!(!send_terminal.legacy_runtime_invoked);
+    assert!(!send_terminal.single_step_fallback_used);
+    assert!(!send_terminal.direct_writes_executed);
     let send_value = serde_json::to_value(&send_result).expect("serialize send parity result");
 
     let mut emitted_events = Vec::<(String, serde_json::Value)>::new();
@@ -3993,6 +4151,22 @@ async fn main_chat_kernel_direct_answer_send_stream_success_metadata_parity() {
     assert_eq!(send_value["reply"], stream_done["reply"]);
     assert_eq!(send_value["legacy_fallback_used"], false);
     assert_eq!(stream_done["legacy_fallback_used"], false);
+    assert_eq!(
+        send_value["turn_terminal"]["runtimeOwner"],
+        serde_json::json!("OpenLifeTurnRuntime")
+    );
+    assert_eq!(
+        stream_done["turn_terminal"]["runtimeOwner"],
+        serde_json::json!("OpenLifeTurnRuntime")
+    );
+    assert_eq!(
+        send_value["turn_terminal"]["state"],
+        stream_done["turn_terminal"]["state"]
+    );
+    assert_eq!(
+        send_value["turn_terminal"]["finalDelivery"]["status"],
+        stream_done["turn_terminal"]["finalDelivery"]["status"]
+    );
     let send_generation = &send_value["reasoning_trace"]["generation_result"];
     let stream_generation = &stream_done["reasoning_trace"]["generation_result"];
     for key in [
@@ -4017,6 +4191,74 @@ async fn main_chat_kernel_direct_answer_send_stream_success_metadata_parity() {
     assert_eq!(send_generation["routeType"], "cloud");
     assert_eq!(send_generation["kernelBackedDirectAnswer"], true);
     assert_eq!(send_generation["directWritesExecuted"], false);
+}
+
+#[tokio::test]
+async fn openlife_turn_runtime_terminal_models_blocker_and_proposal_without_fallback_or_writes() {
+    let blocker_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    {
+        let mut config = blocker_state.config.lock().await;
+        config.system.network_policy.enabled = false;
+    }
+    let blocker_result = crate::main_chat_send::send_message_with_state(
+        "openlife-terminal-web-blocker".into(),
+        vec![openlife_core::llm::ChatMessage {
+            role: "user".into(),
+            content: "Please web search OpenLife release notes.".into(),
+        }],
+        None,
+        &blocker_state,
+    )
+    .await
+    .expect("web blocker terminal result");
+    let blocker_terminal = blocker_result
+        .turn_terminal
+        .as_ref()
+        .expect("web blocker terminal");
+    assert_eq!(blocker_result.status, "blocked");
+    assert_eq!(blocker_terminal.runtime_owner, "OpenLifeTurnRuntime");
+    assert_eq!(blocker_terminal.status, "blocked");
+    assert_eq!(blocker_terminal.state, "ReadOnlyTool");
+    assert_eq!(blocker_terminal.final_delivery.status, "blocked");
+    assert!(blocker_terminal
+        .blockers
+        .iter()
+        .any(|blocker| blocker.contains("network_policy_blocked")));
+    assert!(!blocker_terminal.legacy_fallback_used);
+    assert!(!blocker_terminal.legacy_runtime_invoked);
+    assert!(!blocker_terminal.single_step_fallback_used);
+    assert!(!blocker_terminal.direct_writes_executed);
+
+    let proposal_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let proposal_result = crate::main_chat_send::send_message_with_state(
+        "openlife-terminal-proposal".into(),
+        vec![openlife_core::llm::ChatMessage {
+            role: "user".into(),
+            content: "Please remember that I prefer morning writing blocks.".into(),
+        }],
+        None,
+        &proposal_state,
+    )
+    .await
+    .expect("proposal terminal result");
+    let proposal_terminal = proposal_result
+        .turn_terminal
+        .as_ref()
+        .expect("proposal terminal");
+    assert_eq!(proposal_result.status, "waiting_for_user");
+    assert_eq!(proposal_terminal.runtime_owner, "OpenLifeTurnRuntime");
+    assert_eq!(proposal_terminal.status, "waiting_for_user");
+    assert_eq!(proposal_terminal.state, "WriteOutcome");
+    assert_eq!(
+        proposal_terminal.final_delivery.status,
+        "pending_user_action"
+    );
+    assert!(!proposal_terminal.proposals.is_empty());
+    assert!(proposal_terminal.final_delivery.proposal_count > 0);
+    assert!(!proposal_terminal.legacy_fallback_used);
+    assert!(!proposal_terminal.legacy_runtime_invoked);
+    assert!(!proposal_terminal.single_step_fallback_used);
+    assert!(!proposal_terminal.direct_writes_executed);
 }
 
 #[tokio::test]
@@ -4162,6 +4404,68 @@ async fn main_chat_kernel_direct_answer_invalid_input_blocks_send_and_stream_wit
         openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
     );
     assert_eq!(stream_session.pending_blockers, vec!["invalid_session_id"]);
+}
+
+#[tokio::test]
+async fn main_chat_kernel_ask_clarification_send_stream_uses_policy_route_without_fallback() {
+    let user_text = "嗯";
+    let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let send_result = crate::main_chat_send::send_message_with_state(
+        "ask-clarification-send".into(),
+        vec![openlife_core::llm::ChatMessage {
+            role: "user".into(),
+            content: user_text.into(),
+        }],
+        None,
+        &send_state,
+    )
+    .await
+    .expect("send ask clarification result");
+    let send_ingress = send_result
+        .agent_ingress
+        .as_ref()
+        .expect("send ask clarification ingress");
+    assert_eq!(
+        send_ingress.policy_route,
+        openlife_core::agent::main_chat_agent_v1::PolicyRouteKind::AskClarification
+    );
+    assert_eq!(
+        send_ingress.selected_strategy,
+        openlife_core::agent::main_chat_agent_v1::MainChatAgentStrategy::DirectAnswer
+    );
+    assert!(!send_result.legacy_fallback_used);
+    assert!(!send_result.legacy_runtime_invoked);
+
+    let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let mut emitted_events = Vec::<(String, serde_json::Value)>::new();
+    crate::main_chat_streaming::start_stream_message_with_state(
+        "ask-clarification-stream".into(),
+        vec![openlife_core::llm::ChatMessage {
+            role: "user".into(),
+            content: user_text.into(),
+        }],
+        None,
+        &stream_state,
+        |event, payload| emitted_events.push((event.to_string(), payload)),
+    )
+    .await
+    .expect("stream ask clarification result");
+    let stream_done = emitted_events
+        .iter()
+        .rev()
+        .find(|(event, _)| event == "stream-message-done")
+        .map(|(_, payload)| payload)
+        .expect("stream ask clarification done event");
+    assert_eq!(
+        stream_done["agent_ingress"]["policyRoute"].as_str(),
+        Some("ask_clarification")
+    );
+    assert_eq!(
+        stream_done["agent_ingress"]["selectedStrategy"].as_str(),
+        Some("direct_answer")
+    );
+    assert_eq!(stream_done["legacy_fallback_used"].as_bool(), Some(false));
+    assert_eq!(stream_done["legacy_runtime_invoked"].as_bool(), Some(false));
 }
 
 #[tokio::test]
@@ -5175,7 +5479,7 @@ async fn start_stream_message_registered_mcp_read_completes_through_agent_loop_n
 }
 
 #[tokio::test]
-async fn send_message_registered_mcp_multi_candidate_agent_loop_selects_allowed_manifest() {
+async fn send_message_registered_mcp_multi_candidate_kernel_read_loop_selects_allowed_manifest() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     {
         let store = state.tool_permission_store.lock().await;
@@ -5240,9 +5544,9 @@ async fn send_message_registered_mcp_multi_candidate_agent_loop_selects_allowed_
             }),
         ),
     )
-    .expect("send_message mcp multi-candidate AgentLoop response")
+    .expect("send_message mcp multi-candidate kernel read-loop response")
     .deserialize::<serde_json::Value>()
-    .expect("deserialize mcp multi-candidate AgentLoop response");
+    .expect("deserialize mcp multi-candidate kernel read-loop response");
 
     assert_eq!(response["legacy_fallback_used"], false);
     assert_eq!(
@@ -5251,9 +5555,9 @@ async fn send_message_registered_mcp_multi_candidate_agent_loop_selects_allowed_
     );
     let task_session_id = response["agent_ingress"]["agentTaskSessionId"]
         .as_str()
-        .expect("mcp multi-candidate AgentLoop task session id");
+        .expect("mcp multi-candidate kernel read-loop task session id");
 
-    let completed_entry = {
+    let observation_entry = {
         let store_arc = state
             .main_chat_agent_session_store
             .as_ref()
@@ -5261,23 +5565,29 @@ async fn send_message_registered_mcp_multi_candidate_agent_loop_selects_allowed_
         let store = store_arc.lock().await;
         store
             .list_transcript_entries(task_session_id)
-            .expect("list mcp multi-candidate AgentLoop transcript")
+            .expect("list mcp multi-candidate kernel read-loop transcript")
             .into_iter()
             .find(|entry| {
-                entry.summary.contains("Governed ReAct AgentLoop completed")
-                    || entry
-                        .summary
-                        .contains("MainChatKernel read-only tool loop completed")
+                entry
+                    .summary
+                    .contains("MainChatKernel read-only tool observation recorded")
             })
-            .expect("mcp multi-candidate AgentLoop completion transcript entry")
+            .expect("mcp multi-candidate read-loop observation transcript entry")
     };
-    let metadata = completed_entry.metadata;
+    let metadata = observation_entry.metadata;
     assert_eq!(
         metadata
             .get("kernelBackedReadOnlyToolLoop")
             .and_then(serde_json::Value::as_bool),
-        None,
-        "multi-candidate MCP candidate-selection must use governed AgentLoop, not Kernel read loop"
+        Some(true),
+        "multi-candidate MCP candidate-selection must stay inside OpenLifeTurnRuntime's kernel read loop"
+    );
+    assert_eq!(
+        metadata
+            .get("kernelToolSelection")
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "kernel read loop must preserve governed MCP candidate-selection evidence"
     );
     let candidate_count = metadata
         .get("toolSelectionCandidateCount")
@@ -5285,10 +5595,10 @@ async fn send_message_registered_mcp_multi_candidate_agent_loop_selects_allowed_
         .expect("candidate count metadata");
     assert!(
         candidate_count >= 2,
-        "AgentLoop completion metadata must preserve the multi-candidate contract"
+        "kernel read-loop metadata must preserve the multi-candidate contract"
     );
     let candidate_ids = metadata
-        .get("toolSelectionCandidateIds")
+        .get("boundedCandidateIds")
         .and_then(serde_json::Value::as_array)
         .expect("candidate ids metadata");
     assert!(candidate_ids
@@ -5296,27 +5606,27 @@ async fn send_message_registered_mcp_multi_candidate_agent_loop_selects_allowed_
         .any(|candidate| candidate == "builtin_echo"));
     assert_eq!(
         metadata
-            .get("toolSelectionCandidateId")
+            .get("selectedCandidateId")
             .and_then(serde_json::Value::as_str),
         Some("builtin_echo")
     );
     assert_eq!(
         metadata
-            .get("toolSelectionCandidateTarget")
+            .get("selectedCandidateTarget")
             .and_then(serde_json::Value::as_str),
         Some("builtin_echo")
     );
     assert_eq!(
         metadata
-            .get("modelSelectedAllowedTool")
+            .get("mcpReadTargetResolved")
             .and_then(serde_json::Value::as_bool),
         Some(true)
     );
-    assert_eq!(
+    assert_ne!(
         metadata
             .get("singleStepFallbackUsed")
             .and_then(serde_json::Value::as_bool),
-        Some(false)
+        Some(true)
     );
     assert_eq!(
         metadata
@@ -5333,7 +5643,7 @@ async fn send_message_registered_mcp_multi_candidate_agent_loop_selects_allowed_
         let queue = queue_arc.lock().await;
         queue
             .list_for_session(task_session_id)
-            .expect("list mcp multi-candidate AgentLoop actions")
+            .expect("list mcp multi-candidate kernel read-loop actions")
     };
     let mcp_action = actions
         .iter()
@@ -5346,26 +5656,28 @@ async fn send_message_registered_mcp_multi_candidate_agent_loop_selects_allowed_
     let observation = mcp_action
         .observation_metadata
         .as_ref()
-        .expect("mcp multi-candidate AgentLoop observation metadata");
+        .expect("mcp multi-candidate kernel read-loop observation metadata");
     assert_eq!(
         observation
             .get("kernelBackedReadOnlyToolLoop")
             .and_then(serde_json::Value::as_bool),
-        None,
-        "multi-candidate MCP observation must come from governed AgentLoop"
+        Some(true),
+        "multi-candidate MCP observation must come from kernel read loop under OpenLifeTurnRuntime"
     );
-    assert_eq!(observation["agentLoopSucceeded"], serde_json::json!(true));
+    assert_eq!(observation["kernelToolSelection"], serde_json::json!(true));
     assert_eq!(
-        observation["toolSelectionCandidateId"],
+        observation["selectedCandidateId"],
         serde_json::json!("builtin_echo")
     );
     assert_eq!(
-        observation["toolSelectionCandidateTarget"],
+        observation["selectedCandidateTarget"],
         serde_json::json!("builtin_echo")
     );
-    assert_eq!(
-        observation["singleStepFallbackUsed"],
-        serde_json::json!(false)
+    assert_ne!(
+        observation
+            .get("singleStepFallbackUsed")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
     );
     assert_eq!(
         observation["directWritesExecuted"],

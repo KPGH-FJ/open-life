@@ -10,7 +10,7 @@ use openlife_core::agent::main_chat_agent_v1::{
     AgentIngressDecision, AgentTaskSessionStatus, CompiledContext, ContextCompiler,
     ContextCompilerInput, ContextSourceCandidate, ContextSourceKind, ExecutionQueueStatus,
     ExecutionTranscriptEntry, ExecutionTranscriptEntryKind, MainChatAgentStrategy,
-    MainChatPrivacyRiskSummary,
+    MainChatPrivacyRiskSummary, PolicyRouteKind,
 };
 use openlife_core::agent::{
     classify_main_chat_governance_intent, plan_main_chat_memory_routing, ActionExecutionContext,
@@ -21,7 +21,7 @@ use openlife_core::agent::{
     MainChatMemoryRoutingResult, MemoryCandidateKind, MemoryDestination, ModelRoutePolicy,
     ModelRouteTrace, ReasoningTrace, RedactionLevel, RiskLevel, RuntimeHSPacket,
 };
-use openlife_core::layer_router::Layer;
+use openlife_core::layer::Layer;
 use openlife_core::life_model::LifeModel;
 use openlife_core::llm::ChatMessage;
 use openlife_core::mcp::McpRegistry;
@@ -1290,6 +1290,7 @@ impl MainChatKernelCommandSurfaceResult {
             legacy_runtime_invoked: false,
             model_invoked: true,
             tool_invoked: false,
+            turn_terminal: None,
         }
     }
 }
@@ -1449,10 +1450,7 @@ where
     } else if user_text.trim().is_empty() {
         None
     } else {
-        let router = state.intent_router.lock().await;
-        router
-            .classify(&user_text)
-            .direct_response()
+        main_chat_policy_direct_reflex_response(&main_chat_agent_turn.decision, &user_text)
             .map(CommandSurfaceDirectReply::direct_reflex)
     };
     let (life_model, hs_context) = command_surface_kernel_hs_context(
@@ -2061,6 +2059,46 @@ struct CommandSurfaceDirectReply {
     content: String,
     route_model: String,
     route_reason: String,
+}
+
+fn main_chat_policy_direct_reflex_response(
+    decision: &AgentIngressDecision,
+    user_text: &str,
+) -> Option<String> {
+    if decision.policy_route != PolicyRouteKind::DirectAnswer {
+        return None;
+    }
+    let normalized = user_text
+        .replace(['\r', '\n', '\t'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    if matches!(
+        normalized.as_str(),
+        "你好" | "您好" | "哈喽" | "嗨" | "hello" | "hi" | "hey"
+    ) {
+        return Some("你好！我是 OpenLife，很高兴陪伴你的成长。今天想聊聊什么？".into());
+    }
+    if matches!(
+        normalized.as_str(),
+        "再见" | "拜拜" | "bye" | "goodbye" | "see you"
+    ) {
+        return Some("再见！随时欢迎回来，我会一直在这里支持你。".into());
+    }
+    if matches!(
+        normalized.as_str(),
+        "帮助" | "help" | "怎么用" | "你能做什么" | "你是什么"
+    ) {
+        return Some(
+            "你可以跟我聊人生目标、价值观、当前状态，也可以让我帮你调用工具完成任务。".into(),
+        );
+    }
+    None
 }
 
 impl CommandSurfaceDirectReply {
@@ -3358,16 +3396,31 @@ async fn create_kernel_write_proposal(
     );
     proposal.run_id = Some(run_id.to_string());
     proposal.source_detail = Some(task_session_id.to_string());
+    crate::life_model_write_gateway::stamp_lifemodel_proposal_base_hash_with_state(
+        state,
+        &mut proposal,
+    )
+    .await?;
 
     let store_arc = state
         .proposal_store
         .as_ref()
         .ok_or_else(|| "Proposal store not available".to_string())?;
     let store = store_arc.lock().await;
-    store
-        .create_proposal(&proposal)
+    let outcome = openlife_core::agent::ReviewWorkflow::new(&store)
+        .submit(
+            openlife_core::agent::DurableWriteRequest::from_agent_proposal(
+                openlife_core::agent::DurableWriteSource::MainChat,
+                openlife_core::agent::DurableWriteSubject::from_proposal_type(
+                    proposal.proposal_type,
+                ),
+                proposal.clone(),
+                "Main Chat kernel proposal is pending Review Center approval.",
+            )
+            .with_evidence_refs(vec![format!("main_chat_task_session:{task_session_id}")]),
+        )
         .map_err(|err| format!("create kernel write proposal failed: {err}"))?;
-    Ok(proposal)
+    Ok(outcome.proposal)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3718,16 +3771,34 @@ async fn create_kernel_memory_governance_proposal(
         "main_chat_agent_task_session:{task_session_id};candidate:{}",
         candidate.candidate_id
     ));
+    crate::life_model_write_gateway::stamp_lifemodel_proposal_base_hash_with_state(
+        state,
+        &mut proposal,
+    )
+    .await?;
 
     let store_arc = state
         .proposal_store
         .as_ref()
         .ok_or_else(|| "Proposal store not available".to_string())?;
     let store = store_arc.lock().await;
-    store
-        .create_proposal(&proposal)
+    let outcome = openlife_core::agent::ReviewWorkflow::new(&store)
+        .submit(
+            openlife_core::agent::DurableWriteRequest::from_agent_proposal(
+                openlife_core::agent::DurableWriteSource::MainChat,
+                openlife_core::agent::DurableWriteSubject::from_proposal_type(
+                    proposal.proposal_type,
+                ),
+                proposal.clone(),
+                "Main Chat memory governance proposal is pending Review Center approval.",
+            )
+            .with_evidence_refs(vec![
+                format!("main_chat_task_session:{task_session_id}"),
+                format!("memory_candidate:{}", candidate.candidate_id),
+            ]),
+        )
         .map_err(|err| format!("create memory governance proposal failed: {err}"))?;
-    Ok(proposal)
+    Ok(outcome.proposal)
 }
 
 fn memory_governance_metadata(
@@ -8142,16 +8213,18 @@ mod tests {
     }
 
     #[test]
-    fn main_chat_kernel_goal_2_send_and_stream_use_kernel_direct_answer_adapter() {
+    fn main_chat_kernel_is_subordinate_to_openlife_turn_runtime_command_surface() {
         let send_source = include_str!("main_chat_send.rs");
         let stream_source = include_str!("main_chat_streaming.rs");
-        let pipeline_source = include_str!("main_chat_turn_pipeline.rs");
+        let runtime_source = include_str!("main_chat_turn_runtime.rs");
 
-        assert!(send_source.contains("run_main_chat_turn_pipeline_buffered"));
-        assert!(stream_source.contains("run_main_chat_turn_pipeline_streaming"));
-        assert!(pipeline_source.contains("run_main_chat_kernel_direct_answer_with_state"));
-        assert!(pipeline_source.contains("BufferedMainChatEventSink"));
-        assert!(pipeline_source.contains("StreamingMainChatEventSink"));
+        assert!(send_source.contains("OpenLifeTurnRuntime::new("));
+        assert!(stream_source.contains("OpenLifeTurnRuntime::new("));
+        assert!(runtime_source.contains("run_main_chat_kernel_direct_answer_with_state"));
+        assert!(runtime_source.contains("BufferedMainChatEventSink"));
+        assert!(runtime_source.contains("StreamingMainChatEventSink"));
+        assert!(!send_source.contains("run_main_chat_kernel_direct_answer_with_state"));
+        assert!(!stream_source.contains("run_main_chat_kernel_direct_answer_with_state"));
     }
 
     #[test]

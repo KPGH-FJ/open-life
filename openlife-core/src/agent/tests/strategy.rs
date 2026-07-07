@@ -1,10 +1,11 @@
 use crate::agent::policy_store::{ModelRoutePolicy, BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY};
+use crate::agent::runtime_strategy_contract::select_historical_runtime_strategy;
 use crate::agent::{
     AgentExecutionBudget, AgentTask, AgentTaskKind, GovernanceDecisionKind, HSSelectionAudit,
     ProposalStore, RuntimeHSPacket, RuntimeInput, RuntimeStrategyKind, SelectedPolicyRef,
-    StrategySelectionInput, StrategySelector,
+    StrategySelectionInput,
 };
-use crate::layer_router::Layer;
+use crate::layer::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
 
@@ -37,7 +38,7 @@ fn select(
     allow_planning: bool,
     local_model_available: bool,
 ) -> crate::agent::StrategySelection {
-    StrategySelector::default().select(StrategySelectionInput {
+    select_historical_runtime_strategy(StrategySelectionInput {
         runtime_input,
         allow_planning,
         local_model_available,

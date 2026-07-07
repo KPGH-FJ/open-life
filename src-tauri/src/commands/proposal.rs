@@ -1,13 +1,8 @@
-use crate::legacy_write_convergence::{
-    LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
-    LifeModelMaterializerCallerPurpose,
-};
-use crate::main_chat_hs_runtime::classify_hs_policy_topic;
-use crate::{persist_life_model, storage::app_data_dir, AppState};
+use crate::{life_model_write_gateway, memory_gateway, storage::app_data_dir, AppState};
 use openlife_core::agent::{
-    AgentProposal, MaturationProposalOutcome, MemoryLifecycleAcceptanceInput,
-    MemoryLifecycleRecord, MemoryLifecycleScope, MemoryLifecycleStatus, MemoryRollbackReport,
-    ProposalSource, ProposalStatus, ProposalType, RiskLevel,
+    AgentProposal, MaturationProposalOutcome, MemoryLifecycleRecord, MemoryLifecycleScope,
+    MemoryLifecycleStatus, MemoryRollbackReport, ProposalSource, ProposalStatus, ProposalType,
+    RiskLevel,
 };
 use openlife_core::life_model::patch::PatchSource;
 use openlife_core::life_model::LifeModel;
@@ -71,10 +66,9 @@ fn check_safe_mode(state: &Arc<AppState>) -> Result<(), String> {
 
 fn ensure_pending_or_postponed(proposal: &AgentProposal) -> Result<(), String> {
     match proposal.status {
-        ProposalStatus::Pending | ProposalStatus::Postponed => Ok(()),
+        ProposalStatus::Pending | ProposalStatus::Postponed | ProposalStatus::Edited => Ok(()),
         ProposalStatus::Accepted => Err("该 Proposal 已经被接受，不能重复处理。".to_string()),
         ProposalStatus::Rejected => Err("该 Proposal 已经被拒绝，不能再次处理。".to_string()),
-        ProposalStatus::Edited => Err("该 Proposal 已经被编辑并应用，不能重复处理。".to_string()),
     }
 }
 
@@ -94,7 +88,7 @@ fn patch_result_for_proposal(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct LifeModelProposalPatchSourceMappingReport {
+pub(crate) struct LifeModelProposalPatchSourceMappingReport {
     proposal_source: ProposalSource,
     patch_source: PatchSource,
     exact_source_mapping: bool,
@@ -173,7 +167,7 @@ fn evaluate_lifemodel_proposal_patch_source_mapping(
     }
 }
 
-fn ensure_lifemodel_proposal_patch_source_mapping(
+pub(crate) fn ensure_lifemodel_proposal_patch_source_mapping(
     proposal: &AgentProposal,
 ) -> Result<LifeModelProposalPatchSourceMappingReport, String> {
     let report = evaluate_lifemodel_proposal_patch_source_mapping(proposal);
@@ -212,7 +206,7 @@ fn ensure_lifemodel_proposal_patch_source_mapping(
     Ok(report)
 }
 
-fn resolve_lifemodel_patch_source_for_proposal(proposal: &AgentProposal) -> PatchSource {
+pub(crate) fn resolve_lifemodel_patch_source_for_proposal(proposal: &AgentProposal) -> PatchSource {
     evaluate_lifemodel_proposal_patch_source_mapping(proposal).patch_source
 }
 
@@ -660,7 +654,7 @@ fn safe_write_utf8(path: &str, content: &str, safe_paths: &[String]) -> Result<(
     }
 }
 
-fn memory_session_id(after: &Value) -> String {
+pub(crate) fn memory_session_id(after: &Value) -> String {
     after
         .get("session_id")
         .or_else(|| after.get("sessionId"))
@@ -669,7 +663,7 @@ fn memory_session_id(after: &Value) -> String {
         .to_string()
 }
 
-fn memory_source(after: &Value) -> String {
+pub(crate) fn memory_source(after: &Value) -> String {
     after
         .get("source")
         .and_then(Value::as_str)
@@ -792,7 +786,7 @@ fn sanitize_filename(name: &str) -> String {
         .collect()
 }
 
-fn memory_content(after: &Value) -> Result<String, String> {
+pub(crate) fn memory_content(after: &Value) -> Result<String, String> {
     if let Some(content) = after.get("content").and_then(Value::as_str) {
         let content = content.trim();
         if !content.is_empty() {
@@ -808,42 +802,7 @@ fn memory_content(after: &Value) -> Result<String, String> {
     Err("MemoryWrite Proposal 缺少 after.content。".to_string())
 }
 
-async fn embed_proposal_memory_with_privacy(
-    content: &str,
-    state: &Arc<AppState>,
-) -> Result<Vec<f32>, String> {
-    let (provider, openai_base, openai_key, embedding_model, embedding_enabled) = {
-        let cfg = state.config.lock().await;
-        (
-            cfg.llm.provider.clone(),
-            cfg.llm.openai_base.clone(),
-            cfg.llm.openai_key.clone(),
-            cfg.llm.embedding_model.clone(),
-            cfg.llm.embedding_enabled,
-        )
-    };
-    let privacy_engine = {
-        let engine = state.privacy_engine.lock().await;
-        engine.clone()
-    };
-    let hs_local_only =
-        classify_hs_policy_topic(content, "") != openlife_core::agent::PolicyTopic::General;
-
-    openlife_core::vectors::embed_text_with_privacy(
-        content,
-        &provider,
-        &openai_base,
-        &openai_key,
-        &embedding_model,
-        embedding_enabled,
-        &privacy_engine,
-        hs_local_only,
-    )
-    .await
-    .map_err(|e| e.to_string())
-}
-
-fn memory_archive_ids(after: &Value) -> Result<Vec<i64>, String> {
+pub(crate) fn memory_archive_ids(after: &Value) -> Result<Vec<i64>, String> {
     let value = after
         .get("chunk_ids")
         .or_else(|| after.get("chunkIds"))
@@ -898,7 +857,10 @@ fn apply_life_model_value(
     serde_json::from_value(value).map_err(|e| format!("Proposal 值无法转换为 LifeModel：{}", e))
 }
 
-fn validate_proposal_payload(proposal_type: ProposalType, after: &Value) -> Result<(), String> {
+pub(crate) fn validate_proposal_payload(
+    proposal_type: ProposalType,
+    after: &Value,
+) -> Result<(), String> {
     match proposal_type {
         ProposalType::LifeModelUpdate
         | ProposalType::GoalUpdate
@@ -1030,19 +992,10 @@ async fn apply_proposal_to_state(
         | ProposalType::PreferenceUpdate
         | ProposalType::CapabilityUpdate => {
             let canonical_affected_path = canonical_lifemodel_path(&proposal.affected_path);
-            let mut model = {
+            let model = {
                 let manager = state.life_model_manager.lock().await;
                 manager.load().map_err(|e| e.to_string())?
             };
-
-            // 1. Create Before Snapshot
-            let _before_snapshot = {
-                let vm = state.version_manager.lock().await;
-                vm.snapshot_for_patch(&model, &proposal.id, "before")
-                    .map_err(|e| e.to_string())?
-            };
-
-            // 2. Generate Patch from Proposal
             let path_pointer =
                 openlife_core::life_model::patch::dot_to_pointer(&canonical_affected_path);
             let path_display =
@@ -1072,144 +1025,28 @@ async fn apply_proposal_to_state(
                 patch_source,
             );
 
-            // 3. Apply Patch using new engine
-            let result = model.apply_patch(&patch).map_err(|e| e.to_string())?;
-
-            if !result.success {
-                return Ok(result);
-            }
-
-            // 4. Persist updated model
-            persist_life_model(
-                state,
-                model.clone(),
-                true,
-                LifeModelMaterializerCallerContext::new(
-                    "proposal_apply_lifemodel_update",
-                    LifeModelMaterializerCallerKind::AcceptedProposalApply,
-                    LifeModelMaterializerCallerPurpose::AcceptedProposalApplySourceSpecificPatchMappingComplete,
-                ),
+            life_model_write_gateway::materialize_accepted_lifemodel_proposal_with_state(
+                state, proposal, patch,
             )
-            .await?;
-
-            // 5. Create After Snapshot
-            let _after_snapshot = {
-                let vm = state.version_manager.lock().await;
-                vm.snapshot_for_patch(&model, &proposal.id, "after")
-                    .map_err(|e| e.to_string())?
-            };
-
-            // 6. Save Patch to PatchStore
-            if let Some(ref patch_store_arc) = state.patch_store {
-                let patch_store = patch_store_arc.lock().await;
-                let mut patch_to_save = patch.clone();
-                patch_to_save.mark_applied();
-                let _ = patch_store.create_patch(&patch_to_save);
-            }
-
-            Ok(result)
+            .await
         }
         ProposalType::MemoryWrite | ProposalType::MemoryArchive => match proposal.proposal_type {
             ProposalType::MemoryWrite => {
                 let content = memory_content(&after)?;
                 let session_id = memory_session_id(&after);
                 let original_source = memory_source(&after);
-
-                // Check for duplicate content in memory store
-                {
-                    let store = state.memory_store.lock().await;
-                    let hits = store
-                        .search_text_memories(Some(&session_id), &content, 10)
-                        .map_err(|e| e.to_string())?;
-                    let is_duplicate = hits
-                        .iter()
-                        .any(|hit| hit.chunk.content.trim() == content.trim());
-                    if is_duplicate {
-                        return Ok(patch_result_for_proposal(
-                            proposal,
-                            false,
-                            "memory_write",
-                            Some("检测到重复内容，该记忆已存在。".to_string()),
-                        ));
-                    }
-                }
-
-                let lifecycle_report = {
-                    let lifecycle_store = state
-                        .memory_lifecycle_store
-                        .as_ref()
-                        .ok_or_else(memory_lifecycle_store_missing)?;
-                    let store = lifecycle_store.lock().await;
-                    store
-                        .accept_memory_proposal(
-                            MemoryLifecycleAcceptanceInput::from_memory_proposal(
-                                proposal,
-                                content.clone(),
-                            ),
-                        )
-                        .map_err(|e| e.to_string())?
-                };
-                let lifecycle_source =
-                    format!("memory_lifecycle:{}", lifecycle_report.record.memory_id);
-                let embedding_id = {
-                    match embed_proposal_memory_with_privacy(&content, state).await {
-                        Ok(embedding) if !embedding.is_empty() => {
-                            let store = state.vector_store.lock().await;
-                            store
-                                .insert(&session_id, &content, &embedding, &lifecycle_source)
-                                .map_err(|e| e.to_string())
-                                .ok()
-                        }
-                        Ok(_) | Err(_) => None,
-                    }
-                };
-                {
-                    let store = state.memory_store.lock().await;
-                    let tags = vec![
-                        "proposal".to_string(),
-                        format!("proposal_id:{}", proposal.id),
-                        format!("source:{}", original_source),
-                        format!("memory_id:{}", lifecycle_report.record.memory_id),
-                    ];
-                    store
-                        .save_memory_record(
-                            &session_id,
-                            &content,
-                            "proposal_memory",
-                            &lifecycle_source,
-                            &tags,
-                            "private",
-                            embedding_id,
-                        )
-                        .map_err(|e| e.to_string())?;
-                }
-                Ok(patch_result_for_proposal(
+                memory_gateway::materialize_memory_proposal_with_state(
+                    state,
                     proposal,
-                    true,
-                    "memory_write",
-                    None,
-                ))
+                    content,
+                    session_id,
+                    original_source,
+                )
+                .await
             }
             ProposalType::MemoryArchive => {
                 let ids = memory_archive_ids(&after)?;
-                let archived = {
-                    let store = state.vector_store.lock().await;
-                    store.archive_chunks(&ids).map_err(|e| e.to_string())?
-                };
-                if archived == 0 {
-                    return Ok(patch_result_for_proposal(
-                        proposal,
-                        false,
-                        "memory_archive",
-                        Some("没有匹配到可归档的 active memory chunk。".to_string()),
-                    ));
-                }
-                Ok(patch_result_for_proposal(
-                    proposal,
-                    true,
-                    "memory_archive",
-                    None,
-                ))
+                memory_gateway::archive_memory_for_proposal_with_state(state, proposal, &ids).await
             }
             _ => unreachable!(),
         },
@@ -1653,6 +1490,13 @@ pub(crate) async fn accept_proposal_with_state(
         "patch_result": result,
     });
     if proposal.proposal_type == ProposalType::MemoryWrite {
+        let decision = memory_gateway::memory_gateway_decision_for_proposal(
+            &proposal,
+            "accepted_proposal_materialization",
+            Vec::new(),
+        );
+        response["memoryGateway"] =
+            serde_json::to_value(&decision).unwrap_or(serde_json::Value::Null);
         if let Some(lifecycle_store) = state.memory_lifecycle_store.as_ref() {
             let store = lifecycle_store.lock().await;
             if let Ok(Some(record)) = store.get_record_by_proposal_id(&proposal.id) {
@@ -1731,13 +1575,6 @@ pub(crate) async fn edit_proposal_with_state(
     check_safe_mode(state)?;
     let mut proposal = get_proposal_with_state(state, &proposal_id).await?;
     ensure_pending_or_postponed(&proposal)?;
-    let result = apply_proposal_to_state(state, &proposal, new_after.clone()).await?;
-    if !result.success {
-        return Err(format!(
-            "Patch 应用失败: {}",
-            result.error.unwrap_or_default()
-        ));
-    }
     canonicalize_proposal_affected_path(&mut proposal);
     proposal.edit(new_after);
     update_proposal_with_state(state, &proposal).await?;
@@ -1749,7 +1586,8 @@ pub(crate) async fn edit_proposal_with_state(
     .await;
     Ok(serde_json::json!({
         "success": true,
-        "patch_result": result,
+        "status": "edited_pending_review",
+        "durable_write_executed": false,
     }))
 }
 
@@ -1817,30 +1655,7 @@ pub(crate) async fn rollback_memory_asset_with_state(
     if reason.is_empty() {
         return Err("rollback_memory_asset requires a rollback reason.".into());
     }
-    let lifecycle_store = state
-        .memory_lifecycle_store
-        .as_ref()
-        .ok_or_else(memory_lifecycle_store_missing)?;
-    let store = lifecycle_store.lock().await;
-    let report = store
-        .rollback_memory_asset(&memory_id, "user", reason)
-        .map_err(|e| e.to_string())?;
-    drop(store);
-
-    {
-        let memory_store = state.memory_store.lock().await;
-        memory_store
-            .archive_lifecycle_memory_records(&memory_id)
-            .map_err(|e| e.to_string())?;
-    }
-    {
-        let vector_store = state.vector_store.lock().await;
-        let lifecycle_source = format!("memory_lifecycle:{memory_id}");
-        vector_store
-            .archive_chunks_by_source(&lifecycle_source)
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(report)
+    memory_gateway::rollback_memory_asset_with_state(memory_id, reason.to_string(), state).await
 }
 
 pub(crate) async fn list_memory_assets_with_state(
@@ -1901,14 +1716,11 @@ pub(crate) async fn rebuild_memory_materialized_view_with_state(
     scope: Option<String>,
     state: &Arc<AppState>,
 ) -> Result<serde_json::Value, String> {
-    let lifecycle_store = state
-        .memory_lifecycle_store
-        .as_ref()
-        .ok_or_else(memory_lifecycle_store_missing)?;
-    let store = lifecycle_store.lock().await;
-    let view = store
-        .rebuild_materialized_view(parse_memory_lifecycle_scope(scope))
-        .map_err(|e| e.to_string())?;
+    let view = memory_gateway::rebuild_materialized_memory_view_with_state(
+        parse_memory_lifecycle_scope(scope),
+        state,
+    )
+    .await?;
     serde_json::to_value(view).map_err(|e| e.to_string())
 }
 
@@ -2109,12 +1921,10 @@ mod tests {
         builder::BuilderSessionStore,
         config::AppConfig,
         feedback::FeedbackStore,
-        layer_router::LayerRouter,
         life_model::{patch::PatchSource, LifeModelManager},
         mcp::McpRegistry,
         mcp_audit::McpAuditStore,
         memory::MemoryStore,
-        router::IntentRouter,
         scheduler::InferenceScheduler,
         vectors::VectorStore,
         versioning::VersionManager,
@@ -2134,8 +1944,6 @@ mod tests {
             ))),
             memory_store: Arc::new(Mutex::new(MemoryStore::new_in_memory().unwrap())),
             mcp_registry: Arc::new(Mutex::new(McpRegistry::new())),
-            intent_router: Arc::new(Mutex::new(IntentRouter::new())),
-            layer_router: Arc::new(Mutex::new(LayerRouter::new())),
             scheduler: Arc::new(Mutex::new(InferenceScheduler::new(
                 config.local_model.clone(),
                 config.prefer_local_model,
@@ -2259,6 +2067,14 @@ mod tests {
         cfg.llm.openai_key = "sk-test".to_string();
         cfg.llm.embedding_model = "text-embedding-3-small".to_string();
         cfg.llm.embedding_enabled = true;
+    }
+
+    async fn stamp_lifemodel_base_hash(proposal: &mut AgentProposal, state: &Arc<AppState>) {
+        crate::life_model_write_gateway::stamp_lifemodel_proposal_base_hash_with_state(
+            state, proposal,
+        )
+        .await
+        .unwrap();
     }
 
     async fn create_maturation_source_evidence(
@@ -2994,12 +2810,14 @@ mod tests {
             .create_proposal(&proposal)
             .unwrap();
 
-        edit_proposal_with_state(id.clone(), serde_json::json!("新焦点"), &state)
+        let edit_result = edit_proposal_with_state(id.clone(), serde_json::json!("新焦点"), &state)
             .await
             .unwrap();
+        assert_eq!(edit_result["status"], "edited_pending_review");
+        assert_eq!(edit_result["durable_write_executed"], false);
 
         let model = state.life_model_manager.lock().await.load().unwrap();
-        assert_eq!(model.state.current_focus, "新焦点");
+        assert_ne!(model.state.current_focus, "新焦点");
         let stored = state
             .proposal_store
             .as_ref()
@@ -3010,6 +2828,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.status, ProposalStatus::Edited);
+        assert_eq!(stored.resolved_at, None);
     }
 
     #[tokio::test]
@@ -3038,13 +2857,14 @@ mod tests {
             .unwrap();
         create_maturation_source_evidence(&state, &proposal).await;
 
-        edit_proposal_with_state(
+        let edit_result = edit_proposal_with_state(
             proposal_id.clone(),
             serde_json::json!("RAW_EDITED_PAYLOAD_SECRET"),
             &state,
         )
         .await
         .unwrap();
+        assert_eq!(edit_result["status"], "edited_pending_review");
 
         let records = proposal_outcome_records(&state, &proposal_id).await;
         assert_eq!(records.len(), 1);
@@ -3054,9 +2874,291 @@ mod tests {
         assert_no_w75_raw_content(&serde_json::to_string(evidence).unwrap());
 
         let model = state.life_model_manager.lock().await.load().unwrap();
-        assert_eq!(
+        assert_ne!(
             model.preferences.communication_style,
             "RAW_EDITED_PAYLOAD_SECRET"
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_proposal_does_not_write_lifemodel_until_later_accept() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut proposal = AgentProposal::new(
+            ProposalType::PreferenceUpdate,
+            "preferences.communication_style",
+            serde_json::json!("original proposed style"),
+            "User wants to edit before accepting.",
+            0.82,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        proposal.before = Some(serde_json::json!(""));
+        proposal.run_id = Some("run-edit-then-accept".into());
+        stamp_lifemodel_base_hash(&mut proposal, &state).await;
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        let edit_result = edit_proposal_with_state(
+            proposal_id.clone(),
+            serde_json::json!("edited style"),
+            &state,
+        )
+        .await
+        .unwrap();
+        assert_eq!(edit_result["durable_write_executed"], false);
+        let model_after_edit = state.life_model_manager.lock().await.load().unwrap();
+        assert_ne!(
+            model_after_edit.preferences.communication_style,
+            "edited style"
+        );
+
+        accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap();
+
+        let model_after_accept = state.life_model_manager.lock().await.load().unwrap();
+        assert_eq!(
+            model_after_accept.preferences.communication_style,
+            "edited style"
+        );
+        let stored = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&proposal_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ProposalStatus::Accepted);
+        assert!(stored.resolved_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn stale_lifemodel_proposal_base_hash_conflicts_without_accepting() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut proposal = AgentProposal::new(
+            ProposalType::PreferenceUpdate,
+            "preferences.communication_style",
+            serde_json::json!("proposal style"),
+            "This proposal was based on an older model.",
+            0.82,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        proposal.before = Some(serde_json::json!(""));
+        proposal.run_id = Some("run-stale-base".into());
+        stamp_lifemodel_base_hash(&mut proposal, &state).await;
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        {
+            let manager = state.life_model_manager.lock().await;
+            let mut model = manager.load().unwrap();
+            model.preferences.communication_style = "changed outside proposal".into();
+            manager.save(&model).unwrap();
+        }
+
+        let err = accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("accepted_proposal_base_hash_stale"),
+            "stale accept must report gateway stale conflict: {err}"
+        );
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        assert_eq!(
+            model.preferences.communication_style,
+            "changed outside proposal"
+        );
+        let stored = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&proposal_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ProposalStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn memory_gateway_materializes_food_preference_and_future_rule_lanes() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+
+        let food = AgentProposal::new(
+            ProposalType::MemoryWrite,
+            "memory.records",
+            serde_json::json!({
+                "session_id": "lane-food",
+                "content": "午餐吃了沙拉，下午精力不错",
+                "source": "review_center"
+            }),
+            "User accepted diet event memory.",
+            0.8,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        let food_id = food.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&food)
+            .unwrap();
+        let food_result = accept_proposal_with_state(food_id, &state).await.unwrap();
+        assert_eq!(food_result["memoryGateway"]["lane"], "episodic_life_event");
+        assert_eq!(
+            food_result["memoryGateway"]["status"],
+            "local_memory_written"
+        );
+        assert_eq!(food_result["memoryLifecycle"]["category"], "fact");
+
+        let preference = AgentProposal::new(
+            ProposalType::MemoryWrite,
+            "memory.records",
+            serde_json::json!({
+                "session_id": "lane-preference",
+                "content": "User prefers concise status updates.",
+                "source": "review_center"
+            }),
+            "User accepted preference memory.",
+            0.8,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        let preference_id = preference.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&preference)
+            .unwrap();
+        let preference_result = accept_proposal_with_state(preference_id, &state)
+            .await
+            .unwrap();
+        assert_eq!(
+            preference_result["memoryGateway"]["lane"],
+            "semantic_fact_preference"
+        );
+        assert_eq!(
+            preference_result["memoryLifecycle"]["category"],
+            "preference"
+        );
+
+        let future_rule = AgentProposal::new(
+            ProposalType::MemoryWrite,
+            "memory.rules.planning",
+            serde_json::json!({
+                "session_id": "lane-rule",
+                "content": "以后做计划时，先安排最难的任务。",
+                "source": "review_center"
+            }),
+            "User accepted future planning rule.",
+            0.8,
+            RiskLevel::Medium,
+            ProposalSource::Manual,
+        );
+        let review_decision = memory_gateway::memory_gateway_decision_for_proposal(
+            &future_rule,
+            "proposal_review_required",
+            Vec::new(),
+        );
+        assert_eq!(review_decision.lane.as_str(), "procedural_rule");
+        assert_eq!(review_decision.status.as_str(), "proposal_required");
+        let future_rule_id = future_rule.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&future_rule)
+            .unwrap();
+        let rule_result = accept_proposal_with_state(future_rule_id, &state)
+            .await
+            .unwrap();
+        assert_eq!(rule_result["memoryGateway"]["lane"], "procedural_rule");
+        assert_eq!(rule_result["memoryLifecycle"]["category"], "workflow");
+    }
+
+    #[tokio::test]
+    async fn accepted_lifemodel_proposal_audit_contains_gateway_hashes_and_lane() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut proposal = AgentProposal::new(
+            ProposalType::PreferenceUpdate,
+            "preferences.communication_style",
+            serde_json::json!("audit style"),
+            "User accepted communication style update.",
+            0.82,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        proposal.before = Some(serde_json::json!(""));
+        proposal.run_id = Some("run-audit-lifemodel".into());
+        proposal.source_detail = Some("evidence:evidence-audit".into());
+        stamp_lifemodel_base_hash(&mut proposal, &state).await;
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap();
+
+        let details = state
+            .feedback_store
+            .lock()
+            .await
+            .analytics_details_for_event("lifemodel_gateway_materialized", 5)
+            .unwrap();
+        let detail = details
+            .iter()
+            .find_map(|detail| serde_json::from_str::<serde_json::Value>(detail).ok())
+            .expect("lifemodel gateway audit detail");
+        assert_eq!(detail["proposalId"], proposal_id);
+        assert_eq!(detail["runId"], "run-audit-lifemodel");
+        assert_eq!(detail["evidenceId"], "evidence-audit");
+        assert_eq!(detail["lane"], "canonical_lifemodel_truth");
+        assert!(detail["baseHash"].as_str().is_some_and(|v| !v.is_empty()));
+        assert!(detail["currentHash"]
+            .as_str()
+            .is_some_and(|v| !v.is_empty()));
+        assert!(detail["beforeHash"].as_str().is_some_and(|v| !v.is_empty()));
+        assert!(detail["afterHash"].as_str().is_some_and(|v| !v.is_empty()));
+        assert_eq!(detail["conflictStatus"], serde_json::Value::Null);
+        assert_eq!(
+            detail["reasonCode"],
+            "accepted_proposal_materialization_allowed"
         );
     }
 

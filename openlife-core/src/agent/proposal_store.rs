@@ -44,6 +44,7 @@ impl ProposalStore {
                 proposal_type TEXT NOT NULL,
                 source TEXT NOT NULL,
                 source_detail TEXT,
+                base_hash TEXT,
                 affected_path TEXT NOT NULL,
                 before_json TEXT,
                 after_json TEXT NOT NULL,
@@ -64,6 +65,7 @@ impl ProposalStore {
             [],
         );
         let _ = conn.execute("ALTER TABLE proposals ADD COLUMN source_detail TEXT", []);
+        let _ = conn.execute("ALTER TABLE proposals ADD COLUMN base_hash TEXT", []);
         let _ = conn.execute("ALTER TABLE proposals ADD COLUMN expires_at TEXT", []);
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status, created_at DESC)",
@@ -82,14 +84,15 @@ impl ProposalStore {
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
         conn.execute(
-            "INSERT INTO proposals (id, run_id, proposal_type, source, source_detail, affected_path, before_json, after_json, reason, confidence, risk_level, status, created_at, resolved_at, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            "INSERT INTO proposals (id, run_id, proposal_type, source, source_detail, base_hash, affected_path, before_json, after_json, reason, confidence, risk_level, status, created_at, resolved_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 proposal.id,
                 proposal.run_id.as_ref(),
                 proposal.proposal_type.to_string(),
                 proposal.source,
                 proposal.source_detail.as_ref(),
+                proposal.base_hash.as_ref(),
                 proposal.affected_path,
                 proposal.before.as_ref().map(|b| serde_json::to_string(b).unwrap_or_default()),
                 serde_json::to_string(&proposal.after).unwrap_or_default(),
@@ -116,15 +119,16 @@ impl ProposalStore {
                 proposal_type = ?3,
                 source = ?4,
                 source_detail = ?5,
-                affected_path = ?6,
-                before_json = ?7,
-                after_json = ?8,
-                reason = ?9,
-                confidence = ?10,
-                risk_level = ?11,
-                status = ?12,
-                resolved_at = ?13,
-                expires_at = ?14
+                base_hash = ?6,
+                affected_path = ?7,
+                before_json = ?8,
+                after_json = ?9,
+                reason = ?10,
+                confidence = ?11,
+                risk_level = ?12,
+                status = ?13,
+                resolved_at = ?14,
+                expires_at = ?15
             WHERE id = ?1",
             params![
                 proposal.id,
@@ -132,6 +136,7 @@ impl ProposalStore {
                 proposal.proposal_type.to_string(),
                 proposal.source,
                 proposal.source_detail.as_ref(),
+                proposal.base_hash.as_ref(),
                 proposal.affected_path,
                 proposal
                     .before
@@ -155,7 +160,7 @@ impl ProposalStore {
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, run_id, proposal_type, source, source_detail, affected_path, before_json, after_json, reason, confidence, risk_level, status, created_at, resolved_at, expires_at
+            "SELECT id, run_id, proposal_type, source, source_detail, base_hash, affected_path, before_json, after_json, reason, confidence, risk_level, status, created_at, resolved_at, expires_at
              FROM proposals WHERE id = ?1"
         )?;
         let row = stmt.query_row([id], Self::row_to_proposal);
@@ -172,7 +177,7 @@ impl ProposalStore {
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, run_id, proposal_type, source, source_detail, affected_path, before_json, after_json, reason, confidence, risk_level, status, created_at, resolved_at, expires_at
+            "SELECT id, run_id, proposal_type, source, source_detail, base_hash, affected_path, before_json, after_json, reason, confidence, risk_level, status, created_at, resolved_at, expires_at
              FROM proposals
              WHERE status = 'pending'
              ORDER BY created_at DESC
@@ -190,7 +195,7 @@ impl ProposalStore {
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, run_id, proposal_type, source, source_detail, affected_path, before_json, after_json, reason, confidence, risk_level, status, created_at, resolved_at, expires_at
+            "SELECT id, run_id, proposal_type, source, source_detail, base_hash, affected_path, before_json, after_json, reason, confidence, risk_level, status, created_at, resolved_at, expires_at
              FROM proposals
              ORDER BY created_at DESC
              LIMIT ?1 OFFSET ?2"
@@ -236,7 +241,7 @@ impl ProposalStore {
         };
 
         let sql = format!(
-            "SELECT id, run_id, proposal_type, source, source_detail, affected_path, before_json, after_json, reason, confidence, risk_level, status, created_at, resolved_at, expires_at
+            "SELECT id, run_id, proposal_type, source, source_detail, base_hash, affected_path, before_json, after_json, reason, confidence, risk_level, status, created_at, resolved_at, expires_at
              FROM proposals
              {}
              ORDER BY created_at DESC
@@ -344,7 +349,7 @@ impl ProposalStore {
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, run_id, proposal_type, source, source_detail, affected_path, before_json, after_json, reason, confidence, risk_level, status, created_at, resolved_at, expires_at
+            "SELECT id, run_id, proposal_type, source, source_detail, base_hash, affected_path, before_json, after_json, reason, confidence, risk_level, status, created_at, resolved_at, expires_at
              FROM proposals
              WHERE run_id = ?1
              ORDER BY created_at DESC"
@@ -377,7 +382,7 @@ impl ProposalStore {
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
         let cutoff = (chrono::Utc::now() + chrono::Duration::days(days)).to_rfc3339();
         let mut stmt = conn.prepare(
-            "SELECT id, run_id, proposal_type, source, source_detail, affected_path, before_json, after_json, reason, confidence, risk_level, status, created_at, resolved_at, expires_at
+            "SELECT id, run_id, proposal_type, source, source_detail, base_hash, affected_path, before_json, after_json, reason, confidence, risk_level, status, created_at, resolved_at, expires_at
              FROM proposals
              WHERE status = 'pending' AND expires_at < ?1
              ORDER BY expires_at ASC"
@@ -393,13 +398,14 @@ impl ProposalStore {
         let type_str: String = row.get(2)?;
         let source: ProposalSource = row.get(3)?;
         let source_detail: Option<String> = row.get(4)?;
-        let before_json: Option<String> = row.get(6)?;
-        let after_json: String = row.get(7)?;
-        let risk_str: String = row.get(10)?;
-        let status_str: String = row.get(11)?;
-        let created_at_str: String = row.get(12)?;
-        let resolved_at_str: Option<String> = row.get(13)?;
-        let expires_at_str: Option<String> = row.get(14)?;
+        let base_hash: Option<String> = row.get(5)?;
+        let before_json: Option<String> = row.get(7)?;
+        let after_json: String = row.get(8)?;
+        let risk_str: String = row.get(11)?;
+        let status_str: String = row.get(12)?;
+        let created_at_str: String = row.get(13)?;
+        let resolved_at_str: Option<String> = row.get(14)?;
+        let expires_at_str: Option<String> = row.get(15)?;
 
         let proposal_type = match type_str.as_str() {
             "goal_update" => ProposalType::GoalUpdate,
@@ -439,13 +445,13 @@ impl ProposalStore {
 
         let before = before_json.and_then(|s| serde_json::from_str(&s).ok());
         let after = serde_json::from_str(&after_json).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(e))
+            rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, Box::new(e))
         })?;
 
         let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
             .map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    12,
+                    13,
                     rusqlite::types::Type::Text,
                     Box::new(e),
                 )
@@ -464,11 +470,12 @@ impl ProposalStore {
             proposal_type,
             source,
             source_detail,
-            affected_path: row.get(5)?,
+            base_hash,
+            affected_path: row.get(6)?,
             before,
             after,
-            reason: row.get(8)?,
-            confidence: row.get(9)?,
+            reason: row.get(9)?,
+            confidence: row.get(10)?,
             risk_level,
             status,
             created_at,

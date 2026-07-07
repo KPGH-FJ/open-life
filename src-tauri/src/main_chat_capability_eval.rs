@@ -124,7 +124,7 @@ pub struct MainChatCapabilityEvalCaseReport {
     pub run_ids: Vec<String>,
     pub route_decision_observed: bool,
     pub deterministic_route_used: bool,
-    pub route_preview_advisory_only: bool,
+    pub advisory_route_trace_only: bool,
     pub generation_result_observed: bool,
     pub provider_scheduler_trace_observed: bool,
     pub final_assistant_delivery_observed: bool,
@@ -284,7 +284,7 @@ impl MainChatCapabilityEvalCaseReport {
             run_ids: Vec::new(),
             route_decision_observed: false,
             deterministic_route_used: false,
-            route_preview_advisory_only: true,
+            advisory_route_trace_only: true,
             generation_result_observed: false,
             provider_scheduler_trace_observed: false,
             final_assistant_delivery_observed: false,
@@ -562,7 +562,7 @@ fn evaluate_main_chat_capability_eval_artifacts(
     let deterministic_route_used = artifacts.actual_route
         == Some(artifacts.scenario.expected_route())
         && artifacts.session.selected_strategy == artifacts.scenario.expected_route();
-    let route_preview_advisory_only = deterministic_route_used;
+    let advisory_route_trace_only = deterministic_route_used;
     let provider_scheduler_trace_observed = generation.is_some_and(|generation| {
         generation
             .get("providerGenerationPath")
@@ -590,7 +590,7 @@ fn evaluate_main_chat_capability_eval_artifacts(
         run_ids: artifacts.runs.iter().map(|run| run.id.clone()).collect(),
         route_decision_observed,
         deterministic_route_used,
-        route_preview_advisory_only,
+        advisory_route_trace_only,
         generation_result_observed,
         provider_scheduler_trace_observed,
         final_assistant_delivery_observed,
@@ -677,8 +677,8 @@ fn push_common_capability_blockers(report: &mut MainChatCapabilityEvalCaseReport
     } else {
         report.evidence.push("deterministic_route_used".into());
     }
-    if !report.route_preview_advisory_only {
-        report.blockers.push("route_preview_used_as_route".into());
+    if !report.advisory_route_trace_only {
+        report.blockers.push("advisory_route_used_as_route".into());
     }
     if !report.generation_result_observed {
         report.blockers.push("generation_result_missing".into());

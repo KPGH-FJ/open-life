@@ -2,7 +2,6 @@ use crate::errors::AppError;
 use crate::storage::app_data_dir;
 use crate::{AppState, BuilderCompletion, OllamaModelInfo, SystemDiagnostics};
 use openlife_core::ollama::inspect_ollama_status;
-use openlife_core::router::RouterStatus;
 use std::sync::Arc;
 use tauri::State;
 
@@ -19,6 +18,41 @@ pub struct SchedulerConfigResponse {
     pub prefer_local: bool,
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyRouterStatus {
+    pub active_authority: String,
+    pub authority_chain: Vec<String>,
+    pub route_outputs: Vec<String>,
+    pub app_state_old_routers_present: bool,
+    pub diagnostics_surface: String,
+}
+
+fn current_policy_router_status() -> PolicyRouterStatus {
+    PolicyRouterStatus {
+        active_authority: "IntentFrame + PolicyRouter".into(),
+        authority_chain: vec![
+            "user_input".into(),
+            "IntentFrame".into(),
+            "PolicyRouter".into(),
+            "AgentIngressDecision".into(),
+            "OpenLifeTurnRuntime".into(),
+            "MainChatKernel".into(),
+        ],
+        route_outputs: vec![
+            "direct_answer".into(),
+            "read_only_tool".into(),
+            "proposal_only_write".into(),
+            "plan_draft".into(),
+            "ask_clarification".into(),
+            "governed_blocker".into(),
+            "confirmation_request".into(),
+        ],
+        app_state_old_routers_present: false,
+        diagnostics_surface: "policy_router_status".into(),
+    }
+}
+
 #[tauri::command]
 pub async fn get_system_diagnostics(
     state: State<'_, Arc<AppState>>,
@@ -29,10 +63,7 @@ pub async fn get_system_diagnostics(
 pub(crate) async fn get_system_diagnostics_with_state(
     state: &Arc<AppState>,
 ) -> Result<SystemDiagnostics, AppError> {
-    let router = {
-        let status = state.intent_router.lock().await.status();
-        status
-    };
+    let policy_router = current_policy_router_status();
     let (mcp_server_count, mcp_tool_count) = {
         let registry = state.mcp_registry.lock().await;
         (
@@ -347,7 +378,7 @@ pub(crate) async fn get_system_diagnostics_with_state(
         .await;
 
     Ok(SystemDiagnostics {
-        router,
+        policy_router,
         mcp_server_count,
         mcp_tool_count,
         mcp_recent_audit_count,
@@ -404,9 +435,8 @@ pub async fn check_ollama_status(_state: State<'_, Arc<AppState>>) -> Result<boo
 }
 
 #[tauri::command]
-pub async fn get_router_status(state: State<'_, Arc<AppState>>) -> Result<RouterStatus, AppError> {
-    let router = state.intent_router.lock().await;
-    Ok(router.status())
+pub async fn get_policy_router_status() -> Result<PolicyRouterStatus, AppError> {
+    Ok(current_policy_router_status())
 }
 
 #[tauri::command]

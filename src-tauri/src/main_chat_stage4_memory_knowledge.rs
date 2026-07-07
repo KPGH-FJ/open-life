@@ -363,19 +363,26 @@ pub async fn create_managed_knowledge_write_draft_with_state(
         RiskLevel::Medium,
         ProposalSource::MemoryGovernance,
     );
-    let proposal_id = proposal.id.clone();
-    let source_provenance_proposal_id = source_proposal_id.unwrap_or_else(|| proposal_id.clone());
-
     let store_arc = state
         .proposal_store
         .as_ref()
         .ok_or_else(|| "Proposal store not available".to_string())?;
-    {
+    let proposal_id = {
         let store = store_arc.lock().await;
-        store
-            .create_proposal(&proposal)
+        let outcome = openlife_core::agent::ReviewWorkflow::new(&store)
+            .submit(
+                openlife_core::agent::DurableWriteRequest::from_agent_proposal(
+                    openlife_core::agent::DurableWriteSource::MainChat,
+                    openlife_core::agent::DurableWriteSubject::FileWrite,
+                    proposal,
+                    "Managed knowledge write proposal is pending Review Center approval.",
+                )
+                .with_evidence_refs(linked_memory_ids.clone()),
+            )
             .map_err(|e| e.to_string())?;
-    }
+        outcome.proposal_id().to_string()
+    };
+    let source_provenance_proposal_id = source_proposal_id.unwrap_or_else(|| proposal_id.clone());
 
     let history_dir = history_dir(&root);
     std::fs::create_dir_all(history_dir.join("snapshots")).map_err(|e| e.to_string())?;

@@ -106,7 +106,7 @@ fn legacy_write_convergence_w97_inventory_reports_final_convergence() {
     assert!(report.metadata_safe);
     assert!(!report.contains_raw_content);
     assert!(report.default_chat_unchanged);
-    assert_eq!(report.default_chat_route, "main_chat_kernel");
+    assert_eq!(report.default_chat_route, "OpenLifeTurnRuntime");
     assert_eq!(report.high_risk_legacy_direct_write_count, 0);
     assert!(report.convergence_blockers.is_empty());
     assert!(report.guard_blocking_reasons.is_empty());
@@ -243,7 +243,6 @@ fn legacy_write_convergence_w97_materializer_matrix_has_no_legacy_blockers() {
         "lifemodel_materializer_root",
         "lifemodel_manager_default_initialization",
         "ordinary_chat_auto_checkin_source_data",
-        "ordinary_stream_agent_loop_auto_checkin_source_data",
         "ordinary_stream_legacy_auto_checkin_source_data",
         "manual_lifemodel_editor_save",
         "state_record_state_source_data",
@@ -305,7 +304,6 @@ fn legacy_write_convergence_w97_materializer_matrix_matches_current_production_c
         "src/main_chat_turn_pipeline.rs",
         "src/main_chat_send.rs",
         "src/main_chat_streaming.rs",
-        "src/main_chat_legacy_agent_loop.rs",
         "src/commands/builder.rs",
         "src/commands/settings.rs",
         "src/commands/life_model.rs",
@@ -338,6 +336,9 @@ fn legacy_write_convergence_w97_materializer_matrix_matches_current_production_c
     let lib_rs = std::fs::read_to_string(format!("{manifest_dir}/src/lib.rs")).expect("read lib");
     let version_rs = std::fs::read_to_string(format!("{manifest_dir}/src/commands/version.rs"))
         .expect("read version");
+    let gateway_rs =
+        std::fs::read_to_string(format!("{manifest_dir}/src/life_model_write_gateway.rs"))
+            .expect("read life_model_write_gateway");
     let core_life_model_rs = std::fs::read_to_string(format!(
         "{}/../openlife-core/src/life_model.rs",
         manifest_dir
@@ -345,6 +346,8 @@ fn legacy_write_convergence_w97_materializer_matrix_matches_current_production_c
     .expect("read core life_model");
     let actual_direct_save_count = count_occurrences(&lib_rs, "manager.save(&life_model)")
         + count_occurrences(&version_rs, "manager.save(&restored_model)")
+        + count_occurrences(&gateway_rs, "manager.save(&life_model)")
+        + count_occurrences(&gateway_rs, "manager.save(life_model)")
         + count_occurrences(&core_life_model_rs, "self.save(&model)");
     let matrix_direct_save_count = entries
         .iter()
@@ -366,11 +369,6 @@ fn legacy_write_convergence_w97_materializer_matrix_tracks_extracted_main_chat_c
             "run_main_chat_turn_pipeline_buffered",
         ),
         (
-            "ordinary_stream_agent_loop_auto_checkin_source_data",
-            "src-tauri/src/main_chat_legacy_agent_loop.rs",
-            "start_stream_message_with_agent_loop",
-        ),
-        (
             "ordinary_stream_legacy_auto_checkin_source_data",
             "src-tauri/src/main_chat_turn_pipeline.rs",
             "run_main_chat_turn_pipeline_streaming",
@@ -379,7 +377,7 @@ fn legacy_write_convergence_w97_materializer_matrix_tracks_extracted_main_chat_c
         let entry = materializer_entry(&entries, stable_id);
         assert_eq!(entry.source_file_path, source_file_path);
         assert_eq!(entry.caller_function_name, caller_function_name);
-        assert_eq!(entry.write_entrypoint, "persist_life_model");
+        assert_eq!(entry.write_entrypoint, "retired_no_lifemodel_write");
     }
 }
 
@@ -387,16 +385,12 @@ fn legacy_write_convergence_w97_materializer_matrix_tracks_extracted_main_chat_c
 fn legacy_write_convergence_w97_materializer_contexts_allow_only_classified_callers() {
     let entries = lifemodel_materializer_caller_matrix();
     for stable_id in [
-        "ordinary_chat_auto_checkin_source_data",
-        "ordinary_stream_agent_loop_auto_checkin_source_data",
-        "ordinary_stream_legacy_auto_checkin_source_data",
         "manual_lifemodel_editor_save",
         "state_record_state_source_data",
         "state_add_daily_goal_source_data",
         "state_update_daily_goal_source_data",
         "state_delete_daily_goal_source_data",
         "state_toggle_daily_goal_source_data",
-        "proposal_apply_lifemodel_update",
         "data_import_governed_operation",
     ] {
         let matrix_entry = materializer_entry(&entries, stable_id);
@@ -427,6 +421,12 @@ fn legacy_write_convergence_w97_materializer_contexts_allow_only_classified_call
     assert!(restore_report.allowed);
     assert!(restore_report.restore_import_override);
 
+    let proposal = materializer_entry(&entries, "proposal_apply_lifemodel_update");
+    assert_eq!(
+        proposal.write_entrypoint,
+        "LifeModelWriteGateway::materialize_accepted_lifemodel_proposal"
+    );
+
     let unclassified = LifeModelMaterializerCallerContext::new(
         "synthetic_unclassified_materializer_caller",
         LifeModelMaterializerCallerKind::Unclassified,
@@ -436,6 +436,73 @@ fn legacy_write_convergence_w97_materializer_contexts_allow_only_classified_call
         evaluate_lifemodel_materializer_caller_restriction(&unclassified, "persist_life_model");
     assert!(!report.allowed);
     assert!(!report.matrix_entry_found);
+}
+
+#[tokio::test]
+async fn legacy_write_convergence_phase5_accepted_proposal_materializes_lifemodel_gateway() {
+    let state = crate::test_utils::test_app_state();
+    let mut proposal = openlife_core::agent::AgentProposal::new(
+        openlife_core::agent::ProposalType::PreferenceUpdate,
+        "preferences.communication_style",
+        serde_json::json!("concise"),
+        "accepted proposal materialization regression",
+        0.91,
+        openlife_core::agent::RiskLevel::Low,
+        openlife_core::agent::ProposalSource::ChatConversation,
+    );
+    proposal.before = Some(serde_json::json!(""));
+    proposal.run_id = Some("phase5-run-accepted-proposal".into());
+    crate::life_model_write_gateway::stamp_lifemodel_proposal_base_hash_with_state(
+        &state,
+        &mut proposal,
+    )
+    .await
+    .expect("stamp proposal base hash");
+    let proposal_id = proposal.id.clone();
+    {
+        let store = state
+            .proposal_store
+            .as_ref()
+            .expect("proposal store")
+            .lock()
+            .await;
+        store.create_proposal(&proposal).expect("seed proposal");
+    }
+
+    let response =
+        crate::commands::proposal::accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .expect("accept proposal");
+
+    assert_eq!(response["success"], serde_json::json!(true));
+    let model = state.life_model_manager.lock().await.load().unwrap();
+    assert_eq!(model.preferences.communication_style, "concise");
+    let patch_count = {
+        let patch_store = state
+            .patch_store
+            .as_ref()
+            .expect("patch store")
+            .lock()
+            .await;
+        patch_store.patch_count().expect("patch count")
+    };
+    assert_eq!(patch_count, 1);
+    let stored = {
+        let store = state
+            .proposal_store
+            .as_ref()
+            .expect("proposal store")
+            .lock()
+            .await;
+        store
+            .get_proposal(&proposal_id)
+            .expect("read proposal")
+            .expect("stored proposal")
+    };
+    assert_eq!(
+        stored.status,
+        openlife_core::agent::ProposalStatus::Accepted
+    );
 }
 
 #[test]
@@ -459,6 +526,10 @@ fn legacy_write_convergence_w97_materializer_final_categories_are_explicit() {
     assert!(!manual.high_risk_legacy_blocker);
 
     let proposal = materializer_entry(&entries, "proposal_apply_lifemodel_update");
+    assert_eq!(
+        proposal.write_entrypoint,
+        "LifeModelWriteGateway::materialize_accepted_lifemodel_proposal"
+    );
     assert_eq!(
         proposal.kind,
         LifeModelMaterializerCallerKind::AcceptedProposalApply
@@ -583,7 +654,7 @@ fn legacy_write_convergence_w97_default_chat_and_ordinary_entrypoints_remain_iso
     let entries = legacy_write_convergence_inventory();
     let report = evaluate_legacy_write_convergence_inventory(&entries);
     assert!(report.default_chat_unchanged);
-    assert_eq!(report.default_chat_route, "main_chat_kernel");
+    assert_eq!(report.default_chat_route, "OpenLifeTurnRuntime");
     assert!(!report.w79_guard_called_by_ordinary_chat);
 
     let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));

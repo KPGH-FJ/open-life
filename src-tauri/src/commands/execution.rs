@@ -453,7 +453,7 @@ pub async fn run_skill(
                 content: skill_prompt,
             },
         ],
-        layer: openlife_core::layer_router::Layer::L2,
+        layer: openlife_core::layer::Layer::L2,
     };
 
     let hs_packet =
@@ -565,10 +565,26 @@ pub async fn run_skill(
                         &serde_json::to_string(&accepted.candidate.after).unwrap_or_default(),
                     )
                 ));
-                let proposal_id = proposal.id.clone();
-                store.create_proposal(&proposal).map_err(AppError::from)?;
-                generated.push(proposal_id.clone());
-                run.add_generated_proposal(&proposal_id);
+                crate::life_model_write_gateway::stamp_lifemodel_proposal_base_hash_with_state(
+                    state.inner(),
+                    &mut proposal,
+                )
+                .await
+                .map_err(AppError::from)?;
+                let outcome = openlife_core::agent::ReviewWorkflow::new(&store)
+                    .submit(
+                        openlife_core::agent::DurableWriteRequest::from_agent_proposal(
+                            openlife_core::agent::DurableWriteSource::SkillRuntime,
+                            openlife_core::agent::DurableWriteSubject::from_proposal_type(
+                                proposal.proposal_type,
+                            ),
+                            proposal.clone(),
+                            "Skill runtime proposal is pending Review Center approval.",
+                        ),
+                    )
+                    .map_err(AppError::from)?;
+                generated.push(outcome.proposal_id().to_string());
+                run.add_generated_proposal(outcome.proposal_id());
             }
         }
     }

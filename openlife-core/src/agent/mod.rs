@@ -30,11 +30,12 @@ pub mod proposal_store;
 pub mod react_beta;
 pub mod reasoning;
 pub mod regression_suite;
+pub mod review_workflow;
 pub mod runtime;
 pub mod runtime_contract;
 pub mod runtime_migration_gate;
+mod runtime_strategy_contract;
 pub mod store;
-pub mod strategy;
 pub mod strategy_runtime;
 pub mod types;
 
@@ -197,6 +198,11 @@ pub use reasoning::{
 pub use regression_suite::{
     RegressionResult, RegressionScenario, RegressionSuite, RegressionVerdict,
 };
+pub use review_workflow::{
+    proposal_status_semantics, DurableWriteDecision, DurableWriteDecisionKind, DurableWriteRequest,
+    DurableWriteSource, DurableWriteSubject, FinalDeliveryWordingContract, ReviewWorkflow,
+    ReviewWorkflowOutcome,
+};
 pub use runtime::{AgentRuntime, AgentRuntimeConfig, AgentRuntimeError, AgentRuntimeOutput};
 pub use runtime_contract::{
     AgentRuntimeParams, LifeEventDraft, RuntimeGuidanceConsumptionMode, RuntimeInput, RuntimeOutput,
@@ -207,11 +213,11 @@ pub use runtime_migration_gate::{
     RuntimeMigrationGateInput, RuntimeMigrationGateReport,
     DEFAULT_CONTROLLED_CHAT_PILOT_REQUIRED_CLEAN_RUNS,
 };
-pub use store::AgentRunStore;
-pub use strategy::{
+pub use runtime_strategy_contract::{
     RuntimeStrategyKind, StrategyCandidateEvaluation, StrategySelection, StrategySelectionInput,
-    StrategySelectionReport, StrategySelector,
+    StrategySelectionReport,
 };
+pub use store::AgentRunStore;
 pub use strategy_runtime::{
     MultiStrategyRuntimeMaturityReport, PlanExecuteRuntimeStrategy, ReActRuntimeStrategy,
     RuntimeStrategy, RuntimeStrategyDeclarativeDescriptor, RuntimeStrategyDescriptor,

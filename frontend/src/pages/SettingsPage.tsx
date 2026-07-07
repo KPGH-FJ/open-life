@@ -5,7 +5,7 @@ import {
   type AppConfig,
   exportAllData,
   importAllData,
-  getRouterStatus,
+  getPolicyRouterStatus,
   getModelRouterStatus,
   getSystemDiagnostics,
   getHotCache,
@@ -20,7 +20,7 @@ import {
   type ExportPayload,
   type HotMemoryCache,
   type PrivacyPolicy,
-  type RouterStatus,
+  type PolicyRouterStatus,
   type ModelRouterStatus,
   type SystemDiagnostics,
   type DangerActionPreflightView,
@@ -117,7 +117,7 @@ export default function SettingsPage() {
   const [rebuildResult, setRebuildResult] = useState<string | null>(null);
   const [exportLoading, setExportLoading] = useState(false);
   const [importLoading, setImportLoading] = useState(false);
-  const [routerStatus, setRouterStatus] = useState<RouterStatus | null>(null);
+  const [policyRouterStatus, setPolicyRouterStatus] = useState<PolicyRouterStatus | null>(null);
   const [modelRouterStatus, setModelRouterStatus] = useState<ModelRouterStatus | null>(null);
   const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
   const [hotCache, setHotCache] = useState<HotMemoryCache | null>(null);
@@ -163,9 +163,9 @@ export default function SettingsPage() {
   }, [activeTab, showInternalDebug]);
 
   const refreshAllDiagnostics = async () => {
-    const [router, modelRouter, diag, cache, policy, permissions, pluginRecords, manifests] =
+    const [policyRouter, modelRouter, diag, cache, policy, permissions, pluginRecords, manifests] =
       await Promise.all([
-        getRouterStatus().catch(() => null),
+        getPolicyRouterStatus().catch(() => null),
         getModelRouterStatus().catch(() => null),
         getSystemDiagnostics().catch(() => null),
         getHotCache().catch(() => null),
@@ -174,7 +174,7 @@ export default function SettingsPage() {
         listPlugins().catch(() => []),
         listToolManifests().catch(() => []),
       ]);
-    setRouterStatus(router);
+    setPolicyRouterStatus(policyRouter);
     setModelRouterStatus(modelRouter);
     setDiagnostics(diag);
     setHotCache(cache);
@@ -592,7 +592,7 @@ export default function SettingsPage() {
             config={config}
             setConfig={setConfig}
             diagnostics={diagnostics}
-            routerStatus={routerStatus}
+            policyRouterStatus={policyRouterStatus}
             modelRouterStatus={modelRouterStatus}
             showInternalDebug={showInternalDebug}
             onProviderValidationChanged={refreshAllDiagnostics}
@@ -663,7 +663,7 @@ export default function SettingsPage() {
             config={config}
             setConfig={setConfig}
             diagnostics={diagnostics}
-            routerStatus={routerStatus}
+            policyRouterStatus={policyRouterStatus}
             modelRouterStatus={modelRouterStatus}
             showInternalDebug={showInternalDebug}
             pluginSection={

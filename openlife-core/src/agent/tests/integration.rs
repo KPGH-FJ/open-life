@@ -11,7 +11,7 @@ use crate::agent::{
     ActionExecutionContext, ActionExecutor, ActionExecutorConfig, AgentExecutionBudget, AgentLoop,
     AgentLoopConfig, AgentObservation, AgentRun, AgentRunStatus, AgentTask, AgentTaskKind,
 };
-use crate::layer_router::Layer;
+use crate::layer::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
 use crate::privacy::PrivacyEngine;

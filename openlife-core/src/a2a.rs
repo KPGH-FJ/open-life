@@ -402,7 +402,7 @@ impl A2AServerHandler {
         let user_text = extract_text_from_message(&req.message);
         let issues = self.privacy_engine.detect(&user_text);
         let filtered = self.privacy_engine.desensitize(&user_text);
-        let passes = crate::router::IntentRouter::new().values_filter(&filtered.0);
+        let passes = crate::core_value_signal_extractor::contains_core_value_signal(&filtered.0);
 
         // Desensitize values and goal names so external agents never see raw PII
         let raw_values = self

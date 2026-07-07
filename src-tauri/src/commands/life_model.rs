@@ -554,12 +554,6 @@ mod tests {
             mcp_registry: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::mcp::McpRegistry::new(),
             )),
-            intent_router: Arc::new(tokio::sync::Mutex::new(
-                openlife_core::router::IntentRouter::new(),
-            )),
-            layer_router: Arc::new(tokio::sync::Mutex::new(
-                openlife_core::layer_router::LayerRouter::new(),
-            )),
             scheduler: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::scheduler::InferenceScheduler::new(
                     config.local_model.clone(),

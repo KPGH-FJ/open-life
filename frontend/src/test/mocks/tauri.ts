@@ -2788,12 +2788,28 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       return Promise.resolve({ weekly: false, monthly: false, today: "2026-04-17" } as T);
     case "check_ollama_status":
       return Promise.resolve(true as T);
-    case "get_router_status":
+    case "get_policy_router_status":
       return Promise.resolve({
-        onnx_available: false,
-        onnx_disabled: false,
-        active_backend: "regex",
-        latency_threshold_us: 50000,
+        activeAuthority: "IntentFrame + PolicyRouter",
+        authorityChain: [
+          "user_input",
+          "IntentFrame",
+          "PolicyRouter",
+          "AgentIngressDecision",
+          "OpenLifeTurnRuntime",
+          "MainChatKernel",
+        ],
+        routeOutputs: [
+          "direct_answer",
+          "read_only_tool",
+          "proposal_only_write",
+          "plan_draft",
+          "ask_clarification",
+          "governed_blocker",
+          "confirmation_request",
+        ],
+        appStateOldRoutersPresent: false,
+        diagnosticsSurface: "policy_router_status",
       } as T);
     case "get_model_router_status":
       return Promise.resolve({
@@ -2826,12 +2842,7 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       } as T);
     case "get_system_diagnostics":
       return Promise.resolve({
-        router: {
-          onnx_available: false,
-          onnx_disabled: false,
-          active_backend: "regex",
-          latency_threshold_us: 50000,
-        },
+        policy_router: { activeAuthority: "IntentFrame + PolicyRouter", authorityChain: ["user_input", "IntentFrame", "PolicyRouter", "AgentIngressDecision", "OpenLifeTurnRuntime", "MainChatKernel"], routeOutputs: ["direct_answer", "read_only_tool", "proposal_only_write", "plan_draft", "ask_clarification", "governed_blocker", "confirmation_request"], appStateOldRoutersPresent: false, diagnosticsSurface: "policy_router_status" },
         mcp_server_count: 1,
         mcp_tool_count: 2,
         mcp_recent_audit_count: 1,

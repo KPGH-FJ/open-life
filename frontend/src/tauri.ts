@@ -2371,15 +2371,16 @@ export async function checkOllamaStatus(): Promise<boolean> {
   return safeInvoke<boolean>("check_ollama_status");
 }
 
-export interface RouterStatus {
-  onnx_available: boolean;
-  onnx_disabled: boolean;
-  active_backend: string;
-  latency_threshold_us: number;
+export interface PolicyRouterStatus {
+  activeAuthority: string;
+  authorityChain: string[];
+  routeOutputs: string[];
+  appStateOldRoutersPresent: boolean;
+  diagnosticsSurface: string;
 }
 
-export async function getRouterStatus(): Promise<RouterStatus> {
-  return safeInvoke<RouterStatus>("get_router_status");
+export async function getPolicyRouterStatus(): Promise<PolicyRouterStatus> {
+  return safeInvoke<PolicyRouterStatus>("get_policy_router_status");
 }
 
 export async function getModelRouterStatus(): Promise<ModelRouterStatus> {
@@ -2521,7 +2522,7 @@ export interface ProviderTransmissionHistoryItem {
 }
 
 export interface SystemDiagnostics {
-  router: RouterStatus;
+  policy_router: PolicyRouterStatus;
   mcp_server_count: number;
   mcp_tool_count: number;
   mcp_recent_audit_count: number;

@@ -1,6 +1,6 @@
 use crate::agent::main_chat_governance_intent::{
     classify_main_chat_governance_intent, MainChatBlockerRequirement,
-    MainChatDurableWriteRequirement,
+    MainChatDurableWriteRequirement, MainChatGovernanceIntent,
 };
 use crate::agent::types::AgentTaskKind;
 use crate::agent::{
@@ -69,12 +69,305 @@ pub struct MainChatPrivacyRiskSummary {
     pub external_write_like: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntentTimeRange {
+    Immediate,
+    Today,
+    Tomorrow,
+    ThisWeek,
+    FuturePreference,
+    CurrentExternal,
+    Unspecified,
+}
+
+impl IntentTimeRange {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Immediate => "immediate",
+            Self::Today => "today",
+            Self::Tomorrow => "tomorrow",
+            Self::ThisWeek => "this_week",
+            Self::FuturePreference => "future_preference",
+            Self::CurrentExternal => "current_external",
+            Self::Unspecified => "unspecified",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntentRiskLevel {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+impl IntentRiskLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Critical => "critical",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntentFrame {
+    pub user_goal: String,
+    pub time_range: IntentTimeRange,
+    pub requires_external_read: bool,
+    pub requests_durable_write: bool,
+    pub requests_memory_change: bool,
+    pub requests_lifemodel_change: bool,
+    pub requests_plan_task: bool,
+    pub risk_level: IntentRiskLevel,
+    pub confidence: f32,
+    pub ambiguity_reasons: Vec<String>,
+    #[serde(default)]
+    pub requires_confirmation: bool,
+    #[serde(default)]
+    pub requires_hard_block: bool,
+    #[serde(default)]
+    pub reason_codes: Vec<String>,
+    #[serde(default)]
+    pub matched_terms: Vec<String>,
+}
+
+impl IntentFrame {
+    pub fn from_user_message(user_message: &str) -> Self {
+        let user_goal = bounded_user_goal(user_message);
+        let lower = user_goal.to_ascii_lowercase();
+        let governance_intent = classify_main_chat_governance_intent(user_message);
+        let privacy_risk = classify_privacy_risk(&lower);
+
+        let requests_memory_change = governance_intent.durable_write_requirement
+            == Some(MainChatDurableWriteRequirement::MemoryProposal);
+        let requests_lifemodel_change = governance_intent.durable_write_requirement
+            == Some(MainChatDurableWriteRequirement::LifeModelProposal);
+        let requests_durable_write = requests_memory_change || requests_lifemodel_change;
+        let requires_external_read = governance_intent.external_read_requirement.is_some()
+            || is_current_external_read_intent(&lower);
+        let requests_read_observation = is_tool_observation_intent(&lower);
+        let requests_plan_task = is_plan_execute_intent(&lower)
+            && !requests_durable_write
+            && !requires_external_read
+            && !requests_read_observation;
+        let requires_hard_block = governance_intent.blocker_requirement
+            == Some(MainChatBlockerRequirement::DangerousLocalWrite);
+        let requires_confirmation = (governance_intent.blocker_requirement
+            == Some(MainChatBlockerRequirement::ExternalWriteConfirmation)
+            && !requests_durable_write)
+            || is_unselected_skill_boundary_intent(&lower);
+
+        let mut ambiguity_reasons = Vec::new();
+        if user_goal.trim().is_empty() {
+            ambiguity_reasons.push("empty_user_goal".into());
+        }
+        if lower.chars().count() <= 2 && !contains_any(&lower, &["hi", "嗨", "hi"]) {
+            ambiguity_reasons.push("too_short_to_route_confidently".into());
+        }
+        if contains_any(&lower, &["安排", "plan", "schedule"])
+            && !requests_plan_task
+            && !requests_durable_write
+            && !requires_external_read
+        {
+            ambiguity_reasons.push("planning_goal_missing_scope".into());
+        }
+        if contains_any(&lower, &["保存", "save", "记住", "remember"])
+            && !requests_durable_write
+            && !requires_confirmation
+            && !requires_hard_block
+        {
+            ambiguity_reasons.push("write_target_unclear".into());
+        }
+
+        let risk_level = if requires_hard_block {
+            IntentRiskLevel::Critical
+        } else if requires_confirmation || privacy_risk.local_only_required {
+            IntentRiskLevel::High
+        } else if requests_durable_write || privacy_risk.write_like {
+            IntentRiskLevel::Medium
+        } else {
+            IntentRiskLevel::Low
+        };
+
+        let confidence = intent_frame_confidence(
+            &governance_intent,
+            requests_plan_task,
+            requires_external_read,
+            requires_confirmation,
+            requires_hard_block,
+            &ambiguity_reasons,
+        );
+        let time_range =
+            infer_intent_time_range(&lower, requires_external_read, requests_durable_write);
+
+        Self {
+            user_goal,
+            time_range,
+            requires_external_read,
+            requests_durable_write,
+            requests_memory_change,
+            requests_lifemodel_change,
+            requests_plan_task,
+            risk_level,
+            confidence,
+            ambiguity_reasons,
+            requires_confirmation,
+            requires_hard_block,
+            reason_codes: governance_intent.reason_codes,
+            matched_terms: governance_intent.matched_terms,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyRouteKind {
+    DirectAnswer,
+    ReadOnlyTool,
+    ProposalOnlyWrite,
+    PlanDraft,
+    AskClarification,
+    GovernedBlocker,
+    ConfirmationRequest,
+}
+
+impl PolicyRouteKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DirectAnswer => "direct_answer",
+            Self::ReadOnlyTool => "read_only_tool",
+            Self::ProposalOnlyWrite => "proposal_only_write",
+            Self::PlanDraft => "plan_draft",
+            Self::AskClarification => "ask_clarification",
+            Self::GovernedBlocker => "governed_blocker",
+            Self::ConfirmationRequest => "confirmation_request",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyRoute {
+    pub route_kind: PolicyRouteKind,
+    pub intent_frame: IntentFrame,
+    pub confidence: f32,
+    pub reason_code: String,
+    pub reason_summary: String,
+    pub privacy_risk: MainChatPrivacyRiskSummary,
+}
+
+impl PolicyRoute {
+    pub fn selected_strategy(&self) -> MainChatAgentStrategy {
+        match self.route_kind {
+            PolicyRouteKind::DirectAnswer | PolicyRouteKind::AskClarification => {
+                MainChatAgentStrategy::DirectAnswer
+            }
+            PolicyRouteKind::ReadOnlyTool => MainChatAgentStrategy::ReActToolExecution,
+            PolicyRouteKind::PlanDraft => MainChatAgentStrategy::PlanExecute,
+            PolicyRouteKind::ProposalOnlyWrite => {
+                if self.intent_frame.requests_lifemodel_change {
+                    MainChatAgentStrategy::LifeModelProposal
+                } else {
+                    MainChatAgentStrategy::MemoryProposal
+                }
+            }
+            PolicyRouteKind::ConfirmationRequest => MainChatAgentStrategy::BlockedConfirmation,
+            PolicyRouteKind::GovernedBlocker => {
+                if self.intent_frame.requires_hard_block {
+                    MainChatAgentStrategy::BlockedConfirmation
+                } else {
+                    MainChatAgentStrategy::ReviewMaturation
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PolicyRouter;
+
+impl PolicyRouter {
+    pub fn route(&self, intent_frame: IntentFrame) -> PolicyRoute {
+        let privacy_risk = main_chat_privacy_risk_from_intent(&intent_frame);
+        let (route_kind, reason_code, reason_summary) = if intent_frame.requires_hard_block {
+            (
+                PolicyRouteKind::GovernedBlocker,
+                "dangerous_action_hard_block",
+                "dangerous local write is hard-blocked by policy",
+            )
+        } else if intent_frame.requires_confirmation {
+            (
+                PolicyRouteKind::ConfirmationRequest,
+                "confirmation_required_for_external_or_unselected_action",
+                "external side effect or unselected capability requires explicit confirmation",
+            )
+        } else if intent_frame.requests_durable_write {
+            (
+                PolicyRouteKind::ProposalOnlyWrite,
+                "durable_write_requires_review_proposal",
+                "durable Memory or LifeModel change must be proposal-only",
+            )
+        } else if intent_frame.requests_plan_task {
+            (
+                PolicyRouteKind::PlanDraft,
+                "plan_task_requires_draft",
+                "bounded planning request should produce a plan draft",
+            )
+        } else if intent_frame.requires_external_read
+            || is_tool_observation_intent(&intent_frame.user_goal.to_ascii_lowercase())
+        {
+            (
+                PolicyRouteKind::ReadOnlyTool,
+                "read_only_evidence_required",
+                "the task requires governed read-only evidence before answering",
+            )
+        } else if !intent_frame.ambiguity_reasons.is_empty() {
+            (
+                PolicyRouteKind::AskClarification,
+                "ambiguous_intent_requires_clarification",
+                "the user goal is too ambiguous to route safely",
+            )
+        } else if is_review_maturation_intent(&intent_frame.user_goal.to_ascii_lowercase()) {
+            (
+                PolicyRouteKind::GovernedBlocker,
+                "review_maturation_runtime_unavailable",
+                "review maturation is not an ordinary product route in Phase3",
+            )
+        } else {
+            (
+                PolicyRouteKind::DirectAnswer,
+                "direct_answer_allowed",
+                "lightweight conversational request can be answered directly",
+            )
+        };
+
+        PolicyRoute {
+            route_kind,
+            confidence: intent_frame.confidence,
+            intent_frame,
+            reason_code: reason_code.into(),
+            reason_summary: reason_summary.into(),
+            privacy_risk,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentIngressDecision {
     pub request_id: String,
     pub source_session_id: String,
     pub task_kind: AgentTaskKind,
+    pub policy_route: PolicyRouteKind,
+    pub policy_reason_code: String,
+    pub intent_frame: IntentFrame,
     pub selected_strategy: MainChatAgentStrategy,
     pub confidence: f32,
     pub reason_summary: String,
@@ -86,7 +379,7 @@ pub struct AgentIngressDecision {
 
 #[derive(Debug, Clone, Default)]
 pub struct AgentIngress {
-    router: StrategyRouter,
+    router: PolicyRouter,
 }
 
 impl AgentIngress {
@@ -97,32 +390,38 @@ impl AgentIngress {
         active_task_session_id: Option<&str>,
         task_kind: AgentTaskKind,
     ) -> AgentIngressDecision {
-        let route = self.router.route(user_message);
+        let route = self
+            .router
+            .route(IntentFrame::from_user_message(user_message));
+        let selected_strategy = route.selected_strategy();
         let request_id = stable_id("mainchat_req", &[session_id, user_message]);
-        let agent_task_session_id = route
-            .selected_strategy
-            .creates_or_resumes_task_session()
-            .then(|| {
-                active_task_session_id
-                    .map(str::to_string)
-                    .unwrap_or_else(|| {
-                        stable_id(
-                            "mainchat_task",
-                            &[session_id, user_message, route.selected_strategy.as_str()],
-                        )
-                    })
-            });
+        let agent_task_session_id =
+            selected_strategy
+                .creates_or_resumes_task_session()
+                .then(|| {
+                    active_task_session_id
+                        .map(str::to_string)
+                        .unwrap_or_else(|| {
+                            stable_id(
+                                "mainchat_task",
+                                &[session_id, user_message, selected_strategy.as_str()],
+                            )
+                        })
+                });
 
         AgentIngressDecision {
             request_id,
             source_session_id: session_id.to_string(),
             task_kind,
-            selected_strategy: route.selected_strategy,
+            policy_route: route.route_kind,
+            policy_reason_code: route.reason_code,
+            intent_frame: route.intent_frame,
+            selected_strategy,
             confidence: route.confidence,
             reason_summary: route.reason_summary,
             fallback_eligible: !matches!(
-                route.selected_strategy,
-                MainChatAgentStrategy::BlockedConfirmation
+                route.route_kind,
+                PolicyRouteKind::ConfirmationRequest | PolicyRouteKind::GovernedBlocker
             ),
             privacy_risk: route.privacy_risk,
             agent_task_session_id,
@@ -304,111 +603,6 @@ impl ContextCompiler {
             workspace_policy_override_blocked: true,
             selected_skill_instruction_loaded,
             context_snapshot_ref,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct StrategyRouter;
-
-impl StrategyRouter {
-    pub fn route(&self, user_message: &str) -> StrategyRouteDecision {
-        let lower = user_message.to_ascii_lowercase();
-        let privacy_risk = classify_privacy_risk(&lower);
-        let governance_intent = classify_main_chat_governance_intent(user_message);
-
-        if let Some(blocker_requirement) = governance_intent.blocker_requirement {
-            let reason = match blocker_requirement {
-                MainChatBlockerRequirement::DangerousLocalWrite => {
-                    "dangerous local write requires a hard blocker before execution"
-                }
-                MainChatBlockerRequirement::ExternalWriteConfirmation => {
-                    "external write requires confirmation before execution"
-                }
-            };
-            return StrategyRouteDecision::new(
-                MainChatAgentStrategy::BlockedConfirmation,
-                0.95,
-                reason,
-                privacy_risk,
-            );
-        }
-        if let Some(write_requirement) = governance_intent.durable_write_requirement {
-            let (strategy, reason) = match write_requirement {
-                MainChatDurableWriteRequirement::MemoryProposal => (
-                    MainChatAgentStrategy::MemoryProposal,
-                    "durable memory request must create a governed Memory proposal",
-                ),
-                MainChatDurableWriteRequirement::LifeModelProposal => (
-                    MainChatAgentStrategy::LifeModelProposal,
-                    "durable preference or LifeModel request must create a governed LifeModel proposal",
-                ),
-            };
-            return StrategyRouteDecision::new(strategy, 0.93, reason, privacy_risk);
-        }
-        if governance_intent.external_read_requirement.is_some() {
-            return StrategyRouteDecision::new(
-                MainChatAgentStrategy::ReActToolExecution,
-                0.9,
-                "current external fact request must use governed read-only tool evidence",
-                privacy_risk,
-            );
-        }
-        if is_review_maturation_intent(&lower) {
-            return StrategyRouteDecision::new(
-                MainChatAgentStrategy::ReviewMaturation,
-                0.9,
-                "review or maturation request selected governed review strategy",
-                privacy_risk,
-            );
-        }
-        if is_tool_observation_intent(&lower) {
-            return StrategyRouteDecision::new(
-                MainChatAgentStrategy::ReActToolExecution,
-                0.88,
-                "lookup, search, or observation request selected ReAct tool execution",
-                privacy_risk,
-            );
-        }
-        if is_plan_execute_intent(&lower) {
-            return StrategyRouteDecision::new(
-                MainChatAgentStrategy::PlanExecute,
-                0.9,
-                "planning or decomposition request selected PlanExecute",
-                privacy_risk,
-            );
-        }
-
-        StrategyRouteDecision::new(
-            MainChatAgentStrategy::DirectAnswer,
-            0.72,
-            "lightweight conversational request selected DirectAnswer runtime strategy",
-            privacy_risk,
-        )
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StrategyRouteDecision {
-    pub selected_strategy: MainChatAgentStrategy,
-    pub confidence: f32,
-    pub reason_summary: String,
-    pub privacy_risk: MainChatPrivacyRiskSummary,
-}
-
-impl StrategyRouteDecision {
-    fn new(
-        selected_strategy: MainChatAgentStrategy,
-        confidence: f32,
-        reason_summary: impl Into<String>,
-        privacy_risk: MainChatPrivacyRiskSummary,
-    ) -> Self {
-        Self {
-            selected_strategy,
-            confidence,
-            reason_summary: reason_summary.into(),
-            privacy_risk,
         }
     }
 }
@@ -4625,7 +4819,7 @@ fn runtime_eval_multi_step_agent_loop_observation(
             role: "user".into(),
             content: case.input.clone(),
         }],
-        layer: crate::layer_router::Layer::L2,
+        layer: crate::layer::Layer::L2,
     };
 
     let temp_root = std::env::temp_dir().join(format!(
@@ -5768,6 +5962,169 @@ fn classify_privacy_risk(lower: &str) -> MainChatPrivacyRiskSummary {
     }
 }
 
+fn main_chat_privacy_risk_from_intent(intent: &IntentFrame) -> MainChatPrivacyRiskSummary {
+    let mut risk = classify_privacy_risk(&intent.user_goal.to_ascii_lowercase());
+    if intent.requires_hard_block {
+        risk.risk_level = "critical".into();
+        risk.policy_reason_code = "dangerous_action_hard_block".into();
+        risk.write_like = true;
+    } else if intent.requires_confirmation {
+        risk.risk_level = "high".into();
+        risk.policy_reason_code = "confirmation_required_for_external_or_unselected_action".into();
+        risk.external_write_like = true;
+        risk.write_like = true;
+    } else if intent.requests_durable_write {
+        risk.risk_level = "medium".into();
+        risk.policy_reason_code = "durable_write_requires_review_proposal".into();
+        risk.write_like = true;
+    } else if intent.requires_external_read {
+        risk.policy_reason_code = "read_only_external_evidence_required".into();
+    }
+    risk
+}
+
+fn bounded_user_goal(user_message: &str) -> String {
+    let compact = user_message
+        .replace(['\r', '\n', '\t'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut result = String::new();
+    for ch in compact.chars().take(280) {
+        if ch.is_control() {
+            result.push(' ');
+        } else {
+            result.push(ch);
+        }
+    }
+    result.trim().to_string()
+}
+
+fn intent_frame_confidence(
+    governance_intent: &MainChatGovernanceIntent,
+    requests_plan_task: bool,
+    requires_external_read: bool,
+    requires_confirmation: bool,
+    requires_hard_block: bool,
+    ambiguity_reasons: &[String],
+) -> f32 {
+    if !ambiguity_reasons.is_empty() {
+        return 0.42;
+    }
+    if requires_hard_block || requires_confirmation {
+        return 0.95;
+    }
+    if governance_intent.requires_governance() {
+        return governance_intent.confidence.max(0.9).min(0.98);
+    }
+    if requires_external_read || requests_plan_task {
+        return 0.88;
+    }
+    0.72
+}
+
+fn infer_intent_time_range(
+    lower: &str,
+    requires_external_read: bool,
+    requests_durable_write: bool,
+) -> IntentTimeRange {
+    if requests_durable_write
+        && contains_any(
+            lower,
+            &[
+                "以后",
+                "下次",
+                "往后",
+                "长期",
+                "from now on",
+                "going forward",
+                "next time",
+                "always",
+            ],
+        )
+    {
+        return IntentTimeRange::FuturePreference;
+    }
+    if requires_external_read {
+        return IntentTimeRange::CurrentExternal;
+    }
+    if contains_any(lower, &["今天", "下午", "今晚", "today", "tonight"]) {
+        return IntentTimeRange::Today;
+    }
+    if contains_any(lower, &["明天", "tomorrow"]) {
+        return IntentTimeRange::Tomorrow;
+    }
+    if contains_any(lower, &["本周", "这周", "this week", "weekly"]) {
+        return IntentTimeRange::ThisWeek;
+    }
+    if contains_any(lower, &["现在", "马上", "immediately", "now"]) {
+        return IntentTimeRange::Immediate;
+    }
+    IntentTimeRange::Unspecified
+}
+
+fn is_current_external_read_intent(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "开放时间",
+            "开馆",
+            "闭馆",
+            "预约",
+            "门票",
+            "票价",
+            "展览",
+            "入馆",
+            "营业时间",
+            "四川博物院",
+            "博物馆",
+            "博物院",
+            "opening hours",
+            "hours",
+            "reservation",
+            "reserve tickets",
+            "ticket",
+            "tickets",
+            "book a visit",
+            "current price",
+            "latest",
+            "today's",
+            "now open",
+        ],
+    ) && !is_pure_offline_planning_expression(lower)
+}
+
+fn is_pure_offline_planning_expression(lower: &str) -> bool {
+    contains_any(lower, &["如果", "假如", "if "])
+        && contains_any(lower, &["安排", "计划", "plan"])
+        && !contains_any(
+            lower,
+            &[
+                "查",
+                "查询",
+                "看一下",
+                "看看",
+                "会不会",
+                "是否",
+                "有没有",
+                "should i",
+            ],
+        )
+}
+
+fn is_unselected_skill_boundary_intent(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "skill that is not selected",
+            "unselected skill",
+            "not selected skill",
+            "未选择的 skill",
+            "未选择技能",
+        ],
+    )
+}
+
 fn is_review_maturation_intent(lower: &str) -> bool {
     contains_any(
         lower,
@@ -5796,6 +6153,7 @@ fn is_plan_execute_intent(lower: &str) -> bool {
             "拆解",
         ],
     ) || is_current_work_arrangement_intent(lower)
+        || is_conditional_arrangement_plan_intent(lower)
 }
 
 fn is_current_work_arrangement_intent(lower: &str) -> bool {
@@ -5826,6 +6184,27 @@ fn is_current_work_arrangement_intent(lower: &str) -> bool {
                 "记住",
                 "remember",
                 "prefer",
+            ],
+        )
+}
+
+fn is_conditional_arrangement_plan_intent(lower: &str) -> bool {
+    contains_any(lower, &["如果", "假如", "if "])
+        && contains_any(lower, &["安排", "计划", "plan", "改室内"])
+        && !contains_any(
+            lower,
+            &[
+                "查",
+                "查询",
+                "看一下",
+                "看看",
+                "会不会",
+                "要不要",
+                "需不需要",
+                "是否",
+                "有没有",
+                "should i",
+                "do i need",
             ],
         )
 }

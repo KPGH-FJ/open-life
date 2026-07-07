@@ -3,6 +3,7 @@ use crate::legacy_write_convergence::{
     LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
     LifeModelMaterializerCallerPurpose,
 };
+use crate::memory_gateway;
 use crate::{persist_life_model, AppState};
 use openlife_core::life_model::{
     AlertLevel, CustomStateDimension, DailyGoal, StateAlert, TimeBlock,
@@ -22,10 +23,14 @@ pub(crate) async fn record_state_with_state(
     alert_days: Option<u32>,
     state: &Arc<AppState>,
 ) -> Result<i64, AppError> {
-    let store = state.memory_store.lock().await;
-    let id = store
-        .record_state_entry(&dimension_name, value, &unit, note.as_deref())
-        .map_err(AppError::from)?;
+    let id = memory_gateway::record_state_entry_with_state(
+        &dimension_name,
+        value,
+        &unit,
+        note.as_deref(),
+        state,
+    )
+    .await?;
     let manager = state.life_model_manager.lock().await;
     let mut model = manager.load().map_err(AppError::from)?;
     if let Some(dim) = model
@@ -328,12 +333,6 @@ mod tests {
             )),
             mcp_registry: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::mcp::McpRegistry::new(),
-            )),
-            intent_router: Arc::new(tokio::sync::Mutex::new(
-                openlife_core::router::IntentRouter::new(),
-            )),
-            layer_router: Arc::new(tokio::sync::Mutex::new(
-                openlife_core::layer_router::LayerRouter::new(),
             )),
             scheduler: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::scheduler::InferenceScheduler::new(

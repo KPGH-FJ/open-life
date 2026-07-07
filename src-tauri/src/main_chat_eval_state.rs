@@ -19,8 +19,6 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
             openlife_core::memory::MemoryStore::new_in_memory().unwrap(),
         )),
         mcp_registry: Arc::new(Mutex::new(openlife_core::mcp::McpRegistry::new())),
-        intent_router: Arc::new(Mutex::new(openlife_core::router::IntentRouter::new())),
-        layer_router: Arc::new(Mutex::new(openlife_core::layer_router::LayerRouter::new())),
         scheduler: Arc::new(Mutex::new(
             openlife_core::scheduler::InferenceScheduler::new(
                 config.local_model.clone(),

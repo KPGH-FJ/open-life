@@ -8,7 +8,7 @@ fn main_chat_runtime_module_tests_are_not_concentrated_in_lib_rs() {
         "main_chat_generation_support_helpers_are_extracted_from_lib_rs",
         "main_chat_proposal_support_helpers_are_extracted_from_lib_rs",
         "main_chat_legacy_fallback_helpers_are_extracted_from_lib_rs",
-        "main_chat_legacy_agent_loop_helpers_are_extracted_from_lib_rs",
+        "main_chat_retired_runtime_modules_are_not_registered_or_present",
         "main_chat_preprocess_helpers_are_extracted_from_lib_rs",
         "main_chat_conversation_update_helpers_are_extracted_from_lib_rs",
         "main_chat_final_gate_aggregation_is_not_hidden_in_test_module",
@@ -18,7 +18,7 @@ fn main_chat_runtime_module_tests_are_not_concentrated_in_lib_rs() {
         "retired_stream_fallback_plan_is_blocked_for_l2_l3",
         "ordinary_stream_legacy_plan_is_built_after_governed_strategy_attempt",
         "obsolete_ordinary_chat_legacy_only_guard_wording_is_retired",
-        "ordinary_chat_entrypoints_avoid_deprecated_agent_loop_helpers_and_direct_executor_construction",
+        "ordinary_chat_entrypoints_avoid_retired_agent_loop_helpers_and_direct_executor_construction",
         "chat_page_does_not_call_default_adapter_migration_preview_or_review_commands",
         "default_chat_entrypoints_do_not_call_w19_w60_command_surfaces_or_w73_readiness_report_or_w74_invocation",
         "default_chat_entrypoints_do_not_call_w19_w60_command_surfaces",
@@ -175,40 +175,32 @@ fn main_chat_preprocess_helpers_are_extracted_from_lib_rs() {
 }
 
 #[test]
-fn main_chat_legacy_agent_loop_helpers_are_extracted_from_lib_rs() {
+fn main_chat_retired_runtime_modules_are_not_registered_or_present() {
     let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
     let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
-    let module_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_legacy_agent_loop.rs");
-    assert!(
-        module_path.exists(),
-        "Main Chat legacy AgentLoop helper module file must exist outside lib.rs"
-    );
-    let module_source =
-        std::fs::read_to_string(&module_path).expect("read main_chat_legacy_agent_loop.rs");
+    let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
 
-    for expected in [
-        "pub(crate) async fn send_message_with_agent_loop(",
-        "pub(crate) async fn start_stream_message_with_agent_loop(",
-        "pub(crate) async fn handle_agent_loop_fallback(",
-        "pub(crate) fn emit_agent_status_update(",
-        "struct TauriStreamingCallback",
+    for (module_name, registration) in [
+        (
+            ["main_chat_", "strategy.rs"].concat(),
+            ["pub(crate) mod main_chat_", "strategy;"].concat(),
+        ),
+        (
+            ["main_chat_", "tool_loop.rs"].concat(),
+            ["pub(crate) mod main_chat_", "tool_loop;"].concat(),
+        ),
+        (
+            ["main_chat_", "legacy_agent_loop.rs"].concat(),
+            ["pub(crate) mod main_chat_", "legacy_agent_loop;"].concat(),
+        ),
     ] {
         assert!(
-            module_source.contains(expected),
-            "legacy AgentLoop module must expose {expected}"
+            !src_root.join(&module_name).exists(),
+            "{module_name} must not remain as a product Main Chat runtime module"
         );
-    }
-    for forbidden in [
-        "\nasync fn send_message_with_agent_loop(",
-        "\nasync fn start_stream_message_with_agent_loop(",
-        "\nasync fn handle_agent_loop_fallback(",
-        "\nfn emit_agent_status_update(",
-        "\nstruct TauriStreamingCallback",
-    ] {
         assert!(
-            !source.contains(forbidden),
-            "legacy AgentLoop helper {forbidden} should not remain in lib.rs"
+            !source.contains(&registration),
+            "lib.rs must not register retired product Main Chat runtime module {module_name}"
         );
     }
 }
@@ -257,23 +249,23 @@ fn main_chat_retired_fallback_delivery_is_absent_from_product_modules() {
 }
 
 #[test]
-fn ordinary_chat_entrypoints_try_kernel_before_unsupported_blocker_paths() {
+fn ordinary_chat_entrypoints_and_pipeline_delegate_to_openlife_turn_runtime_only() {
     let send_module_path = format!("{}/src/main_chat_send.rs", env!("CARGO_MANIFEST_DIR"));
     let send_source = std::fs::read_to_string(send_module_path).expect("read main_chat_send.rs");
     let send_body =
         extract_rust_function_body(&send_source, "pub(crate) async fn send_message_with_state(");
-    assert!(send_body.contains("run_main_chat_turn_pipeline_buffered("));
+    assert!(send_body.contains("OpenLifeTurnRuntime::new("));
     assert!(
         !send_body.contains("decide_main_chat_turn_route("),
-        "send_message must not own route branching after the turn pipeline wrapper lands"
+        "send_message must not own route branching after OpenLifeTurnRuntime lands"
     );
     assert!(
-        !send_body.contains("try_run_main_chat_agent_strategy("),
-        "send_message must not own strategy fallback after the turn pipeline wrapper lands"
+        !send_body.contains(&["try_run_main_chat_agent_", "strategy("].concat()),
+        "send_message must not own retired strategy fallback after OpenLifeTurnRuntime lands"
     );
     assert!(
-        !send_body.contains("main_chat_kernel_supports_turn("),
-        "send_message must not reimplement kernel-vs-strategy route branching"
+        !send_body.contains(&["run_main_chat_tool_loop_", "adapter("].concat()),
+        "send_message must not dispatch to the retired ToolLoop adapter"
     );
 
     let stream_module_path = format!("{}/src/main_chat_streaming.rs", env!("CARGO_MANIFEST_DIR"));
@@ -282,22 +274,18 @@ fn ordinary_chat_entrypoints_try_kernel_before_unsupported_blocker_paths() {
         &source,
         "pub(crate) async fn start_stream_message_with_state(",
     );
-    assert!(stream_body.contains("run_main_chat_turn_pipeline_streaming("));
+    assert!(stream_body.contains("OpenLifeTurnRuntime::new("));
     assert!(
         !stream_body.contains("decide_main_chat_turn_route("),
-        "start_stream_message must not own route branching after the turn pipeline wrapper lands"
+        "start_stream_message must not own route branching after OpenLifeTurnRuntime lands"
     );
     assert!(
-        !stream_body.contains("try_run_main_chat_agent_strategy("),
-        "start_stream_message must not own strategy fallback after the turn pipeline wrapper lands"
+        !stream_body.contains(&["try_run_main_chat_agent_", "strategy("].concat()),
+        "start_stream_message must not own retired strategy fallback after OpenLifeTurnRuntime lands"
     );
     assert!(
-        !stream_body.contains("main_chat_unsupported_turn_governed_blocker"),
-        "start_stream_message must not own unsupported-route blocker construction after the turn pipeline wrapper lands"
-    );
-    assert!(
-        !stream_body.contains("main_chat_kernel_supports_turn("),
-        "start_stream_message must not reimplement kernel-vs-strategy route branching"
+        !stream_body.contains(&["run_main_chat_tool_loop_", "adapter("].concat()),
+        "start_stream_message must not dispatch to the retired ToolLoop adapter"
     );
 
     let pipeline_module_path = format!(
@@ -306,63 +294,20 @@ fn ordinary_chat_entrypoints_try_kernel_before_unsupported_blocker_paths() {
     );
     let pipeline_source =
         std::fs::read_to_string(pipeline_module_path).expect("read main_chat_turn_pipeline.rs");
-    let pipeline_body = extract_rust_function_body(
-        &pipeline_source,
-        "pub(crate) async fn run_main_chat_turn_pipeline_streaming(",
-    );
-    let route_decision = pipeline_body
-        .find("decide_main_chat_turn_route(")
-        .expect("pipeline should call the shared route decision helper first");
-    let strategy_attempt = pipeline_body
-        .find("try_run_main_chat_agent_strategy(")
-        .expect("pipeline should keep the final strategy attempt before unsupported blocker");
-    let tool_loop_attempt = pipeline_body
-        .find("run_main_chat_tool_loop_adapter(")
-        .expect("pipeline should dispatch ToolLoop before final strategy attempt");
-    let blocker_after_strategy = pipeline_body[strategy_attempt..]
-        .find("build_main_chat_unsupported_turn_blocker_result(")
-        .map(|offset| strategy_attempt + offset)
-        .expect("pipeline should turn no-result into a governed blocker");
-
     assert!(
-        route_decision < tool_loop_attempt,
-        "pipeline should make the shared route decision before ToolLoop dispatch"
+        pipeline_source.contains("OpenLifeTurnRuntime::new("),
+        "pipeline compatibility wrapper must delegate to OpenLifeTurnRuntime"
     );
-    assert!(
-        tool_loop_attempt < strategy_attempt,
-        "ToolLoop adapter should handle ToolLoop route decisions before final strategy attempt"
-    );
-    assert!(
-        strategy_attempt < blocker_after_strategy,
-        "pipeline should attempt final strategy before building the unsupported governed blocker"
-    );
-}
-
-#[test]
-fn unsupported_turn_blocker_never_constructs_agent_runtime() {
-    let pipeline_module_path = format!(
-        "{}/src/main_chat_turn_pipeline.rs",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    let pipeline_source =
-        std::fs::read_to_string(pipeline_module_path).expect("read main_chat_turn_pipeline.rs");
-    let blocker_body = extract_rust_function_body(
-        &pipeline_source,
-        "async fn build_main_chat_unsupported_turn_blocker_result(",
-    );
-
-    assert!(
-        !blocker_body.contains("AgentRuntime::new"),
-        "unsupported blocker must not construct the old AgentRuntime"
-    );
-    assert!(
-        !blocker_body.contains(".execute_task("),
-        "unsupported blocker must not execute old AgentRuntime tasks"
-    );
-    assert!(
-        blocker_body.contains("main_chat_unsupported_turn_governed_blocker"),
-        "unsupported no-result path should return an explicit blocker payload"
-    );
+    for forbidden in [
+        ["try_run_main_chat_agent_", "strategy("].join(""),
+        ["run_main_chat_tool_loop_", "adapter("].join(""),
+        ["handle_agent_loop_", "fallback("].join(""),
+    ] {
+        assert!(
+            !pipeline_source.contains(&forbidden),
+            "pipeline compatibility wrapper must not call retired runtime helper {forbidden}"
+        );
+    }
 }
 
 #[test]
@@ -389,14 +334,13 @@ fn obsolete_ordinary_chat_legacy_only_guard_wording_is_retired() {
 }
 
 #[test]
-fn ordinary_chat_entrypoints_avoid_deprecated_agent_loop_helpers_and_direct_executor_construction()
-{
+fn ordinary_chat_entrypoints_avoid_retired_agent_loop_helpers_and_direct_executor_construction() {
     let ordinary_chat_bodies = ordinary_chat_entrypoint_bodies();
 
     for (body_name, body) in &ordinary_chat_bodies {
         assert!(
-            !body.contains("send_message_with_agent_loop(")
-                && !body.contains("start_stream_message_with_agent_loop("),
+            !body.contains(&["send_message_with_", "agent_loop("].concat())
+                && !body.contains(&["start_stream_message_with_", "agent_loop("].concat()),
             "{body_name} must not dispatch to the deprecated legacy AgentLoop helper"
         );
         assert!(
@@ -1001,7 +945,6 @@ fn main_chat_stream_command_has_non_tauri_state_executor() {
 #[test]
 fn focused_main_chat_modules_import_helpers_from_owning_modules_not_lib_rs_root() {
     for module_name in [
-        "main_chat_legacy_agent_loop.rs",
         "main_chat_react_runtime.rs",
         "main_chat_react_execution.rs",
         "main_chat_live_provider_harness.rs",

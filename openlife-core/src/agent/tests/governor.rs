@@ -5,7 +5,7 @@ use crate::agent::{
     MaturationProposalCandidate, MemoryWriteGovernanceInput, ModelRouteGovernanceInput,
     ProposalType, RiskLevel, RuntimeHSPacket, RuntimeInput, SelectedPolicyRef, ToolGovernanceInput,
 };
-use crate::layer_router::Layer;
+use crate::layer::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
 

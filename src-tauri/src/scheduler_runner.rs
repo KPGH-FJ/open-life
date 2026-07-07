@@ -6,7 +6,7 @@ use crate::storage::app_data_dir;
 use crate::AppState;
 use openlife_core::agent::agent_loop::{AgentLoopConfig, AgentRole};
 use openlife_core::agent::{AgentLoop, AgentTask, AgentTaskKind};
-use openlife_core::layer_router::Layer;
+use openlife_core::layer::Layer;
 use openlife_core::llm::ChatMessage;
 use serde_json::Value;
 use std::sync::Arc;

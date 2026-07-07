@@ -234,6 +234,9 @@ fn collect_external_read_requirement(normalized: &str, intent: &mut MainChatGove
         "traffic",
         "open now",
         "business hours",
+        "opening hours",
+        "reservation",
+        "tickets",
         "price",
         "exchange rate",
         "news",
@@ -246,6 +249,14 @@ fn collect_external_read_requirement(normalized: &str, intent: &mut MainChatGove
         "营业",
         "开门",
         "关门",
+        "开放时间",
+        "开馆",
+        "闭馆",
+        "预约",
+        "门票",
+        "票价",
+        "展览",
+        "入馆",
         "价格",
         "汇率",
         "新闻",
@@ -285,18 +296,49 @@ fn collect_external_read_requirement(normalized: &str, intent: &mut MainChatGove
         "能不能",
         "是否",
         "有没有",
+        "怎么预约",
+        "如何预约",
         "怎么样",
         "几点",
         "多少",
+    ];
+    let public_venue_terms = [
+        "博物馆",
+        "博物院",
+        "四川博物院",
+        "museum",
+        "gallery",
+        "opening hours",
+        "reservation",
+        "tickets",
+        "开放时间",
+        "预约",
+        "门票",
     ];
 
     let explicit_web_read = contains_any(normalized, &explicit_web_terms);
     let current_fact = contains_any(normalized, &current_fact_terms);
     let temporal = contains_any(normalized, &temporal_terms);
     let request = contains_any(normalized, &request_terms) || normalized.contains('?');
+    let public_venue_read = contains_any(normalized, &public_venue_terms)
+        && contains_any(
+            normalized,
+            &[
+                "开放时间",
+                "预约",
+                "门票",
+                "票价",
+                "开馆",
+                "闭馆",
+                "opening hours",
+                "reservation",
+                "tickets",
+            ],
+        );
 
     if explicit_web_read && (current_fact || temporal || request)
         || current_fact && temporal && request
+        || public_venue_read
     {
         set_external_read_requirement(
             intent,

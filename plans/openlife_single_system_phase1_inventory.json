@@ -1,7 +1,7 @@
 {
-  "schema_version": 1,
-  "last_updated": "2026-07-06",
-  "status": "phase1_inventory_not_deletion_completion",
+  "schema_version": 2,
+  "last_updated": "2026-07-07",
+  "status": "phase4_review_workflow_source_map_synchronized",
   "product_authorities": [
     {
       "id": "agents_md",
@@ -37,64 +37,78 @@
       "id": "main_chat_turn_pipeline",
       "path": "src-tauri/src/main_chat_turn_pipeline.rs",
       "phase": 2,
-      "disposition": "absorb_then_delete",
-      "reason": "Dispatches among kernel, tool loop, strategy helper, route preview, and blockers."
+      "disposition": "keep",
+      "reason": "Phase 2 retained this only as a thin compatibility wrapper delegating to OpenLifeTurnRuntime; it no longer owns routing."
     },
     {
       "id": "main_chat_kernel",
       "path": "src-tauri/src/main_chat_kernel.rs",
       "phase": 2,
-      "disposition": "absorb_then_delete",
-      "reason": "Large product runtime with embedded branches and compatibility terms."
+      "disposition": "keep",
+      "reason": "MainChatKernel remains as subordinate execution machinery under OpenLifeTurnRuntime, not as an ordinary turn runtime owner."
     },
     {
       "id": "main_chat_strategy",
-      "path": "src-tauri/src/main_chat_strategy.rs",
+      "former_path": "src-tauri/src/main_chat_strategy.rs",
       "phase": 2,
-      "disposition": "delete",
-      "reason": "Separate strategy execution path after pipeline routing."
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Separate strategy execution path retired by OpenLifeTurnRuntime."
     },
     {
       "id": "main_chat_tool_loop",
-      "path": "src-tauri/src/main_chat_tool_loop.rs",
+      "former_path": "src-tauri/src/main_chat_tool_loop.rs",
       "phase": 2,
-      "disposition": "absorb_then_delete",
-      "reason": "Separate tool-loop adapter with single-step fallback-shaped outcome."
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Separate tool-loop adapter and single-step fallback-shaped outcome retired by OpenLifeTurnRuntime."
     },
     {
       "id": "main_chat_legacy_agent_loop",
-      "path": "src-tauri/src/main_chat_legacy_agent_loop.rs",
+      "former_path": "src-tauri/src/main_chat_legacy_agent_loop.rs",
       "phase": 2,
-      "disposition": "delete",
-      "reason": "Deprecated non-default product-shaped loop remains compiled."
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Deprecated product-shaped loop is no longer compiled as a product module."
     },
     {
       "id": "main_chat_route_preview",
-      "path": "src-tauri/src/main_chat_route_preview.rs",
+      "former_path": "src-tauri/src/main_chat_route_preview.rs",
       "phase": 3,
-      "disposition": "delete",
-      "reason": "Advisory route preview remains a product-shaped routing surface."
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Advisory route preview was deleted in Phase 3; product routing is owned by PolicyRouter."
     },
     {
       "id": "core_main_chat_agent_v1_strategy_router",
-      "path": "openlife-core/src/agent/main_chat_agent_v1.rs",
+      "host_path": "openlife-core/src/agent/main_chat_agent_v1.rs",
+      "path_kind": "symbol",
+      "former_symbol": "StrategyRouter",
       "phase": 3,
-      "disposition": "absorb_then_delete",
-      "reason": "Keyword/rule product routing must be absorbed into IntentFrame construction."
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Keyword/rule product routing was absorbed into IntentFrame construction and PolicyRouter; StrategyRouter symbol must be absent."
     },
     {
       "id": "core_strategy_selector",
-      "path": "openlife-core/src/agent/strategy.rs",
+      "former_path": "openlife-core/src/agent/strategy.rs",
       "phase": 3,
-      "disposition": "delete",
-      "reason": "Older runtime selector duplicates route authority."
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Older StrategySelector product route authority was deleted; remaining historical runtime contract types live outside the old strategy.rs path."
     },
     {
       "id": "core_multi_strategy_runtime",
       "path": "openlife-core/src/agent/multi_strategy_runtime.rs",
       "phase": 7,
-      "disposition": "delete",
-      "reason": "Historical multi-strategy runtime should not remain in product paths."
+      "disposition": "quarantined_historical_runtime",
+      "reason": "Historical Phase7 runtime remains compiled for legacy development/evidence paths, but StrategySelector was deleted and ordinary Main Chat product routing is owned by PolicyRouter."
     },
     {
       "id": "core_strategy_runtime",
@@ -184,31 +198,39 @@
   "old_router_surfaces": [
     {
       "id": "intent_router",
-      "path": "openlife-core/src/router.rs",
+      "former_path": "openlife-core/src/router.rs",
       "phase": 3,
-      "disposition": "absorb_then_delete",
-      "reason": "Separate router is held in AppState and duplicates future PolicyRouter authority."
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "IntentRouter was removed from core, AppState, bootstrap, diagnostics, and ordinary Main Chat; value keyword matching moved to a stateless non-router extractor."
     },
     {
       "id": "layer_router",
-      "path": "openlife-core/src/layer_router.rs",
+      "former_path": "openlife-core/src/layer_router.rs",
       "phase": 3,
-      "disposition": "absorb_then_delete",
-      "reason": "Separate layer router duplicates future PolicyRouter authority."
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "LayerRouter decision logic was removed; Layer remains only as a pure runtime contract type in openlife-core/src/layer.rs."
     },
     {
       "id": "diagnostics_get_router_status",
-      "path": "src-tauri/src/commands/diagnostics.rs",
+      "host_path": "src-tauri/src/commands/diagnostics.rs",
+      "path_kind": "symbol",
+      "former_symbol": "get_router_status",
       "phase": 3,
-      "disposition": "delete",
-      "reason": "Old router status remains exposed as diagnostics."
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Old IntentRouter diagnostics command was deleted and replaced by get_policy_router_status."
     },
     {
       "id": "frontend_multi_strategy_preview_section",
       "path": "frontend/src/pages/settings/MultiStrategyPreviewSection.tsx",
       "phase": 7,
-      "disposition": "delete",
-      "reason": "Frontend UI exposes old multi-strategy preview/status."
+      "disposition": "internal_debug_historical_surface",
+      "reason": "Frontend preview surface remains behind internal debug and is not ordinary Main Chat routing authority; Phase7 should remove it separately."
     },
     {
       "id": "frontend_tauri_multi_strategy_exports",
@@ -223,37 +245,43 @@
       "id": "marker_legacy_agent_loop",
       "path": "src-tauri/src",
       "phase": 2,
-      "disposition": "delete",
-      "reason": "Old legacy AgentLoop marker must remain registered until deleted.",
+      "disposition": "archive_reference",
+      "reason": "Legacy AgentLoop product files are deleted; remaining marker hits are anti-regression guards/test evidence only.",
       "marker": "legacy_agent_loop",
-      "expected_file_count": 4
+      "marker_scope": "guard_or_evidence",
+      "expected_file_count": 3
     },
     {
       "id": "marker_main_chat_strategy",
       "path": "src-tauri/src",
       "phase": 2,
       "disposition": "delete",
-      "reason": "Old strategy marker must remain registered until deleted.",
+      "reason": "Old strategy product marker is absent from source after Phase 2 runtime deletion.",
       "marker": "main_chat_strategy",
-      "expected_file_count": 3
+      "marker_scope": "deleted_product_marker",
+      "expected_file_count": 0
     },
     {
       "id": "marker_route_preview",
-      "path": "src-tauri/src",
+      "former_path": "src-tauri/src/main_chat_route_preview.rs",
       "phase": 3,
-      "disposition": "delete",
-      "reason": "Old route preview marker must remain registered until deleted.",
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Route preview product marker is absent after Phase 3 deletion.",
       "marker": "route_preview",
-      "expected_file_count": 5
+      "marker_scope": "deleted_product_marker",
+      "expected_file_count": 0
     },
     {
       "id": "marker_single_step_fallback",
       "path": "src-tauri/src",
       "phase": 2,
-      "disposition": "delete",
-      "reason": "Single-step fallback marker must remain registered until deleted.",
+      "disposition": "archive_reference",
+      "reason": "Single-step fallback execution is deleted; remaining marker hits are terminal/evidence fields requiring false/no-credit and anti-regression tests.",
       "marker": "single_step_fallback",
-      "expected_file_count": 9
+      "marker_scope": "guard_or_evidence",
+      "expected_file_count": 10
     },
     {
       "id": "marker_multi_strategy",
@@ -321,92 +349,12 @@
   ],
   "direct_proposal_write_surfaces": [
     {
-      "id": "proposal_write_action_executor_core_os_tools",
-      "path": "openlife-core/src/agent/action_executor/core_os_tools.rs",
+      "id": "proposal_write_review_workflow",
+      "path": "openlife-core/src/agent/review_workflow.rs",
       "phase": 4,
-      "disposition": "absorb_then_delete",
-      "reason": "Tool path creates proposals directly instead of ReviewWorkflow.",
-      "match": ".create_proposal(",
-      "expected_count": 1
-    },
-    {
-      "id": "proposal_write_action_executor_declarative_stubs",
-      "path": "openlife-core/src/agent/action_executor/declarative_stubs.rs",
-      "phase": 4,
-      "disposition": "absorb_then_delete",
-      "reason": "Declarative tool stub creates proposals directly instead of ReviewWorkflow.",
-      "match": ".create_proposal(",
-      "expected_count": 1
-    },
-    {
-      "id": "proposal_write_action_executor_execution_tools",
-      "path": "openlife-core/src/agent/action_executor/execution_tools.rs",
-      "phase": 4,
-      "disposition": "absorb_then_delete",
-      "reason": "Execution tools create proposals directly instead of ReviewWorkflow.",
-      "match": ".create_proposal(",
-      "expected_count": 4
-    },
-    {
-      "id": "proposal_write_action_executor_tool_executor",
-      "path": "openlife-core/src/agent/action_executor/tool_executor.rs",
-      "phase": 4,
-      "disposition": "absorb_then_delete",
-      "reason": "Tool executor creates proposals directly instead of ReviewWorkflow.",
-      "match": ".create_proposal(",
-      "expected_count": 2
-    },
-    {
-      "id": "proposal_write_maturation",
-      "path": "openlife-core/src/agent/maturation.rs",
-      "phase": 4,
-      "disposition": "absorb_then_delete",
-      "reason": "Maturation engine creates proposals directly instead of ReviewWorkflow.",
-      "match": ".create_proposal(",
-      "expected_count": 2
-    },
-    {
-      "id": "proposal_write_plan_execute",
-      "path": "openlife-core/src/agent/plan_execute.rs",
-      "phase": 4,
-      "disposition": "absorb_then_delete",
-      "reason": "PlanExecute creates proposals directly instead of ReviewWorkflow.",
-      "match": ".create_proposal(",
-      "expected_count": 1
-    },
-    {
-      "id": "proposal_write_agent_commands",
-      "path": "src-tauri/src/commands/agent.rs",
-      "phase": 4,
-      "disposition": "absorb_then_delete",
-      "reason": "Agent command path creates proposals directly instead of ReviewWorkflow.",
-      "match": ".create_proposal(",
-      "expected_count": 1
-    },
-    {
-      "id": "proposal_write_builder",
-      "path": "src-tauri/src/commands/builder.rs",
-      "phase": 4,
-      "disposition": "absorb_then_delete",
-      "reason": "Builder command creates proposals directly instead of ReviewWorkflow.",
-      "match": ".create_proposal(",
-      "expected_count": 1
-    },
-    {
-      "id": "proposal_write_calibration",
-      "path": "src-tauri/src/commands/calibration.rs",
-      "phase": 4,
-      "disposition": "absorb_then_delete",
-      "reason": "Calibration command creates proposals directly instead of ReviewWorkflow.",
-      "match": ".create_proposal(",
-      "expected_count": 1
-    },
-    {
-      "id": "proposal_write_execution_command",
-      "path": "src-tauri/src/commands/execution.rs",
-      "phase": 4,
-      "disposition": "absorb_then_delete",
-      "reason": "Skill/tool execution command creates proposals directly instead of ReviewWorkflow.",
+      "disposition": "storage_only",
+      "phase4_classification": "review_workflow_target",
+      "reason": "ReviewWorkflow is the sole product governance entry allowed to call ProposalStore::create_proposal.",
       "match": ".create_proposal(",
       "expected_count": 1
     },
@@ -415,6 +363,7 @@
       "path": "src-tauri/src/main_chat_agent_productization_eval.rs",
       "phase": 7,
       "disposition": "archive_reference",
+      "phase4_classification": "historical_eval",
       "reason": "Productization eval creates proposals directly and must not become product authority.",
       "match": ".create_proposal(",
       "expected_count": 5
@@ -424,54 +373,220 @@
       "path": "src-tauri/src/main_chat_agent_stage1_dogfood.rs",
       "phase": 7,
       "disposition": "test_fixture_only",
+      "phase4_classification": "test_fixture",
       "reason": "Stage dogfood seeds proposals directly and must become fixture-only or be deleted.",
       "match": ".create_proposal(",
       "expected_count": 4
-    },
-    {
-      "id": "proposal_write_generation_support",
-      "path": "src-tauri/src/main_chat_generation_support.rs",
-      "phase": 4,
-      "disposition": "absorb_then_delete",
-      "reason": "Main Chat generation support creates proposals directly instead of ReviewWorkflow.",
-      "match": ".create_proposal(",
-      "expected_count": 1
-    },
-    {
-      "id": "proposal_write_main_chat_kernel",
-      "path": "src-tauri/src/main_chat_kernel.rs",
-      "phase": 4,
-      "disposition": "absorb_then_delete",
-      "reason": "Main Chat kernel creates proposals directly instead of ReviewWorkflow.",
-      "match": ".create_proposal(",
-      "expected_count": 2
-    },
-    {
-      "id": "proposal_write_main_chat_proposal_support",
-      "path": "src-tauri/src/main_chat_proposal_support.rs",
-      "phase": 4,
-      "disposition": "absorb_then_delete",
-      "reason": "Main Chat proposal helper creates proposals directly instead of ReviewWorkflow.",
-      "match": ".create_proposal(",
-      "expected_count": 3
-    },
-    {
-      "id": "proposal_write_stage4_memory_knowledge",
-      "path": "src-tauri/src/main_chat_stage4_memory_knowledge.rs",
-      "phase": 5,
-      "disposition": "absorb_then_delete",
-      "reason": "Stage 4 managed knowledge creates proposals directly instead of ReviewWorkflow.",
-      "match": ".create_proposal(",
-      "expected_count": 1
     },
     {
       "id": "proposal_write_task_continuity_eval",
       "path": "src-tauri/src/main_chat_task_continuity_eval.rs",
       "phase": 7,
       "disposition": "archive_reference",
+      "phase4_classification": "historical_eval",
       "reason": "Task continuity eval creates proposals directly and must remain non-product evidence.",
       "match": ".create_proposal(",
       "expected_count": 1
+    }
+  ],
+  "phase4_proposal_creation_source_map": [
+    {
+      "id": "phase4_review_workflow_entry",
+      "path": "openlife-core/src/agent/review_workflow.rs",
+      "phase": 4,
+      "disposition": "storage_only",
+      "phase4_classification": "review_workflow_target",
+      "proposal_creation_route": "ProposalStore",
+      "reason": "ReviewWorkflow is the only product governance layer allowed to create stored proposals."
+    },
+    {
+      "id": "phase4_proposal_store_storage",
+      "path": "openlife-core/src/agent/proposal_store.rs",
+      "phase": 4,
+      "disposition": "storage_only",
+      "phase4_classification": "storage_only",
+      "proposal_creation_route": "storage_layer_only",
+      "reason": "ProposalStore remains storage only and does not decide product durable-write policy."
+    },
+    {
+      "id": "phase4_main_chat_proposal_support",
+      "path": "src-tauri/src/main_chat_proposal_support.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "Main Chat memory/LifeModel/ToolPermission proposals now route through ReviewWorkflow."
+    },
+    {
+      "id": "phase4_builder",
+      "path": "src-tauri/src/commands/builder.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "Builder accepted signals now route through ReviewWorkflow before storage."
+    },
+    {
+      "id": "phase4_calibration",
+      "path": "src-tauri/src/commands/calibration.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "Calibration evolution changes now route through ReviewWorkflow before storage."
+    },
+    {
+      "id": "phase4_action_executor_declarative_stubs",
+      "path": "openlife-core/src/agent/action_executor/declarative_stubs.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "Declarative tool proposal stubs now create pending review proposals through ReviewWorkflow."
+    },
+    {
+      "id": "phase4_action_executor_core_os_tools",
+      "path": "openlife-core/src/agent/action_executor/core_os_tools.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "Core OS proposal tools now route through ReviewWorkflow."
+    },
+    {
+      "id": "phase4_action_executor_execution_tools",
+      "path": "openlife-core/src/agent/action_executor/execution_tools.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "File/calendar/email/task proposal tools now route through ReviewWorkflow."
+    },
+    {
+      "id": "phase4_action_executor_tool_executor",
+      "path": "openlife-core/src/agent/action_executor/tool_executor.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "ToolPermission and external-write MCP proposals now route through ReviewWorkflow."
+    },
+    {
+      "id": "phase4_plan_execute",
+      "path": "openlife-core/src/agent/plan_execute.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "PlanExecute write-class step proposals now route through ReviewWorkflow."
+    },
+    {
+      "id": "phase4_maturation",
+      "path": "openlife-core/src/agent/maturation.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "Maturation candidate proposals now route through ReviewWorkflow."
+    },
+    {
+      "id": "phase4_agent_command",
+      "path": "src-tauri/src/commands/agent.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "Agent command generated proposals now route through ReviewWorkflow."
+    },
+    {
+      "id": "phase4_execution_command",
+      "path": "src-tauri/src/commands/execution.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "Skill runtime accepted proposal candidates now route through ReviewWorkflow."
+    },
+    {
+      "id": "phase4_main_chat_generation_support",
+      "path": "src-tauri/src/main_chat_generation_support.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "Main Chat generated proposals now route through ReviewWorkflow."
+    },
+    {
+      "id": "phase4_main_chat_kernel",
+      "path": "src-tauri/src/main_chat_kernel.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "MainChatKernel write and memory-governance proposals now route through ReviewWorkflow."
+    },
+    {
+      "id": "phase4_stage4_memory_knowledge",
+      "path": "src-tauri/src/main_chat_stage4_memory_knowledge.rs",
+      "phase": 5,
+      "disposition": "absorb_then_delete",
+      "phase4_classification": "to_delete_later",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "Historical stage managed-knowledge proposal path now routes through ReviewWorkflow until deletion."
+    },
+    {
+      "id": "phase4_stage1_dogfood",
+      "path": "src-tauri/src/main_chat_agent_stage1_dogfood.rs",
+      "phase": 7,
+      "disposition": "test_fixture_only",
+      "phase4_classification": "test_fixture",
+      "proposal_creation_route": "direct_fixture_seed",
+      "reason": "Stage 1 dogfood seeds fixture proposals and is not a product authority."
+    },
+    {
+      "id": "phase4_productization_eval",
+      "path": "src-tauri/src/main_chat_agent_productization_eval.rs",
+      "phase": 7,
+      "disposition": "archive_reference",
+      "phase4_classification": "historical_eval",
+      "proposal_creation_route": "direct_historical_eval_seed",
+      "reason": "Productization eval creates local evidence fixtures and is not product authority."
+    },
+    {
+      "id": "phase4_task_continuity_eval",
+      "path": "src-tauri/src/main_chat_task_continuity_eval.rs",
+      "phase": 7,
+      "disposition": "archive_reference",
+      "phase4_classification": "historical_eval",
+      "proposal_creation_route": "direct_historical_eval_seed",
+      "reason": "Task continuity eval creates local evidence fixtures and is not product authority."
+    },
+    {
+      "id": "phase4_proposal_commands",
+      "path": "src-tauri/src/commands/proposal.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "test_fixture",
+      "proposal_creation_route": "status_ops_product_fixture_seed_only",
+      "reason": "Product proposal command keeps review/accept/edit/reject/postpone status ops; direct creation is confined to cfg(test) fixtures."
+    },
+    {
+      "id": "phase4_life_model_commands",
+      "path": "src-tauri/src/commands/life_model.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "test_fixture",
+      "proposal_creation_route": "cfg_test_fixture_seed_only",
+      "reason": "LifeModel command direct proposal writes are cfg(test) fixture seeds only."
+    },
+    {
+      "id": "phase4_proactive_commands",
+      "path": "src-tauri/src/commands/proactive.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "test_fixture",
+      "proposal_creation_route": "cfg_test_fixture_seed_only",
+      "reason": "Proactive command direct proposal writes are cfg(test) fixture seeds only."
     }
   ],
   "direct_memory_lifemodel_write_surfaces": [
@@ -516,54 +631,63 @@
       "path": "src-tauri/src/commands/memory.rs",
       "phase": 5,
       "disposition": "absorb_then_delete",
-      "reason": "Memory command writes directly to vector and memory stores.",
+      "reason": "Memory commands are thin wrappers; remaining counted markers are command names/tests and must delegate to MemoryGateway.",
       "match": "direct_memory_lifemodel_write",
-      "expected_count": 7
+      "expected_count": 2
     },
     {
       "id": "memory_lifemodel_write_proposal_application",
       "path": "src-tauri/src/commands/proposal.rs",
       "phase": 5,
       "disposition": "absorb_then_delete",
-      "reason": "Proposal acceptance materializes Memory and LifeModel directly.",
+      "reason": "Proposal command delegates materialization to MemoryGateway and LifeModelWriteGateway; remaining marker is the rollback command wrapper.",
       "match": "direct_memory_lifemodel_write",
-      "expected_count": 6
+      "expected_count": 1
     },
     {
       "id": "memory_lifemodel_write_settings_import",
       "path": "src-tauri/src/commands/settings.rs",
       "phase": 5,
       "disposition": "absorb_then_delete",
-      "reason": "Import/restore path writes LifeModel and memory stores directly.",
+      "reason": "Import path now delegates LifeModel writes to LifeModelWriteGateway and memory replacement to MemoryGateway.",
       "match": "direct_memory_lifemodel_write",
-      "expected_count": 3
+      "expected_count": 1
     },
     {
       "id": "memory_lifemodel_write_state_commands",
       "path": "src-tauri/src/commands/state.rs",
       "phase": 5,
       "disposition": "absorb_then_delete",
-      "reason": "State and daily-goal commands write MemoryStore and LifeModel directly.",
+      "reason": "State and daily-goal commands delegate state history to MemoryGateway and LifeModel compatibility writes to LifeModelWriteGateway.",
       "match": "direct_memory_lifemodel_write",
-      "expected_count": 6
-    },
-    {
-      "id": "lifemodel_write_version_restore",
-      "path": "src-tauri/src/commands/version.rs",
-      "phase": 5,
-      "disposition": "absorb_then_delete",
-      "reason": "Snapshot restore writes LifeModel directly.",
-      "match": "direct_memory_lifemodel_write",
-      "expected_count": 1
+      "expected_count": 5
     },
     {
       "id": "lifemodel_write_lib_persist_helper",
       "path": "src-tauri/src/lib.rs",
       "phase": 5,
-      "disposition": "absorb_then_delete",
-      "reason": "Shared persist helper is a direct LifeModel write choke point until gateway replacement.",
+      "disposition": "keep",
+      "reason": "Shared persist helper remains as a compatibility wrapper that delegates to LifeModelWriteGateway.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 1
+    },
+    {
+      "id": "lifemodel_write_gateway_storage_adapter",
+      "path": "src-tauri/src/life_model_write_gateway.rs",
+      "phase": 5,
+      "disposition": "storage_only",
+      "reason": "LifeModelWriteGateway is the only production adapter allowed to call LifeModelManager::save.",
       "match": "direct_memory_lifemodel_write",
       "expected_count": 2
+    },
+    {
+      "id": "memory_write_gateway_storage_adapter",
+      "path": "src-tauri/src/memory_gateway.rs",
+      "phase": 5,
+      "disposition": "storage_only",
+      "reason": "MemoryGateway is the only production adapter allowed to write MemoryStore, VectorStore, and MemoryLifecycleStore.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 12
     },
     {
       "id": "memory_lifemodel_write_productization_eval",
@@ -575,15 +699,6 @@
       "expected_count": 1
     },
     {
-      "id": "lifemodel_write_legacy_agent_loop",
-      "path": "src-tauri/src/main_chat_legacy_agent_loop.rs",
-      "phase": 2,
-      "disposition": "delete",
-      "reason": "Legacy agent loop can persist LifeModel directly.",
-      "match": "direct_memory_lifemodel_write",
-      "expected_count": 1
-    },
-    {
       "id": "memory_write_memory_lifecycle_eval",
       "path": "src-tauri/src/main_chat_memory_lifecycle_eval.rs",
       "phase": 7,
@@ -591,15 +706,6 @@
       "reason": "Memory lifecycle eval writes directly and must stay non-product evidence.",
       "match": "direct_memory_lifemodel_write",
       "expected_count": 3
-    },
-    {
-      "id": "lifemodel_write_turn_pipeline",
-      "path": "src-tauri/src/main_chat_turn_pipeline.rs",
-      "phase": 2,
-      "disposition": "absorb_then_delete",
-      "reason": "Turn pipeline can persist LifeModel directly while still routing among old systems.",
-      "match": "direct_memory_lifemodel_write",
-      "expected_count": 2
     }
   ],
   "frontend_multi_source_state_surfaces": [
@@ -689,8 +795,8 @@
       "id": "command_run_multi_strategy_agent_preview",
       "path": "src-tauri/src/lib.rs",
       "phase": 7,
-      "disposition": "delete",
-      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "disposition": "legacy_development_command",
+      "reason": "Legacy/development command remains registered for historical preview only; ordinary Main Chat and Settings diagnostics must not use it as product routing authority.",
       "command": "run_multi_strategy_agent_preview",
       "matched_tokens": [
         "strategy",

@@ -1,4 +1,5 @@
 use crate::agent::policy_store::{ModelRoutePolicy, BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY};
+use crate::agent::runtime_strategy_contract::select_historical_runtime_strategy;
 use crate::agent::{
     AgentExecutionBudget, AgentTask, AgentTaskKind, EvidenceQuery, EvidenceStore, HSSelectionAudit,
     HeuristicQuery, HeuristicStore, ModelRouter, MultiStrategyRuntime, MultiStrategyRuntimeInput,
@@ -6,9 +7,9 @@ use crate::agent::{
     ProviderAvailability, RuntimeHSPacket, RuntimeInput, RuntimeOutput, RuntimeStrategy,
     RuntimeStrategyDescriptor, RuntimeStrategyInput, RuntimeStrategyKind, RuntimeStrategyOutput,
     RuntimeStrategyPayload, RuntimeStrategyPayloadKind, RuntimeStrategyRegistry, SelectedPolicyRef,
-    StrategySelectionInput, StrategySelector,
+    StrategySelectionInput,
 };
-use crate::layer_router::Layer;
+use crate::layer::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
 use crate::memory::MemoryStore;
@@ -273,7 +274,6 @@ fn counting_runtime(
     seen_summaries: Arc<Mutex<Vec<Value>>>,
 ) -> MultiStrategyRuntime {
     MultiStrategyRuntime::with_strategy_registry(
-        StrategySelector::default(),
         RuntimeStrategyRegistry::new()
             .with_strategy(Box::new(CountingRuntimeStrategy::react(
                 react_count,
@@ -567,7 +567,7 @@ async fn plan_execute_strategy_output_and_metadata_summary_are_metadata_safe() {
         "Plan steps for Alice and alice@example.com using raw memory context.",
         "Available tools: email.send with body payloads and file.update",
     );
-    let selection = StrategySelector::default().select(StrategySelectionInput {
+    let selection = select_historical_runtime_strategy(StrategySelectionInput {
         runtime_input: runtime_input.clone(),
         allow_planning: true,
         local_model_available: true,
@@ -700,7 +700,6 @@ async fn runtime_strategy_missing_selected_adapter_fails_closed_without_raw_inpu
     let plan_count = Arc::new(AtomicUsize::new(0));
     let seen_summaries = Arc::new(Mutex::new(Vec::new()));
     let runtime = MultiStrategyRuntime::with_strategy_registry(
-        StrategySelector::default(),
         RuntimeStrategyRegistry::new().with_strategy(Box::new(
             CountingRuntimeStrategy::plan_execute(plan_count, seen_summaries),
         )),
@@ -729,7 +728,7 @@ async fn runtime_strategy_missing_selected_adapter_fails_closed_without_raw_inpu
 #[tokio::test]
 async fn orchestrator_preserves_strategy_selection_summary() {
     let input = runtime_input("Plan steps for a quiet work block.", "");
-    let expected = StrategySelector::default().select(StrategySelectionInput {
+    let expected = select_historical_runtime_strategy(StrategySelectionInput {
         runtime_input: input.clone(),
         allow_planning: true,
         local_model_available: true,

@@ -15,14 +15,12 @@ use openlife_core::agent::{
 use openlife_core::builder::BuilderSessionStore;
 use openlife_core::config::AppConfig;
 use openlife_core::feedback::FeedbackStore;
-use openlife_core::layer_router::LayerRouter;
 use openlife_core::life_model::LifeModelManager;
 use openlife_core::mcp::McpRegistry;
 use openlife_core::mcp_audit::McpAuditStore;
 use openlife_core::memory::MemoryStore;
 use openlife_core::memory_cache::{HotMemoryCache, SharedHotCache};
 use openlife_core::privacy::PrivacyEngine;
-use openlife_core::router::IntentRouter;
 use openlife_core::scheduler::InferenceScheduler;
 use openlife_core::vectors::VectorStore;
 use openlife_core::versioning::VersionManager;
@@ -694,9 +692,6 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
         std::process::exit(1);
     });
 
-    let model_dir = data_dir.join("models");
-    let intent_router = IntentRouter::with_optional_onnx(Some(&model_dir));
-    let layer_router = LayerRouter::new();
     let scheduler = InferenceScheduler::new(
         config.local_model.clone(),
         config.prefer_local_model,
@@ -780,8 +775,6 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
         life_model_manager: Arc::new(Mutex::new(life_model_manager)),
         memory_store: Arc::new(Mutex::new(memory_store)),
         mcp_registry: Arc::new(Mutex::new(mcp_registry)),
-        intent_router: Arc::new(Mutex::new(intent_router)),
-        layer_router: Arc::new(Mutex::new(layer_router)),
         scheduler: Arc::new(Mutex::new(scheduler)),
         privacy_engine: Arc::new(Mutex::new(privacy_engine)),
         version_manager: Arc::new(Mutex::new(version_manager)),

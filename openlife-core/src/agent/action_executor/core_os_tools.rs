@@ -2,6 +2,9 @@ use anyhow::Result;
 use serde_json::Value;
 
 use super::helpers::ToolCallInternalResult;
+use crate::agent::review_workflow::{
+    DurableWriteRequest, DurableWriteSource, DurableWriteSubject, ReviewWorkflow,
+};
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 
 use super::ActionExecutionContext;
@@ -370,13 +373,18 @@ impl super::ActionExecutor {
             risk,
             ProposalSource::Manual,
         );
-        let proposal_id = proposal.id.clone();
-        store.create_proposal(&proposal)?;
+        let outcome =
+            ReviewWorkflow::new(store).submit(DurableWriteRequest::from_agent_proposal(
+                DurableWriteSource::ToolPermission,
+                DurableWriteSubject::from_proposal_type(proposal.proposal_type),
+                proposal,
+                "Core OS proposal is pending Review Center approval.",
+            ))?;
         Ok(serde_json::json!({
             "status": "proposal_created",
-            "proposal_id": proposal_id,
-            "proposal_type": proposal.proposal_type.to_string(),
-            "affected_path": proposal.affected_path,
+            "proposal_id": outcome.proposal_id(),
+            "proposal_type": outcome.proposal.proposal_type.to_string(),
+            "affected_path": outcome.proposal.affected_path,
         }))
     }
 }

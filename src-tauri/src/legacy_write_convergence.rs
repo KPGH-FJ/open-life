@@ -946,7 +946,7 @@ pub(crate) fn evaluate_legacy_write_convergence_inventory(
         metadata_safe,
         contains_raw_content,
         default_chat_unchanged,
-        default_chat_route: "main_chat_kernel".into(),
+        default_chat_route: "OpenLifeTurnRuntime".into(),
         w79_guard_called_by_ordinary_chat: false,
         w73_w78_maturation_helper_listed_as_chat_write_path,
         proposal_first_targets_clean,
@@ -1230,9 +1230,9 @@ pub(crate) fn lifemodel_materializer_caller_matrix() -> Vec<LifeModelMaterialize
     vec![
         caller_matrix_entry(
             "lifemodel_materializer_root",
-            "LifeModel compatibility materializer root",
-            "src-tauri/src/lib.rs",
-            "persist_life_model",
+            "LifeModelWriteGateway compatibility storage adapter",
+            "src-tauri/src/life_model_write_gateway.rs",
+            "write_life_model",
             "LifeModelManager::save",
             LifeModelMaterializerCallerKind::CompatibilityPrimitiveMaterializerRoot,
             LifeModelMaterializerCallerRisk::CompatibilityMaterializerRoot,
@@ -1270,10 +1270,10 @@ pub(crate) fn lifemodel_materializer_caller_matrix() -> Vec<LifeModelMaterialize
         ),
         caller_matrix_entry(
             "ordinary_chat_auto_checkin_source_data",
-            "Ordinary Chat daily-goal auto-checkin compatibility materialization",
+            "Retired ordinary Chat daily-goal auto-checkin compatibility materialization",
             "src-tauri/src/main_chat_turn_pipeline.rs",
             "run_main_chat_turn_pipeline_buffered",
-            "persist_life_model",
+            "retired_no_lifemodel_write",
             LifeModelMaterializerCallerKind::OrdinaryChatAutoCheckinSourceData,
             LifeModelMaterializerCallerRisk::SourceDataCompatibilityWrite,
             LifeModelMaterializerCallerGovernanceState::SourceDataCompatibilityNotAcceptedTruth,
@@ -1285,35 +1285,15 @@ pub(crate) fn lifemodel_materializer_caller_matrix() -> Vec<LifeModelMaterialize
             false,
             false,
             false,
-            "Daily goal auto-checkin writes the current compatibility view from source data; it is not accepted durable LifeModel-HS truth and grants no migration permission.",
-            &[],
-        ),
-        caller_matrix_entry(
-            "ordinary_stream_agent_loop_auto_checkin_source_data",
-            "Stream AgentLoop daily-goal auto-checkin compatibility materialization",
-            "src-tauri/src/main_chat_legacy_agent_loop.rs",
-            "start_stream_message_with_agent_loop",
-            "persist_life_model",
-            LifeModelMaterializerCallerKind::OrdinaryChatAutoCheckinSourceData,
-            LifeModelMaterializerCallerRisk::SourceDataCompatibilityWrite,
-            LifeModelMaterializerCallerGovernanceState::SourceDataCompatibilityNotAcceptedTruth,
-            true,
-            false,
-            true,
-            false,
-            false,
-            false,
-            false,
-            false,
-            "Stream daily goal auto-checkin writes the current compatibility view from source data; it is not accepted durable LifeModel-HS truth and grants no migration permission.",
+            "Daily goal auto-checkin no longer writes LifeModel from ordinary Chat; retained as historical classification and grants no migration permission.",
             &[],
         ),
         caller_matrix_entry(
             "ordinary_stream_legacy_auto_checkin_source_data",
-            "Legacy stream daily-goal auto-checkin compatibility materialization",
+            "Retired legacy stream daily-goal auto-checkin compatibility materialization",
             "src-tauri/src/main_chat_turn_pipeline.rs",
             "run_main_chat_turn_pipeline_streaming",
-            "persist_life_model",
+            "retired_no_lifemodel_write",
             LifeModelMaterializerCallerKind::OrdinaryChatAutoCheckinSourceData,
             LifeModelMaterializerCallerRisk::SourceDataCompatibilityWrite,
             LifeModelMaterializerCallerGovernanceState::SourceDataCompatibilityNotAcceptedTruth,
@@ -1325,7 +1305,7 @@ pub(crate) fn lifemodel_materializer_caller_matrix() -> Vec<LifeModelMaterialize
             false,
             false,
             false,
-            "Legacy stream daily goal auto-checkin writes the current compatibility view from source data; it is not accepted durable LifeModel-HS truth and grants no migration permission.",
+            "Legacy stream daily goal auto-checkin no longer writes LifeModel; retained as historical classification and grants no migration permission.",
             &[],
         ),
         caller_matrix_entry(
@@ -1453,7 +1433,7 @@ pub(crate) fn lifemodel_materializer_caller_matrix() -> Vec<LifeModelMaterialize
             "Accepted proposal LifeModel apply",
             "src-tauri/src/commands/proposal.rs",
             "apply_proposal_to_state",
-            "persist_life_model",
+            "LifeModelWriteGateway::materialize_accepted_lifemodel_proposal",
             LifeModelMaterializerCallerKind::AcceptedProposalApply,
             LifeModelMaterializerCallerRisk::AcceptedProposalApply,
             LifeModelMaterializerCallerGovernanceState::AcceptedProposalApplySourceSpecificPatchMappingComplete,
@@ -1470,9 +1450,9 @@ pub(crate) fn lifemodel_materializer_caller_matrix() -> Vec<LifeModelMaterialize
         ),
         caller_matrix_entry(
             "snapshot_restore_governed_operation",
-            "Governed snapshot restore direct LifeModel save",
-            "src-tauri/src/commands/version.rs",
-            "restore_snapshot_governed_operation",
+            "Governed snapshot restore LifeModelWriteGateway save",
+            "src-tauri/src/life_model_write_gateway.rs",
+            "write_life_model_without_prepare",
             "LifeModelManager::save",
             LifeModelMaterializerCallerKind::GovernedRestoreImportOperation,
             LifeModelMaterializerCallerRisk::GovernedRestoreImportOperation,
@@ -1550,9 +1530,13 @@ pub(crate) fn evaluate_lifemodel_materializer_caller_matrix(
             );
         }
 
-        if entry.write_entrypoint != "persist_life_model"
-            && entry.write_entrypoint != "LifeModelManager::save"
-        {
+        if !matches!(
+            entry.write_entrypoint.as_str(),
+            "persist_life_model"
+                | "LifeModelManager::save"
+                | "LifeModelWriteGateway::materialize_accepted_lifemodel_proposal"
+                | "retired_no_lifemodel_write"
+        ) {
             push_unique(
                 &mut blocking_reasons,
                 format!(
@@ -2117,7 +2101,6 @@ const REQUIRED_LIFEMODEL_MATERIALIZER_CALLER_IDS: &[&str] = &[
     "lifemodel_materializer_root",
     "lifemodel_manager_default_initialization",
     "ordinary_chat_auto_checkin_source_data",
-    "ordinary_stream_agent_loop_auto_checkin_source_data",
     "ordinary_stream_legacy_auto_checkin_source_data",
     "manual_lifemodel_editor_save",
     "state_record_state_source_data",

@@ -16,12 +16,12 @@ use crate::legacy_write_convergence::{
     LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
     LifeModelMaterializerCallerPurpose,
 };
-use crate::persist_life_model;
 use crate::storage::{
     app_data_dir, mcp_audit_keyring_path, privacy_policy_path, save_mcp_audit_keyring_to_path,
     save_privacy_policy_to_path,
 };
 use crate::AppState;
+use crate::{memory_gateway, persist_life_model};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -877,16 +877,7 @@ async fn apply_import_payload(
         ),
     )
     .await?;
-    {
-        let store = state.memory_store.lock().await;
-        store
-            .replace_all_messages(&messages)
-            .map_err(AppError::from)?;
-    }
-    {
-        let store = state.vector_store.lock().await;
-        store.replace_all_chunks(&vectors).map_err(AppError::from)?;
-    }
+    memory_gateway::replace_imported_memory_with_state(&state, &messages, &vectors).await?;
     Ok(())
 }
 

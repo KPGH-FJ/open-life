@@ -95,106 +95,101 @@ impl Default for StrategySelectionReport {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct StrategySelector;
+pub(crate) fn select_historical_runtime_strategy(
+    input: StrategySelectionInput,
+) -> StrategySelection {
+    let governor = LifeModelGovernor;
+    let governance_decision =
+        governor.govern_runtime_input(&input.runtime_input, input.local_model_available);
+    let has_hs_packet = input.runtime_input.hs_packet.is_some();
+    let task_kind = input.runtime_input.task.kind.to_string();
+    let user_text = input.runtime_input.task.user_text.to_ascii_lowercase();
+    let intent = StrategyIntent::from_user_text(&user_text);
 
-impl StrategySelector {
-    pub fn select(&self, input: StrategySelectionInput) -> StrategySelection {
-        let governor = LifeModelGovernor;
-        let governance_decision =
-            governor.govern_runtime_input(&input.runtime_input, input.local_model_available);
-        let has_hs_packet = input.runtime_input.hs_packet.is_some();
-        let task_kind = input.runtime_input.task.kind.to_string();
-        let user_text = input.runtime_input.task.user_text.to_ascii_lowercase();
-        let intent = StrategyIntent::from_user_text(&user_text);
-
-        let mut warnings = governance_decision.warnings.clone();
-        let mut risk_level = governance_decision.risk_level;
-        let (kind, reason_code, reason) = if governance_decision.kind
-            == GovernanceDecisionKind::Block
-        {
-            warnings.push("strategy selection blocked by governor".into());
-            (
-                choose_candidate_kind(intent, input.allow_planning),
-                "governance_blocked",
-                format!(
-                    "strategy selection blocked by governor: {}",
-                    governance_decision.reason
-                ),
-            )
-        } else if intent.planning && input.allow_planning {
-            (
-                RuntimeStrategyKind::PlanExecute,
-                "planning_intent_allowed",
-                "planning intent selected PlanExecute strategy".into(),
-            )
-        } else if intent.planning && !input.allow_planning {
-            warnings.push("planning disabled; falling back to ReAct strategy".into());
-            (
-                RuntimeStrategyKind::ReAct,
-                "planning_disabled_fallback",
-                "planning intent was detected but planning is disabled".into(),
-            )
-        } else if intent.write_like && input.allow_planning {
-            risk_level = max_risk(risk_level, RiskLevel::Medium);
-            (
-                RuntimeStrategyKind::PlanExecute,
-                "write_like_intent",
-                "write-like intent selected PlanExecute strategy for governed step planning".into(),
-            )
-        } else if intent.write_like {
-            risk_level = max_risk(risk_level, RiskLevel::Medium);
-            warnings.push("planning disabled; falling back to ReAct strategy".into());
-            (
-                RuntimeStrategyKind::ReAct,
-                "planning_disabled_fallback",
-                "write-like intent was detected but planning is disabled".into(),
-            )
-        } else if intent.tool_or_observation {
-            (
-                RuntimeStrategyKind::ReAct,
-                "tool_observation_react",
-                "tool or observation intent selected ReAct strategy".into(),
-            )
-        } else {
-            (
-                RuntimeStrategyKind::ReAct,
-                "default_react",
-                "simple chat selected ReAct strategy".into(),
-            )
-        };
-
-        let governance_decision_kind = governance_decision_kind_str(governance_decision.kind);
-        let report = selection_report(SelectionReportContext {
-            selected_kind: kind,
-            intent,
-            planning_allowed: input.allow_planning,
-            local_model_available: input.local_model_available,
-            has_hs_packet,
-            risk_level,
-            governance_decision_kind: governance_decision.kind,
-            reason_code,
-            warnings: &warnings,
-        });
-
-        StrategySelection {
-            kind,
-            reason,
-            governance_decision: Some(governance_decision.clone()),
-            metadata_safe_summary: selection_summary(
-                kind,
-                task_kind,
-                risk_level,
-                has_hs_packet,
-                governance_decision.kind,
-                reason_code,
+    let mut warnings = governance_decision.warnings.clone();
+    let mut risk_level = governance_decision.risk_level;
+    let (kind, reason_code, reason) = if governance_decision.kind == GovernanceDecisionKind::Block {
+        warnings.push("strategy selection blocked by governor".into());
+        (
+            choose_candidate_kind(intent, input.allow_planning),
+            "governance_blocked",
+            format!(
+                "strategy selection blocked by governor: {}",
+                governance_decision.reason
             ),
-            report: StrategySelectionReport {
-                governance_decision_kind: governance_decision_kind.into(),
-                ..report
-            },
-            warnings,
-        }
+        )
+    } else if intent.planning && input.allow_planning {
+        (
+            RuntimeStrategyKind::PlanExecute,
+            "planning_intent_allowed",
+            "planning intent selected PlanExecute strategy".into(),
+        )
+    } else if intent.planning && !input.allow_planning {
+        warnings.push("planning disabled; falling back to ReAct strategy".into());
+        (
+            RuntimeStrategyKind::ReAct,
+            "planning_disabled_fallback",
+            "planning intent was detected but planning is disabled".into(),
+        )
+    } else if intent.write_like && input.allow_planning {
+        risk_level = max_risk(risk_level, RiskLevel::Medium);
+        (
+            RuntimeStrategyKind::PlanExecute,
+            "write_like_intent",
+            "write-like intent selected PlanExecute strategy for governed step planning".into(),
+        )
+    } else if intent.write_like {
+        risk_level = max_risk(risk_level, RiskLevel::Medium);
+        warnings.push("planning disabled; falling back to ReAct strategy".into());
+        (
+            RuntimeStrategyKind::ReAct,
+            "planning_disabled_fallback",
+            "write-like intent was detected but planning is disabled".into(),
+        )
+    } else if intent.tool_or_observation {
+        (
+            RuntimeStrategyKind::ReAct,
+            "tool_observation_react",
+            "tool or observation intent selected ReAct strategy".into(),
+        )
+    } else {
+        (
+            RuntimeStrategyKind::ReAct,
+            "default_react",
+            "simple chat selected ReAct strategy".into(),
+        )
+    };
+
+    let governance_decision_kind = governance_decision_kind_str(governance_decision.kind);
+    let report = selection_report(SelectionReportContext {
+        selected_kind: kind,
+        intent,
+        planning_allowed: input.allow_planning,
+        local_model_available: input.local_model_available,
+        has_hs_packet,
+        risk_level,
+        governance_decision_kind: governance_decision.kind,
+        reason_code,
+        warnings: &warnings,
+    });
+
+    StrategySelection {
+        kind,
+        reason,
+        governance_decision: Some(governance_decision.clone()),
+        metadata_safe_summary: selection_summary(
+            kind,
+            task_kind,
+            risk_level,
+            has_hs_packet,
+            governance_decision.kind,
+            reason_code,
+        ),
+        report: StrategySelectionReport {
+            governance_decision_kind: governance_decision_kind.into(),
+            ..report
+        },
+        warnings,
     }
 }
 

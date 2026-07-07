@@ -39,7 +39,7 @@ use crate::agent::types::{
 };
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
-use crate::{agent::BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING, layer_router::Layer};
+use crate::{agent::BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING, layer::Layer};
 use anyhow::{anyhow, Result};
 use chrono::{TimeZone, Utc};
 use ring::digest::{digest, SHA256};

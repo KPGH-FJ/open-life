@@ -13,7 +13,7 @@ use openlife_core::agent::{
     RedactionLevel, RiskLevel, RuntimeGuidanceConsumptionMode, RuntimeInput,
     RuntimeStrategyRegistry,
 };
-use openlife_core::layer_router::Layer;
+use openlife_core::layer::Layer;
 use openlife_core::life_model::LifeModel;
 use openlife_core::llm::ChatMessage;
 use serde::{Deserialize, Serialize};

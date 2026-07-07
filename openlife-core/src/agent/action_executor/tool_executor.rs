@@ -21,6 +21,9 @@ use crate::agent::react_beta::{
     metadata_safe_text_digest, metadata_safe_text_preview, metadata_safe_value_digest,
     metadata_safe_value_preview,
 };
+use crate::agent::review_workflow::{
+    DurableWriteRequest, DurableWriteSource, DurableWriteSubject, ReviewWorkflow,
+};
 use crate::agent::types::{
     AgentAction, AgentObservation, AgentProposal, ProposalSource, ProposalType,
     ReactActionTraceEnvelope, RiskLevel, ToolActionScope,
@@ -1066,19 +1069,30 @@ impl super::ActionExecutor {
             proposal.run_id = Some(run_id.clone());
         }
 
-        if let Err(e) = proposal_store.create_proposal(&proposal) {
-            eprintln!(
-                "[warn] Failed to create ToolPermission Proposal for {}: {}",
-                tool_name, e
-            );
-            return None;
-        }
+        let outcome = match ReviewWorkflow::new(proposal_store).submit(
+            DurableWriteRequest::from_agent_proposal(
+                DurableWriteSource::ToolPermission,
+                DurableWriteSubject::ToolPermission,
+                proposal,
+                "Tool permission proposal is pending Review Center approval.",
+            ),
+        ) {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                eprintln!(
+                    "[warn] Failed to create ToolPermission Proposal for {}: {}",
+                    tool_name, e
+                );
+                return None;
+            }
+        };
 
         let mut result = self.build_proposal_required_action(
             request.clone(),
             &format!(
                 "{}: 已创建 ToolPermission 提案 (id: {})，请前往 Review Center 审批",
-                tool_name, proposal.id
+                tool_name,
+                outcome.proposal_id()
             ),
         );
         result.status = ActionExecutionStatus::NeedsConfirmation;
@@ -1093,18 +1107,21 @@ impl super::ActionExecutor {
                     "permission_decision".into(),
                     serde_json::json!("tool_permission_required"),
                 );
-                object.insert("proposalId".into(), serde_json::json!(proposal.id.clone()));
+                object.insert(
+                    "proposalId".into(),
+                    serde_json::json!(outcome.proposal_id()),
+                );
                 object.insert("directWritesExecuted".into(), serde_json::json!(false));
             }
         }
         if let Some(trace) = result.action.react_trace.as_mut() {
-            trace.proposal_id = Some(proposal.id.clone());
+            trace.proposal_id = Some(outcome.proposal_id().to_string());
             trace.status = "needs_confirmation".into();
             trace.permission_decision = Some("tool_permission_required".into());
             trace.action_category = "proposal".into();
         }
         if let Some(trace) = result.observation.react_trace.as_mut() {
-            trace.proposal_id = Some(proposal.id.clone());
+            trace.proposal_id = Some(outcome.proposal_id().to_string());
             trace.status = "needs_confirmation".into();
             trace.observation_status = Some("needs_confirmation".into());
             trace.permission_decision = Some("tool_permission_required".into());
@@ -1241,17 +1258,25 @@ impl super::ActionExecutor {
         if let Some(ref run_id) = request.source_run_id {
             proposal.run_id = Some(run_id.clone());
         }
-        let proposal_id = proposal.id.clone();
+        let outcome = match ReviewWorkflow::new(proposal_store).submit(
+            DurableWriteRequest::from_agent_proposal(
+                DurableWriteSource::ToolPermission,
+                DurableWriteSubject::ExternalWrite,
+                proposal,
+                "External write proposal is pending Review Center approval.",
+            ),
+        ) {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                eprintln!(
+                    "[warn] Failed to create ExternalWriteAction Proposal for {}: {}",
+                    tool_name, e
+                );
+                return None;
+            }
+        };
 
-        if let Err(e) = proposal_store.create_proposal(&proposal) {
-            eprintln!(
-                "[warn] Failed to create ExternalWriteAction Proposal for {}: {}",
-                tool_name, e
-            );
-            return None;
-        }
-
-        Some(Ok(proposal_id))
+        Some(Ok(outcome.proposal_id().to_string()))
     }
 }
 

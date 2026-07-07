@@ -1,6 +1,11 @@
 import { Link } from "react-router-dom";
 import type { ReactNode } from "react";
-import type { AppConfig, ModelRouterStatus, RouterStatus, SystemDiagnostics } from "../../../tauri";
+import type {
+  AppConfig,
+  ModelRouterStatus,
+  PolicyRouterStatus,
+  SystemDiagnostics,
+} from "../../../tauri";
 import {
   advancedRoutePath,
   diagnosticsUsageReadinessIssues,
@@ -15,7 +20,7 @@ interface AdvancedTabProps {
   config: AppConfig;
   setConfig: React.Dispatch<React.SetStateAction<AppConfig>>;
   diagnostics: SystemDiagnostics | null;
-  routerStatus: RouterStatus | null;
+  policyRouterStatus: PolicyRouterStatus | null;
   modelRouterStatus: ModelRouterStatus | null;
   showInternalDebug: boolean;
   pluginSection: ReactNode;
@@ -36,7 +41,7 @@ export default function AdvancedTab({
   config,
   setConfig,
   diagnostics,
-  routerStatus,
+  policyRouterStatus,
   modelRouterStatus,
   showInternalDebug,
   pluginSection,
@@ -79,30 +84,28 @@ export default function AdvancedTab({
       </section>
 
       <section className="space-y-4 border-t pt-4">
-        <h3 className="text-sm font-medium text-gray-700">ModelRouter internals</h3>
+        <h3 className="text-sm font-medium text-gray-700">PolicyRouter authority</h3>
         <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700 space-y-2">
           <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
             这些是诊断字段。普通任务应在 Chat 和 Runs 里看用户语言的路线解释。
           </div>
           <div className="flex items-center justify-between">
-            <span>当前后端</span>
-            <span className="font-medium uppercase">
-              {routerStatus?.active_backend ?? "unknown"}
-            </span>
+            <span>当前权威</span>
+            <span className="font-medium">{policyRouterStatus?.activeAuthority ?? "unknown"}</span>
           </div>
           <div className="flex items-center justify-between">
-            <span>ONNX 可用</span>
-            <span>{routerStatus?.onnx_available ? "是" : "否"}</span>
+            <span>旧 router 挂载</span>
+            <span>{policyRouterStatus?.appStateOldRoutersPresent ? "是" : "否"}</span>
           </div>
-          <div className="flex items-center justify-between">
-            <span>已自动降级</span>
-            <span>{routerStatus?.onnx_disabled ? "是" : "否"}</span>
+          <div className="text-xs leading-5 text-slate-600">
+            {(policyRouterStatus?.authorityChain ?? []).join(" -> ")}
           </div>
-          <div className="flex items-center justify-between">
-            <span>延迟阈值</span>
-            <span>
-              {routerStatus ? `${Math.round(routerStatus.latency_threshold_us / 1000)}ms` : "-"}
-            </span>
+          <div className="flex flex-wrap gap-1.5">
+            {(policyRouterStatus?.routeOutputs ?? []).map(output => (
+              <span key={output} className="rounded bg-white px-2 py-1 text-xs text-slate-600">
+                {output}
+              </span>
+            ))}
           </div>
         </div>
       </section>

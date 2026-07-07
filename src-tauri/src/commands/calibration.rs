@@ -1,7 +1,10 @@
 use crate::errors::AppError;
 use crate::AppState;
 use chrono::Datelike;
-use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
+use openlife_core::agent::{
+    AgentProposal, DurableWriteRequest, DurableWriteSource, DurableWriteSubject, ProposalSource,
+    ProposalType, ReviewWorkflow, RiskLevel,
+};
 use openlife_core::evolution::{EvolutionChange, MicroEvolutionEngine};
 use std::sync::Arc;
 use tauri::State;
@@ -276,11 +279,27 @@ async fn calibration_create_proposals_with_state(
             Ok(mut proposal) => {
                 proposal.run_id = Some(run_id.clone());
                 proposal.source_detail = Some("evolution".to_string());
-                let id = proposal.id.clone();
-                if let Err(e) = store.create_proposal(&proposal) {
+                if let Err(e) =
+                    crate::life_model_write_gateway::stamp_lifemodel_proposal_base_hash_with_state(
+                        state,
+                        &mut proposal,
+                    )
+                    .await
+                {
                     errors.push(format!("{}: {}", proposal.affected_path, e));
-                } else {
-                    created_ids.push(id);
+                    continue;
+                }
+                match ReviewWorkflow::new(&store).submit(
+                    DurableWriteRequest::from_agent_proposal(
+                        DurableWriteSource::Calibration,
+                        DurableWriteSubject::from_proposal_type(proposal.proposal_type),
+                        proposal.clone(),
+                        "Calibration proposal is pending Review Center approval.",
+                    )
+                    .with_evidence_refs(vec![change.dimension.clone()]),
+                ) {
+                    Ok(outcome) => created_ids.push(outcome.proposal_id().to_string()),
+                    Err(e) => errors.push(format!("{}: {}", proposal.affected_path, e)),
                 }
             }
             Err(e) => {
@@ -290,11 +309,11 @@ async fn calibration_create_proposals_with_state(
     }
 
     // Update AgentRun with generated proposal IDs and mark as completed
+    for pid in &created_ids {
+        agent_run.add_generated_proposal(pid);
+    }
     if let Some(ref store_arc) = state.agent_run_store {
         let store = store_arc.lock().await;
-        for pid in &created_ids {
-            let _ = store.add_generated_proposal(&run_id, pid);
-        }
         agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
         agent_run.finished_at = Some(chrono::Utc::now());
         let _ = store.update_run(&agent_run);
@@ -392,6 +411,50 @@ mod tests {
 
         let model = state.life_model_manager.lock().await.load().unwrap();
         assert!(model.is_effectively_empty());
+    }
+
+    #[tokio::test]
+    async fn phase4_calibration_created_ids_use_reused_review_workflow_outcome_id() {
+        let state = crate::test_utils::test_app_state();
+
+        let first = apply_calibration_with_state(vec![calibration_test_change()], None, &state)
+            .await
+            .unwrap();
+        let reused_id = first["created_ids"][0]
+            .as_str()
+            .expect("first created id")
+            .to_string();
+
+        let second = apply_calibration_with_state(vec![calibration_test_change()], None, &state)
+            .await
+            .unwrap();
+        assert_eq!(second["created_ids"][0].as_str(), Some(reused_id.as_str()));
+        let run_id = second["run_id"].as_str().expect("second run id");
+        let stored_run = state
+            .agent_run_store
+            .as_ref()
+            .expect("agent run store")
+            .lock()
+            .await
+            .get_run(run_id)
+            .unwrap()
+            .expect("calibration run exists");
+        assert_eq!(
+            stored_run.generated_proposals,
+            vec![reused_id.clone()],
+            "Calibration AgentRun must record the authoritative reused proposal id"
+        );
+
+        let proposals = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_pending_proposals(10)
+            .unwrap();
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].id, reused_id);
     }
 
     #[tokio::test]

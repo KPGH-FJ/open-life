@@ -4,7 +4,7 @@ use crate::agent::{
     AgentTaskKind, EvidenceQuery, EvidenceStore, HSSelector, HSSelectorInput, HeuristicStore,
     LifeEventDraft, RiskLevel, RuntimeInput, RuntimeOutput,
 };
-use crate::layer_router::Layer;
+use crate::layer::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
 use crate::privacy::PrivacyEngine;

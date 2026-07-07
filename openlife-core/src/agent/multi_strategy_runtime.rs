@@ -2,8 +2,9 @@ use crate::agent::governor::GovernanceDecisionKind;
 use crate::agent::plan_execute::PlanExecutionOutput;
 use crate::agent::runtime::{AgentRuntime, AgentRuntimeError};
 use crate::agent::runtime_contract::{RuntimeInput, RuntimeOutput};
-use crate::agent::strategy::{
-    RuntimeStrategyKind, StrategySelection, StrategySelectionInput, StrategySelector,
+use crate::agent::runtime_strategy_contract::{
+    select_historical_runtime_strategy, RuntimeStrategyKind, StrategySelection,
+    StrategySelectionInput,
 };
 use crate::agent::strategy_runtime::{
     PlanExecuteRuntimeStrategy, ReActRuntimeStrategy, RuntimeStrategyDescriptor,
@@ -39,7 +40,6 @@ pub struct MultiStrategyRuntimeOutput {
 }
 
 pub struct MultiStrategyRuntime {
-    selector: StrategySelector,
     strategies: RuntimeStrategyRegistry,
 }
 
@@ -49,24 +49,18 @@ impl MultiStrategyRuntime {
             .with_strategy(Box::new(ReActRuntimeStrategy::new(runtime)))
             .with_strategy(Box::new(PlanExecuteRuntimeStrategy::default()));
 
-        Self::with_strategy_registry(StrategySelector, strategies)
+        Self::with_strategy_registry(strategies)
     }
 
-    pub(crate) fn with_strategy_registry(
-        selector: StrategySelector,
-        strategies: RuntimeStrategyRegistry,
-    ) -> Self {
-        Self {
-            selector,
-            strategies,
-        }
+    pub(crate) fn with_strategy_registry(strategies: RuntimeStrategyRegistry) -> Self {
+        Self { strategies }
     }
 
     pub async fn execute(
         &self,
         input: MultiStrategyRuntimeInput,
     ) -> Result<MultiStrategyRuntimeOutput, AgentRuntimeError> {
-        let selection = self.selector.select(StrategySelectionInput {
+        let selection = select_historical_runtime_strategy(StrategySelectionInput {
             runtime_input: input.runtime_input.clone(),
             allow_planning: input.allow_planning,
             local_model_available: input.local_model_available,

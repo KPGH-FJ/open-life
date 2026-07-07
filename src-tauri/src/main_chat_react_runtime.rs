@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use openlife_core::layer_router::Layer;
+use openlife_core::layer::Layer;
 use openlife_core::life_model::LifeModel;
 use openlife_core::llm::ChatMessage;
 use openlife_core::privacy::PrivacyEngine;
@@ -239,7 +239,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
         }));
     let mut plan_metadata = serde_json::json!({
         "agentLoopAttempted": true,
-        "singleStepFallbackAvailable": true,
+        "structuredBlockerOnFailure": true,
         "allowWrites": false,
         "allowCloud": allow_cloud,
         "localOnlyRequired": local_only_required,
@@ -461,7 +461,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             let metadata = serde_json::json!({
                 "agentLoopAttempted": true,
                 "agentLoopSucceeded": false,
-                "singleStepFallbackUsed": true,
+                "singleStepFallbackUsed": false,
                 "modelErrorDigest": model_error_digest,
                 "directWritesExecuted": false,
             });
@@ -470,7 +470,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                     state,
                     Some(task_session_id),
                     ExecutionTranscriptEntryKind::Error,
-                    "Governed ReAct AgentLoop failed before execution; single-step fallback remains available.",
+                    "Governed ReAct AgentLoop failed before execution; returning a structured blocker.",
                     metadata.clone(),
                 )
                 .await,
@@ -500,7 +500,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                         let metadata = serde_json::json!({
                             "agentLoopAttempted": true,
                             "agentLoopSucceeded": false,
-                            "singleStepFallbackUsed": true,
+                            "singleStepFallbackUsed": false,
                             "modelErrorDigest": model_error_digest,
                             "directWritesExecuted": false,
                         });
@@ -509,7 +509,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                                 state,
                                 Some(task_session_id),
                                 ExecutionTranscriptEntryKind::Error,
-                                "Governed ReAct AgentLoop could not prepare file permission; single-step fallback remains available.",
+                                "Governed ReAct AgentLoop could not prepare file permission; returning a structured blocker.",
                                 metadata.clone(),
                             )
                             .await,
@@ -533,7 +533,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                         let metadata = serde_json::json!({
                             "agentLoopAttempted": true,
                             "agentLoopSucceeded": false,
-                            "singleStepFallbackUsed": true,
+                            "singleStepFallbackUsed": false,
                             "modelErrorDigest": model_error_digest,
                             "directWritesExecuted": false,
                         });
@@ -542,7 +542,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                                 state,
                                 Some(task_session_id),
                                 ExecutionTranscriptEntryKind::Error,
-                                "Governed ReAct AgentLoop could not prepare MCP wrapper permission; single-step fallback remains available.",
+                                "Governed ReAct AgentLoop could not prepare MCP wrapper permission; returning a structured blocker.",
                                 metadata.clone(),
                             )
                             .await,
@@ -560,7 +560,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                 let metadata = serde_json::json!({
                     "agentLoopAttempted": true,
                     "agentLoopSucceeded": false,
-                    "singleStepFallbackUsed": true,
+                    "singleStepFallbackUsed": false,
                     "modelErrorDigest": model_error_digest,
                     "directWritesExecuted": false,
                 });
@@ -569,7 +569,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                         state,
                         Some(task_session_id),
                         ExecutionTranscriptEntryKind::Error,
-                        "Governed ReAct AgentLoop could not create file permission context; single-step fallback remains available.",
+                        "Governed ReAct AgentLoop could not create file permission context; returning a structured blocker.",
                         metadata.clone(),
                     )
                     .await,
@@ -692,7 +692,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                 let mut metadata = serde_json::json!({
                     "agentLoopAttempted": true,
                     "agentLoopSucceeded": false,
-                    "singleStepFallbackUsed": true,
+                    "singleStepFallbackUsed": false,
                     "plannedActionObserved": false,
                     "modelSelectedAllowedTool": false,
                     "toolSelectionCandidateCount": agent_loop_plan.tool_candidate_count(),
@@ -710,7 +710,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                         state,
                         Some(task_session_id),
                         ExecutionTranscriptEntryKind::Error,
-                        "Governed ReAct AgentLoop did not observe the planned action; single-step fallback remains available.",
+                        "Governed ReAct AgentLoop did not observe the planned action; returning a structured blocker.",
                         metadata.clone(),
                     )
                     .await,
@@ -999,7 +999,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             let metadata = serde_json::json!({
                 "agentLoopAttempted": true,
                 "agentLoopSucceeded": false,
-                "singleStepFallbackUsed": true,
+                "singleStepFallbackUsed": false,
                 "modelErrorDigest": model_error_digest,
                 "directWritesExecuted": false,
             });
@@ -1008,7 +1008,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                     state,
                     Some(task_session_id),
                     ExecutionTranscriptEntryKind::Error,
-                    "Governed ReAct AgentLoop failed; single-step fallback remains available.",
+                    "Governed ReAct AgentLoop failed; returning a structured blocker.",
                     metadata.clone(),
                 )
                 .await,

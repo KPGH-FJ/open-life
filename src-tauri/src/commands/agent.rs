@@ -307,11 +307,19 @@ pub async fn replay_agent_action(
         if !proposals.is_empty() {
             let proposal_store = proposal_store_arc.lock().await;
             for proposal in proposals {
-                let proposal_id = proposal.id.clone();
-                proposal_store
-                    .create_proposal(&proposal)
+                let outcome = openlife_core::agent::ReviewWorkflow::new(&proposal_store)
+                    .submit(
+                        openlife_core::agent::DurableWriteRequest::from_agent_proposal(
+                            openlife_core::agent::DurableWriteSource::ManualOverride,
+                            openlife_core::agent::DurableWriteSubject::from_proposal_type(
+                                proposal.proposal_type,
+                            ),
+                            proposal,
+                            "Agent command proposal is pending Review Center approval.",
+                        ),
+                    )
                     .map_err(AppError::from)?;
-                run.add_generated_proposal(&proposal_id);
+                run.add_generated_proposal(outcome.proposal_id());
             }
         }
     }

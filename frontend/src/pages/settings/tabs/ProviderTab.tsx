@@ -1,5 +1,10 @@
 import ProviderConfigSection from "../ProviderConfigSection";
-import type { AppConfig, ModelRouterStatus, RouterStatus, SystemDiagnostics } from "../../../tauri";
+import type {
+  AppConfig,
+  ModelRouterStatus,
+  PolicyRouterStatus,
+  SystemDiagnostics,
+} from "../../../tauri";
 import { CapabilityCard, StatusChip } from "../../../components/product/ProductPrimitives";
 import { buildProviderReadinessView } from "../../../utils/providerReadiness";
 
@@ -7,7 +12,7 @@ interface ProviderTabProps {
   config: AppConfig;
   setConfig: React.Dispatch<React.SetStateAction<AppConfig>>;
   diagnostics: SystemDiagnostics | null;
-  routerStatus: RouterStatus | null;
+  policyRouterStatus: PolicyRouterStatus | null;
   modelRouterStatus: ModelRouterStatus | null;
   showInternalDebug?: boolean;
   onProviderValidationChanged?: () => Promise<unknown> | unknown;
@@ -25,7 +30,7 @@ export default function ProviderTab({
   config,
   setConfig,
   diagnostics,
-  routerStatus,
+  policyRouterStatus,
   modelRouterStatus,
   onProviderValidationChanged,
 }: ProviderTabProps) {
@@ -102,11 +107,14 @@ export default function ProviderTab({
         </CapabilityCard>
         <CapabilityCard
           title="自动路由"
-          description="路线选择会写入 AgentRun，并在 Chat / Runs 里展示。"
+          description="Main Chat 产品路线由 IntentFrame + PolicyRouter 决定。"
           tone={modelRouterStatus?.enabled ? "ready" : "info"}
-          meta={modelRouterStatus?.enabled ? "已启用" : "灰度"}
+          meta={policyRouterStatus?.activeAuthority ?? "PolicyRouter"}
         >
-          <StatusChip label={routerStatus?.active_backend ?? "router"} tone="info" />
+          <StatusChip
+            label={policyRouterStatus?.appStateOldRoutersPresent ? "legacy mounted" : "single"}
+            tone={policyRouterStatus?.appStateOldRoutersPresent ? "warning" : "ready"}
+          />
         </CapabilityCard>
         <CapabilityCard
           title="云端模型"

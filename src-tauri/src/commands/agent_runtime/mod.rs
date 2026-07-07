@@ -13,7 +13,7 @@ use openlife_core::agent::{
     RuntimeStrategySideEffectBudget, ToolRegistryBetaReadinessReport,
     DEFAULT_CONTROLLED_CHAT_PILOT_REQUIRED_CLEAN_RUNS,
 };
-use openlife_core::layer_router::Layer;
+use openlife_core::layer::Layer;
 use openlife_core::llm::ChatMessage;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

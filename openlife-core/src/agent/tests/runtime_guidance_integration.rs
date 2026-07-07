@@ -6,7 +6,7 @@ use crate::agent::{
     PlanExecuteService, PolicyStore, PolicyTopic, RiskLevel, RuntimeGuidanceConsumptionMode,
     RuntimeHSPacket, RuntimeInput,
 };
-use crate::layer_router::Layer;
+use crate::layer::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
 use crate::privacy::PrivacyEngine;

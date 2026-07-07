@@ -111,10 +111,10 @@ pub(crate) async fn get_main_chat_runtime_status_with_state(
 
     MainChatRuntimeStatus {
         status_version: 2,
-        authoritative_runtime: "main_chat_kernel",
-        default_send_path: "main_chat_kernel",
-        start_stream_path: "main_chat_kernel",
-        source_of_truth: "main_chat_turn_pipeline",
+        authoritative_runtime: "OpenLifeTurnRuntime",
+        default_send_path: "OpenLifeTurnRuntime",
+        start_stream_path: "OpenLifeTurnRuntime",
+        source_of_truth: "main_chat_turn_runtime",
         kernel_evidence,
         latest_route_evidence,
         legacy_fallback: MainChatLegacyFallbackStatus {
@@ -148,21 +148,17 @@ fn latest_route_evidence_status(
     let kernel_backed_default = route.kernel_supported
         && matches!(
             route.execution_path.as_str(),
-            "KernelDirect"
-                | "KernelReadTool"
-                | "KernelWriteOutcome"
-                | "PlanExecute"
-                | "GovernedBlocker"
+            "DirectAnswer" | "ReadOnlyTool" | "WriteOutcome" | "PlanExecute" | "GovernedBlocker"
         )
         && !route.legacy_fallback_used;
     let direct_answer_observed = kernel_backed_default
-        && route.execution_path == "KernelDirect"
-        && route.reason_code == "kernel_supported_direct_answer"
+        && route.execution_path == "DirectAnswer"
+        && route.reason_code == "openlife_runtime_direct_answer"
         && route.kernel_event_count.is_some();
     let governed_blocker_observed = kernel_backed_default
         && route.execution_path == "GovernedBlocker"
-        && route.reason_code == "kernel_governed_blocker";
-    let agent_loop_observed = route.execution_path == "ToolLoop"
+        && route.reason_code == "openlife_runtime_governed_blocker";
+    let agent_loop_observed = route.execution_path == "ReadOnlyTool"
         && route.observed_agent_loop
         && route.observed_agent_loop_without_fallback
         && !route.legacy_fallback_used;

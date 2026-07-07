@@ -1,12 +1,9 @@
 use openlife_core::life_model::LifeModel;
 use openlife_core::llm::ChatMessage;
-use openlife_core::router::RouterStatus;
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
 
-use crate::legacy_write_convergence::{
-    ensure_lifemodel_materializer_caller_restriction, LifeModelMaterializerCallerContext,
-};
+use crate::legacy_write_convergence::LifeModelMaterializerCallerContext;
 
 pub mod a2a_server;
 pub mod a2a_sidecar;
@@ -14,6 +11,7 @@ pub mod bootstrap;
 pub mod commands;
 pub mod errors;
 pub(crate) mod legacy_write_convergence;
+pub(crate) mod life_model_write_gateway;
 #[allow(dead_code)]
 pub(crate) mod main_chat_agent_beta_v1_default_experience;
 #[allow(dead_code)]
@@ -41,7 +39,6 @@ pub(crate) mod main_chat_generation_support;
 pub(crate) mod main_chat_hs_runtime;
 #[allow(dead_code)]
 pub(crate) mod main_chat_kernel;
-pub(crate) mod main_chat_legacy_agent_loop;
 #[allow(dead_code)]
 pub(crate) mod main_chat_live_productization_eval;
 pub(crate) mod main_chat_live_provider_harness;
@@ -55,7 +52,6 @@ pub(crate) mod main_chat_proposal_support;
 pub(crate) mod main_chat_react_execution;
 pub(crate) mod main_chat_react_runtime;
 pub(crate) mod main_chat_react_tool_selection;
-pub(crate) mod main_chat_route_preview;
 #[allow(dead_code)]
 pub(crate) mod main_chat_runtime_facts;
 pub(crate) mod main_chat_runtime_status;
@@ -67,13 +63,13 @@ pub(crate) mod main_chat_stage4_memory_knowledge;
 pub(crate) mod main_chat_stage5_release_debug;
 #[allow(dead_code)]
 pub(crate) mod main_chat_step6_product_acceptance;
-pub(crate) mod main_chat_strategy;
 pub(crate) mod main_chat_streaming;
 #[allow(dead_code)]
 pub(crate) mod main_chat_task_continuity_eval;
 pub(crate) mod main_chat_task_controls;
-pub(crate) mod main_chat_tool_loop;
 pub(crate) mod main_chat_turn_pipeline;
+pub mod main_chat_turn_runtime;
+pub(crate) mod memory_gateway;
 pub(crate) mod provider_validation;
 pub mod runtime_build_info;
 pub mod scheduler_runner;
@@ -209,7 +205,7 @@ use commands::chat::{
     rename_chat_session, save_chat_message,
 };
 use commands::diagnostics::{
-    check_ollama_status, get_router_status, get_runtime_build_info, get_scheduler_config,
+    check_ollama_status, get_policy_router_status, get_runtime_build_info, get_scheduler_config,
     get_system_diagnostics, set_scheduler_config,
 };
 use commands::execution::{
@@ -321,6 +317,8 @@ pub struct SendMessageResult {
     pub legacy_runtime_invoked: bool,
     pub model_invoked: bool,
     pub tool_invoked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_terminal: Option<crate::main_chat_turn_runtime::OpenLifeTurnTerminal>,
 }
 
 #[derive(serde::Serialize)]
@@ -341,7 +339,7 @@ pub struct OllamaModelInfo {
 
 #[derive(serde::Serialize)]
 pub struct SystemDiagnostics {
-    pub router: RouterStatus,
+    pub policy_router: crate::commands::diagnostics::PolicyRouterStatus,
     pub mcp_server_count: usize,
     pub mcp_tool_count: usize,
     pub mcp_recent_audit_count: usize,
@@ -389,36 +387,17 @@ pub struct SystemDiagnostics {
 
 pub(crate) async fn persist_life_model(
     state: &Arc<AppState>,
-    mut life_model: LifeModel,
+    life_model: LifeModel,
     create_daily_snapshot: bool,
     caller_context: LifeModelMaterializerCallerContext,
 ) -> Result<LifeModel, String> {
-    ensure_lifemodel_materializer_caller_restriction(&caller_context, "persist_life_model")?;
-    let previous_model = {
-        let manager = state.life_model_manager.lock().await;
-        manager.load().ok()
-    };
-    openlife_core::versioning::prepare_model_for_save(previous_model.as_ref(), &mut life_model);
-    {
-        let manager = state.life_model_manager.lock().await;
-        manager.save(&life_model).map_err(|e| e.to_string())?;
-    }
-    if create_daily_snapshot {
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let should_snapshot = {
-            let vm = state.version_manager.lock().await;
-            !vm.has_snapshot_tag_on_date("auto:daily-save", &today)
-                .map_err(|e| e.to_string())?
-        };
-        if should_snapshot {
-            let vm = state.version_manager.lock().await;
-            vm.snapshot(&life_model, "auto:daily-save", "当日首次保存自动快照")
-                .map_err(|e| e.to_string())?;
-            let mut last_snapshot_date = state.last_snapshot_date.lock().await;
-            *last_snapshot_date = Some(today);
-        }
-    }
-    Ok(life_model)
+    life_model_write_gateway::persist_life_model_with_gateway(
+        state,
+        life_model,
+        create_daily_snapshot,
+        caller_context,
+    )
+    .await
 }
 #[tauri::command]
 async fn send_message(
@@ -849,7 +828,7 @@ pub fn run() {
             get_system_diagnostics,
             get_runtime_build_info,
             check_ollama_status,
-            get_router_status,
+            get_policy_router_status,
             get_model_router_status,
             get_scheduler_config,
             set_scheduler_config,

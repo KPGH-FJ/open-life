@@ -4,7 +4,7 @@ use crate::agent::action_executor::{
 use crate::agent::runtime::{AgentRuntime, AgentRuntimeOutput};
 use crate::agent::types::{AgentObservation, AgentRun, AgentRunError, AgentRunStatus, AgentTask};
 use crate::agent::{RuntimeGuidanceConsumptionMode, RuntimeHSPacket, RuntimeInput, RuntimeOutput};
-use crate::layer_router::Layer;
+use crate::layer::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
 use crate::privacy::PrivacyEngine;
@@ -2011,7 +2011,7 @@ mod tests {
             session_id: "s1".into(),
             user_text: "帮我查天气".into(),
             messages: vec![],
-            layer: crate::layer_router::Layer::L2,
+            layer: crate::layer::Layer::L2,
         };
         let obs = vec![AgentObservation {
             id: "obs-1".into(),
@@ -2043,7 +2043,7 @@ mod tests {
             session_id: "s1".into(),
             user_text: "hello".into(),
             messages: vec![],
-            layer: crate::layer_router::Layer::L2,
+            layer: crate::layer::Layer::L2,
         };
 
         let messages = agent.build_follow_up_messages(&task, "Hi there!", &[], "可用工具: echo");
@@ -2071,7 +2071,7 @@ mod tests {
                     content: "你好！有什么可以帮你的？".into(),
                 },
             ],
-            layer: crate::layer_router::Layer::L2,
+            layer: crate::layer::Layer::L2,
         };
 
         let obs = vec![AgentObservation {

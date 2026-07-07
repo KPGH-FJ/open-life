@@ -8,7 +8,7 @@ use crate::agent::{
     behavior_checks_for_packet, HSBehaviorCheckSummary, HSSelectionAudit,
     RuntimeGuidanceConsumptionMode, RuntimeHSPacket, RuntimeInput, RuntimeOutput,
 };
-use crate::layer_router::Layer;
+use crate::layer::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
 use crate::scheduler::InferenceScheduler;
@@ -531,7 +531,7 @@ impl std::error::Error for AgentRuntimeError {}
 mod tests {
     use super::*;
     use crate::agent::types::{AgentTask, AgentTaskKind};
-    use crate::layer_router::Layer;
+    use crate::layer::Layer;
     use crate::life_model::LifeModel;
     use crate::llm::ChatMessage;
     use crate::privacy::PrivacyEngine;

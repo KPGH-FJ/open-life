@@ -6,14 +6,12 @@ use crate::a2a_sidecar;
 use openlife_core::builder::{BuilderSession, BuilderSessionStore};
 use openlife_core::config::AppConfig;
 use openlife_core::feedback::FeedbackStore;
-use openlife_core::layer_router::LayerRouter;
 use openlife_core::life_model::LifeModelManager;
 use openlife_core::mcp::McpRegistry;
 use openlife_core::mcp_audit::McpAuditStore;
 use openlife_core::memory::MemoryStore;
 use openlife_core::memory_cache::SharedHotCache;
 use openlife_core::privacy::PrivacyEngine;
-use openlife_core::router::IntentRouter;
 use openlife_core::scheduler::InferenceScheduler;
 use openlife_core::vectors::VectorStore;
 use openlife_core::versioning::VersionManager;
@@ -103,8 +101,6 @@ pub struct AppState {
     pub life_model_manager: Arc<Mutex<LifeModelManager>>,
     pub memory_store: Arc<Mutex<MemoryStore>>,
     pub mcp_registry: Arc<Mutex<McpRegistry>>,
-    pub intent_router: Arc<Mutex<IntentRouter>>,
-    pub layer_router: Arc<Mutex<LayerRouter>>,
     pub scheduler: Arc<Mutex<InferenceScheduler>>,
     pub privacy_engine: Arc<Mutex<PrivacyEngine>>,
     pub version_manager: Arc<Mutex<VersionManager>>,

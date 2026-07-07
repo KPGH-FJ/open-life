@@ -1,8 +1,9 @@
 use crate::errors::AppError;
 use crate::legacy_write_convergence::{
-    ensure_lifemodel_materializer_caller_restriction, LifeModelMaterializerCallerContext,
-    LifeModelMaterializerCallerKind, LifeModelMaterializerCallerPurpose,
+    LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
+    LifeModelMaterializerCallerPurpose,
 };
+use crate::life_model_write_gateway;
 use crate::AppState;
 use openlife_core::versioning::LifeModelVersion;
 use serde::{Deserialize, Serialize};
@@ -161,19 +162,16 @@ async fn restore_snapshot_governed_operation(
         != serde_json::to_value(&restored_model).map_err(AppError::from)?;
     let restored_model_version = restored_model.metadata.version.clone();
     let restored_model_hash = hash_life_model(&restored_model)?;
-    ensure_lifemodel_materializer_caller_restriction(
-        &LifeModelMaterializerCallerContext::new(
+    life_model_write_gateway::restore_life_model_with_gateway(
+        state,
+        &restored_model,
+        LifeModelMaterializerCallerContext::new(
             "snapshot_restore_governed_operation",
             LifeModelMaterializerCallerKind::GovernedRestoreImportOperation,
             LifeModelMaterializerCallerPurpose::GovernedRestoreImportOperation,
         ),
-        "LifeModelManager::save",
     )
-    .map_err(AppError::from)?;
-    {
-        let manager = state.life_model_manager.lock().await;
-        manager.save(&restored_model).map_err(AppError::from)?;
-    }
+    .await?;
 
     ensure_snapshot_restore_response_metadata_safe(serde_json::json!({
         "success": true,

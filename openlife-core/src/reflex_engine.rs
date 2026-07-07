@@ -5,9 +5,19 @@ use std::time::Instant;
 use tokenizers::Tokenizer;
 use tract_onnx::prelude::*;
 
-use crate::router::Intent;
-
 type TypedPlan = SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReflexIntentSignal {
+    Greeting,
+    Goodbye,
+    Help,
+    LifeModelQuery,
+    SmallTalk,
+    ToolRequest,
+    Sensitive,
+    Complex,
+}
 
 pub struct ReflexEngine {
     model: TypedPlan,
@@ -37,8 +47,8 @@ impl ReflexEngine {
         })
     }
 
-    /// Try to classify using ONNX. Returns (Intent, latency_us).
-    pub fn classify(&self, text: &str) -> Result<(Intent, u64)> {
+    /// Try to classify using ONNX. Returns (reflex signal, latency_us).
+    pub fn classify(&self, text: &str) -> Result<(ReflexIntentSignal, u64)> {
         let start = Instant::now();
         let encoding = self
             .tokenizer
@@ -96,16 +106,16 @@ impl ReflexEngine {
         Ok((intent, latency))
     }
 
-    fn label_to_intent(label: &str) -> Intent {
+    fn label_to_intent(label: &str) -> ReflexIntentSignal {
         match label {
-            "greeting" => Intent::Greeting,
-            "goodbye" => Intent::Goodbye,
-            "help" => Intent::Help,
-            "life_model_query" => Intent::LifeModelQuery,
-            "small_talk" => Intent::SmallTalk,
-            "tool_request" => Intent::ToolRequest,
-            "sensitive" => Intent::Sensitive,
-            _ => Intent::Complex,
+            "greeting" => ReflexIntentSignal::Greeting,
+            "goodbye" => ReflexIntentSignal::Goodbye,
+            "help" => ReflexIntentSignal::Help,
+            "life_model_query" => ReflexIntentSignal::LifeModelQuery,
+            "small_talk" => ReflexIntentSignal::SmallTalk,
+            "tool_request" => ReflexIntentSignal::ToolRequest,
+            "sensitive" => ReflexIntentSignal::Sensitive,
+            _ => ReflexIntentSignal::Complex,
         }
     }
 

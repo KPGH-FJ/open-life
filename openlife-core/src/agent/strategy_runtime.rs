@@ -2,7 +2,7 @@ use crate::agent::governor::LifeModelGovernor;
 use crate::agent::plan_execute::{PlanExecuteInput, PlanExecuteService, PlanExecutionOutput};
 use crate::agent::runtime::{AgentRuntime, AgentRuntimeError};
 use crate::agent::runtime_contract::{RuntimeInput, RuntimeOutput};
-use crate::agent::strategy::{RuntimeStrategyKind, StrategySelection};
+use crate::agent::runtime_strategy_contract::{RuntimeStrategyKind, StrategySelection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
