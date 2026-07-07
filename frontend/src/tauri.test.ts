@@ -11,13 +11,32 @@ import {
   editProposal,
   getStateHistory,
   recordState,
+  getMainChatRuntimeStatus,
+  clearMainChatSkill,
+  getMainChatSkillDetail,
+  listMainChatSkills,
+  listMainChatToolCandidates,
+  rollbackManagedKnowledgeWrite,
+  selectMainChatSkill,
+  listMainChatAgentEvents,
+  getMainChatAgentStateSnapshot,
+  restoreArchivedChunks,
+  restoreSnapshot,
+  saveChatMessage,
+  startStreamMessage,
+  importAllData,
+  redactInvokeArgs,
+  saveConfig,
+  sendMessageV2,
+  executeToolCall,
+} from "./tauri";
+import {
   checkControlledChatPilotEligibility,
   checkControlledChatCutoverReadiness,
   checkControlledChatCutoverCandidatePromotionReadiness,
   checkControlledChatMigrationImplementationGate,
   checkControlledPilotPromotionReadiness,
   checkRuntimeMigrationGate,
-  getMainChatRuntimeStatus,
   getRuntimeStrategyRegistryStatus,
   draftControlledChatMigrationPlan,
   getControlledChatCutoverCandidateReviewSummary,
@@ -34,10 +53,6 @@ import {
   runMainChatAgentStage1DogfoodGate,
   runMainChatAgentStage2ReadinessGate,
   validateMainChatAgentStage2ManualDogfoodArtifact,
-  clearMainChatSkill,
-  getMainChatSkillDetail,
-  listMainChatSkills,
-  listMainChatToolCandidates,
   runMainChatExternalLiveProductizationGate,
   runMainChatAgentProductMaturityV2FinalReadinessGate,
   runMainChatAgentProductMaturityV2EventGate,
@@ -57,20 +72,7 @@ import {
   deleteMainChatInternalIssueReport,
   runMainChatStage5ReleaseDebugReport,
   listStage4KnowledgeAssetInventory,
-  rollbackManagedKnowledgeWrite,
-  selectMainChatSkill,
-  listMainChatAgentEvents,
-  getMainChatAgentStateSnapshot,
-  restoreArchivedChunks,
-  restoreSnapshot,
-  saveChatMessage,
-  startStreamMessage,
-  importAllData,
-  redactInvokeArgs,
-  saveConfig,
-  sendMessageV2,
-  executeToolCall,
-} from "./tauri";
+} from "./tauriDev";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -636,7 +638,7 @@ describe("tauri command argument aliases", () => {
 
     const result = await runMainChatAgentProductizationV1Gate();
 
-    expect(invoke).toHaveBeenCalledWith("run_main_chat_agent_productization_v1_gate", undefined);
+    expect(invoke).toHaveBeenCalledWith("run_main_chat_runtime_contract_gate", undefined);
     expect(result.finalReadinessReady).toBe(true);
     expect(result.fullProductizationV1Complete).toBe(true);
     expect(result.futureWork).toEqual([]);
@@ -695,7 +697,7 @@ describe("tauri command argument aliases", () => {
 
     expect(invoke).toHaveBeenCalledWith("run_main_chat_stage3_execution_ux_report", undefined);
     expect(result.totalScenarioCount).toBe(13);
-    expect(result.coverage.map(row => row.scenarioId)).toContain("UX3-13");
+    expect(result.coverage.map((row: any) => row.scenarioId)).toContain("UX3-13");
     expect(result.readyForLimitedInternalTrial).toBe(false);
     expect(result.readinessRecommendation).toBe("not_ready_for_limited_internal_trial");
     expect(result.nonGoals).toContain("manual_dogfood_rows_not_run_or_fabricated");
@@ -1410,9 +1412,9 @@ describe("tauri command argument aliases", () => {
     expect(result.productMaturityPhaseCounts[0]?.scenarioCount).toBe(9);
     expect(result.defaultRealTaskPassedCount).toBe(28);
     expect(result.productMaturityDefaultScenarioCount).toBe(43);
-    expect(result.readinessDimensions.some(dimension => dimension.dimension === "Routing")).toBe(
-      true
-    );
+    expect(
+      result.readinessDimensions.some((dimension: any) => dimension.dimension === "Routing")
+    ).toBe(true);
   });
 
   it("invokes Main Chat Agent Stage 2 readiness gate with manual and live blockers", async () => {
@@ -1689,14 +1691,19 @@ describe("tauri command argument aliases", () => {
     expect(result.manualDogfood.requiredScenarioCount).toBe(24);
     expect(result.liveProvider.requiredScenarioCount).toBe(10);
     expect(result.liveProvider.scenarioPlans).toHaveLength(10);
-    const l205 = result.liveProvider.scenarioReports.find(row => row.scenarioId === "L2-L05");
+    const l205 = result.liveProvider.scenarioReports.find(
+      (row: any) => row.scenarioId === "L2-L05"
+    );
     expect(l205?.credited).toBe(false);
     expect(l205?.blockers).toContain("live_provider_model_ranked_selection_trace_missing");
-    const r201 = result.failureRecovery.coverage.find(row => row.id === "R2-01");
+    const r201 = result.failureRecovery.coverage.find((row: any) => row.id === "R2-01");
     expect(r201?.evidence).toContain("missing_workspace_file_blocker");
-    expect(r201?.evidence.some(evidence => evidence.includes("success"))).toBe(false);
+    expect(r201?.evidence.some((evidence: string) => evidence.includes("success"))).toBe(false);
     const requiredEvidenceByScenario = Object.fromEntries(
-      result.liveProvider.scenarioPlans.map(plan => [plan.scenarioId, plan.requiredRuntimeEvidence])
+      result.liveProvider.scenarioPlans.map((plan: any) => [
+        plan.scenarioId,
+        plan.requiredRuntimeEvidence,
+      ])
     );
     expect(requiredEvidenceByScenario["L2-L01"]).toEqual([
       "provider_model_identity",
@@ -1750,7 +1757,7 @@ describe("tauri command argument aliases", () => {
       "no_fake_final_done",
     ]);
     expect(
-      result.liveProvider.scenarioPlans.find(plan => plan.scenarioId === "L2-L03")
+      result.liveProvider.scenarioPlans.find((plan: any) => plan.scenarioId === "L2-L03")
     ).toMatchObject({
       scenarioSetup: "web_network_policy_disabled",
       executionSource: "stage2_live_web_policy_runner",
@@ -1758,7 +1765,7 @@ describe("tauri command argument aliases", () => {
       failClosedBlocker: "live_provider_web_policy_bypass",
     });
     expect(
-      result.liveProvider.scenarioPlans.find(plan => plan.scenarioId === "L2-L02")
+      result.liveProvider.scenarioPlans.find((plan: any) => plan.scenarioId === "L2-L02")
     ).toMatchObject({
       scenarioSetup: "seeded_workspace_file_or_missing_file_fixture",
       executionSource: "stage2_live_file_read_runner",
@@ -1766,7 +1773,7 @@ describe("tauri command argument aliases", () => {
       failClosedBlocker: "live_provider_read_action_missing",
     });
     expect(
-      result.liveProvider.scenarioPlans.find(plan => plan.scenarioId === "L2-L10")
+      result.liveProvider.scenarioPlans.find((plan: any) => plan.scenarioId === "L2-L10")
     ).toMatchObject({
       scenarioSetup: "induced_bad_tool_or_safe_tool_failure",
       executionSource: "stage2_live_failure_recovery_runner",
@@ -1774,7 +1781,7 @@ describe("tauri command argument aliases", () => {
       failClosedBlocker: "live_provider_failure_hidden",
     });
     expect(
-      result.liveProvider.scenarioPlans.find(plan => plan.scenarioId === "L2-L09")
+      result.liveProvider.scenarioPlans.find((plan: any) => plan.scenarioId === "L2-L09")
     ).toMatchObject({
       scenarioSetup: "pending_safe_read_permission_denial",
       executionSource: "stage2_live_permission_denial_runner",
@@ -1782,7 +1789,7 @@ describe("tauri command argument aliases", () => {
       failClosedBlocker: "live_provider_permission_denial_bypassed",
     });
     expect(
-      result.liveProvider.scenarioPlans.find(plan => plan.scenarioId === "L2-L08")
+      result.liveProvider.scenarioPlans.find((plan: any) => plan.scenarioId === "L2-L08")
     ).toMatchObject({
       scenarioSetup: "memory_proposal_enabled_no_auto_materialization",
       executionSource: "stage2_live_memory_proposal_runner",
@@ -1790,7 +1797,7 @@ describe("tauri command argument aliases", () => {
       failClosedBlocker: "live_provider_memory_proposal_missing",
     });
     expect(
-      result.liveProvider.scenarioPlans.find(plan => plan.scenarioId === "L2-L07")
+      result.liveProvider.scenarioPlans.find((plan: any) => plan.scenarioId === "L2-L07")
     ).toMatchObject({
       scenarioSetup: "two_safe_read_sources_available",
       executionSource: "stage2_live_multistep_react_runner",
@@ -1799,13 +1806,13 @@ describe("tauri command argument aliases", () => {
     });
     expect(result.controlPlane.ready).toBe(true);
     expect(result.safety.silentDurableWriteCount).toBe(0);
-    expect(result.artifacts.map(artifact => artifact.kind)).toEqual([
+    expect(result.artifacts.map((artifact: any) => artifact.kind)).toEqual([
       "stage1_browser_dogfood",
       "manual_dogfood",
       "live_provider",
     ]);
     expect(
-      result.artifacts.find(artifact => artifact.kind === "stage1_browser_dogfood")
+      result.artifacts.find((artifact: any) => artifact.kind === "stage1_browser_dogfood")
     ).toMatchObject({
       path: "frontend/test-results/main-chat-stage1-dogfood-report.json",
       status: "loaded",
@@ -2545,13 +2552,6 @@ describe("tauri command argument aliases", () => {
         legacyFallbackUsed: false,
         lastKernelEventCount: 3,
       },
-      legacyFallback: {
-        mode: "explicit_only",
-        allowedByDefault: false,
-        usedCountSinceStartup: 0,
-        lastUsedAt: null,
-        lastReasonCode: null,
-      },
       finalGateReadiness: {
         authority: "main_chat_final_acceptance_gate",
         status: "not_run",
@@ -2564,7 +2564,6 @@ describe("tauri command argument aliases", () => {
 
     expect(invoke).toHaveBeenCalledWith("get_main_chat_runtime_status", undefined);
     expect(result.authoritativeRuntime).toBe("main_chat_kernel");
-    expect(result.legacyFallback.allowedByDefault).toBe(false);
     expect(result.finalGateReadiness.authority).toBe("main_chat_final_acceptance_gate");
   });
 });

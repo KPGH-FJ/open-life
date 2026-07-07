@@ -18,7 +18,7 @@ import {
   step6JourneyPassed,
   step6ReportDigest,
   type Step6ObservedProductJourney,
-} from "./step6ProductAcceptance";
+} from "./test/archive/step6ProductAcceptance";
 
 function observedJourneys(input: {
   liveStatus: Step6ObservedProductJourney["externalLiveStatus"];

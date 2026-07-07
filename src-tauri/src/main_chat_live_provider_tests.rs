@@ -1,4 +1,4 @@
-use crate::main_chat_final_acceptance_tests::{
+use crate::main_chat_acceptance_test_support::{
     configure_live_provider_eval_state, configure_live_provider_eval_state_with_local_http_provider,
 };
 use crate::main_chat_final_gate::{
@@ -17,8 +17,8 @@ fn live_provider_external_eval_uses_only_openlife_live_env_names() {
             include_str!("main_chat_live_provider_tests.rs"),
         ),
         (
-            "src-tauri/src/main_chat_final_acceptance_tests.rs",
-            include_str!("main_chat_final_acceptance_tests.rs"),
+            "src-tauri/src/main_chat_acceptance_test_support.rs",
+            include_str!("main_chat_acceptance_test_support.rs"),
         ),
     ] {
         assert!(

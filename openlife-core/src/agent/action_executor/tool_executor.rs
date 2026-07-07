@@ -16,11 +16,11 @@ use super::ActionExecutionContext;
 use super::ActionExecutionResult;
 use super::ActionExecutionStatus;
 use super::AgentActionRequest;
-use crate::agent::policy_store::BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST;
-use crate::agent::react_beta::{
+use crate::agent::metadata_safe::{
     metadata_safe_text_digest, metadata_safe_text_preview, metadata_safe_value_digest,
     metadata_safe_value_preview,
 };
+use crate::agent::policy_store::BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST;
 use crate::agent::review_workflow::{
     DurableWriteRequest, DurableWriteSource, DurableWriteSubject, ReviewWorkflow,
 };

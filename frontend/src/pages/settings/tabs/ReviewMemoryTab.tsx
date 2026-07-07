@@ -22,7 +22,9 @@ export default function ReviewMemoryTab({ config, setConfig, projection }: Revie
           title="Mailbox"
           description="记忆、Life Model 和权限建议在确认前不会生效。"
           tone={pendingCount == null ? "neutral" : pendingCount > 0 ? "warning" : "ready"}
-          meta={pendingCount == null ? "pending status loading" : `${pendingCount} pending proposals`}
+          meta={
+            pendingCount == null ? "pending status loading" : `${pendingCount} pending proposals`
+          }
         >
           <Link
             to={mailboxRoute()}

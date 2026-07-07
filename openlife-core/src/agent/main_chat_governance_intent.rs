@@ -284,6 +284,9 @@ fn collect_external_read_requirement(normalized: &str, intent: &mut MainChatGove
         "do i need",
         "will it",
         "is it",
+        "what is",
+        "what's",
+        "whats",
         "can you check",
         "please check",
         "please look up",
@@ -675,6 +678,21 @@ mod tests {
     fn main_chat_governance_intent_classifies_chinese_current_weather_read() {
         let intent =
             classify_main_chat_governance_intent("帮我看一下今天上海会不会下雨，我要不要带伞");
+
+        assert_eq!(
+            intent.external_read_requirement,
+            Some(MainChatExternalReadRequirement::CurrentExternalFactRead)
+        );
+        assert!(intent.durable_write_requirement.is_none());
+        assert!(intent
+            .reason_codes
+            .contains(&"current_external_fact_read_required".to_string()));
+    }
+
+    #[test]
+    fn main_chat_governance_intent_classifies_english_live_weather_read() {
+        let intent =
+            classify_main_chat_governance_intent("What is the live weather in Shanghai right now?");
 
         assert_eq!(
             intent.external_read_requirement,

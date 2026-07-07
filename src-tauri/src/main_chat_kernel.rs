@@ -5,13 +5,13 @@ use crate::main_chat_runtime_facts::{
     RUNTIME_FACT_PROVIDER_GENERATION_PATH, RUNTIME_FACT_PROVIDER_ROUTE_GENERATION_PATH,
 };
 use async_trait::async_trait;
-use openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentStateSnapshot;
 use openlife_core::agent::main_chat_agent_v1::{
     AgentIngressDecision, AgentTaskSessionStatus, CompiledContext, ContextCompiler,
     ContextCompilerInput, ContextSourceCandidate, ContextSourceKind, ExecutionQueueStatus,
     ExecutionTranscriptEntry, ExecutionTranscriptEntryKind, MainChatAgentStrategy,
     MainChatPrivacyRiskSummary, PolicyRouteKind,
 };
+use openlife_core::agent::main_chat_runtime_contract::MainChatAgentStateSnapshot;
 use openlife_core::agent::{
     classify_main_chat_governance_intent, plan_main_chat_memory_routing, ActionExecutionContext,
     ActionExecutionResult, ActionExecutionStatus, ActionExecutorConfig, AgentActionRequest,
@@ -930,7 +930,7 @@ fn kernel_mcp_selection_metadata(
         .collect::<Vec<_>>();
     let selected_react_candidate = selected.react_candidate();
     let arguments_digest =
-        openlife_core::agent::react_beta::metadata_safe_value_digest(&selected.arguments);
+        openlife_core::agent::metadata_safe::metadata_safe_value_digest(&selected.arguments);
     serde_json::json!({
         "kernelToolSelection": true,
         "toolSelectionCandidateCount": candidates.len(),
@@ -963,7 +963,7 @@ fn kernel_mcp_selection_metadata(
         } else {
             Value::String(requested_tool_name.to_string())
         },
-        "selectionQueryDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(
+        "selectionQueryDigest": openlife_core::agent::metadata_safe::metadata_safe_value_digest(
             &serde_json::json!({ "selectionQuery": selection_query })
         ),
         "governedArgumentsSource": "kernel_manifest_candidate_contract",
@@ -1139,7 +1139,7 @@ fn kernel_read_tool_execution_from_action_result(
         "requestedTarget": decision.requested_target.clone(),
         "target": decision.target.clone(),
         "governedInput": governed_input.clone(),
-        "governedInputDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(&governed_input),
+        "governedInputDigest": openlife_core::agent::metadata_safe::metadata_safe_value_digest(&governed_input),
         "governedInputSource": decision
             .governed_input
             .get("governedInputSource")
@@ -1204,7 +1204,7 @@ fn blocked_kernel_read_tool_execution(
         "requestedTarget": decision.requested_target.clone(),
         "target": decision.target.clone(),
         "governedInput": governed_input.clone(),
-        "governedInputDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(&governed_input),
+        "governedInputDigest": openlife_core::agent::metadata_safe::metadata_safe_value_digest(&governed_input),
         "governedInputSource": decision
             .governed_input
             .get("governedInputSource")
@@ -4649,7 +4649,7 @@ async fn attach_kernel_tool_permission_proposal_identity(
     };
 
     let (input_length_bytes, input_hash) =
-        openlife_core::agent::react_beta::metadata_safe_value_digest(&call.governed_input);
+        openlife_core::agent::metadata_safe::metadata_safe_value_digest(&call.governed_input);
     let blocked_action = serde_json::json!({
         "action_type": call.action_type,
         "target": metadata
@@ -4948,7 +4948,7 @@ fn build_kernel_hs_context(
         )
     });
     let summary_digest = summary_content.as_ref().map(|content| {
-        let (bytes, hash) = openlife_core::agent::react_beta::metadata_safe_text_digest(content);
+        let (bytes, hash) = openlife_core::agent::metadata_safe::metadata_safe_text_digest(content);
         format!("bytes:{bytes} hash:{hash}")
     });
     let summary_chars = summary_content

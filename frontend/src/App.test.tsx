@@ -39,6 +39,15 @@ function productionSourceFiles(dir = join(process.cwd(), "src")): string[] {
   return files;
 }
 
+const ARCHIVE_ONLY_SOURCE_FILES = new Set(
+  [
+    "src/tauriDev.ts",
+    "src/test/archive/stage1BrowserEvidence.ts",
+    "src/test/archive/stage1DogfoodScenarios.ts",
+    "src/test/archive/step6ProductAcceptance.ts",
+  ].map(filePath => join(process.cwd(), filePath))
+);
+
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
@@ -60,7 +69,28 @@ describe("App product surface routing", () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_system_diagnostics") {
         return Promise.resolve({
-          policy_router: { activeAuthority: "IntentFrame + PolicyRouter", authorityChain: ["user_input", "IntentFrame", "PolicyRouter", "AgentIngressDecision", "OpenLifeTurnRuntime", "MainChatKernel"], routeOutputs: ["direct_answer", "read_only_tool", "proposal_only_write", "plan_draft", "ask_clarification", "governed_blocker", "confirmation_request"], appStateOldRoutersPresent: false, diagnosticsSurface: "policy_router_status" },
+          policy_router: {
+            activeAuthority: "IntentFrame + PolicyRouter",
+            authorityChain: [
+              "user_input",
+              "IntentFrame",
+              "PolicyRouter",
+              "AgentIngressDecision",
+              "OpenLifeTurnRuntime",
+              "MainChatKernel",
+            ],
+            routeOutputs: [
+              "direct_answer",
+              "read_only_tool",
+              "proposal_only_write",
+              "plan_draft",
+              "ask_clarification",
+              "governed_blocker",
+              "confirmation_request",
+            ],
+            appStateOldRoutersPresent: false,
+            diagnosticsSurface: "policy_router_status",
+          },
           mcp_server_count: 1,
           mcp_tool_count: 2,
           mcp_recent_audit_count: 1,
@@ -127,7 +157,28 @@ describe("App product surface routing", () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_system_diagnostics") {
         return Promise.resolve({
-          policy_router: { activeAuthority: "IntentFrame + PolicyRouter", authorityChain: ["user_input", "IntentFrame", "PolicyRouter", "AgentIngressDecision", "OpenLifeTurnRuntime", "MainChatKernel"], routeOutputs: ["direct_answer", "read_only_tool", "proposal_only_write", "plan_draft", "ask_clarification", "governed_blocker", "confirmation_request"], appStateOldRoutersPresent: false, diagnosticsSurface: "policy_router_status" },
+          policy_router: {
+            activeAuthority: "IntentFrame + PolicyRouter",
+            authorityChain: [
+              "user_input",
+              "IntentFrame",
+              "PolicyRouter",
+              "AgentIngressDecision",
+              "OpenLifeTurnRuntime",
+              "MainChatKernel",
+            ],
+            routeOutputs: [
+              "direct_answer",
+              "read_only_tool",
+              "proposal_only_write",
+              "plan_draft",
+              "ask_clarification",
+              "governed_blocker",
+              "confirmation_request",
+            ],
+            appStateOldRoutersPresent: false,
+            diagnosticsSurface: "policy_router_status",
+          },
           mcp_server_count: 1,
           mcp_tool_count: 2,
           mcp_recent_audit_count: 1,
@@ -304,7 +355,7 @@ describe("App product surface routing", () => {
         ],
       },
       {
-        label: "Stage / debug / eval",
+        label: "Maintenance",
         items: [
           { label: "Metrics", path: "/metrics" },
           { label: "Calibration", path: "/calibration" },
@@ -408,6 +459,11 @@ describe("App product surface routing", () => {
       "src/pages/TodayPage.tsx",
       "src/pages/LifeModelPage.tsx",
       "src/pages/MailboxPage.tsx",
+      "src/pages/ChatPage.tsx",
+      "src/pages/RunsPage.tsx",
+      "src/pages/SettingsPage.tsx",
+      "src/components/AgentControlPlane.tsx",
+      "src/components/RunTracePanel.tsx",
     ];
     const forbiddenWrappers = [
       "saveLifeModel",
@@ -417,6 +473,16 @@ describe("App product surface routing", () => {
       "getSkillRuntimeStatus",
       "checkRuntimeMigrationGate",
       "runMultiStrategyAgentPreview",
+      "runMainChatAgentExecutionV1EvalGate",
+      "runMainChatAgentProductizationV1Gate",
+      "runMainChatAgentBetaV1ReadinessGate",
+      "runMainChatAgentStage1DogfoodGate",
+      "runMainChatAgentStage2ReadinessGate",
+      "runMainChatAgentStep6ProductAcceptanceGate",
+      "checkControlledChatPilotEligibility",
+      "runControlledChatMigrationShadowRun",
+      "runControlledChatCutoverCandidate",
+      "exportMainChatAgentDebugBundle",
     ];
 
     for (const filePath of productSurfaceFiles) {
@@ -427,6 +493,14 @@ describe("App product surface routing", () => {
         );
       }
     }
+
+    const tauriProductBridge = readFileSync(join(process.cwd(), "src/tauri.ts"), "utf8");
+    expect(
+      tauriProductBridge,
+      "product tauri bridge must not export retired Phase7 wrappers"
+    ).not.toMatch(
+      /\b(?:runMultiStrategyAgentPreview|getRuntimeStrategyRegistryStatus|getReactBetaExecutionStatus|runMainChatAgentExecutionV1EvalGate|runMainChatAgentProductizationV1Gate|runMainChatExternalLiveProductizationGate|runMainChatAgentProductMaturityV2(?:Event|Plan|Skills|FinalReadiness)Gate|runMainChatAgentBetaV1ReadinessGate|runMainChatAgentStage[12]|runMainChatAgentStep6ProductAcceptanceGate|prepareMainChatStep6LiveProviderEvalState|checkRuntimeMigrationGate|checkControlledChatPilotEligibility|checkControlledPilotPromotionReadiness|draftControlledChatMigrationPlan|runControlledChatMigrationShadowRun|checkControlledChatCutoverReadiness|runControlledChatCutoverCandidate|listStage4KnowledgeAssetInventory|runMainChatStage4MemoryKnowledgeReport|evaluateMainChatStage5ReleaseDebugPreflight|exportMainChatAgentDebugBundle|createMainChatInternalIssueReport|runMainChatStage5ReleaseDebugReport)\b/
+    );
   });
 
   it("keeps retired product surfaces deleted and legacy routes quarantined to the registry", () => {
@@ -449,6 +523,7 @@ describe("App product surface routing", () => {
     const tauriTypesPath = join(process.cwd(), "src/tauri.ts");
     const appTypesPath = join(process.cwd(), "src/types.ts");
     for (const filePath of productionSourceFiles()) {
+      if (ARCHIVE_ONLY_SOURCE_FILES.has(filePath)) continue;
       const source = readFileSync(filePath, "utf8");
       if (filePath !== routeRegistryPath) {
         expect(source, `${filePath} must not contain retired default routes`).not.toMatch(
@@ -518,7 +593,7 @@ describe("App product surface routing", () => {
     expect(screen.getByTestId("agent-stage")).toHaveAttribute("data-state", "idle");
   });
 
-  it("keeps the Stage 1 dogfood route dev-only and off the legacy /chat surface", async () => {
+  it("keeps the Stage 1 dogfood route out of the product router", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       return mockInvoke(cmd, args);
     });
@@ -529,7 +604,9 @@ describe("App product surface routing", () => {
       </MemoryRouter>
     );
 
-    expect(await screen.findByTestId("chat-page")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByTestId("chat-page")).not.toBeInTheDocument();
+    });
     expect(screen.queryByTestId("companion-page")).not.toBeInTheDocument();
   });
 

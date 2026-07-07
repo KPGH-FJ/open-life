@@ -12,11 +12,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import type { DailyGoal } from "../types";
-import {
-  getDailyGoals,
-  getLifeStateProjection,
-  type LifeStateProjection,
-} from "../tauri";
+import { getDailyGoals, getLifeStateProjection, type LifeStateProjection } from "../tauri";
 import {
   inspectDailyGoalName,
   type DailyGoalDisplayGuard,
@@ -426,8 +422,8 @@ export default function TodayPage() {
                 {pendingReviewCard.count == null
                   ? "待确认状态读取中，暂不显示确定数量。"
                   : pendingReviewCard.count > 0
-                  ? `${pendingReviewCard.count} 个待确认项需要你处理。`
-                  : "现在没有需要处理的待确认项。"}
+                    ? `${pendingReviewCard.count} 个待确认项需要你处理。`
+                    : "现在没有需要处理的待确认项。"}
               </div>
             </div>
             <Link

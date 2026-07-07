@@ -50,7 +50,6 @@ import DataTab from "./settings/tabs/DataTab";
 import ToolsPermissionsTab from "./settings/tabs/ToolsPermissionsTab";
 import ReviewMemoryTab from "./settings/tabs/ReviewMemoryTab";
 import AdvancedTab from "./settings/tabs/AdvancedTab";
-import MultiStrategyPreviewSection from "./settings/MultiStrategyPreviewSection";
 import ConfirmDangerDialog from "../components/ConfirmDangerDialog";
 import DangerActionPreflightDetails from "../components/DangerActionPreflightDetails";
 
@@ -176,16 +175,16 @@ export default function SettingsPage() {
       pluginRecords,
       manifests,
     ] = await Promise.all([
-        getPolicyRouterStatus().catch(() => null),
-        getModelRouterStatus().catch(() => null),
-        getSystemDiagnostics().catch(() => null),
-        getLifeStateProjection().catch(() => null),
-        getHotCache().catch(() => null),
-        getPrivacyPolicy().catch(() => null),
-        listToolPermissions().catch(() => []),
-        listPlugins().catch(() => []),
-        listToolManifests().catch(() => []),
-      ]);
+      getPolicyRouterStatus().catch(() => null),
+      getModelRouterStatus().catch(() => null),
+      getSystemDiagnostics().catch(() => null),
+      getLifeStateProjection().catch(() => null),
+      getHotCache().catch(() => null),
+      getPrivacyPolicy().catch(() => null),
+      listToolPermissions().catch(() => []),
+      listPlugins().catch(() => []),
+      listToolManifests().catch(() => []),
+    ]);
     setPolicyRouterStatus(policyRouter);
     setModelRouterStatus(modelRouter);
     setDiagnostics(diag);
@@ -670,11 +669,7 @@ export default function SettingsPage() {
         )}
 
         {activeTab === "review_memory" && (
-          <ReviewMemoryTab
-            config={config}
-            setConfig={setConfig}
-            projection={lifeStateProjection}
-          />
+          <ReviewMemoryTab config={config} setConfig={setConfig} projection={lifeStateProjection} />
         )}
 
         {activeTab === "advanced" && (
@@ -693,7 +688,6 @@ export default function SettingsPage() {
                 onRefreshDiagnostics={refreshAllDiagnostics}
               />
             }
-            experimentalSection={showInternalDebug ? <MultiStrategyPreviewSection /> : undefined}
           />
         )}
 

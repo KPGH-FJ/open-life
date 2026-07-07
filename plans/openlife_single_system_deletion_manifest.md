@@ -1,249 +1,196 @@
 # OpenLife Single-System Deletion Manifest
 
-> Date: 2026-07-06
-> Status: preparation manifest
-> Purpose: list the old/new parallel systems that must be resolved during the
-> single-system development round.
+> Date: 2026-07-07
+> Status: Phase7 rerun deletion manifest
+> Authority: active Phase7 contract evidence only. Historical stage, beta,
+> migration, cutover, productization, maturity, step6, multi-strategy, react
+> beta, and legacy-write artifacts do not define the current product path.
 
-Disposition values:
+This manifest is intentionally conservative: `done` means the object is absent
+from the shipped product module graph, shipped command handler, product frontend
+page/component surface, product bridge, and active docs. Objects that still
+exist only under test/archive/dev paths are classified explicitly and are not
+counted as product completion evidence.
 
-- `keep`: remains as the product authority.
-- `absorb_then_delete`: useful logic may be moved into the new authority, then
-  the old product module/path is removed.
-- `delete`: remove from product code and command surface.
-- `storage_only`: may remain as a persistence implementation, but cannot be a
-  product semantic authority.
-- `test_fixture_only`: may remain only under tests/fixtures after product
-  references are removed.
-- `archive_reference`: documentation may remain only as historical reference,
-  not as active authority.
+## Disposition Vocabulary
 
-## 1. Product Authority Targets
-
-| Domain | Final product authority | Notes |
-| --- | --- | --- |
-| Ordinary Main Chat turn | `OpenLifeTurnRuntime` | send and stream are transport wrappers only. |
-| Intent/policy routing | `IntentFrame` + `PolicyRouter` | semantic classification and governance routing are separated. |
-| Durable writes | `DurableWritePolicy` | decides direct memory, proposal, ask-user, blocker, or no-write. |
-| Proposal/review | `ReviewWorkflow` | only creator of product proposals. |
-| Memory | `MemoryGateway` | owns product memory lane decisions and reads/writes. |
-| LifeModel writes | `LifeModelWriteGateway` | owns canonical LifeModel updates. |
-| Tool execution | `ToolGateway` | explicit tool contracts, permission, execution, observation. |
-| Final result | `CanonicalFinalDeliveryView` | one terminal object for answer/action/proposal/blocker state. |
-| Frontend state | `LifeStateProjection` | common product pages read one projection. |
-
-## 2. Main Chat Runtime And Routing
-
-| Current object | Current issue | Disposition | Phase |
-| --- | --- | --- | --- |
-| `src-tauri/src/main_chat_turn_pipeline.rs` | Dispatches among kernel, tool loop, strategy helper, route preview, and blockers. | shrink to a thin wrapper over `OpenLifeTurnRuntime`; delete routing logic | 2 |
-| `src-tauri/src/main_chat_kernel.rs` | Large product runtime with many embedded branches and compatibility terms. | absorb_then_delete into runtime services | 2 |
-| `src-tauri/src/main_chat_strategy.rs` | Separate strategy execution path after pipeline routing. | delete | 2 |
-| `src-tauri/src/main_chat_tool_loop.rs` | Separate tool-loop adapter with single-step fallback-shaped outcome. | absorb ToolGateway parts, delete fallback/product adapter | 2, 6 |
-| `src-tauri/src/main_chat_legacy_agent_loop.rs` | Deprecated/non-default product-shaped loop still compiled. | delete | 2 |
-| `src-tauri/src/main_chat_route_preview.rs` | Advisory route preview can still influence runtime/status surface. | delete from product route; any classifier experiment must move outside shipped product runtime | 3 |
-| `openlife-core/src/agent/main_chat_agent_v1.rs` `StrategyRouter` | Keyword/rule product router. | absorb useful labels into IntentFrame, then remove route authority | 3 |
-| `openlife-core/src/agent/strategy.rs` `StrategySelector` | Older runtime selector using keywords and planning fallback. | remove product dependency, migrate useful assertions, then delete module | 3 |
-| `openlife-core/src/agent/multi_strategy_runtime.rs` | Historical multi-strategy runtime. | delete from product path | 7 |
-| `openlife-core/src/agent/react_beta.rs` | Beta terminology and helper surface. | absorb metadata-safe helpers into ToolGateway/runtime, then delete beta surface | 6, 7 |
-
-## 3. Router And Intent Systems
-
-| Current object | Current issue | Disposition | Phase |
-| --- | --- | --- | --- |
-| `openlife-core/src/router.rs` `IntentRouter` | Separate router held in `AppState`. | absorb/delete after `PolicyRouter` lands | 3 |
-| `openlife-core/src/layer_router.rs` `LayerRouter` | Separate layer route authority held in `AppState`. | absorb/delete after `PolicyRouter` lands | 3 |
-| `src-tauri/src/commands/diagnostics.rs` `get_router_status` | Exposes old router status as product diagnostics. | delete from product diagnostics after router removal; developer inspection must use a non-shipped dev harness | 3, 7 |
-| `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx` | UI for old/multi strategy preview/status. | delete | 7 |
-| `frontend/src/tauri.ts` multi-strategy/runtime exports | Keeps old routing concepts callable by frontend. | delete from product bridge; dev-only bridge must not be imported by product pages | 7 |
-
-## 4. Proposal And Review
-
-| Current object | Current issue | Disposition | Phase |
-| --- | --- | --- | --- |
-| `openlife-core/src/agent/proposal_engine.rs` | Contains placeholder generators; not proposal authority. | replace with/absorb into `ReviewWorkflow` | 4 |
-| `openlife-core/src/agent/proposal_store.rs` | Storage is fine, but direct callers create product proposals. | storage_only | 4 |
-| `src-tauri/src/main_chat_proposal_support.rs` | Main Chat creates proposals directly. | absorb_then_delete into ReviewWorkflow adapter | 4 |
-| `src-tauri/src/commands/builder.rs` `builder_create_proposals` | Builder creates proposals directly. | route through ReviewWorkflow | 4 |
-| `src-tauri/src/commands/calibration.rs` `calibration_create_proposals` | Calibration creates proposals directly. | route through ReviewWorkflow | 4 |
-| `src-tauri/src/commands/proactive.rs` | Proactive suggestions create proposals directly. | route through ReviewWorkflow | 4 |
-| `src-tauri/src/commands/execution.rs` and action executors | Tool/skill paths create proposals directly. | route through ReviewWorkflow/ToolGateway | 4, 6 |
-| `openlife-core/src/agent/maturation.rs` | Maturation writes proposal/evidence directly. | route through ReviewWorkflow and MemoryGateway | 4, 5 |
-| `openlife-core/src/agent/plan_execute.rs` | PlanExecute creates proposals directly. | route through ReviewWorkflow | 4 |
-
-## 5. Memory And LifeModel
-
-| Current object | Current issue | Disposition | Phase |
-| --- | --- | --- | --- |
-| `openlife-core/src/memory.rs` `MemoryStore` | Valid storage, but should not be product authority. | storage_only behind MemoryGateway | 5 |
-| `openlife-core/src/vectors.rs` `VectorStore` | Valid storage/search, but direct index command exists. | storage_only behind MemoryGateway | 5 |
-| `openlife-core/src/agent/memory_lifecycle.rs` | Valid lifecycle storage, but product code reads/writes separately. | storage_only behind MemoryGateway | 5 |
-| `openlife-core/src/agent/evidence_store.rs` | Valid evidence storage, but direct evidence writers are scattered. | storage_only behind MemoryGateway/ReviewWorkflow | 5 |
-| `openlife-core/src/agent/lifemodel_backend_completion.rs` `LifeEventStore` | Valid event store, but needs lane policy. | storage_only behind MemoryGateway | 5 |
-| `src-tauri/src/commands/memory.rs` `index_memory_chunk` | Direct product memory write command. | replace with MemoryGateway command; delete current direct product exposure | 5 |
-| `src-tauri/src/commands/life_model.rs` `save_life_model` | Governed manual override exists but still product direct save surface. | move behind LifeModelWriteGateway; only explicit manual override UX may invoke it | 5 |
-| `src-tauri/src/commands/state.rs` daily-goal/state writes | Persist LifeModel compatibility/source data. | route through LifeModelWriteGateway with lane classification | 5 |
-| `src-tauri/src/commands/settings.rs` import/restore writes | Governed but separate write path. | route through LifeModelWriteGateway/import policy | 5 |
-| `src-tauri/src/legacy_write_convergence.rs` | Historical convergence inventory/gate. | delete after gateway guards replace it | 7 |
-
-## 6. Tool Execution
-
-| Current object | Current issue | Disposition | Phase |
-| --- | --- | --- | --- |
-| `openlife-core/src/agent/action_executor/mod.rs` | Very broad context and domain ownership. | shrink behind ToolGateway | 6 |
-| `openlife-core/src/agent/action_executor/**` | Mixed tool execution, memory, proposal, permission behavior. | split into ToolGateway adapters, delete direct write behavior | 6 |
-| `openlife-core/src/tool_manifest.rs` inference helpers | Infers capability/risk/action type from tool name. | remove execution credit; any migration lint must be non-executable and developer-only | 6 |
-| `openlife-core/src/mcp.rs` manifest registration | External MCP may rely on inferred permission/capability. | require explicit executable contract | 6 |
-| `src-tauri/src/main_chat_react_*` | Useful candidate/selection logic but tied to old runtime path. | absorb into ToolGateway/runtime | 6 |
-| `grant_tool_permission` direct command | Useful user-controlled permission path. | keep only through ToolGateway/ReviewWorkflow policy | 6 |
-
-## 7. Frontend Read Model And Product State
-
-| Current object | Current issue | Disposition | Phase |
-| --- | --- | --- | --- |
-| `frontend/src/pages/TodayPage.tsx` | Builds state from diagnostics, daily goals, proposals. | migrate to LifeStateProjection | 6 |
-| `frontend/src/pages/MailboxPage.tsx` | Builds review state from proposals, config, diagnostics. | migrate to LifeStateProjection + ReviewWorkflow views | 6 |
-| `frontend/src/pages/ChatPage.tsx` | Large page reads many backend sources and owns status composition. | migrate common state to LifeStateProjection; keep chat-specific transport state local | 6 |
-| `frontend/src/pages/LifeModelPage.tsx` | Reads LifeModel/current view/diagnostics/proposals separately. | migrate readiness/pending state to LifeStateProjection | 6 |
-| `frontend/src/pages/SettingsPage.tsx` | Mixes config, diagnostics, runtime, router, tool permissions. | split product state from developer diagnostics | 6, 7 |
-| `frontend/src/pages/LifeModelEditor.tsx` | Manual save surface. | route through LifeModelWriteGateway; UI must present explicit governed manual override, not automated learning | 5, 6 |
-| `frontend/src/tauri.ts` | Monolithic bridge exposing product, dev, migration, eval commands. | split product bridge from dev/test bridge | 7 |
-
-## 8. Stage, Beta, Migration, And Eval Surfaces
-
-| Current object | Current issue | Disposition | Phase |
-| --- | --- | --- | --- |
-| `src-tauri/src/main_chat_agent_beta_v1_*` | Beta readiness systems compiled in product crate. | migrate useful assertions to single-system tests, then delete product modules | 7 |
-| `src-tauri/src/main_chat_agent_stage1_dogfood.rs` | Stage dogfood setup compiled and exposed. | remove from product handler; convert remaining value to non-product test fixture or delete | 7 |
-| `src-tauri/src/main_chat_agent_stage2_readiness.rs` | Stage readiness compiled and exposed. | archive/test only after final trial plan replaces it | 7 |
-| `src-tauri/src/main_chat_stage3_execution_ux.rs` | Stage report system compiled and exposed. | archive/test only | 7 |
-| `src-tauri/src/main_chat_stage4_memory_knowledge.rs` | Stage managed knowledge command surface. | absorb valid memory operations into MemoryGateway/ReviewWorkflow | 5, 7 |
-| `src-tauri/src/main_chat_stage5_release_debug.rs` | Debug/report product-like surface. | developer-only, not product handler | 7 |
-| `src-tauri/src/commands/agent_runtime/migration_ladder.rs` | Controlled pilot/migration/cutover commands exposed. | delete from product handler; archive historical evidence outside product runtime | 7 |
-| `frontend/e2e/main-chat-stage1-dogfood.spec.ts` | Old stage-specific e2e. | rewrite as final Computer Use/product trial; old script may only remain as historical archive outside active gates | 7 |
-| `frontend/e2e/main-chat-step6-product-acceptance.spec.ts` | Useful concepts but stage/step-specific. | rewrite under single-system acceptance | 7 |
-
-## 9. Active Plan And Documentation Cleanup
-
-| Current object | Current issue | Disposition | Phase |
-| --- | --- | --- | --- |
-| `plans/README.md` | Still names Goal/Stage/Beta/Migration precedence and fallback visibility. | update to single-system authority after Phase 1 | 1 |
-| `plans/main_chat_*stage*` | Historical stage plans can steer new work. | remove from active index; archive_reference only with explicit historical header | 7 |
-| `plans/main_chat_agent_beta*` | Historical beta plans can steer new work. | remove from active index; archive_reference only with explicit historical header | 7 |
-| `plans/main_chat_agent_migration_v1_goal_spec.md` | Historical migration framing. | archive_reference | 7 |
-| `plans/legacy_direct_write_convergence_goal_spec.md` | Historical convergence plan. | archive_reference after gateways replace it | 7 |
-| `docs/ARCHITECTURE.md` | Quick architecture still describes old IntentRouter/LayerRouter flow. | update after new authorities land | 7 |
-
-## 10. Guards To Add During Implementation
-
-| Guard | Required after phase |
+| Disposition | Meaning |
 | --- | --- |
-| No ordinary send/stream import or call of retired strategy/fallback modules. | 2 |
-| No product route decision from old routers. | 3 |
-| No direct product `ProposalStore::create_proposal` outside ReviewWorkflow. | 4 |
-| No direct product memory/LifeModel write outside gateways. | 5 |
-| No executable tool manifest credit from inferred capability/risk/action type. | 6 |
-| Product frontend pages cannot assemble readiness/pending state from raw sources covered by LifeStateProjection. | 6 |
-| Shipped Tauri handler contains no legacy/development/eval-like command unless it is explicitly product-allowlisted. | 7 |
-| Active docs cannot declare legacy fallback as acceptable product behavior. | 7 |
+| `done` | Removed from product build, product UI, product bridge, shipped command handler, and active docs. |
+| `product-valid-rename` | Useful logic was moved into a semantically current module name; the old shell was deleted. |
+| `test-only-archive` | May remain only under test/archive/dev paths and cannot be imported by product pages or product crate modules. |
+| `historical-doc-only` | May remain only as non-authoritative history outside the active docs index. |
+| `product-valid` | Current single-system product authority; not an old Phase7 object. |
+| `red-until-trial-green` | Product trial blocker remains; Phase7 must not be called complete. |
 
-## 11. Phase 1 Inventory Crosswalk
+## Phase7 Object Disposition
 
-Machine-readable inventory:
-
-- `plans/openlife_single_system_phase1_inventory.json`
-
-Phase 1 does not delete these systems. It makes them explicit, classified, and
-guarded so later phases cannot add unregistered parallel systems.
-
-| Inventory category | Manifest section | Phase rule |
-| --- | --- | --- |
-| `product_authorities` | Sections 1 and 9 | keep only `AGENTS.md`, `plans/README.md`, and the two single-system docs as active authority |
-| `old_runtime_surfaces` | Sections 2, 6, and 8 | absorb/delete/archive according to each entry's phase and disposition |
-| `old_router_surfaces` | Section 3 | replace with `IntentFrame` + `PolicyRouter`, then delete old router surfaces |
-| `product_old_route_markers` | Sections 2, 3, and 8 | every old marker is counted until the owning phase removes it |
-| `direct_proposal_write_surfaces` | Section 4 | route through `ReviewWorkflow`; `ProposalStore` remains storage only |
-| `direct_memory_lifemodel_write_surfaces` | Section 5 | route through `MemoryGateway` / `LifeModelWriteGateway`; storage stays storage only |
-| `frontend_multi_source_state_surfaces` | Section 7 | migrate product pages to `LifeStateProjection`; split product bridge from dev/test bridge |
-| `product_command_allowlist` | Product allowlist table below | keep product commands that match broad guard tokens but are not development/eval surfaces |
-| `legacy_development_command_surfaces` | Section 8 and table below | delete legacy/development/eval-like commands from shipped product handler in Phase 7 |
-
-Phase 1 old-route marker inventory:
-
-| Marker | Phase | Disposition |
-| --- | --- | --- |
-| `legacy_agent_loop` | 2 | delete |
-| `main_chat_strategy` | 2 | delete |
-| `route_preview` | 3 | delete |
-| `single_step_fallback` | 2 | delete |
-| `MultiStrategy` | 7 | delete |
-| `beta_v1` | 7 | delete |
-| `stage1` | 7 | archive_reference |
-| `stage2` | 7 | archive_reference |
-| `stage3` | 7 | archive_reference |
-| `stage4` | 5 | absorb_then_delete |
-| `stage5` | 7 | delete |
-
-Phase 1 product allowlist:
-
-| Command | Classification | Reason |
-| --- | --- | --- |
-| `goal_capability_gap_analysis` | product allowlist | Read-only product command: returns user-facing LifeModel goal/capability gap analysis for Builder and growth workflows; it does not run evals, migrations, debug tooling, or writes. |
-| `goal_capability_gap_report` | product allowlist | Read-only product command: returns structured user-facing LifeModel capability gaps for product growth workflows; it does not run evals, migrations, debug tooling, or writes. |
-
-Phase 1 legacy/development shipped handler command inventory:
-
-| Command | Phase | Disposition | Matched guard tokens |
+| Object | Classification | Disposition | Current evidence |
 | --- | --- | --- | --- |
-| `run_multi_strategy_agent_preview` | 7 | delete | `strategy`, `preview` |
-| `run_main_chat_agent_execution_v1_eval_gate` | 7 | delete | `eval` |
-| `run_main_chat_capability_eval_gate` | 7 | delete | `eval`, `capability` |
-| `run_main_chat_agent_productization_v1_gate` | 7 | delete | `productization` |
-| `run_main_chat_external_live_productization_gate` | 7 | delete | `productization` |
-| `run_main_chat_agent_product_maturity_v2_event_gate` | 7 | delete | `maturity` |
-| `run_main_chat_agent_product_maturity_v2_plan_gate` | 7 | delete | `maturity` |
-| `run_main_chat_agent_product_maturity_v2_skills_gate` | 7 | delete | `maturity` |
-| `run_main_chat_agent_product_maturity_v2_final_readiness_gate` | 7 | delete | `maturity`, `readiness` |
-| `run_main_chat_agent_beta_v1_readiness_gate` | 7 | delete | `beta`, `readiness` |
-| `run_main_chat_agent_stage1_dogfood_gate` | 7 | delete | `stage`, `dogfood` |
-| `run_main_chat_agent_stage2_readiness_gate` | 7 | delete | `stage`, `readiness` |
-| `run_main_chat_agent_step6_product_acceptance_gate` | 7 | delete | `acceptance`, `step6` |
-| `prepare_main_chat_step6_live_provider_eval_state` | 7 | delete | `eval`, `step6` |
-| `run_main_chat_stage3_execution_ux_report` | 7 | delete | `stage` |
-| `validate_main_chat_agent_stage2_manual_dogfood_artifact` | 7 | delete | `stage`, `dogfood` |
-| `prepare_main_chat_agent_stage1_browser_dogfood_state` | 7 | delete | `stage`, `dogfood` |
-| `set_main_chat_agent_stage1_browser_network_policy` | 7 | delete | `stage` |
-| `set_main_chat_agent_stage1_browser_scripted_response` | 7 | delete | `stage` |
-| `set_main_chat_agent_stage1_browser_web_fixture_output` | 7 | delete | `stage` |
-| `run_main_chat_agent_execution_v1_final_acceptance_gate` | 7 | delete | `acceptance`, `final_acceptance` |
-| `get_runtime_strategy_registry_status` | 7 | delete | `strategy` |
-| `get_react_beta_execution_status` | 7 | delete | `beta` |
-| `check_runtime_migration_gate` | 7 | delete | `migration` |
-| `check_controlled_chat_pilot_eligibility` | 7 | delete | `pilot` |
-| `check_controlled_pilot_promotion_readiness` | 7 | delete | `readiness`, `pilot` |
-| `draft_controlled_chat_migration_plan` | 7 | delete | `migration` |
-| `record_controlled_chat_migration_review_decision` | 7 | delete | `migration` |
-| `get_controlled_chat_migration_review_decision_summary` | 7 | delete | `migration` |
-| `check_controlled_chat_migration_implementation_gate` | 7 | delete | `migration` |
-| `run_controlled_chat_migration_shadow_run` | 7 | delete | `migration` |
-| `record_controlled_chat_migration_shadow_review_decision` | 7 | delete | `migration` |
-| `get_controlled_chat_migration_shadow_review_summary` | 7 | delete | `migration` |
-| `check_controlled_chat_cutover_readiness` | 7 | delete | `cutover`, `readiness` |
-| `run_controlled_chat_cutover_candidate` | 7 | delete | `cutover` |
-| `record_controlled_chat_cutover_candidate_review_decision` | 7 | delete | `cutover` |
-| `get_controlled_chat_cutover_candidate_review_summary` | 7 | delete | `cutover` |
-| `check_controlled_chat_cutover_candidate_promotion_readiness` | 7 | delete | `cutover`, `readiness` |
-| `record_controlled_pilot_promotion_evidence` | 7 | delete | `pilot` |
-| `get_controlled_pilot_promotion_evidence_summary` | 7 | delete | `pilot` |
-| `list_stage4_knowledge_asset_inventory` | 7 | delete | `stage` |
-| `run_main_chat_stage4_memory_knowledge_report` | 7 | delete | `stage` |
-| `evaluate_main_chat_stage5_release_debug_preflight` | 7 | delete | `stage`, `eval`, `debug` |
-| `export_main_chat_agent_debug_bundle` | 7 | delete | `debug` |
-| `list_main_chat_debug_bundles` | 7 | delete | `debug` |
-| `get_main_chat_debug_bundle` | 7 | delete | `debug` |
-| `delete_main_chat_debug_bundle` | 7 | delete | `debug` |
-| `create_main_chat_internal_issue_report` | 7 | delete | `internal_issue_report`, `issue_report` |
-| `list_main_chat_internal_issue_reports` | 7 | delete | `internal_issue_report`, `issue_report` |
-| `get_main_chat_internal_issue_report` | 7 | delete | `internal_issue_report`, `issue_report` |
-| `delete_main_chat_internal_issue_report` | 7 | delete | `internal_issue_report`, `issue_report` |
-| `run_main_chat_stage5_release_debug_report` | 7 | delete | `stage`, `debug` |
+| `src-tauri/src/main_chat_agent_beta_v1_*` | `delete-now` | `done` | Old beta modules and focused tests were deleted from `src-tauri/src`; no product crate module declaration remains. |
+| `src-tauri/src/main_chat_agent_stage1_dogfood.rs` | `delete-now` | `done` | Old Stage1 dogfood backend module and tests were deleted from the product crate. |
+| `src-tauri/src/main_chat_agent_stage2_readiness.rs` | `delete-now` | `done` | Old Stage2 readiness backend module and tests were deleted from the product crate. |
+| `src-tauri/src/main_chat_stage3_execution_ux.rs` | `delete-now` | `done` | Old Stage3 execution UX backend module and tests were deleted from the product crate. |
+| `src-tauri/src/main_chat_stage4_memory_knowledge.rs` | `product-valid-rename` | `done` | Product-valid pending memory proposal edit logic moved to `src-tauri/src/main_chat_memory_proposals.rs`; old Stage4 inventory/report shell was deleted. |
+| `src-tauri/src/main_chat_stage5_release_debug.rs` | `delete-now` | `done` | Old Stage5 debug/report backend module and tests were deleted from the product crate. |
+| `src-tauri/src/main_chat_step6_product_acceptance.rs` | `delete-now` | `done` | Old Step6 backend acceptance module and tests were deleted from the product crate. |
+| `src-tauri/src/main_chat_agent_productization_eval.rs` | `delete-now` | `done` | Old productization eval module and tests were deleted from the product crate. |
+| `src-tauri/src/main_chat_live_productization_eval.rs` | `delete-now` | `done` | Old live productization eval module was deleted from the product crate. |
+| `src-tauri/src/main_chat_product_maturity_v2_final_readiness.rs` | `delete-now` | `done` | Old maturity readiness module was deleted from the product crate. |
+| `src-tauri/src/main_chat_memory_lifecycle_eval.rs` | `delete-now` | `done` | Old eval shell was deleted from the product crate. |
+| `src-tauri/src/main_chat_plan_interaction_eval.rs` | `delete-now` | `done` | Old eval shell was deleted from the product crate. |
+| `src-tauri/src/main_chat_task_continuity_eval.rs` | `delete-now` | `done` | Old eval shell was deleted from the product crate. |
+| `src-tauri/src/main_chat_event_stream_tests.rs` Stage/maturity assertions | `test-only-archive` | `done` | Old product-maturity event gate tests were removed instead of keeping a compiled product module alive. |
+| `src-tauri/src/commands/agent_runtime/migration_ladder.rs` | `delete-now` | `done` | Old controlled pilot, migration, and cutover command module was deleted; `commands::agent_runtime` exports only current PlanExecute and Main Chat skill/tool commands. |
+| `src-tauri/src/lib.rs` shipped handler old commands | `delete-now` | `done` | Stage, beta, migration, cutover, dogfood, productization, maturity, step6, legacy debug, and old eval commands are absent from `tauri::generate_handler!`. |
+| `openlife-core/src/agent/multi_strategy_runtime.rs` | `delete-now` | `done` | Old multi-strategy runtime module and tests were deleted from core. |
+| `openlife-core/src/agent/react_beta.rs` | `product-valid-rename` | `done` | Metadata-safe digest/preview helpers moved to `openlife-core/src/agent/metadata_safe.rs`; old beta module and tests were deleted. |
+| `openlife-core/src/agent/runtime_migration_gate.rs` | `delete-now` | `done` | Old migration gate module and tests were deleted from core. |
+| `openlife-core/src/agent/main_chat_agent_productization_v1.rs` | `product-valid-rename` | `done` | Product-valid state snapshot contract moved to `openlife-core/src/agent/main_chat_runtime_contract.rs`; old productization shell was deleted. |
+| `src-tauri/src/legacy_write_convergence.rs` | `product-valid-rename` | `done` | Product guard moved to `src-tauri/src/life_model_materializer_guard.rs`; old legacy-write convergence shell and tests were deleted. |
+| `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx` | `delete-now` | `done` | Old product settings preview UI was deleted. |
+| `frontend/src/pages/settings/multiStrategy/shared.tsx` | `delete-now` | `done` | Old product settings preview helper was deleted. |
+| `frontend/src/pages/ChatPage.tsx` legacy fallback state | `delete-now` | `done` | Product Chat no longer owns `legacyFallbackUsed` state, no longer consumes `legacy_fallback_used`, and no longer renders the legacy fallback notice. |
+| `frontend/src/tauri.ts` old product bridge wrappers/types | `delete-now` | `done` | Old migration/cutover/beta/stage/productization/maturity/step6 command wrappers and product types were removed from the product bridge. |
+| `frontend/src/tauriDev.ts` old wrapper aliases | `test-only-archive` | `done` | Retained as dev/test-only compatibility surface. Product pages/components are guarded from importing it. |
+| `frontend/src/types.ts` old route types | `delete-now` | `done` | Old migration/cutover/beta route types were removed from product-facing shared types. |
+| `frontend/src/stage1BrowserEvidence.ts` | `test-only-archive` | `done` | Moved to `frontend/src/test/archive/stage1BrowserEvidence.ts`; not a product import. |
+| `frontend/src/stage1DogfoodScenarios.ts` | `test-only-archive` | `done` | Moved to `frontend/src/test/archive/stage1DogfoodScenarios.ts`; not a product import. |
+| `frontend/src/step6ProductAcceptance.ts` | `test-only-archive` | `done` | Moved to `frontend/src/test/archive/step6ProductAcceptance.ts`; not a product import. |
+| Active README Stage/Beta/legacy route narrative | `delete-now` | `done` | Root `README.md` now describes only the current single-system path, current blockers, and trial entry. |
+| Active plans index old route recommendations | `delete-now` | `done` | `plans/README.md` keeps single-system authority rules and active files only; old route docs are not active index recommendations. |
+| Historical stage/beta/migration/cutover/step docs under `plans/` | `historical-doc-only` | `done` | They may exist only outside the active index and do not carry current development authority. |
+
+## Product-Valid Current Authorities
+
+These are not old Phase7 objects and must not be deleted as part of the old
+route cleanup.
+
+| Current object | Authority boundary |
+| --- | --- |
+| `src-tauri/src/main_chat_kernel.rs` | Current Main Chat product runtime authority used by send/stream. |
+| `src-tauri/src/main_chat_turn_runtime.rs` | Single turn terminal/read-model wrapper for product command transport. |
+| `src-tauri/src/main_chat_send.rs` and `src-tauri/src/main_chat_streaming.rs` | Product command executors for ordinary send and stream. |
+| `src-tauri/src/main_chat_task_controls.rs` | Product task resume/cancel/retry/replay controls. |
+| `src-tauri/src/main_chat_runtime_status.rs` | Product runtime/readiness evidence; frontend product pages must not use legacy fallback UI state. |
+| `src-tauri/src/main_chat_memory_proposals.rs` | Product-valid pending memory proposal edit helper. |
+| `src-tauri/src/life_model_materializer_guard.rs` | Product guard for LifeModel materialization callers. |
+| `openlife-core/src/agent/main_chat_runtime_contract.rs` | Product runtime state snapshot contract. |
+| `openlife-core/src/agent/metadata_safe.rs` | Shared metadata-safe digest/preview helper. |
+| `frontend/src/tauri.ts` | Product bridge only. |
+| `frontend/src/pages/ChatPage.tsx` | Product Chat UI, now consuming current task/session/read-model evidence instead of legacy fallback state. |
+
+## Shipped Command Surface Result
+
+All old Phase7 command families are absent from the shipped handler:
+
+- multi-strategy preview
+- runtime migration gate
+- controlled pilot, migration, and cutover
+- beta readiness
+- stage1/stage2/stage3/stage4/stage5 reports and setup commands
+- step6 product acceptance
+- productization and maturity eval/readiness gates
+- old debug bundle/internal issue report command family
+
+The only broad-token command names still allowed in the handler are the current
+product Builder commands `goal_capability_gap_analysis` and
+`goal_capability_gap_report`.
+
+### Product Allowlist Commands
+
+These commands are the product allowlist for broad-token handler scans. They are
+not legacy/development routes.
+
+| Product allowlist command | Reason |
+| --- | --- |
+| `goal_capability_gap_analysis` | Read-only Builder product analysis; not a stage, beta, migration, cutover, eval, maturity, or productization route. |
+| `goal_capability_gap_report` | Read-only Builder product report; not a stage, beta, migration, cutover, eval, maturity, or productization route. |
+
+### Retired Legacy/Development Command Inventory
+
+Every command below is classified as `done`: it is absent from the shipped
+Tauri handler and cannot be called through the product bridge.
+
+| Retired command | Disposition |
+| --- | --- |
+| `run_multi_strategy_agent_preview` | `done` |
+| `run_main_chat_agent_execution_v1_eval_gate` | `done` |
+| `run_main_chat_capability_eval_gate` | `done` |
+| `run_main_chat_agent_productization_v1_gate` | `done` |
+| `run_main_chat_external_live_productization_gate` | `done` |
+| `run_main_chat_agent_product_maturity_v2_event_gate` | `done` |
+| `run_main_chat_agent_product_maturity_v2_plan_gate` | `done` |
+| `run_main_chat_agent_product_maturity_v2_skills_gate` | `done` |
+| `run_main_chat_agent_product_maturity_v2_final_readiness_gate` | `done` |
+| `run_main_chat_agent_beta_v1_readiness_gate` | `done` |
+| `run_main_chat_agent_stage1_dogfood_gate` | `done` |
+| `run_main_chat_agent_stage2_readiness_gate` | `done` |
+| `run_main_chat_agent_step6_product_acceptance_gate` | `done` |
+| `prepare_main_chat_step6_live_provider_eval_state` | `done` |
+| `run_main_chat_stage3_execution_ux_report` | `done` |
+| `validate_main_chat_agent_stage2_manual_dogfood_artifact` | `done` |
+| `prepare_main_chat_agent_stage1_browser_dogfood_state` | `done` |
+| `set_main_chat_agent_stage1_browser_network_policy` | `done` |
+| `set_main_chat_agent_stage1_browser_scripted_response` | `done` |
+| `set_main_chat_agent_stage1_browser_web_fixture_output` | `done` |
+| `run_main_chat_agent_execution_v1_final_acceptance_gate` | `done` |
+| `get_runtime_strategy_registry_status` | `done` |
+| `get_react_beta_execution_status` | `done` |
+| `check_runtime_migration_gate` | `done` |
+| `check_controlled_chat_pilot_eligibility` | `done` |
+| `check_controlled_pilot_promotion_readiness` | `done` |
+| `draft_controlled_chat_migration_plan` | `done` |
+| `record_controlled_chat_migration_review_decision` | `done` |
+| `get_controlled_chat_migration_review_decision_summary` | `done` |
+| `check_controlled_chat_migration_implementation_gate` | `done` |
+| `run_controlled_chat_migration_shadow_run` | `done` |
+| `record_controlled_chat_migration_shadow_review_decision` | `done` |
+| `get_controlled_chat_migration_shadow_review_summary` | `done` |
+| `check_controlled_chat_cutover_readiness` | `done` |
+| `run_controlled_chat_cutover_candidate` | `done` |
+| `record_controlled_chat_cutover_candidate_review_decision` | `done` |
+| `get_controlled_chat_cutover_candidate_review_summary` | `done` |
+| `check_controlled_chat_cutover_candidate_promotion_readiness` | `done` |
+| `record_controlled_pilot_promotion_evidence` | `done` |
+| `get_controlled_pilot_promotion_evidence_summary` | `done` |
+| `list_stage4_knowledge_asset_inventory` | `done` |
+| `run_main_chat_stage4_memory_knowledge_report` | `done` |
+| `evaluate_main_chat_stage5_release_debug_preflight` | `done` |
+| `export_main_chat_agent_debug_bundle` | `done` |
+| `list_main_chat_debug_bundles` | `done` |
+| `get_main_chat_debug_bundle` | `done` |
+| `delete_main_chat_debug_bundle` | `done` |
+| `create_main_chat_internal_issue_report` | `done` |
+| `list_main_chat_internal_issue_reports` | `done` |
+| `get_main_chat_internal_issue_report` | `done` |
+| `delete_main_chat_internal_issue_report` | `done` |
+| `run_main_chat_stage5_release_debug_report` | `done` |
+
+## Guard Coverage
+
+Phase7 hard-delete guards now require:
+
+- old route markers are zero in product source, with only explicit
+  test/archive/dev allowlist paths permitted;
+- shipped handler old command count is zero;
+- product crate module graph old stage/beta/productization/migration/cutover
+  module count is zero;
+- product frontend pages/components do not import `tauriDev.ts`;
+- product frontend pages do not consume `legacy_fallback_used` or
+  `legacyFallbackUsed`;
+- active docs do not authorize Stage/Beta/migration/cutover/legacy route
+  development.
+
+## Computer Use Trial Status
+
+Trial report path:
+`frontend/test-results/phase7-computer-use-trial/trial-report.md`.
+
+Status: `red-until-trial-green`.
+
+The prior trial found real product blockers around external fact requests,
+proposal resolution/task state, first LifeModel quick-build next steps, and
+cross-page state consistency. Phase7 is not complete until the rerun either
+turns green or remains red with fail-closed behavior that is explicit,
+auditable, and consistent across Companion/Runs/Mailbox/Today.

@@ -787,7 +787,7 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           metadataSafe: true,
         },
       } as T);
-    case "run_main_chat_agent_productization_v1_gate":
+    case "run_main_chat_runtime_contract_gate":
       return Promise.resolve({
         totalScenarioCount: 93,
         defaultDeterministicScenarioCount: 92,
@@ -2842,7 +2842,28 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       } as T);
     case "get_system_diagnostics":
       return Promise.resolve({
-        policy_router: { activeAuthority: "IntentFrame + PolicyRouter", authorityChain: ["user_input", "IntentFrame", "PolicyRouter", "AgentIngressDecision", "OpenLifeTurnRuntime", "MainChatKernel"], routeOutputs: ["direct_answer", "read_only_tool", "proposal_only_write", "plan_draft", "ask_clarification", "governed_blocker", "confirmation_request"], appStateOldRoutersPresent: false, diagnosticsSurface: "policy_router_status" },
+        policy_router: {
+          activeAuthority: "IntentFrame + PolicyRouter",
+          authorityChain: [
+            "user_input",
+            "IntentFrame",
+            "PolicyRouter",
+            "AgentIngressDecision",
+            "OpenLifeTurnRuntime",
+            "MainChatKernel",
+          ],
+          routeOutputs: [
+            "direct_answer",
+            "read_only_tool",
+            "proposal_only_write",
+            "plan_draft",
+            "ask_clarification",
+            "governed_blocker",
+            "confirmation_request",
+          ],
+          appStateOldRoutersPresent: false,
+          diagnosticsSurface: "policy_router_status",
+        },
         mcp_server_count: 1,
         mcp_tool_count: 2,
         mcp_recent_audit_count: 1,
@@ -2947,24 +2968,19 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           allowUntilRevokedCount: 0,
         },
         safePaths: [],
-        surfaces: [
-          "today",
-          "mailbox",
-          "chat",
-          "companion",
-          "life_model",
-          "settings",
-        ].map(surface => ({
-          surface,
-          pendingReviewCount: 0,
-          editedReviewCount: 0,
-          totalReviewRequiredCount: 0,
-          readinessStatus: "ready",
-          taskStatus: "idle",
-          safeModeActive: false,
-          waitingPermissionCount: 0,
-          activeToolPermissionCount: 0,
-        })),
+        surfaces: ["today", "mailbox", "chat", "companion", "life_model", "settings"].map(
+          surface => ({
+            surface,
+            pendingReviewCount: 0,
+            editedReviewCount: 0,
+            totalReviewRequiredCount: 0,
+            readinessStatus: "ready",
+            taskStatus: "idle",
+            safeModeActive: false,
+            waitingPermissionCount: 0,
+            activeToolPermissionCount: 0,
+          })
+        ),
         sourceRefs: [
           "diagnostics",
           "proposal_store:pending_and_edited",

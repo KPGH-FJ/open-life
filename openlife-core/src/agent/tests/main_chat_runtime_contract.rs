@@ -1,14 +1,14 @@
-use crate::agent::main_chat_agent_productization_v1::{
-    assemble_main_chat_agent_state, main_chat_agent_product_scenarios,
-    MainChatAgentProductProposalStatus, MainChatAgentProductScenarioRunMode,
-    MainChatAgentProductStrategyRoute, MainChatAgentStateAssemblerInput,
-    MainChatAgentStateEventType,
-};
 use crate::agent::main_chat_agent_v1::{
     ActionQueueStore, AgentTaskSessionDraft, AgentTaskSessionStatus, AgentTaskSessionStore,
     ExecutionAction, ExecutionPolicy, ExecutionPolicyDecision, ExecutionQueueStatus,
     ExecutionTranscriptEntryDraft, ExecutionTranscriptEntryKind, MainChatAgentStrategy,
     MainChatPolicyLevel,
+};
+use crate::agent::main_chat_runtime_contract::{
+    assemble_main_chat_agent_state, main_chat_agent_product_scenarios,
+    MainChatAgentProductProposalStatus, MainChatAgentProductScenarioRunMode,
+    MainChatAgentProductStrategyRoute, MainChatAgentStateAssemblerInput,
+    MainChatAgentStateEventType,
 };
 use crate::agent::types::{
     AgentProposal, AgentRun, AgentRunStatus, AgentTaskKind, ContextSummary, ModelRouteTrace,
@@ -52,7 +52,7 @@ fn fixture_run(session_id: &str, output: &str) -> AgentRun {
 }
 
 #[test]
-fn main_chat_agent_productization_v1_scenario_fixture_uses_canonical_routes() {
+fn main_chat_runtime_contract_scenario_fixture_uses_canonical_routes() {
     let scenarios = main_chat_agent_product_scenarios();
     assert_eq!(
         scenarios.len(),
@@ -109,7 +109,7 @@ fn main_chat_agent_productization_v1_scenario_fixture_uses_canonical_routes() {
         .expect("MP-06 rollback fixture must exist");
     assert_eq!(
         rollback.expectation,
-        crate::agent::main_chat_agent_productization_v1::MainChatAgentProductScenarioExpectation::MustPass,
+        crate::agent::main_chat_runtime_contract::MainChatAgentProductScenarioExpectation::MustPass,
         "Phase A requires MP-06 to move from optional unsupported to real rollback"
     );
     for required in [
@@ -129,7 +129,7 @@ fn main_chat_agent_productization_v1_scenario_fixture_uses_canonical_routes() {
 }
 
 #[test]
-fn main_chat_agent_productization_v1_task_control_scenarios_reference_prior_objects() {
+fn main_chat_runtime_contract_task_control_scenarios_reference_prior_objects() {
     let scenarios = main_chat_agent_product_scenarios();
     let task_control = scenarios
         .iter()
@@ -182,7 +182,7 @@ fn main_chat_agent_productization_v1_task_control_scenarios_reference_prior_obje
 }
 
 #[test]
-fn main_chat_agent_productization_v1_assembles_snapshot_and_ordered_events_from_runtime_evidence() {
+fn main_chat_runtime_contract_assembles_snapshot_and_ordered_events_from_runtime_evidence() {
     let session_store = AgentTaskSessionStore::new_in_memory().expect("session store");
     let action_queue = ActionQueueStore::new_in_memory().expect("action queue");
     let policy = ExecutionPolicy::default();
@@ -200,13 +200,10 @@ fn main_chat_agent_productization_v1_assembles_snapshot_and_ordered_events_from_
     let action = action_queue
         .enqueue(
             &session.id,
-            ExecutionAction::new(
-                "file.read",
-                "plans/main_chat_agent_productization_v1_goal_spec.md",
-            ),
+            ExecutionAction::new("file.read", "plans/main_chat_runtime_contract_goal_spec.md"),
             policy.classify(&ExecutionAction::new(
                 "file.read",
-                "plans/main_chat_agent_productization_v1_goal_spec.md",
+                "plans/main_chat_runtime_contract_goal_spec.md",
             )),
         )
         .expect("enqueue action");
@@ -222,7 +219,7 @@ fn main_chat_agent_productization_v1_assembles_snapshot_and_ordered_events_from_
             ExecutionQueueStatus::Observed,
             Some(serde_json::json!({
                 "sourceKind": "file",
-                "sourceLabel": "plans/main_chat_agent_productization_v1_goal_spec.md",
+                "sourceLabel": "plans/main_chat_runtime_contract_goal_spec.md",
                 "preview": "Main Chat Agent Productization v1 requires runtime-backed UI evidence."
             })),
         )
@@ -258,14 +255,14 @@ fn main_chat_agent_productization_v1_assembles_snapshot_and_ordered_events_from_
             metadata: serde_json::json!({
                 "actionId": completed_action.id,
                 "sourceKind": "file",
-                "sourceLabel": "plans/main_chat_agent_productization_v1_goal_spec.md",
+                "sourceLabel": "plans/main_chat_runtime_contract_goal_spec.md",
                 "preview": "Runtime payload/snapshot/event/evidence-gap gate is required.",
                 "structuredResult": {
                     "readExecutionEvidence": {
                         "kind": "file_system_read",
                         "sourceKind": "file",
-                        "sourceLabel": "plans/main_chat_agent_productization_v1_goal_spec.md",
-                        "target": "plans/main_chat_agent_productization_v1_goal_spec.md",
+                        "sourceLabel": "plans/main_chat_runtime_contract_goal_spec.md",
+                        "target": "plans/main_chat_runtime_contract_goal_spec.md",
                         "realReadOnlyExecution": true,
                         "fixtureBacked": false,
                         "networkReadAttempted": false,
@@ -390,7 +387,7 @@ fn main_chat_agent_productization_v1_assembles_snapshot_and_ordered_events_from_
 }
 
 #[test]
-fn main_chat_agent_productization_v1_fails_closed_when_observation_lacks_action_evidence() {
+fn main_chat_runtime_contract_fails_closed_when_observation_lacks_action_evidence() {
     let session_store = AgentTaskSessionStore::new_in_memory().expect("session store");
     let mut session = session_store
         .create_session(AgentTaskSessionDraft {
@@ -409,7 +406,7 @@ fn main_chat_agent_productization_v1_fails_closed_when_observation_lacks_action_
             metadata: serde_json::json!({
                 "actionId": "missing-action",
                 "sourceKind": "file",
-                "sourceLabel": "plans/main_chat_agent_productization_v1_goal_spec.md"
+                "sourceLabel": "plans/main_chat_runtime_contract_goal_spec.md"
             }),
         })
         .expect("fake observation transcript");
@@ -456,7 +453,7 @@ fn main_chat_agent_productization_v1_fails_closed_when_observation_lacks_action_
 }
 
 #[test]
-fn main_chat_agent_productization_v1_does_not_promote_assistant_text_to_runtime_objects() {
+fn main_chat_runtime_contract_does_not_promote_assistant_text_to_runtime_objects() {
     let session_store = AgentTaskSessionStore::new_in_memory().expect("session store");
     let session = session_store
         .create_session(AgentTaskSessionDraft {
@@ -502,7 +499,7 @@ fn main_chat_agent_productization_v1_does_not_promote_assistant_text_to_runtime_
 }
 
 #[test]
-fn main_chat_agent_productization_v1_final_delivery_lists_durable_memory_changes() {
+fn main_chat_runtime_contract_final_delivery_lists_durable_memory_changes() {
     let session_store = AgentTaskSessionStore::new_in_memory().expect("session store");
     let session = session_store
         .create_session(AgentTaskSessionDraft {
@@ -607,7 +604,7 @@ fn main_chat_agent_productization_v1_final_delivery_lists_durable_memory_changes
 }
 
 #[test]
-fn main_chat_agent_productization_v1_final_delivery_lists_managed_knowledge_file_changes() {
+fn main_chat_runtime_contract_final_delivery_lists_managed_knowledge_file_changes() {
     let session_store = AgentTaskSessionStore::new_in_memory().expect("session store");
     let session = session_store
         .create_session(AgentTaskSessionDraft {
@@ -688,7 +685,7 @@ fn main_chat_agent_productization_v1_final_delivery_lists_managed_knowledge_file
 }
 
 #[test]
-fn main_chat_agent_productization_v1_links_tool_permission_proposal_to_pending_action() {
+fn main_chat_runtime_contract_links_tool_permission_proposal_to_pending_action() {
     let session_store = AgentTaskSessionStore::new_in_memory().expect("session store");
     let action_queue = ActionQueueStore::new_in_memory().expect("action queue");
 

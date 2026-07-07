@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "last_updated": "2026-07-07",
-  "status": "phase4_review_workflow_source_map_synchronized",
+  "status": "phase7_old_system_deletion_manifest_synchronized",
   "product_authorities": [
     {
       "id": "agents_md",
@@ -105,10 +105,12 @@
     },
     {
       "id": "core_multi_strategy_runtime",
-      "path": "openlife-core/src/agent/multi_strategy_runtime.rs",
       "phase": 7,
-      "disposition": "quarantined_historical_runtime",
-      "reason": "Historical Phase7 runtime remains compiled for legacy development/evidence paths, but StrategySelector was deleted and ordinary Main Chat product routing is owned by PolicyRouter."
+      "disposition": "deleted",
+      "reason": "Deleted during Phase7 rework; this object is no longer compiled in the product crate or core product module graph.",
+      "former_path": "openlife-core/src/agent/multi_strategy_runtime.rs",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "core_strategy_runtime",
@@ -119,80 +121,102 @@
     },
     {
       "id": "core_react_beta",
-      "path": "openlife-core/src/agent/react_beta.rs",
       "phase": 6,
-      "disposition": "absorb_then_delete",
-      "reason": "Beta terminology and helper surface must be absorbed or renamed under ToolGateway/runtime."
+      "disposition": "deleted",
+      "reason": "Deleted during Phase7 rework; this object is no longer compiled in the product crate or core product module graph.",
+      "former_path": "openlife-core/src/agent/react_beta.rs",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "main_chat_beta_default_experience",
-      "path": "src-tauri/src/main_chat_agent_beta_v1_default_experience.rs",
       "phase": 7,
-      "disposition": "delete",
-      "reason": "Beta readiness module remains compiled in product crate."
+      "disposition": "deleted",
+      "reason": "Deleted during Phase7 rework; this object is no longer compiled in the product crate or core product module graph.",
+      "former_path": "src-tauri/src/main_chat_agent_beta_v1_default_experience.rs",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "main_chat_beta_readiness",
-      "path": "src-tauri/src/main_chat_agent_beta_v1_readiness.rs",
       "phase": 7,
-      "disposition": "delete",
-      "reason": "Beta readiness module remains compiled in product crate."
+      "disposition": "deleted",
+      "reason": "Deleted during Phase7 rework; this object is no longer compiled in the product crate or core product module graph.",
+      "former_path": "src-tauri/src/main_chat_agent_beta_v1_readiness.rs",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "main_chat_beta_real_tasks",
-      "path": "src-tauri/src/main_chat_agent_beta_v1_real_tasks.rs",
       "phase": 7,
-      "disposition": "delete",
-      "reason": "Beta real-task harness remains compiled in product crate."
+      "disposition": "deleted",
+      "reason": "Deleted during Phase7 rework; this object is no longer compiled in the product crate or core product module graph.",
+      "former_path": "src-tauri/src/main_chat_agent_beta_v1_real_tasks.rs",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "main_chat_stage1_dogfood",
-      "path": "src-tauri/src/main_chat_agent_stage1_dogfood.rs",
       "phase": 7,
-      "disposition": "test_fixture_only",
-      "reason": "Stage dogfood setup is still compiled and exposed."
+      "disposition": "deleted",
+      "reason": "Deleted during Phase7 rework; this object is no longer compiled in the product crate or core product module graph.",
+      "former_path": "src-tauri/src/main_chat_agent_stage1_dogfood.rs",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "main_chat_stage2_readiness",
-      "path": "src-tauri/src/main_chat_agent_stage2_readiness.rs",
       "phase": 7,
-      "disposition": "archive_reference",
-      "reason": "Stage readiness report is historical and should not be a product authority."
+      "disposition": "deleted",
+      "reason": "Deleted during Phase7 rework; this object is no longer compiled in the product crate or core product module graph.",
+      "former_path": "src-tauri/src/main_chat_agent_stage2_readiness.rs",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "main_chat_stage3_execution_ux",
-      "path": "src-tauri/src/main_chat_stage3_execution_ux.rs",
       "phase": 7,
-      "disposition": "archive_reference",
-      "reason": "Stage report system remains exposed as product-like status."
+      "disposition": "deleted",
+      "reason": "Deleted during Phase7 rework; this object is no longer compiled in the product crate or core product module graph.",
+      "former_path": "src-tauri/src/main_chat_stage3_execution_ux.rs",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "main_chat_stage4_memory_knowledge",
-      "path": "src-tauri/src/main_chat_stage4_memory_knowledge.rs",
-      "phase": 5,
-      "disposition": "absorb_then_delete",
-      "reason": "Stage managed-knowledge writes must be absorbed into MemoryGateway and ReviewWorkflow."
+      "phase": 7,
+      "disposition": "deleted",
+      "reason": "Stage4 managed-knowledge shell deleted; current draft-edit helper moved to src-tauri/src/main_chat_memory_proposals.rs.",
+      "former_path": "src-tauri/src/main_chat_stage4_memory_knowledge.rs",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "main_chat_stage5_release_debug",
-      "path": "src-tauri/src/main_chat_stage5_release_debug.rs",
       "phase": 7,
-      "disposition": "delete",
-      "reason": "Debug/report surface should not remain in the shipped product handler."
+      "disposition": "deleted",
+      "reason": "Deleted during Phase7 rework; this object is no longer compiled in the product crate or core product module graph.",
+      "former_path": "src-tauri/src/main_chat_stage5_release_debug.rs",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "main_chat_productization_eval",
-      "path": "src-tauri/src/main_chat_agent_productization_eval.rs",
       "phase": 7,
-      "disposition": "archive_reference",
-      "reason": "Productization eval surface is historical evidence, not a product runtime authority."
+      "disposition": "deleted",
+      "reason": "Deleted during Phase7 rework; this object is no longer compiled in the product crate or core product module graph.",
+      "former_path": "src-tauri/src/main_chat_agent_productization_eval.rs",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "main_chat_product_maturity_v2_final_readiness",
-      "path": "src-tauri/src/main_chat_product_maturity_v2_final_readiness.rs",
       "phase": 7,
-      "disposition": "archive_reference",
-      "reason": "Maturity readiness surface is not the single-system product readiness source."
+      "disposition": "deleted",
+      "reason": "Deleted during Phase7 rework; this object is no longer compiled in the product crate or core product module graph.",
+      "former_path": "src-tauri/src/main_chat_product_maturity_v2_final_readiness.rs",
+      "retired": true,
+      "expected_absent": true
     }
   ],
   "old_router_surfaces": [
@@ -227,10 +251,12 @@
     },
     {
       "id": "frontend_multi_strategy_preview_section",
-      "path": "frontend/src/pages/settings/MultiStrategyPreviewSection.tsx",
+      "former_path": "frontend/src/pages/settings/MultiStrategyPreviewSection.tsx",
       "phase": 7,
-      "disposition": "internal_debug_historical_surface",
-      "reason": "Frontend preview surface remains behind internal debug and is not ordinary Main Chat routing authority; Phase7 should remove it separately."
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Frontend preview surface was removed during Phase7; old multi-strategy preview UI is no longer a shipped product surface."
     },
     {
       "id": "frontend_tauri_multi_strategy_exports",
@@ -355,36 +381,6 @@
       "disposition": "storage_only",
       "phase4_classification": "review_workflow_target",
       "reason": "ReviewWorkflow is the sole product governance entry allowed to call ProposalStore::create_proposal.",
-      "match": ".create_proposal(",
-      "expected_count": 1
-    },
-    {
-      "id": "proposal_write_productization_eval",
-      "path": "src-tauri/src/main_chat_agent_productization_eval.rs",
-      "phase": 7,
-      "disposition": "archive_reference",
-      "phase4_classification": "historical_eval",
-      "reason": "Productization eval creates proposals directly and must not become product authority.",
-      "match": ".create_proposal(",
-      "expected_count": 5
-    },
-    {
-      "id": "proposal_write_stage1_dogfood",
-      "path": "src-tauri/src/main_chat_agent_stage1_dogfood.rs",
-      "phase": 7,
-      "disposition": "test_fixture_only",
-      "phase4_classification": "test_fixture",
-      "reason": "Stage dogfood seeds proposals directly and must become fixture-only or be deleted.",
-      "match": ".create_proposal(",
-      "expected_count": 4
-    },
-    {
-      "id": "proposal_write_task_continuity_eval",
-      "path": "src-tauri/src/main_chat_task_continuity_eval.rs",
-      "phase": 7,
-      "disposition": "archive_reference",
-      "phase4_classification": "historical_eval",
-      "reason": "Task continuity eval creates proposals directly and must remain non-product evidence.",
       "match": ".create_proposal(",
       "expected_count": 1
     }
@@ -527,39 +523,14 @@
     },
     {
       "id": "phase4_stage4_memory_knowledge",
-      "path": "src-tauri/src/main_chat_stage4_memory_knowledge.rs",
-      "phase": 5,
-      "disposition": "absorb_then_delete",
-      "phase4_classification": "to_delete_later",
-      "proposal_creation_route": "ReviewWorkflow",
-      "reason": "Historical stage managed-knowledge proposal path now routes through ReviewWorkflow until deletion."
-    },
-    {
-      "id": "phase4_stage1_dogfood",
-      "path": "src-tauri/src/main_chat_agent_stage1_dogfood.rs",
       "phase": 7,
-      "disposition": "test_fixture_only",
-      "phase4_classification": "test_fixture",
-      "proposal_creation_route": "direct_fixture_seed",
-      "reason": "Stage 1 dogfood seeds fixture proposals and is not a product authority."
-    },
-    {
-      "id": "phase4_productization_eval",
-      "path": "src-tauri/src/main_chat_agent_productization_eval.rs",
-      "phase": 7,
-      "disposition": "archive_reference",
-      "phase4_classification": "historical_eval",
-      "proposal_creation_route": "direct_historical_eval_seed",
-      "reason": "Productization eval creates local evidence fixtures and is not product authority."
-    },
-    {
-      "id": "phase4_task_continuity_eval",
-      "path": "src-tauri/src/main_chat_task_continuity_eval.rs",
-      "phase": 7,
-      "disposition": "archive_reference",
-      "phase4_classification": "historical_eval",
-      "proposal_creation_route": "direct_historical_eval_seed",
-      "reason": "Task continuity eval creates local evidence fixtures and is not product authority."
+      "disposition": "deleted",
+      "phase4_classification": "deleted",
+      "proposal_creation_route": "absorbed_by_main_chat_memory_proposals",
+      "reason": "Historical Stage4 proposal shell deleted; current memory proposal draft edit helper does not create proposals and does not execute durable writes.",
+      "former_path": "src-tauri/src/main_chat_stage4_memory_knowledge.rs",
+      "retired": true,
+      "expected_absent": true
     },
     {
       "id": "phase4_proposal_commands",
@@ -688,24 +659,6 @@
       "reason": "MemoryGateway is the only production adapter allowed to write MemoryStore, VectorStore, and MemoryLifecycleStore.",
       "match": "direct_memory_lifemodel_write",
       "expected_count": 12
-    },
-    {
-      "id": "memory_lifemodel_write_productization_eval",
-      "path": "src-tauri/src/main_chat_agent_productization_eval.rs",
-      "phase": 7,
-      "disposition": "archive_reference",
-      "reason": "Productization eval writes directly and must not become product authority.",
-      "match": "direct_memory_lifemodel_write",
-      "expected_count": 1
-    },
-    {
-      "id": "memory_write_memory_lifecycle_eval",
-      "path": "src-tauri/src/main_chat_memory_lifecycle_eval.rs",
-      "phase": 7,
-      "disposition": "archive_reference",
-      "reason": "Memory lifecycle eval writes directly and must stay non-product evidence.",
-      "match": "direct_memory_lifemodel_write",
-      "expected_count": 3
     }
   ],
   "frontend_multi_source_state_surfaces": [

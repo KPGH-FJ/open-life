@@ -6,7 +6,11 @@ import {
 } from "../../../tauri";
 import { buildProviderReadinessView } from "../../../utils/providerReadiness";
 import { buildSafeModeBlockedMessage } from "../../../utils/runtimeMessages";
-import { advancedRoutePath, productRoutePath, secondaryRoutePath } from "../../../productShellContract";
+import {
+  advancedRoutePath,
+  productRoutePath,
+  secondaryRoutePath,
+} from "../../../productShellContract";
 
 function classNames(...classes: (string | false | undefined)[]) {
   return classes.filter(Boolean).join(" ");
@@ -246,9 +250,7 @@ export default function OverviewTab({
         <div
           className={classNames(
             "rounded-2xl border p-4",
-            chatReady
-              ? "border-emerald-200 bg-emerald-50/60"
-              : "border-amber-200 bg-amber-50/60"
+            chatReady ? "border-emerald-200 bg-emerald-50/60" : "border-amber-200 bg-amber-50/60"
           )}
         >
           <div className="flex items-start justify-between gap-3">
@@ -263,9 +265,7 @@ export default function OverviewTab({
             <span
               className={classNames(
                 "rounded-full px-2 py-1 text-xs font-medium shrink-0",
-                chatReady
-                  ? "bg-emerald-100 text-emerald-700"
-                  : "bg-amber-100 text-amber-700"
+                chatReady ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"
               )}
             >
               {chatReady ? "可开始使用" : "还有阻塞"}

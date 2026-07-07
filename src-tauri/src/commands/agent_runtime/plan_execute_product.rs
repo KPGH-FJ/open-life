@@ -1,6 +1,6 @@
 use crate::main_chat_hs_runtime::build_chat_runtime_hs_packet;
 use crate::AppState;
-use openlife_core::agent::main_chat_agent_productization_v1::{
+use openlife_core::agent::main_chat_runtime_contract::{
     ActionEvidence, BlockerEvidence, ObservationEvidence, PlanArtifactFactView,
     PlanArtifactRouteEvidence, PlanArtifactRunEvidence, PlanArtifactSourceEvidence,
     PlanArtifactStepView, PlanArtifactView, ProposalEvidence, StrategyEvidence,
@@ -2192,7 +2192,7 @@ mod tests {
             preview: "Source states opening hours require same-day verification.".into(),
             citation_available: true,
             read_execution: Some(
-                openlife_core::agent::main_chat_agent_productization_v1::ReadExecutionEvidence {
+                openlife_core::agent::main_chat_runtime_contract::ReadExecutionEvidence {
                     kind: "web_read".into(),
                     source_kind: "web".into(),
                     source_label: "Sichuan Museum official opening hours".into(),
@@ -2206,7 +2206,7 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
         let route = StrategyEvidence {
-            strategy: openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentProductStrategyRoute::PlanExecute,
+            strategy: openlife_core::agent::main_chat_runtime_contract::MainChatAgentProductStrategyRoute::PlanExecute,
             reason: "kernel_supported_plan_execute".into(),
             confidence: Some(0.91),
         };
@@ -2281,7 +2281,7 @@ mod tests {
         .await
         .unwrap();
         let route = StrategyEvidence {
-            strategy: openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentProductStrategyRoute::PlanExecute,
+            strategy: openlife_core::agent::main_chat_runtime_contract::MainChatAgentProductStrategyRoute::PlanExecute,
             reason: "kernel_supported_plan_execute".into(),
             confidence: None,
         };

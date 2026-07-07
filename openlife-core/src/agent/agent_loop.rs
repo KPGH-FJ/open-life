@@ -1619,7 +1619,7 @@ fn metadata_safe_model_note(note: &str) -> String {
         || lower.contains("memory context")
         || lower.contains("lifemodel");
     if looks_sensitive {
-        let (byte_count, hash) = crate::agent::react_beta::metadata_safe_text_digest(note);
+        let (byte_count, hash) = crate::agent::metadata_safe::metadata_safe_text_digest(note);
         format!("{byte_count} bytes redacted ({hash})")
     } else {
         note.to_string()

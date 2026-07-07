@@ -198,24 +198,6 @@ pub struct RuntimeStrategyRegistryReadinessReport {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct MultiStrategyRuntimeMaturityReport {
-    pub report_kind: String,
-    pub maturity_ready: bool,
-    pub registry_readiness: RuntimeStrategyRegistryReadinessReport,
-    pub executable_strategies: Vec<RuntimeStrategyDescriptor>,
-    pub future_strategy_descriptors: Vec<RuntimeStrategyDeclarativeDescriptor>,
-    pub default_chat_unchanged: bool,
-    pub migration_permission: bool,
-    pub no_runtime_model_tool_execution: bool,
-    pub no_business_writes: bool,
-    pub status_command_side_effect_budget: RuntimeStrategySideEffectBudget,
-    pub blocking_reasons: Vec<String>,
-    pub metadata_safe: bool,
-    pub metadata_safe_summary: Value,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct RuntimeStrategyExecutionReport {
     pub report_kind: String,
     pub runtime_kind: String,
@@ -442,40 +424,6 @@ impl RuntimeStrategyRegistry {
     pub fn fixed_readiness_report() -> RuntimeStrategyRegistryReadinessReport {
         RuntimeStrategyRegistry::new()
             .readiness_report_for_descriptors(Self::fixed_executable_descriptors())
-    }
-
-    pub fn maturity_report() -> MultiStrategyRuntimeMaturityReport {
-        let registry_readiness = Self::fixed_readiness_report();
-        let blocking_reasons = registry_readiness.blocking_reasons.clone();
-        let maturity_ready = registry_readiness.ready;
-        let metadata_safe_summary = json!({
-            "reportKind": "multi_strategy_runtime_maturity",
-            "maturityReady": maturity_ready,
-            "registryReady": registry_readiness.ready,
-            "executableStrategies": ["react", "plan_execute"],
-            "futureStrategiesDeclarativeOnly": ["direct", "layered", "workflow", "proactive", "reflective"],
-            "defaultChatUnchanged": true,
-            "migrationPermission": false,
-            "runtimeModelToolExecuted": false,
-            "businessWrites": false,
-            "metadataSafe": true,
-        });
-
-        MultiStrategyRuntimeMaturityReport {
-            report_kind: "multi_strategy_runtime_maturity".into(),
-            maturity_ready,
-            executable_strategies: registry_readiness.executable_descriptors.clone(),
-            future_strategy_descriptors: registry_readiness.future_strategy_descriptors.clone(),
-            registry_readiness,
-            default_chat_unchanged: true,
-            migration_permission: false,
-            no_runtime_model_tool_execution: true,
-            no_business_writes: true,
-            status_command_side_effect_budget: RuntimeStrategySideEffectBudget::zero(),
-            blocking_reasons,
-            metadata_safe: true,
-            metadata_safe_summary,
-        }
     }
 }
 

@@ -3,27 +3,16 @@ use openlife_core::llm::ChatMessage;
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
 
-use crate::legacy_write_convergence::LifeModelMaterializerCallerContext;
+use crate::life_model_materializer_guard::LifeModelMaterializerCallerContext;
 
 pub mod a2a_server;
 pub mod a2a_sidecar;
 pub mod bootstrap;
 pub mod commands;
 pub mod errors;
-pub(crate) mod legacy_write_convergence;
+pub(crate) mod life_model_materializer_guard;
 pub(crate) mod life_model_write_gateway;
 pub(crate) mod life_state_projection;
-#[allow(dead_code)]
-pub(crate) mod main_chat_agent_beta_v1_default_experience;
-#[allow(dead_code)]
-pub(crate) mod main_chat_agent_beta_v1_readiness;
-#[allow(dead_code)]
-pub(crate) mod main_chat_agent_beta_v1_real_tasks;
-#[allow(dead_code)]
-pub(crate) mod main_chat_agent_productization_eval;
-#[allow(dead_code)]
-pub(crate) mod main_chat_agent_stage1_dogfood;
-pub(crate) mod main_chat_agent_stage2_readiness;
 pub(crate) mod main_chat_agent_state_payload;
 #[allow(dead_code)]
 pub(crate) mod main_chat_capability_eval;
@@ -40,15 +29,9 @@ pub(crate) mod main_chat_generation_support;
 pub(crate) mod main_chat_hs_runtime;
 #[allow(dead_code)]
 pub(crate) mod main_chat_kernel;
-#[allow(dead_code)]
-pub(crate) mod main_chat_live_productization_eval;
 pub(crate) mod main_chat_live_provider_harness;
-#[allow(dead_code)]
-pub(crate) mod main_chat_memory_lifecycle_eval;
-#[allow(dead_code)]
-pub(crate) mod main_chat_plan_interaction_eval;
+pub(crate) mod main_chat_memory_proposals;
 pub(crate) mod main_chat_preprocess;
-pub(crate) mod main_chat_product_maturity_v2_final_readiness;
 pub(crate) mod main_chat_proposal_support;
 pub(crate) mod main_chat_react_execution;
 pub(crate) mod main_chat_react_runtime;
@@ -59,14 +42,7 @@ pub(crate) mod main_chat_runtime_status;
 pub(crate) mod main_chat_runtime_support;
 pub(crate) mod main_chat_send;
 pub(crate) mod main_chat_skills_tools;
-pub(crate) mod main_chat_stage3_execution_ux;
-pub(crate) mod main_chat_stage4_memory_knowledge;
-pub(crate) mod main_chat_stage5_release_debug;
-#[allow(dead_code)]
-pub(crate) mod main_chat_step6_product_acceptance;
 pub(crate) mod main_chat_streaming;
-#[allow(dead_code)]
-pub(crate) mod main_chat_task_continuity_eval;
 pub(crate) mod main_chat_task_controls;
 pub(crate) mod main_chat_turn_pipeline;
 pub mod main_chat_turn_runtime;
@@ -79,7 +55,7 @@ pub mod storage;
 pub(crate) mod workspace_file_resolver;
 
 #[cfg(test)]
-mod main_chat_final_acceptance_tests;
+mod main_chat_acceptance_test_support;
 
 #[cfg(test)]
 mod main_chat_live_provider_tests;
@@ -112,33 +88,6 @@ mod main_chat_runtime_module_tests;
 mod single_system_authority_tests;
 
 #[cfg(test)]
-mod legacy_surface_tests;
-
-#[cfg(test)]
-mod main_chat_agent_productization_tests;
-
-#[cfg(test)]
-mod main_chat_agent_stage1_dogfood_tests;
-
-#[cfg(test)]
-mod main_chat_agent_stage2_readiness_tests;
-
-#[cfg(test)]
-mod main_chat_stage3_execution_ux_tests;
-
-#[cfg(test)]
-mod main_chat_stage4_memory_knowledge_tests;
-
-#[cfg(test)]
-mod main_chat_stage5_release_debug_tests;
-
-#[cfg(test)]
-mod main_chat_step6_product_acceptance_tests;
-
-#[cfg(test)]
-mod main_chat_event_stream_tests;
-
-#[cfg(test)]
 mod main_chat_runtime_facts_tests;
 
 #[cfg(test)]
@@ -156,38 +105,11 @@ use commands::agent::{
     list_provider_transmission_history, replay_agent_action, restore_agent_run,
 };
 use commands::agent_runtime::{
-    cancel_plan_execute_session, check_controlled_chat_cutover_candidate_promotion_readiness,
-    check_controlled_chat_cutover_readiness, check_controlled_chat_migration_implementation_gate,
-    check_controlled_chat_pilot_eligibility, check_controlled_pilot_promotion_readiness,
-    check_runtime_migration_gate, clear_main_chat_skill, create_plan_execute_session,
-    draft_controlled_chat_migration_plan, execute_plan_execute_step, finalize_plan_execute_session,
-    get_controlled_chat_cutover_candidate_review_summary,
-    get_controlled_chat_migration_review_decision_summary,
-    get_controlled_chat_migration_shadow_review_summary,
-    get_controlled_pilot_promotion_evidence_summary, get_main_chat_skill_detail,
-    get_plan_execute_session, get_react_beta_execution_status,
-    get_runtime_strategy_registry_status, list_main_chat_skills, list_main_chat_tool_candidates,
-    list_plan_execute_sessions, prepare_main_chat_agent_stage1_browser_dogfood_state,
-    prepare_main_chat_step6_live_provider_eval_state,
-    record_controlled_chat_cutover_candidate_review_decision,
-    record_controlled_chat_migration_review_decision,
-    record_controlled_chat_migration_shadow_review_decision,
-    record_controlled_pilot_promotion_evidence, review_plan_execute_session,
-    run_controlled_chat_cutover_candidate, run_controlled_chat_migration_shadow_run,
-    run_main_chat_agent_beta_v1_readiness_gate, run_main_chat_agent_execution_v1_eval_gate,
-    run_main_chat_agent_execution_v1_final_acceptance_gate,
-    run_main_chat_agent_product_maturity_v2_event_gate,
-    run_main_chat_agent_product_maturity_v2_final_readiness_gate,
-    run_main_chat_agent_product_maturity_v2_plan_gate,
-    run_main_chat_agent_product_maturity_v2_skills_gate,
-    run_main_chat_agent_productization_v1_gate, run_main_chat_agent_stage1_dogfood_gate,
-    run_main_chat_agent_stage2_readiness_gate, run_main_chat_agent_step6_product_acceptance_gate,
-    run_main_chat_capability_eval_gate, run_main_chat_external_live_productization_gate,
-    run_main_chat_stage3_execution_ux_report, run_multi_strategy_agent_preview,
-    select_main_chat_skill, set_main_chat_agent_stage1_browser_network_policy,
-    set_main_chat_agent_stage1_browser_scripted_response,
-    set_main_chat_agent_stage1_browser_web_fixture_output, skip_plan_execute_step,
-    update_plan_execute_session_draft, validate_main_chat_agent_stage2_manual_dogfood_artifact,
+    cancel_plan_execute_session, clear_main_chat_skill, create_plan_execute_session,
+    execute_plan_execute_step, finalize_plan_execute_session, get_main_chat_skill_detail,
+    get_plan_execute_session, list_main_chat_skills, list_main_chat_tool_candidates,
+    list_plan_execute_sessions, review_plan_execute_session, select_main_chat_skill,
+    skip_plan_execute_step, update_plan_execute_session_draft,
 };
 
 use commands::builder::{
@@ -253,19 +175,8 @@ use commands::state::{
 use commands::version::{create_snapshot, diff_snapshots, list_snapshots, restore_snapshot};
 use life_state_projection::get_life_state_projection;
 use main_chat_event_stream::{get_main_chat_agent_state_snapshot, list_main_chat_agent_events};
+use main_chat_memory_proposals::draft_edit_memory_proposal;
 use main_chat_runtime_status::get_main_chat_runtime_status;
-use main_chat_stage4_memory_knowledge::{
-    confirm_managed_knowledge_write, create_managed_knowledge_write_draft,
-    draft_edit_memory_proposal, list_stage4_knowledge_asset_inventory,
-    rollback_managed_knowledge_write, run_main_chat_stage4_memory_knowledge_report,
-};
-use main_chat_stage5_release_debug::{
-    create_main_chat_internal_issue_report, delete_main_chat_debug_bundle,
-    delete_main_chat_internal_issue_report, evaluate_main_chat_stage5_release_debug_preflight,
-    export_main_chat_agent_debug_bundle, get_main_chat_debug_bundle,
-    get_main_chat_internal_issue_report, list_main_chat_debug_bundles,
-    list_main_chat_internal_issue_reports, run_main_chat_stage5_release_debug_report,
-};
 use main_chat_task_controls::{
     cancel_main_chat_agent_task, get_main_chat_agent_task_detail, get_main_chat_agent_task_state,
     list_main_chat_agent_tasks, refresh_main_chat_agent_task_context, resume_main_chat_agent_task,
@@ -312,7 +223,7 @@ pub struct SendMessageResult {
     pub run_id: Option<String>,
     pub agent_ingress: Option<openlife_core::agent::main_chat_agent_v1::AgentIngressDecision>,
     pub agent_state:
-        Option<openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentStateSnapshot>,
+        Option<openlife_core::agent::main_chat_runtime_contract::MainChatAgentStateSnapshot>,
     pub execution_transcript:
         Vec<openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry>,
     pub legacy_fallback_used: bool,
@@ -723,30 +634,7 @@ pub fn run() {
             delete_agent_run,
             restore_agent_run,
             replay_agent_action,
-            run_multi_strategy_agent_preview,
-            run_main_chat_agent_execution_v1_eval_gate,
-            run_main_chat_capability_eval_gate,
-            run_main_chat_agent_productization_v1_gate,
-            run_main_chat_external_live_productization_gate,
-            run_main_chat_agent_product_maturity_v2_event_gate,
-            run_main_chat_agent_product_maturity_v2_plan_gate,
-            run_main_chat_agent_product_maturity_v2_skills_gate,
-            run_main_chat_agent_product_maturity_v2_final_readiness_gate,
-            run_main_chat_agent_beta_v1_readiness_gate,
-            run_main_chat_agent_stage1_dogfood_gate,
-            run_main_chat_agent_stage2_readiness_gate,
-            run_main_chat_agent_step6_product_acceptance_gate,
-            prepare_main_chat_step6_live_provider_eval_state,
-            run_main_chat_stage3_execution_ux_report,
-            validate_main_chat_agent_stage2_manual_dogfood_artifact,
-            prepare_main_chat_agent_stage1_browser_dogfood_state,
-            set_main_chat_agent_stage1_browser_network_policy,
-            set_main_chat_agent_stage1_browser_scripted_response,
-            set_main_chat_agent_stage1_browser_web_fixture_output,
-            run_main_chat_agent_execution_v1_final_acceptance_gate,
-            get_runtime_strategy_registry_status,
             get_main_chat_runtime_status,
-            get_react_beta_execution_status,
             list_main_chat_skills,
             get_main_chat_skill_detail,
             select_main_chat_skill,
@@ -761,23 +649,6 @@ pub fn run() {
             review_plan_execute_session,
             execute_plan_execute_step,
             skip_plan_execute_step,
-            check_runtime_migration_gate,
-            check_controlled_chat_pilot_eligibility,
-            check_controlled_pilot_promotion_readiness,
-            draft_controlled_chat_migration_plan,
-            record_controlled_chat_migration_review_decision,
-            get_controlled_chat_migration_review_decision_summary,
-            check_controlled_chat_migration_implementation_gate,
-            run_controlled_chat_migration_shadow_run,
-            record_controlled_chat_migration_shadow_review_decision,
-            get_controlled_chat_migration_shadow_review_summary,
-            check_controlled_chat_cutover_readiness,
-            run_controlled_chat_cutover_candidate,
-            record_controlled_chat_cutover_candidate_review_decision,
-            get_controlled_chat_cutover_candidate_review_summary,
-            check_controlled_chat_cutover_candidate_promotion_readiness,
-            record_controlled_pilot_promotion_evidence,
-            get_controlled_pilot_promotion_evidence_summary,
             get_pending_proposals,
             list_proposals,
             batch_accept_low_risk_proposals,
@@ -791,21 +662,6 @@ pub fn run() {
             get_memory_asset,
             get_memory_lifecycle_events,
             rebuild_memory_materialized_view,
-            list_stage4_knowledge_asset_inventory,
-            create_managed_knowledge_write_draft,
-            confirm_managed_knowledge_write,
-            rollback_managed_knowledge_write,
-            run_main_chat_stage4_memory_knowledge_report,
-            evaluate_main_chat_stage5_release_debug_preflight,
-            export_main_chat_agent_debug_bundle,
-            create_main_chat_internal_issue_report,
-            list_main_chat_debug_bundles,
-            get_main_chat_debug_bundle,
-            delete_main_chat_debug_bundle,
-            list_main_chat_internal_issue_reports,
-            get_main_chat_internal_issue_report,
-            delete_main_chat_internal_issue_report,
-            run_main_chat_stage5_release_debug_report,
             send_message,
             start_stream_message,
             list_main_chat_agent_events,
@@ -938,6 +794,3 @@ pub fn run() {
             _ => {}
         });
 }
-
-#[cfg(test)]
-mod legacy_write_convergence_tests;

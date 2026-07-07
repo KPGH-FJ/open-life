@@ -1,5 +1,31 @@
-import type { MainChatAgentStage1DogfoodReport } from "./tauri";
 import { STAGE1_DOGFOOD_SCENARIOS } from "./stage1DogfoodScenarios";
+
+interface ArchivedStage1DogfoodReport {
+  reportKind?: string;
+  defaultScenarioCount?: number;
+  taskSessionCreatedCount?: number;
+  ordinaryChatScenarioCount?: number;
+  seededTaskControlScenarioCount?: number;
+  finalDeliveryVerifiedScenarioCount?: number;
+  legacyFallbackCount?: number;
+  silentDurableWriteCount?: number;
+  fakeExecutionDetectedCount?: number;
+  scenarios?: Array<{
+    scenarioId: string;
+    entryPoint?: string;
+    taskSessionId?: string;
+    runId?: string;
+    routeStrategy?: string;
+    expectedOutcome?: string;
+    liveProviderEvidence?: string | null;
+    runtimeEvidencePassed?: boolean;
+    finalDeliveryEvidencePassed?: boolean;
+    nonFakeEvidencePassed?: boolean;
+    legacyFallbackUsed?: boolean;
+    silentDurableWriteDetected?: boolean;
+    fakeExecutionDetected?: boolean;
+  }>;
+}
 
 export const STAGE1_REQUIRED_BROWSER_JOURNEYS = Array.from(
   { length: 36 },
@@ -192,7 +218,7 @@ export function buildStage1PassingBrowserEvidenceReportFromObservedScenarios(
 }
 
 function stage1GateRuntimeEvidenceBlockers(gateReport: unknown): string[] {
-  const report = gateReport as Partial<MainChatAgentStage1DogfoodReport> | null;
+  const report = gateReport as ArchivedStage1DogfoodReport | null;
   const blockers: string[] = [];
   if (!report || report.reportKind !== "main_chat_agent_stage1_dogfood_gate") {
     blockers.push("stage1_gate_report_kind_missing");
@@ -254,7 +280,7 @@ function stage1ObservedScenarioBlockers(
   gateReport: unknown
 ): string[] {
   const blockers: string[] = [];
-  const report = gateReport as Partial<MainChatAgentStage1DogfoodReport> | null;
+  const report = gateReport as ArchivedStage1DogfoodReport | null;
   const defaultRows =
     report?.scenarios?.filter(row => row.liveProviderEvidence === "default_deterministic") ?? [];
   const gateRowsById = new Map(defaultRows.map(row => [row.scenarioId, row]));

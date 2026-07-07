@@ -513,7 +513,7 @@ fn single_system_handler_legacy_development_commands_match_inventory_or_allowlis
         );
     }
 
-    let actual: BTreeSet<String> = handler
+    let legacy_like_in_handler: BTreeSet<String> = handler
         .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
         .filter(|token| !token.is_empty())
         .filter(|token| tokens.iter().any(|old| token.contains(old)))
@@ -531,20 +531,25 @@ fn single_system_handler_legacy_development_commands_match_inventory_or_allowlis
             .into_iter()
             .map(|entry| entry_str(entry, "command").to_string())
             .collect();
-    let expected: BTreeSet<String> = legacy_inventory
-        .union(&product_allowlist)
+    let old_commands_still_registered: BTreeSet<String> = legacy_like_in_handler
+        .intersection(&legacy_inventory)
         .cloned()
         .collect();
     assert_eq!(
-        actual, expected,
-        "legacy/development/eval-like shipped handler commands must be in inventory or product allowlist"
+        old_commands_still_registered,
+        BTreeSet::new(),
+        "Phase 7 forbids legacy/development/eval-like commands in the shipped Tauri handler"
+    );
+    assert_eq!(
+        legacy_like_in_handler, product_allowlist,
+        "only product allowlist commands may match broad legacy/development tokens in the shipped handler"
     );
 
     let manifest = read_repo_file("plans/openlife_single_system_deletion_manifest.md");
     for command in &legacy_inventory {
         assert!(
             manifest.contains(&format!("`{command}`")),
-            "deletion manifest must classify shipped legacy/development command {command}"
+            "deletion manifest must classify retired legacy/development command {command}"
         );
     }
     for command in &product_allowlist {
@@ -553,50 +558,6 @@ fn single_system_handler_legacy_development_commands_match_inventory_or_allowlis
             "deletion manifest must explain product allowlist command {command}"
         );
     }
-
-    let stage5_imports: BTreeSet<String> = lib
-        .split("use main_chat_stage5_release_debug::{")
-        .nth(1)
-        .and_then(|rest| rest.split("};").next())
-        .expect("main_chat_stage5_release_debug import block")
-        .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
-        .filter(|token| !token.is_empty())
-        .map(str::to_string)
-        .collect();
-    let handler_commands: BTreeSet<String> = handler
-        .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
-        .filter(|token| !token.is_empty())
-        .map(str::to_string)
-        .collect();
-    let registered_stage5_debug: BTreeSet<String> = stage5_imports
-        .intersection(&handler_commands)
-        .cloned()
-        .collect();
-    for expected_stage5_debug_command in [
-        "evaluate_main_chat_stage5_release_debug_preflight",
-        "export_main_chat_agent_debug_bundle",
-        "create_main_chat_internal_issue_report",
-        "list_main_chat_debug_bundles",
-        "get_main_chat_debug_bundle",
-        "delete_main_chat_debug_bundle",
-        "list_main_chat_internal_issue_reports",
-        "get_main_chat_internal_issue_report",
-        "delete_main_chat_internal_issue_report",
-        "run_main_chat_stage5_release_debug_report",
-    ] {
-        assert!(
-            registered_stage5_debug.contains(expected_stage5_debug_command),
-            "Stage 5 debug command {expected_stage5_debug_command} must stay visible to the module-origin guard"
-        );
-    }
-    let stage5_missing: BTreeSet<String> = registered_stage5_debug
-        .difference(&legacy_inventory)
-        .cloned()
-        .collect();
-    assert!(
-        stage5_missing.is_empty(),
-        "all registered main_chat_stage5_release_debug commands must be in legacy inventory: {stage5_missing:?}"
-    );
 }
 
 #[test]
@@ -630,10 +591,14 @@ fn single_system_phase4_proposal_creation_is_review_workflow_governed() {
         "test_fixture",
         "historical_eval",
         "to_delete_later",
+        "deleted",
     ]);
     for entry in inventory_entries(&inventory, "phase4_proposal_creation_source_map") {
-        let path = entry_str(entry, "path");
         let class = entry_str(entry, "phase4_classification");
+        if class == "deleted" {
+            continue;
+        }
+        let path = entry_str(entry, "path");
         let route = entry_str(entry, "proposal_creation_route");
         assert!(
             allowed_phase4_classes.contains(class),
@@ -726,27 +691,17 @@ fn single_system_phase4_review_workflow_outcome_is_authoritative() {
         );
     }
 
-    let stage4_memory_knowledge = "src-tauri/src/main_chat_stage4_memory_knowledge.rs";
-    let stage4_entry = inventory_entries(&inventory, "phase4_proposal_creation_source_map")
-        .into_iter()
-        .find(|entry| entry_str(entry, "path") == stage4_memory_knowledge)
-        .expect("stage4 memory knowledge source-map entry");
-    assert_eq!(
-        entry_str(stage4_entry, "phase4_classification"),
-        "to_delete_later",
-        "historical Stage4 memory/knowledge path must stay classified outside product_path"
-    );
-    assert_eq!(
-        entry_str(stage4_entry, "proposal_creation_route"),
-        "ReviewWorkflow",
-        "historical Stage4 memory/knowledge path must still route through ReviewWorkflow while retained"
-    );
-    let stage4_raw_source = read_repo_file(stage4_memory_knowledge);
-    let stage4_source = strip_cfg_test_module(&stage4_raw_source);
+    let retired_stage4_memory_knowledge = "src-tauri/src/main_chat_stage4_memory_knowledge.rs";
     assert!(
-        stage4_source.contains("outcome.proposal_id()")
-            || stage4_source.contains("outcome.proposal"),
-        "historical Stage4 memory/knowledge path must consume ReviewWorkflowOutcome while retained"
+        !repo_root().join(retired_stage4_memory_knowledge).exists(),
+        "Phase7 contract requires the historical Stage4 memory/knowledge shell to be deleted from the product crate"
+    );
+    let memory_proposal_raw = read_repo_file("src-tauri/src/main_chat_memory_proposals.rs");
+    let memory_proposal_source = strip_cfg_test_module(&memory_proposal_raw);
+    assert!(
+        memory_proposal_source.contains("update_proposal(&proposal)")
+            && memory_proposal_source.contains("durable_write_executed: false"),
+        "Phase7 keeps only the focused memory proposal draft-edit helper; it must not recreate the old Stage4 proposal route"
     );
 
     for (path, forbidden) in [
@@ -1190,39 +1145,147 @@ fn single_system_direct_memory_lifemodel_write_callsites_match_inventory() {
     );
 }
 
-#[test]
-fn single_system_product_old_route_markers_match_inventory() {
-    let inventory = inventory();
-    let expected: BTreeMap<String, usize> =
-        inventory_entries(&inventory, "product_old_route_markers")
-            .into_iter()
-            .map(|entry| {
-                (
-                    entry_str(entry, "marker").to_string(),
-                    entry_u64(entry, "expected_file_count") as usize,
-                )
-            })
-            .collect();
+fn phase7_old_route_marker_allowlist(rel: &str) -> bool {
+    rel.ends_with("_tests.rs")
+        || rel.ends_with(".test.ts")
+        || rel.ends_with(".test.tsx")
+        || rel.contains("/tests/")
+        || rel.contains("frontend/src/test/")
+        || rel == "frontend/src/tauriDev.ts"
+        || rel == "src-tauri/src/single_system_authority_tests.rs"
+}
 
-    let mut actual = BTreeMap::new();
-    for marker in expected.keys() {
-        let mut count = 0;
-        for file in source_files(&["src-tauri/src", "openlife-core/src", "frontend/src"]) {
-            let rel = to_repo_path(&file);
-            if rel == "src-tauri/src/single_system_authority_tests.rs" {
-                continue;
-            }
-            let source =
-                fs::read_to_string(&file).unwrap_or_else(|err| panic!("read {rel}: {err}"));
-            if source.contains(marker) {
-                count += 1;
+#[test]
+fn single_system_phase7_forbids_old_route_markers_in_product_source() {
+    let markers = [
+        "main_chat_agent_beta_v1",
+        "main_chat_agent_stage1",
+        "main_chat_agent_stage2",
+        "main_chat_stage3",
+        "main_chat_stage4",
+        "main_chat_stage5",
+        "main_chat_step6",
+        "main_chat_agent_productization",
+        "main_chat_live_productization",
+        "main_chat_product_maturity",
+        "run_multi_strategy_agent_preview",
+        "check_runtime_migration_gate",
+        "controlled_chat_migration",
+        "controlled_chat_cutover",
+        "multi_strategy",
+        "legacy_write_convergence",
+    ];
+    let mut violations = Vec::new();
+    for file in source_files(&["src-tauri/src", "openlife-core/src", "frontend/src"]) {
+        let rel = to_repo_path(&file);
+        if phase7_old_route_marker_allowlist(&rel) {
+            continue;
+        }
+        let source = fs::read_to_string(&file).unwrap_or_else(|err| panic!("read {rel}: {err}"));
+        let stripped = strip_cfg_test_module(&source);
+        for marker in markers {
+            if stripped.contains(marker) {
+                violations.push(format!("{rel}:{marker}"));
             }
         }
-        actual.insert(marker.clone(), count);
     }
+    assert!(
+        violations.is_empty(),
+        "Phase7 contract requires old route markers to be absent from product source; violations: {violations:?}"
+    );
+}
 
-    assert_eq!(
-        actual, expected,
-        "old product route markers must stay registered in Phase 1 inventory until their deletion phase"
+#[test]
+fn single_system_phase7_forbids_old_modules_in_product_module_graph() {
+    let module_graph = [
+        (
+            "src-tauri/src/lib.rs",
+            read_repo_file("src-tauri/src/lib.rs"),
+        ),
+        (
+            "src-tauri/src/commands/agent_runtime/mod.rs",
+            read_repo_file("src-tauri/src/commands/agent_runtime/mod.rs"),
+        ),
+        (
+            "openlife-core/src/agent/mod.rs",
+            read_repo_file("openlife-core/src/agent/mod.rs"),
+        ),
+    ];
+    let forbidden = [
+        "main_chat_agent_beta_v1",
+        "main_chat_agent_stage1",
+        "main_chat_agent_stage2",
+        "main_chat_stage3",
+        "main_chat_stage4",
+        "main_chat_stage5",
+        "main_chat_step6",
+        "main_chat_agent_productization",
+        "main_chat_live_productization",
+        "main_chat_product_maturity",
+        "migration_ladder",
+        "multi_strategy_runtime",
+        "react_beta",
+        "runtime_migration_gate",
+    ];
+    let mut violations = Vec::new();
+    for (rel, source) in module_graph {
+        for marker in forbidden {
+            if source.contains(marker) {
+                violations.push(format!("{rel}:{marker}"));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "Phase7 contract requires old stage/beta/productization/migration modules to be absent from the product module graph: {violations:?}"
+    );
+}
+
+#[test]
+fn single_system_phase7_frontend_product_pages_do_not_import_dev_bridge_or_legacy_status() {
+    let mut violations = Vec::new();
+    for file in source_files(&["frontend/src/pages", "frontend/src/components"]) {
+        let rel = to_repo_path(&file);
+        if rel.ends_with(".test.tsx") || rel.ends_with(".test.ts") {
+            continue;
+        }
+        let source = fs::read_to_string(&file).unwrap_or_else(|err| panic!("read {rel}: {err}"));
+        for marker in ["tauriDev", "legacyFallbackUsed", "legacy_fallback_used"] {
+            if source.contains(marker) {
+                violations.push(format!("{rel}:{marker}"));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "Phase7 contract requires product frontend pages/components to avoid dev bridge imports and legacy fallback status fields: {violations:?}"
+    );
+}
+
+#[test]
+fn single_system_phase7_active_docs_do_not_authorize_old_routes() {
+    let active_docs = [
+        ("README.md", read_repo_file("README.md")),
+        ("plans/README.md", read_repo_file("plans/README.md")),
+    ];
+    let forbidden_active_phrases = [
+        "run_multi_strategy_agent_preview",
+        "check_runtime_migration_gate",
+        "default Chat migration",
+        "OpenLife ReAct Beta Roadmap",
+        "Main Chat Agent Migration v1 Goal Spec",
+        "legacy_stream",
+    ];
+    let mut violations = Vec::new();
+    for (rel, source) in active_docs {
+        for phrase in forbidden_active_phrases {
+            if source.contains(phrase) {
+                violations.push(format!("{rel}:{phrase}"));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "Phase7 contract requires active docs to point at the single-system path, not old Stage/Beta/Migration routes: {violations:?}"
     );
 }

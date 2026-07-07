@@ -1,4 +1,4 @@
-use crate::main_chat_final_acceptance_tests::run_main_chat_command_surface_eval_gate;
+use crate::main_chat_acceptance_test_support::run_main_chat_command_surface_eval_gate;
 use crate::main_chat_turn_pipeline::{
     MainChatExecutionPath, MainChatTurnRouteDecision, MainChatTurnStreamMode,
 };
@@ -2680,6 +2680,91 @@ async fn main_chat_kernel_chinese_weather_requires_tool_observation() {
         .any(|action| action.action.action_type == "web.search"
             && action.status
                 == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed));
+}
+
+#[tokio::test]
+async fn main_chat_kernel_english_live_weather_requires_tool_observation() {
+    let user_text = "What is the live weather in Shanghai right now?";
+
+    let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    {
+        let mut config = send_state.config.lock().await;
+        config.system.network_policy.enabled = false;
+    }
+    let send_response = invoke_send_message_for_kernel_goal_3(
+        send_state.clone(),
+        "k3-send-english-weather-network-blocked",
+        user_text,
+    )
+    .await;
+    assert_eq!(
+        send_response["agent_ingress"]["selectedStrategy"],
+        "re_act_tool_execution"
+    );
+    assert_eq!(send_response["tool_calls"][0]["name"], "web.search");
+    assert_eq!(send_response["tool_calls"][0]["status"], "blocked");
+    assert_eq!(
+        send_response["tool_calls"][0]["error"],
+        "network_policy_blocked"
+    );
+    assert!(send_response["reply"]
+        .as_str()
+        .is_some_and(|reply| reply.contains("network_policy_blocked")));
+    let send_task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
+        .as_str()
+        .expect("send english weather task session id");
+    let send_session = load_command_surface_session(&send_state, send_task_session_id).await;
+    assert_eq!(
+        send_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
+    );
+    assert!(send_session
+        .pending_blockers
+        .contains(&"network_policy_blocked".to_string()));
+    let send_actions = list_command_surface_actions(&send_state, send_task_session_id).await;
+    assert!(send_actions
+        .iter()
+        .any(|action| action.action.action_type == "web.search"
+            && action.status
+                == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed));
+    assert!(
+        list_command_surface_proposals(&send_state).await.is_empty(),
+        "external fact blocker must not create proposals"
+    );
+
+    let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    {
+        let mut config = stream_state.config.lock().await;
+        config.system.network_policy.enabled = false;
+    }
+    let stream_response = invoke_start_stream_message_for_kernel_goal_3(
+        stream_state.clone(),
+        "k3-stream-english-weather-network-blocked",
+        user_text,
+    )
+    .await;
+    assert_eq!(
+        stream_response["agent_ingress"]["selectedStrategy"],
+        "re_act_tool_execution"
+    );
+    assert_eq!(stream_response["tool_calls"][0]["name"], "web.search");
+    assert_eq!(stream_response["tool_calls"][0]["status"], "blocked");
+    let stream_task_session_id =
+        expected_task_session_id("k3-stream-english-weather-network-blocked", user_text);
+    let stream_session = load_command_surface_session(&stream_state, &stream_task_session_id).await;
+    assert_eq!(
+        stream_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
+    );
+    assert!(stream_session
+        .pending_blockers
+        .contains(&"network_policy_blocked".to_string()));
+    assert!(
+        list_command_surface_proposals(&stream_state)
+            .await
+            .is_empty(),
+        "stream external fact blocker must not create proposals"
+    );
 }
 
 #[tokio::test]

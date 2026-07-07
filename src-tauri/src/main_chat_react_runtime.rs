@@ -231,7 +231,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
     let tool_selection_allowlist = agent_loop_plan.allowed_tool_targets();
     let tool_selection_allowed_actions = agent_loop_plan.allowed_tool_action_metadata();
     let tool_selection_contract_digest =
-        openlife_core::agent::react_beta::metadata_safe_value_digest(&serde_json::json!({
+        openlife_core::agent::metadata_safe::metadata_safe_value_digest(&serde_json::json!({
             "candidateIds": tool_selection_candidate_ids.clone(),
             "allowedTargets": tool_selection_allowlist.clone(),
             "allowedActions": tool_selection_allowed_actions.clone(),
@@ -245,7 +245,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
         "localOnlyRequired": local_only_required,
         "plannedActionType": plan.queue_action_type.clone(),
         "plannedTarget": plan.target.clone(),
-        "argumentsDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(&plan.arguments),
+        "argumentsDigest": openlife_core::agent::metadata_safe::metadata_safe_value_digest(&plan.arguments),
         "toolSelectionCandidateCount": agent_loop_plan.tool_candidate_count(),
         "toolSelectionCandidateIds": agent_loop_plan.tool_candidate_ids(),
         "toolSelectionAllowlist": agent_loop_plan.allowed_tool_targets(),
@@ -322,7 +322,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
     if plan.requires_network && !network_policy.enabled {
         let selected_tool_candidate = agent_loop_plan.default_tool_candidate();
         let selected_arguments_digest =
-            openlife_core::agent::react_beta::metadata_safe_value_digest(
+            openlife_core::agent::metadata_safe::metadata_safe_value_digest(
                 &selected_tool_candidate.arguments,
             );
         let selected_arguments_digest_label = format!(
@@ -456,9 +456,10 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
     {
         Ok(packet) => packet,
         Err(err) => {
-            let model_error_digest = openlife_core::agent::react_beta::metadata_safe_value_digest(
-                &serde_json::json!({ "error": err.to_string() }),
-            );
+            let model_error_digest =
+                openlife_core::agent::metadata_safe::metadata_safe_value_digest(
+                    &serde_json::json!({ "error": err.to_string() }),
+                );
             let metadata = serde_json::json!({
                 "agentLoopAttempted": true,
                 "agentLoopSucceeded": false,
@@ -495,7 +496,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                         None,
                     ) {
                         let model_error_digest =
-                            openlife_core::agent::react_beta::metadata_safe_value_digest(
+                            openlife_core::agent::metadata_safe::metadata_safe_value_digest(
                                 &serde_json::json!({ "error": err.to_string() }),
                             );
                         let metadata = serde_json::json!({
@@ -528,7 +529,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                         None,
                     ) {
                         let model_error_digest =
-                            openlife_core::agent::react_beta::metadata_safe_value_digest(
+                            openlife_core::agent::metadata_safe::metadata_safe_value_digest(
                                 &serde_json::json!({ "error": err.to_string() }),
                             );
                         let metadata = serde_json::json!({
@@ -555,7 +556,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             }
             Err(err) => {
                 let model_error_digest =
-                    openlife_core::agent::react_beta::metadata_safe_value_digest(
+                    openlife_core::agent::metadata_safe::metadata_safe_value_digest(
                         &serde_json::json!({ "error": err.to_string() }),
                     );
                 let metadata = serde_json::json!({
@@ -739,7 +740,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             let observed_action_error = observed_action.error.clone();
             let observed_action_id = Some(observed_action.id.clone());
             let selected_arguments_digest =
-                openlife_core::agent::react_beta::metadata_safe_value_digest(
+                openlife_core::agent::metadata_safe::metadata_safe_value_digest(
                     &selected_tool_candidate.arguments,
                 );
             let selected_arguments_digest_label = format!(
@@ -994,9 +995,10 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             })
         }
         Err(err) => {
-            let model_error_digest = openlife_core::agent::react_beta::metadata_safe_value_digest(
-                &serde_json::json!({ "error": err.to_string() }),
-            );
+            let model_error_digest =
+                openlife_core::agent::metadata_safe::metadata_safe_value_digest(
+                    &serde_json::json!({ "error": err.to_string() }),
+                );
             let metadata = serde_json::json!({
                 "agentLoopAttempted": true,
                 "agentLoopSucceeded": false,
@@ -1040,7 +1042,7 @@ pub(crate) async fn synthesize_main_chat_react_follow_up(
         "ReAct follow-up synthesis started after a governed observation.",
         serde_json::json!({
             "actionExecutorBacked": true,
-            "observationDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(&observation.metadata),
+            "observationDigest": openlife_core::agent::metadata_safe::metadata_safe_value_digest(&observation.metadata),
             "toolExecutionAllowed": false,
             "writeExecutionAllowed": false,
             "directWritesExecuted": false,
@@ -1087,7 +1089,7 @@ pub(crate) async fn synthesize_main_chat_react_follow_up(
             None,
         ),
         Err(err) => {
-            let err_digest = openlife_core::agent::react_beta::metadata_safe_value_digest(
+            let err_digest = openlife_core::agent::metadata_safe::metadata_safe_value_digest(
                 &serde_json::json!({ "error": err.to_string() }),
             );
             (
@@ -1152,7 +1154,7 @@ pub(crate) fn blocked_main_chat_observation(
         "actionType": plan.queue_action_type.clone(),
         "executorActionType": plan.executor_action_type.clone(),
         "target": plan.target.clone(),
-        "argumentsDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(&plan.arguments),
+        "argumentsDigest": openlife_core::agent::metadata_safe::metadata_safe_value_digest(&plan.arguments),
         "actionExecutorBacked": true,
         "executorStatus": "blocked",
         "blockerReason": blocker_reason,

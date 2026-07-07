@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, fireEvent, act } from "@testing-library/react";
-import { BrowserRouter, MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
+import { BrowserRouter, MemoryRouter, Route, Routes } from "react-router-dom";
 import ChatPage, { buildMainChatAgentStatusView } from "./ChatPage";
 import MailboxPage from "./MailboxPage";
 import { invoke } from "@tauri-apps/api/core";
@@ -190,19 +190,17 @@ function projectionWithEditedOnlyReview(): LifeStateProjection {
       allowUntilRevokedCount: 0,
     },
     safePaths: [],
-    surfaces: ["today", "mailbox", "chat", "companion", "life_model", "settings"].map(
-      surface => ({
-        surface,
-        pendingReviewCount: 0,
-        editedReviewCount: 1,
-        totalReviewRequiredCount: 1,
-        readinessStatus: "ready",
-        taskStatus: "idle",
-        safeModeActive: false,
-        waitingPermissionCount: 0,
-        activeToolPermissionCount: 0,
-      })
-    ),
+    surfaces: ["today", "mailbox", "chat", "companion", "life_model", "settings"].map(surface => ({
+      surface,
+      pendingReviewCount: 0,
+      editedReviewCount: 1,
+      totalReviewRequiredCount: 1,
+      readinessStatus: "ready",
+      taskStatus: "idle",
+      safeModeActive: false,
+      waitingPermissionCount: 0,
+      activeToolPermissionCount: 0,
+    })),
     sourceRefs: ["proposal_store:pending_and_edited"],
   };
 }
@@ -1072,7 +1070,28 @@ describe("ChatPage", () => {
       }
       if (cmd === "get_system_diagnostics") {
         return Promise.resolve({
-          policy_router: { activeAuthority: "IntentFrame + PolicyRouter", authorityChain: ["user_input", "IntentFrame", "PolicyRouter", "AgentIngressDecision", "OpenLifeTurnRuntime", "MainChatKernel"], routeOutputs: ["direct_answer", "read_only_tool", "proposal_only_write", "plan_draft", "ask_clarification", "governed_blocker", "confirmation_request"], appStateOldRoutersPresent: false, diagnosticsSurface: "policy_router_status" },
+          policy_router: {
+            activeAuthority: "IntentFrame + PolicyRouter",
+            authorityChain: [
+              "user_input",
+              "IntentFrame",
+              "PolicyRouter",
+              "AgentIngressDecision",
+              "OpenLifeTurnRuntime",
+              "MainChatKernel",
+            ],
+            routeOutputs: [
+              "direct_answer",
+              "read_only_tool",
+              "proposal_only_write",
+              "plan_draft",
+              "ask_clarification",
+              "governed_blocker",
+              "confirmation_request",
+            ],
+            appStateOldRoutersPresent: false,
+            diagnosticsSurface: "policy_router_status",
+          },
           mcp_server_count: 0,
           mcp_tool_count: 0,
           mcp_recent_audit_count: 0,
@@ -1139,7 +1158,28 @@ describe("ChatPage", () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_system_diagnostics") {
         return Promise.resolve({
-          policy_router: { activeAuthority: "IntentFrame + PolicyRouter", authorityChain: ["user_input", "IntentFrame", "PolicyRouter", "AgentIngressDecision", "OpenLifeTurnRuntime", "MainChatKernel"], routeOutputs: ["direct_answer", "read_only_tool", "proposal_only_write", "plan_draft", "ask_clarification", "governed_blocker", "confirmation_request"], appStateOldRoutersPresent: false, diagnosticsSurface: "policy_router_status" },
+          policy_router: {
+            activeAuthority: "IntentFrame + PolicyRouter",
+            authorityChain: [
+              "user_input",
+              "IntentFrame",
+              "PolicyRouter",
+              "AgentIngressDecision",
+              "OpenLifeTurnRuntime",
+              "MainChatKernel",
+            ],
+            routeOutputs: [
+              "direct_answer",
+              "read_only_tool",
+              "proposal_only_write",
+              "plan_draft",
+              "ask_clarification",
+              "governed_blocker",
+              "confirmation_request",
+            ],
+            appStateOldRoutersPresent: false,
+            diagnosticsSurface: "policy_router_status",
+          },
           mcp_server_count: 1,
           mcp_tool_count: 2,
           mcp_recent_audit_count: 0,
@@ -1229,7 +1269,28 @@ describe("ChatPage", () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_system_diagnostics") {
         return Promise.resolve({
-          policy_router: { activeAuthority: "IntentFrame + PolicyRouter", authorityChain: ["user_input", "IntentFrame", "PolicyRouter", "AgentIngressDecision", "OpenLifeTurnRuntime", "MainChatKernel"], routeOutputs: ["direct_answer", "read_only_tool", "proposal_only_write", "plan_draft", "ask_clarification", "governed_blocker", "confirmation_request"], appStateOldRoutersPresent: false, diagnosticsSurface: "policy_router_status" },
+          policy_router: {
+            activeAuthority: "IntentFrame + PolicyRouter",
+            authorityChain: [
+              "user_input",
+              "IntentFrame",
+              "PolicyRouter",
+              "AgentIngressDecision",
+              "OpenLifeTurnRuntime",
+              "MainChatKernel",
+            ],
+            routeOutputs: [
+              "direct_answer",
+              "read_only_tool",
+              "proposal_only_write",
+              "plan_draft",
+              "ask_clarification",
+              "governed_blocker",
+              "confirmation_request",
+            ],
+            appStateOldRoutersPresent: false,
+            diagnosticsSurface: "policy_router_status",
+          },
           mcp_server_count: 0,
           mcp_tool_count: 0,
           mcp_recent_audit_count: 0,
@@ -3541,8 +3602,8 @@ describe("ChatPage", () => {
     expect(screen.getAllByText("resumeBlockedByPendingPermission").length).toBeGreaterThanOrEqual(
       1
     );
-    expect(screen.getByText(/Fallback notice/)).toBeInTheDocument();
-    expect(screen.getByText(/visible legacy fallback/)).toBeInTheDocument();
+    expect(screen.queryByText(/Fallback notice/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/visible legacy fallback/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Resume task" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Retry failed action" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Cancel task" })).toBeEnabled();
@@ -4316,116 +4377,7 @@ describe("ChatPage", () => {
     expect(screen.queryByText(/ReasoningTrace/i)).not.toBeInTheDocument();
   });
 
-  it("runs governed preview explicitly with write-disabled budget and keeps it out of chat messages", async () => {
-    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
-      if (cmd === "run_multi_strategy_agent_preview") {
-        return Promise.resolve({
-          runId: "run-chat-preview-1",
-          strategyKind: "react",
-          payloadKind: "react",
-          userOutput: "PRIVATE PREVIEW USER OUTPUT",
-          proposalIds: [],
-          warnings: ["preview runtime forces allowWrites=false"],
-          metadataSafeSummary: {
-            taskKind: "conversation",
-            reasonCode: "default_react",
-            riskLevel: "low",
-            hasHsPacket: false,
-            governanceDecisionKind: "allow",
-            rawMemoryContext: "must not render",
-          },
-          governanceDecisionKind: "allow",
-        });
-      }
-      return mockInvoke(cmd, args);
-    });
-
-    function ChatWithLocation() {
-      const location = useLocation();
-      return (
-        <>
-          <ChatPage />
-          <div data-testid="location-path">{location.pathname}</div>
-        </>
-      );
-    }
-
-    render(
-      <MemoryRouter initialEntries={["/chat"]}>
-        <ChatWithLocation />
-      </MemoryRouter>
-    );
-
-    const textarea = await screen.findByPlaceholderText(/输入消息/);
-    await screen.findByText("聊天就绪");
-    fireEvent.change(textarea, { target: { value: "Preview this guarded chat input" } });
-    fireEvent.click(screen.getByRole("button", { name: /Governed Preview/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Run Governed Preview" }));
-
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith("run_multi_strategy_agent_preview", {
-        input: expect.objectContaining({
-          sessionId: expect.stringMatching(/^chat-governed-preview-/),
-          userText: "Preview this guarded chat input",
-          toolsPrompt: "No developer tools catalog supplied for this chat preview.",
-          allowPlanning: false,
-          localModelAvailable: false,
-          executionBudget: expect.objectContaining({ allowWrites: false }),
-        }),
-      });
-    });
-
-    expect(await screen.findByText("run-chat-preview-1")).toBeInTheDocument();
-    expect(screen.getByText("Strategy: react")).toBeInTheDocument();
-    expect(screen.getByText("preview runtime forces allowWrites=false")).toBeInTheDocument();
-    expect(screen.getByText("reasonCode: default_react")).toBeInTheDocument();
-    expect(screen.queryByText("PRIVATE PREVIEW USER OUTPUT")).not.toBeInTheDocument();
-    expect(screen.queryByText("rawMemoryContext: must not render")).not.toBeInTheDocument();
-    expect(invoke).not.toHaveBeenCalledWith("save_chat_message", expect.anything());
-    expect(invoke).not.toHaveBeenCalledWith("start_stream_message", expect.anything());
-
-    fireEvent.click(screen.getByRole("link", { name: "View Run Trace" }));
-    expect(screen.getByTestId("location-path")).toHaveTextContent("/runs/run-chat-preview-1");
-  });
-
-  const mockSuccessfulControlledPilot = (overrides: Record<string, any> = {}) => {
-    const metadataSafeSummary = {
-      taskKind: "conversation",
-      reasonCode: "default_react",
-      riskLevel: "low",
-      hasHsPacket: false,
-      governanceDecisionKind: "allow",
-      ...(overrides.metadataSafeSummary ?? {}),
-    };
-    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
-      if (cmd === "check_controlled_chat_pilot_eligibility") {
-        return Promise.resolve({
-          eligible: true,
-          requiredCleanRuns: 3,
-          cleanRunCount: 3,
-          checkedRunIds: ["run-preview-clean-3", "run-preview-clean-2", "run-preview-clean-1"],
-          blockingReasons: [],
-          defaultChatUnchanged: true,
-        });
-      }
-      if (cmd === "run_multi_strategy_agent_preview") {
-        return Promise.resolve({
-          runId: "run-controlled-pilot-1",
-          strategyKind: "react",
-          payloadKind: "react",
-          userOutput: "Pilot-only answer",
-          proposalIds: [],
-          warnings: [],
-          governanceDecisionKind: "allow",
-          ...overrides,
-          metadataSafeSummary,
-        });
-      }
-      return mockInvoke(cmd, args);
-    });
-  };
-
-  const runControlledPilotFromChat = async (draft = "Run one controlled pilot turn") => {
+  it("does not expose retired governed preview or controlled pilot routes in product chat", async () => {
     render(
       <BrowserRouter>
         <ChatPage />
@@ -4434,381 +4386,27 @@ describe("ChatPage", () => {
 
     const textarea = await screen.findByPlaceholderText(/输入消息/);
     await screen.findByText("聊天就绪");
-    fireEvent.change(textarea, { target: { value: draft } });
-    fireEvent.click(screen.getByRole("button", { name: /Governed Preview/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Run Controlled Pilot" }));
-  };
+    fireEvent.change(textarea, { target: { value: "Use the current product chat path" } });
 
-  it("blocks controlled pilot when eligibility fails and does not call preview", async () => {
-    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
-      if (cmd === "check_controlled_chat_pilot_eligibility") {
-        return Promise.resolve({
-          eligible: false,
-          requiredCleanRuns: 3,
-          cleanRunCount: 1,
-          checkedRunIds: ["run-preview-1"],
-          blockingReasons: ["only 1 clean preview run found"],
-          defaultChatUnchanged: true,
-        });
-      }
-      if (cmd === "run_multi_strategy_agent_preview") {
-        return Promise.reject(new Error("preview must not run when pilot is blocked"));
-      }
-      return mockInvoke(cmd, args);
-    });
-
-    render(
-      <BrowserRouter>
-        <ChatPage />
-      </BrowserRouter>
-    );
-
-    const textarea = await screen.findByPlaceholderText(/输入消息/);
-    await screen.findByText("聊天就绪");
-    fireEvent.change(textarea, { target: { value: "Try controlled pilot" } });
-    fireEvent.click(screen.getByRole("button", { name: /Governed Preview/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Run Controlled Pilot" }));
-
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith("check_controlled_chat_pilot_eligibility", {
-        input: {},
-      });
-    });
-
-    expect(
-      vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "run_multi_strategy_agent_preview")
-    ).toBe(false);
-    expect(await screen.findByText(/Controlled Pilot blocked/)).toBeInTheDocument();
-    expect(screen.getByText("only 1 clean preview run found")).toBeInTheDocument();
-    expect(screen.getByText(/Use normal Send for the stable Chat path/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Governed Preview/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Run Governed Preview" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Run Controlled Pilot" })).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Promote Pilot Response" })
     ).not.toBeInTheDocument();
-    expect(invoke).not.toHaveBeenCalledWith(
-      "record_controlled_pilot_promotion_evidence",
-      expect.anything()
-    );
-  });
-
-  it("runs controlled pilot after eligibility passes and renders pilot response separately without auto-saving", async () => {
-    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
-      if (cmd === "check_controlled_chat_pilot_eligibility") {
-        return Promise.resolve({
-          eligible: true,
-          requiredCleanRuns: 3,
-          cleanRunCount: 3,
-          checkedRunIds: ["run-preview-clean-3", "run-preview-clean-2", "run-preview-clean-1"],
-          blockingReasons: [],
-          defaultChatUnchanged: true,
-        });
-      }
-      if (cmd === "run_multi_strategy_agent_preview") {
-        return Promise.resolve({
-          runId: "run-controlled-pilot-1",
-          strategyKind: "react",
-          payloadKind: "react",
-          userOutput: "Pilot-only answer",
-          proposalIds: [],
-          warnings: [],
-          metadataSafeSummary: {
-            taskKind: "conversation",
-            reasonCode: "default_react",
-            riskLevel: "low",
-            hasHsPacket: false,
-            governanceDecisionKind: "allow",
-          },
-          governanceDecisionKind: "allow",
-        });
-      }
-      return mockInvoke(cmd, args);
-    });
-
-    render(
-      <BrowserRouter>
-        <ChatPage />
-      </BrowserRouter>
-    );
-
-    const textarea = await screen.findByPlaceholderText(/输入消息/);
-    await screen.findByText("聊天就绪");
-    fireEvent.change(textarea, { target: { value: "Run one controlled pilot turn" } });
-    fireEvent.click(screen.getByRole("button", { name: /Governed Preview/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Run Controlled Pilot" }));
-
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith("run_multi_strategy_agent_preview", {
-        input: expect.objectContaining({
-          sessionId: expect.stringMatching(/^chat-controlled-pilot-/),
-          userText: "Run one controlled pilot turn",
-          toolsPrompt: "No developer tools catalog supplied for this chat preview.",
-          allowPlanning: false,
-          localModelAvailable: false,
-          layer: "L2",
-          executionBudget: expect.objectContaining({ allowWrites: false }),
-        }),
-      });
-    });
-
-    const calls = vi.mocked(invoke).mock.calls;
-    const eligibilityIndex = calls.findIndex(
-      ([cmd]) => cmd === "check_controlled_chat_pilot_eligibility"
-    );
-    const previewIndex = calls.findIndex(([cmd]) => cmd === "run_multi_strategy_agent_preview");
-    expect(eligibilityIndex).toBeGreaterThanOrEqual(0);
-    expect(previewIndex).toBeGreaterThan(eligibilityIndex);
-    expect(await screen.findByText("Pilot response")).toBeInTheDocument();
-    expect(screen.getByText("Pilot-only answer")).toBeInTheDocument();
-    expect(screen.getByText("run-controlled-pilot-1")).toBeInTheDocument();
-    expect(invoke).not.toHaveBeenCalledWith("save_chat_message", expect.anything());
-    expect(invoke).not.toHaveBeenCalledWith("start_stream_message", expect.anything());
-  });
-
-  it("shows promote operation only for successful controlled pilot responses with userOutput", async () => {
-    mockSuccessfulControlledPilot();
-
-    await runControlledPilotFromChat();
-
-    expect(await screen.findByText("Pilot response")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Promote Pilot Response" })).toBeInTheDocument();
-    expect(invoke).not.toHaveBeenCalledWith("save_chat_message", expect.anything());
-  });
-
-  it("does not show promote operation when successful controlled pilot omits userOutput", async () => {
-    mockSuccessfulControlledPilot({ userOutput: undefined });
-
-    await runControlledPilotFromChat("Pilot returns metadata only");
-
-    expect(await screen.findByText("Pilot response")).toBeInTheDocument();
+    expect(screen.queryByText(/Controlled Pilot/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Pilot response/)).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Promote Pilot Response" })
-    ).not.toBeInTheDocument();
-    expect(invoke).not.toHaveBeenCalledWith("save_chat_message", expect.anything());
-    expect(invoke).not.toHaveBeenCalledWith(
-      "record_controlled_pilot_promotion_evidence",
-      expect.anything()
-    );
-  });
-
-  it("cancels pilot promotion review without writing chat history", async () => {
-    mockSuccessfulControlledPilot();
-
-    await runControlledPilotFromChat();
-    fireEvent.click(await screen.findByRole("button", { name: "Promote Pilot Response" }));
-
-    expect(screen.getByText("Confirm pilot promotion")).toBeInTheDocument();
-    expect(screen.getAllByText("Pilot-only answer")).toHaveLength(2);
-    expect(screen.getAllByText("run-controlled-pilot-1")).toHaveLength(2);
-    expect(screen.getByText("Source session")).toBeInTheDocument();
-    expect(screen.getByText("Target session")).toBeInTheDocument();
-    expect(screen.getByText("Selected strategy")).toBeInTheDocument();
-    expect(screen.getByText("Governance summary")).toBeInTheDocument();
-    expect(screen.getByText("Payload summary")).toBeInTheDocument();
-    expect(screen.getByText(/确认后将写入当前聊天历史/)).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "Cancel Promotion" }));
-
-    expect(screen.queryByText("Confirm pilot promotion")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Promote Pilot Response" })).toBeInTheDocument();
-    expect(invoke).not.toHaveBeenCalledWith("save_chat_message", expect.anything());
-  });
-
-  it("confirms pilot promotion by saving one assistant chat message", async () => {
-    mockSuccessfulControlledPilot();
-
-    await runControlledPilotFromChat();
-    fireEvent.click(await screen.findByRole("button", { name: "Promote Pilot Response" }));
-    fireEvent.click(screen.getByRole("button", { name: "Confirm Promotion" }));
-
-    await waitFor(() => {
-      const saveCalls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "save_chat_message");
-      expect(saveCalls).toHaveLength(1);
-    });
-    const saveCalls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "save_chat_message");
-    expect(saveCalls[0][1]).toMatchObject({
-      sessionId: "session-1",
-      session_id: "session-1",
-      message: {
-        role: "assistant",
-        content: "Pilot-only answer",
-        run_id: "run-controlled-pilot-1",
-      },
-    });
-    expect(screen.getAllByText("Pilot-only answer")).toHaveLength(2);
-
-    const evidenceCalls = vi
-      .mocked(invoke)
-      .mock.calls.filter(([cmd]) => cmd === "record_controlled_pilot_promotion_evidence");
-    expect(evidenceCalls).toHaveLength(1);
-    expect(evidenceCalls[0][1]).toMatchObject({
-      input: {
-        pilotRunId: "run-controlled-pilot-1",
-        sourceSessionId: "session-1",
-        targetSessionId: "session-1",
-        strategyKind: "react",
-        payloadKind: "react",
-        governanceDecisionKind: "allow",
-        promotedMessageLength: "Pilot-only answer".length,
-        promotedMessageHash: expect.any(String),
-        promotedAt: expect.any(String),
-      },
-    });
-    expect(JSON.stringify(evidenceCalls[0][1])).not.toContain("Pilot-only answer");
-  });
-
-  it("blocks pilot promotion after switching sessions and asks the user to rerun the pilot", async () => {
-    mockSuccessfulControlledPilot();
-
-    await runControlledPilotFromChat();
-    fireEvent.click(await screen.findByText("会话 2"));
-    fireEvent.click(await screen.findByRole("button", { name: "Promote Pilot Response" }));
-    fireEvent.click(screen.getByRole("button", { name: "Confirm Promotion" }));
-
-    expect(await screen.findByText(/Promotion blocked/)).toBeInTheDocument();
-    expect(screen.getByText(/source session session-1/)).toBeInTheDocument();
-    expect(screen.getByText(/target session session-2/)).toBeInTheDocument();
-    expect(screen.getAllByText(/Rerun Controlled Pilot in this session/).length).toBeGreaterThan(0);
-    const saveCalls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "save_chat_message");
-    expect(saveCalls).toHaveLength(0);
-    const evidenceCalls = vi
-      .mocked(invoke)
-      .mock.calls.filter(([cmd]) => cmd === "record_controlled_pilot_promotion_evidence");
-    expect(evidenceCalls).toHaveLength(0);
-  });
-
-  it("does not allow repeating promotion for the same pilot response", async () => {
-    mockSuccessfulControlledPilot();
-
-    await runControlledPilotFromChat();
-    fireEvent.click(await screen.findByRole("button", { name: "Promote Pilot Response" }));
-    fireEvent.click(screen.getByRole("button", { name: "Confirm Promotion" }));
-
-    await waitFor(() => {
-      const saveCalls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "save_chat_message");
-      expect(saveCalls).toHaveLength(1);
-    });
-    expect(screen.getByText("Promoted to chat history")).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Promote Pilot Response" })
-    ).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Confirm Promotion" })).not.toBeInTheDocument();
-    const saveCalls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "save_chat_message");
-    expect(saveCalls).toHaveLength(1);
-    const evidenceCalls = vi
-      .mocked(invoke)
-      .mock.calls.filter(([cmd]) => cmd === "record_controlled_pilot_promotion_evidence");
-    expect(evidenceCalls).toHaveLength(1);
-  });
-
-  it("does not duplicate the promoted assistant message when evidence recording is retried", async () => {
-    let evidenceAttempts = 0;
-    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
-      if (cmd === "check_controlled_chat_pilot_eligibility") {
-        return Promise.resolve({
-          eligible: true,
-          requiredCleanRuns: 3,
-          cleanRunCount: 3,
-          checkedRunIds: ["run-preview-clean-3", "run-preview-clean-2", "run-preview-clean-1"],
-          blockingReasons: [],
-          defaultChatUnchanged: true,
-        });
-      }
-      if (cmd === "run_multi_strategy_agent_preview") {
-        return Promise.resolve({
-          runId: "run-controlled-pilot-1",
-          strategyKind: "react",
-          payloadKind: "react",
-          userOutput: "Pilot-only answer",
-          proposalIds: [],
-          warnings: [],
-          metadataSafeSummary: {
-            taskKind: "conversation",
-            reasonCode: "default_react",
-            riskLevel: "low",
-            hasHsPacket: false,
-            governanceDecisionKind: "allow",
-          },
-          governanceDecisionKind: "allow",
-        });
-      }
-      if (cmd === "record_controlled_pilot_promotion_evidence") {
-        evidenceAttempts += 1;
-        if (evidenceAttempts === 1) {
-          return Promise.reject(new Error("evidence db unavailable"));
-        }
-        return Promise.resolve({
-          evidenceId: "ev_promotion_1",
-          created: true,
-          pilotRunId: "run-controlled-pilot-1",
-          promotedAt: "2026-05-30T00:00:00Z",
-        });
-      }
-      return mockInvoke(cmd, args);
-    });
-
-    await runControlledPilotFromChat();
-    fireEvent.click(await screen.findByRole("button", { name: "Promote Pilot Response" }));
-    fireEvent.click(screen.getByRole("button", { name: "Confirm Promotion" }));
-
-    expect(await screen.findByText(/Promotion evidence recording failed/)).toBeInTheDocument();
-    expect(screen.getByText(/Retry will only record evidence/)).toBeInTheDocument();
-    let saveCalls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "save_chat_message");
-    expect(saveCalls).toHaveLength(1);
-
-    fireEvent.click(screen.getByRole("button", { name: "Confirm Promotion" }));
-
-    await waitFor(() => {
-      const evidenceCalls = vi
+      vi
         .mocked(invoke)
-        .mock.calls.filter(([cmd]) => cmd === "record_controlled_pilot_promotion_evidence");
-      expect(evidenceCalls).toHaveLength(2);
-    });
-    saveCalls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "save_chat_message");
-    expect(saveCalls).toHaveLength(1);
-    expect(await screen.findByText("Promoted to chat history")).toBeInTheDocument();
-  });
-
-  it("shows controlled pilot fallback when preview fails without writing chat history", async () => {
-    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
-      if (cmd === "check_controlled_chat_pilot_eligibility") {
-        return Promise.resolve({
-          eligible: true,
-          requiredCleanRuns: 3,
-          cleanRunCount: 3,
-          checkedRunIds: ["run-preview-clean-3", "run-preview-clean-2", "run-preview-clean-1"],
-          blockingReasons: [],
-          defaultChatUnchanged: true,
-        });
-      }
-      if (cmd === "run_multi_strategy_agent_preview") {
-        return Promise.reject(new Error("preview runtime unavailable"));
-      }
-      return mockInvoke(cmd, args);
-    });
-
-    render(
-      <BrowserRouter>
-        <ChatPage />
-      </BrowserRouter>
-    );
-
-    const textarea = await screen.findByPlaceholderText(/输入消息/);
-    await screen.findByText("聊天就绪");
-    fireEvent.change(textarea, { target: { value: "Pilot failure path" } });
-    fireEvent.click(screen.getByRole("button", { name: /Governed Preview/ }));
-    fireEvent.click(screen.getByRole("button", { name: "Run Controlled Pilot" }));
-
-    expect(await screen.findByText(/Controlled Pilot failed/)).toBeInTheDocument();
-    expect(screen.getByText(/preview runtime unavailable/)).toBeInTheDocument();
-    expect(screen.getByText(/Use normal Send for the stable Chat path/)).toBeInTheDocument();
-    expect(invoke).not.toHaveBeenCalledWith("save_chat_message", expect.anything());
-    expect(invoke).not.toHaveBeenCalledWith("start_stream_message", expect.anything());
-    expect(
-      screen.queryByRole("button", { name: "Promote Pilot Response" })
-    ).not.toBeInTheDocument();
-    expect(invoke).not.toHaveBeenCalledWith(
-      "record_controlled_pilot_promotion_evidence",
-      expect.anything()
-    );
+        .mock.calls.some(([cmd]) =>
+          [
+            "run_multi_strategy_agent_preview",
+            "check_controlled_chat_pilot_eligibility",
+            "record_controlled_pilot_promotion_evidence",
+          ].includes(String(cmd))
+        )
+    ).toBe(false);
   });
 
   it("ignores a delayed AgentRun fetch after switching away from the originating session", async () => {
@@ -4999,7 +4597,28 @@ describe("ChatPage", () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_system_diagnostics") {
         return Promise.resolve({
-          policy_router: { activeAuthority: "IntentFrame + PolicyRouter", authorityChain: ["user_input", "IntentFrame", "PolicyRouter", "AgentIngressDecision", "OpenLifeTurnRuntime", "MainChatKernel"], routeOutputs: ["direct_answer", "read_only_tool", "proposal_only_write", "plan_draft", "ask_clarification", "governed_blocker", "confirmation_request"], appStateOldRoutersPresent: false, diagnosticsSurface: "policy_router_status" },
+          policy_router: {
+            activeAuthority: "IntentFrame + PolicyRouter",
+            authorityChain: [
+              "user_input",
+              "IntentFrame",
+              "PolicyRouter",
+              "AgentIngressDecision",
+              "OpenLifeTurnRuntime",
+              "MainChatKernel",
+            ],
+            routeOutputs: [
+              "direct_answer",
+              "read_only_tool",
+              "proposal_only_write",
+              "plan_draft",
+              "ask_clarification",
+              "governed_blocker",
+              "confirmation_request",
+            ],
+            appStateOldRoutersPresent: false,
+            diagnosticsSurface: "policy_router_status",
+          },
           mcp_server_count: 1,
           mcp_tool_count: 2,
           mcp_recent_audit_count: 1,

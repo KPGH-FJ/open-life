@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tauri::State;
 
-use crate::legacy_write_convergence::{
+use crate::life_model_materializer_guard::{
     LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
     LifeModelMaterializerCallerPurpose,
 };

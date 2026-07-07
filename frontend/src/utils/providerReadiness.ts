@@ -28,7 +28,8 @@ function fallbackStatus(diagnostics: SystemDiagnostics | null): string {
   if (diagnostics.cloud_api_validation_status === "validated") return "validated";
   if (diagnostics.cloud_api_validation_status === "failed") return "failed";
   if (diagnostics.cloud_api_validation_status === "stale") return "stale";
-  if (diagnostics.cloud_api_validation_status === "scripted_dogfood") return "scripted_dogfood";
+  if (diagnostics.cloud_api_validation_status === "scripted_provider_probe")
+    return "scripted_provider_probe";
   if (diagnostics.cloud_api_validated === true) return "validated";
   return "unvalidated";
 }
@@ -131,7 +132,7 @@ export function buildProviderReadinessView(
     };
   }
 
-  if (status === "scripted_dogfood") {
+  if (status === "scripted_provider_probe") {
     return {
       providerLabel,
       status,

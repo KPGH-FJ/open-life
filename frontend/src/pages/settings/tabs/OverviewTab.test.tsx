@@ -15,7 +15,28 @@ describe("OverviewTab", () => {
   });
 
   const defaultDiagnostics = {
-    policy_router: { activeAuthority: "IntentFrame + PolicyRouter", authorityChain: ["user_input", "IntentFrame", "PolicyRouter", "AgentIngressDecision", "OpenLifeTurnRuntime", "MainChatKernel"], routeOutputs: ["direct_answer", "read_only_tool", "proposal_only_write", "plan_draft", "ask_clarification", "governed_blocker", "confirmation_request"], appStateOldRoutersPresent: false, diagnosticsSurface: "policy_router_status" },
+    policy_router: {
+      activeAuthority: "IntentFrame + PolicyRouter",
+      authorityChain: [
+        "user_input",
+        "IntentFrame",
+        "PolicyRouter",
+        "AgentIngressDecision",
+        "OpenLifeTurnRuntime",
+        "MainChatKernel",
+      ],
+      routeOutputs: [
+        "direct_answer",
+        "read_only_tool",
+        "proposal_only_write",
+        "plan_draft",
+        "ask_clarification",
+        "governed_blocker",
+        "confirmation_request",
+      ],
+      appStateOldRoutersPresent: false,
+      diagnosticsSurface: "policy_router_status",
+    },
     mcp_server_count: 2,
     mcp_tool_count: 5,
     mcp_recent_audit_count: 10,

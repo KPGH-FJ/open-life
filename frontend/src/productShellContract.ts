@@ -144,7 +144,7 @@ export const ADVANCED_PRODUCT_ROUTE_GROUPS = [
     ],
   },
   {
-    label: "Stage / debug / eval",
+    label: "Maintenance",
     items: [
       { label: "Metrics", path: advancedRoutePath("Metrics") },
       { label: "Calibration", path: advancedRoutePath("Calibration") },
@@ -153,5 +153,5 @@ export const ADVANCED_PRODUCT_ROUTE_GROUPS = [
   },
 ] as const;
 
-// Future AgentStage bitmap assets should live under frontend/public/assets/agent-stage.
+// Bitmap assets for agent workspace states live under frontend/public/assets/agent-stage.
 export const AGENT_STAGE_ASSET_ROOT = "/assets/agent-stage" as const;

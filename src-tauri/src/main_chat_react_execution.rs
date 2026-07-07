@@ -201,7 +201,7 @@ pub(crate) async fn execute_main_chat_react_action_with_tool_gateway(
         "executorActionType": plan.executor_action_type.clone(),
         "target": mcp_read_resolution.target.clone(),
         "requestedTarget": plan.target.clone(),
-        "argumentsDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(&mcp_read_resolution.arguments),
+        "argumentsDigest": openlife_core::agent::metadata_safe::metadata_safe_value_digest(&mcp_read_resolution.arguments),
         "toolGatewayAuthority": true,
         "actionExecutorBacked": true,
         "mcpReadTargetResolved": mcp_read_resolution.resolved,

@@ -3,7 +3,7 @@ use crate::commands::proposal::{
     COMMUNICATION_STYLE_CANONICAL_PATH,
 };
 use crate::errors::AppError;
-use crate::legacy_write_convergence::{
+use crate::life_model_materializer_guard::{
     LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
     LifeModelMaterializerCallerPurpose,
 };

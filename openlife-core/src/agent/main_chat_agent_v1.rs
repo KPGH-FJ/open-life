@@ -4181,7 +4181,7 @@ fn runtime_eval_eval_provider_generation_observation(
             "empty",
         ));
     }
-    let generated_digest = crate::agent::react_beta::metadata_safe_value_digest(
+    let generated_digest = crate::agent::metadata_safe::metadata_safe_value_digest(
         &serde_json::json!({ "generated": generated }),
     );
 

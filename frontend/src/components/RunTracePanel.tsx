@@ -9,7 +9,6 @@ import type {
 } from "../tauri";
 import { mailboxRoute, productRoutePath } from "../productShellContract";
 import { getPlanExecuteProductTrace } from "../utils/planExecuteProduct";
-import { getMultiStrategyPreviewAudit } from "../utils/previewAudit";
 
 interface Props {
   run?: AgentRun | null;
@@ -126,12 +125,11 @@ export default function RunTracePanel({ run, trace }: Props) {
   const policies = selectedPolicies(audit);
   const styles = selectedStyles(audit);
   const checks = collectBehaviorChecks(run, trace);
-  const previewAudit = getMultiStrategyPreviewAudit(run);
   const productTrace = getPlanExecuteProductTrace(run);
   const reactActionTraces = collectReactActionTraces(run);
   const skillRuntimeTraces = collectSkillRuntimeTraces(run);
   const hasCollaborationContent = policies.length > 0 || styles.length > 0 || checks.length > 0;
-  const hasStrategyContent = !!previewAudit || !!productTrace;
+  const hasStrategyContent = !!productTrace;
   const hasReactActionContent = reactActionTraces.length > 0;
   const hasSkillRuntimeContent = skillRuntimeTraces.length > 0;
   const hasContent =
@@ -373,74 +371,6 @@ export default function RunTracePanel({ run, trace }: Props) {
                 >
                   {proposalId}
                 </Link>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {previewAudit && (
-        <div
-          className={`rounded-lg bg-white/80 p-3 text-stone-800 ${
-            productTrace || hasReactActionContent ? "mt-3" : ""
-          }`}
-        >
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="font-semibold text-stone-900">Multi-strategy preview trace</div>
-            {previewAudit.metadataSafe && (
-              <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] text-emerald-700">
-                metadata-safe
-              </span>
-            )}
-          </div>
-          <div className="mt-2 flex flex-wrap gap-2 text-xs">
-            {previewAudit.strategyDescriptorId && (
-              <span className="rounded border border-violet-100 bg-violet-50 px-2 py-0.5 text-violet-700">
-                Descriptor: {previewAudit.strategyDescriptorId}
-              </span>
-            )}
-            {previewAudit.registryReady !== undefined && (
-              <span className="rounded border border-emerald-100 bg-emerald-50 px-2 py-0.5 text-emerald-700">
-                Registry: {previewAudit.registryReady ? "ready" : "blocked"}
-              </span>
-            )}
-            {previewAudit.strategyKind && (
-              <span className="rounded border border-blue-100 bg-blue-50 px-2 py-0.5 text-blue-700">
-                Strategy: {previewAudit.strategyKind}
-              </span>
-            )}
-            {previewAudit.payloadKind && (
-              <span className="rounded border border-teal-100 bg-teal-50 px-2 py-0.5 text-teal-700">
-                Payload: {previewAudit.payloadKind}
-              </span>
-            )}
-            {previewAudit.governanceDecisionKind && (
-              <span className="rounded border border-amber-100 bg-amber-50 px-2 py-0.5 text-amber-700">
-                Governance: {previewAudit.governanceDecisionKind}
-              </span>
-            )}
-            {previewAudit.reasonCode && (
-              <span className="rounded border border-stone-200 bg-stone-50 px-2 py-0.5 text-stone-700">
-                {previewAudit.reasonCode}
-              </span>
-            )}
-          </div>
-          {previewAudit.planStepStatuses && previewAudit.planStepStatuses.length > 0 && (
-            <div className="mt-2 flex flex-wrap gap-2 text-xs">
-              {previewAudit.planStepStatuses.map(status => (
-                <span
-                  key={status}
-                  className="rounded border border-stone-200 bg-stone-50 px-2 py-0.5 text-stone-700"
-                >
-                  {status}
-                </span>
-              ))}
-            </div>
-          )}
-          {previewAudit.warnings && previewAudit.warnings.length > 0 && (
-            <div className="mt-2 space-y-1 text-xs text-amber-700">
-              {previewAudit.warnings.map(warning => (
-                <div key={warning}>{warning}</div>
               ))}
             </div>
           )}

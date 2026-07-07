@@ -11,8 +11,8 @@ import {
   buildStage1PassingBrowserEvidenceReportFromObservedScenarios,
   stage1NonTauriBrowserBlockersForPlatform,
   type Stage1ObservedBrowserScenario,
-} from "./stage1BrowserEvidence";
-import { STAGE1_DOGFOOD_SCENARIOS } from "./stage1DogfoodScenarios";
+} from "./test/archive/stage1BrowserEvidence";
+import { STAGE1_DOGFOOD_SCENARIOS } from "./test/archive/stage1DogfoodScenarios";
 import {
   STEP6_PRODUCT_ACCEPTANCE_JOURNEYS,
   STEP6_BLOCKED_LIVE_UI_STATUS,
@@ -22,7 +22,7 @@ import {
   buildStep6ProductAcceptanceReportFromObservedJourneys,
   step6ObservedJourneyBlockers,
   type Step6ObservedProductJourney,
-} from "./step6ProductAcceptance";
+} from "./test/archive/step6ProductAcceptance";
 
 function baseGateReport(overrides: Record<string, unknown> = {}) {
   const scenarios = STAGE1_REQUIRED_BROWSER_JOURNEYS.map(id => ({

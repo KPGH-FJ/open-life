@@ -22,7 +22,6 @@ import {
   planExecuteProductSearchText,
   planExecuteProductSubtitle,
 } from "../utils/planExecuteProduct";
-import { getMultiStrategyPreviewAudit, previewWarningLabel } from "../utils/previewAudit";
 import { buildRunDisplaySummary } from "../utils/runDisplaySummary";
 import { buildRuntimeDisclosure } from "../utils/runtimeDisclosure";
 import RuntimeDisclosureStrip from "../components/RuntimeDisclosureStrip";
@@ -81,7 +80,7 @@ function kindLabel(kind: string): string {
 
 function runKindLabel(run: AgentRun): string {
   if (getPlanExecuteProductTrace(run)) return "计划执行";
-  return getMultiStrategyPreviewAudit(run) ? "策略预览" : kindLabel(run.kind);
+  return kindLabel(run.kind);
 }
 
 function runSubtitle(run: AgentRun): string {
@@ -89,11 +88,11 @@ function runSubtitle(run: AgentRun): string {
   if (productTrace) {
     return planExecuteProductSubtitle(productTrace);
   }
-  const audit = getMultiStrategyPreviewAudit(run);
-  if (audit) {
-    return [audit.strategyKind, audit.payloadKind, audit.reasonCode].filter(Boolean).join(" · ");
-  }
   return run.userInput ? safePreviewText(run.userInput, 96) : "No user input";
+}
+
+function warningLabel(count: number): string {
+  return `${count} warning${count === 1 ? "" : "s"}`;
 }
 
 function taskStatusLabel(status: string): string {
@@ -254,16 +253,12 @@ export default function RunsPage() {
     if (searchQuery) {
       const query = searchQuery.toLowerCase();
       const displaySummary = buildRunDisplaySummary(run, taskSummary);
-      const audit = getMultiStrategyPreviewAudit(run);
       const productTrace = getPlanExecuteProductTrace(run);
-      const auditText = audit
-        ? `${audit.runtimeStrategyTraceKind ?? ""} ${audit.selectedStrategyKind ?? ""} ${audit.strategyKind ?? ""} ${audit.payloadKind ?? ""} ${audit.strategyDescriptorId ?? ""} ${audit.governanceDecisionKind ?? ""} ${audit.selectionReasonCode ?? ""} ${audit.reasonCode ?? ""} ${(audit.strategyCapabilityIds ?? []).join(" ")}`
-        : "";
       const productText = productTrace ? planExecuteProductSearchText(productTrace) : "";
       const outputText = productTrace ? "" : "";
       const traceText = reactTraceSearchText(run);
       const text =
-        `${outputText} ${run.kind} ${displaySummary.searchableText} ${auditText} ${productText} ${traceText}`.toLowerCase();
+        `${outputText} ${run.kind} ${displaySummary.searchableText} ${productText} ${traceText}`.toLowerCase();
       if (!text.includes(query)) return false;
     }
 
@@ -543,16 +538,13 @@ export default function RunsPage() {
               </div>
 
               {paginatedRuns.map(run => {
-                const previewAudit = getMultiStrategyPreviewAudit(run);
                 const productTrace = getPlanExecuteProductTrace(run);
-                const warningCount = previewAudit?.warnings?.length ?? 0;
                 const taskSummary = taskSummaryByRunId.get(run.id);
                 const evidenceView = evidenceViewForSummary(taskSummary);
                 const lifecycle = lifecycleForRun(run, taskSummary);
                 const allowedControls = allowedControlsForSummary(taskSummary);
                 const displaySummary = buildRunDisplaySummary(run, taskSummary);
-                const subtitle =
-                  productTrace || previewAudit ? runSubtitle(run) : displaySummary.subtitle;
+                const subtitle = productTrace ? runSubtitle(run) : displaySummary.subtitle;
                 const stale = isPossiblyStaleRun(run, taskSummary);
                 const actionControls = allowedControls.filter(control =>
                   ["resume", "retry", "cancel", "refresh_context"].includes(control)
@@ -683,33 +675,6 @@ export default function RunsPage() {
                             旧 run 或缺少 task session，当前无法直接控制。
                           </div>
                         )}
-                        {previewAudit && (
-                          <div className="mt-2 flex flex-wrap gap-2 text-xs">
-                            <span className="rounded bg-stone-100 px-2 py-1 text-stone-700">
-                              策略预览
-                            </span>
-                            {previewAudit.strategyKind && (
-                              <span className="rounded bg-blue-50 px-2 py-1 text-blue-700">
-                                策略：{previewAudit.strategyKind}
-                              </span>
-                            )}
-                            {previewAudit.payloadKind && (
-                              <span className="rounded bg-teal-50 px-2 py-1 text-teal-700">
-                                载荷：{previewAudit.payloadKind}
-                              </span>
-                            )}
-                            {previewAudit.governanceDecisionKind && (
-                              <span className="rounded bg-amber-50 px-2 py-1 text-amber-700">
-                                治理：{previewAudit.governanceDecisionKind}
-                              </span>
-                            )}
-                            {warningCount > 0 && (
-                              <span className="rounded bg-red-50 px-2 py-1 text-red-700">
-                                {previewWarningLabel(warningCount)}
-                              </span>
-                            )}
-                          </div>
-                        )}
                         {productTrace && (
                           <div className="mt-2 flex flex-wrap gap-2 text-xs">
                             <span className="rounded bg-stone-100 px-2 py-1 text-stone-700">
@@ -738,7 +703,7 @@ export default function RunsPage() {
                             {productTrace.warningCount !== undefined &&
                               productTrace.warningCount > 0 && (
                                 <span className="rounded bg-red-50 px-2 py-1 text-red-700">
-                                  {previewWarningLabel(productTrace.warningCount)}
+                                  {warningLabel(productTrace.warningCount)}
                                 </span>
                               )}
                           </div>

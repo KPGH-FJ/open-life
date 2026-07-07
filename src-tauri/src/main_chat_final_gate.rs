@@ -520,7 +520,7 @@ fn live_provider_summary_blocker_label(blocker: String) -> String {
     if live_provider_contract_safe_label(&blocker) {
         return blocker;
     }
-    let (bytes, hash) = openlife_core::agent::react_beta::metadata_safe_text_digest(&blocker);
+    let (bytes, hash) = openlife_core::agent::metadata_safe::metadata_safe_text_digest(&blocker);
     let hash = hash.strip_prefix("sha256:").unwrap_or(hash.as_str());
     format!("unsafe_blocker_bytes_{bytes}_sha256_{hash}")
 }

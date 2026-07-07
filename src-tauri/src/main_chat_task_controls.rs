@@ -1282,7 +1282,7 @@ fn string_from_metadata(value: &serde_json::Value, keys: &[&str]) -> Option<Stri
 }
 
 fn digest_label(value: &serde_json::Value) -> String {
-    let (bytes, hash) = openlife_core::agent::react_beta::metadata_safe_value_digest(value);
+    let (bytes, hash) = openlife_core::agent::metadata_safe::metadata_safe_value_digest(value);
     format!("bytes:{bytes} hash:{hash}")
 }
 
@@ -1619,7 +1619,7 @@ impl AcceptedToolPermissionScope {
             return false;
         };
         let (current_length_bytes, current_input_hash) =
-            openlife_core::agent::react_beta::metadata_safe_value_digest(&resolution.arguments);
+            openlife_core::agent::metadata_safe::metadata_safe_value_digest(&resolution.arguments);
         action_type == plan.queue_action_type
             && requested_target == plan.target
             && resolved_target == resolution.target
@@ -1884,7 +1884,7 @@ pub(crate) async fn retry_main_chat_agent_action(
                     "manualBlocker": manual_blocker,
                     "automaticExecution": false,
                     "automaticReplayBlocked": true,
-                    "retryReplayErrorDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(
+                    "retryReplayErrorDigest": openlife_core::agent::metadata_safe::metadata_safe_value_digest(
                         &serde_json::json!({ "error": error.to_string() })
                     ),
                 })),
@@ -2022,7 +2022,7 @@ async fn replay_main_chat_agent_action(
                 "retryRequested": true,
                 "automaticExecution": true,
                 "automaticReplayFailed": true,
-                "retryReplayErrorDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(
+                "retryReplayErrorDigest": openlife_core::agent::metadata_safe::metadata_safe_value_digest(
                     &serde_json::json!({ "error": error.to_string() })
                 ),
                 "directWritesExecuted": false,

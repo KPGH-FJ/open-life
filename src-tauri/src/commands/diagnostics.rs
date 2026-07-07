@@ -100,11 +100,11 @@ pub(crate) async fn get_system_diagnostics_with_state(
         cloud_api_configured,
         cloud_provider,
         cloud_api_validated,
-        mut cloud_api_last_error,
-        mut cloud_api_validation_status,
-        mut cloud_api_validated_at,
-        mut cloud_api_failed_at,
-        mut cloud_api_validation_source,
+        cloud_api_last_error,
+        cloud_api_validation_status,
+        cloud_api_validated_at,
+        cloud_api_failed_at,
+        cloud_api_validation_source,
         embedding_enabled,
     ) = {
         let cfg = state.config.lock().await;
@@ -132,20 +132,6 @@ pub(crate) async fn get_system_diagnostics_with_state(
             cfg.llm.embedding_enabled,
         )
     };
-    let config_for_browser_dogfood = { state.config.lock().await.clone() };
-    let stage1_dogfood_ready =
-        crate::main_chat_agent_stage1_dogfood::stage1_browser_dogfood_scripted_provider_ready(
-            state,
-            &config_for_browser_dogfood,
-        )
-        .await;
-    if stage1_dogfood_ready {
-        cloud_api_last_error = None;
-        cloud_api_validation_status = "scripted_dogfood".into();
-        cloud_api_validated_at.get_or_insert_with(|| chrono::Utc::now().to_rfc3339());
-        cloud_api_failed_at = None;
-        cloud_api_validation_source = Some("stage1_browser_dogfood_scripted".into());
-    }
     let ollama_status = inspect_ollama_status(&local_model).await;
     let ollama_service_online = ollama_status.server_online;
     let ollama_models = ollama_status
@@ -297,7 +283,7 @@ pub(crate) async fn get_system_diagnostics_with_state(
             state.startup_warnings.join("；")
         ));
     }
-    let cloud_chat_backend_available = cloud_api_validated || stage1_dogfood_ready;
+    let cloud_chat_backend_available = cloud_api_validated;
     let chat_ready = life_model_ready && (ollama_online || cloud_chat_backend_available);
 
     let mut usage_readiness_issues = Vec::new();

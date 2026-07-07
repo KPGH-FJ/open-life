@@ -230,7 +230,7 @@ pub(crate) async fn attach_main_chat_tool_permission_proposal_metadata(
 
     let source = openlife_core::agent::action_executor::helpers::canonical_tool_source(&manifest);
     let (input_length_bytes, input_hash) =
-        openlife_core::agent::react_beta::metadata_safe_value_digest(&target_arguments);
+        openlife_core::agent::metadata_safe::metadata_safe_value_digest(&target_arguments);
     let risk_level = match manifest.risk_level.to_ascii_lowercase().as_str() {
         "high" => RiskLevel::High,
         "low" => RiskLevel::Low,
