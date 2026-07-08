@@ -5,9 +5,10 @@ import {
   type AppConfig,
   exportAllData,
   importAllData,
-  getRouterStatus,
+  getPolicyRouterStatus,
   getModelRouterStatus,
   getSystemDiagnostics,
+  getLifeStateProjection,
   getHotCache,
   exportMcpAuditLogs,
   cleanupMcpAuditLogs,
@@ -20,9 +21,10 @@ import {
   type ExportPayload,
   type HotMemoryCache,
   type PrivacyPolicy,
-  type RouterStatus,
+  type PolicyRouterStatus,
   type ModelRouterStatus,
   type SystemDiagnostics,
+  type LifeStateProjection,
   type DangerActionPreflightView,
   type DangerActionType,
   type DangerActionConfirmationEvidence,
@@ -38,7 +40,6 @@ import { Cpu, Shield, Wrench, Inbox, SlidersHorizontal } from "lucide-react";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, readTextFile } from "@tauri-apps/plugin-fs";
 import LoadingSpinner from "../components/LoadingSpinner";
-import { isSafeMode } from "../utils/safeMode";
 import { isInternalDebugSurfaceEnabled } from "../utils/internalDebug";
 import { buildRuntimeActionError } from "../utils/runtimeMessages";
 import PluginSection from "./settings/PluginSection";
@@ -49,7 +50,6 @@ import DataTab from "./settings/tabs/DataTab";
 import ToolsPermissionsTab from "./settings/tabs/ToolsPermissionsTab";
 import ReviewMemoryTab from "./settings/tabs/ReviewMemoryTab";
 import AdvancedTab from "./settings/tabs/AdvancedTab";
-import MultiStrategyPreviewSection from "./settings/MultiStrategyPreviewSection";
 import ConfirmDangerDialog from "../components/ConfirmDangerDialog";
 import DangerActionPreflightDetails from "../components/DangerActionPreflightDetails";
 
@@ -117,9 +117,10 @@ export default function SettingsPage() {
   const [rebuildResult, setRebuildResult] = useState<string | null>(null);
   const [exportLoading, setExportLoading] = useState(false);
   const [importLoading, setImportLoading] = useState(false);
-  const [routerStatus, setRouterStatus] = useState<RouterStatus | null>(null);
+  const [policyRouterStatus, setPolicyRouterStatus] = useState<PolicyRouterStatus | null>(null);
   const [modelRouterStatus, setModelRouterStatus] = useState<ModelRouterStatus | null>(null);
   const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
+  const [lifeStateProjection, setLifeStateProjection] = useState<LifeStateProjection | null>(null);
   const [hotCache, setHotCache] = useState<HotMemoryCache | null>(null);
   const [privacyPolicy, setPrivacyPolicyState] = useState<PrivacyPolicy | null>(null);
   const [toolPermissions, setToolPermissions] = useState<ToolPermissionRecord[]>([]);
@@ -163,26 +164,37 @@ export default function SettingsPage() {
   }, [activeTab, showInternalDebug]);
 
   const refreshAllDiagnostics = async () => {
-    const [router, modelRouter, diag, cache, policy, permissions, pluginRecords, manifests] =
-      await Promise.all([
-        getRouterStatus().catch(() => null),
-        getModelRouterStatus().catch(() => null),
-        getSystemDiagnostics().catch(() => null),
-        getHotCache().catch(() => null),
-        getPrivacyPolicy().catch(() => null),
-        listToolPermissions().catch(() => []),
-        listPlugins().catch(() => []),
-        listToolManifests().catch(() => []),
-      ]);
-    setRouterStatus(router);
+    const [
+      policyRouter,
+      modelRouter,
+      diag,
+      projection,
+      cache,
+      policy,
+      permissions,
+      pluginRecords,
+      manifests,
+    ] = await Promise.all([
+      getPolicyRouterStatus().catch(() => null),
+      getModelRouterStatus().catch(() => null),
+      getSystemDiagnostics().catch(() => null),
+      getLifeStateProjection().catch(() => null),
+      getHotCache().catch(() => null),
+      getPrivacyPolicy().catch(() => null),
+      listToolPermissions().catch(() => []),
+      listPlugins().catch(() => []),
+      listToolManifests().catch(() => []),
+    ]);
+    setPolicyRouterStatus(policyRouter);
     setModelRouterStatus(modelRouter);
     setDiagnostics(diag);
+    setLifeStateProjection(projection);
     setHotCache(cache);
     setPrivacyPolicyState(policy);
     setToolPermissions(permissions);
     setPlugins(pluginRecords);
     setToolManifests(manifests);
-    return diag;
+    return projection;
   };
 
   const handleSave = async () => {
@@ -399,7 +411,7 @@ export default function SettingsPage() {
     try {
       const res = await rebuildMemoryIndex(confirmationEvidence);
       const refreshed = await refreshAllDiagnostics();
-      const recovered = refreshed && !isSafeMode(refreshed);
+      const recovered = refreshed?.safeMode.active === false;
       setRebuildResult(
         `向量索引重建完成：共处理 ${res.processed} 条消息，重建 ${res.indexed} 条，跳过 ${res.skipped} 条。${
           recovered
@@ -459,7 +471,7 @@ export default function SettingsPage() {
     }
   };
 
-  const safeMode = isSafeMode(diagnostics);
+  const safeMode = lifeStateProjection?.safeMode.active ?? false;
 
   if (loading) {
     return (
@@ -571,6 +583,7 @@ export default function SettingsPage() {
         {activeTab === "overview" && (
           <OverviewTab
             diagnostics={diagnostics}
+            projection={lifeStateProjection}
             safeMode={safeMode}
             exportLoading={exportLoading}
             handleExport={handleExport}
@@ -592,7 +605,7 @@ export default function SettingsPage() {
             config={config}
             setConfig={setConfig}
             diagnostics={diagnostics}
-            routerStatus={routerStatus}
+            policyRouterStatus={policyRouterStatus}
             modelRouterStatus={modelRouterStatus}
             showInternalDebug={showInternalDebug}
             onProviderValidationChanged={refreshAllDiagnostics}
@@ -644,6 +657,7 @@ export default function SettingsPage() {
         {activeTab === "tools" && (
           <ToolsPermissionsTab
             diagnostics={diagnostics}
+            projection={lifeStateProjection}
             config={config}
             setConfig={setConfig}
             toolPermissions={toolPermissions}
@@ -655,7 +669,7 @@ export default function SettingsPage() {
         )}
 
         {activeTab === "review_memory" && (
-          <ReviewMemoryTab config={config} setConfig={setConfig} diagnostics={diagnostics} />
+          <ReviewMemoryTab config={config} setConfig={setConfig} projection={lifeStateProjection} />
         )}
 
         {activeTab === "advanced" && (
@@ -663,7 +677,8 @@ export default function SettingsPage() {
             config={config}
             setConfig={setConfig}
             diagnostics={diagnostics}
-            routerStatus={routerStatus}
+            projection={lifeStateProjection}
+            policyRouterStatus={policyRouterStatus}
             modelRouterStatus={modelRouterStatus}
             showInternalDebug={showInternalDebug}
             pluginSection={
@@ -673,7 +688,6 @@ export default function SettingsPage() {
                 onRefreshDiagnostics={refreshAllDiagnostics}
               />
             }
-            experimentalSection={showInternalDebug ? <MultiStrategyPreviewSection /> : undefined}
           />
         )}
 

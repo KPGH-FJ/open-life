@@ -1111,7 +1111,7 @@ fn is_bounded_route_truth_mixed_prompt(normalized: &str, compact: &str) -> bool 
 
 #[allow(clippy::too_many_arguments)]
 async fn build_runtime_route_evidence_from_snapshots(
-    state: &Arc<AppState>,
+    _state: &Arc<AppState>,
     config: &AppConfig,
     scheduler: &InferenceScheduler,
     conversation_id: Option<&str>,
@@ -1132,11 +1132,7 @@ async fn build_runtime_route_evidence_from_snapshots(
         validation_record.as_ref(),
         chrono::Utc::now(),
     );
-    let scripted_dogfood_ready =
-        crate::main_chat_agent_stage1_dogfood::stage1_browser_dogfood_scripted_provider_ready(
-            state, config,
-        )
-        .await;
+    let local_test_provider_ready = false;
     let preflight = planned
         .map(snapshot_to_model_route_trace)
         .map(|route| provider_preflight_snapshot(config, scheduler, &route))
@@ -1165,7 +1161,7 @@ async fn build_runtime_route_evidence_from_snapshots(
     let provider_readiness = provider_readiness(
         config,
         &validation,
-        scripted_dogfood_ready,
+        local_test_provider_ready,
         actual_route.as_ref().or(last_completed_route.as_ref()),
     );
     let external_transmission = external_transmission_status(
@@ -1267,20 +1263,15 @@ fn runtime_route_evidence_id(
 fn provider_readiness(
     config: &AppConfig,
     validation: &crate::provider_validation::ProviderValidationSummary,
-    scripted_dogfood_ready: bool,
+    local_test_provider_ready: bool,
     actual_route: Option<&RouteIdentity>,
 ) -> ProviderReadiness {
     let identity = crate::provider_validation::current_provider_validation_identity(config);
-    let validation_status = if scripted_dogfood_ready {
-        "scripted_dogfood"
-    } else {
-        validation.status
-    }
-    .to_string();
+    let validation_status = validation.status.to_string();
     ProviderReadiness {
         configured: validation.configured,
         credential_present: identity.key_present,
-        validated: validation.status == "validated" && !scripted_dogfood_ready,
+        validated: validation.status == "validated" && !local_test_provider_ready,
         validation_status: validation_status.clone(),
         preferred: if config.prefer_local_model {
             "local".into()

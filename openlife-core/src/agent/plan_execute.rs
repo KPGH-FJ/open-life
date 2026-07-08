@@ -5,6 +5,9 @@ use crate::agent::governor::{
 use crate::agent::hs_selector::{
     build_guidance_impact_read_model, GuidanceAffectedSurface, GuidanceImpactReadModel,
 };
+use crate::agent::review_workflow::{
+    DurableWriteRequest, DurableWriteSource, DurableWriteSubject, ReviewWorkflow,
+};
 use crate::agent::runtime_contract::{RuntimeInput, RuntimeOutput};
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 use crate::agent::ProposalStore;
@@ -1672,9 +1675,16 @@ fn create_step_proposal(
     );
     proposal.run_id = source_run_id.map(str::to_string);
     proposal.source_detail = Some(format!("plan_execute_session:{}", session_id));
-    let proposal_id = proposal.id.clone();
-    proposal_store.create_proposal(&proposal)?;
-    Ok(proposal_id)
+    let outcome = ReviewWorkflow::new(proposal_store).submit(
+        DurableWriteRequest::from_agent_proposal(
+            DurableWriteSource::PlanExecute,
+            DurableWriteSubject::PlanStep,
+            proposal,
+            "Plan step proposal is pending Review Center approval.",
+        )
+        .with_evidence_refs(vec![format!("plan_execute_session:{session_id}")]),
+    )?;
+    Ok(outcome.proposal_id().to_string())
 }
 
 fn minimized_step_proposal_payload(session_id: &str, step: &PlanExecuteStepRecord) -> Value {

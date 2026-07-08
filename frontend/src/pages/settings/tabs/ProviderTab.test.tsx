@@ -47,7 +47,7 @@ describe("ProviderTab", () => {
             config={mockConfig}
             setConfig={vi.fn()}
             diagnostics={mockDiagnostics}
-            routerStatus={null}
+            policyRouterStatus={null}
             modelRouterStatus={null}
           />
         </MemoryRouter>
@@ -77,7 +77,7 @@ describe("ProviderTab", () => {
                 cloud_api_validated_at: "2026-06-27T00:00:00Z",
               } as any
             }
-            routerStatus={null}
+            policyRouterStatus={null}
             modelRouterStatus={null}
           />
         </MemoryRouter>
@@ -100,7 +100,7 @@ describe("ProviderTab", () => {
               cloud_api_last_error: "http_status:401",
             } as any
           }
-          routerStatus={null}
+          policyRouterStatus={null}
           modelRouterStatus={null}
         />
       </MemoryRouter>
@@ -120,7 +120,7 @@ describe("ProviderTab", () => {
               cloud_api_validation_status: "stale",
             } as any
           }
-          routerStatus={null}
+          policyRouterStatus={null}
           modelRouterStatus={null}
         />
       </MemoryRouter>
@@ -162,7 +162,7 @@ describe("ProviderTab", () => {
                 },
               } as any
             }
-            routerStatus={null}
+            policyRouterStatus={null}
             modelRouterStatus={null}
           />
         </MemoryRouter>
@@ -183,7 +183,7 @@ describe("ProviderTab", () => {
             config={{ ...mockConfig, runtime_mode: "local_first_default" }}
             setConfig={setConfig}
             diagnostics={mockDiagnostics}
-            routerStatus={null}
+            policyRouterStatus={null}
             modelRouterStatus={null}
           />
         </MemoryRouter>
@@ -206,12 +206,20 @@ describe("ProviderTab", () => {
             config={mockConfig}
             setConfig={vi.fn()}
             diagnostics={mockDiagnostics}
-            routerStatus={
+            policyRouterStatus={
               {
-                onnx_available: true,
-                onnx_disabled: false,
-                active_backend: "regex",
-                latency_threshold_us: 50000,
+                activeAuthority: "IntentFrame + PolicyRouter",
+                authorityChain: [
+                  "user_input",
+                  "IntentFrame",
+                  "PolicyRouter",
+                  "AgentIngressDecision",
+                  "OpenLifeTurnRuntime",
+                  "MainChatKernel",
+                ],
+                routeOutputs: ["direct_answer", "read_only_tool", "proposal_only_write"],
+                appStateOldRoutersPresent: false,
+                diagnosticsSurface: "policy_router_status",
               } as any
             }
             modelRouterStatus={null}
@@ -220,7 +228,13 @@ describe("ProviderTab", () => {
       );
     });
     expect(screen.getByText(/自动路由/)).toBeInTheDocument();
-    expect(screen.getByText(/regex/)).toBeInTheDocument();
+    const authorityTexts = screen.getAllByText(/IntentFrame \+ PolicyRouter/);
+    expect(authorityTexts.length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("single")).toBeInTheDocument();
+    expect(screen.queryByText(/legacy mounted/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/regex/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/ONNX/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/active_backend/)).not.toBeInTheDocument();
     expect(screen.queryByText(/路由诊断（高级）/)).not.toBeInTheDocument();
   });
 
@@ -240,7 +254,7 @@ describe("ProviderTab", () => {
                 ollama_models: [{ name: "llama3.1:8b", size_mb: 8192 }],
               } as any
             }
-            routerStatus={null}
+            policyRouterStatus={null}
             modelRouterStatus={null}
           />
         </MemoryRouter>
@@ -271,7 +285,7 @@ describe("ProviderTab", () => {
                 ],
               } as any
             }
-            routerStatus={null}
+            policyRouterStatus={null}
             modelRouterStatus={null}
           />
         </MemoryRouter>
@@ -291,7 +305,7 @@ describe("ProviderTab", () => {
             config={mockConfig}
             setConfig={setConfig}
             diagnostics={mockDiagnostics}
-            routerStatus={null}
+            policyRouterStatus={null}
             modelRouterStatus={null}
           />
         </MemoryRouter>
@@ -316,7 +330,7 @@ describe("ProviderTab", () => {
             config={mockConfig}
             setConfig={vi.fn()}
             diagnostics={mockDiagnostics}
-            routerStatus={null}
+            policyRouterStatus={null}
             modelRouterStatus={null}
           />
         </MemoryRouter>
@@ -337,7 +351,7 @@ describe("ProviderTab", () => {
             config={mockConfig}
             setConfig={vi.fn()}
             diagnostics={mockDiagnostics}
-            routerStatus={null}
+            policyRouterStatus={null}
             modelRouterStatus={null}
             showInternalDebug
           />

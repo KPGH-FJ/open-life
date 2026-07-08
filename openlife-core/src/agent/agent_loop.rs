@@ -1,10 +1,11 @@
 use crate::agent::action_executor::{
-    ActionExecutionContext, ActionExecutionStatus, ActionExecutor, AgentActionRequest,
+    ActionExecutionContext, ActionExecutionStatus, AgentActionRequest,
 };
 use crate::agent::runtime::{AgentRuntime, AgentRuntimeOutput};
+use crate::agent::tool_gateway::ToolGateway;
 use crate::agent::types::{AgentObservation, AgentRun, AgentRunError, AgentRunStatus, AgentTask};
 use crate::agent::{RuntimeGuidanceConsumptionMode, RuntimeHSPacket, RuntimeInput, RuntimeOutput};
-use crate::layer_router::Layer;
+use crate::layer::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
 use crate::privacy::PrivacyEngine;
@@ -207,7 +208,7 @@ struct StepContext<'a> {
 /// Configurable via AgentLoopConfig (max_steps default: 4, max_tool_calls default: 6).
 pub struct AgentLoop {
     runtime: AgentRuntime,
-    action_executor: ActionExecutor,
+    tool_gateway: ToolGateway,
     scheduler: InferenceScheduler,
     config: AgentLoopConfig,
     scripted_replies: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
@@ -216,13 +217,13 @@ pub struct AgentLoop {
 impl AgentLoop {
     pub fn new(
         runtime: AgentRuntime,
-        action_executor: ActionExecutor,
+        tool_gateway: ToolGateway,
         scheduler: InferenceScheduler,
         config: AgentLoopConfig,
     ) -> Self {
         Self {
             runtime,
-            action_executor,
+            tool_gateway,
             scheduler,
             config,
             scripted_replies: std::sync::Arc::new(std::sync::Mutex::new(
@@ -1309,7 +1310,7 @@ impl AgentLoop {
             }
 
             let exec_result = match self
-                .action_executor
+                .tool_gateway
                 .execute(action_request.clone(), action_ctx)
             {
                 Ok(r) => r,
@@ -1618,7 +1619,7 @@ fn metadata_safe_model_note(note: &str) -> String {
         || lower.contains("memory context")
         || lower.contains("lifemodel");
     if looks_sensitive {
-        let (byte_count, hash) = crate::agent::react_beta::metadata_safe_text_digest(note);
+        let (byte_count, hash) = crate::agent::metadata_safe::metadata_safe_text_digest(note);
         format!("{byte_count} bytes redacted ({hash})")
     } else {
         note.to_string()
@@ -1636,8 +1637,9 @@ fn preview_text(text: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::action_executor::{ActionExecutor, ActionExecutorConfig};
+    use crate::agent::action_executor::ActionExecutorConfig;
     use crate::agent::runtime::AgentRuntime;
+    use crate::agent::tool_gateway::ToolGateway;
     use crate::agent::types::{AgentObservation, AgentRun};
     use crate::config::AppConfig;
     use crate::life_model::LifeModel;
@@ -1664,9 +1666,9 @@ mod tests {
         );
         let app_config = AppConfig::default();
         let runtime = AgentRuntime::new(life_model, scheduler.clone(), &app_config);
-        let executor = ActionExecutor::new(ActionExecutorConfig::default());
+        let gateway = ToolGateway::from_executor_config(ActionExecutorConfig::default());
         let config = AgentLoopConfig::default();
-        AgentLoop::new(runtime, executor, scheduler, config)
+        AgentLoop::new(runtime, gateway, scheduler, config)
     }
 
     /// Create a minimal ActionExecutionContext backed by tempfile-based stores.
@@ -2011,7 +2013,7 @@ mod tests {
             session_id: "s1".into(),
             user_text: "帮我查天气".into(),
             messages: vec![],
-            layer: crate::layer_router::Layer::L2,
+            layer: crate::layer::Layer::L2,
         };
         let obs = vec![AgentObservation {
             id: "obs-1".into(),
@@ -2043,7 +2045,7 @@ mod tests {
             session_id: "s1".into(),
             user_text: "hello".into(),
             messages: vec![],
-            layer: crate::layer_router::Layer::L2,
+            layer: crate::layer::Layer::L2,
         };
 
         let messages = agent.build_follow_up_messages(&task, "Hi there!", &[], "可用工具: echo");
@@ -2071,7 +2073,7 @@ mod tests {
                     content: "你好！有什么可以帮你的？".into(),
                 },
             ],
-            layer: crate::layer_router::Layer::L2,
+            layer: crate::layer::Layer::L2,
         };
 
         let obs = vec![AgentObservation {

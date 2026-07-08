@@ -80,6 +80,34 @@ describe("proposalDisplay", () => {
     expect(serializedTechnicalRows).toContain("sha256:external-write-digest");
   });
 
+  it("previews array proposal values with the actual reviewable items", () => {
+    const model = buildProposalDisplayModel(
+      proposal({
+        proposalType: "capability_update",
+        affectedPath: "capabilities.skills",
+        before: [],
+        after: [
+          {
+            name: "analyze messy problems",
+            proficiency: 5,
+            description: "I can analyze messy problems",
+          },
+          {
+            name: "write clearly",
+            proficiency: 5,
+            description: "I can write clearly",
+          },
+        ],
+      })
+    );
+
+    expect(model.afterSummary).toContain("analyze messy problems");
+    expect(model.afterSummary).toContain("write clearly");
+    expect(model.afterSummary).not.toBe("数组 2 项");
+    expect(model.diffRows[0].after).toContain("analyze messy problems");
+    expect(model.diffRows[0].after).not.toBe("数组 2 项");
+  });
+
   it("normalizes communication style aliases into a path-specific Review display", () => {
     const model = buildProposalDisplayModel(
       proposal({
@@ -147,5 +175,50 @@ describe("proposalDisplay", () => {
       label: "来源不可用",
       value: "source_excerpt_unavailable",
     });
+  });
+
+  it("labels memory governance proposals from typed candidate metadata", () => {
+    const memoryModel = buildProposalDisplayModel(
+      proposal({
+        proposalType: "memory_write",
+        source: "memory_governance",
+        affectedPath: "memory.pending.chat_conversation",
+        after: {
+          content: "空腹喝咖啡会心慌",
+          candidateKind: "semantic_user_fact",
+          sourceEvidence: "帮我记下来：空腹喝咖啡会心慌",
+          impactPreview: "确认后会影响 Memory 检索。",
+        },
+      })
+    );
+
+    expect(memoryModel.domain).toBe("用户事实/经验");
+    expect(memoryModel.evidenceSummary).toBe("Source evidence：帮我记下来：空腹喝咖啡会心慌");
+    expect(memoryModel.plainImpact).toBe("确认后会影响 Memory 检索。");
+    expect(memoryModel.technicalRows).toEqual(
+      expect.arrayContaining([
+        { label: "Candidate kind", value: "semantic_user_fact" },
+        { label: "Source evidence", value: "帮我记下来：空腹喝咖啡会心慌" },
+        { label: "Impact preview", value: "确认后会影响 Memory 检索。" },
+      ])
+    );
+
+    const ruleModel = buildProposalDisplayModel(
+      proposal({
+        proposalType: "life_model_update",
+        source: "memory_governance",
+        affectedPath: "lifemodel.pending.chat_conversation",
+        after: {
+          requestedChange: "以后早上安排工作前先确认我有没有吃东西",
+          candidateKind: "procedural_rule",
+          sourceEvidence: "以后早上安排工作前先确认我有没有吃东西",
+          impactPreview: "确认后会影响 LifeModel 规划和未来建议。",
+        },
+        riskLevel: "high",
+      })
+    );
+
+    expect(ruleModel.domain).toBe("未来行为规则/偏好");
+    expect(ruleModel.plainImpact).toBe("确认后会影响 LifeModel 规划和未来建议。");
   });
 });

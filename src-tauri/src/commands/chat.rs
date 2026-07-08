@@ -1,4 +1,5 @@
 use crate::errors::AppError;
+use crate::memory_gateway;
 use crate::AppState;
 use openlife_core::llm::ChatMessage;
 use std::sync::Arc;
@@ -27,11 +28,9 @@ pub(crate) async fn save_chat_message_with_state(
     message: &ChatMessage,
     state: &Arc<AppState>,
 ) -> Result<(), AppError> {
-    let store = state.memory_store.lock().await;
-    store
-        .save_message(session_id, message)
-        .map_err(AppError::from)?;
-    store.touch_chat_session(session_id).map_err(AppError::from)
+    memory_gateway::save_turn_message_with_state(session_id, message, state)
+        .await
+        .map(|_| ())
 }
 
 #[tauri::command]
@@ -48,10 +47,7 @@ pub(crate) async fn create_chat_session_with_state(
     title: &str,
     state: &Arc<AppState>,
 ) -> Result<(), AppError> {
-    let store = state.memory_store.lock().await;
-    store
-        .create_chat_session(session_id, title)
-        .map_err(AppError::from)
+    memory_gateway::create_chat_session_with_state(session_id, title, state).await
 }
 
 #[tauri::command]
@@ -69,10 +65,7 @@ pub async fn rename_chat_session(
     title: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), AppError> {
-    let store = state.memory_store.lock().await;
-    store
-        .rename_chat_session(&session_id, &title)
-        .map_err(AppError::from)
+    memory_gateway::rename_chat_session_with_state(&session_id, &title, state.inner()).await
 }
 
 #[tauri::command]
@@ -80,10 +73,7 @@ pub async fn delete_chat_session(
     session_id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), AppError> {
-    let store = state.memory_store.lock().await;
-    store
-        .delete_chat_session(&session_id)
-        .map_err(AppError::from)
+    memory_gateway::delete_chat_session_with_state(&session_id, state.inner()).await
 }
 
 pub(crate) async fn list_chat_sessions_with_state(
@@ -123,12 +113,6 @@ mod tests {
             mcp_registry: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::mcp::McpRegistry::new(),
             )),
-            intent_router: Arc::new(tokio::sync::Mutex::new(
-                openlife_core::router::IntentRouter::new(),
-            )),
-            layer_router: Arc::new(tokio::sync::Mutex::new(
-                openlife_core::layer_router::LayerRouter::new(),
-            )),
             scheduler: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::scheduler::InferenceScheduler::new(
                     config.local_model.clone(),
@@ -155,6 +139,7 @@ mod tests {
             vector_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::vectors::VectorStore::new_in_memory().unwrap(),
             )),
+            vector_persistence_mode: crate::state::VectorPersistenceMode::Enabled,
             builder_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             builder_session_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::builder::BuilderSessionStore::new(
@@ -172,6 +157,9 @@ mod tests {
             evidence_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::EvidenceStore::new_in_memory().unwrap(),
             )),
+            life_event_store: Some(Arc::new(tokio::sync::Mutex::new(
+                openlife_core::agent::LifeEventStore::new_in_memory().unwrap(),
+            ))),
             heuristic_store: Arc::new(tokio::sync::Mutex::new({
                 let store = openlife_core::agent::HeuristicStore::new_in_memory().unwrap();
                 store.seed_mvp_heuristics().unwrap();

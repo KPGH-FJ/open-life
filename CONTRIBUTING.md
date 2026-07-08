@@ -9,7 +9,7 @@
 | Rust | 1.75+ | 后端核心语言 |
 | Node.js | 18+ | 前端运行时 |
 | npm | 9+ | 包管理器 |
-| pnpm | 9.1.0 | 推荐使用（已在 package.json 中声明） |
+| pnpm | 9.1.0 | 推荐使用（已在 `frontend/package.json` 中声明） |
 | Tauri CLI | 2.x | 桌面应用框架 |
 
 ### macOS 快速安装
@@ -67,7 +67,8 @@ make dev
 - `AgentRun`: 可追踪的任务执行记录
 - `AgentProposal`: 待确认的生命模型变更
 - `Memory`: 消息、会话、向量记忆的 SQLite 存储
-- `Hermes`: 三层决策总线（Meaning→Strategy→Execution）
+- `OpenLifeTurnRuntime` / `MainChatKernel`: 当前 Main Chat send/stream turn owner（source-map: `src-tauri/src/main_chat_send.rs` / `src-tauri/src/main_chat_streaming.rs` → `src-tauri/src/main_chat_turn_runtime.rs` → `src-tauri/src/main_chat_kernel.rs`）
+- `ReasoningStrategy` / historical `Hermes`: 旧 PRD/历史概念，不代表当前源码中的现存 Hermes core 模块；当前源码树已无对应专用模块
 
 ## 分支策略
 
@@ -88,7 +89,7 @@ feature/* ← 单个 task 的开发分支
 | 功能 | `feature/功能描述` | `feature/proposal-review-center` |
 | 修复 | `fix/问题描述` | `fix/builder-session-cleanup` |
 | 重构 | `refactor/范围` | `refactor/agent-run-types` |
-| 文档 | `docs/范围` | `docs/architecture-update` |
+| 文档 | `docs/范围` | `docs-architecture-update` |
 
 ## 提交规范
 
@@ -203,11 +204,11 @@ frontend/src/test/mocks/tauri.ts
 
 ## 资源
 
-- [架构文档](./ARCHITECTURE.md)
-- [详细架构](./ARCHITECTUREDETAILED.md)
-- [开发计划](../plans/openlife_development_plan.md)
-- [API 文档](./api/)
-- [决策记录](./decisions/)
+- [架构文档](docs/ARCHITECTURE.md)
+- [Agent Framework 架构基准](plans/openlife_agent_framework_architecture.md)
+- [开发计划](plans/openlife_development_plan.md)
+- [Tauri Command 合约检查清单](docs/tauri_command_contract_checklist.md)
+- [决策记录](docs/decisions/)
 
 ## 需要帮助？
 

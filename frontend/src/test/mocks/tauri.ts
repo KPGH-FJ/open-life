@@ -146,16 +146,16 @@ export function createEmptyLifeModel(): LifeModel {
       knowledge_domains: [],
     },
     state: {
-      current_focus: "构建人生模型",
+      current_focus: "",
       health_status: {
-        physical: "良好",
-        mental: "积极",
-        energy_level: 7,
+        physical: "",
+        mental: "",
+        energy_level: 0,
       },
       emotional_state: {
-        current_mood: "期待",
-        stress_level: 3,
-        fulfillment_score: 6,
+        current_mood: "",
+        stress_level: 0,
+        fulfillment_score: 0,
       },
       recent_reflections: [],
       open_questions: [],
@@ -787,7 +787,7 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           metadataSafe: true,
         },
       } as T);
-    case "run_main_chat_agent_productization_v1_gate":
+    case "run_main_chat_runtime_contract_gate":
       return Promise.resolve({
         totalScenarioCount: 93,
         defaultDeterministicScenarioCount: 92,
@@ -1703,102 +1703,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         traceIdsPresent: false,
         artifactDigest: null,
         blockers: ["stage2_manual_dogfood_evidence_missing"],
-      } as T);
-    case "run_main_chat_agent_stage1_dogfood_gate":
-      return Promise.resolve({
-        reportKind: "main_chat_agent_stage1_dogfood_gate",
-        readinessSemantics:
-          "stage1_real_e2e_dogfood_default_deterministic_browser_required_live_opt_in_separate",
-        defaultReadinessScope: "stage1_default_deterministic_seeded_dogfood",
-        optInLiveReadinessScope: "stage1_external_live_opt_in_only",
-        defaultReady: false,
-        optInLiveReady: false,
-        readinessRecommendation: "not_ready",
-        scenarioCount: 40,
-        defaultScenarioCount: 36,
-        defaultPassedCount: 0,
-        defaultFailedCount: 36,
-        taskSessionCreatedCount: 36,
-        ordinaryChatScenarioCount: 24,
-        seededTaskControlScenarioCount: 12,
-        uiVerifiedScenarioCount: 0,
-        finalDeliveryVerifiedScenarioCount: 36,
-        legacyFallbackCount: 0,
-        silentDurableWriteCount: 0,
-        fakeExecutionDetectedCount: 0,
-        externalLiveAttempted: false,
-        externalLiveScenarioCount: 4,
-        externalLivePassedCount: 0,
-        externalLiveBlockedCount: 4,
-        externalLiveBlockers: ["explicit_live_eval_required"],
-        defaultReadinessUnaffectedByLive: true,
-        browserE2eEnvironmentReady: false,
-        browserE2eReportPath: "frontend/test-results/main-chat-stage1-dogfood-report.json",
-        browserE2eRequiredJourneyCount: 36,
-        browserE2ePassedJourneyCount: 0,
-        browserE2eFailedJourneyCount: 36,
-        manualDogfoodStatus: "not_attempted_engineering_dogfood_only",
-        betaV1DefaultReady: true,
-        productMaturityDefaultScenarioCount: 43,
-        seedManifest: {
-          seedWorkspaceRootKind: "temp_isolated",
-          knowledgeAssetCount: 9,
-          skillCount: 3,
-          sessionSeedCount: 1,
-          memorySeedCount: 5,
-          proposalSeedCount: 2,
-          taskSeedCount: 5,
-          planSeedCount: 1,
-          mcpManifestSeedCount: 2,
-          webFixtureSeedCount: 1,
-          seedDigest:
-            "bytes:12 hash:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          fileDigests: {
-            "project_brief.md":
-              "bytes:12 hash:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-          },
-          runtimeObjectDigests: {},
-          secretsDetected: false,
-        },
-        scenarios: [
-          {
-            scenarioId: "D01",
-            scenarioType: "chat_e2e",
-            entryPoint: "ordinary_main_chat_input",
-            scenarioPromptId: "stage1:P0:D01",
-            boundedPromptPreview:
-              "What is the difference between a task and a proposal in OpenLife?",
-            userPromptDigest:
-              "bytes:12 hash:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-            taskSessionId: "stage1_task_d01",
-            runId: "stage1_run_d01",
-            routeStrategy: "DirectAnswer",
-            expectedOutcome: "success",
-            actualOutcome: "success",
-            runtimeEvents: ["route.selected", "final_delivery.created"],
-            actions: [],
-            observations: [],
-            proposals: [],
-            blockers: [],
-            uiStates: [],
-            finalDeliverySections: ["completed_work", "next_action"],
-            controlEvidence: "not_applicable",
-            runtimeEvidencePassed: true,
-            uiEvidencePassed: false,
-            finalDeliveryEvidencePassed: true,
-            nonFakeEvidencePassed: true,
-            legacyFallbackUsed: false,
-            silentDurableWriteDetected: false,
-            fakeExecutionDetected: false,
-            seedManifestDigest:
-              "bytes:12 hash:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            liveProviderEvidence: "default_deterministic",
-            passed: false,
-            failureReason: "stage1_browser_ui_evidence_missing",
-          },
-        ],
-        blockers: ["not_ready_browser_e2e_blocked"],
-        acceptedResidualRisks: ["manual_dogfood_not_attempted_ready_for_engineering_dogfood_only"],
       } as T);
     case "list_mcp_servers":
       return Promise.resolve([
@@ -2788,12 +2692,28 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       return Promise.resolve({ weekly: false, monthly: false, today: "2026-04-17" } as T);
     case "check_ollama_status":
       return Promise.resolve(true as T);
-    case "get_router_status":
+    case "get_policy_router_status":
       return Promise.resolve({
-        onnx_available: false,
-        onnx_disabled: false,
-        active_backend: "regex",
-        latency_threshold_us: 50000,
+        activeAuthority: "IntentFrame + PolicyRouter",
+        authorityChain: [
+          "user_input",
+          "IntentFrame",
+          "PolicyRouter",
+          "AgentIngressDecision",
+          "OpenLifeTurnRuntime",
+          "MainChatKernel",
+        ],
+        routeOutputs: [
+          "direct_answer",
+          "read_only_tool",
+          "proposal_only_write",
+          "plan_draft",
+          "ask_clarification",
+          "governed_blocker",
+          "confirmation_request",
+        ],
+        appStateOldRoutersPresent: false,
+        diagnosticsSurface: "policy_router_status",
       } as T);
     case "get_model_router_status":
       return Promise.resolve({
@@ -2826,11 +2746,27 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       } as T);
     case "get_system_diagnostics":
       return Promise.resolve({
-        router: {
-          onnx_available: false,
-          onnx_disabled: false,
-          active_backend: "regex",
-          latency_threshold_us: 50000,
+        policy_router: {
+          activeAuthority: "IntentFrame + PolicyRouter",
+          authorityChain: [
+            "user_input",
+            "IntentFrame",
+            "PolicyRouter",
+            "AgentIngressDecision",
+            "OpenLifeTurnRuntime",
+            "MainChatKernel",
+          ],
+          routeOutputs: [
+            "direct_answer",
+            "read_only_tool",
+            "proposal_only_write",
+            "plan_draft",
+            "ask_clarification",
+            "governed_blocker",
+            "confirmation_request",
+          ],
+          appStateOldRoutersPresent: false,
+          diagnosticsSurface: "policy_router_status",
         },
         mcp_server_count: 1,
         mcp_tool_count: 2,
@@ -2884,6 +2820,78 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           { name: "qwen2.5", size_mb: 3200 },
         ],
         config_source: "env+default",
+      } as T);
+    case "get_life_state_projection":
+      return Promise.resolve({
+        version: "life_state_projection_v1",
+        generatedAt: new Date().toISOString(),
+        pending: {
+          pendingProposalCount: 0,
+          editedProposalCount: 0,
+          totalReviewRequiredCount: 0,
+          highRiskReviewRequiredCount: 0,
+          proposalStoreStatus: "ok",
+          requiresUserAction: false,
+        },
+        readiness: {
+          chatReady: true,
+          usageReady: true,
+          lifeModelReady: true,
+          modelEmpty: false,
+          pendingBuilderReviewSessions: 0,
+          unfinishedBuilderSessions: 0,
+          databaseStatus: "ok",
+          readinessIssues: [],
+          usageReadinessIssues: [],
+        },
+        taskState: {
+          taskStoreStatus: "ok",
+          latestTaskId: null,
+          latestTaskStatus: null,
+          runningCount: 0,
+          waitingPermissionCount: 0,
+          blockedCount: 0,
+          failedCount: 0,
+          cancelledCount: 0,
+          completedCount: 0,
+          activeCount: 0,
+        },
+        safeMode: {
+          active: false,
+          reason: "系统当前未处于 Safe Mode。",
+          sourceRefs: [],
+        },
+        toolPermissions: {
+          totalCount: 0,
+          activeCount: 0,
+          consumedCount: 0,
+          allowCount: 0,
+          denyCount: 0,
+          askEveryTimeCount: 0,
+          allowOnceCount: 0,
+          allowUntilRevokedCount: 0,
+        },
+        safePaths: [],
+        surfaces: ["today", "mailbox", "chat", "companion", "life_model", "settings"].map(
+          surface => ({
+            surface,
+            pendingReviewCount: 0,
+            editedReviewCount: 0,
+            totalReviewRequiredCount: 0,
+            readinessStatus: "ready",
+            taskStatus: "idle",
+            safeModeActive: false,
+            waitingPermissionCount: 0,
+            activeToolPermissionCount: 0,
+          })
+        ),
+        sourceRefs: [
+          "diagnostics",
+          "proposal_store:pending_and_edited",
+          "main_chat_agent_session_store",
+          "tool_permission_store",
+          "config:safe_paths",
+        ],
       } as T);
     case "get_scheduler_config":
       return Promise.resolve({ localModel: "llama3", preferLocal: true } as T);

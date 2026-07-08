@@ -15,11 +15,27 @@ describe("OverviewTab", () => {
   });
 
   const defaultDiagnostics = {
-    router: {
-      onnx_available: true,
-      onnx_disabled: false,
-      active_backend: "regex",
-      latency_threshold_us: 50000,
+    policy_router: {
+      activeAuthority: "IntentFrame + PolicyRouter",
+      authorityChain: [
+        "user_input",
+        "IntentFrame",
+        "PolicyRouter",
+        "AgentIngressDecision",
+        "OpenLifeTurnRuntime",
+        "MainChatKernel",
+      ],
+      routeOutputs: [
+        "direct_answer",
+        "read_only_tool",
+        "proposal_only_write",
+        "plan_draft",
+        "ask_clarification",
+        "governed_blocker",
+        "confirmation_request",
+      ],
+      appStateOldRoutersPresent: false,
+      diagnosticsSurface: "policy_router_status",
     },
     mcp_server_count: 2,
     mcp_tool_count: 5,
@@ -50,8 +66,63 @@ describe("OverviewTab", () => {
     config_source: "file",
   };
 
+  const defaultProjection = {
+    version: "life_state_projection_v1",
+    generatedAt: "2026-07-08T00:00:00.000Z",
+    pending: {
+      pendingProposalCount: 0,
+      editedProposalCount: 0,
+      totalReviewRequiredCount: 0,
+      highRiskReviewRequiredCount: 0,
+      proposalStoreStatus: "ok",
+      requiresUserAction: false,
+    },
+    readiness: {
+      chatReady: true,
+      usageReady: true,
+      lifeModelReady: true,
+      modelEmpty: false,
+      pendingBuilderReviewSessions: 0,
+      unfinishedBuilderSessions: 0,
+      databaseStatus: "ok",
+      readinessIssues: [],
+      usageReadinessIssues: [],
+    },
+    taskState: {
+      taskStoreStatus: "ok",
+      latestTaskId: null,
+      latestTaskStatus: null,
+      runningCount: 0,
+      waitingPermissionCount: 0,
+      blockedCount: 0,
+      failedCount: 0,
+      cancelledCount: 0,
+      completedCount: 0,
+      activeCount: 0,
+    },
+    safeMode: {
+      active: false,
+      reason: "系统当前未处于 Safe Mode。",
+      sourceRefs: [],
+    },
+    toolPermissions: {
+      totalCount: 0,
+      activeCount: 0,
+      consumedCount: 0,
+      allowCount: 0,
+      denyCount: 0,
+      askEveryTimeCount: 0,
+      allowOnceCount: 0,
+      allowUntilRevokedCount: 0,
+    },
+    safePaths: [],
+    surfaces: [],
+    sourceRefs: ["projection:test"],
+  };
+
   const baseProps = {
     diagnostics: defaultDiagnostics as any,
+    projection: defaultProjection as any,
     safeMode: false,
     exportLoading: false,
     handleExport: vi.fn(),

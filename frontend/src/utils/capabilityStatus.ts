@@ -28,7 +28,7 @@ type CloudRouteState =
   | "validated"
   | "failed"
   | "stale"
-  | "scripted_dogfood";
+  | "scripted_provider_probe";
 
 type GovernanceBlockerReason =
   | "model_selected_disallowed_tool"
@@ -51,10 +51,15 @@ function cloudRouteState(diagnostics: SystemDiagnostics): CloudRouteState {
   if (diagnostics.cloud_api_validation_status === "validated") return "validated";
   if (diagnostics.cloud_api_validation_status === "failed") return "failed";
   if (diagnostics.cloud_api_validation_status === "stale") return "stale";
-  if (diagnostics.cloud_api_validation_status === "scripted_dogfood") return "scripted_dogfood";
+  if (isScriptedProofStatus(diagnostics.cloud_api_validation_status))
+    return "scripted_provider_probe";
   if (diagnostics.cloud_api_validated === true) return "validated";
   if (diagnostics.cloud_api_configured) return "unvalidated";
   return "none";
+}
+
+function isScriptedProofStatus(status: string | null | undefined): boolean {
+  return status === "scripted_provider_probe" || status === "scripted_dogfood";
 }
 
 function cloudConfiguredLabel(
@@ -76,7 +81,7 @@ export function cloudApiStatusLabel(diagnostics: SystemDiagnostics | null): stri
       : `${providerName(diagnostics)} 验证失败`;
   }
   if (cloud === "stale") return `${providerName(diagnostics)} 验证已过期或配置已变更`;
-  if (cloud === "scripted_dogfood") return `${providerName(diagnostics)} 仅脚本化开发 proof`;
+  if (cloud === "scripted_provider_probe") return `${providerName(diagnostics)} 仅脚本化 proof`;
   if (cloud === "unvalidated") return cloudConfiguredLabel(diagnostics, cloud);
   return "未配置";
 }
@@ -154,7 +159,7 @@ function toolAccess(diagnostics: SystemDiagnostics | null): {
 
 export function buildCapabilityStatusViewModel(
   diagnostics: SystemDiagnostics | null,
-  pendingProposalCount: number,
+  pendingProposalCount: number | null,
   currentRun?: AgentRun | null
 ): CapabilityStatusViewModel {
   const tools = toolAccess(diagnostics);
@@ -214,8 +219,18 @@ export function buildCapabilityStatusViewModel(
         detail: tools.detail,
       },
       {
-        label: pendingProposalCount > 0 ? `待确认 ${pendingProposalCount}` : "无待确认",
-        tone: pendingProposalCount > 0 ? "warning" : "neutral",
+        label:
+          pendingProposalCount == null
+            ? "待确认状态读取中"
+            : pendingProposalCount > 0
+              ? `待确认 ${pendingProposalCount}`
+              : "无待确认",
+        tone:
+          pendingProposalCount == null
+            ? "neutral"
+            : pendingProposalCount > 0
+              ? "warning"
+              : "neutral",
       },
     ],
     modelRouteLabel,

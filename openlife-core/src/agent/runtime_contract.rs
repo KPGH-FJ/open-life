@@ -77,7 +77,7 @@ impl RuntimeInput {
                     content: user_text.clone(),
                 }],
                 user_text,
-                layer: crate::layer_router::Layer::L2,
+                layer: crate::layer::Layer::L2,
             },
             life_model_compat,
             None,

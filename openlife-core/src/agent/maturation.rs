@@ -16,6 +16,9 @@ use crate::agent::policy_store::{
     BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY,
 };
 use crate::agent::proposal_store::ProposalStore;
+use crate::agent::review_workflow::{
+    DurableWriteRequest, DurableWriteSource, DurableWriteSubject, ReviewWorkflow,
+};
 use crate::agent::runtime_contract::{LifeEventDraft, RuntimeOutput};
 use crate::agent::types::{
     AgentProposal, AgentTaskKind, ProposalSource, ProposalStatus, ProposalType, RiskLevel,
@@ -759,9 +762,17 @@ pub fn propose_low_energy_collaboration_rule_candidate(
     );
     proposal.run_id = report.linked_agent_run_ids.first().cloned();
     proposal.source_detail = Some(LOW_ENERGY_RULE_CANDIDATE_SOURCE_DETAIL.into());
-    proposal_store.create_proposal(&proposal)?;
+    let outcome = ReviewWorkflow::new(proposal_store).submit(
+        DurableWriteRequest::from_agent_proposal(
+            DurableWriteSource::Maturation,
+            DurableWriteSubject::MaturationCandidate,
+            proposal,
+            "Maturation candidate proposal is pending Review Center approval.",
+        )
+        .with_evidence_refs(report.source_evidence_ids.clone()),
+    )?;
 
-    report.candidate_proposal_id = Some(proposal.id);
+    report.candidate_proposal_id = Some(outcome.proposal_id().to_string());
     report.wrote_proposal_count = 1;
     Ok(report)
 }
@@ -1870,6 +1881,17 @@ impl MaturationProposalCandidate {
     }
 }
 
+fn maturation_candidate_evidence_refs(candidate: &MaturationProposalCandidate) -> Vec<String> {
+    let mut refs = vec![format!(
+        "maturation_event_type:{}",
+        candidate.source_event_type
+    )];
+    if let Some(source_run_id) = candidate.source_run_id.as_ref() {
+        refs.push(format!("source_run:{source_run_id}"));
+    }
+    refs
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MaturationReport {
@@ -1986,9 +2008,18 @@ impl MaturationService {
                 None
             } else {
                 let proposal = candidate.to_agent_proposal();
-                proposal_store.create_proposal(&proposal)?;
-                report.proposal_ids.push(proposal.id.clone());
-                Some(proposal.id)
+                let outcome = ReviewWorkflow::new(proposal_store).submit(
+                    DurableWriteRequest::from_agent_proposal(
+                        DurableWriteSource::Maturation,
+                        DurableWriteSubject::MaturationCandidate,
+                        proposal,
+                        "Maturation candidate proposal is pending Review Center approval.",
+                    )
+                    .with_evidence_refs(maturation_candidate_evidence_refs(&candidate)),
+                )?;
+                let proposal_id = outcome.proposal_id().to_string();
+                report.proposal_ids.push(proposal_id.clone());
+                Some(proposal_id)
             };
 
             let evidence = evidence_store.create_evidence(evidence_draft_from_candidate(

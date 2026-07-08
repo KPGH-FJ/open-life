@@ -2,13 +2,14 @@
 
 > 本文档面向新加入的开发者，帮助你快速理解项目结构、开发流程与关键约定。
 >
-> Agent 开发前必须先读 `AGENTS.md`、`plans/README.md` 和
-> `plans/openlife_lifemodel_governed_agent_runtime.md`。若本文与这些入口冲突，
-> 以这些入口为准。
+> Agent 开发前必须先读 `AGENTS.md`、`plans/README.md` 和 active Phase7
+> single-system documents。若本文与这些入口冲突，以这些入口为准。
 >
-> 结构表和模块名是交接快照，可能落后于 W123 后的实际代码拆分。执行开发前
-> 必须用 `rg --files`、当前代码和 progress index 复核，不要按本文的旧文件名
-> 或旧 command 数量直接改代码。
+> 结构表、模块名、`src-tauri/src/lib.rs` 命令注册示例和 command 数量都是历史
+> 交接快照，不是当前 onboarding authority。执行开发前必须用 `rg --files`、
+> 当前代码、`src-tauri/src/commands/mod.rs`、相关 domain command module、
+> `frontend/src/tauri.ts` 和 `frontend/src/test/mocks/tauri.ts` 复核；不要按本文的
+> 旧文件名或旧 command 数量直接改代码。
 
 ---
 
@@ -29,7 +30,7 @@
 │   └── src/
 │       ├── lib.rs              # 模块暴露
 │       ├── life_model.rs       # 四维人生模型
-│       ├── hermes.rs           # 三层决策总线
+│       ├── hermes.rs           # 历史快照：当前源码树已无此文件，勿作为现行模块
 │       ├── scheduler.rs        # 模型调度器
 │       ├── memory.rs           # SQLite 持久化
 │       ├── vectors.rs          # 向量记忆 Tier 3
@@ -85,7 +86,11 @@ make test-rust     # 仅 Rust
 
 ## 3. 前后端通信约定
 
-### 3.1 新增一个 Tauri Command 的完整流程
+### 3.1 新增一个 Tauri Command 的历史流程快照
+
+以下流程保留为旧版接手参考，不是当前命令注册权威。新增或修改 command 时，
+先 source-map 当前 `src-tauri/src/commands/` domain module、`src-tauri/src/lib.rs`
+handler registration、`frontend/src/tauri.ts` wrapper 和前端 mock，再决定实际落点。
 
 假设你要新增 `get_foo` / `set_foo` 命令：
 
@@ -149,7 +154,7 @@ case 'set_foo':
 | 范畴 | 约定 | 示例 |
 |------|------|------|
 | Rust 文件/函数 | `snake_case` | `life_model.rs`, `save_message()` |
-| Rust 结构体/枚举 | `PascalCase` | `LifeModel`, `HermesBus` |
+| Rust 结构体/枚举 | `PascalCase` | `LifeModel`, `AgentRun` |
 | TS 组件文件 | `PascalCase` | `ChatPage.tsx`, `ErrorBanner.tsx` |
 | TS 函数/变量 | `camelCase` | `sendMessage()`, `exportAllData()` |
 | TS 接口/类型 | `PascalCase` | `AppConfig`, `ChatMessage` |

@@ -259,7 +259,7 @@ describe("AgentControlPlane", () => {
       "timestamp",
     ]);
     expect(parsed).toMatchObject({
-      schemaVersion: "main-chat-stage3-reviewer-trace-v1",
+      schemaVersion: "main-chat-reviewer-trace-v1",
       taskId: "task-agent-control-plane-1",
       runId: "run-agent-control-plane-1",
       status: "blocked",
@@ -272,56 +272,19 @@ describe("AgentControlPlane", () => {
     expect(parsed.timestamp).toEqual(expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/));
   });
 
-  it("renders Stage 5 internal debug operations without readiness semantics", () => {
-    const onRefreshStage5Preflight = vi.fn();
-    const onExportDebugBundle = vi.fn();
-    const onCreateIssueReport = vi.fn();
-
+  it("does not expose retired internal debug operations in the product control plane", () => {
     render(
       <MemoryRouter>
-        <AgentControlPlane
-          state={agentState()}
-          onRefreshStage5Preflight={onRefreshStage5Preflight}
-          onExportDebugBundle={onExportDebugBundle}
-          onCreateIssueReport={onCreateIssueReport}
-          stage5Debug={{
-            preflight: {
-              failure: { class: "environment_preflight_failure" },
-              metadataSafe: true,
-              externalProviderInvokedByDefault: false,
-              provider: { keyPresent: false },
-            } as any,
-            latestBundle: {
-              bundleId: "stage5-bundle-1",
-              artifact: {
-                artifactId: "stage5-bundle-1",
-                byteSize: 2048,
-              },
-            } as any,
-            latestIssue: null,
-            artifacts: [],
-            busy: false,
-            error: null,
-          }}
-        />
+        <AgentControlPlane state={agentState()} />
       </MemoryRouter>
     );
 
-    const strip = screen.getByTestId("stage5-debug-operations");
-    expect(strip).toHaveAttribute("data-preflight-status", "environment_preflight_failure");
-    expect(strip).toHaveAttribute("data-metadata-safe", "true");
-    expect(strip).toHaveAttribute("data-external-provider-invoked", "false");
-    expect(strip).toHaveTextContent("Internal debug ops");
-    expect(strip).toHaveTextContent("provider key missing");
-    expect(strip).toHaveTextContent("bundle");
-
-    fireEvent.click(screen.getByRole("button", { name: "Refresh Stage 5 preflight" }));
-    fireEvent.click(screen.getByRole("button", { name: "Export debug bundle" }));
-    fireEvent.click(screen.getByRole("button", { name: "Create issue report" }));
-
-    expect(onRefreshStage5Preflight).toHaveBeenCalledTimes(1);
-    expect(onExportDebugBundle).toHaveBeenCalledTimes(1);
-    expect(onCreateIssueReport).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId("stage5-debug-operations")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Refresh Stage 5 preflight" })
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Export debug bundle" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Create issue report" })).not.toBeInTheDocument();
   });
 
   it("renders canonical final delivery sections separately", () => {

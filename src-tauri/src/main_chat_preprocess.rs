@@ -319,8 +319,8 @@ pub(crate) async fn preprocess_chat_input_with_options(
             );
             privacy_map.extend(map);
             let mut final_text = masked;
-            let router = state.intent_router.lock().await;
-            if router.values_filter(&msg.content) {
+            if openlife_core::core_value_signal_extractor::contains_core_value_signal(&msg.content)
+            {
                 final_text = format!("[该消息涉及你的核心价值观] {}", final_text);
             }
             desensitized_messages.push(ChatMessage {

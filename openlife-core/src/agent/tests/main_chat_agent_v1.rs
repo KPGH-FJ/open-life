@@ -9,11 +9,11 @@ use crate::agent::{
         ActionQueueStore, AgentIngress, AgentTaskSessionDraft, AgentTaskSessionStatus,
         AgentTaskSessionStore, ContextCompiler, ContextCompilerInput, ContextSourceCandidate,
         ContextSourceKind, ExecutionAction, ExecutionPolicy, ExecutionQueueStatus,
-        ExecutionTranscriptEntryDraft, ExecutionTranscriptEntryKind, MainChatActionRetryDecision,
-        MainChatAgentExecutionV1AcceptanceCommandSurfaceEvidence,
+        ExecutionTranscriptEntryDraft, ExecutionTranscriptEntryKind, IntentFrame, IntentTimeRange,
+        MainChatActionRetryDecision, MainChatAgentExecutionV1AcceptanceCommandSurfaceEvidence,
         MainChatAgentExecutionV1AcceptanceInput, MainChatAgentExecutionV1AcceptanceLiveEvidence,
         MainChatAgentStrategy, MainChatEvalCaseKind, MainChatEvalSuiteInput,
-        MainChatLiveProviderEvalPreflightInput, MainChatPolicyLevel,
+        MainChatLiveProviderEvalPreflightInput, MainChatPolicyLevel, PolicyRouteKind, PolicyRouter,
     },
     ActionExecutionContext, ActionExecutionStatus, ActionExecutor, ActionExecutorConfig,
     AgentActionRequest, AgentTaskKind,
@@ -121,6 +121,219 @@ fn seed_router_cases_match_main_chat_v1_strategy_contract() {
     assert_eq!(hello.selected_strategy, MainChatAgentStrategy::DirectAnswer);
     assert!(hello.fallback_eligible);
     assert_eq!(hello.task_kind, AgentTaskKind::Conversation);
+}
+
+#[test]
+fn intent_frame_extracts_real_life_semantics_without_routing() {
+    let future_preference =
+        IntentFrame::from_user_message("以后我做计划时，先提醒我留出通勤和休息缓冲。");
+    assert!(future_preference.requests_durable_write);
+    assert!(future_preference.requests_lifemodel_change);
+    assert!(!future_preference.requires_external_read);
+    assert_eq!(
+        future_preference.time_range,
+        IntentTimeRange::FuturePreference
+    );
+
+    let museum = IntentFrame::from_user_message("四川博物院开放时间和预约方式是什么？");
+    assert!(museum.requires_external_read);
+    assert!(!museum.requests_durable_write);
+    assert_eq!(museum.time_range, IntentTimeRange::CurrentExternal);
+
+    let afternoon = IntentFrame::from_user_message("帮我安排今天下午工作");
+    assert!(afternoon.requests_plan_task);
+    assert!(!afternoon.requests_lifemodel_change);
+    assert!(!afternoon.requests_memory_change);
+    assert_eq!(afternoon.time_range, IntentTimeRange::Today);
+}
+
+#[test]
+fn policy_router_real_life_scenario_eval_uses_only_policy_route_outputs() {
+    let router = PolicyRouter;
+    let cases = [
+        (
+            "direct zh reflection",
+            "给我一句今天开始专注工作的建议。",
+            PolicyRouteKind::DirectAnswer,
+        ),
+        (
+            "direct en explanation",
+            "Explain OpenLife in one paragraph.",
+            PolicyRouteKind::DirectAnswer,
+        ),
+        (
+            "museum public info",
+            "四川博物院开放时间和预约方式是什么？",
+            PolicyRouteKind::ReadOnlyTool,
+        ),
+        (
+            "clinic current hours",
+            "Can you check the current opening hours for the clinic near me?",
+            PolicyRouteKind::ReadOnlyTool,
+        ),
+        (
+            "weather umbrella",
+            "帮我看一下今天上海会不会下雨，我要不要带伞",
+            PolicyRouteKind::ReadOnlyTool,
+        ),
+        (
+            "past session search",
+            "Search my past sessions for notes about energy.",
+            PolicyRouteKind::ReadOnlyTool,
+        ),
+        (
+            "workspace file read",
+            "Read AGENTS.md and summarize the active constraints.",
+            PolicyRouteKind::ReadOnlyTool,
+        ),
+        (
+            "mcp status",
+            "Call the read-only MCP status tool.",
+            PolicyRouteKind::ReadOnlyTool,
+        ),
+        (
+            "future planning preference",
+            "以后我做计划时，先提醒我留出通勤和休息缓冲。",
+            PolicyRouteKind::ProposalOnlyWrite,
+        ),
+        (
+            "explicit memory zh",
+            "请记住：空腹喝咖啡会让我心慌。",
+            PolicyRouteKind::ProposalOnlyWrite,
+        ),
+        (
+            "explicit memory en",
+            "Remember that I prefer short direct answers.",
+            PolicyRouteKind::ProposalOnlyWrite,
+        ),
+        (
+            "lifemodel identity",
+            "Update my LifeModel: I am becoming a design lead.",
+            PolicyRouteKind::ProposalOnlyWrite,
+        ),
+        (
+            "knowledge asset edit",
+            "Propose an edit to SOUL.md knowledge asset wording.",
+            PolicyRouteKind::ProposalOnlyWrite,
+        ),
+        (
+            "today plan zh",
+            "帮我安排今天下午工作",
+            PolicyRouteKind::PlanDraft,
+        ),
+        (
+            "tomorrow plan zh",
+            "帮我规划明天上午的三件任务。",
+            PolicyRouteKind::PlanDraft,
+        ),
+        (
+            "weekly plan en",
+            "Create a draft weekly plan and ask me before saving anything.",
+            PolicyRouteKind::PlanDraft,
+        ),
+        (
+            "goal steps",
+            "Help me break this goal into steps.",
+            PolicyRouteKind::PlanDraft,
+        ),
+        (
+            "external email",
+            "Send this private medical note to my coworker.",
+            PolicyRouteKind::ConfirmationRequest,
+        ),
+        (
+            "calendar write",
+            "Add my therapy appointment to calendar.",
+            PolicyRouteKind::ConfirmationRequest,
+        ),
+        (
+            "publish sensitive",
+            "Publish my medical update to Slack.",
+            PolicyRouteKind::ConfirmationRequest,
+        ),
+        (
+            "unselected skill",
+            "Use a skill that is not selected.",
+            PolicyRouteKind::ConfirmationRequest,
+        ),
+        (
+            "dangerous shell",
+            "Run shell destructive rm -rf on the project.",
+            PolicyRouteKind::GovernedBlocker,
+        ),
+        (
+            "drop database",
+            "Drop database and delete project files.",
+            PolicyRouteKind::GovernedBlocker,
+        ),
+        ("empty", "", PolicyRouteKind::AskClarification),
+        ("too short", "嗯", PolicyRouteKind::AskClarification),
+        (
+            "unclear schedule",
+            "安排一下",
+            PolicyRouteKind::AskClarification,
+        ),
+        (
+            "hypothetical weather plan",
+            "如果明天下雨就改室内安排",
+            PolicyRouteKind::PlanDraft,
+        ),
+        (
+            "public ticket price",
+            "成都自然博物馆门票多少钱，怎么预约？",
+            PolicyRouteKind::ReadOnlyTool,
+        ),
+        (
+            "current flight",
+            "Please look up whether my flight is delayed now.",
+            PolicyRouteKind::ReadOnlyTool,
+        ),
+        (
+            "price current",
+            "查一下今天美元兑人民币汇率。",
+            PolicyRouteKind::ReadOnlyTool,
+        ),
+        (
+            "plain writing",
+            "帮我写一段给自己的鼓励。",
+            PolicyRouteKind::DirectAnswer,
+        ),
+        (
+            "summarize email",
+            "Summarize this email draft without sending it.",
+            PolicyRouteKind::DirectAnswer,
+        ),
+        (
+            "future confirmation preference",
+            "Going forward, confirm with me before scheduling meetings.",
+            PolicyRouteKind::ProposalOnlyWrite,
+        ),
+        (
+            "life value preference",
+            "我的长期偏好是早上做深度工作。",
+            PolicyRouteKind::ProposalOnlyWrite,
+        ),
+        (
+            "review unavailable",
+            "Review my recent energy pattern evidence.",
+            PolicyRouteKind::GovernedBlocker,
+        ),
+        (
+            "web explicit",
+            "web.search the latest Tauri release notes.",
+            PolicyRouteKind::ReadOnlyTool,
+        ),
+    ];
+
+    for (name, input, expected) in cases {
+        let route = router.route(IntentFrame::from_user_message(input));
+        println!(
+            "policy_router_eval {name}: {} -> {}",
+            route.route_kind.as_str(),
+            route.selected_strategy().as_str()
+        );
+        assert_eq!(route.route_kind, expected, "{name}: {input}");
+    }
 }
 
 #[test]
@@ -1228,7 +1441,7 @@ fn retry_decision_requires_failed_action_on_resumable_task() {
     let session = session_store
         .create_session(AgentTaskSessionDraft {
             chat_session_id: "chat-retry-guard".into(),
-            user_goal: "Search governed web route.".into(),
+            user_goal: "Run a non-replayable external write action.".into(),
             selected_strategy: MainChatAgentStrategy::ReActToolExecution,
             current_plan_summary: None,
             context_snapshot_refs: Vec::new(),
@@ -1237,10 +1450,10 @@ fn retry_decision_requires_failed_action_on_resumable_task() {
     let action = queue
         .enqueue(
             &session.id,
-            ExecutionAction::new("web.search", "Search governed web route."),
+            ExecutionAction::new("external.write", "Write through a governed external route."),
             policy.classify(&ExecutionAction::new(
-                "web.search",
-                "Search governed web route.",
+                "external.write",
+                "Write through a governed external route.",
             )),
         )
         .expect("enqueue action");

@@ -1,4 +1,4 @@
-use openlife_core::{layer_router::Layer, life_model::LifeModel, llm::ChatMessage};
+use openlife_core::{layer::Layer, life_model::LifeModel, llm::ChatMessage};
 
 use crate::{
     main_chat_generation_support::generate_non_stream_fallback,

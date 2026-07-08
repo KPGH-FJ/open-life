@@ -52,6 +52,77 @@ describe("SettingsPage", () => {
     fireEvent.click(tab);
   };
 
+  const lifeStateProjection = (
+    overrides: {
+      readiness?: Record<string, unknown>;
+      safeMode?: Record<string, unknown>;
+    } = {}
+  ) => ({
+    version: "life_state_projection_v1",
+    generatedAt: new Date().toISOString(),
+    pending: {
+      pendingProposalCount: 0,
+      editedProposalCount: 0,
+      totalReviewRequiredCount: 0,
+      highRiskReviewRequiredCount: 0,
+      proposalStoreStatus: "ok",
+      requiresUserAction: false,
+    },
+    readiness: {
+      chatReady: true,
+      usageReady: true,
+      lifeModelReady: true,
+      modelEmpty: false,
+      pendingBuilderReviewSessions: 0,
+      unfinishedBuilderSessions: 0,
+      databaseStatus: "ok",
+      readinessIssues: [],
+      usageReadinessIssues: [],
+      ...(overrides.readiness ?? {}),
+    },
+    taskState: {
+      taskStoreStatus: "ok",
+      latestTaskId: null,
+      latestTaskStatus: null,
+      runningCount: 0,
+      waitingPermissionCount: 0,
+      blockedCount: 0,
+      failedCount: 0,
+      cancelledCount: 0,
+      completedCount: 0,
+      activeCount: 0,
+    },
+    safeMode: {
+      active: false,
+      reason: "系统当前未处于 Safe Mode。",
+      sourceRefs: [],
+      ...(overrides.safeMode ?? {}),
+    },
+    toolPermissions: {
+      totalCount: 0,
+      activeCount: 0,
+      consumedCount: 0,
+      allowCount: 0,
+      denyCount: 0,
+      askEveryTimeCount: 0,
+      allowOnceCount: 0,
+      allowUntilRevokedCount: 0,
+    },
+    safePaths: [],
+    surfaces: ["today", "mailbox", "chat", "companion", "life_model", "settings"].map(surface => ({
+      surface,
+      pendingReviewCount: 0,
+      editedReviewCount: 0,
+      totalReviewRequiredCount: 0,
+      readinessStatus: "ready",
+      taskStatus: "idle",
+      safeModeActive: Boolean(overrides.safeMode?.active),
+      waitingPermissionCount: 0,
+      activeToolPermissionCount: 0,
+    })),
+    sourceRefs: ["diagnostics", "life_state_projection"],
+  });
+
   it("renders settings title and checklist", async () => {
     renderSettings();
 
@@ -85,11 +156,27 @@ describe("SettingsPage", () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_system_diagnostics") {
         return Promise.resolve({
-          router: {
-            onnx_available: false,
-            onnx_disabled: false,
-            active_backend: "regex",
-            latency_threshold_us: 50000,
+          policy_router: {
+            activeAuthority: "IntentFrame + PolicyRouter",
+            authorityChain: [
+              "user_input",
+              "IntentFrame",
+              "PolicyRouter",
+              "AgentIngressDecision",
+              "OpenLifeTurnRuntime",
+              "MainChatKernel",
+            ],
+            routeOutputs: [
+              "direct_answer",
+              "read_only_tool",
+              "proposal_only_write",
+              "plan_draft",
+              "ask_clarification",
+              "governed_blocker",
+              "confirmation_request",
+            ],
+            appStateOldRoutersPresent: false,
+            diagnosticsSurface: "policy_router_status",
           },
           mcp_server_count: 1,
           mcp_tool_count: 2,
@@ -137,6 +224,18 @@ describe("SettingsPage", () => {
           ollama_models: [],
           config_source: "default",
         });
+      }
+      if (cmd === "get_life_state_projection") {
+        return Promise.resolve(
+          lifeStateProjection({
+            readiness: {
+              chatReady: false,
+              readinessIssues: [
+                "聊天不可用：未检测到可用 Ollama 本地模型，也没有配置云端 API Key。",
+              ],
+            },
+          })
+        );
       }
       return mockInvoke(cmd, args);
     });
@@ -326,11 +425,27 @@ describe("SettingsPage", () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_system_diagnostics") {
         return Promise.resolve({
-          router: {
-            onnx_available: false,
-            onnx_disabled: false,
-            active_backend: "regex",
-            latency_threshold_us: 50000,
+          policy_router: {
+            activeAuthority: "IntentFrame + PolicyRouter",
+            authorityChain: [
+              "user_input",
+              "IntentFrame",
+              "PolicyRouter",
+              "AgentIngressDecision",
+              "OpenLifeTurnRuntime",
+              "MainChatKernel",
+            ],
+            routeOutputs: [
+              "direct_answer",
+              "read_only_tool",
+              "proposal_only_write",
+              "plan_draft",
+              "ask_clarification",
+              "governed_blocker",
+              "confirmation_request",
+            ],
+            appStateOldRoutersPresent: false,
+            diagnosticsSurface: "policy_router_status",
           },
           mcp_server_count: 1,
           mcp_tool_count: 2,
@@ -387,6 +502,26 @@ describe("SettingsPage", () => {
           config_source: "default",
         });
       }
+      if (cmd === "get_life_state_projection") {
+        return Promise.resolve(
+          lifeStateProjection({
+            readiness: {
+              usageReady: false,
+              pendingBuilderReviewSessions: 1,
+              unfinishedBuilderSessions: 1,
+              databaseStatus: "degraded",
+              usageReadinessIssues: [
+                "数据存储曾在启动时降级：请先确认数据目录和数据库状态，再继续深度使用。",
+              ],
+            },
+            safeMode: {
+              active: true,
+              reason: "数据库降级启动",
+              sourceRefs: ["diagnostics:database_status"],
+            },
+          })
+        );
+      }
       return mockInvoke(cmd, args);
     });
 
@@ -409,87 +544,47 @@ describe("SettingsPage", () => {
     expect(screen.getByText("4. 查看校准或版本回滚")).toBeInTheDocument();
   });
 
-  it("runs current Main Chat runtime debug actions from the experimental panel", async () => {
-    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
-      if (cmd === "get_main_chat_runtime_status") {
-        return Promise.resolve({
-          statusVersion: 2,
-          authoritativeRuntime: "main_chat_kernel",
-          defaultSendPath: "main_chat_kernel",
-          startStreamPath: "main_chat_kernel",
-          sourceOfTruth: "main_chat_turn_pipeline",
-          kernelEvidence: {
-            kernelBackedDefault: false,
-            finalGateEvidencePresent: false,
-            finalGateReady: false,
-            latestKernelRouteObserved: false,
-            legacyFallbackFreeSinceStartup: true,
-          },
-          latestRouteEvidence: {
-            status: "not_observed",
-            directAnswerObserved: false,
-            governedBlockerObserved: false,
-            agentLoopObserved: false,
-            kernelBackedDefaultObserved: false,
-            legacyFallbackUsed: false,
-          },
-          legacyFallback: {
-            mode: "explicit_only",
-            allowedByDefault: false,
-            usedCountSinceStartup: 0,
-          },
-          finalGateReadiness: {
-            authority: "main_chat_final_acceptance_gate",
-            status: "not_run",
-            blockers: [],
-            lastReportRunId: null,
-          },
-        });
-      }
-      if (cmd === "check_runtime_migration_gate") {
-        return Promise.resolve({
-          defaultChatUnchanged: true,
-          previewPathHealthy: true,
-          metadataSafeTraceReady: true,
-          fallbackAvailable: false,
-          noExternalWrites: true,
-          proposalFirstPreserved: true,
-          blockingReasons: ["missing_live_provider_evidence"],
-        });
-      }
-      return mockInvoke(cmd, args);
-    });
-
+  it("keeps retired Main Chat runtime debug actions out of Settings", async () => {
     renderSettings();
 
     await clickTab("实验");
-    expect(await screen.findByText("Main Chat Runtime Debug")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Show" }));
-    fireEvent.click(screen.getByRole("button", { name: "Runtime status" }));
-
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith("get_main_chat_runtime_status", undefined);
-    });
-    expect(await screen.findByText("Runtime Status")).toBeInTheDocument();
-    expect(screen.getAllByText(/main_chat_kernel/).length).toBeGreaterThan(0);
-
-    fireEvent.click(screen.getByRole("button", { name: "Migration gate" }));
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith("check_runtime_migration_gate", { input: {} });
-    });
-    expect(await screen.findByText("Migration Gate")).toBeInTheDocument();
-    expect(screen.getByText(/missing_live_provider_evidence/)).toBeInTheDocument();
+    expect(await screen.findByText("内部调试功能")).toBeInTheDocument();
+    expect(screen.queryByText("Main Chat Runtime Debug")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Runtime status" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Migration gate" })).not.toBeInTheDocument();
+    expect(
+      vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "get_main_chat_runtime_status")
+    ).toBe(false);
+    expect(
+      vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "check_runtime_migration_gate")
+    ).toBe(false);
   });
 
   it("prioritizes continuing Builder when unfinished builder sessions exist", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_system_diagnostics") {
         return Promise.resolve({
-          router: {
-            onnx_available: false,
-            onnx_disabled: false,
-            active_backend: "regex",
-            latency_threshold_us: 50000,
+          policy_router: {
+            activeAuthority: "IntentFrame + PolicyRouter",
+            authorityChain: [
+              "user_input",
+              "IntentFrame",
+              "PolicyRouter",
+              "AgentIngressDecision",
+              "OpenLifeTurnRuntime",
+              "MainChatKernel",
+            ],
+            routeOutputs: [
+              "direct_answer",
+              "read_only_tool",
+              "proposal_only_write",
+              "plan_draft",
+              "ask_clarification",
+              "governed_blocker",
+              "confirmation_request",
+            ],
+            appStateOldRoutersPresent: false,
+            diagnosticsSurface: "policy_router_status",
           },
           mcp_server_count: 1,
           mcp_tool_count: 2,
@@ -539,6 +634,16 @@ describe("SettingsPage", () => {
           config_source: "default",
         });
       }
+      if (cmd === "get_life_state_projection") {
+        return Promise.resolve(
+          lifeStateProjection({
+            readiness: {
+              modelEmpty: true,
+              unfinishedBuilderSessions: 1,
+            },
+          })
+        );
+      }
       return mockInvoke(cmd, args);
     });
 
@@ -553,11 +658,27 @@ describe("SettingsPage", () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_system_diagnostics") {
         return Promise.resolve({
-          router: {
-            onnx_available: false,
-            onnx_disabled: false,
-            active_backend: "regex",
-            latency_threshold_us: 50000,
+          policy_router: {
+            activeAuthority: "IntentFrame + PolicyRouter",
+            authorityChain: [
+              "user_input",
+              "IntentFrame",
+              "PolicyRouter",
+              "AgentIngressDecision",
+              "OpenLifeTurnRuntime",
+              "MainChatKernel",
+            ],
+            routeOutputs: [
+              "direct_answer",
+              "read_only_tool",
+              "proposal_only_write",
+              "plan_draft",
+              "ask_clarification",
+              "governed_blocker",
+              "confirmation_request",
+            ],
+            appStateOldRoutersPresent: false,
+            diagnosticsSurface: "policy_router_status",
           },
           mcp_server_count: 1,
           mcp_tool_count: 2,
@@ -607,6 +728,20 @@ describe("SettingsPage", () => {
           config_source: "default",
         });
       }
+      if (cmd === "get_life_state_projection") {
+        return Promise.resolve(
+          lifeStateProjection({
+            readiness: {
+              databaseStatus: "degraded",
+            },
+            safeMode: {
+              active: true,
+              reason: "数据库降级启动",
+              sourceRefs: ["diagnostics:database_status"],
+            },
+          })
+        );
+      }
       return mockInvoke(cmd, args);
     });
 
@@ -628,11 +763,27 @@ describe("SettingsPage", () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_system_diagnostics") {
         return Promise.resolve({
-          router: {
-            onnx_available: false,
-            onnx_disabled: false,
-            active_backend: "regex",
-            latency_threshold_us: 50000,
+          policy_router: {
+            activeAuthority: "IntentFrame + PolicyRouter",
+            authorityChain: [
+              "user_input",
+              "IntentFrame",
+              "PolicyRouter",
+              "AgentIngressDecision",
+              "OpenLifeTurnRuntime",
+              "MainChatKernel",
+            ],
+            routeOutputs: [
+              "direct_answer",
+              "read_only_tool",
+              "proposal_only_write",
+              "plan_draft",
+              "ask_clarification",
+              "governed_blocker",
+              "confirmation_request",
+            ],
+            appStateOldRoutersPresent: false,
+            diagnosticsSurface: "policy_router_status",
           },
           mcp_server_count: 1,
           mcp_tool_count: 2,
@@ -681,6 +832,20 @@ describe("SettingsPage", () => {
           ollama_models: [],
           config_source: "default",
         });
+      }
+      if (cmd === "get_life_state_projection") {
+        return Promise.resolve(
+          lifeStateProjection({
+            readiness: {
+              databaseStatus: "degraded",
+            },
+            safeMode: {
+              active: true,
+              reason: "数据库降级启动",
+              sourceRefs: ["diagnostics:database_status"],
+            },
+          })
+        );
       }
       return mockInvoke(cmd, args);
     });

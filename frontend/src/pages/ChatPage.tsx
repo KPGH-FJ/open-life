@@ -10,10 +10,7 @@ import {
   MessageSquare,
   Target,
   Activity,
-  AlertTriangle,
   Compass,
-  ChevronDown,
-  ChevronRight,
   ExternalLink,
   Sparkles,
   Heart,
@@ -27,7 +24,6 @@ import {
 import type { ChatMessage, LifeModel } from "../types";
 import LoadingSpinner from "../components/LoadingSpinner";
 import {
-  diagnosticsUsageReady,
   mailboxLinkTarget,
   mailboxRoute,
   productRoutePath,
@@ -38,6 +34,7 @@ import {
   startStreamMessage,
   getChatHistory,
   getSystemDiagnostics,
+  getLifeStateProjection,
   getSchedulerConfig,
   setSchedulerConfig,
   saveFeedback,
@@ -52,7 +49,6 @@ import {
   addDailyGoal,
   toggleDailyGoal,
   recordState,
-  replayAgentAction,
   indexMemoryChunk,
   listAgentRunsForSession,
   getAgentRun,
@@ -62,13 +58,11 @@ import {
   editProposal,
   draftEditMemoryProposal,
   postponeProposal,
-  runMultiStrategyAgentPreview,
-  checkControlledChatPilotEligibility,
-  recordControlledPilotPromotionEvidence,
   getMainChatAgentTaskState,
   resumeMainChatAgentTask,
   cancelMainChatAgentTask,
   retryMainChatAgentAction,
+  replayAgentAction,
   listMainChatAgentTasks,
   getMainChatAgentTaskDetail,
   refreshMainChatAgentTaskContext,
@@ -86,10 +80,6 @@ import {
   selectMainChatSkill,
   clearMainChatSkill,
   listMainChatToolCandidates,
-  evaluateMainChatStage5ReleaseDebugPreflight,
-  exportMainChatAgentDebugBundle,
-  createMainChatInternalIssueReport,
-  listMainChatDebugBundles,
 } from "../tauri";
 import type {
   AgentRun,
@@ -112,25 +102,19 @@ import type {
   MainChatSkillDetail,
   MainChatSelectedSkill,
   MainChatToolCandidateList,
-  MainChatStage5ArtifactMetadata,
-  MainChatStage5DebugBundle,
-  MainChatStage5IssueReport,
-  MainChatStage5PreflightReport,
+  MainChatMemoryGovernanceEvidence,
+  LifeStateProjection,
 } from "../tauri";
-import type {
-  ControlledPilotPromotionEvidenceInput,
-  ControlledChatPilotEligibilityReport,
-  MultiStrategyAgentPreviewLayer,
-  MultiStrategyAgentPreviewOutput,
-} from "../types";
 import { getModelEmptyState } from "../utils/modelEmpty";
 import {
   buildCapabilityStatusViewModel,
   explainGovernanceBlocker,
   userFacingAssistantContent,
   type CapabilityTone,
+  type CapabilityStatusViewModel,
 } from "../utils/capabilityStatus";
 import { inspectDailyGoalName } from "../utils/dailyGoalDisplayGuard";
+import { reviewRequiredCountFromProjection } from "../utils/lifeStateProjection";
 import { listen } from "@tauri-apps/api/event";
 import ReasoningTracePanel from "../components/ReasoningTracePanel";
 import ToolCallCard from "../components/ToolCallCard";
@@ -139,7 +123,6 @@ import AgentControlPlane from "../components/AgentControlPlane";
 import MainChatExecutionEvidence from "../components/MainChatExecutionEvidence";
 import type { AgentStageState } from "../components/AgentStage";
 import RuntimeDisclosureStrip from "../components/RuntimeDisclosureStrip";
-import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
 import { buildRuntimeDisclosure } from "../utils/runtimeDisclosure";
 import ChatSidebar from "./chat/ChatSidebar";
 import ChatInputArea from "./chat/ChatInputArea";
@@ -148,13 +131,16 @@ function generateSessionId() {
   return "sess_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
-function buildReadinessSummary(diagnostics: SystemDiagnostics | null): {
+function buildReadinessSummary(
+  diagnostics: SystemDiagnostics | null,
+  projection: LifeStateProjection | null
+): {
   status: string;
   tone: "ready" | "warning" | "error";
   detail: string;
   usageReady?: boolean;
 } {
-  if (!diagnostics) {
+  if (!diagnostics && !projection) {
     return {
       status: "检测中",
       tone: "warning",
@@ -162,32 +148,32 @@ function buildReadinessSummary(diagnostics: SystemDiagnostics | null): {
     };
   }
 
-  if (diagnostics.chat_ready) {
-    const backend = diagnostics.ollama_online
+  if (projection?.readiness.chatReady) {
+    const backend = diagnostics?.ollama_online
       ? `本地模型 ${diagnostics.resolved_local_model || diagnostics.local_model}`
       : "云端模型";
     return {
       status: "聊天就绪",
       tone: "ready",
       detail: `当前可使用 ${backend}。`,
-      usageReady: diagnosticsUsageReady(diagnostics),
+      usageReady: projection.readiness.usageReady,
     };
   }
-  if (!diagnostics.ollama_online && !diagnostics.cloud_api_configured) {
+  if (diagnostics && !diagnostics.ollama_online && !diagnostics.cloud_api_configured) {
     return {
       status: "需要配置",
       tone: "error",
       detail: "本地模型离线，云端 API 也未配置。无法开始聊天。",
     };
   }
-  if (!diagnostics.ollama_online) {
+  if (diagnostics && !diagnostics.ollama_online) {
     return {
       status: "本地模型离线",
       tone: "warning",
       detail: `未检测到 ${diagnostics.local_model}，将依赖云端 API。`,
     };
   }
-  if (!diagnostics.cloud_api_configured) {
+  if (diagnostics && !diagnostics.cloud_api_configured) {
     return { status: "云端 API 未配置", tone: "warning", detail: "复杂任务可能只能使用本地模型。" };
   }
   return { status: "需要检查", tone: "warning", detail: "部分运行状态异常，请查看设置页诊断。" };
@@ -198,6 +184,60 @@ function companionCapabilityChipClass(tone: CapabilityTone): string {
   if (tone === "warning") return "border-amber-200 bg-amber-50 text-amber-900";
   if (tone === "error") return "border-rose-200 bg-rose-50 text-rose-800";
   return "border-stone-200 bg-white text-stone-700";
+}
+
+function buildCompanionInitialAssistantMessage(
+  diagnostics: SystemDiagnostics | null,
+  pendingReviewCount: number | null = null,
+  loadState: "normal" | "history_unavailable" = "normal"
+): string {
+  const status: CapabilityStatusViewModel = buildCapabilityStatusViewModel(
+    diagnostics,
+    pendingReviewCount,
+    null
+  );
+
+  if (loadState === "history_unavailable") {
+    return [
+      "你好，我是 OpenLife。",
+      "当前无法确认会话历史或运行状态，可能处于浏览器预览或 Tauri bridge 不可用。",
+      "在能力恢复前，我不会声称 Life Model 已加载；请以顶部能力状态和设置页诊断为准。",
+    ].join("\n");
+  }
+
+  if (!diagnostics) {
+    return [
+      "你好，我是 OpenLife。",
+      "我正在检查模型、Life Model 和工具权限；确认前不会声称 Life Model 已加载。",
+      "请以顶部能力状态和设置页诊断为准。",
+    ].join("\n");
+  }
+
+  const lifeModelReady = diagnostics.life_model_ready && !diagnostics.model_empty;
+  const modelReady = diagnostics.chat_ready;
+
+  if (modelReady && lifeModelReady) {
+    return [
+      "你好，我是 OpenLife。",
+      "当前对话能力和 Life Model 已通过本地状态检查；我会基于已确认的信息陪你交流。",
+      `当前状态：${status.headline}。`,
+    ].join("\n");
+  }
+
+  if (!modelReady) {
+    return [
+      "你好，我是 OpenLife。",
+      "当前对话能力还未通过检查；我不会声称 Life Model 已加载或完整可用。",
+      `状态详情：${status.detail}`,
+      `下一步：${status.primaryActionLabel}。`,
+    ].join("\n");
+  }
+
+  return [
+    "你好，我是 OpenLife。",
+    "对话入口可用，但 Life Model 仍是待补全或未确认状态；我会先依赖你当前输入。",
+    `当前状态：${status.headline}。`,
+  ].join("\n");
 }
 
 function CompanionTaskControlStrip({
@@ -329,8 +369,20 @@ function formatStreamDoneFailure(payload: StreamMessageDonePayload): string {
   return `Main Chat stream failed before producing a successful reply.\n\nBlockers:\n${blockers}\n\nRun id: ${payload.run_id}`;
 }
 
+function formatMalformedStreamCompletion(expectedSessionId: string): string {
+  return [
+    "Main Chat stream did not return a completed response.",
+    "",
+    "OpenLife stopped waiting because the native bridge returned an invalid completion payload.",
+    `Expected session: ${expectedSessionId}`,
+    "",
+    "The message was not treated as successful. Check Runs for any completed backend run, then retry.",
+  ].join("\n");
+}
+
 function getFixSuggestion(
-  diagnostics: SystemDiagnostics | null
+  diagnostics: SystemDiagnostics | null,
+  projection: LifeStateProjection | null
 ): { text: string; action: string; link: string } | null {
   if (!diagnostics) return null;
   if (!diagnostics.ollama_online && !diagnostics.cloud_api_configured) {
@@ -348,16 +400,18 @@ function getFixSuggestion(
     };
   }
   if (diagnostics.model_empty) {
-    if ((diagnostics.pending_builder_review_sessions ?? 0) > 0) {
+    const pendingBuilderReviewSessions = projection?.readiness.pendingBuilderReviewSessions ?? 0;
+    const unfinishedBuilderSessions = projection?.readiness.unfinishedBuilderSessions ?? 0;
+    if (pendingBuilderReviewSessions > 0) {
       return {
-        text: `人生模型还没有真正写入，但你有 ${diagnostics.pending_builder_review_sessions} 个构建内容待确认。`,
+        text: `人生模型还没有真正写入，但你有 ${pendingBuilderReviewSessions} 个构建内容待确认。`,
         action: "回构建页查看",
         link: secondaryRoutePath("LifeModelBuild"),
       };
     }
-    if (diagnostics.unfinished_builder_sessions > 0) {
+    if (unfinishedBuilderSessions > 0) {
       return {
-        text: `人生模型还没有真正写入，但你有 ${diagnostics.unfinished_builder_sessions} 个待继续的构建会话。`,
+        text: `人生模型还没有真正写入，但你有 ${unfinishedBuilderSessions} 个待继续的构建会话。`,
         action: "回 Builder 继续",
         link: secondaryRoutePath("LifeModelBuild"),
       };
@@ -445,20 +499,6 @@ function formatChatRuntimeError(error: unknown, diagnostics: SystemDiagnostics |
   return `${hint}\n\n请去设置页查看“启动检查”。`;
 }
 
-const CHAT_PREVIEW_NO_TOOLS_PROMPT = "No developer tools catalog supplied for this chat preview.";
-const CONTROLLED_PILOT_FALLBACK_COPY =
-  "Use normal Send for the stable Chat path. The pilot will not retry automatically.";
-const CONTROLLED_PILOT_RERUN_COPY =
-  "Rerun Controlled Pilot in this session before promoting, or switch back to the source session.";
-const CHAT_PREVIEW_SAFE_SUMMARY_KEYS = [
-  "taskKind",
-  "reasonCode",
-  "riskLevel",
-  "hasHsPacket",
-  "policyReasonCode",
-  "governanceDecisionKind",
-];
-
 function classNames(...classes: (string | false | undefined)[]) {
   return classes.filter(Boolean).join(" ");
 }
@@ -491,6 +531,7 @@ type MainChatAgentStatusView = {
   blockerLabels: string[];
   pendingProposalCount: number;
   pendingPermissionCount: number;
+  memoryGovernanceLabels: string[];
   actions: MainChatAgentProductAction[];
   taskSessionId?: string;
 };
@@ -543,6 +584,26 @@ function productCount(value: unknown): number {
     if (Number.isFinite(parsed)) return Math.max(0, parsed);
   }
   return 0;
+}
+
+function memoryGovernanceStatusLabels(
+  governance: MainChatMemoryGovernanceEvidence | null | undefined
+): string[] {
+  if (!governance || typeof governance !== "object") return [];
+  const labels: string[] = [];
+  if (
+    governance.localLifeEventCaptureExecuted === true ||
+    productStringArray(governance.lifeEventIds).length > 0
+  ) {
+    labels.push("已记录到本地生活事件");
+  }
+  if (productStringArray(governance.memoryProposalIds).length > 0) {
+    labels.push("待确认记忆");
+  }
+  if (productStringArray(governance.lifeModelProposalIds).length > 0) {
+    labels.push("待确认 LifeModel 更新");
+  }
+  return labels;
 }
 
 function includesAnyControl(controls: string[], candidates: string[]): boolean {
@@ -657,6 +718,7 @@ export function buildMainChatAgentStatusView({
       proposal => proposal.status === "pending" && proposal.proposalType === "tool_permission"
     ).length ?? 0
   );
+  const memoryGovernanceLabels = memoryGovernanceStatusLabels(generation?.memoryGovernance);
   const safeNextControls = productStringArray(generation?.safeNextControls);
   const taskControls = [
     ...(agentState?.task.controls ?? []),
@@ -748,6 +810,7 @@ export function buildMainChatAgentStatusView({
     blockerLabels,
     pendingProposalCount,
     pendingPermissionCount,
+    memoryGovernanceLabels,
     actions: Array.from(new Set(actions)),
     taskSessionId,
   };
@@ -825,6 +888,14 @@ function MainChatAgentStatusSurface({
                   {view.pendingPermissionCount} permission
                 </span>
               )}
+              {view.memoryGovernanceLabels.map(label => (
+                <span
+                  key={label}
+                  className="inline-flex min-h-6 items-center rounded-md border border-white/70 bg-white/60 px-2 font-medium"
+                >
+                  {label}
+                </span>
+              ))}
             </div>
             <div className="mt-1 leading-5">{view.detail}</div>
             {view.blockerLabels.length > 0 && (
@@ -1098,44 +1169,6 @@ function readablePreviewError(error: unknown): string {
   return String(error);
 }
 
-function safeSummaryEntries(summary: Record<string, unknown>): Array<[string, string]> {
-  return CHAT_PREVIEW_SAFE_SUMMARY_KEYS.flatMap(key => {
-    const value = summary[key];
-    if (value === undefined || value === null) return [];
-    if (!["string", "number", "boolean"].includes(typeof value)) return [];
-    return [[key, String(value)]];
-  });
-}
-
-function getPilotPromotionKey(result: MultiStrategyAgentPreviewOutput | null): string {
-  if (!result) return "";
-  return result.runId ?? "";
-}
-
-function checksumText(value: string): string {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return `checksum:${hash.toString(16).padStart(8, "0")}`;
-}
-
-function buildControlledPilotSourceMismatchMessage(
-  sourceSessionId: string | null,
-  targetSessionId: string | null
-): string {
-  return `Promotion blocked: source session ${sourceSessionId ?? "unknown"} does not match target session ${targetSessionId ?? "unknown"}. ${CONTROLLED_PILOT_RERUN_COPY}`;
-}
-
-function hasPromotablePilotResponse(
-  result: MultiStrategyAgentPreviewOutput | null
-): result is MultiStrategyAgentPreviewOutput & { userOutput: string; runId: string } {
-  if (!result?.userOutput?.trim()) return false;
-  if (!result.runId?.trim()) return false;
-  return result.payloadKind !== "blocked" && result.governanceDecisionKind !== "block";
-}
-
 export default function ChatPage({
   companionMode = false,
   onCompanionStageChange,
@@ -1162,6 +1195,7 @@ export default function ChatPage({
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [preferLocal, setPreferLocal] = useState<boolean>(true);
   const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
+  const [lifeStateProjection, setLifeStateProjection] = useState<LifeStateProjection | null>(null);
   const [reasoningTrace, setReasoningTrace] = useState<ReasoningTrace | null>(null);
   const [showReasoningTrace, setShowReasoningTrace] = useState(false);
   const [toolCalls, setToolCalls] = useState<ToolCallResult[]>([]);
@@ -1198,53 +1232,8 @@ export default function ChatPage({
     useState<MainChatEventStreamViewState | null>(null);
   const [agentTaskControlBusy, setAgentTaskControlBusy] = useState(false);
   const [agentTaskControlError, setAgentTaskControlError] = useState<string | null>(null);
-  const [stage5Preflight, setStage5Preflight] = useState<MainChatStage5PreflightReport | null>(
-    null
-  );
-  const [stage5LatestBundle, setStage5LatestBundle] = useState<MainChatStage5DebugBundle | null>(
-    null
-  );
-  const [stage5LatestIssue, setStage5LatestIssue] = useState<MainChatStage5IssueReport | null>(
-    null
-  );
-  const [stage5Artifacts, setStage5Artifacts] = useState<MainChatStage5ArtifactMetadata[]>([]);
-  const [stage5DebugBusy, setStage5DebugBusy] = useState(false);
-  const [stage5DebugError, setStage5DebugError] = useState<string | null>(null);
-  const [legacyFallbackUsed, setLegacyFallbackUsed] = useState(false);
   const [pendingProposals, setPendingProposals] = useState<AgentProposal[]>([]);
   const [feedbackGiven, setFeedbackGiven] = useState<Record<number, "up" | "down">>({});
-  const [governedPreviewOpen, setGovernedPreviewOpen] = useState(false);
-  const [governedPreviewAllowPlanning, setGovernedPreviewAllowPlanning] = useState(false);
-  const [governedPreviewLocalModelAvailable, setGovernedPreviewLocalModelAvailable] =
-    useState(false);
-  const [governedPreviewLayer, setGovernedPreviewLayer] =
-    useState<MultiStrategyAgentPreviewLayer>("L2");
-  const [governedPreviewSubmitting, setGovernedPreviewSubmitting] = useState(false);
-  const [governedPreviewError, setGovernedPreviewError] = useState<string | null>(null);
-  const [governedPreviewResult, setGovernedPreviewResult] =
-    useState<MultiStrategyAgentPreviewOutput | null>(null);
-  const [controlledPilotSubmitting, setControlledPilotSubmitting] = useState(false);
-  const [controlledPilotError, setControlledPilotError] = useState<string | null>(null);
-  const [controlledPilotFallback, setControlledPilotFallback] = useState<string | null>(null);
-  const [controlledPilotEligibility, setControlledPilotEligibility] =
-    useState<ControlledChatPilotEligibilityReport | null>(null);
-  const [controlledPilotResult, setControlledPilotResult] =
-    useState<MultiStrategyAgentPreviewOutput | null>(null);
-  const [controlledPilotSourceSessionId, setControlledPilotSourceSessionId] = useState<
-    string | null
-  >(null);
-  const [controlledPilotPromotionReviewOpen, setControlledPilotPromotionReviewOpen] =
-    useState(false);
-  const [controlledPilotPromoting, setControlledPilotPromoting] = useState(false);
-  const [controlledPilotPromotionError, setControlledPilotPromotionError] = useState<string | null>(
-    null
-  );
-  const [promotedControlledPilotKeys, setPromotedControlledPilotKeys] = useState<
-    Record<string, boolean>
-  >({});
-  const [savedControlledPilotPromotionKeys, setSavedControlledPilotPromotionKeys] = useState<
-    Record<string, boolean>
-  >({});
 
   // Throttle streaming updates to reduce React re-render pressure
   const streamingBufferRef = useRef("");
@@ -1258,9 +1247,15 @@ export default function ChatPage({
   const currentKernelEventSessionRef = useRef<string | null>(null);
   const lastUserMessageRef = useRef<ChatMessage | null>(null);
   const currentSessionIdRef = useRef<string>(currentSessionId);
-  const promotedControlledPilotKeysRef = useRef<Record<string, boolean>>({});
-  const savedControlledPilotPromotionKeysRef = useRef<Record<string, boolean>>({});
-  const inFlightControlledPilotPromotionKeysRef = useRef<Set<string>>(new Set());
+  const projectionSurface = companionMode ? "companion" : "chat";
+  const projectionPendingReviewCount = reviewRequiredCountFromProjection(
+    lifeStateProjection,
+    projectionSurface
+  );
+  const initialAssistantMessage = useMemo(
+    () => buildCompanionInitialAssistantMessage(diagnostics, projectionPendingReviewCount),
+    [diagnostics, projectionPendingReviewCount]
+  );
 
   const applyMainChatAgentStateSnapshot = useCallback(
     (
@@ -1438,14 +1433,6 @@ export default function ChatPage({
     currentSessionIdRef.current = currentSessionId;
   }, [applyMainChatAgentStateSnapshot, currentSessionId]);
 
-  useEffect(() => {
-    promotedControlledPilotKeysRef.current = promotedControlledPilotKeys;
-  }, [promotedControlledPilotKeys]);
-
-  useEffect(() => {
-    savedControlledPilotPromotionKeysRef.current = savedControlledPilotPromotionKeys;
-  }, [savedControlledPilotPromotionKeys]);
-
   const refreshAgentRuns = async (sessionId = currentSessionIdRef.current) => {
     try {
       const runs = await listAgentRunsForSession(sessionId, 10);
@@ -1545,6 +1532,15 @@ export default function ChatPage({
     }
   };
 
+  const refreshLifeStateProjection = async () => {
+    try {
+      const projection = await getLifeStateProjection();
+      setLifeStateProjection(projection);
+    } catch {
+      setLifeStateProjection(null);
+    }
+  };
+
   const flushStreaming = () => {
     if (streamingRafRef.current !== null) {
       cancelAnimationFrame(streamingRafRef.current);
@@ -1572,16 +1568,16 @@ export default function ChatPage({
   }, [diagnostics]);
 
   useEffect(() => {
-    if (diagnostics && isSafeMode(diagnostics)) {
+    if (lifeStateProjection?.safeMode.active) {
       emitCompanionStage("privacy");
     }
-  }, [diagnostics, emitCompanionStage]);
+  }, [lifeStateProjection?.safeMode.active, emitCompanionStage]);
 
   useEffect(() => {
-    if (pendingProposals.length > 0) {
+    if (projectionPendingReviewCount != null && projectionPendingReviewCount > 0) {
       emitCompanionStage("review");
     }
-  }, [pendingProposals.length, emitCompanionStage]);
+  }, [projectionPendingReviewCount, emitCompanionStage]);
 
   useEffect(() => {
     const toolStage = inferStageFromToolCalls(toolCalls);
@@ -1615,8 +1611,13 @@ export default function ChatPage({
   useEffect(() => {
     (async () => {
       try {
-        const [diag, cfg] = await Promise.all([getSystemDiagnostics(), getSchedulerConfig()]);
+        const [diag, cfg, projection] = await Promise.all([
+          getSystemDiagnostics(),
+          getSchedulerConfig(),
+          getLifeStateProjection().catch(() => null),
+        ]);
         setDiagnostics(diag);
+        setLifeStateProjection(projection);
         setPreferLocal(cfg.preferLocal);
       } catch {
         // silently ignore
@@ -1629,6 +1630,7 @@ export default function ChatPage({
       .then(setModel)
       .catch(() => {});
     refreshPendingProposals();
+    refreshLifeStateProjection();
     loadTaskContinuityList();
   }, [loadTaskContinuityList]);
 
@@ -1640,6 +1642,7 @@ export default function ChatPage({
       getSystemDiagnostics()
         .then(setDiagnostics)
         .catch(() => {});
+      refreshLifeStateProjection();
       loadSessions(currentSessionIdRef.current);
       refreshPendingProposals();
       loadTaskContinuityList();
@@ -1665,6 +1668,7 @@ export default function ChatPage({
     getSystemDiagnostics()
       .then(setDiagnostics)
       .catch(() => {});
+    refreshLifeStateProjection();
     loadSessions();
   }, [location.state]);
 
@@ -1696,8 +1700,7 @@ export default function ChatPage({
           setMessages([
             {
               role: "assistant",
-              content:
-                "你好，我是 OpenLife。我已经加载了你的人生模型，随时可以从你的价值观和目标出发进行交流。",
+              content: initialAssistantMessage,
             },
           ]);
         } else {
@@ -1709,13 +1712,23 @@ export default function ChatPage({
         setMessages([
           {
             role: "assistant",
-            content:
-              "你好，我是 OpenLife。我已经加载了你的人生模型，随时可以从你的价值观和目标出发进行交流。",
+            content: buildCompanionInitialAssistantMessage(
+              diagnostics,
+              projectionPendingReviewCount,
+              "history_unavailable"
+            ),
           },
         ]);
       })
       .finally(() => setLoadingHistory(false));
-  }, [currentSessionId, applyMainChatAgentStateSnapshot, loadTaskContinuityList]);
+  }, [
+    currentSessionId,
+    applyMainChatAgentStateSnapshot,
+    diagnostics,
+    initialAssistantMessage,
+    projectionPendingReviewCount,
+    loadTaskContinuityList,
+  ]);
 
   // Scroll on significant changes only; avoid smooth scroll during streaming
   useEffect(() => {
@@ -1758,7 +1771,6 @@ export default function ChatPage({
             setCurrentAgentIngress(event.payload.agent_ingress ?? null);
             applyMainChatAgentStateSnapshot(event.payload.agent_state ?? null);
             setCurrentExecutionTranscript(event.payload.execution_transcript ?? []);
-            setLegacyFallbackUsed(Boolean(event.payload.legacy_fallback_used));
             await loadMainChatTaskState(
               event.payload.agent_ingress?.agentTaskSessionId,
               event.payload.session_id
@@ -1810,7 +1822,6 @@ export default function ChatPage({
             setCurrentAgentIngress(event.payload.agent_ingress ?? null);
             applyMainChatAgentStateSnapshot(event.payload.agent_state ?? null);
             setCurrentExecutionTranscript(event.payload.execution_transcript ?? []);
-            setLegacyFallbackUsed(Boolean(event.payload.legacy_fallback_used));
             setStreamInterrupted(true);
             streamErrorHandledRef.current = true;
             emitCompanionStage("error");
@@ -1853,7 +1864,6 @@ export default function ChatPage({
           setCurrentAgentIngress(event.payload.agent_ingress ?? null);
           applyMainChatAgentStateSnapshot(event.payload.agent_state ?? null);
           setCurrentExecutionTranscript(event.payload.execution_transcript ?? []);
-          setLegacyFallbackUsed(Boolean(event.payload.legacy_fallback_used));
           setStreamInterrupted(false);
           emitCompanionStage(nextStage);
           await loadMainChatTaskState(
@@ -2162,7 +2172,6 @@ export default function ChatPage({
     setCurrentExecutionTranscript([]);
     setCurrentAgentTaskState(null);
     setAgentTaskControlError(null);
-    setLegacyFallbackUsed(false);
     emitCompanionStage("sorting");
 
     try {
@@ -2172,65 +2181,31 @@ export default function ChatPage({
       const browserE2eDone = await startStreamMessage(currentSessionId, nextMessages, {
         selectedSkillId: selectedSkillOption,
       });
-      if (isStreamDonePayload(browserE2eDone) && browserE2eDone.session_id === currentSessionId) {
-        if (browserE2eDone.status === "failed") {
-          flushStreaming();
-          setMessages(prev => [
-            ...prev,
-            {
-              role: "assistant",
-              content: formatStreamDoneFailure(browserE2eDone),
-              run_id: browserE2eDone.run_id,
-            },
-          ]);
-          setStreamingReply("");
-          setSending(false);
-          setReasoningTrace(browserE2eDone.reasoning_trace ?? null);
-          setCurrentRunId(browserE2eDone.run_id);
-          setToolCalls(
-            (browserE2eDone.tool_calls ?? []).map(call => ({
-              ...call,
-              run_id: browserE2eDone.run_id,
-            }))
-          );
-          setCurrentAgentIngress(browserE2eDone.agent_ingress ?? null);
-          applyMainChatAgentStateSnapshot(browserE2eDone.agent_state ?? null);
-          setCurrentExecutionTranscript(browserE2eDone.execution_transcript ?? []);
-          setLegacyFallbackUsed(Boolean(browserE2eDone.legacy_fallback_used));
-          setStreamInterrupted(true);
-          streamErrorHandledRef.current = true;
-          emitCompanionStage("error");
-          await loadMainChatTaskState(
-            browserE2eDone.agent_ingress?.agentTaskSessionId,
-            browserE2eDone.session_id
-          );
-          await loadAgentRunForSession(browserE2eDone.run_id, browserE2eDone.session_id);
-          refreshAgentRuns(browserE2eDone.session_id);
-          await loadSessions();
-          return;
-        }
-        const nextStage =
-          inferStageFromToolCalls(browserE2eDone.tool_calls ?? []) ??
-          inferStageFromText(browserE2eDone.reply) ??
-          "idle";
+      if (!isStreamDonePayload(browserE2eDone) || browserE2eDone.session_id !== currentSessionId) {
         flushStreaming();
-        setMessages(prev => {
-          if (
-            prev.some(
-              message => message.role === "assistant" && message.run_id === browserE2eDone.run_id
-            )
-          ) {
-            return prev;
-          }
-          return [
-            ...prev,
-            {
-              role: "assistant",
-              content: browserE2eDone.reply,
-              run_id: browserE2eDone.run_id,
-            },
-          ];
-        });
+        setMessages(prev => [
+          ...prev,
+          { role: "assistant", content: formatMalformedStreamCompletion(currentSessionId) },
+        ]);
+        setStreamingReply("");
+        setSending(false);
+        setStreamInterrupted(true);
+        streamErrorHandledRef.current = true;
+        emitCompanionStage("error");
+        refreshAgentRuns(currentSessionId);
+        await loadSessions();
+        return;
+      }
+      if (browserE2eDone.status === "failed") {
+        flushStreaming();
+        setMessages(prev => [
+          ...prev,
+          {
+            role: "assistant",
+            content: formatStreamDoneFailure(browserE2eDone),
+            run_id: browserE2eDone.run_id,
+          },
+        ]);
         setStreamingReply("");
         setSending(false);
         setReasoningTrace(browserE2eDone.reasoning_trace ?? null);
@@ -2244,17 +2219,62 @@ export default function ChatPage({
         setCurrentAgentIngress(browserE2eDone.agent_ingress ?? null);
         applyMainChatAgentStateSnapshot(browserE2eDone.agent_state ?? null);
         setCurrentExecutionTranscript(browserE2eDone.execution_transcript ?? []);
-        setLegacyFallbackUsed(Boolean(browserE2eDone.legacy_fallback_used));
-        setStreamInterrupted(false);
-        emitCompanionStage(nextStage);
+        setStreamInterrupted(true);
+        streamErrorHandledRef.current = true;
+        emitCompanionStage("error");
         await loadMainChatTaskState(
           browserE2eDone.agent_ingress?.agentTaskSessionId,
           browserE2eDone.session_id
         );
         await loadAgentRunForSession(browserE2eDone.run_id, browserE2eDone.session_id);
         refreshAgentRuns(browserE2eDone.session_id);
-        logAnalyticsEvent("send_message", currentSessionId, undefined).catch(() => {});
+        await loadSessions();
+        return;
       }
+      const nextStage =
+        inferStageFromToolCalls(browserE2eDone.tool_calls ?? []) ??
+        inferStageFromText(browserE2eDone.reply) ??
+        "idle";
+      flushStreaming();
+      setMessages(prev => {
+        if (
+          prev.some(
+            message => message.role === "assistant" && message.run_id === browserE2eDone.run_id
+          )
+        ) {
+          return prev;
+        }
+        return [
+          ...prev,
+          {
+            role: "assistant",
+            content: browserE2eDone.reply,
+            run_id: browserE2eDone.run_id,
+          },
+        ];
+      });
+      setStreamingReply("");
+      setSending(false);
+      setReasoningTrace(browserE2eDone.reasoning_trace ?? null);
+      setCurrentRunId(browserE2eDone.run_id);
+      setToolCalls(
+        (browserE2eDone.tool_calls ?? []).map(call => ({
+          ...call,
+          run_id: browserE2eDone.run_id,
+        }))
+      );
+      setCurrentAgentIngress(browserE2eDone.agent_ingress ?? null);
+      applyMainChatAgentStateSnapshot(browserE2eDone.agent_state ?? null);
+      setCurrentExecutionTranscript(browserE2eDone.execution_transcript ?? []);
+      setStreamInterrupted(false);
+      emitCompanionStage(nextStage);
+      await loadMainChatTaskState(
+        browserE2eDone.agent_ingress?.agentTaskSessionId,
+        browserE2eDone.session_id
+      );
+      await loadAgentRunForSession(browserE2eDone.run_id, browserE2eDone.session_id);
+      refreshAgentRuns(browserE2eDone.session_id);
+      logAnalyticsEvent("send_message", currentSessionId, undefined).catch(() => {});
       await loadSessions();
     } catch (e) {
       flushStreaming();
@@ -2307,13 +2327,104 @@ export default function ChatPage({
     setCurrentExecutionTranscript([]);
     setCurrentAgentTaskState(null);
     setAgentTaskControlError(null);
-    setLegacyFallbackUsed(false);
     emitCompanionStage("sorting");
     try {
       const selectedSkillOption = selectedSkillId.trim() || undefined;
-      await startStreamMessage(currentSessionId, retryMessages, {
+      const retryDone = await startStreamMessage(currentSessionId, retryMessages, {
         selectedSkillId: selectedSkillOption,
       });
+      if (!isStreamDonePayload(retryDone) || retryDone.session_id !== currentSessionId) {
+        flushStreaming();
+        setMessages(prev => [
+          ...prev,
+          { role: "assistant", content: formatMalformedStreamCompletion(currentSessionId) },
+        ]);
+        setStreamingReply("");
+        setSending(false);
+        setStreamInterrupted(true);
+        streamErrorHandledRef.current = true;
+        emitCompanionStage("error");
+        refreshAgentRuns(currentSessionId);
+        await loadSessions();
+        return;
+      }
+      if (retryDone.status === "failed") {
+        flushStreaming();
+        setMessages(prev => [
+          ...prev,
+          {
+            role: "assistant",
+            content: formatStreamDoneFailure(retryDone),
+            run_id: retryDone.run_id,
+          },
+        ]);
+        setStreamingReply("");
+        setSending(false);
+        setReasoningTrace(retryDone.reasoning_trace ?? null);
+        setCurrentRunId(retryDone.run_id);
+        setToolCalls(
+          (retryDone.tool_calls ?? []).map(call => ({
+            ...call,
+            run_id: retryDone.run_id,
+          }))
+        );
+        setCurrentAgentIngress(retryDone.agent_ingress ?? null);
+        applyMainChatAgentStateSnapshot(retryDone.agent_state ?? null);
+        setCurrentExecutionTranscript(retryDone.execution_transcript ?? []);
+        setStreamInterrupted(true);
+        streamErrorHandledRef.current = true;
+        emitCompanionStage("error");
+        await loadMainChatTaskState(
+          retryDone.agent_ingress?.agentTaskSessionId,
+          retryDone.session_id
+        );
+        await loadAgentRunForSession(retryDone.run_id, retryDone.session_id);
+        refreshAgentRuns(retryDone.session_id);
+        await loadSessions();
+        return;
+      }
+      const nextStage =
+        inferStageFromToolCalls(retryDone.tool_calls ?? []) ??
+        inferStageFromText(retryDone.reply) ??
+        "idle";
+      flushStreaming();
+      setMessages(prev => {
+        if (
+          prev.some(message => message.role === "assistant" && message.run_id === retryDone.run_id)
+        ) {
+          return prev;
+        }
+        return [
+          ...prev,
+          {
+            role: "assistant",
+            content: retryDone.reply,
+            run_id: retryDone.run_id,
+          },
+        ];
+      });
+      setStreamingReply("");
+      setSending(false);
+      setReasoningTrace(retryDone.reasoning_trace ?? null);
+      setCurrentRunId(retryDone.run_id);
+      setToolCalls(
+        (retryDone.tool_calls ?? []).map(call => ({
+          ...call,
+          run_id: retryDone.run_id,
+        }))
+      );
+      setCurrentAgentIngress(retryDone.agent_ingress ?? null);
+      applyMainChatAgentStateSnapshot(retryDone.agent_state ?? null);
+      setCurrentExecutionTranscript(retryDone.execution_transcript ?? []);
+      setStreamInterrupted(false);
+      emitCompanionStage(nextStage);
+      await loadMainChatTaskState(
+        retryDone.agent_ingress?.agentTaskSessionId,
+        retryDone.session_id
+      );
+      await loadAgentRunForSession(retryDone.run_id, retryDone.session_id);
+      refreshAgentRuns(retryDone.session_id);
+      await loadSessions();
     } catch (e) {
       flushStreaming();
       if (!streamErrorHandledRef.current) {
@@ -2347,98 +2458,6 @@ export default function ChatPage({
     currentAgentState?.task?.taskId,
     currentAgentTaskState?.session?.id,
   ]);
-
-  const refreshStage5DebugArtifacts = useCallback(async () => {
-    try {
-      const artifacts = await listMainChatDebugBundles();
-      setStage5Artifacts(artifacts);
-    } catch {
-      setStage5Artifacts([]);
-    }
-  }, []);
-
-  const handleRefreshStage5Preflight = useCallback(async () => {
-    setStage5DebugBusy(true);
-    setStage5DebugError(null);
-    try {
-      const preflight = await evaluateMainChatStage5ReleaseDebugPreflight();
-      setStage5Preflight(preflight);
-      await refreshStage5DebugArtifacts();
-    } catch (error) {
-      setStage5DebugError(`Stage 5 preflight failed: ${readablePreviewError(error)}`);
-    } finally {
-      setStage5DebugBusy(false);
-    }
-  }, [refreshStage5DebugArtifacts]);
-
-  useEffect(() => {
-    if (companionMode) return;
-    void handleRefreshStage5Preflight();
-  }, [companionMode, handleRefreshStage5Preflight]);
-
-  const buildStage5UiEvidence = useCallback(
-    (taskSessionId: string) => ({
-      frontendRoute: productRoutePath("Companion"),
-      surface: "AgentControlPlane",
-      visibleControlLabels: ["Preflight", "Export debug bundle", "Create issue report"],
-      taskSessionId,
-      backendSnapshotId: currentAgentState
-        ? `sequence:${currentAgentState.sequence}`
-        : currentAgentTaskState?.session?.id,
-      timestamp: new Date().toISOString(),
-    }),
-    [currentAgentState, currentAgentTaskState?.session?.id]
-  );
-
-  const handleExportStage5DebugBundle = useCallback(async () => {
-    const taskSessionId = currentMainChatTaskSessionId();
-    if (!taskSessionId || stage5DebugBusy) return;
-    setStage5DebugBusy(true);
-    setStage5DebugError(null);
-    try {
-      const bundle = await exportMainChatAgentDebugBundle(taskSessionId, {
-        scenarioId: "DBG5-manual",
-        reviewerId: "internal-tester",
-        uiEvidence: buildStage5UiEvidence(taskSessionId),
-      });
-      setStage5LatestBundle(bundle);
-      setStage5Preflight(bundle.environment);
-      await refreshStage5DebugArtifacts();
-    } catch (error) {
-      setStage5DebugError(`Stage 5 debug bundle export failed: ${readablePreviewError(error)}`);
-    } finally {
-      setStage5DebugBusy(false);
-    }
-  }, [
-    buildStage5UiEvidence,
-    currentMainChatTaskSessionId,
-    refreshStage5DebugArtifacts,
-    stage5DebugBusy,
-  ]);
-
-  const handleCreateStage5IssueReport = useCallback(async () => {
-    const bundle = stage5LatestBundle;
-    if (!bundle || stage5DebugBusy) return;
-    setStage5DebugBusy(true);
-    setStage5DebugError(null);
-    try {
-      const issue = await createMainChatInternalIssueReport({
-        scenarioId: bundle.scenario.scenarioId ?? "DBG5-19",
-        reviewerId: bundle.scenario.reviewerId ?? "internal-tester",
-        status: bundle.failure.class === "unknown_failure" ? "blocked_by_environment" : "fail",
-        taskSessionId: bundle.task.taskSessionId,
-        runId: bundle.task.runId ?? currentAgentState?.task?.runId ?? currentRunId,
-        bundleId: bundle.bundleId,
-        failureClass: bundle.failure.class,
-        notes: "Created from AgentControlPlane internal debug ops.",
-      });
-      setStage5LatestIssue(issue);
-    } catch (error) {
-      setStage5DebugError(`Stage 5 issue report failed: ${readablePreviewError(error)}`);
-    } finally {
-      setStage5DebugBusy(false);
-    }
-  }, [currentAgentState?.task?.runId, currentRunId, stage5DebugBusy, stage5LatestBundle]);
 
   const loadSkillToolSurface = useCallback(
     async (taskSessionId?: string) => {
@@ -3129,57 +3148,14 @@ export default function ChatPage({
     [agentTaskControlBusy, currentMainChatTaskSessionId, refreshMainChatSnapshot]
   );
 
-  const readiness = useMemo(() => buildReadinessSummary(diagnostics), [diagnostics]);
+  const readiness = useMemo(
+    () => buildReadinessSummary(diagnostics, lifeStateProjection),
+    [diagnostics, lifeStateProjection]
+  );
   const capabilityStatus = useMemo(
-    () =>
-      buildCapabilityStatusViewModel(
-        diagnostics,
-        pendingProposals.length || diagnostics?.pending_proposal_count || 0,
-        currentRun
-      ),
-    [currentRun, diagnostics, pendingProposals.length]
+    () => buildCapabilityStatusViewModel(diagnostics, projectionPendingReviewCount, currentRun),
+    [currentRun, diagnostics, projectionPendingReviewCount]
   );
-  const governedPreviewSummaryEntries = useMemo(
-    () => safeSummaryEntries(governedPreviewResult?.metadataSafeSummary ?? {}),
-    [governedPreviewResult]
-  );
-  const controlledPilotSummaryEntries = useMemo(
-    () => safeSummaryEntries(controlledPilotResult?.metadataSafeSummary ?? {}),
-    [controlledPilotResult]
-  );
-  const controlledPilotCanPromote = hasPromotablePilotResponse(controlledPilotResult);
-  const controlledPilotPromotionKey = getPilotPromotionKey(controlledPilotResult);
-  const controlledPilotPromoted = Boolean(
-    controlledPilotPromotionKey && promotedControlledPilotKeys[controlledPilotPromotionKey]
-  );
-  const controlledPilotPromotionMessageSaved = Boolean(
-    controlledPilotPromotionKey && savedControlledPilotPromotionKeys[controlledPilotPromotionKey]
-  );
-  const controlledPilotTargetSessionId = currentSessionId || null;
-  const controlledPilotSessionMismatch = Boolean(
-    controlledPilotResult &&
-    (!controlledPilotSourceSessionId ||
-      controlledPilotSourceSessionId !== controlledPilotTargetSessionId)
-  );
-  const controlledPilotSessionBlockingMessage = controlledPilotSessionMismatch
-    ? buildControlledPilotSourceMismatchMessage(
-        controlledPilotSourceSessionId,
-        controlledPilotTargetSessionId
-      )
-    : "";
-  const controlledPilotGovernanceSummary = controlledPilotResult
-    ? [
-        `decision=${controlledPilotResult.governanceDecisionKind ?? "unknown"}`,
-        ...controlledPilotSummaryEntries.map(([key, value]) => `${key}=${value}`),
-      ].join(" · ")
-    : "";
-  const controlledPilotPayloadSummary = controlledPilotResult
-    ? [
-        `payloadKind=${controlledPilotResult.payloadKind}`,
-        `proposalIds=${controlledPilotResult.proposalIds.length}`,
-        `warnings=${controlledPilotResult.warnings.length}`,
-      ].join(" · ")
-    : "";
   const readinessClass =
     readiness.tone === "ready"
       ? "bg-emerald-50 border-emerald-100 text-emerald-800"
@@ -3339,191 +3315,15 @@ export default function ChatPage({
     }
   }, []);
 
-  const handleRunGovernedPreview = useCallback(async () => {
-    const trimmedInput = input.trim();
-    if (!trimmedInput) {
-      setGovernedPreviewError("Enter a chat draft before running governed preview.");
-      return;
-    }
-
-    setGovernedPreviewSubmitting(true);
-    setGovernedPreviewError(null);
-    setGovernedPreviewResult(null);
-
-    try {
-      const output = await runMultiStrategyAgentPreview({
-        sessionId: `chat-governed-preview-${Date.now()}`,
-        userText: trimmedInput,
-        toolsPrompt: CHAT_PREVIEW_NO_TOOLS_PROMPT,
-        allowPlanning: governedPreviewAllowPlanning,
-        localModelAvailable: governedPreviewLocalModelAvailable,
-        layer: governedPreviewLayer,
-        executionBudget: {
-          allowWrites: false,
-        },
-      });
-      setGovernedPreviewResult(output);
-    } catch (e) {
-      setGovernedPreviewError(`Preview failed: ${readablePreviewError(e)}`);
-    } finally {
-      setGovernedPreviewSubmitting(false);
-    }
-  }, [
-    governedPreviewAllowPlanning,
-    governedPreviewLayer,
-    governedPreviewLocalModelAvailable,
-    input,
-  ]);
-
-  const handleRunControlledPilot = useCallback(async () => {
-    const trimmedInput = input.trim();
-    if (!trimmedInput) {
-      setControlledPilotError("Enter a chat draft before running controlled pilot.");
-      setControlledPilotFallback(CONTROLLED_PILOT_FALLBACK_COPY);
-      return;
-    }
-
-    setControlledPilotSubmitting(true);
-    setControlledPilotError(null);
-    setControlledPilotFallback(null);
-    setControlledPilotEligibility(null);
-    setControlledPilotResult(null);
-    setControlledPilotSourceSessionId(null);
-    setControlledPilotPromotionReviewOpen(false);
-    setControlledPilotPromotionError(null);
-
-    try {
-      const sourceSessionId = currentSessionIdRef.current;
-      const eligibility = await checkControlledChatPilotEligibility();
-      setControlledPilotEligibility(eligibility);
-
-      if (!eligibility.eligible) {
-        setControlledPilotError("Controlled Pilot blocked.");
-        setControlledPilotFallback(CONTROLLED_PILOT_FALLBACK_COPY);
-        return;
-      }
-
-      const output = await runMultiStrategyAgentPreview({
-        sessionId: `chat-controlled-pilot-${Date.now()}`,
-        userText: trimmedInput,
-        toolsPrompt: CHAT_PREVIEW_NO_TOOLS_PROMPT,
-        allowPlanning: false,
-        localModelAvailable: false,
-        layer: "L2",
-        executionBudget: {
-          allowWrites: false,
-        },
-      });
-      setControlledPilotSourceSessionId(sourceSessionId);
-      setControlledPilotResult(output);
-    } catch (e) {
-      setControlledPilotSourceSessionId(null);
-      setControlledPilotError(`Controlled Pilot failed: ${readablePreviewError(e)}`);
-      setControlledPilotFallback(CONTROLLED_PILOT_FALLBACK_COPY);
-    } finally {
-      setControlledPilotSubmitting(false);
-    }
-  }, [input]);
-
-  const handleConfirmControlledPilotPromotion = useCallback(async () => {
-    if (
-      !hasPromotablePilotResponse(controlledPilotResult) ||
-      !currentSessionId ||
-      controlledPilotPromoting
-    ) {
-      return;
-    }
-    const targetSessionId = currentSessionId;
-    const promotionKey = getPilotPromotionKey(controlledPilotResult);
-    if (
-      !promotionKey ||
-      promotedControlledPilotKeysRef.current[promotionKey] ||
-      inFlightControlledPilotPromotionKeysRef.current.has(promotionKey)
-    ) {
-      return;
-    }
-
-    if (!controlledPilotSourceSessionId || controlledPilotSourceSessionId !== targetSessionId) {
-      setControlledPilotPromotionReviewOpen(true);
-      setControlledPilotPromotionError(
-        buildControlledPilotSourceMismatchMessage(controlledPilotSourceSessionId, targetSessionId)
-      );
-      setControlledPilotFallback(CONTROLLED_PILOT_RERUN_COPY);
-      return;
-    }
-
-    const assistantMsg: ChatMessage = {
-      role: "assistant",
-      content: controlledPilotResult.userOutput.trim(),
-      ...(controlledPilotResult.runId ? { run_id: controlledPilotResult.runId } : {}),
-    };
-    const evidenceInput: ControlledPilotPromotionEvidenceInput = {
-      pilotRunId: controlledPilotResult.runId,
-      sourceSessionId: controlledPilotSourceSessionId,
-      targetSessionId,
-      strategyKind: controlledPilotResult.strategyKind,
-      payloadKind: controlledPilotResult.payloadKind,
-      governanceDecisionKind: controlledPilotResult.governanceDecisionKind ?? "unknown",
-      promotedMessageLength: assistantMsg.content.length,
-      promotedMessageHash: checksumText(assistantMsg.content),
-      promotedAt: new Date().toISOString(),
-    };
-
-    inFlightControlledPilotPromotionKeysRef.current.add(promotionKey);
-    setControlledPilotPromoting(true);
-    setControlledPilotPromotionError(null);
-    setControlledPilotFallback(null);
-    try {
-      const messageAlreadySaved = Boolean(
-        savedControlledPilotPromotionKeysRef.current[promotionKey]
-      );
-      if (!messageAlreadySaved) {
-        await saveChatMessage(targetSessionId, assistantMsg);
-        if (currentSessionIdRef.current === targetSessionId) {
-          setMessages(prev => [...prev, assistantMsg]);
-        }
-        setSavedControlledPilotPromotionKeys(prev => {
-          const next = { ...prev, [promotionKey]: true };
-          savedControlledPilotPromotionKeysRef.current = next;
-          return next;
-        });
-      }
-      await recordControlledPilotPromotionEvidence(evidenceInput);
-      setPromotedControlledPilotKeys(prev => {
-        const next = { ...prev, [promotionKey]: true };
-        promotedControlledPilotKeysRef.current = next;
-        return next;
-      });
-      setControlledPilotPromotionReviewOpen(false);
-      await loadSessions();
-    } catch (e) {
-      if (savedControlledPilotPromotionKeysRef.current[promotionKey]) {
-        setControlledPilotPromotionError(
-          `Promotion evidence recording failed: ${readablePreviewError(e)}. Retry will only record evidence; it will not save another chat message.`
-        );
-      } else {
-        setControlledPilotPromotionError(`Promotion failed: ${readablePreviewError(e)}`);
-      }
-    } finally {
-      inFlightControlledPilotPromotionKeysRef.current.delete(promotionKey);
-      setControlledPilotPromoting(false);
-    }
-  }, [
-    controlledPilotPromoting,
-    controlledPilotResult,
-    controlledPilotSourceSessionId,
-    currentSessionId,
-  ]);
-
   const handleIndexMemory = useCallback(
     async (content: string) => {
-      emitCompanionStage(isSafeMode(diagnostics) ? "privacy" : "memory");
-      if (isSafeMode(diagnostics)) {
+      emitCompanionStage(lifeStateProjection?.safeMode.active ? "privacy" : "memory");
+      if (lifeStateProjection?.safeMode.active) {
         setMessages(prev => [
           ...prev,
           {
             role: "assistant",
-            content: `当前处于 Safe Mode，${getSafeModeReason(diagnostics)} 建议先去设置页恢复控制台处理数据风险，再执行"加入记忆"。`,
+            content: `当前处于 Safe Mode，${lifeStateProjection.safeMode.reason} 建议先去设置页恢复控制台处理数据风险，再执行"加入记忆"。`,
           },
         ]);
         return;
@@ -3534,7 +3334,12 @@ export default function ChatPage({
         console.error("加入记忆失败", e);
       }
     },
-    [diagnostics, currentSessionId, emitCompanionStage]
+    [
+      lifeStateProjection?.safeMode.active,
+      lifeStateProjection?.safeMode.reason,
+      currentSessionId,
+      emitCompanionStage,
+    ]
   );
 
   const handleInputChange = useCallback(
@@ -3587,7 +3392,6 @@ export default function ChatPage({
     Boolean(reasoningTrace) ||
     currentExecutionTranscript.length > 0 ||
     Boolean(agentEventStreamState?.events.length) ||
-    Boolean(stage5Preflight || stage5LatestBundle || stage5LatestIssue || stage5Artifacts.length) ||
     toolCalls.length > 0;
   const canCancelCurrentMainChatTask = Boolean(
     currentAgentTaskState?.canCancel ||
@@ -3731,12 +3535,12 @@ export default function ChatPage({
             </div>
           </>
         )}
-        {!companionMode && diagnostics && isSafeMode(diagnostics) && (
+        {!companionMode && lifeStateProjection?.safeMode.active && (
           <div className="border-b border-amber-200 bg-amber-50 px-6 py-2">
             <div className="max-w-3xl text-xs text-amber-800 flex flex-wrap items-center justify-between gap-2">
               <div>
                 <span className="font-medium">Safe Mode：</span>
-                {getSafeModeReason(diagnostics)}
+                {lifeStateProjection.safeMode.reason}
                 <span className="ml-2">普通对话仍可继续，但“加入记忆”等写入操作建议先暂停。</span>
               </div>
               <Link to={productRoutePath("Settings")} className="underline font-medium">
@@ -3746,22 +3550,42 @@ export default function ChatPage({
           </div>
         )}
         {/* Pending Proposals Alert */}
-        {!companionMode && pendingProposals.length > 0 && (
-          <div className="border-b border-indigo-100 bg-indigo-50 px-6 py-2">
-            <div className="max-w-3xl text-xs text-indigo-800 flex flex-wrap items-center justify-between gap-2">
+        {!companionMode && projectionPendingReviewCount == null && (
+          <div className="border-b border-stone-200 bg-stone-50 px-6 py-2">
+            <div className="max-w-3xl text-xs text-stone-700 flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <ShieldCheck size={14} />
-                <span className="font-medium">{pendingProposals.length} 个待确认</span>
-                <span className="text-indigo-600">
-                  （{pendingProposals[0].affectedPath || pendingProposals[0].proposalType}）
-                </span>
+                <span className="font-medium">待确认状态读取中</span>
+                <span className="text-stone-500">暂不显示确定数量。</span>
               </div>
               <Link to={mailboxRoute()} className="underline font-medium">
-                去 Mailbox 确认
+                打开 Mailbox
               </Link>
             </div>
           </div>
         )}
+        {!companionMode &&
+          projectionPendingReviewCount != null &&
+          projectionPendingReviewCount > 0 && (
+            <div className="border-b border-indigo-100 bg-indigo-50 px-6 py-2">
+              <div className="max-w-3xl text-xs text-indigo-800 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <ShieldCheck size={14} />
+                  <span className="font-medium">
+                    {projectionPendingReviewCount} 个待确认/已修改
+                  </span>
+                  <span className="text-indigo-600">
+                    {pendingProposals[0]
+                      ? `（${pendingProposals[0].affectedPath || pendingProposals[0].proposalType}）`
+                      : "（进入 Mailbox 处理）"}
+                  </span>
+                </div>
+                <Link to={mailboxRoute()} className="underline font-medium">
+                  去 Mailbox 确认
+                </Link>
+              </div>
+            </div>
+          )}
 
         {/* Chat mode selector */}
         <div className={companionMode ? "hidden" : "border-b bg-white px-6 py-2"}>
@@ -3780,459 +3604,6 @@ export default function ChatPage({
                 {m.label}
               </button>
             ))}
-          </div>
-        </div>
-        <div
-          className={
-            companionMode ? "hidden" : "border-b border-amber-100 bg-amber-50/60 px-6 py-2"
-          }
-        >
-          <div className="max-w-4xl space-y-3">
-            <button
-              type="button"
-              onClick={() => setGovernedPreviewOpen(value => !value)}
-              aria-expanded={governedPreviewOpen}
-              className="flex w-full items-center justify-between gap-3 text-left"
-            >
-              <span className="flex min-w-0 items-center gap-2">
-                {governedPreviewOpen ? (
-                  <ChevronDown size={15} className="shrink-0 text-amber-700" />
-                ) : (
-                  <ChevronRight size={15} className="shrink-0 text-amber-700" />
-                )}
-                <span className="min-w-0">
-                  <span className="block text-xs font-semibold text-amber-950">
-                    Governed Preview
-                  </span>
-                  <span className="block text-[11px] leading-4 text-amber-800">
-                    内部预览 · write-disabled runtime check, separate from normal Chat
-                  </span>
-                </span>
-              </span>
-              <span className="shrink-0 rounded-full bg-white px-2 py-0.5 text-[10px] font-medium text-amber-800 ring-1 ring-amber-200">
-                内部预览
-              </span>
-            </button>
-
-            {governedPreviewOpen && (
-              <div className="space-y-3 rounded-lg border border-amber-200 bg-white p-3">
-                <div className="flex items-start gap-2 text-xs leading-5 text-amber-900">
-                  <AlertTriangle size={14} className="mt-0.5 shrink-0" />
-                  <div>
-                    This preview uses the current chat draft only after explicit trigger. It forces
-                    external writes off and shows metadata-safe governance output only.
-                  </div>
-                </div>
-
-                <div className="grid gap-2 md:grid-cols-3">
-                  <label className="block">
-                    <span className="text-[11px] font-medium text-stone-600">Layer</span>
-                    <select
-                      value={governedPreviewLayer}
-                      onChange={event =>
-                        setGovernedPreviewLayer(
-                          event.target.value as MultiStrategyAgentPreviewLayer
-                        )
-                      }
-                      className="mt-1 w-full rounded-md border border-stone-200 px-2 py-1.5 text-xs text-stone-800 focus:border-stone-900 focus:outline-none focus:ring-1 focus:ring-stone-900"
-                    >
-                      <option value="L1">L1</option>
-                      <option value="L2">L2</option>
-                      <option value="L3">L3</option>
-                    </select>
-                  </label>
-
-                  <label className="flex items-center gap-2 rounded-md border border-stone-200 px-3 py-2 text-xs text-stone-700">
-                    <input
-                      type="checkbox"
-                      checked={governedPreviewAllowPlanning}
-                      onChange={event => setGovernedPreviewAllowPlanning(event.target.checked)}
-                      className="rounded border-stone-300"
-                    />
-                    <span>Allow planning</span>
-                  </label>
-
-                  <label className="flex items-center gap-2 rounded-md border border-stone-200 px-3 py-2 text-xs text-stone-700">
-                    <input
-                      type="checkbox"
-                      checked={governedPreviewLocalModelAvailable}
-                      onChange={event =>
-                        setGovernedPreviewLocalModelAvailable(event.target.checked)
-                      }
-                      className="rounded border-stone-300"
-                    />
-                    <span>Local model available</span>
-                  </label>
-                </div>
-
-                <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-emerald-100 bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
-                  <div className="flex items-center gap-2">
-                    <ShieldCheck size={14} />
-                    <span>No external write operations. No default full tools catalog.</span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleRunGovernedPreview}
-                    disabled={governedPreviewSubmitting || !input.trim()}
-                    className={classNames(
-                      "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium",
-                      governedPreviewSubmitting || !input.trim()
-                        ? "bg-stone-200 text-stone-500"
-                        : "bg-stone-900 text-white hover:bg-stone-800"
-                    )}
-                  >
-                    {governedPreviewSubmitting && <Loader2 size={13} className="animate-spin" />}
-                    Run Governed Preview
-                  </button>
-                </div>
-
-                <div className="space-y-2 rounded-md border border-sky-100 bg-sky-50 px-3 py-2 text-xs text-sky-950">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex min-w-0 items-center gap-2">
-                      <ShieldCheck size={14} className="shrink-0 text-sky-700" />
-                      <div>
-                        <div className="font-semibold">Controlled Pilot</div>
-                        <div className="text-[11px] leading-4 text-sky-800">
-                          Eligibility-gated single turn. Normal Send remains unchanged.
-                        </div>
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={handleRunControlledPilot}
-                      disabled={controlledPilotSubmitting || !input.trim()}
-                      className={classNames(
-                        "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium",
-                        controlledPilotSubmitting || !input.trim()
-                          ? "bg-sky-100 text-sky-400"
-                          : "bg-sky-900 text-white hover:bg-sky-800"
-                      )}
-                    >
-                      {controlledPilotSubmitting && <Loader2 size={13} className="animate-spin" />}
-                      Run Controlled Pilot
-                    </button>
-                  </div>
-
-                  {controlledPilotEligibility && (
-                    <div className="rounded-md border border-sky-100 bg-white px-3 py-2 text-sky-900">
-                      Eligibility: {controlledPilotEligibility.cleanRunCount}/
-                      {controlledPilotEligibility.requiredCleanRuns} clean preview runs
-                    </div>
-                  )}
-
-                  {controlledPilotError && (
-                    <div className="rounded-md border border-red-100 bg-red-50 px-3 py-2 text-red-700">
-                      {controlledPilotError}
-                    </div>
-                  )}
-
-                  {controlledPilotEligibility &&
-                    !controlledPilotEligibility.eligible &&
-                    controlledPilotEligibility.blockingReasons.length > 0 && (
-                      <div className="rounded-md border border-amber-100 bg-amber-50 px-3 py-2 text-amber-900">
-                        <div className="font-medium">Blocking reasons</div>
-                        <ul className="mt-1 list-disc space-y-1 pl-4">
-                          {controlledPilotEligibility.blockingReasons.map((reason: string) => (
-                            <li key={reason}>{reason}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-
-                  {controlledPilotFallback && (
-                    <div className="rounded-md border border-stone-200 bg-white px-3 py-2 text-stone-700">
-                      {controlledPilotFallback}
-                    </div>
-                  )}
-
-                  {controlledPilotResult && (
-                    <div
-                      data-testid="controlled-pilot-response"
-                      className="space-y-3 rounded-lg border border-sky-200 bg-white p-3"
-                    >
-                      <div className="flex flex-wrap items-center justify-between gap-3">
-                        <div>
-                          <div className="text-xs font-semibold text-stone-900">Pilot response</div>
-                          <div className="mt-0.5 text-[11px] text-stone-500">
-                            {controlledPilotPromoted
-                              ? "Promoted to chat history as a normal assistant message with metadata-safe evidence."
-                              : controlledPilotPromotionMessageSaved
-                                ? "Message saved. Promotion evidence is degraded until the recorder succeeds."
-                                : "Separate pilot output. It is not saved as a normal assistant message."}
-                          </div>
-                        </div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          {controlledPilotPromoted && (
-                            <span className="inline-flex items-center gap-1.5 rounded-md bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-800 ring-1 ring-emerald-100">
-                              <CheckCircle2 size={13} />
-                              Promoted to chat history
-                            </span>
-                          )}
-                          {!controlledPilotPromoted && controlledPilotCanPromote && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setControlledPilotPromotionReviewOpen(true);
-                                setControlledPilotPromotionError(
-                                  controlledPilotSessionMismatch
-                                    ? controlledPilotSessionBlockingMessage
-                                    : null
-                                );
-                                setControlledPilotFallback(
-                                  controlledPilotSessionMismatch
-                                    ? CONTROLLED_PILOT_RERUN_COPY
-                                    : null
-                                );
-                              }}
-                              className="inline-flex items-center gap-1.5 rounded-md bg-emerald-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-800"
-                            >
-                              <CheckCircle2 size={13} />
-                              Promote Pilot Response
-                            </button>
-                          )}
-                          {controlledPilotResult.runId && (
-                            <Link
-                              to={runDetailRoute(controlledPilotResult.runId)}
-                              className="inline-flex items-center gap-1.5 rounded-md bg-sky-50 px-3 py-1.5 text-xs font-medium text-sky-800 ring-1 ring-sky-100 hover:bg-sky-100"
-                            >
-                              <ExternalLink size={13} />
-                              View Run Trace
-                            </Link>
-                          )}
-                        </div>
-                      </div>
-
-                      <div className="whitespace-pre-wrap rounded-md bg-stone-50 px-3 py-2 text-sm leading-6 text-stone-900">
-                        {controlledPilotResult.userOutput ?? "No pilot response returned."}
-                      </div>
-
-                      <div className="grid gap-2 text-xs md:grid-cols-2">
-                        <div className="rounded-md bg-stone-50 px-3 py-2 text-stone-700">
-                          <div className="text-[10px] uppercase text-stone-400">runId</div>
-                          <div className="mt-1 font-mono text-stone-900">
-                            {controlledPilotResult.runId ?? "not returned"}
-                          </div>
-                        </div>
-                        <div className="rounded-md bg-stone-50 px-3 py-2 text-stone-700">
-                          Strategy: {controlledPilotResult.strategyKind}
-                        </div>
-                        <div className="rounded-md bg-stone-50 px-3 py-2 text-stone-700">
-                          Payload: {controlledPilotResult.payloadKind}
-                        </div>
-                        <div className="rounded-md bg-stone-50 px-3 py-2 text-stone-700">
-                          Governance: {controlledPilotResult.governanceDecisionKind ?? "unknown"}
-                        </div>
-                        <div className="rounded-md bg-stone-50 px-3 py-2 text-stone-700">
-                          Source session: {controlledPilotSourceSessionId ?? "unknown"}
-                        </div>
-                        <div className="rounded-md bg-stone-50 px-3 py-2 text-stone-700">
-                          Target session: {currentSessionId || "unknown"}
-                        </div>
-                      </div>
-
-                      {controlledPilotSummaryEntries.length > 0 && (
-                        <div className="flex flex-wrap gap-2 text-xs">
-                          {controlledPilotSummaryEntries.map(([key, value]) => (
-                            <span
-                              key={key}
-                              className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
-                            >
-                              {key}: {value}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-
-                      {controlledPilotPromotionError && (
-                        <div className="rounded-md border border-red-100 bg-red-50 px-3 py-2 text-xs text-red-700">
-                          {controlledPilotPromotionError}
-                        </div>
-                      )}
-
-                      {controlledPilotPromotionReviewOpen &&
-                        controlledPilotCanPromote &&
-                        !controlledPilotPromoted && (
-                          <div className="space-y-3 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-3 text-xs text-emerald-950">
-                            <div>
-                              <div className="font-semibold">Confirm pilot promotion</div>
-                              <div className="mt-0.5 text-emerald-800">
-                                确认后将写入当前聊天历史，成为普通 assistant message。
-                              </div>
-                            </div>
-
-                            {controlledPilotSessionMismatch && !controlledPilotPromotionError && (
-                              <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-amber-900">
-                                {controlledPilotSessionBlockingMessage}
-                              </div>
-                            )}
-
-                            <div>
-                              <div className="text-[10px] uppercase text-emerald-700">
-                                Pilot response text
-                              </div>
-                              <div className="mt-1 whitespace-pre-wrap rounded-md bg-white px-3 py-2 text-sm leading-6 text-stone-900">
-                                {controlledPilotResult.userOutput?.trim()}
-                              </div>
-                            </div>
-
-                            <div className="grid gap-2 md:grid-cols-2">
-                              <div className="rounded-md bg-white px-3 py-2">
-                                <div className="text-[10px] uppercase text-emerald-700">
-                                  Source session
-                                </div>
-                                <div className="mt-1 font-mono text-stone-900">
-                                  {controlledPilotSourceSessionId ?? "unknown"}
-                                </div>
-                              </div>
-                              <div className="rounded-md bg-white px-3 py-2">
-                                <div className="text-[10px] uppercase text-emerald-700">
-                                  Target session
-                                </div>
-                                <div className="mt-1 font-mono text-stone-900">
-                                  {currentSessionId || "unknown"}
-                                </div>
-                              </div>
-                              <div className="rounded-md bg-white px-3 py-2">
-                                <div className="text-[10px] uppercase text-emerald-700">runId</div>
-                                <div className="mt-1 font-mono text-stone-900">
-                                  {controlledPilotResult.runId ?? "not returned"}
-                                </div>
-                              </div>
-                              <div className="rounded-md bg-white px-3 py-2">
-                                <div className="text-[10px] uppercase text-emerald-700">
-                                  Selected strategy
-                                </div>
-                                <div className="mt-1 text-stone-900">
-                                  {controlledPilotResult.strategyKind}
-                                </div>
-                              </div>
-                              <div className="rounded-md bg-white px-3 py-2">
-                                <div className="text-[10px] uppercase text-emerald-700">
-                                  Governance summary
-                                </div>
-                                <div className="mt-1 text-stone-900">
-                                  {controlledPilotGovernanceSummary}
-                                </div>
-                              </div>
-                              <div className="rounded-md bg-white px-3 py-2">
-                                <div className="text-[10px] uppercase text-emerald-700">
-                                  Payload summary
-                                </div>
-                                <div className="mt-1 text-stone-900">
-                                  {controlledPilotPayloadSummary}
-                                </div>
-                              </div>
-                            </div>
-
-                            <div className="flex flex-wrap justify-end gap-2">
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setControlledPilotPromotionReviewOpen(false);
-                                  setControlledPilotPromotionError(null);
-                                }}
-                                disabled={controlledPilotPromoting}
-                                className="rounded-md border border-emerald-200 bg-white px-3 py-1.5 text-xs font-medium text-emerald-900 hover:bg-emerald-100 disabled:opacity-50"
-                              >
-                                Cancel Promotion
-                              </button>
-                              <button
-                                type="button"
-                                onClick={handleConfirmControlledPilotPromotion}
-                                disabled={controlledPilotPromoting}
-                                className="inline-flex items-center gap-1.5 rounded-md bg-emerald-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-800 disabled:opacity-50"
-                              >
-                                {controlledPilotPromoting && (
-                                  <Loader2 size={13} className="animate-spin" />
-                                )}
-                                Confirm Promotion
-                              </button>
-                            </div>
-                          </div>
-                        )}
-                    </div>
-                  )}
-                </div>
-
-                {governedPreviewError && (
-                  <div className="rounded-md border border-red-100 bg-red-50 px-3 py-2 text-xs text-red-700">
-                    {governedPreviewError}
-                  </div>
-                )}
-
-                {governedPreviewResult && (
-                  <div className="space-y-3 rounded-lg border border-stone-200 bg-stone-50 p-3">
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div>
-                        <div className="text-xs font-semibold text-stone-900">Preview result</div>
-                        <div className="mt-0.5 text-[11px] text-stone-500">
-                          Metadata-safe fields only. Raw prompts, memory context, PII, mail bodies,
-                          and file content are not rendered here.
-                        </div>
-                      </div>
-                      {governedPreviewResult.runId && (
-                        <Link
-                          to={runDetailRoute(governedPreviewResult.runId)}
-                          className="inline-flex items-center gap-1.5 rounded-md bg-white px-3 py-1.5 text-xs font-medium text-stone-700 ring-1 ring-stone-200 hover:bg-stone-100"
-                        >
-                          <ExternalLink size={13} />
-                          View Run Trace
-                        </Link>
-                      )}
-                    </div>
-
-                    <div className="grid gap-2 text-xs md:grid-cols-2">
-                      <div className="rounded-md bg-white px-3 py-2 text-stone-700 ring-1 ring-stone-100">
-                        <div className="text-[10px] uppercase text-stone-400">runId</div>
-                        <div className="mt-1 font-mono text-stone-900">
-                          {governedPreviewResult.runId ?? "not returned"}
-                        </div>
-                      </div>
-                      <div className="rounded-md bg-white px-3 py-2 text-stone-700 ring-1 ring-stone-100">
-                        Strategy: {governedPreviewResult.strategyKind}
-                      </div>
-                      <div className="rounded-md bg-white px-3 py-2 text-stone-700 ring-1 ring-stone-100">
-                        Payload: {governedPreviewResult.payloadKind}
-                      </div>
-                      <div className="rounded-md bg-white px-3 py-2 text-stone-700 ring-1 ring-stone-100">
-                        Governance: {governedPreviewResult.governanceDecisionKind ?? "unknown"}
-                      </div>
-                    </div>
-
-                    {governedPreviewSummaryEntries.length > 0 && (
-                      <div className="flex flex-wrap gap-2 text-xs">
-                        {governedPreviewSummaryEntries.map(([key, value]) => (
-                          <span
-                            key={key}
-                            className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
-                          >
-                            {key}: {value}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-
-                    <div>
-                      <div className="text-xs font-medium text-stone-700">Warnings</div>
-                      {governedPreviewResult.warnings.length > 0 ? (
-                        <div className="mt-1 space-y-1">
-                          {governedPreviewResult.warnings.map(warning => (
-                            <div
-                              key={warning}
-                              className="rounded-md border border-amber-100 bg-amber-50 px-2 py-1 text-xs text-amber-800"
-                            >
-                              {warning}
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <div className="mt-1 text-xs text-stone-500">No warnings returned.</div>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
           </div>
         </div>
         <div
@@ -4696,17 +4067,6 @@ export default function ChatPage({
                 onSkipPlanStep={handleSkipPlanStep}
                 onCancelPlan={handleCancelPlan}
                 onReviewPlan={handleReviewPlan}
-                onRefreshStage5Preflight={handleRefreshStage5Preflight}
-                onExportDebugBundle={handleExportStage5DebugBundle}
-                onCreateIssueReport={handleCreateStage5IssueReport}
-                stage5Debug={{
-                  preflight: stage5Preflight,
-                  latestBundle: stage5LatestBundle,
-                  latestIssue: stage5LatestIssue,
-                  artifacts: stage5Artifacts,
-                  busy: stage5DebugBusy,
-                  error: stage5DebugError,
-                }}
               />
               {safeAgentTaskControlError && (
                 <div className="border-b border-rose-200 bg-rose-50 px-4 py-2 text-xs text-rose-800">
@@ -4823,12 +4183,6 @@ export default function ChatPage({
                       </div>
                     )}
                   </div>
-                  {legacyFallbackUsed && (
-                    <div className="mt-2 border-l-2 border-amber-400 bg-amber-50 px-2 py-1 text-amber-900">
-                      <span className="font-semibold">Fallback notice</span>: response used the
-                      visible legacy fallback path.
-                    </div>
-                  )}
                   {safeAgentTaskControlError && (
                     <div className="mt-2 border-l-2 border-rose-400 bg-rose-50 px-2 py-1 text-rose-900">
                       {safeAgentTaskControlError}
@@ -5528,7 +4882,7 @@ export default function ChatPage({
           onCancel={handleCancelMainChatTask}
           onContinueStream={handleContinueStream}
           onRetryLastMessage={retryLastUserMessage}
-          getFixSuggestion={getFixSuggestion}
+          getFixSuggestion={diag => getFixSuggestion(diag, lifeStateProjection)}
           companionMode={companionMode}
         />
       </div>

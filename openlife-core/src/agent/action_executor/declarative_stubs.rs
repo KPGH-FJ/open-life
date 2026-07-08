@@ -1,3 +1,6 @@
+use crate::agent::review_workflow::{
+    DurableWriteRequest, DurableWriteSource, DurableWriteSubject, ReviewWorkflow,
+};
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 use serde_json::Value;
 
@@ -54,19 +57,31 @@ impl super::ActionExecutor {
             proposal.run_id = Some(run_id.clone());
         }
 
-        if let Err(e) = proposal_store.create_proposal(&proposal) {
-            eprintln!(
-                "[warn] Failed to create {} Proposal for {}: {}",
-                proposal_type, tool_name, e
-            );
-            return None;
-        }
+        let outcome = match ReviewWorkflow::new(proposal_store).submit(
+            DurableWriteRequest::from_agent_proposal(
+                DurableWriteSource::ToolPermission,
+                DurableWriteSubject::from_proposal_type(proposal.proposal_type),
+                proposal,
+                "Tool proposal is pending Review Center approval.",
+            ),
+        ) {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                eprintln!(
+                    "[warn] Failed to create {} Proposal for {}: {}",
+                    proposal_type, tool_name, e
+                );
+                return None;
+            }
+        };
 
         let result = self.build_proposal_required_action(
             request.clone(),
             &format!(
                 "{}: created {} Proposal (id: {})",
-                tool_name, proposal_type, proposal.id
+                tool_name,
+                proposal_type,
+                outcome.proposal_id()
             ),
         );
 

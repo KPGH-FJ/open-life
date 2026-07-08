@@ -5,25 +5,30 @@ use crate::main_chat_runtime_facts::{
     RUNTIME_FACT_PROVIDER_GENERATION_PATH, RUNTIME_FACT_PROVIDER_ROUTE_GENERATION_PATH,
 };
 use async_trait::async_trait;
-use openlife_core::agent::main_chat_agent_productization_v1::MainChatAgentStateSnapshot;
 use openlife_core::agent::main_chat_agent_v1::{
     AgentIngressDecision, AgentTaskSessionStatus, CompiledContext, ContextCompiler,
     ContextCompilerInput, ContextSourceCandidate, ContextSourceKind, ExecutionQueueStatus,
     ExecutionTranscriptEntry, ExecutionTranscriptEntryKind, MainChatAgentStrategy,
-    MainChatPrivacyRiskSummary,
+    MainChatPrivacyRiskSummary, PolicyRouteKind,
 };
+use openlife_core::agent::main_chat_runtime_contract::MainChatAgentStateSnapshot;
 use openlife_core::agent::{
-    ActionExecutionContext, ActionExecutionResult, ActionExecutionStatus, ActionExecutor,
-    ActionExecutorConfig, AgentActionRequest, AgentRun, AgentRunError, AgentTask, ContextSummary,
-    ModelRoutePolicy, ModelRouteTrace, ReasoningTrace, RedactionLevel, RuntimeHSPacket,
+    classify_main_chat_governance_intent, plan_main_chat_memory_routing, ActionExecutionContext,
+    ActionExecutionResult, ActionExecutionStatus, ActionExecutorConfig, AgentActionRequest,
+    AgentRun, AgentRunError, AgentTask, ContextSummary, LifeDomain, LifeEventDraft,
+    LifeEventPrivacyLevel, LifeEventSourceRef, LifeEventSourceType, MainChatBlockerRequirement,
+    MainChatDurableWriteRequirement, MainChatMemoryCandidate, MainChatMemoryRoutingResult,
+    MemoryCandidateKind, MemoryDestination, ModelRoutePolicy, ModelRouteTrace, ReasoningTrace,
+    RedactionLevel, RiskLevel, RuntimeHSPacket,
 };
-use openlife_core::layer_router::Layer;
+use openlife_core::layer::Layer;
 use openlife_core::life_model::LifeModel;
 use openlife_core::llm::ChatMessage;
 use openlife_core::mcp::McpRegistry;
 use openlife_core::scheduler::InferenceScheduler;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::main_chat_agent_state_payload::assemble_main_chat_agent_state_for_turn;
@@ -40,10 +45,13 @@ use crate::main_chat_generation_support::{
 };
 use crate::main_chat_hs_runtime::{build_chat_runtime_hs_packet, included_life_model_sections};
 use crate::main_chat_react_runtime::{
-    attach_main_chat_read_observation_metadata, bind_main_chat_observation_metadata_to_queue_action,
+    attach_main_chat_read_observation_metadata,
+    bind_main_chat_observation_metadata_to_queue_action, try_run_main_chat_react_agent_loop,
+    MainChatReactAgentLoopAttempt,
 };
 use crate::main_chat_react_tool_selection::{
-    main_chat_manifest_has_write_like_surface, main_chat_manifest_is_governed_read_candidate,
+    build_main_chat_react_action_plan, main_chat_manifest_has_write_like_surface,
+    main_chat_manifest_is_governed_read_candidate, MainChatReactActionPlan,
     MainChatReactToolCandidate,
 };
 use crate::main_chat_runtime_support::{
@@ -88,6 +96,8 @@ pub struct MainChatTurnResult {
     pub tool_calls: Vec<MainChatKernelToolCall>,
     #[serde(default)]
     pub write_outcome: Option<MainChatKernelWriteOutcome>,
+    #[serde(default)]
+    pub memory_governance: Option<MainChatMemoryRoutingResult>,
     pub route_metadata: Option<MainChatRouteMetadata>,
     pub context_metadata: Option<MainChatKernelContextMetadata>,
     pub direct_writes_executed: bool,
@@ -102,6 +112,7 @@ impl MainChatTurnResult {
             proposals: Vec::new(),
             tool_calls: Vec::new(),
             write_outcome: None,
+            memory_governance: None,
             route_metadata: None,
             context_metadata: None,
             direct_writes_executed: false,
@@ -590,7 +601,7 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
                 .map(str::to_string),
             step_index: 0,
         };
-        match ActionExecutor::new(ActionExecutorConfig {
+        match openlife_core::agent::ToolGateway::from_executor_config(ActionExecutorConfig {
             allow_writes: false,
             allow_cloud: false,
             ..Default::default()
@@ -600,8 +611,8 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
             Ok(result) => kernel_read_tool_execution_from_action_result(decision, result),
             Err(error) => blocked_kernel_read_tool_execution(
                 decision,
-                "read_tool_executor_failed",
-                &format!("ActionExecutor failed: {error}"),
+                "read_tool_gateway_failed",
+                &format!("ToolGateway failed: {error}"),
                 None,
             ),
         }
@@ -864,6 +875,9 @@ fn kernel_mcp_candidate_from_manifest(
 fn kernel_manifest_is_explicit_read_target_candidate(
     manifest: &openlife_core::tool_manifest::ToolManifest,
 ) -> bool {
+    if openlife_core::agent::validate_manifest_execution_contract(manifest).is_err() {
+        return false;
+    }
     if manifest.name == "mcp.call_tool" || !manifest.enabled || manifest.declarative_only {
         return false;
     }
@@ -920,7 +934,7 @@ fn kernel_mcp_selection_metadata(
         .collect::<Vec<_>>();
     let selected_react_candidate = selected.react_candidate();
     let arguments_digest =
-        openlife_core::agent::react_beta::metadata_safe_value_digest(&selected.arguments);
+        openlife_core::agent::metadata_safe::metadata_safe_value_digest(&selected.arguments);
     serde_json::json!({
         "kernelToolSelection": true,
         "toolSelectionCandidateCount": candidates.len(),
@@ -953,7 +967,7 @@ fn kernel_mcp_selection_metadata(
         } else {
             Value::String(requested_tool_name.to_string())
         },
-        "selectionQueryDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(
+        "selectionQueryDigest": openlife_core::agent::metadata_safe::metadata_safe_value_digest(
             &serde_json::json!({ "selectionQuery": selection_query })
         ),
         "governedArgumentsSource": "kernel_manifest_candidate_contract",
@@ -1129,7 +1143,7 @@ fn kernel_read_tool_execution_from_action_result(
         "requestedTarget": decision.requested_target.clone(),
         "target": decision.target.clone(),
         "governedInput": governed_input.clone(),
-        "governedInputDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(&governed_input),
+        "governedInputDigest": openlife_core::agent::metadata_safe::metadata_safe_value_digest(&governed_input),
         "governedInputSource": decision
             .governed_input
             .get("governedInputSource")
@@ -1194,7 +1208,7 @@ fn blocked_kernel_read_tool_execution(
         "requestedTarget": decision.requested_target.clone(),
         "target": decision.target.clone(),
         "governedInput": governed_input.clone(),
-        "governedInputDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(&governed_input),
+        "governedInputDigest": openlife_core::agent::metadata_safe::metadata_safe_value_digest(&governed_input),
         "governedInputSource": decision
             .governed_input
             .get("governedInputSource")
@@ -1283,6 +1297,7 @@ impl MainChatKernelCommandSurfaceResult {
             legacy_runtime_invoked: false,
             model_invoked: true,
             tool_invoked: false,
+            turn_terminal: None,
         }
     }
 }
@@ -1442,10 +1457,7 @@ where
     } else if user_text.trim().is_empty() {
         None
     } else {
-        let router = state.intent_router.lock().await;
-        router
-            .classify(&user_text)
-            .direct_response()
+        main_chat_policy_direct_reflex_response(&main_chat_agent_turn.decision, &user_text)
             .map(CommandSurfaceDirectReply::direct_reflex)
     };
     let (life_model, hs_context) = command_surface_kernel_hs_context(
@@ -1472,6 +1484,69 @@ where
     .with_read_tool_executor(Arc::new(AppStateMainChatReadToolExecutor::new(Arc::clone(
         state,
     ))));
+
+    if main_chat_react_turn_requires_governed_agent_loop_candidate_selection(
+        &main_chat_agent_turn.decision.selected_strategy,
+        &messages,
+        state,
+    )
+    .await
+    {
+        let plan = build_main_chat_react_action_plan(session_id, &user_text)?;
+        let privacy_engine = openlife_core::privacy::PrivacyEngine::new();
+        let privacy_map: HashMap<String, String> = HashMap::new();
+        let agent_loop_attempt = try_run_main_chat_react_agent_loop(
+            state,
+            &task_session_id,
+            session_id,
+            &user_text,
+            &messages,
+            &life_model,
+            &privacy_engine,
+            &privacy_map,
+            &plan,
+            main_chat_agent_turn
+                .decision
+                .privacy_risk
+                .local_only_required,
+        )
+        .await?;
+        execution_transcript.extend(agent_loop_attempt.transcript_entries.clone());
+        let kernel_result = kernel_turn_result_from_react_agent_loop_attempt(
+            &agent_loop_attempt,
+            &plan,
+            &scheduler,
+        );
+        let kernel_events = event_sink.events().to_vec();
+        if !kernel_result.blockers.is_empty() {
+            return build_blocked_kernel_command_surface_result(
+                session_id,
+                &task_session_id,
+                state,
+                main_chat_agent_turn,
+                execution_transcript,
+                kernel_result,
+                event_sink_label,
+                kernel_events,
+            )
+            .await;
+        }
+        return build_successful_kernel_command_surface_result(
+            session_id,
+            &user_text,
+            state,
+            main_chat_agent_turn,
+            execution_transcript,
+            kernel_result,
+            scheduler,
+            life_model,
+            false,
+            None,
+            event_sink_label,
+            kernel_events,
+        )
+        .await;
+    }
 
     if main_chat_agent_turn.decision.selected_strategy == MainChatAgentStrategy::PlanExecute {
         return build_kernel_plan_execute_command_surface_result(
@@ -1506,7 +1581,7 @@ where
 
     let kernel_events = event_sink.events().to_vec();
 
-    if kernel_result.write_outcome.is_some() {
+    if kernel_result.write_outcome.is_some() && kernel_result.memory_governance.is_none() {
         return build_kernel_write_outcome_command_surface_result(
             session_id,
             &user_text,
@@ -2056,6 +2131,46 @@ struct CommandSurfaceDirectReply {
     route_reason: String,
 }
 
+fn main_chat_policy_direct_reflex_response(
+    decision: &AgentIngressDecision,
+    user_text: &str,
+) -> Option<String> {
+    if decision.policy_route != PolicyRouteKind::DirectAnswer {
+        return None;
+    }
+    let normalized = user_text
+        .replace(['\r', '\n', '\t'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    if matches!(
+        normalized.as_str(),
+        "你好" | "您好" | "哈喽" | "嗨" | "hello" | "hi" | "hey"
+    ) {
+        return Some("你好！我是 OpenLife，很高兴陪伴你的成长。今天想聊聊什么？".into());
+    }
+    if matches!(
+        normalized.as_str(),
+        "再见" | "拜拜" | "bye" | "goodbye" | "see you"
+    ) {
+        return Some("再见！随时欢迎回来，我会一直在这里支持你。".into());
+    }
+    if matches!(
+        normalized.as_str(),
+        "帮助" | "help" | "怎么用" | "你能做什么" | "你是什么"
+    ) {
+        return Some(
+            "你可以跟我聊人生目标、价值观、当前状态，也可以让我帮你调用工具完成任务。".into(),
+        );
+    }
+    None
+}
+
 impl CommandSurfaceDirectReply {
     fn runtime_fact(answer: &MainChatRuntimeFactAnswer) -> Self {
         let route_reason = answer
@@ -2215,18 +2330,49 @@ where
             });
         }
 
-        let mut route_metadata = self.model_client.route_metadata();
-        let write_outcome = if input.runtime_fact_direct_answer {
+        let external_read_required = latest_user_text(&input.messages)
+            .map(|user_text| {
+                classify_main_chat_governance_intent(user_text)
+                    .external_read_requirement
+                    .is_some()
+            })
+            .unwrap_or(false);
+        let memory_governance = if input.runtime_fact_direct_answer || external_read_required {
+            None
+        } else {
+            plan_kernel_memory_governance(&input)
+        };
+        let mut write_outcome = if input.runtime_fact_direct_answer {
             None
         } else {
             plan_kernel_write_outcome(&input, input.model_supplied_tool_arguments.is_some())
         };
+        if memory_governance_has_artifacts(memory_governance.as_ref())
+            && write_outcome.as_ref().is_some_and(|outcome| {
+                matches!(
+                    outcome.kind,
+                    MainChatKernelWriteOutcomeKind::MemoryProposal
+                        | MainChatKernelWriteOutcomeKind::LifeModelProposal
+                )
+            })
+        {
+            write_outcome = memory_governance_compatible_write_outcome(
+                memory_governance
+                    .as_ref()
+                    .expect("memory governance checked"),
+                write_outcome.as_ref().expect("write outcome checked"),
+            );
+        }
         let read_tool_decisions = if input.runtime_fact_direct_answer {
             Vec::new()
         } else {
             plan_kernel_read_tools(&input, input.model_supplied_tool_arguments.is_some())
         };
-        if !read_tool_decisions.is_empty() || write_outcome.is_some() {
+        let mut route_metadata = self.model_client.route_metadata();
+        if !read_tool_decisions.is_empty()
+            || write_outcome.is_some()
+            || memory_governance_has_artifacts(memory_governance.as_ref())
+        {
             route_metadata.tools_enabled = true;
         }
         event_sink.emit(MainChatKernelEvent::RouteSelected {
@@ -2242,11 +2388,30 @@ where
             );
         }
 
-        if let Some(outcome) = write_outcome {
+        if let Some(outcome) = write_outcome.clone().filter(|outcome| {
+            !memory_governance_has_artifacts(memory_governance.as_ref())
+                || !matches!(
+                    outcome.kind,
+                    MainChatKernelWriteOutcomeKind::MemoryProposal
+                        | MainChatKernelWriteOutcomeKind::LifeModelProposal
+                )
+        }) {
             return self.run_write_outcome_turn(
                 context_metadata,
                 route_metadata,
                 outcome,
+                event_sink,
+            );
+        }
+
+        if let Some(memory_governance) =
+            memory_governance.filter(|routing| memory_governance_has_artifacts(Some(routing)))
+        {
+            return self.run_memory_governance_turn(
+                context_metadata,
+                route_metadata,
+                memory_governance,
+                write_outcome,
                 event_sink,
             );
         }
@@ -2263,6 +2428,9 @@ where
                 .await;
         }
 
+        let latest_user_text_for_guard = latest_user_text(&input.messages)
+            .map(str::to_string)
+            .unwrap_or_default();
         let request = MainChatModelRequest {
             messages: input.messages,
             system_prompt,
@@ -2272,6 +2440,21 @@ where
 
         match self.model_client.generate_direct_answer(request).await {
             Ok(reply) if !reply.trim().is_empty() => {
+                let (reply, blockers) = match assert_direct_answer_has_required_evidence(
+                    &latest_user_text_for_guard,
+                    &reply,
+                    0,
+                    0,
+                    0,
+                ) {
+                    Ok(()) => (reply, Vec::new()),
+                    Err(blocker) => {
+                        event_sink.emit(MainChatKernelEvent::Blocker {
+                            code: blocker.code.clone(),
+                        });
+                        (blocker.replacement_reply, vec![blocker.code])
+                    }
+                };
                 let assistant_message = ChatMessage {
                     role: "assistant".into(),
                     content: reply,
@@ -2285,10 +2468,11 @@ where
                 });
                 MainChatTurnResult {
                     assistant_message: Some(assistant_message),
-                    blockers: Vec::new(),
+                    blockers,
                     proposals: Vec::new(),
                     tool_calls: Vec::new(),
                     write_outcome: None,
+                    memory_governance: None,
                     route_metadata: Some(route_metadata),
                     context_metadata: Some(context_metadata),
                     direct_writes_executed: false,
@@ -2325,6 +2509,7 @@ where
             proposals: Vec::new(),
             tool_calls: Vec::new(),
             write_outcome: None,
+            memory_governance: None,
             route_metadata: Some(route_metadata),
             context_metadata: Some(context_metadata),
             direct_writes_executed: false,
@@ -2426,6 +2611,7 @@ where
             proposals: Vec::new(),
             tool_calls,
             write_outcome: None,
+            memory_governance: None,
             route_metadata: Some(route_metadata),
             context_metadata: Some(context_metadata),
             direct_writes_executed: false,
@@ -2475,6 +2661,48 @@ where
             proposals: Vec::new(),
             tool_calls: Vec::new(),
             write_outcome: Some(outcome),
+            memory_governance: None,
+            route_metadata: Some(route_metadata),
+            context_metadata: Some(context_metadata),
+            direct_writes_executed: false,
+            legacy_fallback_used: false,
+        }
+    }
+
+    fn run_memory_governance_turn<S>(
+        &self,
+        context_metadata: MainChatKernelContextMetadata,
+        route_metadata: MainChatRouteMetadata,
+        memory_governance: MainChatMemoryRoutingResult,
+        compatible_write_outcome: Option<MainChatKernelWriteOutcome>,
+        event_sink: &mut S,
+    ) -> MainChatTurnResult
+    where
+        S: MainChatEventSink + ?Sized,
+    {
+        event_sink.emit(MainChatKernelEvent::ToolDecision {
+            tool_name: "memory.governance".into(),
+            action_type: "memory.governance.plan".into(),
+            target: "main_chat_memory_governance".into(),
+            reason: "MainChatKernel planned deterministic memory governance artifacts.".into(),
+            model_arguments_ignored: true,
+        });
+        let reply = "Memory governance plan prepared; no durable Memory or LifeModel truth has been written yet.".to_string();
+        event_sink.emit(MainChatKernelEvent::FinalAnswer {
+            content_preview: bounded_label(&reply, MAX_ASSISTANT_PREVIEW_CHARS),
+            content_chars: reply.chars().count(),
+        });
+
+        MainChatTurnResult {
+            assistant_message: Some(ChatMessage {
+                role: "assistant".into(),
+                content: reply,
+            }),
+            blockers: memory_governance.blockers.clone(),
+            proposals: Vec::new(),
+            tool_calls: Vec::new(),
+            write_outcome: compatible_write_outcome,
+            memory_governance: Some(memory_governance),
             route_metadata: Some(route_metadata),
             context_metadata: Some(context_metadata),
             direct_writes_executed: false,
@@ -2562,6 +2790,87 @@ where
     }
 }
 
+fn kernel_turn_result_from_react_agent_loop_attempt(
+    attempt: &MainChatReactAgentLoopAttempt,
+    plan: &MainChatReactActionPlan,
+    scheduler: &InferenceScheduler,
+) -> MainChatTurnResult {
+    let mut route_metadata = route_metadata_from_scheduler(scheduler);
+    route_metadata.tools_enabled = true;
+    route_metadata.reason = "main_chat_governed_react_agent_loop".into();
+    let blocker = attempt.blocker_reason.clone();
+    let status = match attempt.queue_status {
+        Some(ExecutionQueueStatus::Completed) => "succeeded",
+        Some(ExecutionQueueStatus::PendingPermission) => "needs_confirmation",
+        Some(ExecutionQueueStatus::Failed) if blocker.is_some() => "blocked",
+        Some(ExecutionQueueStatus::Failed) => "failed",
+        _ if blocker.is_some() => "blocked",
+        _ => "succeeded",
+    };
+    let reply = attempt.reply.clone().unwrap_or_else(|| {
+        format!(
+            "That read action is blocked by governance: {}",
+            blocker
+                .clone()
+                .unwrap_or_else(|| "agent_loop_failed".into())
+        )
+    });
+    let metadata = attempt.metadata.clone();
+    let selected_target = metadata
+        .get("toolSelectionCandidateTarget")
+        .or_else(|| metadata.get("selectedCandidateTarget"))
+        .and_then(Value::as_str)
+        .unwrap_or(plan.target.as_str())
+        .to_string();
+    let action_type = metadata
+        .get("plannedActionType")
+        .and_then(Value::as_str)
+        .unwrap_or(plan.queue_action_type.as_str())
+        .to_string();
+    let tool_name = attempt
+        .tool_calls
+        .first()
+        .map(|call| call.name.clone())
+        .unwrap_or_else(|| action_type.clone());
+    let output_preview = metadata
+        .get("preview")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            metadata
+                .get("outputPreview")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| preview_text(&reply, MAX_TOOL_OBSERVATION_PREVIEW_CHARS));
+
+    MainChatTurnResult {
+        assistant_message: Some(ChatMessage {
+            role: "assistant".into(),
+            content: reply,
+        }),
+        blockers: blocker.into_iter().collect(),
+        proposals: Vec::new(),
+        tool_calls: vec![MainChatKernelToolCall {
+            name: tool_name,
+            action_type,
+            target: selected_target,
+            governed_input: plan.arguments.clone(),
+            status: status.into(),
+            output_preview: Some(output_preview),
+            blocker: attempt.blocker_reason.clone(),
+            observation_metadata: Some(metadata),
+            model_arguments_ignored: true,
+        }],
+        write_outcome: None,
+        memory_governance: None,
+        route_metadata: Some(route_metadata),
+        context_metadata: None,
+        direct_writes_executed: false,
+        legacy_fallback_used: false,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn build_successful_kernel_command_surface_result(
     session_id: &str,
@@ -2594,6 +2903,7 @@ async fn build_successful_kernel_command_surface_result(
     let model_route = model_route_from_kernel_route(&route_metadata);
     let context_summary = context_summary_from_kernel_result(&kernel_result, &life_model);
     let read_tool_loop_used = !kernel_result.tool_calls.is_empty();
+    let memory_governance_planned = kernel_result.memory_governance.is_some();
     let scripted_provider_response = route_metadata.scripted_response_configured;
     let provider_endpoint_kind = if runtime_fact_answer.is_some() {
         "runtime_fact"
@@ -2601,15 +2911,19 @@ async fn build_successful_kernel_command_surface_result(
         "direct_reflex"
     } else if read_tool_loop_used {
         "kernel_read_tool_synthesis"
+    } else if memory_governance_planned {
+        "main_chat_memory_governance"
     } else {
         main_chat_provider_endpoint_kind(&scheduler, scripted_provider_response)
     };
     let provider_live_invoked = !read_tool_loop_used
+        && !memory_governance_planned
         && !direct_reflex_used
         && !scripted_provider_response
         && route_metadata.provider != "none"
         && route_metadata.route_type == "cloud";
-    let current_turn_model_generated = !direct_reflex_used && !read_tool_loop_used;
+    let current_turn_model_generated =
+        !direct_reflex_used && !read_tool_loop_used && !memory_governance_planned;
     let provider_route_fact_answer = if runtime_fact_answer.is_none() {
         resolve_post_model_runtime_fact_answer(MainChatRuntimeFactPostModelRequest {
             user_text,
@@ -2679,11 +2993,13 @@ async fn build_successful_kernel_command_surface_result(
             .as_ref()
             .is_some_and(|metadata| metadata.raw_life_model_yaml_included),
         "toolCallCount": kernel_result.tool_calls.len(),
-        "toolCalled": read_tool_loop_used,
+        "toolCalled": read_tool_loop_used || memory_governance_planned,
         "directWritesExecuted": false,
         "legacyFallbackUsed": false,
-        "kernelBackedDirectAnswer": !read_tool_loop_used,
+        "kernelBackedDirectAnswer": !read_tool_loop_used && !memory_governance_planned,
         "kernelBackedReadOnlyToolLoop": read_tool_loop_used,
+        "kernelBackedMemoryGovernance": memory_governance_planned,
+        "memoryGovernance": empty_memory_governance_metadata(),
         "kernelEventSink": event_sink_label,
         "kernelEventCount": kernel_event_count,
         "kernelContextSnapshotRef": kernel_result
@@ -2694,6 +3010,8 @@ async fn build_successful_kernel_command_surface_result(
         "schedulerGenerationCalled": current_turn_model_generated,
         "providerGenerationPath": if read_tool_loop_used {
             "main_chat_kernel_read_tool_synthesis"
+        } else if memory_governance_planned {
+            "main_chat_kernel_memory_governance"
         } else if runtime_fact_answer.is_some() {
             RUNTIME_FACT_PROVIDER_GENERATION_PATH
         } else if direct_reflex_used {
@@ -2725,32 +3043,16 @@ async fn build_successful_kernel_command_surface_result(
             answer.generation_metadata(),
         );
     }
-    execution_transcript.extend(
-        append_main_chat_agent_transcript(
-            state,
-            Some(task_session_id),
-            ExecutionTranscriptEntryKind::Observation,
-            if read_tool_loop_used {
-                "MainChatKernel read-only tool loop synthesized an answer without writes."
-            } else if direct_reflex_used {
-                "DirectAnswer returned a local deterministic response without provider generation."
-            } else {
-                "DirectAnswer generated a model response without tools or writes."
-            },
-            generation_metadata.clone(),
-        )
-        .await,
-    );
-
     let mut agent_run = AgentRun::new_chat_run(session_id, user_text);
-    agent_run.reasoning_strategy = Some(if read_tool_loop_used {
+    agent_run.reasoning_strategy = Some(if memory_governance_planned {
+        "main_chat_agent_v1_memory_governance".into()
+    } else if read_tool_loop_used {
         "main_chat_agent_v1_read_only_tool_loop".into()
     } else {
         "main_chat_agent_v1_direct_answer".into()
     });
     agent_run.tool_call_count = kernel_result.tool_calls.len() as u32;
     agent_run.step_count = if read_tool_loop_used { 1 } else { 0 };
-    agent_run.complete(&preview_text(&reply, 200), model_route, context_summary);
     let mut proposal_tool_calls = Vec::new();
     let mut pending_proposal_ids = Vec::new();
     if read_tool_loop_used
@@ -2829,6 +3131,74 @@ async fn build_successful_kernel_command_surface_result(
             (kernel_result.tool_calls.len() + proposal_tool_calls.len()) as u32;
         agent_run.step_count = agent_run.tool_call_count;
     }
+    let mut memory_governance_tool_calls = Vec::new();
+    let mut memory_governance_metadata = empty_memory_governance_metadata();
+    if let Some(routing) = kernel_result.memory_governance.as_ref() {
+        let materialized = materialize_kernel_memory_governance(
+            state,
+            task_session_id,
+            &agent_run.id,
+            routing,
+            &mut execution_transcript,
+        )
+        .await?;
+        memory_governance_metadata = materialized.metadata;
+        pending_proposal_ids.extend(materialized.pending_proposal_ids.clone());
+        for proposal_id in &materialized.pending_proposal_ids {
+            agent_run.add_generated_proposal(proposal_id);
+        }
+        memory_governance_tool_calls = materialized.tool_calls;
+        reply = synthesize_memory_governance_reply(&memory_governance_metadata);
+        assistant_message.content = reply.clone();
+        if let Some(MainChatKernelEvent::FinalAnswer {
+            content_preview,
+            content_chars,
+        }) = kernel_events
+            .iter_mut()
+            .rev()
+            .find(|event| matches!(event, MainChatKernelEvent::FinalAnswer { .. }))
+        {
+            *content_preview = bounded_label(&reply, MAX_ASSISTANT_PREVIEW_CHARS);
+            *content_chars = reply.chars().count();
+        }
+    }
+    if let Some(object) = generation_metadata.as_object_mut() {
+        object.insert(
+            "memoryGovernance".into(),
+            memory_governance_metadata.clone(),
+        );
+        object.insert(
+            "toolCallCount".into(),
+            serde_json::json!(
+                kernel_result.tool_calls.len()
+                    + proposal_tool_calls.len()
+                    + memory_governance_tool_calls.len()
+            ),
+        );
+    }
+    execution_transcript.extend(
+        append_main_chat_agent_transcript(
+            state,
+            Some(task_session_id),
+            ExecutionTranscriptEntryKind::Observation,
+            if memory_governance_planned {
+                "MainChatKernel materialized deterministic memory governance artifacts."
+            } else if read_tool_loop_used {
+                "MainChatKernel read-only tool loop synthesized an answer without writes."
+            } else if direct_reflex_used {
+                "DirectAnswer returned a local deterministic response without provider generation."
+            } else {
+                "DirectAnswer generated a model response without tools or writes."
+            },
+            generation_metadata.clone(),
+        )
+        .await,
+    );
+    agent_run.tool_call_count = (kernel_result.tool_calls.len()
+        + proposal_tool_calls.len()
+        + memory_governance_tool_calls.len()) as u32;
+    agent_run.step_count = agent_run.tool_call_count;
+    agent_run.complete(&preview_text(&reply, 200), model_route, context_summary);
     let mut reasoning_trace = ReasoningTrace {
         generation_result: Some({
             let mut generation = generation_metadata;
@@ -2870,6 +3240,7 @@ async fn build_successful_kernel_command_surface_result(
     .await?;
     let mut tool_calls = tool_calls;
     tool_calls.extend(proposal_tool_calls);
+    tool_calls.extend(memory_governance_tool_calls);
     let pending_permission_blockers = tool_calls
         .iter()
         .filter(|tool_call| matches!(tool_call.status, ToolCallStatus::NeedsConfirmation))
@@ -2990,6 +3361,7 @@ async fn build_successful_kernel_command_surface_result(
                 "agentLoopActionCount": if read_tool_loop_used { kernel_result.tool_calls.len() } else { 0 },
                 "agentLoopObservationCount": read_tool_loop_observation_count,
                 "proposalIds": pending_proposal_ids.clone(),
+                "memoryGovernance": memory_governance_metadata.clone(),
                 "directWritesExecuted": false,
                 "pendingBlockers": pending_read_tool_blockers.clone(),
                 "pendingPermissionBlockers": pending_permission_blockers.clone(),
@@ -3071,7 +3443,8 @@ async fn create_kernel_write_proposal(
         MainChatKernelWriteOutcomeKind::MemoryProposal => (
             ProposalType::MemoryWrite,
             "memory.pending.chat_conversation".to_string(),
-            "User requested a proposal-first memory update from MainChatKernel.".to_string(),
+            "User asked OpenLife to remember this local conversation fact after review."
+                .to_string(),
             RiskLevel::Medium,
             serde_json::json!({
                 "content": outcome
@@ -3079,13 +3452,10 @@ async fn create_kernel_write_proposal(
                     .get("content")
                     .and_then(Value::as_str)
                     .unwrap_or(user_text),
-                "source": "main_chat_kernel",
-                "originatingTaskSessionId": task_session_id,
+                "source": "chat_explicit",
+                "session_id": task_session_id,
                 "sourceRunId": run_id,
-                "payloadSummary": outcome.payload_summary,
-                "directMemoryWrite": false,
-                "acceptedDurableTruthWritten": false,
-                "directWritesExecuted": false,
+                "reviewPath": "mailbox",
             }),
         ),
         MainChatKernelWriteOutcomeKind::LifeModelProposal => {
@@ -3184,16 +3554,31 @@ async fn create_kernel_write_proposal(
     );
     proposal.run_id = Some(run_id.to_string());
     proposal.source_detail = Some(task_session_id.to_string());
+    crate::life_model_write_gateway::stamp_lifemodel_proposal_base_hash_with_state(
+        state,
+        &mut proposal,
+    )
+    .await?;
 
     let store_arc = state
         .proposal_store
         .as_ref()
         .ok_or_else(|| "Proposal store not available".to_string())?;
     let store = store_arc.lock().await;
-    store
-        .create_proposal(&proposal)
+    let outcome = openlife_core::agent::ReviewWorkflow::new(&store)
+        .submit(
+            openlife_core::agent::DurableWriteRequest::from_agent_proposal(
+                openlife_core::agent::DurableWriteSource::MainChat,
+                openlife_core::agent::DurableWriteSubject::from_proposal_type(
+                    proposal.proposal_type,
+                ),
+                proposal.clone(),
+                "Main Chat kernel proposal is pending Review Center approval.",
+            )
+            .with_evidence_refs(vec![format!("main_chat_task_session:{task_session_id}")]),
+        )
         .map_err(|err| format!("create kernel write proposal failed: {err}"))?;
-    Ok(proposal)
+    Ok(outcome.proposal)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3227,6 +3612,511 @@ fn kernel_write_tool_call(
         run_id: run_id.map(str::to_string),
         permission_decision: None,
         react_trace: None,
+    }
+}
+
+#[derive(Clone)]
+struct MainChatMemoryGovernanceMaterialization {
+    metadata: serde_json::Value,
+    tool_calls: Vec<ToolCallResult>,
+    pending_proposal_ids: Vec<String>,
+}
+
+async fn materialize_kernel_memory_governance(
+    state: &Arc<AppState>,
+    task_session_id: &str,
+    run_id: &str,
+    routing: &MainChatMemoryRoutingResult,
+    execution_transcript: &mut Vec<ExecutionTranscriptEntry>,
+) -> Result<MainChatMemoryGovernanceMaterialization, String> {
+    let mut life_event_ids = Vec::new();
+    let mut memory_proposal_ids = Vec::new();
+    let mut lifemodel_proposal_ids = Vec::new();
+    let mut pending_proposal_ids = Vec::new();
+    let mut tool_calls = Vec::new();
+    let mut blockers = routing.blockers.clone();
+
+    for candidate_id in &routing.life_event_candidate_ids {
+        let Some(candidate) = find_memory_candidate(routing, candidate_id) else {
+            push_unique_string(&mut blockers, "life_event_candidate_missing");
+            continue;
+        };
+        let queued = enqueue_main_chat_agent_action(
+            state,
+            task_session_id,
+            "life_event.create",
+            "Create a local LifeEvent from Main Chat memory governance.",
+            execution_transcript,
+        )
+        .await?;
+        transition_main_chat_action(state, &queued.id, ExecutionQueueStatus::Executing, None)
+            .await?;
+        let event =
+            create_kernel_life_event_for_candidate(state, task_session_id, run_id, candidate)
+                .await?;
+        life_event_ids.push(event.id.clone());
+        let event_metadata = serde_json::json!({
+            "memoryGovernanceArtifact": true,
+            "artifactType": "life_event",
+            "lifeEventId": event.id,
+            "candidateId": candidate.candidate_id,
+            "sourceTaskSessionId": task_session_id,
+            "sourceRunId": run_id,
+            "rawEvidencePreview": candidate.source_preview,
+            "localOnly": true,
+            "proposalRequired": false,
+            "directLifeModelWrite": false,
+            "acceptedDurableTruthWritten": false,
+            "directWritesExecuted": false,
+            "directMemoryWrite": false,
+        });
+        transition_main_chat_action(
+            state,
+            &queued.id,
+            ExecutionQueueStatus::Observed,
+            Some(event_metadata.clone()),
+        )
+        .await?;
+        transition_main_chat_action(
+            state,
+            &queued.id,
+            ExecutionQueueStatus::Completed,
+            Some(event_metadata.clone()),
+        )
+        .await?;
+        execution_transcript.extend(
+            append_main_chat_agent_transcript(
+                state,
+                Some(task_session_id),
+                ExecutionTranscriptEntryKind::Observation,
+                "MainChatKernel captured a local LifeEvent from deterministic memory governance.",
+                event_metadata.clone(),
+            )
+            .await,
+        );
+        tool_calls.push(kernel_write_tool_call(
+            "life_event.create",
+            &queued.id,
+            Some(run_id),
+            event_metadata,
+            true,
+            ToolCallStatus::Success,
+            None,
+            false,
+        ));
+    }
+
+    for candidate_id in routing
+        .memory_proposal_candidate_ids
+        .iter()
+        .chain(routing.lifemodel_proposal_candidate_ids.iter())
+    {
+        let Some(candidate) = find_memory_candidate(routing, candidate_id) else {
+            push_unique_string(&mut blockers, "proposal_candidate_missing");
+            continue;
+        };
+        let queued = enqueue_main_chat_agent_action(
+            state,
+            task_session_id,
+            "proposal.create",
+            "Create a Mailbox proposal from Main Chat memory governance.",
+            execution_transcript,
+        )
+        .await?;
+        transition_main_chat_action(state, &queued.id, ExecutionQueueStatus::Executing, None)
+            .await?;
+        let proposal =
+            create_kernel_memory_governance_proposal(state, task_session_id, run_id, candidate)
+                .await?;
+        let is_lifemodel = candidate.destination == MemoryDestination::LifeModelProposal;
+        if is_lifemodel {
+            lifemodel_proposal_ids.push(proposal.id.clone());
+        } else {
+            memory_proposal_ids.push(proposal.id.clone());
+        }
+        pending_proposal_ids.push(proposal.id.clone());
+        let proposal_metadata = serde_json::json!({
+            "memoryGovernanceArtifact": true,
+            "artifactType": if is_lifemodel { "life_model_proposal" } else { "memory_proposal" },
+            "proposalId": proposal.id,
+            "proposalType": proposal.proposal_type,
+            "affectedPath": proposal.affected_path,
+            "candidateId": candidate.candidate_id,
+            "candidateKind": candidate.kind,
+            "sourceTaskSessionId": task_session_id,
+            "sourceRunId": run_id,
+            "sourceEvidence": candidate.source_preview,
+            "impactPreview": memory_candidate_impact_preview(candidate),
+            "reviewStatus": proposal.status,
+            "kernelBackedProposalOnlyWrite": true,
+            "directWritesExecuted": false,
+            "directMemoryWrite": false,
+            "directLifeModelWrite": false,
+            "acceptedDurableTruthWritten": false,
+        });
+        transition_main_chat_action(
+            state,
+            &queued.id,
+            ExecutionQueueStatus::Observed,
+            Some(proposal_metadata.clone()),
+        )
+        .await?;
+        transition_main_chat_action(
+            state,
+            &queued.id,
+            ExecutionQueueStatus::Completed,
+            Some(proposal_metadata.clone()),
+        )
+        .await?;
+        execution_transcript.extend(
+            append_main_chat_agent_transcript(
+                state,
+                Some(task_session_id),
+                ExecutionTranscriptEntryKind::ProposalRequest,
+                "MainChatKernel created a memory governance proposal without applying it.",
+                proposal_metadata.clone(),
+            )
+            .await,
+        );
+        tool_calls.push(kernel_write_tool_call(
+            "proposal.create",
+            &queued.id,
+            Some(run_id),
+            proposal_metadata,
+            true,
+            ToolCallStatus::Pending,
+            None,
+            false,
+        ));
+    }
+
+    let metadata = memory_governance_metadata(
+        routing,
+        &life_event_ids,
+        &memory_proposal_ids,
+        &lifemodel_proposal_ids,
+        &blockers,
+    );
+
+    Ok(MainChatMemoryGovernanceMaterialization {
+        metadata,
+        tool_calls,
+        pending_proposal_ids,
+    })
+}
+
+async fn create_kernel_life_event_for_candidate(
+    state: &Arc<AppState>,
+    task_session_id: &str,
+    run_id: &str,
+    candidate: &MainChatMemoryCandidate,
+) -> Result<openlife_core::agent::LifeEvent, String> {
+    let store_arc = state
+        .life_event_store
+        .as_ref()
+        .ok_or_else(|| "LifeEvent store not available".to_string())?;
+    let source_payload = format!(
+        "{}|{}|{}",
+        run_id, candidate.candidate_id, candidate.source_preview
+    );
+    let source_refs = vec![
+        LifeEventSourceRef::from_payload(
+            LifeEventSourceType::ChatMessage,
+            task_session_id,
+            Some(candidate.candidate_id.as_str()),
+            &source_payload,
+        ),
+        LifeEventSourceRef::from_payload(
+            LifeEventSourceType::AgentRun,
+            run_id,
+            Some(candidate.candidate_id.as_str()),
+            &source_payload,
+        ),
+    ];
+    let draft = LifeEventDraft::new(
+        life_event_type_for_candidate(candidate),
+        candidate.normalized_claim.clone(),
+    )
+    .with_source_run_id(run_id)
+    .with_metadata(serde_json::json!({
+        "candidateId": candidate.candidate_id,
+        "sourceTaskSessionId": task_session_id,
+        "sourceRunId": run_id,
+        "rawEvidencePreview": candidate.source_preview,
+        "localOnly": true,
+        "proposalRequired": false,
+        "directLifeModelWrite": false,
+        "acceptedDurableTruthWritten": false,
+        "confidence": candidate.confidence,
+        "domain": life_domain_for_candidate(candidate).to_string(),
+        "sourceDigest": candidate.candidate_id,
+    }));
+    let store = store_arc.lock().await;
+    store
+        .create_event(
+            draft,
+            source_refs,
+            life_domain_for_candidate(candidate),
+            risk_level_for_candidate(candidate),
+            privacy_level_for_candidate(candidate),
+        )
+        .map_err(|err| format!("create LifeEvent failed: {err}"))
+}
+
+async fn create_kernel_memory_governance_proposal(
+    state: &Arc<AppState>,
+    task_session_id: &str,
+    run_id: &str,
+    candidate: &MainChatMemoryCandidate,
+) -> Result<openlife_core::agent::AgentProposal, String> {
+    use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType};
+
+    let (proposal_type, affected_path, reason, risk_level, after) = match candidate.destination {
+        MemoryDestination::MemoryProposal => (
+            ProposalType::MemoryWrite,
+            "memory.pending.chat_conversation".to_string(),
+            "User requested a governed Memory proposal from Main Chat memory governance."
+                .to_string(),
+            RiskLevel::Medium,
+            serde_json::json!({
+                "content": candidate.normalized_claim,
+                "candidateId": candidate.candidate_id,
+                "candidateKind": candidate.kind,
+                "sourceEvidence": candidate.source_preview,
+                "impactPreview": memory_candidate_impact_preview(candidate),
+                "source": "main_chat_memory_governance",
+                "originatingTaskSessionId": task_session_id,
+                "sourceRunId": run_id,
+                "directMemoryWrite": false,
+                "acceptedDurableTruthWritten": false,
+                "directWritesExecuted": false,
+            }),
+        ),
+        MemoryDestination::LifeModelProposal => (
+            ProposalType::LifeModelUpdate,
+            "lifemodel.pending.chat_conversation".to_string(),
+            "User requested a governed LifeModel proposal from Main Chat memory governance."
+                .to_string(),
+            RiskLevel::High,
+            serde_json::json!({
+                "requestedChange": candidate.normalized_claim,
+                "candidateId": candidate.candidate_id,
+                "candidateKind": candidate.kind,
+                "sourceEvidence": candidate.source_preview,
+                "impactPreview": memory_candidate_impact_preview(candidate),
+                "source": "main_chat_memory_governance",
+                "originatingTaskSessionId": task_session_id,
+                "sourceRunId": run_id,
+                "directLifeModelWrite": false,
+                "acceptedDurableTruthWritten": false,
+                "directWritesExecuted": false,
+            }),
+        ),
+        _ => return Err("candidate destination cannot create proposal".into()),
+    };
+
+    let mut proposal = AgentProposal::new(
+        proposal_type,
+        &affected_path,
+        after,
+        &reason,
+        candidate.confidence,
+        risk_level,
+        ProposalSource::MemoryGovernance,
+    );
+    proposal.run_id = Some(run_id.to_string());
+    proposal.source_detail = Some(format!(
+        "main_chat_agent_task_session:{task_session_id};candidate:{}",
+        candidate.candidate_id
+    ));
+    crate::life_model_write_gateway::stamp_lifemodel_proposal_base_hash_with_state(
+        state,
+        &mut proposal,
+    )
+    .await?;
+
+    let store_arc = state
+        .proposal_store
+        .as_ref()
+        .ok_or_else(|| "Proposal store not available".to_string())?;
+    let store = store_arc.lock().await;
+    let outcome = openlife_core::agent::ReviewWorkflow::new(&store)
+        .submit(
+            openlife_core::agent::DurableWriteRequest::from_agent_proposal(
+                openlife_core::agent::DurableWriteSource::MainChat,
+                openlife_core::agent::DurableWriteSubject::from_proposal_type(
+                    proposal.proposal_type,
+                ),
+                proposal.clone(),
+                "Main Chat memory governance proposal is pending Review Center approval.",
+            )
+            .with_evidence_refs(vec![
+                format!("main_chat_task_session:{task_session_id}"),
+                format!("memory_candidate:{}", candidate.candidate_id),
+            ]),
+        )
+        .map_err(|err| format!("create memory governance proposal failed: {err}"))?;
+    Ok(outcome.proposal)
+}
+
+fn memory_governance_metadata(
+    routing: &MainChatMemoryRoutingResult,
+    life_event_ids: &[String],
+    memory_proposal_ids: &[String],
+    lifemodel_proposal_ids: &[String],
+    blockers: &[String],
+) -> serde_json::Value {
+    serde_json::json!({
+        "candidateCount": routing.candidates.len(),
+        "candidateTrace": routing.candidates.iter().map(memory_candidate_trace).collect::<Vec<_>>(),
+        "lifeEventIds": life_event_ids,
+        "memoryProposalIds": memory_proposal_ids,
+        "lifeModelProposalIds": lifemodel_proposal_ids,
+        "sessionOnlyCandidateIds": routing.session_only_candidate_ids,
+        "noOpCandidateIds": routing.no_op_candidate_ids,
+        "blockers": blockers,
+        "directWritesExecuted": false,
+        "directLifeModelWrite": false,
+        "directMemoryWrite": false,
+        "acceptedDurableTruthWritten": false,
+        "localLifeEventCaptureExecuted": !life_event_ids.is_empty(),
+    })
+}
+
+fn empty_memory_governance_metadata() -> serde_json::Value {
+    serde_json::json!({
+        "candidateCount": 0,
+        "candidateTrace": [],
+        "lifeEventIds": [],
+        "memoryProposalIds": [],
+        "lifeModelProposalIds": [],
+        "sessionOnlyCandidateIds": [],
+        "noOpCandidateIds": [],
+        "blockers": [],
+        "directWritesExecuted": false,
+        "directLifeModelWrite": false,
+        "directMemoryWrite": false,
+        "acceptedDurableTruthWritten": false,
+        "localLifeEventCaptureExecuted": false,
+    })
+}
+
+fn memory_candidate_trace(candidate: &MainChatMemoryCandidate) -> serde_json::Value {
+    serde_json::json!({
+        "candidateId": candidate.candidate_id,
+        "sourceSpanId": candidate.source_span_id,
+        "kind": candidate.kind,
+        "destination": candidate.destination,
+        "sourcePreview": candidate.source_preview,
+        "normalizedClaim": candidate.normalized_claim,
+        "sensitivity": candidate.sensitivity,
+        "stability": candidate.stability,
+        "explicitness": candidate.explicitness,
+        "futureActionability": candidate.future_actionability,
+        "confidence": candidate.confidence,
+        "reasonCodes": candidate.reason_codes,
+    })
+}
+
+fn find_memory_candidate<'a>(
+    routing: &'a MainChatMemoryRoutingResult,
+    candidate_id: &str,
+) -> Option<&'a MainChatMemoryCandidate> {
+    routing
+        .candidates
+        .iter()
+        .find(|candidate| candidate.candidate_id == candidate_id)
+}
+
+fn memory_candidate_impact_preview(candidate: &MainChatMemoryCandidate) -> &'static str {
+    match candidate.destination {
+        MemoryDestination::MemoryProposal => "确认后会影响 Memory 检索和未来回答的用户事实上下文。",
+        MemoryDestination::LifeModelProposal => {
+            "确认后会影响 LifeModel 规划、未来建议和行为规则选择。"
+        }
+        _ => "本地记录只作为生活事件证据，不会直接写入 accepted Memory 或 LifeModel。",
+    }
+}
+
+fn life_event_type_for_candidate(candidate: &MainChatMemoryCandidate) -> &'static str {
+    match candidate.kind {
+        MemoryCandidateKind::EpisodicLifeEvent => "main_chat.episodic_life_event",
+        _ => "main_chat.life_event",
+    }
+}
+
+fn life_domain_for_candidate(candidate: &MainChatMemoryCandidate) -> LifeDomain {
+    let claim = candidate.normalized_claim.to_ascii_lowercase();
+    if contains_any(&claim, &["心慌", "头疼", "身体", "胃", "health", "medical"]) {
+        LifeDomain::Health
+    } else if contains_any(&claim, &["犯困", "sleep", "睡", "tired"]) {
+        LifeDomain::StateEnergy
+    } else if contains_any(&claim, &["工作", "任务", "work", "task"]) {
+        LifeDomain::WorkStyle
+    } else {
+        LifeDomain::Other
+    }
+}
+
+fn risk_level_for_candidate(candidate: &MainChatMemoryCandidate) -> RiskLevel {
+    if candidate.sensitivity == "sensitive" {
+        RiskLevel::Medium
+    } else {
+        RiskLevel::Low
+    }
+}
+
+fn privacy_level_for_candidate(candidate: &MainChatMemoryCandidate) -> LifeEventPrivacyLevel {
+    if candidate.sensitivity == "sensitive"
+        || contains_any(
+            &candidate.normalized_claim,
+            &["心慌", "身体", "空腹", "健康", "医疗"],
+        )
+    {
+        LifeEventPrivacyLevel::StrictlyLocal
+    } else {
+        LifeEventPrivacyLevel::Sensitive
+    }
+}
+
+fn synthesize_memory_governance_reply(memory_governance: &serde_json::Value) -> String {
+    let life_event_count = memory_governance
+        .get("lifeEventIds")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let memory_proposal_count = memory_governance
+        .get("memoryProposalIds")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let lifemodel_proposal_count = memory_governance
+        .get("lifeModelProposalIds")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let mut lines = Vec::new();
+    if life_event_count > 0 {
+        lines.push(format!("已记录到本地生活事件：{life_event_count} 条。"));
+    }
+    if memory_proposal_count > 0 {
+        lines.push(format!(
+            "待确认记忆：{memory_proposal_count} 条，去 Mailbox 审批后才会进入 Memory。"
+        ));
+    }
+    if lifemodel_proposal_count > 0 {
+        lines.push(format!("待确认 LifeModel 更新：{lifemodel_proposal_count} 条，审批前不会写入 accepted LifeModel。"));
+    }
+    if lines.is_empty() {
+        lines.push("这次没有产生可持久化的记忆治理产物。".into());
+    }
+    lines.push("没有执行直接 Memory 写入或 accepted LifeModel 写入。".into());
+    lines.join("\n")
+}
+
+fn push_unique_string(values: &mut Vec<String>, value: &str) {
+    if !values.iter().any(|existing| existing == value) {
+        values.push(value.to_string());
     }
 }
 
@@ -3914,7 +4804,7 @@ async fn attach_kernel_tool_permission_proposal_identity(
     };
 
     let (input_length_bytes, input_hash) =
-        openlife_core::agent::react_beta::metadata_safe_value_digest(&call.governed_input);
+        openlife_core::agent::metadata_safe::metadata_safe_value_digest(&call.governed_input);
     let blocked_action = serde_json::json!({
         "action_type": call.action_type,
         "target": metadata
@@ -4213,7 +5103,7 @@ fn build_kernel_hs_context(
         )
     });
     let summary_digest = summary_content.as_ref().map(|content| {
-        let (bytes, hash) = openlife_core::agent::react_beta::metadata_safe_text_digest(content);
+        let (bytes, hash) = openlife_core::agent::metadata_safe::metadata_safe_text_digest(content);
         format!("bytes:{bytes} hash:{hash}")
     });
     let summary_chars = summary_content
@@ -4311,7 +5201,21 @@ fn render_kernel_hs_summary(
     let accepted_guidance_count = packet
         .map(|packet| packet.guidance_refs.len())
         .unwrap_or_default();
-    let current_focus = bounded_label(&life_model.state.current_focus, MAX_REASON_CHARS);
+    let default_life_model = LifeModel::default_model();
+    let current_focus = if life_model.state.current_focus == default_life_model.state.current_focus
+    {
+        String::new()
+    } else {
+        bounded_label(&life_model.state.current_focus, MAX_REASON_CHARS)
+    };
+    let energy_level = if life_model.state.health_status.energy_level == 0
+        || life_model.state.health_status.energy_level
+            == default_life_model.state.health_status.energy_level
+    {
+        "unknown".to_string()
+    } else {
+        life_model.state.health_status.energy_level.to_string()
+    };
     let identity_name_present = !life_model.identity.name.trim().is_empty();
     let active_goal_count = life_model
         .goals
@@ -4333,7 +5237,7 @@ fn render_kernel_hs_summary(
         } else {
             included_sections.join(",")
         },
-        life_model.state.health_status.energy_level,
+        energy_level,
         if current_focus.is_empty() {
             "none".into()
         } else {
@@ -4426,12 +5330,51 @@ fn kernel_memory_search_read_tool_decision(
     }
 }
 
+fn kernel_web_search_read_tool_decision(
+    query: &str,
+    governed_input_source: &str,
+    reason: &str,
+    model_arguments_ignored: bool,
+) -> MainChatKernelReadToolDecision {
+    MainChatKernelReadToolDecision {
+        tool_name: "web.search".into(),
+        queue_action_type: "web.search".into(),
+        executor_action_type: "mcp_tool".into(),
+        requested_target: "web.search".into(),
+        target: "web.search".into(),
+        governed_input: serde_json::json!({
+            "query": bounded_text(query, MAX_TOOL_QUERY_CHARS),
+            "max_results": 5,
+            "governedInputSource": governed_input_source,
+        }),
+        reason: reason.into(),
+        model_arguments_ignored,
+        fixture_backed_read: false,
+        selection_metadata: Some(serde_json::json!({
+            "kernelToolSelection": true,
+            "toolSelectionCandidateCount": 1,
+            "boundedCandidateIds": ["web.search"],
+            "targetAllowlist": ["web.search"],
+            "actionTargetAllowlist": [{ "actionType": "mcp_tool", "target": "web.search" }],
+            "toolSelectionModelRanked": false,
+            "toolSelectionRankingSource": "deterministic_local",
+            "toolSelectionDeterministicFallbackReady": true,
+            "toolSelectionProviderRankingRequiredForLocalCompletion": false,
+            "selectedCandidateId": "web.search",
+            "selectedCandidateTarget": "web.search",
+            "selectedCandidateActionType": "mcp_tool",
+            "selectedCandidateRank": 1,
+        })),
+    }
+}
+
 fn plan_kernel_read_tool(
     input: &MainChatTurnInput,
     model_arguments_ignored: bool,
 ) -> Option<MainChatKernelReadToolDecision> {
     let user_text = latest_user_text(&input.messages)?;
     let lower = user_text.to_ascii_lowercase();
+    let governance_intent = classify_main_chat_governance_intent(user_text);
 
     if contains_any(
         &lower,
@@ -4459,6 +5402,15 @@ fn plan_kernel_read_tool(
         });
     }
 
+    if governance_intent.external_read_requirement.is_some() {
+        return Some(kernel_web_search_read_tool_decision(
+            user_text,
+            "kernel_external_fact_query_from_governance_intent",
+            "current external fact read requires governed web search evidence",
+            model_arguments_ignored,
+        ));
+    }
+
     if contains_any(
         &lower,
         &[
@@ -4471,36 +5423,12 @@ fn plan_kernel_read_tool(
             "network unavailable",
         ],
     ) {
-        return Some(MainChatKernelReadToolDecision {
-            tool_name: "web.search".into(),
-            queue_action_type: "web.search".into(),
-            executor_action_type: "mcp_tool".into(),
-            requested_target: "web.search".into(),
-            target: "web.search".into(),
-            governed_input: serde_json::json!({
-                "query": bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
-                "max_results": 5,
-                "governedInputSource": "kernel_web_search_query_from_user_text",
-            }),
-            reason: "governed web search requested".into(),
+        return Some(kernel_web_search_read_tool_decision(
+            user_text,
+            "kernel_web_search_query_from_user_text",
+            "governed web search requested",
             model_arguments_ignored,
-            fixture_backed_read: false,
-            selection_metadata: Some(serde_json::json!({
-                "kernelToolSelection": true,
-                "toolSelectionCandidateCount": 1,
-                "boundedCandidateIds": ["web.search"],
-                "targetAllowlist": ["web.search"],
-                "actionTargetAllowlist": [{ "actionType": "mcp_tool", "target": "web.search" }],
-                "toolSelectionModelRanked": false,
-                "toolSelectionRankingSource": "deterministic_local",
-                "toolSelectionDeterministicFallbackReady": true,
-                "toolSelectionProviderRankingRequiredForLocalCompletion": false,
-                "selectedCandidateId": "web.search",
-                "selectedCandidateTarget": "web.search",
-                "selectedCandidateActionType": "mcp_tool",
-                "selectedCandidateRank": 1,
-            })),
-        });
+        ));
     }
 
     if lower.contains("http://") || lower.contains("https://") || lower.contains("web.fetch") {
@@ -4659,6 +5587,171 @@ fn looks_like_workspace_file_read_request(lower: &str) -> bool {
         )
 }
 
+fn compact_memory_candidate(value: &str) -> String {
+    value
+        .replace(['\n', '\r', '\t'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_matches(|c: char| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    ':' | '：' | ',' | '，' | '.' | '。' | '!' | '！' | '-' | '—'
+                )
+        })
+        .trim()
+        .to_string()
+}
+
+fn strip_memory_after_trigger_prefix(value: &str) -> String {
+    let mut candidate = compact_memory_candidate(value);
+    for prefix in ["that ", "that: ", "this: ", "这个：", "这个:", "：", ":"] {
+        if candidate.to_ascii_lowercase().starts_with(prefix) {
+            candidate = compact_memory_candidate(&candidate[prefix.len()..]);
+        }
+    }
+    candidate
+}
+
+fn looks_like_instruction_fragment(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    contains_any(
+        &lower,
+        &[
+            "locally if appropriate",
+            "if appropriate",
+            "give me",
+            "next step",
+            "practical next",
+            "please",
+            "do not",
+            "don't",
+            "不要",
+            "不允许",
+        ],
+    )
+}
+
+fn meaningful_memory_candidate(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.chars().count() >= 8 && !looks_like_instruction_fragment(trimmed)
+}
+
+fn plan_kernel_memory_governance(input: &MainChatTurnInput) -> Option<MainChatMemoryRoutingResult> {
+    let user_text = latest_user_text(&input.messages)?;
+    let routing = plan_main_chat_memory_routing(user_text);
+    memory_governance_has_artifacts(Some(&routing)).then_some(routing)
+}
+
+fn memory_governance_has_artifacts(routing: Option<&MainChatMemoryRoutingResult>) -> bool {
+    routing.is_some_and(|routing| {
+        !routing.life_event_candidate_ids.is_empty()
+            || !routing.memory_proposal_candidate_ids.is_empty()
+            || !routing.lifemodel_proposal_candidate_ids.is_empty()
+    })
+}
+
+fn memory_governance_compatible_write_outcome(
+    routing: &MainChatMemoryRoutingResult,
+    outcome: &MainChatKernelWriteOutcome,
+) -> Option<MainChatKernelWriteOutcome> {
+    let single_memory_proposal = routing.life_event_candidate_ids.is_empty()
+        && routing.lifemodel_proposal_candidate_ids.is_empty()
+        && routing.memory_proposal_candidate_ids.len() == 1;
+    let single_lifemodel_proposal = routing.life_event_candidate_ids.is_empty()
+        && routing.memory_proposal_candidate_ids.is_empty()
+        && routing.lifemodel_proposal_candidate_ids.len() == 1;
+    let compatible = matches!(
+        (
+            single_memory_proposal,
+            single_lifemodel_proposal,
+            outcome.kind
+        ),
+        (true, false, MainChatKernelWriteOutcomeKind::MemoryProposal)
+            | (
+                false,
+                true,
+                MainChatKernelWriteOutcomeKind::LifeModelProposal
+            )
+    );
+    if !compatible {
+        return None;
+    }
+
+    let mut compatible_outcome = outcome.clone();
+    if let Some(input) = compatible_outcome.governed_input.as_object_mut() {
+        input.insert(
+            "governedInputSource".into(),
+            serde_json::Value::String("kernel_memory_governance".into()),
+        );
+        input.insert(
+            "directWritesExecuted".into(),
+            serde_json::Value::Bool(false),
+        );
+        input.insert("directMemoryWrite".into(), serde_json::Value::Bool(false));
+        input.insert(
+            "directLifeModelWrite".into(),
+            serde_json::Value::Bool(false),
+        );
+        input.insert(
+            "acceptedDurableTruthWritten".into(),
+            serde_json::Value::Bool(false),
+        );
+        input.insert(
+            "memoryGovernanceCandidateCount".into(),
+            serde_json::json!(routing.candidates.len()),
+        );
+    } else {
+        compatible_outcome.governed_input = serde_json::json!({
+            "governedInputSource": "kernel_memory_governance",
+            "directWritesExecuted": false,
+            "directMemoryWrite": false,
+            "directLifeModelWrite": false,
+            "acceptedDurableTruthWritten": false,
+            "memoryGovernanceCandidateCount": routing.candidates.len(),
+        });
+    }
+    Some(compatible_outcome)
+}
+
+fn extract_memory_proposal_content(user_text: &str) -> String {
+    let lower = user_text.to_ascii_lowercase();
+    let triggers = [
+        "please remember this",
+        "remember this",
+        "please remember",
+        "remember that",
+        "remember",
+        "save this",
+        "记住这个",
+        "请记住",
+        "帮我记一下",
+        "记一下",
+        "记住",
+        "保存这个",
+        "记下来",
+        "加入记忆",
+    ];
+
+    for trigger in triggers {
+        if let Some(pos) = lower.find(trigger) {
+            let before = compact_memory_candidate(&user_text[..pos]);
+            if meaningful_memory_candidate(&before) {
+                return bounded_text(&before, MAX_TOOL_OBSERVATION_PREVIEW_CHARS);
+            }
+
+            let after_start = pos + trigger.len();
+            let after = strip_memory_after_trigger_prefix(&user_text[after_start..]);
+            if meaningful_memory_candidate(&after) {
+                return bounded_text(&after, MAX_TOOL_OBSERVATION_PREVIEW_CHARS);
+            }
+        }
+    }
+
+    bounded_text(user_text, MAX_TOOL_OBSERVATION_PREVIEW_CHARS)
+}
+
 fn plan_kernel_write_outcome(
     input: &MainChatTurnInput,
     model_arguments_ignored: bool,
@@ -4666,8 +5759,12 @@ fn plan_kernel_write_outcome(
     let user_text = latest_user_text(&input.messages)?;
     let lower = user_text.to_ascii_lowercase();
     let selected_strategy = input.selected_strategy;
+    let governance_intent = classify_main_chat_governance_intent(user_text);
 
-    if is_dangerous_shell_write_intent(&lower) {
+    if is_dangerous_shell_write_intent(&lower)
+        || governance_intent.blocker_requirement
+            == Some(MainChatBlockerRequirement::DangerousLocalWrite)
+    {
         return Some(MainChatKernelWriteOutcome {
             kind: MainChatKernelWriteOutcomeKind::DangerousHardBlock,
             action_type: "shell.destructive".into(),
@@ -4690,9 +5787,12 @@ fn plan_kernel_write_outcome(
     }
 
     if (selected_strategy == Some(MainChatAgentStrategy::MemoryProposal)
-        || is_memory_write_intent(&lower))
+        || is_memory_write_intent(&lower)
+        || governance_intent.durable_write_requirement
+            == Some(MainChatDurableWriteRequirement::MemoryProposal))
         && !user_text_requests_memory_proposal_after_read(user_text)
     {
+        let memory_content = extract_memory_proposal_content(user_text);
         return Some(MainChatKernelWriteOutcome {
             kind: MainChatKernelWriteOutcomeKind::MemoryProposal,
             action_type: "proposal.create".into(),
@@ -4700,7 +5800,7 @@ fn plan_kernel_write_outcome(
             reason: "memory write request must create a governed Memory proposal".into(),
             payload_summary: bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
             governed_input: serde_json::json!({
-                "content": bounded_text(user_text, MAX_TOOL_OBSERVATION_PREVIEW_CHARS),
+                "content": memory_content,
                 "governedInputSource": "kernel_memory_write_proposal",
                 "directMemoryWrite": false,
                 "directWritesExecuted": false,
@@ -4716,6 +5816,8 @@ fn plan_kernel_write_outcome(
 
     if selected_strategy == Some(MainChatAgentStrategy::LifeModelProposal)
         || is_lifemodel_write_intent(&lower)
+        || governance_intent.durable_write_requirement
+            == Some(MainChatDurableWriteRequirement::LifeModelProposal)
     {
         let target = main_chat_lifemodel_write_target(user_text);
         return Some(MainChatKernelWriteOutcome {
@@ -4768,6 +5870,8 @@ fn plan_kernel_write_outcome(
 
     if selected_strategy == Some(MainChatAgentStrategy::BlockedConfirmation)
         || is_external_write_intent(&lower)
+        || governance_intent.blocker_requirement
+            == Some(MainChatBlockerRequirement::ExternalWriteConfirmation)
     {
         return Some(MainChatKernelWriteOutcome {
             kind: MainChatKernelWriteOutcomeKind::ExternalConfirmationBlocker,
@@ -4795,6 +5899,7 @@ fn plan_kernel_write_outcome(
 }
 
 fn kernel_followup_memory_proposal_outcome(user_text: &str) -> MainChatKernelWriteOutcome {
+    let memory_content = extract_memory_proposal_content(user_text);
     MainChatKernelWriteOutcome {
         kind: MainChatKernelWriteOutcomeKind::MemoryProposal,
         action_type: "proposal.create".into(),
@@ -4802,7 +5907,7 @@ fn kernel_followup_memory_proposal_outcome(user_text: &str) -> MainChatKernelWri
         reason: "memory proposal requested after a governed read".into(),
         payload_summary: bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
         governed_input: serde_json::json!({
-            "content": bounded_text(user_text, MAX_TOOL_OBSERVATION_PREVIEW_CHARS),
+            "content": memory_content,
             "governedInputSource": "kernel_read_followup_memory_proposal",
             "directMemoryWrite": false,
             "directWritesExecuted": false,
@@ -4975,6 +6080,196 @@ fn action_execution_status_label(status: &ActionExecutionStatus) -> &'static str
         ActionExecutionStatus::Blocked => "blocked",
         ActionExecutionStatus::NeedsConfirmation => "needs_confirmation",
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct DirectAnswerEvidenceBlocker {
+    code: String,
+    replacement_reply: String,
+}
+
+fn assert_direct_answer_has_required_evidence(
+    user_text: &str,
+    reply: &str,
+    tool_observation_count: usize,
+    proposal_count: usize,
+    life_event_count: usize,
+) -> Result<(), DirectAnswerEvidenceBlocker> {
+    let governance_intent = classify_main_chat_governance_intent(user_text);
+    if (governance_intent.external_read_requirement.is_some()
+        || direct_answer_claims_external_fact_read(reply))
+        && tool_observation_count == 0
+    {
+        return Err(DirectAnswerEvidenceBlocker {
+            code: "external_fact_read_unavailable".into(),
+            replacement_reply: [
+                "I did not read live external data for this turn, so I cannot state current weather or other outside facts as verified.",
+                "Enable a governed read-only tool such as web.search, or ask for offline planning advice instead.",
+            ]
+            .join(" "),
+        });
+    }
+
+    if (governance_intent.durable_write_requirement.is_some()
+        || direct_answer_claims_durable_write(reply))
+        && proposal_count == 0
+    {
+        return Err(DirectAnswerEvidenceBlocker {
+            code: "proposal_review_required".into(),
+            replacement_reply:
+                "I have not written this into long-term memory or the Life Model. This needs a review proposal before any durable update."
+                    .into(),
+        });
+    }
+
+    if direct_answer_claims_life_event_capture(reply) && life_event_count == 0 {
+        return Err(DirectAnswerEvidenceBlocker {
+            code: "life_event_evidence_required".into(),
+            replacement_reply: "I have not recorded a local LifeEvent for this turn. I can only treat this as the current conversation unless local LifeEvent capture returns a typed lifeEventId."
+                .into(),
+        });
+    }
+
+    Ok(())
+}
+
+fn direct_answer_claims_external_fact_read(reply: &str) -> bool {
+    let lower = reply.to_ascii_lowercase();
+    if contains_any(
+        &lower,
+        &[
+            "did not read",
+            "didn't read",
+            "did not check",
+            "didn't check",
+            "no live data",
+            "没有读取",
+            "没有查",
+            "未读取",
+            "未查询",
+            "无法查询",
+            "不能查询",
+        ],
+    ) {
+        return false;
+    }
+
+    contains_any(
+        &lower,
+        &[
+            "i checked",
+            "i found",
+            "i looked up",
+            "according to the latest",
+            "current weather",
+            "live weather",
+            "weather is",
+            "it will rain",
+            "查到",
+            "查询到",
+            "我查",
+            "我看了",
+            "根据最新",
+            "实时",
+            "当前天气",
+            "会下雨",
+            "不会下雨",
+        ],
+    ) && contains_any(
+        &lower,
+        &[
+            "weather",
+            "rain",
+            "traffic",
+            "business hours",
+            "price",
+            "exchange rate",
+            "news",
+            "flight",
+            "天气",
+            "下雨",
+            "雨",
+            "带伞",
+            "路况",
+            "营业",
+            "价格",
+            "汇率",
+            "新闻",
+            "航班",
+        ],
+    )
+}
+
+fn direct_answer_claims_durable_write(reply: &str) -> bool {
+    let lower = reply.to_ascii_lowercase();
+    if contains_any(
+        &lower,
+        &[
+            "not written",
+            "not saved",
+            "did not save",
+            "didn't save",
+            "proposal",
+            "还没有",
+            "没有写入",
+            "未写入",
+            "没有保存",
+            "未保存",
+        ],
+    ) {
+        return false;
+    }
+
+    contains_any(
+        &lower,
+        &[
+            "i remembered",
+            "i have remembered",
+            "saved to memory",
+            "added to memory",
+            "added to your life model",
+            "i will remember",
+            "我记住了",
+            "我已经记住",
+            "已经记住",
+            "记下来了",
+            "已记下",
+            "写入长期记忆",
+            "加入长期记忆",
+            "加入 life model",
+            "加入lifemodel",
+            "以后会按",
+        ],
+    )
+}
+
+fn direct_answer_claims_life_event_capture(reply: &str) -> bool {
+    let lower = reply.to_ascii_lowercase();
+    if contains_any(
+        &lower,
+        &[
+            "not recorded",
+            "did not record",
+            "no lifeevent",
+            "没有记录",
+            "未记录",
+            "没有写入",
+        ],
+    ) {
+        return false;
+    }
+    contains_any(
+        &lower,
+        &[
+            "recorded to local lifeevent",
+            "recorded a local lifeevent",
+            "logged this life event",
+            "已记录到本地生活事件",
+            "已记录生活事件",
+            "记录到 lifeevent",
+            "记录到本地",
+        ],
+    )
 }
 
 fn synthesize_read_tool_answer(execution: &MainChatKernelReadToolExecution) -> String {
@@ -6156,6 +7451,164 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn main_chat_kernel_chinese_memory_governance_plans_without_model_even_if_strategy_is_direct(
+    ) {
+        let model = ScriptedModelClient::ok("model should not be called");
+        let kernel = test_kernel(model.clone(), Vec::new());
+        let mut events = BufferedMainChatEventSink::default();
+
+        let result = kernel
+            .run_turn(
+                MainChatTurnInput {
+                    session_id: "session-chinese-memory".into(),
+                    messages: vec![user_message(
+                        "今天空腹喝咖啡后赶路时心慌，香蕉酸奶有缓解，帮我记下来。以后早上安排工作前先确认我有没有吃东西。",
+                    )],
+                    selected_skill_id: None,
+                    selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
+                    model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
+                },
+                &mut events,
+            )
+            .await;
+
+        assert_eq!(model.call_count(), 0);
+        assert!(result.write_outcome.is_none());
+        let memory_governance = result
+            .memory_governance
+            .as_ref()
+            .expect("memory governance");
+        assert_eq!(memory_governance.life_event_candidate_ids.len(), 1);
+        assert_eq!(memory_governance.memory_proposal_candidate_ids.len(), 1);
+        assert_eq!(memory_governance.lifemodel_proposal_candidate_ids.len(), 1);
+        assert!(memory_governance.blockers.is_empty());
+        assert!(!result.direct_writes_executed);
+        assert!(result.tool_calls.is_empty());
+        assert!(events.events().iter().any(|event| {
+            matches!(
+                event,
+                MainChatKernelEvent::ToolDecision {
+                    tool_name,
+                    action_type,
+                    ..
+                } if tool_name == "memory.governance" && action_type == "memory.governance.plan"
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn main_chat_kernel_chinese_current_weather_request_uses_web_search_evidence() {
+        let model = ScriptedModelClient::ok("model should not be called");
+        let decisions = Arc::new(Mutex::new(Vec::new()));
+        let kernel = test_kernel(model.clone(), Vec::new()).with_read_tool_executor(Arc::new(
+            RecordingReadToolExecutor {
+                decisions: decisions.clone(),
+            },
+        ));
+        let mut events = BufferedMainChatEventSink::default();
+
+        let result = kernel
+            .run_turn(
+                MainChatTurnInput {
+                    session_id: "session-chinese-weather".into(),
+                    messages: vec![user_message("帮我看一下今天上海会不会下雨，我要不要带伞")],
+                    selected_skill_id: None,
+                    selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
+                    model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
+                },
+                &mut events,
+            )
+            .await;
+
+        assert_eq!(model.call_count(), 0);
+        assert!(result.blockers.is_empty());
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "web.search");
+        assert_eq!(
+            result.tool_calls[0].governed_input["governedInputSource"],
+            serde_json::json!("kernel_external_fact_query_from_governance_intent")
+        );
+        assert!(result
+            .assistant_message
+            .as_ref()
+            .is_some_and(|message| message.content.contains("fake governed read observation")));
+        let recorded = decisions.lock().expect("decisions lock");
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].tool_name, "web.search");
+    }
+
+    #[tokio::test]
+    async fn main_chat_kernel_direct_answer_guard_blocks_external_fact_claim_without_tool_evidence()
+    {
+        let model = ScriptedModelClient::ok("我查到今天上海不会下雨，不用带伞。");
+        let kernel = test_kernel(model.clone(), Vec::new());
+        let mut events = BufferedMainChatEventSink::default();
+
+        let result = kernel
+            .run_turn(
+                MainChatTurnInput {
+                    session_id: "session-direct-guard-weather".into(),
+                    messages: vec![user_message("给我一句普通生活建议。")],
+                    selected_skill_id: None,
+                    selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
+                    model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
+                },
+                &mut events,
+            )
+            .await;
+
+        assert_eq!(model.call_count(), 1);
+        assert_eq!(result.blockers, vec!["external_fact_read_unavailable"]);
+        let reply = result
+            .assistant_message
+            .as_ref()
+            .map(|message| message.content.as_str())
+            .expect("guard reply");
+        assert!(reply.contains("did not read live external data"));
+        assert!(!reply.contains("不会下雨"));
+        assert!(events.events().iter().any(|event| {
+            matches!(event, MainChatKernelEvent::Blocker { code } if code == "external_fact_read_unavailable")
+        }));
+    }
+
+    #[tokio::test]
+    async fn main_chat_kernel_direct_answer_guard_blocks_durable_write_claim_without_proposal() {
+        let model = ScriptedModelClient::ok("我已经记住了，以后会按这个处理。");
+        let kernel = test_kernel(model.clone(), Vec::new());
+        let mut events = BufferedMainChatEventSink::default();
+
+        let result = kernel
+            .run_turn(
+                MainChatTurnInput {
+                    session_id: "session-direct-guard-memory".into(),
+                    messages: vec![user_message("给我一句普通生活建议。")],
+                    selected_skill_id: None,
+                    selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
+                    model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
+                },
+                &mut events,
+            )
+            .await;
+
+        assert_eq!(model.call_count(), 1);
+        assert_eq!(result.blockers, vec!["proposal_review_required"]);
+        let reply = result
+            .assistant_message
+            .as_ref()
+            .map(|message| message.content.as_str())
+            .expect("guard reply");
+        assert!(reply.contains("not written this into long-term memory"));
+        assert!(!reply.contains("已经记住"));
+        assert!(result.tool_calls.is_empty());
+        assert!(result.proposals.is_empty());
+        assert!(!result.direct_writes_executed);
+    }
+
+    #[tokio::test]
     async fn main_chat_kernel_empty_input_returns_named_blocker_without_model_call() {
         let model = ScriptedModelClient::ok("should not be called");
         let kernel = test_kernel(model.clone(), Vec::new());
@@ -6409,15 +7862,53 @@ mod tests {
             outcome.blocker_code.as_deref(),
             Some("proposal_review_required")
         );
+        assert_eq!(
+            outcome
+                .governed_input
+                .get("governedInputSource")
+                .and_then(Value::as_str),
+            Some("kernel_memory_governance")
+        );
+        assert_eq!(
+            outcome
+                .governed_input
+                .get("directMemoryWrite")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            outcome
+                .governed_input
+                .get("directLifeModelWrite")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            outcome
+                .governed_input
+                .get("acceptedDurableTruthWritten")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        let memory_governance = result
+            .memory_governance
+            .as_ref()
+            .expect("memory governance");
+        assert_eq!(memory_governance.memory_proposal_candidate_ids.len(), 1);
+        assert!(memory_governance.life_event_candidate_ids.is_empty());
+        assert!(memory_governance
+            .lifemodel_proposal_candidate_ids
+            .is_empty());
         assert!(!outcome.hard_blocked);
         assert!(!result.direct_writes_executed);
         assert!(events.events().iter().any(|event| {
             matches!(
                 event,
-                MainChatKernelEvent::WriteIntentDecision {
-                    outcome_kind: MainChatKernelWriteOutcomeKind::MemoryProposal,
+                MainChatKernelEvent::ToolDecision {
+                    tool_name,
+                    action_type,
                     ..
-                }
+                } if tool_name == "memory.governance" && action_type == "memory.governance.plan"
             )
         }));
     }
@@ -6458,6 +7949,37 @@ mod tests {
         assert!(outcome.hard_blocked);
         assert!(!outcome.replayable);
         assert!(!result.direct_writes_executed);
+    }
+
+    #[test]
+    fn main_chat_kernel_hs_summary_does_not_treat_default_state_as_fact() {
+        let life_model = LifeModel::default_model();
+        let summary = render_kernel_hs_summary(
+            &life_model,
+            &["state".to_string()],
+            None,
+            "hs_selector.audit:none",
+            "unknown",
+            "private",
+            &[],
+        );
+
+        assert!(summary.contains("energy_level: unknown"));
+        assert!(summary.contains("current_focus: none"));
+        assert!(!summary.contains("energy_level: 7"));
+        assert!(!summary.contains("current_focus: 构建人生模型"));
+
+        let empty_summary = render_kernel_hs_summary(
+            &LifeModel::default(),
+            &["state".to_string()],
+            None,
+            "hs_selector.audit:none",
+            "unknown",
+            "private",
+            &[],
+        );
+        assert!(empty_summary.contains("energy_level: unknown"));
+        assert!(!empty_summary.contains("energy_level: 0"));
     }
 
     #[tokio::test]
@@ -6592,6 +8114,18 @@ mod tests {
             outcome.blocker_code.as_deref(),
             Some("proposal_review_required")
         );
+        assert_eq!(
+            outcome
+                .governed_input
+                .get("governedInputSource")
+                .and_then(Value::as_str),
+            Some("kernel_memory_governance")
+        );
+        assert!(result.memory_governance.as_ref().is_some_and(|routing| {
+            routing.memory_proposal_candidate_ids.len() == 1
+                && routing.life_event_candidate_ids.is_empty()
+                && routing.lifemodel_proposal_candidate_ids.is_empty()
+        }));
         assert!(!result.direct_writes_executed);
         assert!(!result.legacy_fallback_used);
         assert!(result
@@ -6633,6 +8167,21 @@ mod tests {
             life_model_outcome.blocker_code.as_deref(),
             Some("proposal_review_required")
         );
+        assert_eq!(
+            life_model_outcome
+                .governed_input
+                .get("governedInputSource")
+                .and_then(Value::as_str),
+            Some("kernel_memory_governance")
+        );
+        assert!(life_model_result
+            .memory_governance
+            .as_ref()
+            .is_some_and(|routing| {
+                routing.lifemodel_proposal_candidate_ids.len() == 1
+                    && routing.life_event_candidate_ids.is_empty()
+                    && routing.memory_proposal_candidate_ids.is_empty()
+            }));
         assert!(!life_model_result.direct_writes_executed);
         assert!(!life_model_result.legacy_fallback_used);
     }
@@ -6822,16 +8371,18 @@ mod tests {
     }
 
     #[test]
-    fn main_chat_kernel_goal_2_send_and_stream_use_kernel_direct_answer_adapter() {
+    fn main_chat_kernel_is_subordinate_to_openlife_turn_runtime_command_surface() {
         let send_source = include_str!("main_chat_send.rs");
         let stream_source = include_str!("main_chat_streaming.rs");
-        let pipeline_source = include_str!("main_chat_turn_pipeline.rs");
+        let runtime_source = include_str!("main_chat_turn_runtime.rs");
 
-        assert!(send_source.contains("run_main_chat_turn_pipeline_buffered"));
-        assert!(stream_source.contains("run_main_chat_turn_pipeline_streaming"));
-        assert!(pipeline_source.contains("run_main_chat_kernel_direct_answer_with_state"));
-        assert!(pipeline_source.contains("BufferedMainChatEventSink"));
-        assert!(pipeline_source.contains("StreamingMainChatEventSink"));
+        assert!(send_source.contains("OpenLifeTurnRuntime::new("));
+        assert!(stream_source.contains("OpenLifeTurnRuntime::new("));
+        assert!(runtime_source.contains("run_main_chat_kernel_direct_answer_with_state"));
+        assert!(runtime_source.contains("BufferedMainChatEventSink"));
+        assert!(runtime_source.contains("StreamingMainChatEventSink"));
+        assert!(!send_source.contains("run_main_chat_kernel_direct_answer_with_state"));
+        assert!(!stream_source.contains("run_main_chat_kernel_direct_answer_with_state"));
     }
 
     #[test]
@@ -6840,12 +8391,12 @@ mod tests {
         let final_gate = ["main_chat_", "final_gate"].concat();
         let live_provider_harness = ["main_chat_", "live_provider_harness"].concat();
         let live_provider_tests = ["main_chat_", "live_provider_tests"].concat();
-        let react_agent_loop = ["Agent", "Loop"].concat();
-
         assert!(!source.contains(&final_gate));
         assert!(!source.contains(&live_provider_harness));
         assert!(!source.contains(&live_provider_tests));
         assert!(source.contains("main_chat_live_provider_eval_requires_provider_backed_react"));
-        assert!(!source.contains(&react_agent_loop));
+        assert!(source.contains("try_run_main_chat_react_agent_loop"));
+        assert!(source
+            .contains("main_chat_react_turn_requires_governed_agent_loop_candidate_selection"));
     }
 }

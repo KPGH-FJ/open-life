@@ -744,19 +744,18 @@ impl McpRegistry {
                             name: tool.name.clone(),
                             description: tool.description.clone(),
                             parameters: tool.parameters.clone(),
-                            permission_level: ToolManifest::infer_permission_level(&tool.name),
-                            risk_level: ToolManifest::infer_permission_level(&tool.name),
+                            permission_level: String::new(),
+                            risk_level: String::new(),
                             version: "1.0.0".into(),
                             source: ToolSource::Mcp {
                                 server_name: server_name.clone(),
                             },
-                            capabilities: ToolManifest::infer_capabilities(&tool.name),
-                            requires_confirmation: ToolManifest::infer_permission_level(&tool.name)
-                                == "high",
+                            capabilities: Vec::new(),
+                            requires_confirmation: true,
                             enabled: true,
                             declarative_only: false,
-                            action_type: ToolManifest::infer_action_type(&tool.name),
-                            tags: Vec::new(),
+                            action_type: String::new(),
+                            tags: vec!["migration:name_inferred_contract_warning".into()],
                         }
                         .normalized(),
                     );
@@ -781,18 +780,18 @@ impl McpRegistry {
                 name: tool.name.clone(),
                 description: tool.description.clone(),
                 parameters: tool.parameters.clone(),
-                permission_level: ToolManifest::infer_permission_level(&tool.name),
-                risk_level: ToolManifest::infer_permission_level(&tool.name),
+                permission_level: String::new(),
+                risk_level: String::new(),
                 version: "1.0.0".into(),
                 source: ToolSource::Mcp {
                     server_name: "cached_registry_snapshot".into(),
                 },
-                capabilities: ToolManifest::infer_capabilities(&tool.name),
-                requires_confirmation: ToolManifest::infer_permission_level(&tool.name) == "high",
+                capabilities: Vec::new(),
+                requires_confirmation: true,
                 enabled: true,
                 declarative_only: false,
-                action_type: ToolManifest::infer_action_type(&tool.name),
-                tags: Vec::new(),
+                action_type: String::new(),
+                tags: vec!["migration:name_inferred_contract_warning".into()],
             }
             .normalized()
         }));

@@ -10,30 +10,32 @@ pub mod governor;
 pub mod heuristic_store;
 pub mod hs_selector;
 pub mod lifemodel_backend_completion;
-pub mod main_chat_agent_productization_v1;
 pub mod main_chat_agent_v1;
+pub mod main_chat_governance_intent;
+pub mod main_chat_memory_candidate;
+pub mod main_chat_runtime_contract;
 pub mod maturation;
 mod maturation_domain;
 pub mod memory_lifecycle;
 pub mod memory_service;
+pub mod metadata_safe;
 pub mod metrics;
 pub mod model_router;
-pub mod multi_strategy_runtime;
 pub mod plan_execute;
 pub mod policy_store;
 pub mod proposal_engine;
 pub mod proposal_generators;
 pub mod proposal_outcome;
 pub mod proposal_store;
-pub mod react_beta;
 pub mod reasoning;
 pub mod regression_suite;
+pub mod review_workflow;
 pub mod runtime;
 pub mod runtime_contract;
-pub mod runtime_migration_gate;
+mod runtime_strategy_contract;
 pub mod store;
-pub mod strategy;
 pub mod strategy_runtime;
+pub mod tool_gateway;
 pub mod types;
 
 #[cfg(test)]
@@ -111,6 +113,14 @@ pub use lifemodel_backend_completion::{
     LifeSignalBridgeInput, LifeSignalEvidenceBridgeReport, LifeSignalExtractorInput,
     LifeSignalExtractorReport, LifeSignalPolarity, LifeSignalType,
 };
+pub use main_chat_governance_intent::{
+    classify_main_chat_governance_intent, MainChatBlockerRequirement,
+    MainChatDurableWriteRequirement, MainChatExternalReadRequirement, MainChatGovernanceIntent,
+};
+pub use main_chat_memory_candidate::{
+    extract_main_chat_memory_candidates, plan_main_chat_memory_routing, route_memory_candidates,
+    MainChatMemoryCandidate, MainChatMemoryRoutingResult, MemoryCandidateKind, MemoryDestination,
+};
 pub use maturation::{
     ensure_accepted_low_energy_rule_selection, ensure_lifemodel_maturation_non_default_invocation,
     ensure_lifemodel_maturation_readiness, ensure_low_energy_rule_trace_visibility,
@@ -138,14 +148,14 @@ pub use memory_lifecycle::{
     MemoryMaterializedView, MemoryRollbackEvent, MemoryRollbackReport,
 };
 pub use memory_service::{EmbeddingConfig, MemoryContext, MemoryService};
+pub use metadata_safe::{
+    metadata_safe_text_digest, metadata_safe_text_preview, metadata_safe_value_digest,
+    metadata_safe_value_preview,
+};
 pub use metrics::{RolloutMetric, RolloutMetricsStore, RolloutSummary};
 pub use model_router::{
     ModelRouteDecision, ModelRouteScore, ModelRouter, PrivacyRequirement, ProviderAvailability,
     ProviderHealth, TaskType,
-};
-pub use multi_strategy_runtime::{
-    MultiStrategyRuntime, MultiStrategyRuntimeInput, MultiStrategyRuntimeOutput,
-    MultiStrategyRuntimePayload,
 };
 pub use plan_execute::{
     PlanDraft, PlanExecuteCancelResult, PlanExecuteInput, PlanExecuteProductAuthorityReport,
@@ -172,13 +182,6 @@ pub use proposal_outcome::{
     MaturationProposalOutcome, MaturationProposalOutcomeEvidenceReport,
 };
 pub use proposal_store::ProposalStore;
-pub use react_beta::{
-    evaluate_react_beta_execution_readiness, evaluate_react_beta_execution_readiness_for_input,
-    evaluate_tool_registry_beta_readiness, metadata_safe_value_digest, metadata_safe_value_preview,
-    ReactBetaExecutionReadinessInput, ReactBetaExecutionReadinessReport,
-    ReactBetaReadinessComponentOverride, ToolRegistryBetaReadinessReport,
-    ToolRegistryBetaToolReport,
-};
 pub use reasoning::layered::{SafetyCheckResult, SafetyChecker};
 pub use reasoning::{
     DirectReasoner, LayeredReasoner, ReasoningConfig, ReasoningError, ReasoningInput,
@@ -187,26 +190,28 @@ pub use reasoning::{
 pub use regression_suite::{
     RegressionResult, RegressionScenario, RegressionSuite, RegressionVerdict,
 };
+pub use review_workflow::{
+    proposal_status_semantics, DurableWriteDecision, DurableWriteDecisionKind, DurableWriteRequest,
+    DurableWriteSource, DurableWriteSubject, FinalDeliveryWordingContract, ReviewWorkflow,
+    ReviewWorkflowOutcome,
+};
 pub use runtime::{AgentRuntime, AgentRuntimeConfig, AgentRuntimeError, AgentRuntimeOutput};
 pub use runtime_contract::{
     AgentRuntimeParams, LifeEventDraft, RuntimeGuidanceConsumptionMode, RuntimeInput, RuntimeOutput,
 };
-pub use runtime_migration_gate::{
-    evaluate_controlled_chat_pilot_eligibility, evaluate_runtime_migration_gate,
-    ControlledChatPilotEligibilityInput, ControlledChatPilotEligibilityReport,
-    RuntimeMigrationGateInput, RuntimeMigrationGateReport,
-    DEFAULT_CONTROLLED_CHAT_PILOT_REQUIRED_CLEAN_RUNS,
+pub use runtime_strategy_contract::{
+    RuntimeStrategyKind, StrategyCandidateEvaluation, StrategySelection, StrategySelectionInput,
+    StrategySelectionReport,
 };
 pub use store::AgentRunStore;
-pub use strategy::{
-    RuntimeStrategyKind, StrategyCandidateEvaluation, StrategySelection, StrategySelectionInput,
-    StrategySelectionReport, StrategySelector,
-};
 pub use strategy_runtime::{
-    MultiStrategyRuntimeMaturityReport, PlanExecuteRuntimeStrategy, ReActRuntimeStrategy,
-    RuntimeStrategy, RuntimeStrategyDeclarativeDescriptor, RuntimeStrategyDescriptor,
+    PlanExecuteRuntimeStrategy, ReActRuntimeStrategy, RuntimeStrategy,
+    RuntimeStrategyDeclarativeDescriptor, RuntimeStrategyDescriptor,
     RuntimeStrategyExecutionReport, RuntimeStrategyInput, RuntimeStrategyOutput,
     RuntimeStrategyPayload, RuntimeStrategyPayloadKind, RuntimeStrategyRegistry,
     RuntimeStrategyRegistryReadinessReport, RuntimeStrategySideEffectBudget,
+};
+pub use tool_gateway::{
+    validate_manifest_execution_contract, ToolGateway, ToolGatewayContractEvidence,
 };
 pub use types::*;

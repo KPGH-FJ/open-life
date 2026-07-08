@@ -101,4 +101,4 @@ OpenLife 有多个模块会产生 LifeModel 更新：
 - [ADR 0003: AgentRun 追踪](./0003-agent-run-tracking.md)
 - `openlife-core/src/agent/types.rs`
 - `openlife-core/src/agent/proposal_store.rs`
-- `frontend/src/pages/ProposalReviewPage.tsx`
+- `frontend/src/pages/ChatPage.tsx`（当前 Chat proposal review/action handoff surface）

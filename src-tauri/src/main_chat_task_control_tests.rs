@@ -823,6 +823,12 @@ async fn resume_main_chat_task_replays_pending_action_after_tool_permission_acce
     use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    {
+        let mut scheduler = state.scheduler.lock().await;
+        scheduler.provider = "none".into();
+        scheduler.openai_key.clear();
+        scheduler.local_model.clear();
+    }
     let app = tauri::test::mock_builder()
         .manage(state.clone())
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
@@ -971,6 +977,282 @@ async fn resume_main_chat_task_replays_pending_action_after_tool_permission_acce
         serde_json::json!(true)
     );
     assert_eq!(metadata["directWritesExecuted"], serde_json::json!(false));
+}
+
+#[tokio::test]
+async fn resume_main_chat_task_reaches_executor_for_native_web_tool_permission_scope() {
+    use openlife_core::agent::main_chat_agent_v1::{
+        AgentTaskSessionDraft, AgentTaskSessionStatus, ExecutionAction, ExecutionPolicy,
+        ExecutionQueueStatus, MainChatAgentStrategy,
+    };
+    use openlife_core::agent::metadata_safe::metadata_safe_value_digest;
+    use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
+
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let app = tauri::test::mock_builder()
+        .manage(state.clone())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("build mock tauri app");
+
+    let user_goal =
+        "请告诉我今天旧金山的天气。必须使用可审计的 web/weather 读取证据；如果当前没有可用外部读取工具，请明确 fail closed，不要猜。";
+    let plan = crate::main_chat_react_tool_selection::build_main_chat_react_action_plan(
+        "resume-native-web-permission-chat",
+        user_goal,
+    )
+    .expect("build web.search action plan");
+    assert_eq!(plan.queue_action_type, "web.search");
+    assert_eq!(plan.executor_action_type, "mcp_tool");
+    let native_governed_input = serde_json::json!({
+        "governedInputSource": "kernel_external_fact_query_from_governance_intent",
+        "query": user_goal,
+        "max_results": 5,
+    });
+    let (input_length_bytes, input_hash) = metadata_safe_value_digest(&native_governed_input);
+
+    let proposal = AgentProposal::new(
+        ProposalType::ToolPermission,
+        "tool_permission.builtin.web.search",
+        serde_json::json!({
+            "tool_name": "web.search",
+            "source": "builtin",
+            "risk_level": "medium",
+            "permission_action": "grant",
+            "policy": "allow_until_revoked",
+            "canonical_scope": {
+                "tool_name": "web.search",
+                "source": "builtin",
+                "risk_level": "medium",
+                "action_type": "read",
+                "input_hash": input_hash,
+                "input_length_bytes": input_length_bytes
+            },
+            "blocked_action": {
+                "action_type": "mcp_tool",
+                "target": "web.search"
+            },
+            "auto_generated": true,
+            "directWritesExecuted": false
+        }),
+        "Allow the pending Main Chat web.search read action to continue.",
+        0.7,
+        RiskLevel::Medium,
+        ProposalSource::ChatConversation,
+    );
+    let proposal_id = proposal.id.clone();
+    {
+        let proposal_store = state.proposal_store.as_ref().expect("proposal store");
+        proposal_store
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .expect("create native web ToolPermission proposal");
+    }
+
+    let session = {
+        let store = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("main chat session store")
+            .lock()
+            .await;
+        store
+            .create_session(AgentTaskSessionDraft {
+                chat_session_id: "resume-native-web-permission-chat".into(),
+                user_goal: user_goal.into(),
+                selected_strategy: MainChatAgentStrategy::ReActToolExecution,
+                current_plan_summary: Some(
+                    "Waiting for native ToolPermission acceptance before replaying web.search."
+                        .into(),
+                ),
+                context_snapshot_refs: vec!["resume-native-web-permission-context".into()],
+            })
+            .expect("create main chat task session")
+    };
+    let action = ExecutionAction::new(
+        &plan.queue_action_type,
+        "Pending web.search action blocked on ToolPermission.",
+    );
+    let queued = {
+        let queue = state
+            .main_chat_action_queue_store
+            .as_ref()
+            .expect("main chat action queue")
+            .lock()
+            .await;
+        let queued = queue
+            .enqueue(
+                &session.id,
+                action.clone(),
+                ExecutionPolicy.classify(&action),
+            )
+            .expect("enqueue pending web action");
+        queue
+            .transition(&queued.id, ExecutionQueueStatus::Executing, None)
+            .expect("move action to executing");
+        queue
+            .transition(
+                &queued.id,
+                ExecutionQueueStatus::PendingPermission,
+                Some(serde_json::json!({
+                    "proposalId": proposal_id,
+                    "toolName": "web.search",
+                    "resumeReplayable": true,
+                    "governedInput": native_governed_input,
+                    "governedInputDigest": [input_length_bytes, input_hash],
+                    "queueActionType": "web.search",
+                    "executorActionType": "mcp_tool",
+                    "selectedCandidateTarget": "web.search",
+                    "target": "web.search",
+                    "directWritesExecuted": false,
+                })),
+            )
+            .expect("move action to pending permission");
+        queued
+    };
+    {
+        let store = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("main chat session store")
+            .lock()
+            .await;
+        store
+            .record_action_queue_id(&session.id, &queued.id)
+            .expect("record action id");
+        store
+            .set_pending_blockers(&session.id, vec!["tool_permission_required".into()])
+            .expect("set pending blocker");
+        store
+            .mark_waiting_permission(&session.id)
+            .expect("mark waiting permission");
+    }
+
+    crate::commands::proposal::accept_proposal_with_state(proposal_id.clone(), &state)
+        .await
+        .expect("accept native web ToolPermission proposal");
+    {
+        let registry = state.mcp_registry.lock().await;
+        let manifest = registry
+            .list_manifests()
+            .into_iter()
+            .find(|manifest| manifest.name == "web.search")
+            .expect("web.search manifest is registered");
+        let decision = {
+            let permissions = state.tool_permission_store.lock().await;
+            permissions
+                .peek(
+                    &manifest.name,
+                    &openlife_core::agent::action_executor::helpers::canonical_tool_source(
+                        &manifest,
+                    ),
+                    &manifest.risk_level,
+                    &manifest.action_type,
+                    &manifest.capabilities,
+                )
+                .expect("peek accepted native web permission")
+        };
+        assert!(
+            decision.allowed && decision.policy_id.is_some(),
+            "accepted native web ToolPermission must match the exact web.search manifest scope: {:?}",
+            decision
+        );
+    }
+    let pre_resume_detail =
+        crate::main_chat_task_controls::get_main_chat_agent_task_detail_with_state(
+            &session.id,
+            &state,
+        )
+        .await
+        .expect("load pre-resume native web task detail");
+    assert!(
+        !pre_resume_detail
+            .continuity_diagnostics
+            .permission_scope_mismatch,
+        "accepted native web ToolPermission scope must match the pending action before resume: {:?}",
+        pre_resume_detail.continuity_diagnostics
+    );
+    assert!(
+        pre_resume_detail
+            .allowed_controls
+            .iter()
+            .any(|control| control == "resume"),
+        "accepted native web ToolPermission task should expose resume control: {:?}",
+        pre_resume_detail.allowed_controls
+    );
+
+    let managed_state = app.state::<std::sync::Arc<crate::AppState>>();
+    resume_main_chat_agent_task(session.id.clone(), managed_state)
+        .await
+        .expect("resume command should replay accepted native web ToolPermission action");
+
+    let post_resume_detail =
+        crate::main_chat_task_controls::get_main_chat_agent_task_detail_with_state(
+            &session.id,
+            &state,
+        )
+        .await
+        .expect("load post-resume native web task detail");
+    let resumed = {
+        let store = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("main chat session store")
+            .lock()
+            .await;
+        store
+            .load_session(&session.id)
+            .expect("load resumed session")
+            .expect("resumed session exists")
+    };
+    assert_eq!(
+        resumed.status,
+        AgentTaskSessionStatus::WaitingPermission,
+        "post-resume native web detail: {}",
+        serde_json::to_string_pretty(&post_resume_detail).expect("serialize post-resume detail")
+    );
+    assert!(
+        resumed
+            .pending_blockers
+            .iter()
+            .any(|blocker| blocker == "blocked_by_policy"),
+        "native web resume must stay fail-closed when the governed executor still blocks network read: {:?}",
+        resumed.pending_blockers
+    );
+
+    let replayed = {
+        let queue = state
+            .main_chat_action_queue_store
+            .as_ref()
+            .expect("main chat action queue")
+            .lock()
+            .await;
+        queue
+            .load(&queued.id)
+            .expect("load replayed action")
+            .expect("replayed action exists")
+    };
+    assert_eq!(replayed.status, ExecutionQueueStatus::PendingPermission);
+    let metadata = replayed
+        .observation_metadata
+        .as_ref()
+        .expect("replay observation metadata");
+    assert_eq!(
+        metadata["automaticResumeReplayCompleted"],
+        serde_json::json!(false)
+    );
+    assert_eq!(
+        metadata["automaticReplayNeedsPermission"],
+        serde_json::json!(true)
+    );
+    assert_eq!(metadata["directWritesExecuted"], serde_json::json!(false));
+    assert!(post_resume_detail.transcript.iter().any(|entry| {
+        entry
+            .metadata
+            .get("automaticResumeReplayStillBlocked")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    }));
 }
 
 #[tokio::test]

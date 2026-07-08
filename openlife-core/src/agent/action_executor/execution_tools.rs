@@ -6,6 +6,9 @@ use crate::agent::action_executor::helpers::{
     is_path_in_safe_paths, search_web_on_worker_thread, summarize_content_blocking,
     ToolCallInternalResult,
 };
+use crate::agent::review_workflow::{
+    DurableWriteRequest, DurableWriteSource, DurableWriteSubject, ReviewWorkflow,
+};
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 use crate::tool_manifest::ToolSource;
 use anyhow::Result;
@@ -512,14 +515,21 @@ impl super::ActionExecutor {
                         if let Some(ref run_id) = request.source_run_id {
                             proposal.run_id = Some(run_id.clone());
                         }
-                        let id = proposal.id.clone();
-                        if let Err(e) = proposal_store.create_proposal(&proposal) {
-                            eprintln!(
-                                "[warn] Failed to create ExternalWriteAction Proposal: {}",
-                                e
-                            );
-                        } else {
-                            proposal_id = Some(id);
+                        match ReviewWorkflow::new(proposal_store).submit(
+                            DurableWriteRequest::from_agent_proposal(
+                                DurableWriteSource::ToolPermission,
+                                DurableWriteSubject::FileWrite,
+                                proposal,
+                                "File write proposal is pending Review Center approval.",
+                            ),
+                        ) {
+                            Ok(outcome) => proposal_id = Some(outcome.proposal_id().to_string()),
+                            Err(e) => {
+                                eprintln!(
+                                    "[warn] Failed to create ExternalWriteAction Proposal: {}",
+                                    e
+                                );
+                            }
                         }
                     }
                 }
@@ -598,14 +608,20 @@ impl super::ActionExecutor {
                     if let Some(ref run_id) = request.source_run_id {
                         proposal.run_id = Some(run_id.clone());
                     }
-                    let proposal_id = proposal.id.clone();
-                    match proposal_store.create_proposal(&proposal) {
-                        Ok(_) => Ok(ToolCallInternalResult {
+                    match ReviewWorkflow::new(proposal_store).submit(
+                        DurableWriteRequest::from_agent_proposal(
+                            DurableWriteSource::ToolPermission,
+                            DurableWriteSubject::Calendar,
+                            proposal,
+                            "Calendar event proposal is pending Review Center approval.",
+                        ),
+                    ) {
+                        Ok(outcome) => Ok(ToolCallInternalResult {
                             success: true,
                             output: Some(
                                 serde_json::json!({
                                     "status": "proposal_created",
-                                    "proposal_id": proposal_id,
+                                    "proposal_id": outcome.proposal_id(),
                                     "proposal_type": "scheduled_task",
                                     "title": title,
                                 })
@@ -659,14 +675,20 @@ impl super::ActionExecutor {
                     if let Some(ref run_id) = request.source_run_id {
                         proposal.run_id = Some(run_id.clone());
                     }
-                    let proposal_id = proposal.id.clone();
-                    match proposal_store.create_proposal(&proposal) {
-                        Ok(_) => Ok(ToolCallInternalResult {
+                    match ReviewWorkflow::new(proposal_store).submit(
+                        DurableWriteRequest::from_agent_proposal(
+                            DurableWriteSource::ToolPermission,
+                            DurableWriteSubject::Email,
+                            proposal,
+                            "Email draft proposal is pending Review Center approval.",
+                        ),
+                    ) {
+                        Ok(outcome) => Ok(ToolCallInternalResult {
                             success: true,
                             output: Some(
                                 serde_json::json!({
                                     "status": "proposal_created",
-                                    "proposal_id": proposal_id,
+                                    "proposal_id": outcome.proposal_id(),
                                     "proposal_type": "data_export",
                                     "proposal_kind": "email_draft",
                                     "subject": subject,
@@ -731,12 +753,18 @@ impl super::ActionExecutor {
                     if let Some(ref run_id) = request.source_run_id {
                         proposal.run_id = Some(run_id.clone());
                     }
-                    let proposal_id = proposal.id.clone();
-                    match proposal_store.create_proposal(&proposal) {
-                        Ok(_) => {
+                    match ReviewWorkflow::new(proposal_store).submit(
+                        DurableWriteRequest::from_agent_proposal(
+                            DurableWriteSource::ToolPermission,
+                            DurableWriteSubject::Calendar,
+                            proposal,
+                            "Task proposal is pending Review Center approval.",
+                        ),
+                    ) {
+                        Ok(outcome) => {
                             let output = serde_json::json!({
                                 "status": "proposal_created",
-                                "proposal_id": proposal_id,
+                                "proposal_id": outcome.proposal_id(),
                                 "proposal_type": "scheduled_task",
                                 "title": title,
                             })

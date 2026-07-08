@@ -59,7 +59,7 @@ describe("ProductShell navigation IA", () => {
     }
   );
 
-  it("keeps MCP, A2A, metrics, calibration, and stage/debug/eval surfaces in Advanced", () => {
+  it("keeps MCP, A2A, metrics, calibration, and maintenance surfaces in Advanced", () => {
     renderShell("/companion");
 
     expect(screen.queryByRole("link", { name: "MCP / Tools" })).not.toBeInTheDocument();
@@ -73,7 +73,8 @@ describe("ProductShell navigation IA", () => {
       name: "Advanced technical navigation",
     });
     expect(within(advancedNav).getByText("Technical surfaces")).toBeInTheDocument();
-    expect(within(advancedNav).getByText("Stage / debug / eval")).toBeInTheDocument();
+    expect(within(advancedNav).getByText("Maintenance")).toBeInTheDocument();
+    expect(within(advancedNav).queryByText("Stage / debug / eval")).not.toBeInTheDocument();
 
     for (const [label, path] of [
       ["MCP / Tools", "/mcp"],

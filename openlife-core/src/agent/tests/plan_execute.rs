@@ -5,7 +5,7 @@ use crate::agent::{
     PlanExecuteSessionStore, PlanExecuteStepEdit, PlanStep, PlanStepStatus, ProposalStore,
     RiskLevel, RuntimeHSPacket, RuntimeInput,
 };
-use crate::layer_router::Layer;
+use crate::layer::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
 
@@ -543,6 +543,71 @@ fn finalized_session_executes_read_only_steps_and_creates_proposals_for_write_li
     );
     assert_eq!(proposal_store.list_pending_proposals(10).unwrap().len(), 1);
     assert_eq!(session.linked_proposal_ids.len(), 1);
+}
+
+#[test]
+fn phase4_plan_execute_returns_reused_review_workflow_outcome_id() {
+    let service = PlanExecuteService::default();
+    let proposal_store = ProposalStore::new_in_memory().unwrap();
+    let fixed_session_id = "phase4-plan-outcome-session";
+
+    let build_finalized_session = |source_run_id: &str| {
+        let contract = PlanExecuteProductContract::weekly_planning();
+        let draft = service.draft_product_plan(
+            &plan_input(
+                "Use my LifeModel to plan this week.",
+                contract.max_step_count,
+            ),
+            PlanExecuteProductScenario::WeeklyPlanning,
+        );
+        let mut session =
+            PlanExecuteSession::new_draft(None, Some(source_run_id.into()), contract, draft)
+                .unwrap();
+        session.session_id = fixed_session_id.into();
+        session.plan_id = format!("plan:{fixed_session_id}");
+        for step in &mut session.steps {
+            step.plan_id = session.plan_id.clone();
+        }
+        session.finalize().unwrap();
+        session
+    };
+
+    let mut first_session = build_finalized_session("phase4-plan-run-a");
+    let write_step_id = first_session
+        .steps
+        .iter()
+        .find(|step| step.declared_write)
+        .unwrap()
+        .step_id
+        .clone();
+    let first_result = first_session
+        .execute_step(
+            &write_step_id,
+            &LifeModelGovernor::default(),
+            &proposal_store,
+        )
+        .unwrap();
+    let reused_id = first_result
+        .linked_proposal_id
+        .clone()
+        .expect("first write step proposal id");
+
+    let mut second_session = build_finalized_session("phase4-plan-run-b");
+    let second_result = second_session
+        .execute_step(
+            &write_step_id,
+            &LifeModelGovernor::default(),
+            &proposal_store,
+        )
+        .unwrap();
+
+    assert_eq!(second_result.linked_proposal_id, Some(reused_id.clone()));
+    assert_eq!(second_session.linked_proposal_ids, vec![reused_id.clone()]);
+    assert!(
+        second_result.evidence_ids.contains(&reused_id),
+        "PlanExecute evidence must use the authoritative ReviewWorkflowOutcome id"
+    );
+    assert_eq!(proposal_store.list_pending_proposals(10).unwrap().len(), 1);
 }
 
 #[test]

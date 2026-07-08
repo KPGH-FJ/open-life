@@ -8,10 +8,10 @@
 //! 5. Tool failure still records observation
 
 use crate::agent::{
-    ActionExecutionContext, ActionExecutor, ActionExecutorConfig, AgentExecutionBudget, AgentLoop,
-    AgentLoopConfig, AgentObservation, AgentRun, AgentRunStatus, AgentTask, AgentTaskKind,
+    ActionExecutionContext, ActionExecutorConfig, AgentExecutionBudget, AgentLoop, AgentLoopConfig,
+    AgentObservation, AgentRun, AgentRunStatus, AgentTask, AgentTaskKind, ToolGateway,
 };
-use crate::layer_router::Layer;
+use crate::layer::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
 use crate::privacy::PrivacyEngine;
@@ -26,8 +26,8 @@ fn create_test_agent_loop(config: AgentLoopConfig) -> AgentLoop {
         scheduler.clone(),
         &crate::config::AppConfig::default(),
     );
-    let action_executor = ActionExecutor::new(ActionExecutorConfig::default());
-    AgentLoop::new(runtime, action_executor, scheduler, config)
+    let tool_gateway = ToolGateway::from_executor_config(ActionExecutorConfig::default());
+    AgentLoop::new(runtime, tool_gateway, scheduler, config)
 }
 
 /// Helper to create an ActionExecutionContext for testing
@@ -622,7 +622,7 @@ fn test_proposal_tool_bypass_permission_blocking() {
         hs_runtime_packet: None,
     };
 
-    let executor = ActionExecutor::new(ActionExecutorConfig::default());
+    let executor = ToolGateway::from_executor_config(ActionExecutorConfig::default());
 
     // file.write_proposal is high-risk with "write"+"filesystem" capabilities.
     // With no explicit permission policy, our A1 fix allows proposal tools to
@@ -692,7 +692,7 @@ fn test_permission_check_tool() {
         hs_runtime_packet: None,
     };
 
-    let executor = ActionExecutor::new(ActionExecutorConfig::default());
+    let executor = ToolGateway::from_executor_config(ActionExecutorConfig::default());
 
     // Check a tool that has an explicit allow policy
     let request = crate::agent::AgentActionRequest {
@@ -746,7 +746,7 @@ fn test_memory_propose_write_creates_proposal() {
         hs_runtime_packet: None,
     };
 
-    let executor = ActionExecutor::new(ActionExecutorConfig::default());
+    let executor = ToolGateway::from_executor_config(ActionExecutorConfig::default());
 
     let request = crate::agent::AgentActionRequest {
         action_type: "mcp_tool".into(),

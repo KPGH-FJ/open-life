@@ -3,7 +3,7 @@ use crate::commands::proposal::{
     COMMUNICATION_STYLE_CANONICAL_PATH,
 };
 use crate::errors::AppError;
-use crate::legacy_write_convergence::{
+use crate::life_model_materializer_guard::{
     LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
     LifeModelMaterializerCallerPurpose,
 };
@@ -554,12 +554,6 @@ mod tests {
             mcp_registry: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::mcp::McpRegistry::new(),
             )),
-            intent_router: Arc::new(tokio::sync::Mutex::new(
-                openlife_core::router::IntentRouter::new(),
-            )),
-            layer_router: Arc::new(tokio::sync::Mutex::new(
-                openlife_core::layer_router::LayerRouter::new(),
-            )),
             scheduler: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::scheduler::InferenceScheduler::new(
                     config.local_model.clone(),
@@ -586,6 +580,7 @@ mod tests {
             vector_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::vectors::VectorStore::new_in_memory().unwrap(),
             )),
+            vector_persistence_mode: crate::state::VectorPersistenceMode::Enabled,
             builder_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             builder_session_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::builder::BuilderSessionStore::new(
@@ -605,6 +600,9 @@ mod tests {
             evidence_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::EvidenceStore::new_in_memory().unwrap(),
             )),
+            life_event_store: Some(Arc::new(tokio::sync::Mutex::new(
+                openlife_core::agent::LifeEventStore::new_in_memory().unwrap(),
+            ))),
             heuristic_store: Arc::new(tokio::sync::Mutex::new({
                 let store = openlife_core::agent::HeuristicStore::new_in_memory().unwrap();
                 store.seed_mvp_heuristics().unwrap();
@@ -687,6 +685,12 @@ mod tests {
         );
         proposal.run_id = Some("run-communication-style-1".into());
         proposal.source_detail = Some("maturation:preference.communication".into());
+        crate::life_model_write_gateway::stamp_lifemodel_proposal_base_hash_with_state(
+            &state,
+            &mut proposal,
+        )
+        .await
+        .unwrap();
         let proposal_id = proposal.id.clone();
         state
             .proposal_store

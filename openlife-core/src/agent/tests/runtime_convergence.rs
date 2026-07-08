@@ -1,8 +1,8 @@
 use crate::agent::{
-    ActionExecutionContext, ActionExecutor, ActionExecutorConfig, AgentExecutionBudget, AgentLoop,
-    AgentLoopConfig, AgentTask, AgentTaskKind, ModelRouter, ProviderAvailability, RuntimeInput,
+    ActionExecutionContext, ActionExecutorConfig, AgentExecutionBudget, AgentLoop, AgentLoopConfig,
+    AgentTask, AgentTaskKind, ModelRouter, ProviderAvailability, RuntimeInput,
 };
-use crate::layer_router::Layer;
+use crate::layer::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
 use crate::privacy::PrivacyEngine;
@@ -60,8 +60,9 @@ fn test_agent_loop(config: AgentLoopConfig) -> AgentLoop {
         scheduler.clone(),
         crate::agent::AgentRuntimeConfig::default(),
     );
-    let action_executor = ActionExecutor::new(ActionExecutorConfig::default());
-    AgentLoop::new(runtime, action_executor, scheduler, config)
+    let tool_gateway =
+        crate::agent::ToolGateway::from_executor_config(ActionExecutorConfig::default());
+    AgentLoop::new(runtime, tool_gateway, scheduler, config)
 }
 
 fn test_action_context_deps() -> (

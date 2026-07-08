@@ -19,8 +19,6 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
             openlife_core::memory::MemoryStore::new_in_memory().unwrap(),
         )),
         mcp_registry: Arc::new(Mutex::new(openlife_core::mcp::McpRegistry::new())),
-        intent_router: Arc::new(Mutex::new(openlife_core::router::IntentRouter::new())),
-        layer_router: Arc::new(Mutex::new(openlife_core::layer_router::LayerRouter::new())),
         scheduler: Arc::new(Mutex::new(
             openlife_core::scheduler::InferenceScheduler::new(
                 config.local_model.clone(),
@@ -43,6 +41,7 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
         vector_store: Arc::new(Mutex::new(
             openlife_core::vectors::VectorStore::new_in_memory().unwrap(),
         )),
+        vector_persistence_mode: crate::state::VectorPersistenceMode::EvalDisabled,
         builder_sessions: Arc::new(Mutex::new(HashMap::new())),
         builder_session_store: Arc::new(Mutex::new(
             openlife_core::builder::BuilderSessionStore::new(base.join("builder_sessions.json")),
@@ -60,6 +59,9 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
         evidence_store: Arc::new(Mutex::new(
             openlife_core::agent::EvidenceStore::new_in_memory().unwrap(),
         )),
+        life_event_store: Some(Arc::new(Mutex::new(
+            openlife_core::agent::LifeEventStore::new_in_memory().unwrap(),
+        ))),
         heuristic_store: Arc::new(Mutex::new({
             let store = openlife_core::agent::HeuristicStore::new_in_memory().unwrap();
             store.seed_mvp_heuristics().unwrap();

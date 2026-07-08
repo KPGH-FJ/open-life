@@ -1,12 +1,12 @@
 use crate::AppState;
 use chrono::Utc;
-use openlife_core::agent::main_chat_agent_productization_v1::{
+use openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind;
+use openlife_core::agent::main_chat_runtime_contract::{
     assemble_main_chat_agent_state, EvidenceGap, MainChatAgentProductStrategyRoute,
     MainChatAgentProductTaskStatus, MainChatAgentStateAssemblerInput, MainChatAgentStateEvent,
     MainChatAgentStateEventType, MainChatAgentStateSnapshot, PlanStepEvidence, StrategyEvidence,
     TaskSessionEvidence,
 };
-use openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind;
 use openlife_core::agent::{PlanExecuteSession, PlanExecuteSessionStatus, PlanStepStatus};
 use std::sync::Arc;
 

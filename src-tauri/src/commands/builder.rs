@@ -1,7 +1,8 @@
 use crate::errors::AppError;
 use crate::AppState;
 use openlife_core::agent::{
-    AgentProposal, ProposalSource, ProposalType, RiskLevel as ProposalRiskLevel,
+    AgentProposal, DurableWriteRequest, DurableWriteSource, DurableWriteSubject, ProposalSource,
+    ProposalType, ReviewWorkflow, RiskLevel as ProposalRiskLevel,
 };
 use openlife_core::builder::{
     BuilderDimension, BuilderEngine, BuilderMode, BuilderSession, BuilderSummary,
@@ -181,10 +182,17 @@ async fn builder_step_with_state(
     user_reply: String,
     state: &Arc<AppState>,
 ) -> Result<serde_json::Value, AppError> {
-    let mut session = {
+    let in_memory_session = {
         let mut sessions = state.builder_sessions.lock().await;
-        sessions
-            .remove(&session_id)
+        sessions.remove(&session_id)
+    };
+    let mut session = if let Some(session) = in_memory_session {
+        session
+    } else {
+        let store = state.builder_session_store.lock().await;
+        store
+            .get_session(&session_id)
+            .map_err(AppError::from)?
             .ok_or_else(|| AppError::not_found("Session not found"))?
     };
     let model = {
@@ -486,6 +494,12 @@ async fn builder_create_proposals_with_state(
         proposal.before = value_at_path(&model_value, &signal.affected_path);
         proposal.run_id = Some(run_id.clone());
         proposal.source_detail = Some(format!("{}:{}", session_id, signal.id));
+        crate::life_model_write_gateway::stamp_lifemodel_proposal_base_hash_with_state(
+            state,
+            &mut proposal,
+        )
+        .await
+        .map_err(AppError::from)?;
         proposals.push(proposal);
     }
 
@@ -495,6 +509,7 @@ async fn builder_create_proposals_with_state(
         ));
     }
 
+    let mut proposal_ids = Vec::new();
     {
         let proposal_store_opt = state.proposal_store.clone();
         let store = proposal_store_opt
@@ -503,16 +518,27 @@ async fn builder_create_proposals_with_state(
             .lock()
             .await;
         for proposal in &proposals {
-            store.create_proposal(proposal).map_err(AppError::from)?;
+            let outcome = ReviewWorkflow::new(&store)
+                .submit(
+                    DurableWriteRequest::from_agent_proposal(
+                        DurableWriteSource::Builder,
+                        DurableWriteSubject::LifeModel,
+                        proposal.clone(),
+                        "Builder proposal is pending Review Center approval.",
+                    )
+                    .with_evidence_refs(vec![proposal.source_detail.clone().unwrap_or_default()]),
+                )
+                .map_err(AppError::from)?;
+            proposal_ids.push(outcome.proposal_id().to_string());
         }
     }
 
     // Update AgentRun with generated proposal IDs and mark as completed
+    for proposal_id in &proposal_ids {
+        agent_run.add_generated_proposal(proposal_id);
+    }
     if let Some(ref store_arc) = state.agent_run_store {
         let store = store_arc.lock().await;
-        for proposal in &proposals {
-            let _ = store.add_generated_proposal(&run_id, &proposal.id);
-        }
         agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
         agent_run.finished_at = Some(chrono::Utc::now());
         let _ = store.update_run(&agent_run);
@@ -528,9 +554,9 @@ async fn builder_create_proposals_with_state(
 
     Ok(serde_json::json!({
         "success": true,
-        "created_count": proposals.len(),
+        "created_count": proposal_ids.len(),
         "rejected_count": rejected_count,
-        "proposal_ids": proposals.iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
+        "proposal_ids": proposal_ids,
         "run_id": run_id,
         "warnings": warnings,
     }))
@@ -609,14 +635,12 @@ mod tests {
     };
     use openlife_core::config::AppConfig;
     use openlife_core::feedback::FeedbackStore;
-    use openlife_core::layer_router::LayerRouter;
     use openlife_core::life_model::LifeModelManager;
     use openlife_core::mcp::McpRegistry;
     use openlife_core::mcp_audit::McpAuditStore;
     use openlife_core::memory::MemoryStore;
     use openlife_core::memory_cache::{HotMemoryCache, SharedHotCache};
     use openlife_core::privacy::PrivacyEngine;
-    use openlife_core::router::IntentRouter;
     use openlife_core::scheduler::InferenceScheduler;
     use openlife_core::vectors::VectorStore;
     use openlife_core::versioning::VersionManager;
@@ -636,8 +660,6 @@ mod tests {
                 MemoryStore::new_in_memory().unwrap(),
             )),
             mcp_registry: Arc::new(tokio::sync::Mutex::new(McpRegistry::new())),
-            intent_router: Arc::new(tokio::sync::Mutex::new(IntentRouter::new())),
-            layer_router: Arc::new(tokio::sync::Mutex::new(LayerRouter::new())),
             scheduler: Arc::new(tokio::sync::Mutex::new(InferenceScheduler::new(
                 config.local_model.clone(),
                 config.prefer_local_model,
@@ -658,6 +680,7 @@ mod tests {
             vector_store: Arc::new(tokio::sync::Mutex::new(
                 VectorStore::new_in_memory().unwrap(),
             )),
+            vector_persistence_mode: crate::state::VectorPersistenceMode::Enabled,
             builder_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             builder_session_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::builder::BuilderSessionStore::new(
@@ -671,10 +694,15 @@ mod tests {
             mcp_audit_store: Arc::new(tokio::sync::Mutex::new(McpAuditStore::new(
                 temp_dir.path().join("mcp_audit.db"),
             ))),
-            agent_run_store: None,
+            agent_run_store: Some(Arc::new(tokio::sync::Mutex::new(
+                openlife_core::agent::AgentRunStore::new_in_memory().unwrap(),
+            ))),
             evidence_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::EvidenceStore::new_in_memory().unwrap(),
             )),
+            life_event_store: Some(Arc::new(tokio::sync::Mutex::new(
+                openlife_core::agent::LifeEventStore::new_in_memory().unwrap(),
+            ))),
             heuristic_store: Arc::new(tokio::sync::Mutex::new({
                 let store = openlife_core::agent::HeuristicStore::new_in_memory().unwrap();
                 store.seed_mvp_heuristics().unwrap();
@@ -1018,6 +1046,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stage6d_builder_step_restores_persisted_step7_session_into_review_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut session = BuilderSession::new("persisted-step7-session", BuilderMode::Quick);
+        session.step_index = 7;
+        session.finished = false;
+        session.current_prompt = "【第 7 步/7：陪伴风格】".into();
+        session.draft_yaml = [
+            "# step 1\nAlex",
+            "# step 2\n事业 / 学业",
+            "# step 3\n- 把 OpenLife 跑通",
+            "# step 4\n成为能持续创造产品的人",
+            "# step 5\n- 编程\n- 产品设计",
+            "# step 6\n精力不足和方向不清晰",
+        ]
+        .join("\n");
+        state
+            .builder_session_store
+            .lock()
+            .await
+            .save_session(&session)
+            .unwrap();
+
+        assert!(state.builder_sessions.lock().await.is_empty());
+
+        let res = builder_step_with_state(
+            "persisted-step7-session".into(),
+            "直接高效型：少废话，直接给建议".into(),
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(res.get("finished").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            res.get("prompt").and_then(|v| v.as_str()),
+            Some("快速构建问题已完成！接下来请审阅 AI 生成的模型建议。")
+        );
+        let pending_signals = res
+            .get("pending_signals")
+            .and_then(|v| v.as_array())
+            .expect("step 7 should enter review with pending signals");
+        assert!(pending_signals.iter().any(|signal| {
+            signal
+                .get("id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|id| id == "sig_comm_style")
+                && signal
+                    .get("source_step")
+                    .and_then(|v| v.as_u64())
+                    .is_some_and(|step| step == 7)
+        }));
+
+        let persisted = state
+            .builder_session_store
+            .lock()
+            .await
+            .get_session("persisted-step7-session")
+            .unwrap()
+            .expect("finished review session should remain persisted for proposal creation");
+        assert!(persisted.finished);
+        assert!(persisted
+            .draft_yaml
+            .contains("# step 7\n直接高效型：少废话，直接给建议"));
+        assert!(!persisted.pending_signals.is_empty());
+
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        assert!(model.is_effectively_empty());
+        let proposal_count = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_all_proposals(100, 0)
+            .unwrap()
+            .len();
+        assert_eq!(
+            proposal_count, 0,
+            "step 7 completion must stop at review and not create or accept proposals automatically"
+        );
+    }
+
+    #[tokio::test]
     async fn builder_create_proposals_moves_review_signals_to_proposal_store() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
@@ -1074,5 +1186,89 @@ mod tests {
             .get_session("proposal-session")
             .unwrap();
         assert!(persisted.is_none());
+    }
+
+    #[tokio::test]
+    async fn phase4_builder_records_reused_review_workflow_outcome_id() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+
+        let build_session = || {
+            let mut session = BuilderSession::new("phase4-builder-reuse", BuilderMode::Quick);
+            session.finished = true;
+            session.pending_signals.push(BuilderSignal {
+                id: "sig_name".into(),
+                source_step: 1,
+                source_question_id: "name".into(),
+                dimension: BuilderDimension::Identity,
+                affected_path: "identity.name".into(),
+                proposed_value: serde_json::Value::String("fujing".into()),
+                confidence: 0.95,
+                reason: "用户直接提供的称呼".into(),
+                risk_level: RiskLevel::Low,
+                user_status: SignalUserStatus::Pending,
+            });
+            session
+        };
+        let decisions = || {
+            vec![BuilderSignalDecision {
+                id: "sig_name".into(),
+                status: "accepted".into(),
+                proposed_value: None,
+            }]
+        };
+
+        state
+            .builder_session_store
+            .lock()
+            .await
+            .save_session(&build_session())
+            .unwrap();
+        let first =
+            builder_create_proposals_with_state("phase4-builder-reuse".into(), decisions(), &state)
+                .await
+                .unwrap();
+        let reused_id = first["proposal_ids"][0]
+            .as_str()
+            .expect("first proposal id")
+            .to_string();
+
+        state
+            .builder_session_store
+            .lock()
+            .await
+            .save_session(&build_session())
+            .unwrap();
+        let second =
+            builder_create_proposals_with_state("phase4-builder-reuse".into(), decisions(), &state)
+                .await
+                .unwrap();
+        assert_eq!(second["proposal_ids"][0].as_str(), Some(reused_id.as_str()));
+        let run_id = second["run_id"].as_str().expect("second run id");
+        let stored_run = state
+            .agent_run_store
+            .as_ref()
+            .expect("agent run store")
+            .lock()
+            .await
+            .get_run(run_id)
+            .unwrap()
+            .expect("builder run exists");
+        assert_eq!(
+            stored_run.generated_proposals,
+            vec![reused_id.clone()],
+            "Builder AgentRun must record the authoritative reused proposal id"
+        );
+
+        let proposals = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_pending_proposals(10)
+            .unwrap();
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].id, reused_id);
     }
 }

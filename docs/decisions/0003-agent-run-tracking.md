@@ -91,4 +91,4 @@ OpenLife 需要回答用户的问题：
 - [ADR 0002: Proposal 统一层](./0002-proposal-unified.md)
 - `openlife-core/src/agent/types.rs`
 - `openlife-core/src/agent/store.rs`
-- `frontend/src/components/HermesTracePanel.tsx`
+- `frontend/src/components/RunTracePanel.tsx`（当前 AgentRun trace detail surface）

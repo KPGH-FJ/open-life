@@ -110,18 +110,129 @@ const unsupportedProposal: AgentProposal = {
   expiresAt: "2026-07-02T11:00:00.000Z",
 };
 
+const editedMemoryProposal: AgentProposal = {
+  ...communicationStyleProposal,
+  id: "proposal-edited-memory-1",
+  runId: "run-edited-memory-1",
+  proposalType: "memory_write",
+  source: "memory_governance",
+  sourceDetail: "mainchat-task-memory-edit",
+  affectedPath: "memory.user.preference.communication",
+  before: "建议太绕",
+  after: "直接给结论，再解释原因，然后给一条可执行动作",
+  status: "edited",
+  reason: "用户编辑了记忆候选内容，等待最终同意或不同意。",
+};
+
+function buildLifeStateProjection(proposals: AgentProposal[], safeMode = false) {
+  const pendingProposalCount = proposals.filter(p => p.status === "pending").length;
+  const editedProposalCount = proposals.filter(p => p.status === "edited").length;
+  const totalReviewRequiredCount = pendingProposalCount + editedProposalCount;
+  return {
+    version: "life_state_projection_v1",
+    generatedAt: new Date().toISOString(),
+    pending: {
+      pendingProposalCount,
+      editedProposalCount,
+      totalReviewRequiredCount,
+      highRiskReviewRequiredCount: proposals.filter(
+        p =>
+          (p.status === "pending" || p.status === "edited") &&
+          (p.riskLevel === "high" || p.riskLevel === "critical")
+      ).length,
+      proposalStoreStatus: "ok",
+      requiresUserAction: totalReviewRequiredCount > 0,
+    },
+    readiness: {
+      chatReady: true,
+      usageReady: true,
+      lifeModelReady: true,
+      modelEmpty: false,
+      pendingBuilderReviewSessions: 0,
+      unfinishedBuilderSessions: 0,
+      databaseStatus: safeMode ? "degraded" : "ok",
+      readinessIssues: safeMode ? ["database_degraded"] : [],
+      usageReadinessIssues: [],
+    },
+    taskState: {
+      taskStoreStatus: "ok",
+      latestTaskId: null,
+      latestTaskStatus: null,
+      runningCount: 0,
+      waitingPermissionCount: 0,
+      blockedCount: 0,
+      failedCount: 0,
+      cancelledCount: 0,
+      completedCount: 0,
+      activeCount: 0,
+    },
+    safeMode: {
+      active: safeMode,
+      reason: safeMode ? "测试 Safe Mode：存储降级。" : "系统当前未处于 Safe Mode。",
+      sourceRefs: safeMode ? ["database_status"] : [],
+    },
+    toolPermissions: {
+      totalCount: 0,
+      activeCount: 0,
+      consumedCount: 0,
+      allowCount: 0,
+      denyCount: 0,
+      askEveryTimeCount: 0,
+      allowOnceCount: 0,
+      allowUntilRevokedCount: 0,
+    },
+    safePaths: ["/tmp/openlife-test"],
+    surfaces: ["today", "mailbox", "chat", "companion", "life_model", "settings"].map(surface => ({
+      surface,
+      pendingReviewCount: pendingProposalCount,
+      editedReviewCount: editedProposalCount,
+      totalReviewRequiredCount: surface === "mailbox" ? totalReviewRequiredCount : 0,
+      readinessStatus: safeMode ? "degraded" : "ready",
+      taskStatus: "idle",
+      safeModeActive: safeMode,
+      waitingPermissionCount: 0,
+      activeToolPermissionCount: 0,
+    })),
+    sourceRefs: [
+      "proposal_store:pending_and_edited",
+      "main_chat_agent_session_store",
+      "tool_permission_store",
+      "config:safe_paths",
+    ],
+  };
+}
+
 function mockProposals(proposals: AgentProposal[], safeMode = false) {
   vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
     if (cmd === "list_proposals") {
       return Promise.resolve(proposals);
     }
+    if (cmd === "get_life_state_projection") {
+      return Promise.resolve(buildLifeStateProjection(proposals, safeMode));
+    }
     if (cmd === "get_system_diagnostics") {
       return Promise.resolve({
-        router: {
-          onnx_available: false,
-          onnx_disabled: false,
-          active_backend: "regex",
-          latency_threshold_us: 50000,
+        policy_router: {
+          activeAuthority: "IntentFrame + PolicyRouter",
+          authorityChain: [
+            "user_input",
+            "IntentFrame",
+            "PolicyRouter",
+            "AgentIngressDecision",
+            "OpenLifeTurnRuntime",
+            "MainChatKernel",
+          ],
+          routeOutputs: [
+            "direct_answer",
+            "read_only_tool",
+            "proposal_only_write",
+            "plan_draft",
+            "ask_clarification",
+            "governed_blocker",
+            "confirmation_request",
+          ],
+          appStateOldRoutersPresent: false,
+          diagnosticsSurface: "policy_router_status",
         },
         mcp_server_count: 0,
         mcp_tool_count: 0,
@@ -196,6 +307,53 @@ function mockProposals(proposals: AgentProposal[], safeMode = false) {
   });
 }
 
+function mockMutableProposals(initialProposals: AgentProposal[], safeMode = false) {
+  let mutableProposals = initialProposals.map(proposal => ({ ...proposal }));
+  vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+    if (cmd === "list_proposals") {
+      return Promise.resolve(mutableProposals);
+    }
+    if (cmd === "get_life_state_projection") {
+      return Promise.resolve(buildLifeStateProjection(mutableProposals, safeMode));
+    }
+    if (cmd === "accept_proposal") {
+      mutableProposals = mutableProposals.map(proposal =>
+        proposal.id === args?.proposalId ? { ...proposal, status: "accepted" } : proposal
+      );
+      return Promise.resolve({ success: true });
+    }
+    if (cmd === "reject_proposal") {
+      mutableProposals = mutableProposals.map(proposal =>
+        proposal.id === args?.proposalId ? { ...proposal, status: "rejected" } : proposal
+      );
+      return Promise.resolve(undefined);
+    }
+    if (cmd === "postpone_proposal") {
+      mutableProposals = mutableProposals.map(proposal =>
+        proposal.id === args?.proposalId ? { ...proposal, status: "postponed" } : proposal
+      );
+      return Promise.resolve(undefined);
+    }
+    if (cmd === "edit_proposal") {
+      mutableProposals = mutableProposals.map(proposal =>
+        proposal.id === args?.proposalId
+          ? { ...proposal, status: "edited", after: args?.after ?? proposal.after }
+          : proposal
+      );
+      return Promise.resolve({
+        proposalId: args?.proposalId,
+        draftOnly: true,
+        durableWriteExecuted: false,
+        originalProvenancePreserved: true,
+        status: "edited",
+        beforeDigest: "sha256:before",
+        afterDigest: "sha256:after",
+      });
+    }
+    return mockInvoke(cmd, args);
+  });
+}
+
 function renderMailboxPage(
   initialEntries: Array<string | { pathname: string; state?: unknown }> = ["/mailbox"]
 ) {
@@ -246,11 +404,11 @@ describe("MailboxPage", () => {
 
     expect(await screen.findByTestId("mailbox-page")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Mailbox" })).toBeInTheDocument();
-    expect(screen.getByText("2 个待确认")).toBeInTheDocument();
+    expect(screen.getByText("2 个待确认/已修改")).toBeInTheDocument();
     expect(screen.getAllByText("待确认").length).toBeGreaterThan(0);
     expect(screen.getByText("已同意")).toBeInTheDocument();
     expect(screen.getByText("已处理")).toBeInTheDocument();
-    expect(screen.getByText("草稿修改")).toBeInTheDocument();
+    expect(screen.getByText("已修改待处理")).toBeInTheDocument();
     expect(screen.getAllByText("OpenLife").length).toBeGreaterThan(0);
     expect(screen.getAllByText("新增目标").length).toBeGreaterThan(0);
     expect(screen.getAllByText("确认外部能力").length).toBeGreaterThan(0);
@@ -422,6 +580,21 @@ describe("MailboxPage", () => {
     });
   });
 
+  it("notifies the shell to refresh diagnostics after accepting a proposal", async () => {
+    const listener = vi.fn();
+    window.addEventListener("openlife:diagnostics-refresh", listener);
+
+    renderMailboxPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "同意" }));
+
+    await waitFor(() => {
+      expect(listener).toHaveBeenCalledTimes(1);
+    });
+
+    window.removeEventListener("openlife:diagnostics-refresh", listener);
+  });
+
   it("resumes a Main Chat task after accepting the matching proposal route state", async () => {
     const taskId = "mainchat-task-resume-1";
     mockProposals([{ ...lowRiskProposal, sourceDetail: taskId }]);
@@ -463,6 +636,78 @@ describe("MailboxPage", () => {
     });
   });
 
+  it("allows edited proposals to be accepted and moves them to accepted status", async () => {
+    mockMutableProposals([editedMemoryProposal]);
+
+    renderMailboxRoutes(["/mailbox?proposal=proposal-edited-memory-1"]);
+
+    expect(await screen.findByTestId("mailbox-page")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByTestId("mail-reader")).toHaveTextContent("状态：已修改");
+    });
+    const acceptButton = screen.getByRole("button", { name: "同意" });
+    expect(acceptButton).toBeEnabled();
+    fireEvent.click(acceptButton);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "accept_proposal",
+        expect.objectContaining({
+          proposalId: "proposal-edited-memory-1",
+          proposal_id: "proposal-edited-memory-1",
+        })
+      );
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("mail-reader")).toHaveTextContent("状态：已同意");
+    });
+  });
+
+  it("allows edited proposals to be rejected and moves them to handled status", async () => {
+    mockMutableProposals([editedMemoryProposal]);
+
+    renderMailboxRoutes(["/mailbox?proposal=proposal-edited-memory-1"]);
+
+    expect(await screen.findByTestId("mailbox-page")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByTestId("mail-reader")).toHaveTextContent("状态：已修改");
+    });
+    const rejectButton = screen.getByRole("button", { name: "不同意" });
+    expect(rejectButton).toBeEnabled();
+    fireEvent.click(rejectButton);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "reject_proposal",
+        expect.objectContaining({
+          proposalId: "proposal-edited-memory-1",
+          proposal_id: "proposal-edited-memory-1",
+        })
+      );
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("mail-reader")).toHaveTextContent("状态：不同意");
+    });
+  });
+
+  it("keeps unsupported edited proposals disabled for accept", async () => {
+    mockProposals([{ ...unsupportedProposal, status: "edited" }]);
+
+    renderMailboxRoutes(["/mailbox?proposal=proposal-plugin-1"]);
+
+    expect(await screen.findByTestId("mailbox-page")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByTestId("mail-reader")).toHaveTextContent("状态：已修改");
+    });
+    const acceptButton = screen.getByRole("button", { name: "同意" });
+    expect(acceptButton).toBeDisabled();
+    fireEvent.click(acceptButton);
+
+    await waitFor(() => {
+      expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "accept_proposal")).toBe(false);
+    });
+  });
+
   it("rejects through an existing quick reply command", async () => {
     renderMailboxPage();
 
@@ -494,6 +739,7 @@ describe("MailboxPage", () => {
       );
     });
 
+    fireEvent.click((await screen.findAllByText("新增目标"))[0].closest("button")!);
     fireEvent.click(await screen.findByRole("button", { name: "改一下" }));
     const editField = await screen.findByLabelText("你想改成什么");
     expect(editField).toBeInTheDocument();
@@ -511,6 +757,22 @@ describe("MailboxPage", () => {
     expect(screen.getByRole("button", { name: "同意" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "改一下" })).toBeDisabled();
 
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "accept_proposal")).toBe(false);
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "edit_proposal")).toBe(false);
+  });
+
+  it("keeps Safe Mode protection on edited proposal accept and edit while leaving reject visible", async () => {
+    mockProposals([editedMemoryProposal], true);
+
+    renderMailboxRoutes(["/mailbox?proposal=proposal-edited-memory-1"]);
+
+    expect(await screen.findByText("系统处于 Safe Mode")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByTestId("mail-reader")).toHaveTextContent("状态：已修改");
+    });
+    expect(screen.getByRole("button", { name: "同意" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "改一下" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "不同意" })).toBeEnabled();
     expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "accept_proposal")).toBe(false);
     expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "edit_proposal")).toBe(false);
   });

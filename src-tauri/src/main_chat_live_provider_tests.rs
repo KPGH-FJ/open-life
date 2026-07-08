@@ -1,4 +1,4 @@
-use crate::main_chat_final_acceptance_tests::{
+use crate::main_chat_acceptance_test_support::{
     configure_live_provider_eval_state, configure_live_provider_eval_state_with_local_http_provider,
 };
 use crate::main_chat_final_gate::{
@@ -17,8 +17,8 @@ fn live_provider_external_eval_uses_only_openlife_live_env_names() {
             include_str!("main_chat_live_provider_tests.rs"),
         ),
         (
-            "src-tauri/src/main_chat_final_acceptance_tests.rs",
-            include_str!("main_chat_final_acceptance_tests.rs"),
+            "src-tauri/src/main_chat_acceptance_test_support.rs",
+            include_str!("main_chat_acceptance_test_support.rs"),
         ),
     ] {
         assert!(
@@ -265,11 +265,11 @@ fn live_provider_harness_preserves_agent_loop_attempt_metadata_when_not_complete
             }
         }),
         serde_json::json!({
-            "summary": "Governed ReAct AgentLoop did not observe the planned action; single-step fallback remains available.",
+            "summary": "Governed ReAct AgentLoop did not observe the planned action; returning a structured blocker.",
             "metadata": {
                 "agentLoopAttempted": true,
                 "agentLoopSucceeded": false,
-                "singleStepFallbackUsed": true,
+                "singleStepFallbackUsed": false,
                 "plannedActionObserved": false,
                 "toolSelectionCandidateCount": 2,
                 "toolSelectionCandidateIds": ["builtin_echo", "tool.list_available"],
@@ -294,7 +294,7 @@ fn live_provider_harness_preserves_agent_loop_attempt_metadata_when_not_complete
         metadata
             .get("singleStepFallbackUsed")
             .and_then(serde_json::Value::as_bool),
-        Some(true)
+        Some(false)
     );
 }
 

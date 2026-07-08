@@ -39,7 +39,7 @@ pub(crate) struct MainChatReactToolCandidate {
 
 impl MainChatReactToolCandidate {
     pub(crate) fn capabilities_digest_label(&self) -> String {
-        let capabilities_digest = openlife_core::agent::react_beta::metadata_safe_value_digest(
+        let capabilities_digest = openlife_core::agent::metadata_safe::metadata_safe_value_digest(
             &serde_json::json!(self.capabilities),
         );
         format!(
@@ -240,9 +240,10 @@ impl MainChatReactActionPlan {
         let candidate_contract = candidates
             .into_iter()
             .map(|candidate| {
-                let arguments_digest = openlife_core::agent::react_beta::metadata_safe_value_digest(
-                    &candidate.arguments,
-                );
+                let arguments_digest =
+                    openlife_core::agent::metadata_safe::metadata_safe_value_digest(
+                        &candidate.arguments,
+                    );
                 let arguments_digest_label =
                     format!("bytes:{} hash:{}", arguments_digest.0, arguments_digest.1);
                 let capabilities_digest_label = candidate.capabilities_digest_label();
@@ -357,7 +358,7 @@ pub(crate) async fn rank_main_chat_react_tool_candidates_with_model(
     };
 
     let response_digest =
-        openlife_core::agent::react_beta::metadata_safe_value_digest(&serde_json::json!({
+        openlife_core::agent::metadata_safe::metadata_safe_value_digest(&serde_json::json!({
             "response": response,
         }));
     let response_digest_label = format!("bytes:{} hash:{}", response_digest.0, response_digest.1);
@@ -745,7 +746,7 @@ pub(crate) fn build_main_chat_react_agent_loop_messages(
     plan: &MainChatReactActionPlan,
 ) -> Vec<ChatMessage> {
     let arguments_digest =
-        openlife_core::agent::react_beta::metadata_safe_value_digest(&plan.arguments);
+        openlife_core::agent::metadata_safe::metadata_safe_value_digest(&plan.arguments);
     let arguments_digest_label =
         format!("bytes:{} hash:{}", arguments_digest.0, arguments_digest.1);
     let mut guided_messages = Vec::with_capacity(messages_for_generation.len() + 1);
@@ -1160,6 +1161,9 @@ fn main_chat_generic_selection_term(term: &str) -> bool {
 pub(crate) fn main_chat_manifest_is_governed_read_candidate(
     manifest: &openlife_core::tool_manifest::ToolManifest,
 ) -> bool {
+    if openlife_core::agent::validate_manifest_execution_contract(manifest).is_err() {
+        return false;
+    }
     if manifest.name == "mcp.call_tool" || !manifest.enabled || manifest.declarative_only {
         return false;
     }
@@ -1201,6 +1205,9 @@ pub(crate) fn main_chat_manifest_is_governed_read_candidate(
 fn main_chat_manifest_is_explicit_read_target_candidate(
     manifest: &openlife_core::tool_manifest::ToolManifest,
 ) -> bool {
+    if openlife_core::agent::validate_manifest_execution_contract(manifest).is_err() {
+        return false;
+    }
     if manifest.name == "mcp.call_tool" || !manifest.enabled || manifest.declarative_only {
         return false;
     }

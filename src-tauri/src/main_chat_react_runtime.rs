@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use openlife_core::layer_router::Layer;
+use openlife_core::layer::Layer;
 use openlife_core::life_model::LifeModel;
 use openlife_core::llm::ChatMessage;
 use openlife_core::privacy::PrivacyEngine;
@@ -231,7 +231,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
     let tool_selection_allowlist = agent_loop_plan.allowed_tool_targets();
     let tool_selection_allowed_actions = agent_loop_plan.allowed_tool_action_metadata();
     let tool_selection_contract_digest =
-        openlife_core::agent::react_beta::metadata_safe_value_digest(&serde_json::json!({
+        openlife_core::agent::metadata_safe::metadata_safe_value_digest(&serde_json::json!({
             "candidateIds": tool_selection_candidate_ids.clone(),
             "allowedTargets": tool_selection_allowlist.clone(),
             "allowedActions": tool_selection_allowed_actions.clone(),
@@ -239,13 +239,13 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
         }));
     let mut plan_metadata = serde_json::json!({
         "agentLoopAttempted": true,
-        "singleStepFallbackAvailable": true,
+        "structuredBlockerOnFailure": true,
         "allowWrites": false,
         "allowCloud": allow_cloud,
         "localOnlyRequired": local_only_required,
         "plannedActionType": plan.queue_action_type.clone(),
         "plannedTarget": plan.target.clone(),
-        "argumentsDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(&plan.arguments),
+        "argumentsDigest": openlife_core::agent::metadata_safe::metadata_safe_value_digest(&plan.arguments),
         "toolSelectionCandidateCount": agent_loop_plan.tool_candidate_count(),
         "toolSelectionCandidateIds": agent_loop_plan.tool_candidate_ids(),
         "toolSelectionAllowlist": agent_loop_plan.allowed_tool_targets(),
@@ -322,7 +322,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
     if plan.requires_network && !network_policy.enabled {
         let selected_tool_candidate = agent_loop_plan.default_tool_candidate();
         let selected_arguments_digest =
-            openlife_core::agent::react_beta::metadata_safe_value_digest(
+            openlife_core::agent::metadata_safe::metadata_safe_value_digest(
                 &selected_tool_candidate.arguments,
             );
         let selected_arguments_digest_label = format!(
@@ -423,15 +423,16 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             blocker_reason: Some("network_policy_blocked".into()),
         });
     }
-    let action_executor =
-        openlife_core::agent::ActionExecutor::new(openlife_core::agent::ActionExecutorConfig {
+    let tool_gateway = openlife_core::agent::ToolGateway::from_executor_config(
+        openlife_core::agent::ActionExecutorConfig {
             allow_writes: false,
             allow_cloud,
             ..Default::default()
-        });
+        },
+    );
     let agent_loop = openlife_core::agent::AgentLoop::new(
         agent_runtime,
-        action_executor,
+        tool_gateway,
         scheduler.clone(),
         loop_config,
     );
@@ -455,13 +456,14 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
     {
         Ok(packet) => packet,
         Err(err) => {
-            let model_error_digest = openlife_core::agent::react_beta::metadata_safe_value_digest(
-                &serde_json::json!({ "error": err.to_string() }),
-            );
+            let model_error_digest =
+                openlife_core::agent::metadata_safe::metadata_safe_value_digest(
+                    &serde_json::json!({ "error": err.to_string() }),
+                );
             let metadata = serde_json::json!({
                 "agentLoopAttempted": true,
                 "agentLoopSucceeded": false,
-                "singleStepFallbackUsed": true,
+                "singleStepFallbackUsed": false,
                 "modelErrorDigest": model_error_digest,
                 "directWritesExecuted": false,
             });
@@ -470,7 +472,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                     state,
                     Some(task_session_id),
                     ExecutionTranscriptEntryKind::Error,
-                    "Governed ReAct AgentLoop failed before execution; single-step fallback remains available.",
+                    "Governed ReAct AgentLoop failed before execution; returning a structured blocker.",
                     metadata.clone(),
                 )
                 .await,
@@ -494,13 +496,13 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                         None,
                     ) {
                         let model_error_digest =
-                            openlife_core::agent::react_beta::metadata_safe_value_digest(
+                            openlife_core::agent::metadata_safe::metadata_safe_value_digest(
                                 &serde_json::json!({ "error": err.to_string() }),
                             );
                         let metadata = serde_json::json!({
                             "agentLoopAttempted": true,
                             "agentLoopSucceeded": false,
-                            "singleStepFallbackUsed": true,
+                            "singleStepFallbackUsed": false,
                             "modelErrorDigest": model_error_digest,
                             "directWritesExecuted": false,
                         });
@@ -509,7 +511,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                                 state,
                                 Some(task_session_id),
                                 ExecutionTranscriptEntryKind::Error,
-                                "Governed ReAct AgentLoop could not prepare file permission; single-step fallback remains available.",
+                                "Governed ReAct AgentLoop could not prepare file permission; returning a structured blocker.",
                                 metadata.clone(),
                             )
                             .await,
@@ -527,13 +529,13 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                         None,
                     ) {
                         let model_error_digest =
-                            openlife_core::agent::react_beta::metadata_safe_value_digest(
+                            openlife_core::agent::metadata_safe::metadata_safe_value_digest(
                                 &serde_json::json!({ "error": err.to_string() }),
                             );
                         let metadata = serde_json::json!({
                             "agentLoopAttempted": true,
                             "agentLoopSucceeded": false,
-                            "singleStepFallbackUsed": true,
+                            "singleStepFallbackUsed": false,
                             "modelErrorDigest": model_error_digest,
                             "directWritesExecuted": false,
                         });
@@ -542,7 +544,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                                 state,
                                 Some(task_session_id),
                                 ExecutionTranscriptEntryKind::Error,
-                                "Governed ReAct AgentLoop could not prepare MCP wrapper permission; single-step fallback remains available.",
+                                "Governed ReAct AgentLoop could not prepare MCP wrapper permission; returning a structured blocker.",
                                 metadata.clone(),
                             )
                             .await,
@@ -554,13 +556,13 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             }
             Err(err) => {
                 let model_error_digest =
-                    openlife_core::agent::react_beta::metadata_safe_value_digest(
+                    openlife_core::agent::metadata_safe::metadata_safe_value_digest(
                         &serde_json::json!({ "error": err.to_string() }),
                     );
                 let metadata = serde_json::json!({
                     "agentLoopAttempted": true,
                     "agentLoopSucceeded": false,
-                    "singleStepFallbackUsed": true,
+                    "singleStepFallbackUsed": false,
                     "modelErrorDigest": model_error_digest,
                     "directWritesExecuted": false,
                 });
@@ -569,7 +571,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                         state,
                         Some(task_session_id),
                         ExecutionTranscriptEntryKind::Error,
-                        "Governed ReAct AgentLoop could not create file permission context; single-step fallback remains available.",
+                        "Governed ReAct AgentLoop could not create file permission context; returning a structured blocker.",
                         metadata.clone(),
                     )
                     .await,
@@ -692,7 +694,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                 let mut metadata = serde_json::json!({
                     "agentLoopAttempted": true,
                     "agentLoopSucceeded": false,
-                    "singleStepFallbackUsed": true,
+                    "singleStepFallbackUsed": false,
                     "plannedActionObserved": false,
                     "modelSelectedAllowedTool": false,
                     "toolSelectionCandidateCount": agent_loop_plan.tool_candidate_count(),
@@ -710,7 +712,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                         state,
                         Some(task_session_id),
                         ExecutionTranscriptEntryKind::Error,
-                        "Governed ReAct AgentLoop did not observe the planned action; single-step fallback remains available.",
+                        "Governed ReAct AgentLoop did not observe the planned action; returning a structured blocker.",
                         metadata.clone(),
                     )
                     .await,
@@ -738,7 +740,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             let observed_action_error = observed_action.error.clone();
             let observed_action_id = Some(observed_action.id.clone());
             let selected_arguments_digest =
-                openlife_core::agent::react_beta::metadata_safe_value_digest(
+                openlife_core::agent::metadata_safe::metadata_safe_value_digest(
                     &selected_tool_candidate.arguments,
                 );
             let selected_arguments_digest_label = format!(
@@ -993,13 +995,14 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             })
         }
         Err(err) => {
-            let model_error_digest = openlife_core::agent::react_beta::metadata_safe_value_digest(
-                &serde_json::json!({ "error": err.to_string() }),
-            );
+            let model_error_digest =
+                openlife_core::agent::metadata_safe::metadata_safe_value_digest(
+                    &serde_json::json!({ "error": err.to_string() }),
+                );
             let metadata = serde_json::json!({
                 "agentLoopAttempted": true,
                 "agentLoopSucceeded": false,
-                "singleStepFallbackUsed": true,
+                "singleStepFallbackUsed": false,
                 "modelErrorDigest": model_error_digest,
                 "directWritesExecuted": false,
             });
@@ -1008,7 +1011,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                     state,
                     Some(task_session_id),
                     ExecutionTranscriptEntryKind::Error,
-                    "Governed ReAct AgentLoop failed; single-step fallback remains available.",
+                    "Governed ReAct AgentLoop failed; returning a structured blocker.",
                     metadata.clone(),
                 )
                 .await,
@@ -1039,7 +1042,7 @@ pub(crate) async fn synthesize_main_chat_react_follow_up(
         "ReAct follow-up synthesis started after a governed observation.",
         serde_json::json!({
             "actionExecutorBacked": true,
-            "observationDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(&observation.metadata),
+            "observationDigest": openlife_core::agent::metadata_safe::metadata_safe_value_digest(&observation.metadata),
             "toolExecutionAllowed": false,
             "writeExecutionAllowed": false,
             "directWritesExecuted": false,
@@ -1086,7 +1089,7 @@ pub(crate) async fn synthesize_main_chat_react_follow_up(
             None,
         ),
         Err(err) => {
-            let err_digest = openlife_core::agent::react_beta::metadata_safe_value_digest(
+            let err_digest = openlife_core::agent::metadata_safe::metadata_safe_value_digest(
                 &serde_json::json!({ "error": err.to_string() }),
             );
             (
@@ -1151,7 +1154,7 @@ pub(crate) fn blocked_main_chat_observation(
         "actionType": plan.queue_action_type.clone(),
         "executorActionType": plan.executor_action_type.clone(),
         "target": plan.target.clone(),
-        "argumentsDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(&plan.arguments),
+        "argumentsDigest": openlife_core::agent::metadata_safe::metadata_safe_value_digest(&plan.arguments),
         "actionExecutorBacked": true,
         "executorStatus": "blocked",
         "blockerReason": blocker_reason,

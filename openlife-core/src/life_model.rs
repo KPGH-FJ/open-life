@@ -943,6 +943,7 @@ impl LifeModel {
     }
 
     pub fn calculate_4d_completion(&self) -> Model4DCompletion {
+        let default = Self::default_model();
         let identity = {
             let mut score = 0u8;
             if !self.identity.name.is_empty() {
@@ -1004,13 +1005,20 @@ impl LifeModel {
         };
         let state = {
             let mut score = 0u8;
-            if !self.state.current_focus.is_empty() {
+            if !self.state.current_focus.is_empty()
+                && self.state.current_focus != default.state.current_focus
+            {
                 score += 15;
             }
-            if !self.state.health_status.physical.is_empty() {
+            if !self.state.health_status.physical.is_empty()
+                && self.state.health_status.physical != default.state.health_status.physical
+            {
                 score += 15;
             }
-            if !self.state.emotional_state.current_mood.is_empty() {
+            if !self.state.emotional_state.current_mood.is_empty()
+                && self.state.emotional_state.current_mood
+                    != default.state.emotional_state.current_mood
+            {
                 score += 20;
             }
             if !self.state.recent_reflections.is_empty() {
@@ -1720,15 +1728,14 @@ mod tests {
     }
 
     #[test]
-    fn calculate_4d_completion_empty_is_not_zero_for_state() {
+    fn calculate_4d_completion_default_skeleton_is_zero() {
         let m = LifeModel::default_model();
         let c = m.calculate_4d_completion();
-        // default model sets some state fields
-        assert!(c.state > 0);
-        assert_eq!(
-            c.overall,
-            (c.identity / 4) + (c.goals / 4) + (c.capabilities / 4) + (c.state / 4)
-        );
+        assert_eq!(c.identity, 0);
+        assert_eq!(c.goals, 0);
+        assert_eq!(c.capabilities, 0);
+        assert_eq!(c.state, 0);
+        assert_eq!(c.overall, 0);
     }
 
     #[test]

@@ -12,37 +12,25 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import type { DailyGoal } from "../types";
-import {
-  getDailyGoals,
-  getSystemDiagnostics,
-  listProposals,
-  type AgentProposal,
-  type SystemDiagnostics,
-} from "../tauri";
+import { getDailyGoals, getLifeStateProjection, type LifeStateProjection } from "../tauri";
 import {
   inspectDailyGoalName,
   type DailyGoalDisplayGuard,
   type TodayCardType,
 } from "../utils/dailyGoalDisplayGuard";
-import {
-  countPendingReviewProposals,
-  REVIEW_PENDING_PROPOSAL_LIMIT,
-} from "../utils/reviewPendingCount";
-import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
+import { reviewRequiredCountFromProjection } from "../utils/lifeStateProjection";
 import { mailboxRoute, productRoutePath } from "../productShellContract";
 
 type TodayPageState = {
-  diagnostics: SystemDiagnostics | null;
+  projection: LifeStateProjection | null;
   dailyGoals: DailyGoal[];
-  pendingProposals: AgentProposal[];
   loading: boolean;
   error: string;
 };
 
 const INITIAL_STATE: TodayPageState = {
-  diagnostics: null,
+  projection: null,
   dailyGoals: [],
-  pendingProposals: [],
   loading: true,
   error: "",
 };
@@ -70,7 +58,7 @@ type TodayPendingProposalCardView = {
   type: "pending_proposal";
   id: string;
   title: string;
-  count: number;
+  count: number | null;
   href: string;
 };
 
@@ -167,19 +155,15 @@ export default function TodayPage() {
     async function loadToday() {
       setState(current => ({ ...current, loading: true, error: "" }));
       try {
-        const [diagnostics, dailyGoals, pendingProposals] = await Promise.all([
-          getSystemDiagnostics().catch(() => null),
+        const [projection, dailyGoals] = await Promise.all([
+          getLifeStateProjection().catch(() => null),
           getDailyGoals().catch(() => []),
-          listProposals("pending", undefined, undefined, REVIEW_PENDING_PROPOSAL_LIMIT).catch(
-            () => []
-          ),
         ]);
 
         if (cancelled) return;
         setState({
-          diagnostics,
+          projection,
           dailyGoals,
-          pendingProposals,
           loading: false,
           error: "",
         });
@@ -200,8 +184,8 @@ export default function TodayPage() {
     };
   }, []);
 
-  const safeMode = isSafeMode(state.diagnostics);
-  const safeModeReason = getSafeModeReason(state.diagnostics);
+  const safeMode = state.projection?.safeMode.active ?? false;
+  const safeModeReason = state.projection?.safeMode.reason ?? "系统当前处于 Safe Mode。";
   const dailyGoalCards = useMemo(() => buildDailyGoalCards(state.dailyGoals), [state.dailyGoals]);
   const primaryGoal = useMemo(() => choosePrimaryGoal(goalCards(dailyGoalCards)), [dailyGoalCards]);
   const stateSignalCards = useMemo(
@@ -216,7 +200,7 @@ export default function TodayPage() {
     () => classifiedCardsByType(dailyGoalCards, "blocker"),
     [dailyGoalCards]
   );
-  const pendingCount = countPendingReviewProposals(state.pendingProposals);
+  const pendingCount = reviewRequiredCountFromProjection(state.projection, "today");
   const pendingReviewCard: TodayCardView = {
     type: "pending_proposal",
     id: "pending-review-proposals",
@@ -235,7 +219,9 @@ export default function TodayPage() {
               <h1 className="text-xl font-semibold tracking-normal text-stone-950">今日</h1>
             </div>
             <div className="mt-3 flex flex-wrap gap-2">
-              <StatusChip label={`待确认 ${pendingCount}`} />
+              <StatusChip
+                label={pendingCount == null ? "待确认状态读取中" : `待确认 ${pendingCount}`}
+              />
               {safeMode && <StatusChip label="Safe Mode" tone="warn" />}
             </div>
           </div>
@@ -433,9 +419,11 @@ export default function TodayPage() {
             <div>
               <div className="text-sm font-semibold text-stone-950">{pendingReviewCard.title}</div>
               <div className="mt-1 text-sm text-stone-600">
-                {pendingReviewCard.count > 0
-                  ? `${pendingReviewCard.count} 个待确认项需要你处理。`
-                  : "现在没有需要处理的待确认项。"}
+                {pendingReviewCard.count == null
+                  ? "待确认状态读取中，暂不显示确定数量。"
+                  : pendingReviewCard.count > 0
+                    ? `${pendingReviewCard.count} 个待确认项需要你处理。`
+                    : "现在没有需要处理的待确认项。"}
               </div>
             </div>
             <Link

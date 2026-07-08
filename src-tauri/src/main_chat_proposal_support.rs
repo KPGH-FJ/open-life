@@ -7,6 +7,9 @@ use crate::main_chat_runtime_support::{
     append_main_chat_agent_transcript, enqueue_main_chat_agent_action, transition_main_chat_action,
 };
 use crate::AppState;
+use openlife_core::agent::{
+    DurableWriteRequest, DurableWriteSource, DurableWriteSubject, ReviewWorkflow,
+};
 
 pub(crate) async fn create_main_chat_agent_proposal(
     state: &Arc<AppState>,
@@ -82,6 +85,11 @@ pub(crate) async fn create_main_chat_agent_proposal(
         ProposalSource::ChatConversation,
     );
     proposal.source_detail = Some(format!("main_chat_agent_task_session:{task_session_id}"));
+    crate::life_model_write_gateway::stamp_lifemodel_proposal_base_hash_with_state(
+        state,
+        &mut proposal,
+    )
+    .await?;
 
     let mut internal_transcript = Vec::new();
     let queue_action_type = if knowledge_asset_edit {
@@ -107,9 +115,18 @@ pub(crate) async fn create_main_chat_agent_proposal(
         .as_ref()
         .ok_or_else(|| "Proposal store not available".to_string())?;
     let store = store_arc.lock().await;
-    store
-        .create_proposal(&proposal)
+    let outcome = ReviewWorkflow::new(&store)
+        .submit(
+            DurableWriteRequest::from_agent_proposal(
+                DurableWriteSource::MainChat,
+                DurableWriteSubject::from_proposal_type(proposal.proposal_type),
+                proposal,
+                "Main Chat proposal is pending Review Center approval.",
+            )
+            .with_evidence_refs(vec![format!("main_chat_task_session:{task_session_id}")]),
+        )
         .map_err(|err| format!("create proposal failed: {err}"))?;
+    let proposal = outcome.proposal;
     drop(store);
     transition_main_chat_action(state, &queued.id, ExecutionQueueStatus::Executing, None).await?;
     transition_main_chat_action(
@@ -135,7 +152,7 @@ pub(crate) async fn create_main_chat_agent_proposal(
         state,
         Some(task_session_id),
         ExecutionTranscriptEntryKind::Action,
-        "Proposal create action completed without applying the proposal.",
+        "Proposal create action observed; proposal remains pending Review Center approval.",
         serde_json::json!({
             "actionId": queued.id,
             "proposalId": proposal.id,
@@ -186,9 +203,7 @@ pub(crate) async fn attach_main_chat_tool_permission_proposal_metadata(
     String,
 > {
     use openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind;
-    use openlife_core::agent::{
-        AgentProposal, ProposalSource, ProposalStatus, ProposalType, RiskLevel,
-    };
+    use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 
     if plan.queue_action_type != "mcp.read_only" {
         return Ok((metadata, Vec::new()));
@@ -215,7 +230,7 @@ pub(crate) async fn attach_main_chat_tool_permission_proposal_metadata(
 
     let source = openlife_core::agent::action_executor::helpers::canonical_tool_source(&manifest);
     let (input_length_bytes, input_hash) =
-        openlife_core::agent::react_beta::metadata_safe_value_digest(&target_arguments);
+        openlife_core::agent::metadata_safe::metadata_safe_value_digest(&target_arguments);
     let risk_level = match manifest.risk_level.to_ascii_lowercase().as_str() {
         "high" => RiskLevel::High,
         "low" => RiskLevel::Low,
@@ -264,63 +279,41 @@ pub(crate) async fn attach_main_chat_tool_permission_proposal_metadata(
         .map(str::to_string);
     let proposal = {
         let proposal_store = proposal_store_arc.lock().await;
-        if let Some(existing_proposal_id) = existing_proposal_id {
-            if let Some(mut existing) = proposal_store
+        let reusable_existing_id = if let Some(existing_proposal_id) = existing_proposal_id {
+            proposal_store
                 .get_proposal(&existing_proposal_id)
                 .map_err(|err| format!("load existing ToolPermission proposal failed: {err}"))?
                 .filter(|proposal| {
                     proposal.proposal_type == ProposalType::ToolPermission
-                        && proposal.status == ProposalStatus::Pending
+                        && proposal.status == openlife_core::agent::ProposalStatus::Pending
                 })
-            {
-                existing.source = ProposalSource::ChatConversation;
-                existing.source_detail =
-                    Some(format!("main_chat_agent_task_session:{task_session_id}"));
-                existing.affected_path = affected_path.clone();
-                existing.after = after.clone();
-                existing.reason =
-                    "Allow the pending Main Chat MCP read action to continue after explicit review."
-                        .into();
-                existing.confidence = 0.72;
-                existing.risk_level = risk_level;
-                proposal_store.update_proposal(&existing).map_err(|err| {
-                    format!("link existing Main Chat ToolPermission proposal failed: {err}")
-                })?;
-                existing
-            } else {
-                let mut proposal = AgentProposal::new(
-                    ProposalType::ToolPermission,
-                    &affected_path,
-                    after.clone(),
-                    "Allow the pending Main Chat MCP read action to continue after explicit review.",
-                    0.72,
-                    risk_level,
-                    ProposalSource::ChatConversation,
-                );
-                proposal.source_detail =
-                    Some(format!("main_chat_agent_task_session:{task_session_id}"));
-                proposal_store.create_proposal(&proposal).map_err(|err| {
-                    format!("create Main Chat ToolPermission proposal failed: {err}")
-                })?;
-                proposal
-            }
+                .map(|proposal| proposal.id)
         } else {
-            let mut proposal = AgentProposal::new(
-                ProposalType::ToolPermission,
-                &affected_path,
-                after.clone(),
-                "Allow the pending Main Chat MCP read action to continue after explicit review.",
-                0.72,
-                risk_level,
-                ProposalSource::ChatConversation,
-            );
-            proposal.source_detail =
-                Some(format!("main_chat_agent_task_session:{task_session_id}"));
-            proposal_store
-                .create_proposal(&proposal)
-                .map_err(|err| format!("create Main Chat ToolPermission proposal failed: {err}"))?;
-            proposal
-        }
+            None
+        };
+        let mut proposal = AgentProposal::new(
+            ProposalType::ToolPermission,
+            &affected_path,
+            after.clone(),
+            "Allow the pending Main Chat MCP read action to continue after explicit review.",
+            0.72,
+            risk_level,
+            ProposalSource::ChatConversation,
+        );
+        proposal.source_detail = Some(format!("main_chat_agent_task_session:{task_session_id}"));
+        let outcome = ReviewWorkflow::new(&proposal_store)
+            .submit(
+                DurableWriteRequest::from_agent_proposal(
+                    DurableWriteSource::MainChat,
+                    DurableWriteSubject::ToolPermission,
+                    proposal,
+                    "Main Chat tool permission proposal is pending Review Center approval.",
+                )
+                .with_existing_proposal_id(reusable_existing_id)
+                .with_evidence_refs(vec![format!("main_chat_task_session:{task_session_id}")]),
+            )
+            .map_err(|err| format!("create Main Chat ToolPermission proposal failed: {err}"))?;
+        outcome.proposal
     };
 
     if let Some(object) = metadata.as_object_mut() {

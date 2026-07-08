@@ -1,5 +1,6 @@
 import type {
   AppConfig,
+  LifeStateProjection,
   SystemDiagnostics,
   ToolManifest,
   ToolPermissionRecord,
@@ -12,17 +13,19 @@ function classNames(...classes: (string | false | undefined)[]) {
 
 interface ToolsPermissionsTabProps {
   diagnostics: SystemDiagnostics | null;
+  projection?: LifeStateProjection | null;
   config: AppConfig;
   setConfig: React.Dispatch<React.SetStateAction<AppConfig>>;
   toolPermissions: ToolPermissionRecord[];
   revokeToolPermission: (id: string) => Promise<boolean>;
-  refreshAllDiagnostics: () => Promise<SystemDiagnostics | null>;
+  refreshAllDiagnostics: () => Promise<LifeStateProjection | null>;
   refreshSecurityState: () => Promise<void>;
   toolManifests: ToolManifest[];
 }
 
 export default function ToolsPermissionsTab({
   diagnostics,
+  projection,
   config,
   setConfig,
   toolPermissions,
@@ -33,9 +36,11 @@ export default function ToolsPermissionsTab({
 }: ToolsPermissionsTabProps) {
   const networkEnabled = config.system?.network_policy?.enabled ?? true;
   const safePathCount = config.system?.safe_paths?.length ?? 0;
-  const grantedCount = toolPermissions.filter(permission =>
-    ["allow", "allow_once", "allow_until_revoked"].includes(permission.policy)
-  ).length;
+  const grantedCount =
+    (projection?.toolPermissions.allowCount ?? 0) +
+    (projection?.toolPermissions.allowOnceCount ?? 0) +
+    (projection?.toolPermissions.allowUntilRevokedCount ?? 0);
+  const activeToolPermissionCount = projection?.toolPermissions.activeCount ?? 0;
   const executableManifestCount = toolManifests.filter(
     manifest => manifest.enabled && !manifest.declarative_only
   ).length;
@@ -63,7 +68,7 @@ export default function ToolsPermissionsTab({
         <CapabilityCard
           title="Tool Permissions"
           description="已授予、拒绝或需要每次确认的工具权限。"
-          tone={toolPermissions.length ? "ready" : "neutral"}
+          tone={activeToolPermissionCount ? "ready" : "neutral"}
           meta={`${grantedCount} 已授予`}
         />
         <CapabilityCard

@@ -344,7 +344,7 @@ pub async fn chat_with_openrouter_raw_stream(
 }
 
 pub fn build_system_prompt(life_model: &LifeModel, tools_prompt: Option<&str>) -> String {
-    let yaml = serde_yaml::to_string(life_model).unwrap_or_default();
+    let yaml = life_model_prompt_yaml(life_model);
     let tool_section = tools_prompt.unwrap_or("");
     let time_context = build_local_time_context();
     let state_hint = format_state_hint(&life_model.state);
@@ -390,6 +390,10 @@ pub fn build_system_prompt(life_model: &LifeModel, tools_prompt: Option<&str>) -
 【自动进化规则（基于近期反馈与行为数据）】
 {}
 
+【事实边界】
+- 默认模板值不是已确认事实；只有上方状态摘要、用户消息或明确记录中出现的信息，才能作为用户当前健康、精力、压力、心情或生活状态的事实。
+- 如果缺少明确记录，请说“尚未确认”或直接基于用户当前输入回答，不要补全默认状态。
+
 在每次回应时：
 1. 优先考虑用户的核心价值观
 2. 结合用户当前的目标和状态给出建议
@@ -400,6 +404,98 @@ pub fn build_system_prompt(life_model: &LifeModel, tools_prompt: Option<&str>) -
 "#,
         time_context, yaml, state_hint, evolution_hint, tool_section, tool_call_instruction
     )
+}
+
+fn life_model_prompt_yaml(life_model: &LifeModel) -> String {
+    let mut value = match serde_yaml::to_value(life_model) {
+        Ok(value) => value,
+        Err(_) => return String::new(),
+    };
+    remove_default_prompt_state_fields(&mut value, &LifeModel::default_model());
+    serde_yaml::to_string(&value).unwrap_or_default()
+}
+
+fn remove_default_prompt_state_fields(value: &mut serde_yaml::Value, default_model: &LifeModel) {
+    let Some(root) = value.as_mapping_mut() else {
+        return;
+    };
+    let state_key = serde_yaml::Value::String("state".into());
+    let Some(state) = root
+        .get_mut(&state_key)
+        .and_then(serde_yaml::Value::as_mapping_mut)
+    else {
+        return;
+    };
+
+    remove_scalar_if_matches(
+        state,
+        "current_focus",
+        &serde_yaml::Value::String(default_model.state.current_focus.clone()),
+    );
+
+    let health_key = serde_yaml::Value::String("health_status".into());
+    if let Some(health) = state
+        .get_mut(&health_key)
+        .and_then(serde_yaml::Value::as_mapping_mut)
+    {
+        remove_scalar_if_matches(
+            health,
+            "physical",
+            &serde_yaml::Value::String(default_model.state.health_status.physical.clone()),
+        );
+        remove_scalar_if_matches(
+            health,
+            "mental",
+            &serde_yaml::Value::String(default_model.state.health_status.mental.clone()),
+        );
+        if let Ok(default_energy) =
+            serde_yaml::to_value(default_model.state.health_status.energy_level)
+        {
+            remove_scalar_if_matches(health, "energy_level", &default_energy);
+        }
+        if let Ok(empty_energy) = serde_yaml::to_value(0u8) {
+            remove_scalar_if_matches(health, "energy_level", &empty_energy);
+        }
+    }
+
+    let emotional_key = serde_yaml::Value::String("emotional_state".into());
+    if let Some(emotional) = state
+        .get_mut(&emotional_key)
+        .and_then(serde_yaml::Value::as_mapping_mut)
+    {
+        remove_scalar_if_matches(
+            emotional,
+            "current_mood",
+            &serde_yaml::Value::String(default_model.state.emotional_state.current_mood.clone()),
+        );
+        if let Ok(default_stress) =
+            serde_yaml::to_value(default_model.state.emotional_state.stress_level)
+        {
+            remove_scalar_if_matches(emotional, "stress_level", &default_stress);
+        }
+        if let Ok(empty_stress) = serde_yaml::to_value(0u8) {
+            remove_scalar_if_matches(emotional, "stress_level", &empty_stress);
+        }
+        if let Ok(default_fulfillment) =
+            serde_yaml::to_value(default_model.state.emotional_state.fulfillment_score)
+        {
+            remove_scalar_if_matches(emotional, "fulfillment_score", &default_fulfillment);
+        }
+        if let Ok(empty_fulfillment) = serde_yaml::to_value(0u8) {
+            remove_scalar_if_matches(emotional, "fulfillment_score", &empty_fulfillment);
+        }
+    }
+}
+
+fn remove_scalar_if_matches(
+    mapping: &mut serde_yaml::Mapping,
+    key: &str,
+    default_value: &serde_yaml::Value,
+) {
+    let yaml_key = serde_yaml::Value::String(key.into());
+    if mapping.get(&yaml_key) == Some(default_value) {
+        mapping.remove(&yaml_key);
+    }
 }
 
 fn build_local_time_context() -> String {
@@ -433,25 +529,52 @@ fn chinese_weekday(weekday: chrono::Weekday) -> &'static str {
 }
 
 fn format_state_hint(state: &crate::life_model::State) -> String {
+    let default_state = LifeModel::default_model().state;
     let mut parts = Vec::new();
-    if !state.current_focus.is_empty() {
+    if !state.current_focus.is_empty() && state.current_focus != default_state.current_focus {
         parts.push(format!("- 当前重心: {}", state.current_focus));
     }
-    if !state.emotional_state.current_mood.is_empty() {
-        parts.push(format!(
-            "- 当前心情: {} (压力{}/10, 满足度{}/10)",
-            state.emotional_state.current_mood,
-            state.emotional_state.stress_level,
+    let mut emotional_parts = Vec::new();
+    if !state.emotional_state.current_mood.is_empty()
+        && state.emotional_state.current_mood != default_state.emotional_state.current_mood
+    {
+        emotional_parts.push(format!("当前心情: {}", state.emotional_state.current_mood));
+    }
+    if state.emotional_state.stress_level > 0
+        && state.emotional_state.stress_level != default_state.emotional_state.stress_level
+    {
+        emotional_parts.push(format!("压力{}/10", state.emotional_state.stress_level));
+    }
+    if state.emotional_state.fulfillment_score > 0
+        && state.emotional_state.fulfillment_score
+            != default_state.emotional_state.fulfillment_score
+    {
+        emotional_parts.push(format!(
+            "满足度{}/10",
             state.emotional_state.fulfillment_score
         ));
     }
-    if !state.health_status.physical.is_empty() || !state.health_status.mental.is_empty() {
-        parts.push(format!(
-            "- 身心健康: {}/{} (精力{}/10)",
-            state.health_status.physical,
-            state.health_status.mental,
-            state.health_status.energy_level
-        ));
+    if !emotional_parts.is_empty() {
+        parts.push(format!("- 情绪状态: {}", emotional_parts.join("，")));
+    }
+    let mut health_parts = Vec::new();
+    if !state.health_status.physical.is_empty()
+        && state.health_status.physical != default_state.health_status.physical
+    {
+        health_parts.push(format!("身体: {}", state.health_status.physical));
+    }
+    if !state.health_status.mental.is_empty()
+        && state.health_status.mental != default_state.health_status.mental
+    {
+        health_parts.push(format!("心理: {}", state.health_status.mental));
+    }
+    if state.health_status.energy_level > 0
+        && state.health_status.energy_level != default_state.health_status.energy_level
+    {
+        health_parts.push(format!("精力{}/10", state.health_status.energy_level));
+    }
+    if !health_parts.is_empty() {
+        parts.push(format!("- 身心状态: {}", health_parts.join("，")));
     }
     if !state.focus_areas.is_empty() {
         parts.push(format!("- 关注领域: {}", state.focus_areas.join(", ")));
@@ -535,6 +658,57 @@ mod tests {
         assert!(prompt.contains("星期"));
         assert!(prompt.contains("本地时区"));
         assert!(prompt.contains("不要声称无法访问实时钟表"));
+    }
+
+    #[test]
+    fn system_prompt_omits_default_life_model_state_baseline_as_facts() {
+        let prompt = build_system_prompt(&LifeModel::default_model(), None);
+
+        assert!(prompt.contains("【事实边界】"));
+        assert!(prompt.contains("默认模板值不是已确认事实"));
+        assert!(prompt.contains("暂无状态记录"));
+        assert!(!prompt.contains("身心健康"));
+        assert!(!prompt.contains("精力7/10"));
+        assert!(!prompt.contains("current_focus: 构建人生模型"));
+        assert!(!prompt.contains("physical: 良好"));
+        assert!(!prompt.contains("mental: 积极"));
+        assert!(!prompt.contains("energy_level: 7"));
+        assert!(!prompt.contains("current_mood: 期待"));
+        assert!(!prompt.contains("stress_level: 3"));
+        assert!(!prompt.contains("fulfillment_score: 6"));
+    }
+
+    #[test]
+    fn system_prompt_omits_empty_numeric_state_values_as_facts() {
+        let prompt = build_system_prompt(&LifeModel::default(), None);
+
+        assert!(prompt.contains("暂无状态记录"));
+        assert!(!prompt.contains("精力0/10"));
+        assert!(!prompt.contains("压力0/10"));
+        assert!(!prompt.contains("满足度0/10"));
+        assert!(!prompt.contains("energy_level: 0"));
+        assert!(!prompt.contains("stress_level: 0"));
+        assert!(!prompt.contains("fulfillment_score: 0"));
+    }
+
+    #[test]
+    fn system_prompt_preserves_non_default_life_model_state_facts() {
+        let mut model = LifeModel::default_model();
+        model.state.current_focus = "准备产品测试".into();
+        model.state.health_status.physical = "疲惫".into();
+        model.state.health_status.energy_level = 4;
+        model.state.emotional_state.current_mood = "焦虑".into();
+        let prompt = build_system_prompt(&model, None);
+
+        assert!(prompt.contains("当前重心: 准备产品测试"));
+        assert!(prompt.contains("身体: 疲惫"));
+        assert!(prompt.contains("精力4/10"));
+        assert!(prompt.contains("当前心情: 焦虑"));
+        assert!(prompt.contains("current_focus: 准备产品测试"));
+        assert!(prompt.contains("physical: 疲惫"));
+        assert!(prompt.contains("energy_level: 4"));
+        assert!(prompt.contains("current_mood: 焦虑"));
+        assert!(!prompt.contains("mental: 积极"));
     }
 
     #[test]

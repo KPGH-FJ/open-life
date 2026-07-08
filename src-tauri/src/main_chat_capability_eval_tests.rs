@@ -59,7 +59,7 @@ async fn main_chat_capability_eval_direct_requires_provider_scheduler_trace_and_
     assert_eq!(case.actual_route.as_deref(), Some("direct_answer"));
     assert!(case.route_decision_observed);
     assert!(case.deterministic_route_used);
-    assert!(case.route_preview_advisory_only);
+    assert!(case.advisory_route_trace_only);
     assert!(case.generation_result_observed);
     assert!(case.provider_scheduler_trace_observed);
     assert!(case.final_assistant_delivery_observed);

@@ -157,6 +157,22 @@ impl FeedbackStore {
         Ok(count)
     }
 
+    pub fn analytics_details_for_event(&self, event_name: &str, limit: i64) -> Result<Vec<String>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let mut stmt = conn.prepare(
+            "SELECT detail FROM analytics WHERE event_name = ?1 ORDER BY created_at DESC, id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![event_name, limit.max(1)], |row| {
+            row.get::<_, Option<String>>(0)
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map(|items| items.into_iter().flatten().collect())
+            .map_err(|e| e.into())
+    }
+
     pub fn save_conversation_inference(
         &self,
         session_id: Option<&str>,

@@ -6,7 +6,7 @@ use crate::storage::app_data_dir;
 use crate::AppState;
 use openlife_core::agent::agent_loop::{AgentLoopConfig, AgentRole};
 use openlife_core::agent::{AgentLoop, AgentTask, AgentTaskKind};
-use openlife_core::layer_router::Layer;
+use openlife_core::layer::Layer;
 use openlife_core::llm::ChatMessage;
 use serde_json::Value;
 use std::sync::Arc;
@@ -146,7 +146,7 @@ async fn execute_scheduled_task(
 
     let agent_runtime =
         openlife_core::agent::AgentRuntime::new(life_model.clone(), scheduler.clone(), &cfg);
-    let action_executor = openlife_core::agent::ActionExecutor::new(
+    let tool_gateway = openlife_core::agent::ToolGateway::from_executor_config(
         openlife_core::agent::ActionExecutorConfig::default(),
     );
     let loop_config = AgentLoopConfig {
@@ -166,12 +166,7 @@ async fn execute_scheduled_task(
         ],
         tool_action_allowlist: Vec::new(),
     };
-    let agent_loop = AgentLoop::new(
-        agent_runtime,
-        action_executor,
-        scheduler.clone(),
-        loop_config,
-    );
+    let agent_loop = AgentLoop::new(agent_runtime, tool_gateway, scheduler.clone(), loop_config);
 
     let task = AgentTask {
         kind: AgentTaskKind::Proactive,

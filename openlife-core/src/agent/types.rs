@@ -90,7 +90,7 @@ pub struct AgentTask {
     pub session_id: String,
     pub user_text: String,
     pub messages: Vec<crate::llm::ChatMessage>,
-    pub layer: crate::layer_router::Layer,
+    pub layer: crate::layer::Layer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -680,6 +680,7 @@ pub struct AgentProposal {
     pub proposal_type: ProposalType,
     pub source: ProposalSource,
     pub source_detail: Option<String>,
+    pub base_hash: Option<String>,
     pub affected_path: String,
     pub before: Option<serde_json::Value>,
     pub after: serde_json::Value,
@@ -709,6 +710,7 @@ impl AgentProposal {
             proposal_type,
             source,
             source_detail: None,
+            base_hash: None,
             affected_path: affected_path.to_string(),
             before: None,
             after,
@@ -774,7 +776,7 @@ impl AgentProposal {
     pub fn edit(&mut self, new_after: serde_json::Value) {
         self.after = new_after;
         self.status = ProposalStatus::Edited;
-        self.resolved_at = Some(Utc::now());
+        self.resolved_at = None;
     }
 
     pub fn postpone(&mut self) {

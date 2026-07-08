@@ -1,0 +1,1341 @@
+{
+  "schema_version": 2,
+  "last_updated": "2026-07-07",
+  "status": "phase7_old_system_deletion_manifest_synchronized",
+  "product_authorities": [
+    {
+      "id": "agents_md",
+      "path": "AGENTS.md",
+      "phase": 1,
+      "disposition": "keep",
+      "reason": "Project-wide agent context remains the top authority."
+    },
+    {
+      "id": "plans_readme",
+      "path": "plans/README.md",
+      "phase": 1,
+      "disposition": "keep",
+      "reason": "Active authority map for plan precedence."
+    },
+    {
+      "id": "single_system_development_preparation",
+      "path": "plans/openlife_single_system_development_preparation.md",
+      "phase": 1,
+      "disposition": "keep",
+      "reason": "Current active development entry for the single-system round."
+    },
+    {
+      "id": "single_system_deletion_manifest",
+      "path": "plans/openlife_single_system_deletion_manifest.md",
+      "phase": 1,
+      "disposition": "keep",
+      "reason": "Current deletion contract for old systems and direct-write surfaces."
+    }
+  ],
+  "old_runtime_surfaces": [
+    {
+      "id": "main_chat_turn_pipeline",
+      "path": "src-tauri/src/main_chat_turn_pipeline.rs",
+      "phase": 2,
+      "disposition": "keep",
+      "reason": "Phase 2 retained this only as a thin compatibility wrapper delegating to OpenLifeTurnRuntime; it no longer owns routing."
+    },
+    {
+      "id": "main_chat_kernel",
+      "path": "src-tauri/src/main_chat_kernel.rs",
+      "phase": 2,
+      "disposition": "keep",
+      "reason": "MainChatKernel remains as subordinate execution machinery under OpenLifeTurnRuntime, not as an ordinary turn runtime owner."
+    },
+    {
+      "id": "main_chat_strategy",
+      "former_path": "src-tauri/src/main_chat_strategy.rs",
+      "phase": 2,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Separate strategy execution path retired by OpenLifeTurnRuntime."
+    },
+    {
+      "id": "main_chat_tool_loop",
+      "former_path": "src-tauri/src/main_chat_tool_loop.rs",
+      "phase": 2,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Separate tool-loop adapter and single-step fallback-shaped outcome retired by OpenLifeTurnRuntime."
+    },
+    {
+      "id": "main_chat_legacy_agent_loop",
+      "former_path": "src-tauri/src/main_chat_legacy_agent_loop.rs",
+      "phase": 2,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Deprecated product-shaped loop is no longer compiled as a product module."
+    },
+    {
+      "id": "main_chat_route_preview",
+      "former_path": "src-tauri/src/main_chat_route_preview.rs",
+      "phase": 3,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Advisory route preview was deleted in Phase 3; product routing is owned by PolicyRouter."
+    },
+    {
+      "id": "core_main_chat_agent_v1_strategy_router",
+      "host_path": "openlife-core/src/agent/main_chat_agent_v1.rs",
+      "path_kind": "symbol",
+      "former_symbol": "StrategyRouter",
+      "phase": 3,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Keyword/rule product routing was absorbed into IntentFrame construction and PolicyRouter; StrategyRouter symbol must be absent."
+    },
+    {
+      "id": "core_strategy_selector",
+      "former_path": "openlife-core/src/agent/strategy.rs",
+      "phase": 3,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Older StrategySelector product route authority was deleted; remaining historical runtime contract types live outside the old strategy.rs path."
+    },
+    {
+      "id": "core_multi_strategy_runtime",
+      "phase": 7,
+      "disposition": "deleted",
+      "reason": "Deleted during Phase7 rework; this object is no longer compiled in the product crate or core product module graph.",
+      "former_path": "openlife-core/src/agent/multi_strategy_runtime.rs",
+      "retired": true,
+      "expected_absent": true
+    },
+    {
+      "id": "core_strategy_runtime",
+      "path": "openlife-core/src/agent/strategy_runtime.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Strategy runtime is part of the old multi-strategy surface."
+    },
+    {
+      "id": "core_react_beta",
+      "phase": 6,
+      "disposition": "deleted",
+      "reason": "Deleted during Phase7 rework; this object is no longer compiled in the product crate or core product module graph.",
+      "former_path": "openlife-core/src/agent/react_beta.rs",
+      "retired": true,
+      "expected_absent": true
+    },
+    {
+      "id": "main_chat_beta_default_experience",
+      "phase": 7,
+      "disposition": "deleted",
+      "reason": "Deleted during Phase7 rework; this object is no longer compiled in the product crate or core product module graph.",
+      "former_path": "src-tauri/src/main_chat_agent_beta_v1_default_experience.rs",
+      "retired": true,
+      "expected_absent": true
+    },
+    {
+      "id": "main_chat_beta_readiness",
+      "phase": 7,
+      "disposition": "deleted",
+      "reason": "Deleted during Phase7 rework; this object is no longer compiled in the product crate or core product module graph.",
+      "former_path": "src-tauri/src/main_chat_agent_beta_v1_readiness.rs",
+      "retired": true,
+      "expected_absent": true
+    },
+    {
+      "id": "main_chat_beta_real_tasks",
+      "phase": 7,
+      "disposition": "deleted",
+      "reason": "Deleted during Phase7 rework; this object is no longer compiled in the product crate or core product module graph.",
+      "former_path": "src-tauri/src/main_chat_agent_beta_v1_real_tasks.rs",
+      "retired": true,
+      "expected_absent": true
+    },
+    {
+      "id": "main_chat_stage1_dogfood",
+      "phase": 7,
+      "disposition": "deleted",
+      "reason": "Deleted during Phase7 rework; this object is no longer compiled in the product crate or core product module graph.",
+      "former_path": "src-tauri/src/main_chat_agent_stage1_dogfood.rs",
+      "retired": true,
+      "expected_absent": true
+    },
+    {
+      "id": "main_chat_stage2_readiness",
+      "phase": 7,
+      "disposition": "deleted",
+      "reason": "Deleted during Phase7 rework; this object is no longer compiled in the product crate or core product module graph.",
+      "former_path": "src-tauri/src/main_chat_agent_stage2_readiness.rs",
+      "retired": true,
+      "expected_absent": true
+    },
+    {
+      "id": "main_chat_stage3_execution_ux",
+      "phase": 7,
+      "disposition": "deleted",
+      "reason": "Deleted during Phase7 rework; this object is no longer compiled in the product crate or core product module graph.",
+      "former_path": "src-tauri/src/main_chat_stage3_execution_ux.rs",
+      "retired": true,
+      "expected_absent": true
+    },
+    {
+      "id": "main_chat_stage4_memory_knowledge",
+      "phase": 7,
+      "disposition": "deleted",
+      "reason": "Stage4 managed-knowledge shell deleted; current draft-edit helper moved to src-tauri/src/main_chat_memory_proposals.rs.",
+      "former_path": "src-tauri/src/main_chat_stage4_memory_knowledge.rs",
+      "retired": true,
+      "expected_absent": true
+    },
+    {
+      "id": "main_chat_stage5_release_debug",
+      "phase": 7,
+      "disposition": "deleted",
+      "reason": "Deleted during Phase7 rework; this object is no longer compiled in the product crate or core product module graph.",
+      "former_path": "src-tauri/src/main_chat_stage5_release_debug.rs",
+      "retired": true,
+      "expected_absent": true
+    },
+    {
+      "id": "main_chat_productization_eval",
+      "phase": 7,
+      "disposition": "deleted",
+      "reason": "Deleted during Phase7 rework; this object is no longer compiled in the product crate or core product module graph.",
+      "former_path": "src-tauri/src/main_chat_agent_productization_eval.rs",
+      "retired": true,
+      "expected_absent": true
+    },
+    {
+      "id": "main_chat_product_maturity_v2_final_readiness",
+      "phase": 7,
+      "disposition": "deleted",
+      "reason": "Deleted during Phase7 rework; this object is no longer compiled in the product crate or core product module graph.",
+      "former_path": "src-tauri/src/main_chat_product_maturity_v2_final_readiness.rs",
+      "retired": true,
+      "expected_absent": true
+    }
+  ],
+  "old_router_surfaces": [
+    {
+      "id": "intent_router",
+      "former_path": "openlife-core/src/router.rs",
+      "phase": 3,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "IntentRouter was removed from core, AppState, bootstrap, diagnostics, and ordinary Main Chat; value keyword matching moved to a stateless non-router extractor."
+    },
+    {
+      "id": "layer_router",
+      "former_path": "openlife-core/src/layer_router.rs",
+      "phase": 3,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "LayerRouter decision logic was removed; Layer remains only as a pure runtime contract type in openlife-core/src/layer.rs."
+    },
+    {
+      "id": "diagnostics_get_router_status",
+      "host_path": "src-tauri/src/commands/diagnostics.rs",
+      "path_kind": "symbol",
+      "former_symbol": "get_router_status",
+      "phase": 3,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Old IntentRouter diagnostics command was deleted and replaced by get_policy_router_status."
+    },
+    {
+      "id": "frontend_multi_strategy_preview_section",
+      "former_path": "frontend/src/pages/settings/MultiStrategyPreviewSection.tsx",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Frontend preview surface was removed during Phase7; old multi-strategy preview UI is no longer a shipped product surface."
+    },
+    {
+      "id": "frontend_tauri_multi_strategy_exports",
+      "path": "frontend/src/tauri.ts",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Frontend bridge keeps old routing concepts callable."
+    }
+  ],
+  "product_old_route_markers": [
+    {
+      "id": "marker_legacy_agent_loop",
+      "path": "src-tauri/src",
+      "phase": 2,
+      "disposition": "archive_reference",
+      "reason": "Legacy AgentLoop product files are deleted; remaining marker hits are anti-regression guards/test evidence only.",
+      "marker": "legacy_agent_loop",
+      "marker_scope": "guard_or_evidence",
+      "expected_file_count": 3
+    },
+    {
+      "id": "marker_main_chat_strategy",
+      "path": "src-tauri/src",
+      "phase": 2,
+      "disposition": "delete",
+      "reason": "Old strategy product marker is absent from source after Phase 2 runtime deletion.",
+      "marker": "main_chat_strategy",
+      "marker_scope": "deleted_product_marker",
+      "expected_file_count": 0
+    },
+    {
+      "id": "marker_route_preview",
+      "former_path": "src-tauri/src/main_chat_route_preview.rs",
+      "phase": 3,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Route preview product marker is absent after Phase 3 deletion.",
+      "marker": "route_preview",
+      "marker_scope": "deleted_product_marker",
+      "expected_file_count": 0
+    },
+    {
+      "id": "marker_single_step_fallback",
+      "path": "src-tauri/src",
+      "phase": 2,
+      "disposition": "archive_reference",
+      "reason": "Single-step fallback execution is deleted; remaining marker hits are terminal/evidence fields requiring false/no-credit and anti-regression tests.",
+      "marker": "single_step_fallback",
+      "marker_scope": "guard_or_evidence",
+      "expected_file_count": 10
+    },
+    {
+      "id": "marker_multi_strategy",
+      "path": "frontend/src",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "MultiStrategy marker must remain registered until deleted.",
+      "marker": "MultiStrategy",
+      "expected_file_count": 19
+    },
+    {
+      "id": "marker_beta_v1",
+      "path": "src-tauri/src",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Beta v1 marker must remain registered until deleted.",
+      "marker": "beta_v1",
+      "expected_file_count": 12
+    },
+    {
+      "id": "marker_stage1",
+      "path": "src-tauri/src",
+      "phase": 7,
+      "disposition": "archive_reference",
+      "reason": "Stage 1 marker must remain registered until archived or deleted.",
+      "marker": "stage1",
+      "expected_file_count": 24
+    },
+    {
+      "id": "marker_stage2",
+      "path": "src-tauri/src",
+      "phase": 7,
+      "disposition": "archive_reference",
+      "reason": "Stage 2 marker must remain registered until archived or deleted.",
+      "marker": "stage2",
+      "expected_file_count": 18
+    },
+    {
+      "id": "marker_stage3",
+      "path": "src-tauri/src",
+      "phase": 7,
+      "disposition": "archive_reference",
+      "reason": "Stage 3 marker must remain registered until archived or deleted.",
+      "marker": "stage3",
+      "expected_file_count": 9
+    },
+    {
+      "id": "marker_stage4",
+      "path": "src-tauri/src",
+      "phase": 5,
+      "disposition": "absorb_then_delete",
+      "reason": "Stage 4 marker must remain registered until memory knowledge writes move behind gateways.",
+      "marker": "stage4",
+      "expected_file_count": 8
+    },
+    {
+      "id": "marker_stage5",
+      "path": "src-tauri/src",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Stage 5 marker must remain registered until debug/report surfaces leave product handler.",
+      "marker": "stage5",
+      "expected_file_count": 9
+    }
+  ],
+  "direct_proposal_write_surfaces": [
+    {
+      "id": "proposal_write_review_workflow",
+      "path": "openlife-core/src/agent/review_workflow.rs",
+      "phase": 4,
+      "disposition": "storage_only",
+      "phase4_classification": "review_workflow_target",
+      "reason": "ReviewWorkflow is the sole product governance entry allowed to call ProposalStore::create_proposal.",
+      "match": ".create_proposal(",
+      "expected_count": 1
+    }
+  ],
+  "phase4_proposal_creation_source_map": [
+    {
+      "id": "phase4_review_workflow_entry",
+      "path": "openlife-core/src/agent/review_workflow.rs",
+      "phase": 4,
+      "disposition": "storage_only",
+      "phase4_classification": "review_workflow_target",
+      "proposal_creation_route": "ProposalStore",
+      "reason": "ReviewWorkflow is the only product governance layer allowed to create stored proposals."
+    },
+    {
+      "id": "phase4_proposal_store_storage",
+      "path": "openlife-core/src/agent/proposal_store.rs",
+      "phase": 4,
+      "disposition": "storage_only",
+      "phase4_classification": "storage_only",
+      "proposal_creation_route": "storage_layer_only",
+      "reason": "ProposalStore remains storage only and does not decide product durable-write policy."
+    },
+    {
+      "id": "phase4_main_chat_proposal_support",
+      "path": "src-tauri/src/main_chat_proposal_support.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "Main Chat memory/LifeModel/ToolPermission proposals now route through ReviewWorkflow."
+    },
+    {
+      "id": "phase4_builder",
+      "path": "src-tauri/src/commands/builder.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "Builder accepted signals now route through ReviewWorkflow before storage."
+    },
+    {
+      "id": "phase4_calibration",
+      "path": "src-tauri/src/commands/calibration.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "Calibration evolution changes now route through ReviewWorkflow before storage."
+    },
+    {
+      "id": "phase4_action_executor_declarative_stubs",
+      "path": "openlife-core/src/agent/action_executor/declarative_stubs.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "Declarative tool proposal stubs now create pending review proposals through ReviewWorkflow."
+    },
+    {
+      "id": "phase4_action_executor_core_os_tools",
+      "path": "openlife-core/src/agent/action_executor/core_os_tools.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "Core OS proposal tools now route through ReviewWorkflow."
+    },
+    {
+      "id": "phase4_action_executor_execution_tools",
+      "path": "openlife-core/src/agent/action_executor/execution_tools.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "File/calendar/email/task proposal tools now route through ReviewWorkflow."
+    },
+    {
+      "id": "phase4_action_executor_tool_executor",
+      "path": "openlife-core/src/agent/action_executor/tool_executor.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "ToolPermission and external-write MCP proposals now route through ReviewWorkflow."
+    },
+    {
+      "id": "phase4_plan_execute",
+      "path": "openlife-core/src/agent/plan_execute.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "PlanExecute write-class step proposals now route through ReviewWorkflow."
+    },
+    {
+      "id": "phase4_maturation",
+      "path": "openlife-core/src/agent/maturation.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "Maturation candidate proposals now route through ReviewWorkflow."
+    },
+    {
+      "id": "phase4_agent_command",
+      "path": "src-tauri/src/commands/agent.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "Agent command generated proposals now route through ReviewWorkflow."
+    },
+    {
+      "id": "phase4_execution_command",
+      "path": "src-tauri/src/commands/execution.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "Skill runtime accepted proposal candidates now route through ReviewWorkflow."
+    },
+    {
+      "id": "phase4_main_chat_generation_support",
+      "path": "src-tauri/src/main_chat_generation_support.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "Main Chat generated proposals now route through ReviewWorkflow."
+    },
+    {
+      "id": "phase4_main_chat_kernel",
+      "path": "src-tauri/src/main_chat_kernel.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "reason": "MainChatKernel write and memory-governance proposals now route through ReviewWorkflow."
+    },
+    {
+      "id": "phase4_stage4_memory_knowledge",
+      "phase": 7,
+      "disposition": "deleted",
+      "phase4_classification": "deleted",
+      "proposal_creation_route": "absorbed_by_main_chat_memory_proposals",
+      "reason": "Historical Stage4 proposal shell deleted; current memory proposal draft edit helper does not create proposals and does not execute durable writes.",
+      "former_path": "src-tauri/src/main_chat_stage4_memory_knowledge.rs",
+      "retired": true,
+      "expected_absent": true
+    },
+    {
+      "id": "phase4_proposal_commands",
+      "path": "src-tauri/src/commands/proposal.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "test_fixture",
+      "proposal_creation_route": "status_ops_product_fixture_seed_only",
+      "reason": "Product proposal command keeps review/accept/edit/reject/postpone status ops; direct creation is confined to cfg(test) fixtures."
+    },
+    {
+      "id": "phase4_life_model_commands",
+      "path": "src-tauri/src/commands/life_model.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "test_fixture",
+      "proposal_creation_route": "cfg_test_fixture_seed_only",
+      "reason": "LifeModel command direct proposal writes are cfg(test) fixture seeds only."
+    },
+    {
+      "id": "phase4_proactive_commands",
+      "path": "src-tauri/src/commands/proactive.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "test_fixture",
+      "proposal_creation_route": "cfg_test_fixture_seed_only",
+      "reason": "Proactive command direct proposal writes are cfg(test) fixture seeds only."
+    }
+  ],
+  "direct_memory_lifemodel_write_surfaces": [
+    {
+      "id": "memory_write_core_memory_lifecycle_store",
+      "path": "openlife-core/src/agent/memory_lifecycle.rs",
+      "phase": 5,
+      "disposition": "storage_only",
+      "reason": "Storage implementation remains valid only behind MemoryGateway.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 1
+    },
+    {
+      "id": "memory_write_core_memory_store",
+      "path": "openlife-core/src/memory.rs",
+      "phase": 5,
+      "disposition": "storage_only",
+      "reason": "MemoryStore remains valid only behind MemoryGateway.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 2
+    },
+    {
+      "id": "memory_write_core_vector_store",
+      "path": "openlife-core/src/vectors.rs",
+      "phase": 5,
+      "disposition": "storage_only",
+      "reason": "VectorStore remains valid only behind MemoryGateway.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 2
+    },
+    {
+      "id": "lifemodel_write_manual_editor",
+      "path": "src-tauri/src/commands/life_model.rs",
+      "phase": 5,
+      "disposition": "absorb_then_delete",
+      "reason": "Manual LifeModel save must move behind LifeModelWriteGateway with explicit override policy.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 1
+    },
+    {
+      "id": "memory_write_memory_commands",
+      "path": "src-tauri/src/commands/memory.rs",
+      "phase": 5,
+      "disposition": "absorb_then_delete",
+      "reason": "Memory commands are thin wrappers; remaining counted markers are command names/tests and must delegate to MemoryGateway.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 2
+    },
+    {
+      "id": "memory_lifemodel_write_proposal_application",
+      "path": "src-tauri/src/commands/proposal.rs",
+      "phase": 5,
+      "disposition": "absorb_then_delete",
+      "reason": "Proposal command delegates materialization to MemoryGateway and LifeModelWriteGateway; remaining marker is the rollback command wrapper.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 1
+    },
+    {
+      "id": "memory_lifemodel_write_settings_import",
+      "path": "src-tauri/src/commands/settings.rs",
+      "phase": 5,
+      "disposition": "absorb_then_delete",
+      "reason": "Import path now delegates LifeModel writes to LifeModelWriteGateway and memory replacement to MemoryGateway.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 1
+    },
+    {
+      "id": "memory_lifemodel_write_state_commands",
+      "path": "src-tauri/src/commands/state.rs",
+      "phase": 5,
+      "disposition": "absorb_then_delete",
+      "reason": "State and daily-goal commands delegate state history to MemoryGateway and LifeModel compatibility writes to LifeModelWriteGateway.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 5
+    },
+    {
+      "id": "lifemodel_write_lib_persist_helper",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 5,
+      "disposition": "keep",
+      "reason": "Shared persist helper remains as a compatibility wrapper that delegates to LifeModelWriteGateway.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 1
+    },
+    {
+      "id": "lifemodel_write_gateway_storage_adapter",
+      "path": "src-tauri/src/life_model_write_gateway.rs",
+      "phase": 5,
+      "disposition": "storage_only",
+      "reason": "LifeModelWriteGateway is the only production adapter allowed to call LifeModelManager::save.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 2
+    },
+    {
+      "id": "memory_write_gateway_storage_adapter",
+      "path": "src-tauri/src/memory_gateway.rs",
+      "phase": 5,
+      "disposition": "storage_only",
+      "reason": "MemoryGateway is the only production adapter allowed to write MemoryStore, VectorStore, and MemoryLifecycleStore.",
+      "match": "direct_memory_lifemodel_write",
+      "expected_count": 12
+    }
+  ],
+  "frontend_multi_source_state_surfaces": [
+    {
+      "id": "frontend_today_multi_source_state",
+      "path": "frontend/src/pages/TodayPage.tsx",
+      "phase": 6,
+      "disposition": "absorb_then_delete",
+      "reason": "Today assembles product state from diagnostics, daily goals, and proposals."
+    },
+    {
+      "id": "frontend_mailbox_multi_source_state",
+      "path": "frontend/src/pages/MailboxPage.tsx",
+      "phase": 6,
+      "disposition": "absorb_then_delete",
+      "reason": "Mailbox assembles review state from proposals, config, and diagnostics."
+    },
+    {
+      "id": "frontend_chat_multi_source_state",
+      "path": "frontend/src/pages/ChatPage.tsx",
+      "phase": 6,
+      "disposition": "absorb_then_delete",
+      "reason": "Chat composes diagnostics, scheduler config, LifeModel, daily goals, task state, skills, and snapshots."
+    },
+    {
+      "id": "frontend_companion_multi_source_state",
+      "path": "frontend/src/pages/CompanionPage.tsx",
+      "phase": 6,
+      "disposition": "absorb_then_delete",
+      "reason": "Companion state should be folded into the product projection where shared."
+    },
+    {
+      "id": "frontend_lifemodel_multi_source_state",
+      "path": "frontend/src/pages/LifeModelPage.tsx",
+      "phase": 6,
+      "disposition": "absorb_then_delete",
+      "reason": "LifeModel page combines current view, diagnostics, and proposal state."
+    },
+    {
+      "id": "frontend_settings_multi_source_state",
+      "path": "frontend/src/pages/SettingsPage.tsx",
+      "phase": 6,
+      "disposition": "absorb_then_delete",
+      "reason": "Settings presents readiness from diagnostics, runtime, router, permissions, provider config, and cache state."
+    },
+    {
+      "id": "frontend_lifemodel_editor_direct_save",
+      "path": "frontend/src/pages/LifeModelEditor.tsx",
+      "phase": 5,
+      "disposition": "absorb_then_delete",
+      "reason": "LifeModel editor calls manual save and must remain an explicit governed override."
+    },
+    {
+      "id": "frontend_tauri_monolithic_bridge",
+      "path": "frontend/src/tauri.ts",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Monolithic frontend bridge exposes product, dev, migration, and eval commands together."
+    }
+  ],
+  "product_command_allowlist": [
+    {
+      "id": "product_allowlist_goal_capability_gap_analysis",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 1,
+      "disposition": "keep",
+      "reason": "Read-only product command: returns user-facing LifeModel goal/capability gap analysis for Builder and growth workflows; it does not run evals, migrations, debug tooling, or writes.",
+      "command": "goal_capability_gap_analysis",
+      "matched_tokens": [
+        "capability"
+      ]
+    },
+    {
+      "id": "product_allowlist_goal_capability_gap_report",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 1,
+      "disposition": "keep",
+      "reason": "Read-only product command: returns structured user-facing LifeModel capability gaps for product growth workflows; it does not run evals, migrations, debug tooling, or writes.",
+      "command": "goal_capability_gap_report",
+      "matched_tokens": [
+        "capability"
+      ]
+    }
+  ],
+  "legacy_development_command_surfaces": [
+    {
+      "id": "command_run_multi_strategy_agent_preview",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "legacy_development_command",
+      "reason": "Legacy/development command remains registered for historical preview only; ordinary Main Chat and Settings diagnostics must not use it as product routing authority.",
+      "command": "run_multi_strategy_agent_preview",
+      "matched_tokens": [
+        "strategy",
+        "preview"
+      ]
+    },
+    {
+      "id": "command_run_main_chat_agent_execution_v1_eval_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_agent_execution_v1_eval_gate",
+      "matched_tokens": [
+        "eval"
+      ]
+    },
+    {
+      "id": "command_run_main_chat_capability_eval_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_capability_eval_gate",
+      "matched_tokens": [
+        "eval",
+        "capability"
+      ]
+    },
+    {
+      "id": "command_run_main_chat_agent_productization_v1_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_agent_productization_v1_gate",
+      "matched_tokens": [
+        "productization"
+      ]
+    },
+    {
+      "id": "command_run_main_chat_external_live_productization_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_external_live_productization_gate",
+      "matched_tokens": [
+        "productization"
+      ]
+    },
+    {
+      "id": "command_run_main_chat_agent_product_maturity_v2_event_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_agent_product_maturity_v2_event_gate",
+      "matched_tokens": [
+        "maturity"
+      ]
+    },
+    {
+      "id": "command_run_main_chat_agent_product_maturity_v2_plan_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_agent_product_maturity_v2_plan_gate",
+      "matched_tokens": [
+        "maturity"
+      ]
+    },
+    {
+      "id": "command_run_main_chat_agent_product_maturity_v2_skills_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_agent_product_maturity_v2_skills_gate",
+      "matched_tokens": [
+        "maturity"
+      ]
+    },
+    {
+      "id": "command_run_main_chat_agent_product_maturity_v2_final_readiness_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_agent_product_maturity_v2_final_readiness_gate",
+      "matched_tokens": [
+        "maturity",
+        "readiness"
+      ]
+    },
+    {
+      "id": "command_run_main_chat_agent_beta_v1_readiness_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_agent_beta_v1_readiness_gate",
+      "matched_tokens": [
+        "beta",
+        "readiness"
+      ]
+    },
+    {
+      "id": "command_run_main_chat_agent_stage1_dogfood_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_agent_stage1_dogfood_gate",
+      "matched_tokens": [
+        "stage",
+        "dogfood"
+      ]
+    },
+    {
+      "id": "command_run_main_chat_agent_stage2_readiness_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_agent_stage2_readiness_gate",
+      "matched_tokens": [
+        "stage",
+        "readiness"
+      ]
+    },
+    {
+      "id": "command_run_main_chat_agent_step6_product_acceptance_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_agent_step6_product_acceptance_gate",
+      "matched_tokens": [
+        "acceptance",
+        "step6"
+      ]
+    },
+    {
+      "id": "command_prepare_main_chat_step6_live_provider_eval_state",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "prepare_main_chat_step6_live_provider_eval_state",
+      "matched_tokens": [
+        "eval",
+        "step6"
+      ]
+    },
+    {
+      "id": "command_run_main_chat_stage3_execution_ux_report",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_stage3_execution_ux_report",
+      "matched_tokens": [
+        "stage"
+      ]
+    },
+    {
+      "id": "command_validate_main_chat_agent_stage2_manual_dogfood_artifact",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "validate_main_chat_agent_stage2_manual_dogfood_artifact",
+      "matched_tokens": [
+        "stage",
+        "dogfood"
+      ]
+    },
+    {
+      "id": "command_prepare_main_chat_agent_stage1_browser_dogfood_state",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "prepare_main_chat_agent_stage1_browser_dogfood_state",
+      "matched_tokens": [
+        "stage",
+        "dogfood"
+      ]
+    },
+    {
+      "id": "command_set_main_chat_agent_stage1_browser_network_policy",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "set_main_chat_agent_stage1_browser_network_policy",
+      "matched_tokens": [
+        "stage"
+      ]
+    },
+    {
+      "id": "command_set_main_chat_agent_stage1_browser_scripted_response",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "set_main_chat_agent_stage1_browser_scripted_response",
+      "matched_tokens": [
+        "stage"
+      ]
+    },
+    {
+      "id": "command_set_main_chat_agent_stage1_browser_web_fixture_output",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "set_main_chat_agent_stage1_browser_web_fixture_output",
+      "matched_tokens": [
+        "stage"
+      ]
+    },
+    {
+      "id": "command_run_main_chat_agent_execution_v1_final_acceptance_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_agent_execution_v1_final_acceptance_gate",
+      "matched_tokens": [
+        "acceptance",
+        "final_acceptance"
+      ]
+    },
+    {
+      "id": "command_get_runtime_strategy_registry_status",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "get_runtime_strategy_registry_status",
+      "matched_tokens": [
+        "strategy"
+      ]
+    },
+    {
+      "id": "command_get_react_beta_execution_status",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "get_react_beta_execution_status",
+      "matched_tokens": [
+        "beta"
+      ]
+    },
+    {
+      "id": "command_check_runtime_migration_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "check_runtime_migration_gate",
+      "matched_tokens": [
+        "migration"
+      ]
+    },
+    {
+      "id": "command_check_controlled_chat_pilot_eligibility",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "check_controlled_chat_pilot_eligibility",
+      "matched_tokens": [
+        "pilot"
+      ]
+    },
+    {
+      "id": "command_check_controlled_pilot_promotion_readiness",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "check_controlled_pilot_promotion_readiness",
+      "matched_tokens": [
+        "readiness",
+        "pilot"
+      ]
+    },
+    {
+      "id": "command_draft_controlled_chat_migration_plan",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "draft_controlled_chat_migration_plan",
+      "matched_tokens": [
+        "migration"
+      ]
+    },
+    {
+      "id": "command_record_controlled_chat_migration_review_decision",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "record_controlled_chat_migration_review_decision",
+      "matched_tokens": [
+        "migration"
+      ]
+    },
+    {
+      "id": "command_get_controlled_chat_migration_review_decision_summary",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "get_controlled_chat_migration_review_decision_summary",
+      "matched_tokens": [
+        "migration"
+      ]
+    },
+    {
+      "id": "command_check_controlled_chat_migration_implementation_gate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "check_controlled_chat_migration_implementation_gate",
+      "matched_tokens": [
+        "migration"
+      ]
+    },
+    {
+      "id": "command_run_controlled_chat_migration_shadow_run",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_controlled_chat_migration_shadow_run",
+      "matched_tokens": [
+        "migration"
+      ]
+    },
+    {
+      "id": "command_record_controlled_chat_migration_shadow_review_decision",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "record_controlled_chat_migration_shadow_review_decision",
+      "matched_tokens": [
+        "migration"
+      ]
+    },
+    {
+      "id": "command_get_controlled_chat_migration_shadow_review_summary",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "get_controlled_chat_migration_shadow_review_summary",
+      "matched_tokens": [
+        "migration"
+      ]
+    },
+    {
+      "id": "command_check_controlled_chat_cutover_readiness",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "check_controlled_chat_cutover_readiness",
+      "matched_tokens": [
+        "cutover",
+        "readiness"
+      ]
+    },
+    {
+      "id": "command_run_controlled_chat_cutover_candidate",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_controlled_chat_cutover_candidate",
+      "matched_tokens": [
+        "cutover"
+      ]
+    },
+    {
+      "id": "command_record_controlled_chat_cutover_candidate_review_decision",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "record_controlled_chat_cutover_candidate_review_decision",
+      "matched_tokens": [
+        "cutover"
+      ]
+    },
+    {
+      "id": "command_get_controlled_chat_cutover_candidate_review_summary",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "get_controlled_chat_cutover_candidate_review_summary",
+      "matched_tokens": [
+        "cutover"
+      ]
+    },
+    {
+      "id": "command_check_controlled_chat_cutover_candidate_promotion_readiness",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "check_controlled_chat_cutover_candidate_promotion_readiness",
+      "matched_tokens": [
+        "cutover",
+        "readiness"
+      ]
+    },
+    {
+      "id": "command_record_controlled_pilot_promotion_evidence",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "record_controlled_pilot_promotion_evidence",
+      "matched_tokens": [
+        "pilot"
+      ]
+    },
+    {
+      "id": "command_get_controlled_pilot_promotion_evidence_summary",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "get_controlled_pilot_promotion_evidence_summary",
+      "matched_tokens": [
+        "pilot"
+      ]
+    },
+    {
+      "id": "command_list_stage4_knowledge_asset_inventory",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "list_stage4_knowledge_asset_inventory",
+      "matched_tokens": [
+        "stage"
+      ]
+    },
+    {
+      "id": "command_run_main_chat_stage4_memory_knowledge_report",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_stage4_memory_knowledge_report",
+      "matched_tokens": [
+        "stage"
+      ]
+    },
+    {
+      "id": "command_evaluate_main_chat_stage5_release_debug_preflight",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "evaluate_main_chat_stage5_release_debug_preflight",
+      "matched_tokens": [
+        "stage",
+        "eval",
+        "debug"
+      ]
+    },
+    {
+      "id": "command_export_main_chat_agent_debug_bundle",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "export_main_chat_agent_debug_bundle",
+      "matched_tokens": [
+        "debug"
+      ]
+    },
+    {
+      "id": "command_list_main_chat_debug_bundles",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "list_main_chat_debug_bundles",
+      "matched_tokens": [
+        "debug"
+      ]
+    },
+    {
+      "id": "command_get_main_chat_debug_bundle",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "get_main_chat_debug_bundle",
+      "matched_tokens": [
+        "debug"
+      ]
+    },
+    {
+      "id": "command_delete_main_chat_debug_bundle",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "delete_main_chat_debug_bundle",
+      "matched_tokens": [
+        "debug"
+      ]
+    },
+    {
+      "id": "command_create_main_chat_internal_issue_report",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Stage 5 release debug/internal issue report shipped handler surface; Phase 1 inventories it only, and Phase 7 must remove it from the product handler.",
+      "command": "create_main_chat_internal_issue_report",
+      "matched_tokens": [
+        "internal_issue_report",
+        "issue_report"
+      ]
+    },
+    {
+      "id": "command_list_main_chat_internal_issue_reports",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Stage 5 release debug/internal issue report shipped handler surface; Phase 1 inventories it only, and Phase 7 must remove it from the product handler.",
+      "command": "list_main_chat_internal_issue_reports",
+      "matched_tokens": [
+        "internal_issue_report",
+        "issue_report"
+      ]
+    },
+    {
+      "id": "command_get_main_chat_internal_issue_report",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Stage 5 release debug/internal issue report shipped handler surface; Phase 1 inventories it only, and Phase 7 must remove it from the product handler.",
+      "command": "get_main_chat_internal_issue_report",
+      "matched_tokens": [
+        "internal_issue_report",
+        "issue_report"
+      ]
+    },
+    {
+      "id": "command_delete_main_chat_internal_issue_report",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Stage 5 release debug/internal issue report shipped handler surface; Phase 1 inventories it only, and Phase 7 must remove it from the product handler.",
+      "command": "delete_main_chat_internal_issue_report",
+      "matched_tokens": [
+        "internal_issue_report",
+        "issue_report"
+      ]
+    },
+    {
+      "id": "command_run_main_chat_stage5_release_debug_report",
+      "path": "src-tauri/src/lib.rs",
+      "phase": 7,
+      "disposition": "delete",
+      "reason": "Legacy/development command remains registered in shipped handler for Phase 1 inventory only.",
+      "command": "run_main_chat_stage5_release_debug_report",
+      "matched_tokens": [
+        "stage",
+        "debug"
+      ]
+    }
+  ]
+}

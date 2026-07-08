@@ -4,10 +4,9 @@ use openlife_core::agent::ReasoningTrace;
 use openlife_core::life_model::LifeModel;
 use openlife_core::llm::ChatMessage;
 use openlife_core::scheduler::InferenceScheduler;
-use openlife_core::vectors::{embed_text_with_privacy, VectorInsertItem};
 use tokio::time::{timeout, Duration};
 
-use crate::main_chat_hs_runtime::classify_hs_policy_topic;
+use crate::memory_gateway;
 use crate::AppState;
 
 const NON_STREAM_FALLBACK_TIMEOUT_SECS: u64 = 120;
@@ -43,11 +42,19 @@ async fn generate_and_persist_chat_proposals(
     {
         let store = proposal_store_arc.lock().await;
         for proposal in proposals {
-            let proposal_id = proposal.id.clone();
-            if let Err(e) = store.create_proposal(&proposal) {
-                log::warn!("[ChatProposal] Failed to save proposal: {}", e);
-            } else {
-                created_proposal_ids.push(proposal_id);
+            match openlife_core::agent::ReviewWorkflow::new(&store).submit(
+                openlife_core::agent::DurableWriteRequest::from_agent_proposal(
+                    openlife_core::agent::DurableWriteSource::MainChat,
+                    openlife_core::agent::DurableWriteSubject::from_proposal_type(
+                        proposal.proposal_type,
+                    ),
+                    proposal,
+                    "Main Chat generated proposal is pending Review Center approval.",
+                )
+                .with_evidence_refs(vec![format!("agent_run:{}", agent_run.id)]),
+            ) {
+                Ok(outcome) => created_proposal_ids.push(outcome.proposal_id().to_string()),
+                Err(e) => log::warn!("[ChatProposal] Failed to save proposal: {}", e),
             }
         }
     }
@@ -66,27 +73,44 @@ async fn generate_and_persist_chat_proposals(
     }
 }
 
+fn should_generate_chat_proposals(
+    agent_run: &openlife_core::agent::AgentRun,
+    reasoning_trace: &ReasoningTrace,
+) -> bool {
+    if !agent_run.generated_proposals.is_empty() || agent_run.tool_call_count > 0 {
+        return false;
+    }
+
+    let Some(metadata) = reasoning_trace.generation_result.as_ref() else {
+        return true;
+    };
+    let selected_strategy = metadata
+        .get("selectedStrategy")
+        .and_then(serde_json::Value::as_str);
+    let kernel_read_only = metadata
+        .get("kernelBackedReadOnlyToolLoop")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    let proposal_only_write = metadata
+        .get("kernelBackedProposalOnlyWrite")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+
+    if kernel_read_only || proposal_only_write {
+        return false;
+    }
+
+    selected_strategy
+        .map(|strategy| strategy == "direct_answer")
+        .unwrap_or(true)
+}
+
 pub(crate) async fn persist_chat_message_if_needed(
     session_id: &str,
     msg: &ChatMessage,
     state: &Arc<AppState>,
 ) -> Result<bool, String> {
-    let store = state.memory_store.lock().await;
-    let should_skip = store
-        .load_recent_messages(session_id, 1)
-        .map_err(|e| e.to_string())?
-        .last()
-        .map(|last| last.role == msg.role && last.content == msg.content)
-        .unwrap_or(false);
-    if should_skip {
-        let _ = store.touch_chat_session(session_id);
-        return Ok(false);
-    }
-    store
-        .save_message(session_id, msg)
-        .map_err(|e| e.to_string())?;
-    let _ = store.touch_chat_session(session_id);
-    Ok(true)
+    memory_gateway::save_turn_message_if_needed_with_state(session_id, msg, state).await
 }
 
 pub(crate) async fn persist_vector_memory_for_message(
@@ -94,61 +118,22 @@ pub(crate) async fn persist_vector_memory_for_message(
     msg: &ChatMessage,
     state: &Arc<AppState>,
 ) {
-    let content = msg.content.trim();
-    if content.is_empty() {
-        return;
-    }
-    let (provider, openai_base, openai_key, embedding_model, embedding_enabled) = {
-        let cfg = state.config.lock().await;
-        (
-            cfg.llm.provider.clone(),
-            cfg.llm.openai_base.clone(),
-            cfg.llm.openai_key.clone(),
-            cfg.llm.embedding_model.clone(),
-            cfg.llm.embedding_enabled,
-        )
-    };
-    let privacy_engine = state.privacy_engine.lock().await.clone();
-    let hs_local_only =
-        classify_hs_policy_topic(content, "") != openlife_core::agent::PolicyTopic::General;
-    let embedding = match embed_text_with_privacy(
-        content,
-        &provider,
-        &openai_base,
-        &openai_key,
-        &embedding_model,
-        embedding_enabled,
-        &privacy_engine,
-        hs_local_only,
-    )
-    .await
-    {
-        Ok(embedding) if !embedding.is_empty() => embedding,
-        Ok(_) => return,
-        Err(e) => {
-            eprintln!(
-                "[memory] embedding generation failed for {} message in session {}: {}",
-                msg.role, session_id, e
+    memory_gateway::persist_vector_memory_for_message_with_state(session_id, msg, state).await;
+}
+
+fn mark_vector_persistence_skipped(reasoning_trace: &mut ReasoningTrace, reason: &str) {
+    match reasoning_trace.generation_result.as_mut() {
+        Some(serde_json::Value::Object(metadata)) => {
+            metadata.insert(
+                "vectorPersistenceSkipped".into(),
+                serde_json::Value::String(reason.to_string()),
             );
-            return;
         }
-    };
-    let store = state.vector_store.lock().await;
-    let item = VectorInsertItem {
-        session_id,
-        content,
-        embedding: &embedding,
-        source: if msg.role == "assistant" {
-            "assistant_reply"
-        } else {
-            "user_message"
-        },
-    };
-    if let Err(e) = store.insert_batch(&[item]) {
-        eprintln!(
-            "[memory] vector insert failed for {} message in session {}: {}",
-            msg.role, session_id, e
-        );
+        _ => {
+            reasoning_trace.generation_result = Some(serde_json::json!({
+                "vectorPersistenceSkipped": reason,
+            }));
+        }
     }
 }
 
@@ -171,6 +156,11 @@ pub(crate) async fn finalize_chat_agent_run(
         }
         _ => serde_json::json!({ "text": reply }),
     });
+    if inserted {
+        if let Some(reason) = state.vector_persistence_mode.skip_reason() {
+            mark_vector_persistence_skipped(reasoning_trace, reason);
+        }
+    }
     agent_run.output_preview = Some(preview_text(reply, 200));
     if agent_run.status == openlife_core::agent::AgentRunStatus::Running {
         agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
@@ -201,6 +191,7 @@ pub(crate) async fn finalize_chat_agent_run(
     }
 
     if inserted
+        && state.vector_persistence_mode.skip_reason().is_none()
         && timeout(
             Duration::from_secs(CHAT_VECTOR_PERSIST_TIMEOUT_SECS),
             persist_vector_memory_for_message(session_id, assistant_message, state),
@@ -208,18 +199,20 @@ pub(crate) async fn finalize_chat_agent_run(
         .await
         .is_err()
     {
-        eprintln!(
+        log::warn!(
             "[memory] vector persistence timed out after {}s for assistant message in session {}",
-            CHAT_VECTOR_PERSIST_TIMEOUT_SECS, session_id
+            CHAT_VECTOR_PERSIST_TIMEOUT_SECS,
+            session_id
         );
     }
 
-    if timeout(
-        Duration::from_secs(CHAT_PROPOSAL_GENERATION_TIMEOUT_SECS),
-        generate_and_persist_chat_proposals(state, agent_run, reply, life_model),
-    )
-    .await
-    .is_err()
+    if should_generate_chat_proposals(agent_run, reasoning_trace)
+        && timeout(
+            Duration::from_secs(CHAT_PROPOSAL_GENERATION_TIMEOUT_SECS),
+            generate_and_persist_chat_proposals(state, agent_run, reply, life_model),
+        )
+        .await
+        .is_err()
     {
         eprintln!(
             "[ChatProposal] Proposal generation timed out after {}s for run {}",

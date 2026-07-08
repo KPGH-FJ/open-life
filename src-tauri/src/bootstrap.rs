@@ -15,14 +15,12 @@ use openlife_core::agent::{
 use openlife_core::builder::BuilderSessionStore;
 use openlife_core::config::AppConfig;
 use openlife_core::feedback::FeedbackStore;
-use openlife_core::layer_router::LayerRouter;
 use openlife_core::life_model::LifeModelManager;
 use openlife_core::mcp::McpRegistry;
 use openlife_core::mcp_audit::McpAuditStore;
 use openlife_core::memory::MemoryStore;
 use openlife_core::memory_cache::{HotMemoryCache, SharedHotCache};
 use openlife_core::privacy::PrivacyEngine;
-use openlife_core::router::IntentRouter;
 use openlife_core::scheduler::InferenceScheduler;
 use openlife_core::vectors::VectorStore;
 use openlife_core::versioning::VersionManager;
@@ -226,6 +224,37 @@ fn init_evidence_store(
                     openlife_core::agent::EvidenceStore::new_in_memory().map_err(|memory_err| {
                         format!(
                             "所有 evidence store 初始化失败: primary={}, fallback={}, in_memory={}",
+                            primary_err, fallback_err, memory_err
+                        )
+                    })
+                }
+            }
+        }
+    }
+}
+
+fn init_life_event_store(
+    db_path: &Path,
+    startup_warnings: &std::cell::RefCell<Vec<String>>,
+) -> Result<openlife_core::agent::LifeEventStore, String> {
+    match openlife_core::agent::LifeEventStore::new(db_path) {
+        Ok(store) => Ok(store),
+        Err(primary_err) => {
+            let fallback = recovery_db_path("life_events.db");
+            startup_warnings.borrow_mut().push(format!(
+                "life_events.db 初始化失败，正在使用临时数据库：{}",
+                primary_err
+            ));
+            match openlife_core::agent::LifeEventStore::new(&fallback) {
+                Ok(store) => Ok(store),
+                Err(fallback_err) => {
+                    startup_warnings.borrow_mut().push(format!(
+                        "临时 life_events.db 初始化也失败，已降级为内存数据库：{}",
+                        fallback_err
+                    ));
+                    openlife_core::agent::LifeEventStore::new_in_memory().map_err(|memory_err| {
+                        format!(
+                            "所有 life event store 初始化失败: primary={}, fallback={}, in_memory={}",
                             primary_err, fallback_err, memory_err
                         )
                     })
@@ -543,6 +572,18 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
         std::process::exit(1);
     });
 
+    let life_events_db_path = data_dir.join("life_events.db");
+    let life_event_store = init_store(
+        || init_life_event_store(&life_events_db_path, &startup_warnings),
+        || openlife_core::agent::LifeEventStore::new_in_memory().map_err(|e| e.to_string()),
+        "LifeEventStore",
+        &startup_warnings,
+    )
+    .unwrap_or_else(|e| {
+        log::warn!("[startup] Fatal: {}", e);
+        std::process::exit(1);
+    });
+
     let heuristics_db_path = data_dir.join("heuristics.db");
     let heuristic_store = init_store(
         || init_heuristic_store(&heuristics_db_path, &startup_warnings),
@@ -651,9 +692,6 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
         std::process::exit(1);
     });
 
-    let model_dir = data_dir.join("models");
-    let intent_router = IntentRouter::with_optional_onnx(Some(&model_dir));
-    let layer_router = LayerRouter::new();
     let scheduler = InferenceScheduler::new(
         config.local_model.clone(),
         config.prefer_local_model,
@@ -737,13 +775,12 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
         life_model_manager: Arc::new(Mutex::new(life_model_manager)),
         memory_store: Arc::new(Mutex::new(memory_store)),
         mcp_registry: Arc::new(Mutex::new(mcp_registry)),
-        intent_router: Arc::new(Mutex::new(intent_router)),
-        layer_router: Arc::new(Mutex::new(layer_router)),
         scheduler: Arc::new(Mutex::new(scheduler)),
         privacy_engine: Arc::new(Mutex::new(privacy_engine)),
         version_manager: Arc::new(Mutex::new(version_manager)),
         feedback_store: Arc::new(Mutex::new(feedback_store)),
         vector_store: Arc::new(Mutex::new(vector_store)),
+        vector_persistence_mode: crate::state::VectorPersistenceMode::Enabled,
         builder_sessions: Arc::new(Mutex::new(HashMap::new())),
         builder_session_store: Arc::new(Mutex::new(BuilderSessionStore::new(
             data_dir.join("builder_sessions.json"),
@@ -755,6 +792,7 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
         mcp_audit_store: Arc::new(Mutex::new(mcp_audit_store)),
         agent_run_store: Some(Arc::new(Mutex::new(agent_run_store))),
         evidence_store: Arc::new(Mutex::new(evidence_store)),
+        life_event_store: Some(Arc::new(Mutex::new(life_event_store))),
         heuristic_store: Arc::new(Mutex::new(heuristic_store)),
         policy_store: Arc::new(policy_store),
         proposal_store: Some(Arc::new(Mutex::new(proposal_store))),

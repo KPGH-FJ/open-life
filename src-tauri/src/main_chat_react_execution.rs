@@ -9,7 +9,7 @@ use crate::main_chat_react_tool_selection::{
 };
 use crate::AppState;
 
-pub(crate) async fn execute_main_chat_react_action_with_executor(
+pub(crate) async fn execute_main_chat_react_action_with_tool_gateway(
     state: &Arc<AppState>,
     plan: &MainChatReactActionPlan,
     local_only_required: bool,
@@ -120,13 +120,14 @@ pub(crate) async fn execute_main_chat_react_action_with_executor(
         source_run_id: None,
         step_index: 0,
     };
-    let result =
-        openlife_core::agent::ActionExecutor::new(openlife_core::agent::ActionExecutorConfig {
+    let result = openlife_core::agent::ToolGateway::from_executor_config(
+        openlife_core::agent::ActionExecutorConfig {
             allow_writes: false,
             ..Default::default()
-        })
-        .execute(request, &action_ctx)
-        .map_err(|err| format!("ActionExecutor failed: {err}"))?;
+        },
+    )
+    .execute(request, &action_ctx)
+    .map_err(|err| format!("ToolGateway failed: {err}"))?;
 
     let executor_status = result.status.clone();
     let status_label = match executor_status {
@@ -200,7 +201,8 @@ pub(crate) async fn execute_main_chat_react_action_with_executor(
         "executorActionType": plan.executor_action_type.clone(),
         "target": mcp_read_resolution.target.clone(),
         "requestedTarget": plan.target.clone(),
-        "argumentsDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(&mcp_read_resolution.arguments),
+        "argumentsDigest": openlife_core::agent::metadata_safe::metadata_safe_value_digest(&mcp_read_resolution.arguments),
+        "toolGatewayAuthority": true,
         "actionExecutorBacked": true,
         "mcpReadTargetResolved": mcp_read_resolution.resolved,
         "executorStatus": status_label,

@@ -238,11 +238,12 @@ pub async fn replay_agent_action(
         .cloned()
         .unwrap_or_else(|| action.input.clone());
 
-    let executor =
-        openlife_core::agent::ActionExecutor::new(openlife_core::agent::ActionExecutorConfig {
+    let tool_gateway = openlife_core::agent::ToolGateway::from_executor_config(
+        openlife_core::agent::ActionExecutorConfig {
             consume_allow_once: false,
             ..Default::default()
-        });
+        },
+    );
     let ctx = openlife_core::agent::ActionExecutionContext {
         registry: &reg,
         permission_store: &permission_store,
@@ -267,7 +268,9 @@ pub async fn replay_agent_action(
         step_index: action_idx as u32,
     };
 
-    let exec_result = executor.execute(request, &ctx).map_err(AppError::from)?;
+    let exec_result = tool_gateway
+        .execute(request, &ctx)
+        .map_err(AppError::from)?;
     drop(proposal_store_guard);
     drop(agent_run_store_guard);
 
@@ -307,11 +310,19 @@ pub async fn replay_agent_action(
         if !proposals.is_empty() {
             let proposal_store = proposal_store_arc.lock().await;
             for proposal in proposals {
-                let proposal_id = proposal.id.clone();
-                proposal_store
-                    .create_proposal(&proposal)
+                let outcome = openlife_core::agent::ReviewWorkflow::new(&proposal_store)
+                    .submit(
+                        openlife_core::agent::DurableWriteRequest::from_agent_proposal(
+                            openlife_core::agent::DurableWriteSource::ManualOverride,
+                            openlife_core::agent::DurableWriteSubject::from_proposal_type(
+                                proposal.proposal_type,
+                            ),
+                            proposal,
+                            "Agent command proposal is pending Review Center approval.",
+                        ),
+                    )
                     .map_err(AppError::from)?;
-                run.add_generated_proposal(&proposal_id);
+                run.add_generated_proposal(outcome.proposal_id());
             }
         }
     }

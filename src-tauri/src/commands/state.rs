@@ -1,8 +1,9 @@
 use crate::errors::AppError;
-use crate::legacy_write_convergence::{
+use crate::life_model_materializer_guard::{
     LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
     LifeModelMaterializerCallerPurpose,
 };
+use crate::memory_gateway;
 use crate::{persist_life_model, AppState};
 use openlife_core::life_model::{
     AlertLevel, CustomStateDimension, DailyGoal, StateAlert, TimeBlock,
@@ -22,10 +23,14 @@ pub(crate) async fn record_state_with_state(
     alert_days: Option<u32>,
     state: &Arc<AppState>,
 ) -> Result<i64, AppError> {
-    let store = state.memory_store.lock().await;
-    let id = store
-        .record_state_entry(&dimension_name, value, &unit, note.as_deref())
-        .map_err(AppError::from)?;
+    let id = memory_gateway::record_state_entry_with_state(
+        &dimension_name,
+        value,
+        &unit,
+        note.as_deref(),
+        state,
+    )
+    .await?;
     let manager = state.life_model_manager.lock().await;
     let mut model = manager.load().map_err(AppError::from)?;
     if let Some(dim) = model
@@ -329,12 +334,6 @@ mod tests {
             mcp_registry: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::mcp::McpRegistry::new(),
             )),
-            intent_router: Arc::new(tokio::sync::Mutex::new(
-                openlife_core::router::IntentRouter::new(),
-            )),
-            layer_router: Arc::new(tokio::sync::Mutex::new(
-                openlife_core::layer_router::LayerRouter::new(),
-            )),
             scheduler: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::scheduler::InferenceScheduler::new(
                     config.local_model.clone(),
@@ -361,6 +360,7 @@ mod tests {
             vector_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::vectors::VectorStore::new_in_memory().unwrap(),
             )),
+            vector_persistence_mode: crate::state::VectorPersistenceMode::Enabled,
             builder_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             builder_session_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::builder::BuilderSessionStore::new(
@@ -378,6 +378,9 @@ mod tests {
             evidence_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::EvidenceStore::new_in_memory().unwrap(),
             )),
+            life_event_store: Some(Arc::new(tokio::sync::Mutex::new(
+                openlife_core::agent::LifeEventStore::new_in_memory().unwrap(),
+            ))),
             heuristic_store: Arc::new(tokio::sync::Mutex::new({
                 let store = openlife_core::agent::HeuristicStore::new_in_memory().unwrap();
                 store.seed_mvp_heuristics().unwrap();

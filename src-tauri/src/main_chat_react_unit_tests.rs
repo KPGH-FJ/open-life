@@ -6,91 +6,27 @@ use crate::main_chat_react_tool_selection::{
     MainChatReactActionPlan, MainChatReactToolCandidate,
 };
 
-fn main_chat_strategy_source() -> String {
+#[test]
+fn retired_main_chat_runtime_modules_do_not_exist_as_product_sources() {
+    let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for file_name in [
+        ["main_chat_", "strategy.rs"].concat(),
+        ["main_chat_", "tool_loop.rs"].concat(),
+        ["main_chat_", "legacy_agent_loop.rs"].concat(),
+    ] {
+        let path = src_root.join(&file_name);
+        assert!(
+            !path.exists(),
+            "{file_name} must not remain as a product Main Chat runtime module"
+        );
+    }
+}
+
+#[test]
+fn main_chat_react_runtime_synthesizes_follow_up_after_observation() {
     let module_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_strategy.rs");
-    std::fs::read_to_string(module_path).expect("read main_chat_strategy.rs")
-}
-
-fn main_chat_tool_loop_source() -> String {
-    let module_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_tool_loop.rs");
-    std::fs::read_to_string(module_path).expect("read main_chat_tool_loop.rs")
-}
-
-#[test]
-fn main_chat_strategy_dispatcher_is_extracted_from_lib_rs() {
-    let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
-    let lib_source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
-    let module_source = main_chat_strategy_source();
-
-    assert!(
-        lib_source.contains("pub(crate) mod main_chat_strategy;"),
-        "Main Chat strategy dispatcher module should be registered from lib.rs"
-    );
-    assert!(
-        !lib_source.contains("\nasync fn try_run_main_chat_agent_strategy("),
-        "try_run_main_chat_agent_strategy should not remain concentrated in src/lib.rs"
-    );
-    assert!(
-        module_source.contains("pub(crate) async fn try_run_main_chat_agent_strategy("),
-        "focused Main Chat strategy module should own the dispatcher"
-    );
-    assert!(
-        !lib_source.contains(
-            "fn main_chat_direct_answer_strategy_does_not_return_to_hidden_legacy_generation("
-        ),
-        "DirectAnswer strategy regression coverage should live in main_chat_react_unit_tests.rs"
-    );
-}
-
-#[test]
-fn main_chat_direct_answer_strategy_does_not_return_to_hidden_legacy_generation() {
-    let source = main_chat_strategy_source();
-    let strategy_body = extract_rust_function_body(
-        &source,
-        "pub(crate) async fn try_run_main_chat_agent_strategy(",
-    );
-    let direct_answer_start = strategy_body
-        .find("MainChatAgentStrategy::DirectAnswer =>")
-        .expect("DirectAnswer strategy arm exists");
-    let react_start = strategy_body
-        .find("MainChatAgentStrategy::ReActToolExecution =>")
-        .expect("ReAct no-result strategy arm exists");
-    let direct_answer_arm = &strategy_body[direct_answer_start..react_start];
-
-    assert!(
-        !direct_answer_arm.contains("return Ok(None);"),
-        "DirectAnswer must execute as a Main Chat strategy instead of returning to legacy generation"
-    );
-}
-
-#[test]
-fn main_chat_react_strategy_uses_action_executor_instead_of_keyword_mapper_core() {
-    let strategy_source = main_chat_strategy_source();
-    let strategy_body = extract_rust_function_body(
-        &strategy_source,
-        "pub(crate) async fn try_run_main_chat_agent_strategy(",
-    );
-    let tool_loop_source = main_chat_tool_loop_source();
-
-    assert!(
-        strategy_body.contains("MainChatAgentStrategy::ReActToolExecution => {\n            return Ok(None);\n        }"),
-        "ReActToolExecution should leave old strategy dispatch as no-result for the pipeline ToolLoop adapter"
-    );
-    assert!(
-        !tool_loop_source.contains("main_chat_react_action_type("),
-        "ReActToolExecution must not use the keyword action mapper as its core execution path"
-    );
-    assert!(
-        tool_loop_source.contains("execute_main_chat_react_action_with_executor("),
-        "ReActToolExecution should delegate read actions to the governed ActionExecutor fallback path from the ToolLoop adapter"
-    );
-}
-
-#[test]
-fn main_chat_react_strategy_synthesizes_follow_up_after_observation() {
-    let source = main_chat_tool_loop_source();
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_react_runtime.rs");
+    let source = std::fs::read_to_string(module_path).expect("read main_chat_react_runtime.rs");
 
     assert!(
         source.contains("synthesize_main_chat_react_follow_up("),
@@ -103,6 +39,27 @@ fn main_chat_react_strategy_synthesizes_follow_up_after_observation() {
 }
 
 #[test]
+fn main_chat_react_runtime_failures_are_blockers_not_single_step_fallback_success() {
+    let module_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_react_runtime.rs");
+    let source = std::fs::read_to_string(module_path).expect("read main_chat_react_runtime.rs");
+    let used_true_marker = ["singleStepFallbackUsed", "\": true"].concat();
+
+    assert!(
+        !source.contains(&used_true_marker),
+        "ReAct runtime must not mark tool failures as single-step fallback success"
+    );
+    assert!(
+        !source.contains("single-step fallback remains available"),
+        "ReAct runtime failure transcript must describe structured blockers, not fallback availability"
+    );
+    assert!(
+        source.contains("structuredBlockerOnFailure"),
+        "ReAct runtime should make failure handling explicit as structured blocker handling"
+    );
+}
+
+#[test]
 fn main_chat_mcp_read_resolves_registered_tool_instead_of_wrapper_only() {
     let module_path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_react_execution.rs");
@@ -110,7 +67,7 @@ fn main_chat_mcp_read_resolves_registered_tool_instead_of_wrapper_only() {
         std::fs::read_to_string(module_path).expect("read src/main_chat_react_execution.rs");
     let executor_body = extract_rust_function_body(
         &source,
-        "pub(crate) async fn execute_main_chat_react_action_with_executor(",
+        "pub(crate) async fn execute_main_chat_react_action_with_tool_gateway(",
     );
 
     assert!(
@@ -120,28 +77,6 @@ fn main_chat_mcp_read_resolves_registered_tool_instead_of_wrapper_only() {
     assert!(
         executor_body.contains("mcpReadTargetResolved"),
         "MCP read target resolution must be visible in metadata"
-    );
-}
-
-#[test]
-fn main_chat_react_attempts_agent_loop_before_single_step_fallback() {
-    let source = main_chat_tool_loop_source();
-    let tool_loop_body = extract_rust_function_body(
-        &source,
-        "pub(crate) async fn run_main_chat_tool_loop_adapter(",
-    );
-    let runtime_module_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_react_runtime.rs");
-    let runtime_source =
-        std::fs::read_to_string(runtime_module_path).expect("read main_chat_react_runtime.rs");
-
-    assert!(
-        tool_loop_body.contains("try_run_main_chat_react_agent_loop("),
-        "ReActToolExecution must attempt the governed AgentLoop before single-step fallback"
-    );
-    assert!(
-        runtime_source.contains("agentLoopAttempted"),
-        "Main Chat ReAct AgentLoop attempt/fallback must be visible in transcript metadata"
     );
 }
 
@@ -1167,20 +1102,21 @@ fn main_chat_react_execution_helper_is_extracted_from_lib_rs() {
         std::fs::read_to_string(&module_path).expect("read src/main_chat_react_execution.rs");
 
     assert!(
-        module_source.contains("pub(crate) async fn execute_main_chat_react_action_with_executor("),
-        "ReAct execution module must expose the ActionExecutor fallback helper"
+        module_source
+            .contains("pub(crate) async fn execute_main_chat_react_action_with_tool_gateway("),
+        "ReAct execution module must expose the governed read ToolGateway helper"
     );
     assert!(
-        module_source.contains("ActionExecutor::new("),
-        "ReAct execution module must own ActionExecutor fallback construction"
+        module_source.contains("ToolGateway::from_executor_config("),
+        "ReAct execution module must route governed reads through ToolGateway"
     );
     assert!(
         module_source.contains("resolve_main_chat_mcp_read_target("),
         "ReAct execution module must preserve registered MCP read resolution"
     );
     assert!(
-        !source.contains("\npub(crate) async fn execute_main_chat_react_action_with_executor("),
-        "ActionExecutor fallback helper should not remain in lib.rs"
+        !source.contains("\npub(crate) async fn execute_main_chat_react_action_with_tool_gateway("),
+        "ToolGateway read helper should not remain in lib.rs"
     );
 }
 

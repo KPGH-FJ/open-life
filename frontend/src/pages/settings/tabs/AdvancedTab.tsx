@@ -1,11 +1,13 @@
 import { Link } from "react-router-dom";
 import type { ReactNode } from "react";
-import type { AppConfig, ModelRouterStatus, RouterStatus, SystemDiagnostics } from "../../../tauri";
-import {
-  advancedRoutePath,
-  diagnosticsUsageReadinessIssues,
-  diagnosticsUsageReady,
-} from "../../../productShellContract";
+import type {
+  AppConfig,
+  LifeStateProjection,
+  ModelRouterStatus,
+  PolicyRouterStatus,
+  SystemDiagnostics,
+} from "../../../tauri";
+import { advancedRoutePath } from "../../../productShellContract";
 
 function classNames(...classes: (string | false | undefined)[]) {
   return classes.filter(Boolean).join(" ");
@@ -15,33 +17,28 @@ interface AdvancedTabProps {
   config: AppConfig;
   setConfig: React.Dispatch<React.SetStateAction<AppConfig>>;
   diagnostics: SystemDiagnostics | null;
-  routerStatus: RouterStatus | null;
+  projection?: LifeStateProjection | null;
+  policyRouterStatus: PolicyRouterStatus | null;
   modelRouterStatus: ModelRouterStatus | null;
   showInternalDebug: boolean;
   pluginSection: ReactNode;
   experimentalSection?: ReactNode;
 }
 
-function usageReady(diagnostics: SystemDiagnostics | null): boolean {
-  if (!diagnostics) return false;
-  return diagnosticsUsageReady(diagnostics);
-}
-
-function usageReadinessIssues(diagnostics: SystemDiagnostics | null): string[] {
-  if (!diagnostics) return [];
-  return diagnosticsUsageReadinessIssues(diagnostics);
-}
-
 export default function AdvancedTab({
   config,
   setConfig,
   diagnostics,
-  routerStatus,
+  projection,
+  policyRouterStatus,
   modelRouterStatus,
   showInternalDebug,
   pluginSection,
   experimentalSection,
 }: AdvancedTabProps) {
+  const usageReady = projection?.readiness.usageReady ?? false;
+  const usageReadinessIssues = projection?.readiness.usageReadinessIssues ?? [];
+
   return (
     <>
       <section className="space-y-4 border-t pt-4">
@@ -79,30 +76,28 @@ export default function AdvancedTab({
       </section>
 
       <section className="space-y-4 border-t pt-4">
-        <h3 className="text-sm font-medium text-gray-700">ModelRouter internals</h3>
+        <h3 className="text-sm font-medium text-gray-700">PolicyRouter authority</h3>
         <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700 space-y-2">
           <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
             这些是诊断字段。普通任务应在 Chat 和 Runs 里看用户语言的路线解释。
           </div>
           <div className="flex items-center justify-between">
-            <span>当前后端</span>
-            <span className="font-medium uppercase">
-              {routerStatus?.active_backend ?? "unknown"}
-            </span>
+            <span>当前权威</span>
+            <span className="font-medium">{policyRouterStatus?.activeAuthority ?? "unknown"}</span>
           </div>
           <div className="flex items-center justify-between">
-            <span>ONNX 可用</span>
-            <span>{routerStatus?.onnx_available ? "是" : "否"}</span>
+            <span>旧 router 挂载</span>
+            <span>{policyRouterStatus?.appStateOldRoutersPresent ? "是" : "否"}</span>
           </div>
-          <div className="flex items-center justify-between">
-            <span>已自动降级</span>
-            <span>{routerStatus?.onnx_disabled ? "是" : "否"}</span>
+          <div className="text-xs leading-5 text-slate-600">
+            {(policyRouterStatus?.authorityChain ?? []).join(" -> ")}
           </div>
-          <div className="flex items-center justify-between">
-            <span>延迟阈值</span>
-            <span>
-              {routerStatus ? `${Math.round(routerStatus.latency_threshold_us / 1000)}ms` : "-"}
-            </span>
+          <div className="flex flex-wrap gap-1.5">
+            {(policyRouterStatus?.routeOutputs ?? []).map(output => (
+              <span key={output} className="rounded bg-white px-2 py-1 text-xs text-slate-600">
+                {output}
+              </span>
+            ))}
           </div>
         </div>
       </section>
@@ -193,7 +188,7 @@ export default function AdvancedTab({
         <div
           className={classNames(
             "rounded-xl border p-4",
-            usageReady(diagnostics)
+            usageReady
               ? "border-blue-100 bg-blue-50 text-blue-900"
               : "border-amber-100 bg-amber-50 text-amber-900"
           )}
@@ -202,18 +197,18 @@ export default function AdvancedTab({
             <div>
               <div className="text-sm font-semibold">使用准备状态</div>
               <div className="mt-1 text-xs">
-                {usageReady(diagnostics)
+                {usageReady
                   ? "使用准备就绪：核心链路、人生模型、对话验证和模型后端均已通过当前检查。"
                   : "继续处理以下事项后，默认体验会更稳定。"}
               </div>
             </div>
             <span className="shrink-0 rounded-full bg-white/70 px-2 py-1 text-xs font-medium">
-              {usageReady(diagnostics) ? "已就绪" : "待完善"}
+              {usageReady ? "已就绪" : "待完善"}
             </span>
           </div>
           <div className="mt-3 grid gap-2 text-xs md:grid-cols-2">
-            <div>核心链路：{diagnostics?.chat_ready ? "就绪" : "未就绪"}</div>
-            <div>人生模型：{diagnostics?.model_empty ? "未构建" : "已构建"}</div>
+            <div>核心链路：{projection?.readiness.chatReady ? "就绪" : "未就绪"}</div>
+            <div>人生模型：{projection?.readiness.modelEmpty ? "未构建" : "已构建"}</div>
             <div>
               对话验证：
               {diagnostics?.chat_session_count && diagnostics.chat_session_count > 0
@@ -222,11 +217,11 @@ export default function AdvancedTab({
             </div>
             <div>云端 API：{diagnostics?.cloud_api_configured ? "已配置" : "未配置"}</div>
           </div>
-          {usageReadinessIssues(diagnostics).length ? (
+          {usageReadinessIssues.length ? (
             <div className="mt-3 rounded-lg bg-white/70 p-3">
               <div className="text-xs font-medium">建议处理：</div>
               <ul className="mt-1 list-disc space-y-1 pl-4 text-xs">
-                {usageReadinessIssues(diagnostics).map(issue => (
+                {usageReadinessIssues.map(issue => (
                   <li key={issue}>{issue}</li>
                 ))}
               </ul>

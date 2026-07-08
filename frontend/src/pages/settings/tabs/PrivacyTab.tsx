@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type {
   AppConfig,
   HotMemoryCache,
+  LifeStateProjection,
   PrivacyPolicy,
   ProviderTransmissionHistoryItem,
   ProviderTransmissionStatus,
@@ -83,7 +84,7 @@ interface PrivacyTabProps {
   handleRotateAuditKey: () => Promise<void>;
   toolPermissions: ToolPermissionRecord[];
   revokeToolPermission: (id: string) => Promise<boolean>;
-  refreshAllDiagnostics: () => Promise<SystemDiagnostics | null>;
+  refreshAllDiagnostics: () => Promise<LifeStateProjection | null>;
   config: AppConfig;
   setConfig: React.Dispatch<React.SetStateAction<AppConfig>>;
   refreshSecurityState: () => Promise<void>;

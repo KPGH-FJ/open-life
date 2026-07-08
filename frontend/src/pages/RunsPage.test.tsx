@@ -298,10 +298,9 @@ describe("RunsPage contract", () => {
     expect(screen.getByText("脱敏：metadata_only")).toBeInTheDocument();
     expect(screen.getAllByText(/云端路线 · deepseek/).length).toBeGreaterThan(0);
     expect(screen.getAllByText("待确认 1").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("策略预览").length).toBeGreaterThan(0);
-    expect(screen.getByText("策略：planExecute")).toBeInTheDocument();
-    expect(screen.getByText("治理：warn")).toBeInTheDocument();
-    expect(screen.getByText("1 warning")).toBeInTheDocument();
+    expect(screen.queryByText("策略预览")).not.toBeInTheDocument();
+    expect(screen.queryByText("策略：planExecute")).not.toBeInTheDocument();
+    expect(screen.queryByText("治理：warn")).not.toBeInTheDocument();
     expect(screen.getAllByText("计划执行").length).toBeGreaterThan(0);
     expect(screen.getByText("weekly_planning · 3 步 · 待确认 1")).toBeInTheDocument();
     expect(screen.getByText("状态：finalized")).toBeInTheDocument();

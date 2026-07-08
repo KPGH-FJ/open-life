@@ -1,10 +1,13 @@
 import { Link } from "react-router-dom";
-import { runMemoryTierMaintenance, type SystemDiagnostics } from "../../../tauri";
+import {
+  runMemoryTierMaintenance,
+  type LifeStateProjection,
+  type SystemDiagnostics,
+} from "../../../tauri";
 import { buildProviderReadinessView } from "../../../utils/providerReadiness";
 import { buildSafeModeBlockedMessage } from "../../../utils/runtimeMessages";
 import {
   advancedRoutePath,
-  diagnosticsUsageReady,
   productRoutePath,
   secondaryRoutePath,
 } from "../../../productShellContract";
@@ -24,10 +27,11 @@ function readableError(e: unknown): string {
 
 interface OverviewTabProps {
   diagnostics: SystemDiagnostics | null;
+  projection?: LifeStateProjection | null;
   safeMode: boolean;
   exportLoading: boolean;
   handleExport: () => Promise<void>;
-  refreshAllDiagnostics: () => Promise<SystemDiagnostics | null>;
+  refreshAllDiagnostics: () => Promise<LifeStateProjection | null>;
   tierLoading: boolean;
   setTierLoading: (v: boolean) => void;
   setTierResult: (v: string | null) => void;
@@ -40,6 +44,7 @@ interface OverviewTabProps {
 
 export default function OverviewTab({
   diagnostics,
+  projection,
   safeMode,
   exportLoading,
   handleExport,
@@ -53,7 +58,14 @@ export default function OverviewTab({
 }: OverviewTabProps) {
   const runtime = diagnostics?.runtime_build_info;
   const providerReadiness = buildProviderReadinessView(diagnostics);
-  const usageReady = diagnostics ? diagnosticsUsageReady(diagnostics) : undefined;
+  const readiness = projection?.readiness;
+  const usageReady = readiness?.usageReady ?? false;
+  const modelEmpty = readiness?.modelEmpty ?? true;
+  const lifeModelReady = readiness?.lifeModelReady ?? false;
+  const chatReady = readiness?.chatReady ?? false;
+  const pendingBuilderReviewCount = readiness?.pendingBuilderReviewSessions ?? 0;
+  const unfinishedBuilderSessionCount = readiness?.unfinishedBuilderSessions ?? 0;
+  const readinessIssues = readiness?.readinessIssues ?? [];
   // ---- Data file health ----
   const df = diagnostics?.data_files;
   const dataFileItems = df
@@ -92,24 +104,24 @@ export default function OverviewTab({
     },
     {
       label: "人生模型",
-      ok: Boolean(diagnostics?.life_model_ready && !diagnostics?.model_empty),
-      detail: diagnostics?.model_empty
-        ? (diagnostics?.pending_builder_review_sessions ?? 0) > 0
-          ? `有 ${diagnostics?.pending_builder_review_sessions} 个 Builder 待确认项`
-          : (diagnostics?.unfinished_builder_sessions ?? 0) > 0
-            ? `有 ${diagnostics?.unfinished_builder_sessions} 个待继续的 Builder 会话`
+      ok: Boolean(lifeModelReady && !modelEmpty),
+      detail: modelEmpty
+        ? pendingBuilderReviewCount > 0
+          ? `有 ${pendingBuilderReviewCount} 个 Builder 待确认项`
+          : unfinishedBuilderSessionCount > 0
+            ? `有 ${unfinishedBuilderSessionCount} 个待继续的 Builder 会话`
             : "尚未完成初始构建"
-        : diagnostics?.life_model_ready
+        : lifeModelReady
           ? "可读取"
           : "读取失败",
-      action: diagnostics?.model_empty
-        ? (diagnostics?.pending_builder_review_sessions ?? 0) > 0
+      action: modelEmpty
+        ? pendingBuilderReviewCount > 0
           ? "去审阅"
-          : (diagnostics?.unfinished_builder_sessions ?? 0) > 0
+          : unfinishedBuilderSessionCount > 0
             ? "继续 Builder"
             : "去构建"
         : "查看模型",
-      href: diagnostics?.model_empty
+      href: modelEmpty
         ? `#${secondaryRoutePath("LifeModelBuild")}`
         : `#${productRoutePath("Today")}`,
     },
@@ -140,10 +152,8 @@ export default function OverviewTab({
   const usageFlow = [
     {
       title: "1. 完成设置与诊断",
-      done: Boolean(
-        diagnostics?.chat_ready || diagnostics?.cloud_api_configured || diagnostics?.ollama_online
-      ),
-      detail: diagnostics?.chat_ready
+      done: Boolean(chatReady || diagnostics?.cloud_api_configured || diagnostics?.ollama_online),
+      detail: chatReady
         ? "模型后端已经可用，基础运行环境通过。"
         : "先把本地或云端模型跑通，避免进入聊天页后才发现不能用。",
       to: "#llm-settings",
@@ -151,19 +161,19 @@ export default function OverviewTab({
     },
     {
       title: "2. 完成人生模型构建",
-      done: Boolean(diagnostics && !diagnostics.model_empty && diagnostics.life_model_ready),
-      detail: diagnostics?.model_empty
-        ? (diagnostics?.pending_builder_review_sessions ?? 0) > 0
-          ? `Builder 里还有 ${diagnostics?.pending_builder_review_sessions} 个待确认项。先处理这些建议，比重新开始更合适。`
-          : (diagnostics?.unfinished_builder_sessions ?? 0) > 0
-            ? `Builder 里还有 ${diagnostics?.unfinished_builder_sessions} 个待继续或待确认的会话。先处理确认建议，比重新开始更合适。`
+      done: Boolean(!modelEmpty && lifeModelReady),
+      detail: modelEmpty
+        ? pendingBuilderReviewCount > 0
+          ? `Builder 里还有 ${pendingBuilderReviewCount} 个待确认项。先处理这些建议，比重新开始更合适。`
+          : unfinishedBuilderSessionCount > 0
+            ? `Builder 里还有 ${unfinishedBuilderSessionCount} 个待继续或待确认的会话。先处理确认建议，比重新开始更合适。`
             : "Builder 还没形成最小模型，当前很多建议仍会偏通用。"
         : "人生模型已可读取，个性化能力开始成立。",
       to: `#${secondaryRoutePath("LifeModelBuild")}`,
-      action: diagnostics?.model_empty
-        ? (diagnostics?.pending_builder_review_sessions ?? 0) > 0
+      action: modelEmpty
+        ? pendingBuilderReviewCount > 0
           ? "去审阅"
-          : (diagnostics?.unfinished_builder_sessions ?? 0) > 0
+          : unfinishedBuilderSessionCount > 0
             ? "继续 Builder"
             : "去构建"
         : "去构建",
@@ -205,11 +215,11 @@ export default function OverviewTab({
           },
         ]
       : []),
-    ...((diagnostics?.pending_builder_review_sessions ?? 0) > 0
+    ...(pendingBuilderReviewCount > 0
       ? [
           {
             title: "Builder 待确认项",
-            detail: `当前还有 ${diagnostics?.pending_builder_review_sessions} 个待确认项。建议先回到 Builder 审阅并应用，再验证对话与今日页。`,
+            detail: `当前还有 ${pendingBuilderReviewCount} 个待确认项。建议先回到 Builder 审阅并应用，再验证对话与今日页。`,
             tone: "warning" as const,
           },
         ]
@@ -242,16 +252,14 @@ export default function OverviewTab({
         <div
           className={classNames(
             "rounded-2xl border p-4",
-            diagnostics?.chat_ready
-              ? "border-emerald-200 bg-emerald-50/60"
-              : "border-amber-200 bg-amber-50/60"
+            chatReady ? "border-emerald-200 bg-emerald-50/60" : "border-amber-200 bg-amber-50/60"
           )}
         >
           <div className="flex items-start justify-between gap-3">
             <div>
               <div className="text-sm font-semibold text-stone-900">启动检查清单</div>
               <div className="mt-1 text-xs text-stone-500">
-                {diagnostics?.chat_ready
+                {chatReady
                   ? "核心链路已就绪，可以开始使用 Chat / Builder / Calibration。"
                   : "按这些项逐个修复，桌面端使用会稳定很多。"}
               </div>
@@ -259,12 +267,10 @@ export default function OverviewTab({
             <span
               className={classNames(
                 "rounded-full px-2 py-1 text-xs font-medium shrink-0",
-                diagnostics?.chat_ready
-                  ? "bg-emerald-100 text-emerald-700"
-                  : "bg-amber-100 text-amber-700"
+                chatReady ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"
               )}
             >
-              {diagnostics?.chat_ready ? "可开始使用" : "还有阻塞"}
+              {chatReady ? "可开始使用" : "还有阻塞"}
             </span>
           </div>
           <div className="mt-4 space-y-2">
@@ -294,11 +300,11 @@ export default function OverviewTab({
               </div>
             ))}
           </div>
-          {diagnostics && diagnostics.readiness_issues.length > 0 && (
+          {readinessIssues.length > 0 && (
             <div className="mt-3 rounded-lg bg-white/70 p-3">
               <div className="text-xs font-medium text-amber-800">建议先处理：</div>
               <ul className="mt-1 list-disc space-y-1 pl-4 text-xs text-amber-700">
-                {diagnostics.readiness_issues.map(issue => (
+                {readinessIssues.map(issue => (
                   <li key={issue}>{issue}</li>
                 ))}
               </ul>
@@ -361,7 +367,7 @@ export default function OverviewTab({
       </section>
 
       {/* Quick Actions */}
-      {diagnostics && !diagnostics.chat_ready && (
+      {diagnostics && !chatReady && (
         <section className="space-y-3">
           <div className="text-sm font-medium text-gray-700">快速修复</div>
           <div className="flex flex-wrap gap-2">
@@ -373,7 +379,7 @@ export default function OverviewTab({
                 1. 配置 API Key
               </a>
             )}
-            {diagnostics.model_empty && (
+            {modelEmpty && (
               <Link
                 to={secondaryRoutePath("LifeModelBuild")}
                 className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700"
@@ -381,7 +387,7 @@ export default function OverviewTab({
                 2. 构建人生模型
               </Link>
             )}
-            {!diagnostics.model_empty && diagnostics.chat_session_count === 0 && (
+            {!modelEmpty && diagnostics.chat_session_count === 0 && (
               <Link
                 to={productRoutePath("Companion")}
                 className="rounded-md bg-slate-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800"

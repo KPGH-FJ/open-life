@@ -227,7 +227,7 @@ describe("RunTracePanel", () => {
     expect(screen.queryByText(/raw skill output preview/)).not.toBeInTheDocument();
   });
 
-  it("renders metadata-safe multi-strategy preview audit", () => {
+  it("does not render retired multi-strategy preview audit metadata", () => {
     renderPanel({
       ...baseRun,
       reasoningStrategy: "multi_strategy_preview",
@@ -258,14 +258,11 @@ describe("RunTracePanel", () => {
       outputPreview: "raw-sensitive-payload-should-not-drive-trace",
     });
 
-    expect(screen.getByText("Multi-strategy preview trace")).toBeInTheDocument();
-    expect(screen.getByText("Strategy: planExecute")).toBeInTheDocument();
-    expect(screen.getByText("Descriptor: plan_execute")).toBeInTheDocument();
-    expect(screen.getByText("Registry: ready")).toBeInTheDocument();
-    expect(screen.getByText("Governance: warn")).toBeInTheDocument();
-    expect(screen.getByText("write_like_intent")).toBeInTheDocument();
-    expect(screen.getByText("requires_proposal")).toBeInTheDocument();
-    expect(screen.getByText("preview runtime forces allowWrites=false")).toBeInTheDocument();
+    expect(screen.queryByText("Multi-strategy preview trace")).not.toBeInTheDocument();
+    expect(screen.queryByText("Strategy: planExecute")).not.toBeInTheDocument();
+    expect(screen.queryByText("Descriptor: plan_execute")).not.toBeInTheDocument();
+    expect(screen.queryByText("preview runtime forces allowWrites=false")).not.toBeInTheDocument();
+    expect(screen.getByText("No collaboration rules affected this run.")).toBeInTheDocument();
     expect(
       screen.queryByText("raw-sensitive-payload-should-not-drive-trace")
     ).not.toBeInTheDocument();
