@@ -182,6 +182,27 @@ Phase7 hard-delete guards now require:
 - active docs do not authorize Stage/Beta/migration/cutover/legacy route
   development.
 
+## Stage4C Expected-Absent Evidence Closure
+
+Stage4C audits the remaining active repository-link baseline missing records
+against this manifest. The remaining records are expected-absent evidence for
+objects already classified as `done` in the Phase7 Object Disposition table;
+they are not repair instructions and must not be restored.
+
+| Category | Records |
+| --- | ---: |
+| `active_doc_missing_records` | 37 |
+| `active_expected_absent_records` | 37 |
+| `stage4c_verified_expected_absent_records` | 37 |
+| `active_actionable_repair_records` | 0 |
+| `active_future_blocked_records` | 0 |
+| `active_adr_blocked_records` | 0 |
+| `active_unresolved_missing_records` | 0 |
+
+The manifest keeps the exact Phase7 evidence paths above because those entries
+prove deletion/retirement. Removing those path mentions would weaken the audit
+trail; recreating the absent targets would violate the single-system contract.
+
 ## Computer Use Trial Status
 
 Trial report path:

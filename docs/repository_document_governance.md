@@ -23,20 +23,18 @@ been public, use the history-rewrite workflow below.
 | Class | Git status | Examples | Rule |
 | --- | --- | --- | --- |
 | Public entry points | Tracked | `README.md`, `AGENTS.md`, `plans/README.md` | Must stay concise, current, and authority-labeled. |
-| Stable product and architecture docs | Tracked | `docs/ARCHITECTURE.md`, `docs/BETA_USER_GUIDE.md`, `docs/decisions/*.md` | Public by intent; include status when stale or scoped. |
+| Stable product, architecture, and development docs | Tracked | `docs/ARCHITECTURE.md`, `docs/architecture/*.md`, `docs/development/testing.md`, `docs/BETA_USER_GUIDE.md`, `docs/decisions/*.md` | Public by intent; include status when stale or scoped. |
 | Current execution plans | Tracked, limited | One current goal spec per active area | Track only when it is the active or accepted execution source. |
 | Historical plans and PRDs | Tracked archive or removed from tracking | old PRDs, old beta checklists, superseded plans | Must be clearly labeled historical/scoped; do not update as live status logs. |
 | Local/private planning | Not tracked | AI scratch notes, private PRDs, raw handoff notes, personal strategy | Keep under ignored local-only paths. |
 
-## Local-Only Paths
+## Local-Only Material
 
-Use these paths for drafts and private material that should not be pushed:
+Use reviewed local-only locations or filename suffixes for drafts and private
+material that should not be pushed. The docs/plans private, local, and draft
+namespace families are reserved policy labels; Stage4B does not materialize
+them as empty directories.
 
-- `docs/private/`
-- `docs/local/`
-- `plans/private/`
-- `plans/local/`
-- `plans/drafts/`
 - `ai-notes/`
 - `agent-notes/`
 - `prd-drafts/`
@@ -113,17 +111,45 @@ Do not mix history rewriting with ordinary cleanup PRs.
 
 ## Current Repository Notes
 
-As of 2026-06-16, the current repository has a large tracked document surface:
+As of 2026-07-07 Stage4B, the current working-tree document baseline is:
 
-- 48 tracked Markdown/HTML files.
-- 7 currently untracked Markdown plan files in `plans/`.
-- About 28.5k lines of Markdown/HTML, with most volume under `plans/`.
+- 204 Markdown/HTML files in the non-hidden
+  `rg --files -g '*.md' -g '*.html'` scope.
+- 191 tracked Markdown/HTML files in `git ls-files '*.md' '*.html'`, including
+  hidden GitHub governance docs outside the `rg --files` default scope.
+- 14 currently untracked Markdown files in the `rg --files` scope, all from the
+  repository cleanup / Stage3-Stage4 documentation work.
+- 17 Markdown files under `docs/`, with `docs/architecture/`,
+  `docs/development/`, and `docs/decisions/` present. The product-doc namespace
+  is still absent by design.
+- 169 Markdown/HTML files under `plans/` and 173 plan Markdown/HTML/JSON files
+  in the current `rg --files` scope. `plans/adr/` remains the only plans
+  subdirectory; no plan-archive namespace move has happened.
 
-Recommended first cleanup pass:
+Stage3-B / Stage4A classification:
 
-- Keep public entry points and stable docs tracked.
-- Keep only the active Main Chat stabilization/productization documents as
-  current execution plans.
-- Mark old PRDs, beta checklists, and superseded plans as historical or move
-  them to a tracked archive.
+- `docs/ARCHITECTURE.md` is a Stage3-A architecture index and historical
+  pointer, not a runtime authority.
+- `docs/architecture/agent-runtime.md`,
+  `docs/architecture/life-model.md`, `docs/architecture/governance.md`, and
+  `docs/architecture/memory.md` are public, stable, source-backed explanatory
+  docs beneath the active authority stack.
+- `docs/development/testing.md` is a public, stable validation-command
+  explainer. It does not convert local/scripted evidence into live-provider
+  completion evidence.
+- `docs/decisions/README.md` is the Stage4A ADR index. It records ADR 0001,
+  0002, 0003, and ADR 0013 without moving ADR 0013.
+- `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` remains the
+  canonical ADR 0013 path by Stage4A no-move decision.
+- `plans/openlife_repository_document_inventory.json` and
+  `plans/openlife_repository_document_link_baseline.json` are the current
+  Stage4B inventory and link/path baseline artifacts.
+
+Recommended next cleanup pass:
+
+- Keep public entry points and stable explanatory docs tracked.
+- Keep ADR 0013 at its Stage4A no-move canonical path; any future ADR 0013 move
+  needs a separate reviewed slice.
+- Keep plan-archive namespace creation and broad plan moves deferred until link
+  impact and authority guards are reviewed.
 - Keep new AI/product planning drafts local-only until explicitly promoted.

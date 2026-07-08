@@ -82,8 +82,8 @@ OpenLife 当前不再是概念验证项目，而是一个已经具备可运行�
 
 从本次维护开始，PRD 负责回答“为什么做、最终要到哪”，实际开发执行统一以以下文档为准：
 
-- 主计划：[plans/openlife_development_plan.md](/Users/fujing/Desktop/偶来福/plans/openlife_development_plan.md)
-- Codex 执行手册：[plans/openlife_codex_execution_playbook.md](/Users/fujing/Desktop/偶来福/plans/openlife_codex_execution_playbook.md)
+- 主计划：[plans/openlife_development_plan.md](plans/openlife_development_plan.md)
+- Codex 执行手册：[plans/openlife_codex_execution_playbook.md](plans/openlife_codex_execution_playbook.md)
 
 ---
 
@@ -699,6 +699,11 @@ OpenLife的目标市场是上述市场的**交集区域**：
 ```
 
 ### 5.2 核心模块定义
+
+> Historical-only note (2026-07-07 Stage 2B): 本节保留旧版 PRD 的目标态和
+> 伪代码示例。`intent_router` / `IntentRouter` 示例不描述当前 Main Chat
+> 实现；当前实现入口和优先级以 `AGENTS.md`、`plans/README.md` 以及当前源码
+> source-map 为准。
 
 #### 5.2.1 模块划分和职责
 
@@ -1849,8 +1854,8 @@ impl TieredModelScheduler {
 
 > 说明：本章节保留 PRD 的长期路线图，用于描述目标态。
 > 针对当前代码基线的实际开发顺序，不再直接按下面的 12 个月规划执行，
-> 而以 [plans/openlife_development_plan.md](/Users/fujing/Desktop/偶来福/plans/openlife_development_plan.md) 和
-> [plans/openlife_codex_execution_playbook.md](/Users/fujing/Desktop/偶来福/plans/openlife_codex_execution_playbook.md) 为当前主计划。
+> 而以 [plans/openlife_development_plan.md](plans/openlife_development_plan.md) 和
+> [plans/openlife_codex_execution_playbook.md](plans/openlife_codex_execution_playbook.md) 为当前主计划。
 
 ### 6.1 开发路线图（12个月）
 

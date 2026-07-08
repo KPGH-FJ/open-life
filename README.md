@@ -18,6 +18,13 @@ Older planning documents are historical evidence only. They do not authorize a
 second product runtime, old command surfaces, old frontend status fields, or old
 readiness routes.
 
+## Documentation Map
+
+- Architecture index: `docs/ARCHITECTURE.md`
+- Source-backed explainers: `docs/architecture/`
+- Testing and validation commands: `docs/development/testing.md`
+- Document governance: `docs/repository_document_governance.md`
+
 ## Phase7 Status
 
 Phase7 is a real deletion pass, not a compatibility pass. The product contract

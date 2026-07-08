@@ -53,33 +53,34 @@ Observed objects:
 
 - `src-tauri/src/main_chat_turn_pipeline.rs`
 - `src-tauri/src/main_chat_kernel.rs`
-- `src-tauri/src/main_chat_strategy.rs`
-- `src-tauri/src/main_chat_tool_loop.rs`
-- `src-tauri/src/main_chat_legacy_agent_loop.rs`
-- `src-tauri/src/main_chat_route_preview.rs`
+- `src-tauri/src/main_chat_turn_runtime.rs`
+- `src-tauri/src/main_chat_react_runtime.rs`
+- `src-tauri/src/main_chat_react_execution.rs`
+- `src-tauri/src/main_chat_react_tool_selection.rs`
 - `openlife-core/src/agent/main_chat_agent_v1.rs`
-- `openlife-core/src/agent/strategy.rs`
 
 The ordinary send/stream entrypoints are thin, which is good. The problem is
-inside the pipeline: it still chooses among kernel dispatch, tool-loop adapter,
-strategy helper, blocker handling, route preview, and fallback-shaped metadata.
-That is still a multi-system runtime.
+inside the pipeline: it still carries source-map residue from old strategy,
+tool-loop, route-preview, blocker, and fallback-shaped product paths. Those old
+module names are historical/deleted residue, not files to restore as cleanup.
+The remaining work is to prove the current send/stream path has a single
+runtime owner.
 
 ### 3.2 Intent routing is split across several layers
 
 Observed objects:
 
 - `openlife-core/src/agent/main_chat_agent_v1.rs` `StrategyRouter`
-- `openlife-core/src/agent/strategy.rs` `StrategySelector`
-- `openlife-core/src/router.rs` `IntentRouter`
-- `openlife-core/src/layer_router.rs` `LayerRouter`
-- `src-tauri/src/main_chat_route_preview.rs`
+- `openlife-core/src/agent/main_chat_governance_intent.rs`
+- `openlife-core/src/agent/main_chat_memory_candidate.rs`
+- `src-tauri/src/main_chat_preprocess.rs`
 - planner/tool/governance keyword helpers such as
   `main_chat_governance_intent.rs` and `main_chat_memory_candidate.rs`
 
 The current problem is not that the keyword list is short. The deeper problem
-is that many components are allowed to decide intent. That makes realistic
-Chinese daily-life inputs brittle.
+is that many components and historical/deleted router concepts still influence
+intent documentation and guard interpretation. That makes realistic Chinese
+daily-life inputs brittle.
 
 ### 3.3 Proposal creation is not a single workflow
 
@@ -130,7 +131,6 @@ Observed objects:
 - `openlife-core/src/agent/action_executor/**`
 - `openlife-core/src/tool_manifest.rs`
 - `openlife-core/src/mcp.rs`
-- `src-tauri/src/main_chat_tool_loop.rs`
 - `src-tauri/src/main_chat_react_*`
 
 The important issue is that tool ability/risk can still be inferred from names
@@ -312,10 +312,10 @@ Problems to solve:
 
 - `main_chat_turn_pipeline.rs` still dispatches among kernel, tool loop,
   strategy helper, and blocker paths.
-- `main_chat_strategy.rs` duplicates strategy execution.
-- `main_chat_tool_loop.rs` still has single-step fallback-shaped outcomes.
-- `main_chat_legacy_agent_loop.rs` remains a production module.
-- Route preview is still part of the runtime surface.
+- Historical/deleted strategy, tool-loop, legacy-agent-loop, and route-preview
+  module names still appear in source-map residue and guard interpretation.
+- The current pipeline must prove that any fallback-shaped behavior is explicit
+  blocker/HITL state, not a second product runtime.
 
 Objects to inspect before coding:
 
@@ -323,11 +323,11 @@ Objects to inspect before coding:
 - `src-tauri/src/main_chat_streaming.rs`
 - `src-tauri/src/main_chat_turn_pipeline.rs`
 - `src-tauri/src/main_chat_kernel.rs`
-- `src-tauri/src/main_chat_strategy.rs`
-- `src-tauri/src/main_chat_tool_loop.rs`
-- `src-tauri/src/main_chat_legacy_agent_loop.rs`
+- `src-tauri/src/main_chat_turn_runtime.rs`
 - `src-tauri/src/main_chat_runtime_support.rs`
 - `src-tauri/src/main_chat_event_stream.rs`
+- `src-tauri/src/main_chat_react_runtime.rs`
+- `src-tauri/src/main_chat_react_execution.rs`
 - `openlife-core/src/agent/main_chat_agent_v1.rs`
 
 Solution:
@@ -337,8 +337,8 @@ Solution:
   as states inside one runtime, not separate product runtimes.
 - Absorb useful code from kernel/tool/strategy modules into the runtime or
   subordinate non-routing services.
-- Delete product use of `main_chat_strategy.rs`,
-  `main_chat_legacy_agent_loop.rs`, and single-step fallback.
+- Keep deleted old strategy/legacy module names absent from product use, and
+  remove any remaining single-step fallback product behavior.
 - Keep send and stream as transport wrappers only.
 
 Start-before checklist:
@@ -377,12 +377,8 @@ Problems to solve:
 Objects to inspect before coding:
 
 - `openlife-core/src/agent/main_chat_agent_v1.rs`
-- `openlife-core/src/agent/strategy.rs`
-- `openlife-core/src/router.rs`
-- `openlife-core/src/layer_router.rs`
 - `openlife-core/src/agent/main_chat_governance_intent.rs`
 - `openlife-core/src/agent/main_chat_memory_candidate.rs`
-- `src-tauri/src/main_chat_route_preview.rs`
 - `src-tauri/src/main_chat_preprocess.rs`
 
 Solution:
@@ -555,7 +551,6 @@ Objects to inspect before coding:
 - `openlife-core/src/agent/action_executor/**`
 - `openlife-core/src/tool_manifest.rs`
 - `openlife-core/src/mcp.rs`
-- `src-tauri/src/main_chat_tool_loop.rs`
 - `src-tauri/src/main_chat_react_tool_selection.rs`
 - `src-tauri/src/main_chat_react_runtime.rs`
 - `plans/main_chat_final_delivery_contract_v1.md`
@@ -720,3 +715,28 @@ The next coding step should start with Phase 1 only:
 2. update active plan governance so old plans cannot steer new work;
 3. establish the first static checks over command surface and direct writes;
 4. only then enter Main Chat runtime code changes.
+
+## 11. Stage4C Repository Missing-Record Closure
+
+Stage4C keeps this preparation document subordinate to the Phase7 deletion
+manifest and closes the repository-link baseline's remaining active missing
+records as expected-absent evidence.
+
+| Category | Records |
+| --- | ---: |
+| `active_doc_missing_records` | 37 |
+| `active_expected_absent_records` | 37 |
+| `stage4c_verified_expected_absent_records` | 37 |
+| `active_actionable_repair_records` | 0 |
+| `active_future_blocked_records` | 0 |
+| `active_adr_blocked_records` | 0 |
+| `active_unresolved_missing_records` | 0 |
+
+This is not Phase7 completion. The Computer Use trial remains
+`red-until-trial-green`, Main Chat Agent Execution v1 remains incomplete, and
+live provider evidence remains incomplete. Stage5A later changed the
+runtime-module guard result: `cargo test -p openlife-tauri
+main_chat_runtime_module -- --nocapture` now passes under the current Phase7
+owner-shape guard, which only removes that inherited blocker and does not
+complete Phase7, Main Chat Agent Execution v1, or external live-provider
+evidence.
