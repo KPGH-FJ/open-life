@@ -88,13 +88,13 @@ mod tests {
                 "Please remember that I prefer morning writing blocks.",
                 MainChatAgentStrategy::MemoryProposal,
                 MainChatExecutionPath::WriteOutcome,
-                "openlife_runtime_write_outcome",
+                "openlife_runtime_proposal_only_write",
             ),
             (
                 "Send this private medical update to my coworker.",
                 MainChatAgentStrategy::BlockedConfirmation,
                 MainChatExecutionPath::WriteOutcome,
-                "openlife_runtime_write_outcome",
+                "openlife_runtime_confirmation_request",
             ),
         ];
 

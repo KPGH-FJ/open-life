@@ -1441,7 +1441,7 @@ fn retry_decision_requires_failed_action_on_resumable_task() {
     let session = session_store
         .create_session(AgentTaskSessionDraft {
             chat_session_id: "chat-retry-guard".into(),
-            user_goal: "Search governed web route.".into(),
+            user_goal: "Run a non-replayable external write action.".into(),
             selected_strategy: MainChatAgentStrategy::ReActToolExecution,
             current_plan_summary: None,
             context_snapshot_refs: Vec::new(),
@@ -1450,10 +1450,10 @@ fn retry_decision_requires_failed_action_on_resumable_task() {
     let action = queue
         .enqueue(
             &session.id,
-            ExecutionAction::new("web.search", "Search governed web route."),
+            ExecutionAction::new("external.write", "Write through a governed external route."),
             policy.classify(&ExecutionAction::new(
-                "web.search",
-                "Search governed web route.",
+                "external.write",
+                "Write through a governed external route.",
             )),
         )
         .expect("enqueue action");

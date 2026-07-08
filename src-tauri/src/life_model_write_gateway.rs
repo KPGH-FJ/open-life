@@ -433,6 +433,7 @@ async fn record_patch_conflict(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn record_lifemodel_gateway_audit(
     state: &Arc<AppState>,
     event_name: &str,

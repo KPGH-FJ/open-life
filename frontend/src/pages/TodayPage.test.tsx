@@ -88,30 +88,6 @@ const healthyDiagnostics = {
   proposal_store_status: "ok",
 };
 
-const pendingProposal = {
-  id: "proposal-today-1",
-  runId: "run-1",
-  proposalType: "life_model_update",
-  source: "builder_review",
-  sourceDetail: "RAW_EVIDENCE_PAYLOAD_SHOULD_NOT_RENDER",
-  affectedPath: "goals.daily",
-  before: { raw: "RAW_LIFEMODEL_JSON_SHOULD_NOT_RENDER" },
-  after: { raw: "RAW_PROPOSAL_PAYLOAD_SHOULD_NOT_RENDER" },
-  reason: "A pending update exists.",
-  confidence: 0.8,
-  riskLevel: "low",
-  status: "pending",
-  createdAt: "2026-06-07T00:00:00.000Z",
-};
-
-const secondPendingProposal = {
-  ...pendingProposal,
-  id: "proposal-today-2",
-  runId: "run-2",
-  affectedPath: "state.current_focus",
-  source: "feedback_evolution",
-};
-
 function renderPage() {
   render(
     <BrowserRouter>
@@ -120,11 +96,82 @@ function renderPage() {
   );
 }
 
+function lifeStateProjection({
+  pendingCount = 1,
+  safeMode = false,
+}: {
+  pendingCount?: number;
+  safeMode?: boolean;
+} = {}) {
+  return {
+    version: "life_state_projection_v1",
+    generatedAt: "2026-07-08T00:00:00.000Z",
+    pending: {
+      pendingProposalCount: pendingCount,
+      editedProposalCount: 0,
+      totalReviewRequiredCount: pendingCount,
+      highRiskReviewRequiredCount: 0,
+      proposalStoreStatus: "ok",
+      requiresUserAction: pendingCount > 0,
+    },
+    readiness: {
+      chatReady: true,
+      usageReady: true,
+      lifeModelReady: true,
+      modelEmpty: false,
+      pendingBuilderReviewSessions: 0,
+      unfinishedBuilderSessions: 0,
+      databaseStatus: safeMode ? "degraded" : "ok",
+      readinessIssues: [],
+      usageReadinessIssues: [],
+    },
+    taskState: {
+      taskStoreStatus: "ok",
+      latestTaskId: null,
+      latestTaskStatus: null,
+      runningCount: 0,
+      waitingPermissionCount: 0,
+      blockedCount: 0,
+      failedCount: 0,
+      cancelledCount: 0,
+      completedCount: 0,
+      activeCount: 0,
+    },
+    safeMode: {
+      active: safeMode,
+      reason: safeMode ? "memory.db 初始化失败，正在使用临时数据库" : "系统当前未处于 Safe Mode。",
+      sourceRefs: safeMode ? ["diagnostics.startup_warnings"] : [],
+    },
+    toolPermissions: {
+      totalCount: 0,
+      activeCount: 0,
+      consumedCount: 0,
+      allowCount: 0,
+      denyCount: 0,
+      askEveryTimeCount: 0,
+      allowOnceCount: 0,
+      allowUntilRevokedCount: 0,
+    },
+    safePaths: [],
+    surfaces: ["today", "mailbox", "chat", "companion", "life_model", "settings"].map(surface => ({
+      surface,
+      pendingReviewCount: pendingCount,
+      editedReviewCount: 0,
+      totalReviewRequiredCount: pendingCount,
+      readinessStatus: safeMode ? "blocked" : "ready",
+      taskStatus: "idle",
+      safeModeActive: safeMode,
+      waitingPermissionCount: 0,
+      activeToolPermissionCount: 0,
+    })),
+    sourceRefs: ["projection:test"],
+  };
+}
+
 describe("TodayPage", () => {
   beforeEach(() => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
-      if (cmd === "get_system_diagnostics") return Promise.resolve(healthyDiagnostics);
-      if (cmd === "list_proposals") return Promise.resolve([pendingProposal]);
+      if (cmd === "get_life_state_projection") return Promise.resolve(lifeStateProjection());
       return mockInvoke(cmd, args);
     });
   });
@@ -148,24 +195,22 @@ describe("TodayPage", () => {
 
     await waitFor(() => {
       const calledCommands = vi.mocked(invoke).mock.calls.map(([command]) => command);
-      for (const command of ["get_system_diagnostics", "get_daily_goals", "list_proposals"]) {
+      for (const command of ["get_life_state_projection", "get_daily_goals"]) {
         expect(calledCommands).toContain(command);
       }
+      expect(calledCommands).not.toContain("get_system_diagnostics");
+      expect(calledCommands).not.toContain("list_proposals");
       expect(calledCommands).not.toContain("get_pending_proposals");
       expect(calledCommands).not.toContain("count_memory_chunks");
       expect(calledCommands).not.toContain("get_state_alerts");
-      expect(vi.mocked(invoke)).toHaveBeenCalledWith(
-        "list_proposals",
-        expect.objectContaining({ status: "pending", limit: 100 })
-      );
     });
   });
 
   it("renders a light empty state when there is no daily goal", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_daily_goals") return Promise.resolve([]);
-      if (cmd === "get_system_diagnostics") return Promise.resolve(healthyDiagnostics);
-      if (cmd === "list_proposals") return Promise.resolve([]);
+      if (cmd === "get_life_state_projection")
+        return Promise.resolve(lifeStateProjection({ pendingCount: 0 }));
       return mockInvoke(cmd, args);
     });
 
@@ -197,14 +242,8 @@ describe("TodayPage", () => {
 
   it("does not show direct-write actions in Safe Mode", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
-      if (cmd === "get_system_diagnostics") {
-        return Promise.resolve({
-          ...healthyDiagnostics,
-          database_status: "degraded",
-          startup_warnings: ["memory.db 初始化失败，正在使用临时数据库"],
-        });
-      }
-      if (cmd === "list_proposals") return Promise.resolve([pendingProposal]);
+      if (cmd === "get_life_state_projection")
+        return Promise.resolve(lifeStateProjection({ safeMode: true }));
       return mockInvoke(cmd, args);
     });
 
@@ -222,8 +261,8 @@ describe("TodayPage", () => {
       if (cmd === "get_daily_goals") {
         return Promise.resolve([{ name: "qapressure = 8 points", done: false }]);
       }
-      if (cmd === "get_system_diagnostics") return Promise.resolve(healthyDiagnostics);
-      if (cmd === "list_proposals") return Promise.resolve([]);
+      if (cmd === "get_life_state_projection")
+        return Promise.resolve(lifeStateProjection({ pendingCount: 0 }));
       return mockInvoke(cmd, args);
     });
 
@@ -245,13 +284,13 @@ describe("TodayPage", () => {
     expect(screen.queryByTestId("today-card-task")).not.toBeInTheDocument();
   });
 
-  it("uses the same pending proposal source as Mailbox instead of diagnostics fallback", async () => {
+  it("uses LifeStateProjection review counts instead of diagnostics fallback", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_system_diagnostics") {
         return Promise.resolve({ ...healthyDiagnostics, pending_proposal_count: 9 });
       }
-      if (cmd === "list_proposals")
-        return Promise.resolve([pendingProposal, secondPendingProposal]);
+      if (cmd === "get_life_state_projection")
+        return Promise.resolve(lifeStateProjection({ pendingCount: 2 }));
       return mockInvoke(cmd, args);
     });
 
@@ -260,10 +299,8 @@ describe("TodayPage", () => {
     expect(await screen.findByText("待确认 2")).toBeInTheDocument();
     expect(screen.getByText("2 个待确认项需要你处理。")).toBeInTheDocument();
     expect(screen.queryByText("待确认 9")).not.toBeInTheDocument();
-    expect(vi.mocked(invoke)).toHaveBeenCalledWith(
-      "list_proposals",
-      expect.objectContaining({ status: "pending", limit: 100 })
-    );
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("get_life_state_projection", undefined);
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "list_proposals")).toBe(false);
   });
 
   it("does not render dashboard-style status stats on Today", async () => {

@@ -146,16 +146,16 @@ export function createEmptyLifeModel(): LifeModel {
       knowledge_domains: [],
     },
     state: {
-      current_focus: "构建人生模型",
+      current_focus: "",
       health_status: {
-        physical: "良好",
-        mental: "积极",
-        energy_level: 7,
+        physical: "",
+        mental: "",
+        energy_level: 0,
       },
       emotional_state: {
-        current_mood: "期待",
-        stress_level: 3,
-        fulfillment_score: 6,
+        current_mood: "",
+        stress_level: 0,
+        fulfillment_score: 0,
       },
       recent_reflections: [],
       open_questions: [],

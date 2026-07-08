@@ -685,6 +685,12 @@ mod tests {
         );
         proposal.run_id = Some("run-communication-style-1".into());
         proposal.source_detail = Some("maturation:preference.communication".into());
+        crate::life_model_write_gateway::stamp_lifemodel_proposal_base_hash_with_state(
+            &state,
+            &mut proposal,
+        )
+        .await
+        .unwrap();
         let proposal_id = proposal.id.clone();
         state
             .proposal_store

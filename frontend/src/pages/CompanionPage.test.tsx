@@ -15,6 +15,78 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn().mockResolvedValue(() => {}),
 }));
 
+function lifeStateProjection({
+  pendingCount = 0,
+  safeMode = false,
+}: {
+  pendingCount?: number;
+  safeMode?: boolean;
+} = {}) {
+  return {
+    version: "life_state_projection_v1",
+    generatedAt: "2026-07-08T00:00:00.000Z",
+    pending: {
+      pendingProposalCount: pendingCount,
+      editedProposalCount: 0,
+      totalReviewRequiredCount: pendingCount,
+      highRiskReviewRequiredCount: 0,
+      proposalStoreStatus: "ok",
+      requiresUserAction: pendingCount > 0,
+    },
+    readiness: {
+      chatReady: true,
+      usageReady: true,
+      lifeModelReady: true,
+      modelEmpty: false,
+      pendingBuilderReviewSessions: 0,
+      unfinishedBuilderSessions: 0,
+      databaseStatus: safeMode ? "degraded" : "ok",
+      readinessIssues: [],
+      usageReadinessIssues: [],
+    },
+    taskState: {
+      taskStoreStatus: "ok",
+      latestTaskId: null,
+      latestTaskStatus: null,
+      runningCount: 0,
+      waitingPermissionCount: 0,
+      blockedCount: 0,
+      failedCount: 0,
+      cancelledCount: 0,
+      completedCount: 0,
+      activeCount: 0,
+    },
+    safeMode: {
+      active: safeMode,
+      reason: safeMode ? "memory.db 初始化失败，正在使用临时数据库" : "系统当前未处于 Safe Mode。",
+      sourceRefs: safeMode ? ["diagnostics.startup_warnings"] : [],
+    },
+    toolPermissions: {
+      totalCount: 0,
+      activeCount: 0,
+      consumedCount: 0,
+      allowCount: 0,
+      denyCount: 0,
+      askEveryTimeCount: 0,
+      allowOnceCount: 0,
+      allowUntilRevokedCount: 0,
+    },
+    safePaths: [],
+    surfaces: ["today", "mailbox", "chat", "companion", "life_model", "settings"].map(surface => ({
+      surface,
+      pendingReviewCount: pendingCount,
+      editedReviewCount: 0,
+      totalReviewRequiredCount: pendingCount,
+      readinessStatus: safeMode ? "blocked" : "ready",
+      taskStatus: "idle",
+      safeModeActive: safeMode,
+      waitingPermissionCount: 0,
+      activeToolPermissionCount: 0,
+    })),
+    sourceRefs: ["projection:test"],
+  };
+}
+
 describe("CompanionPage", () => {
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -113,22 +185,8 @@ describe("CompanionPage", () => {
 
   it("moves AgentStage to review when pending proposals are visible", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
-      if (cmd === "get_pending_proposals") {
-        return Promise.resolve([
-          {
-            id: "proposal-1",
-            proposalType: "memory_write",
-            source: "chat_conversation",
-            affectedPath: "memory.pending",
-            after: {},
-            reason: "Needs confirmation",
-            confidence: 0.8,
-            riskLevel: "low",
-            status: "pending",
-            createdAt: new Date().toISOString(),
-          },
-        ]);
-      }
+      if (cmd === "get_life_state_projection")
+        return Promise.resolve(lifeStateProjection({ pendingCount: 1 }));
       return mockInvoke(cmd, args);
     });
 
@@ -145,16 +203,9 @@ describe("CompanionPage", () => {
   });
 
   it("moves AgentStage to privacy when Safe Mode is active", async () => {
-    vi.mocked(invoke).mockImplementation(async (cmd: string, args?: Record<string, any>) => {
-      if (cmd === "get_system_diagnostics") {
-        const base = (await mockInvoke(cmd, args)) as Record<string, any>;
-        return {
-          ...base,
-          database_status: "degraded",
-          startup_warnings: ["memory.db 初始化失败，正在使用临时数据库"],
-          vector_corrupt_embedding_count: 2,
-        };
-      }
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_life_state_projection")
+        return Promise.resolve(lifeStateProjection({ safeMode: true }));
       return mockInvoke(cmd, args);
     });
 

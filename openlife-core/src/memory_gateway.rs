@@ -560,7 +560,7 @@ fn is_canonical_lifemodel_request(request: &MemoryGatewayRequest, haystack: &str
         || request
             .affected_path
             .as_deref()
-            .is_some_and(|path| canonical_lifemodel_path(path))
+            .is_some_and(canonical_lifemodel_path)
 }
 
 fn canonical_lifemodel_path(path: &str) -> bool {

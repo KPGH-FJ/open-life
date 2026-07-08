@@ -560,36 +560,25 @@ describe("Step6 product acceptance evidence", () => {
     expect(workflow).not.toContain("macos-latest");
   });
 
-  it("exposes the Step 6 live-provider state prep command without a persisted config path", () => {
+  it("keeps retired Step 6 prep commands out of the current Tauri command surface", () => {
     const tauriApi = fs.readFileSync(path.resolve(process.cwd(), "src/tauri.ts"), "utf8");
     const rustCommand = fs.readFileSync(
       path.resolve(process.cwd(), "..", "src-tauri", "src", "commands", "agent_runtime", "mod.rs"),
       "utf8"
     );
-    const rustGate = fs.readFileSync(
-      path.resolve(
-        process.cwd(),
-        "..",
-        "src-tauri",
-        "src",
-        "main_chat_step6_product_acceptance.rs"
-      ),
-      "utf8"
+    const retiredRustGatePath = path.resolve(
+      process.cwd(),
+      "..",
+      "src-tauri",
+      "src",
+      "main_chat_step6_product_acceptance.rs"
     );
 
-    expect(tauriApi).toContain("MainChatStep6LiveProviderEvalStatePrepReport");
-    expect(tauriApi).toContain("prepareMainChatStep6LiveProviderEvalState");
-    expect(tauriApi).toContain("prepare_main_chat_step6_live_provider_eval_state");
-    expect(rustCommand).toContain("prepare_main_chat_step6_live_provider_eval_state");
-    expect(rustGate).toContain("OPENLIFE_LIVE_EVAL_PROVIDER");
-    expect(rustGate).toContain("OPENLIFE_LIVE_EVAL_BASE");
-    expect(rustGate).toContain("OPENLIFE_LIVE_EVAL_MODEL");
-    expect(rustGate).toContain("OPENLIFE_LIVE_EVAL_API_KEY");
-    expect(rustGate).toContain("app_config_persisted: false");
-    expect(rustGate).toContain("config.system.network_policy.enabled = network_enabled");
-    expect(rustGate).toContain("step6_final_acceptance_not_ready");
-    expect(rustGate).toContain("final_acceptance_blockers");
-    expect(rustGate).not.toContain("OPENAI_API_KEY");
-    expect(rustGate).not.toContain(".save(");
+    expect(tauriApi).not.toContain("MainChatStep6LiveProviderEvalStatePrepReport");
+    expect(tauriApi).not.toContain("prepareMainChatStep6LiveProviderEvalState");
+    expect(tauriApi).not.toContain("prepare_main_chat_step6_live_provider_eval_state");
+    expect(rustCommand).not.toContain("prepare_main_chat_step6_live_provider_eval_state");
+    expect(rustCommand).not.toContain("run_main_chat_agent_step6_product_acceptance_gate");
+    expect(fs.existsSync(retiredRustGatePath)).toBe(false);
   });
 });

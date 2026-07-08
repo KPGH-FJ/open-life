@@ -1107,7 +1107,7 @@ fn main_chat_react_execution_helper_is_extracted_from_lib_rs() {
         "ReAct execution module must expose the governed read ToolGateway helper"
     );
     assert!(
-        module_source.contains("ToolGateway::new("),
+        module_source.contains("ToolGateway::from_executor_config("),
         "ReAct execution module must route governed reads through ToolGateway"
     );
     assert!(

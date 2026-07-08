@@ -1111,7 +1111,7 @@ fn is_bounded_route_truth_mixed_prompt(normalized: &str, compact: &str) -> bool 
 
 #[allow(clippy::too_many_arguments)]
 async fn build_runtime_route_evidence_from_snapshots(
-    state: &Arc<AppState>,
+    _state: &Arc<AppState>,
     config: &AppConfig,
     scheduler: &InferenceScheduler,
     conversation_id: Option<&str>,

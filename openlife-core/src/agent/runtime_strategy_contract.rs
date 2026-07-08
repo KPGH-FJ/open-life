@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::agent::governor::{GovernanceDecision, GovernanceDecisionKind, LifeModelGovernor};
 use crate::agent::runtime_contract::RuntimeInput;
 use crate::agent::types::RiskLevel;

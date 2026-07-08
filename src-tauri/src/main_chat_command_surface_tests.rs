@@ -5849,10 +5849,17 @@ async fn send_message_registered_mcp_multi_candidate_kernel_read_loop_selects_al
     );
     assert_eq!(
         metadata
-            .get("kernelToolSelection")
+            .get("agentLoopAttempted")
             .and_then(serde_json::Value::as_bool),
         Some(true),
-        "kernel read loop must preserve governed MCP candidate-selection evidence"
+        "multi-candidate MCP read must use governed AgentLoop candidate selection"
+    );
+    assert_eq!(
+        metadata
+            .get("modelSelectedAllowedTool")
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "governed MCP candidate selection must preserve allowed-tool evidence"
     );
     let candidate_count = metadata
         .get("toolSelectionCandidateCount")
@@ -5863,7 +5870,7 @@ async fn send_message_registered_mcp_multi_candidate_kernel_read_loop_selects_al
         "kernel read-loop metadata must preserve the multi-candidate contract"
     );
     let candidate_ids = metadata
-        .get("boundedCandidateIds")
+        .get("toolSelectionCandidateIds")
         .and_then(serde_json::Value::as_array)
         .expect("candidate ids metadata");
     assert!(candidate_ids
@@ -5871,13 +5878,13 @@ async fn send_message_registered_mcp_multi_candidate_kernel_read_loop_selects_al
         .any(|candidate| candidate == "builtin_echo"));
     assert_eq!(
         metadata
-            .get("selectedCandidateId")
+            .get("toolSelectionCandidateId")
             .and_then(serde_json::Value::as_str),
         Some("builtin_echo")
     );
     assert_eq!(
         metadata
-            .get("selectedCandidateTarget")
+            .get("toolSelectionCandidateTarget")
             .and_then(serde_json::Value::as_str),
         Some("builtin_echo")
     );
@@ -5924,18 +5931,22 @@ async fn send_message_registered_mcp_multi_candidate_kernel_read_loop_selects_al
         .expect("mcp multi-candidate kernel read-loop observation metadata");
     assert_eq!(
         observation
-            .get("kernelBackedReadOnlyToolLoop")
+            .get("agentLoopAttempted")
             .and_then(serde_json::Value::as_bool),
         Some(true),
-        "multi-candidate MCP observation must come from kernel read loop under OpenLifeTurnRuntime"
+        "multi-candidate MCP action observation must preserve governed AgentLoop evidence"
     );
-    assert_eq!(observation["kernelToolSelection"], serde_json::json!(true));
+    assert_eq!(observation["agentLoopAttempted"], serde_json::json!(true));
     assert_eq!(
-        observation["selectedCandidateId"],
+        observation["modelSelectedAllowedTool"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
+        observation["toolSelectionCandidateId"],
         serde_json::json!("builtin_echo")
     );
     assert_eq!(
-        observation["selectedCandidateTarget"],
+        observation["toolSelectionCandidateTarget"],
         serde_json::json!("builtin_echo")
     );
     assert_ne!(

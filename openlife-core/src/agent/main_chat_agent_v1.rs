@@ -6019,7 +6019,7 @@ fn intent_frame_confidence(
         return 0.95;
     }
     if governance_intent.requires_governance() {
-        return governance_intent.confidence.max(0.9).min(0.98);
+        return governance_intent.confidence.clamp(0.9, 0.98);
     }
     if requires_external_read || requests_plan_task {
         return 0.88;

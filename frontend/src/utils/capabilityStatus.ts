@@ -51,11 +51,15 @@ function cloudRouteState(diagnostics: SystemDiagnostics): CloudRouteState {
   if (diagnostics.cloud_api_validation_status === "validated") return "validated";
   if (diagnostics.cloud_api_validation_status === "failed") return "failed";
   if (diagnostics.cloud_api_validation_status === "stale") return "stale";
-  if (diagnostics.cloud_api_validation_status === "scripted_provider_probe")
+  if (isScriptedProofStatus(diagnostics.cloud_api_validation_status))
     return "scripted_provider_probe";
   if (diagnostics.cloud_api_validated === true) return "validated";
   if (diagnostics.cloud_api_configured) return "unvalidated";
   return "none";
+}
+
+function isScriptedProofStatus(status: string | null | undefined): boolean {
+  return status === "scripted_provider_probe" || status === "scripted_dogfood";
 }
 
 function cloudConfiguredLabel(

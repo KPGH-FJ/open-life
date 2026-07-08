@@ -58,12 +58,14 @@ export default function OverviewTab({
 }: OverviewTabProps) {
   const runtime = diagnostics?.runtime_build_info;
   const providerReadiness = buildProviderReadinessView(diagnostics);
-  const usageReady = projection?.readiness.usageReady;
-  const modelEmpty = projection?.readiness.modelEmpty ?? true;
-  const lifeModelReady = projection?.readiness.lifeModelReady ?? false;
-  const chatReady = projection?.readiness.chatReady ?? false;
-  const pendingBuilderReviewCount = projection?.readiness.pendingBuilderReviewSessions ?? 0;
-  const unfinishedBuilderSessionCount = projection?.readiness.unfinishedBuilderSessions ?? 0;
+  const readiness = projection?.readiness;
+  const usageReady = readiness?.usageReady ?? false;
+  const modelEmpty = readiness?.modelEmpty ?? true;
+  const lifeModelReady = readiness?.lifeModelReady ?? false;
+  const chatReady = readiness?.chatReady ?? false;
+  const pendingBuilderReviewCount = readiness?.pendingBuilderReviewSessions ?? 0;
+  const unfinishedBuilderSessionCount = readiness?.unfinishedBuilderSessions ?? 0;
+  const readinessIssues = readiness?.readinessIssues ?? [];
   // ---- Data file health ----
   const df = diagnostics?.data_files;
   const dataFileItems = df
@@ -298,11 +300,11 @@ export default function OverviewTab({
               </div>
             ))}
           </div>
-          {projection && projection.readiness.readinessIssues.length > 0 && (
+          {readinessIssues.length > 0 && (
             <div className="mt-3 rounded-lg bg-white/70 p-3">
               <div className="text-xs font-medium text-amber-800">建议先处理：</div>
               <ul className="mt-1 list-disc space-y-1 pl-4 text-xs text-amber-700">
-                {projection.readiness.readinessIssues.map(issue => (
+                {readinessIssues.map(issue => (
                   <li key={issue}>{issue}</li>
                 ))}
               </ul>

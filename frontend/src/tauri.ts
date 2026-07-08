@@ -1475,6 +1475,7 @@ export interface ProviderReadiness {
     | "validated"
     | "failed"
     | "scripted_provider_probe"
+    | "scripted_dogfood"
     | string;
   preferred: string;
   actually_used?: string | null;

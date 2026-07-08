@@ -10,6 +10,7 @@ pub mod a2a_sidecar;
 pub mod bootstrap;
 pub mod commands;
 pub mod errors;
+#[allow(dead_code)]
 pub(crate) mod life_model_materializer_guard;
 pub(crate) mod life_model_write_gateway;
 pub(crate) mod life_state_projection;
@@ -19,33 +20,45 @@ pub(crate) mod main_chat_capability_eval;
 #[allow(dead_code)]
 pub(crate) mod main_chat_command_surface_eval;
 pub(crate) mod main_chat_context_loader;
+#[allow(dead_code)]
 pub(crate) mod main_chat_conversation_updates;
 #[allow(dead_code)]
 pub(crate) mod main_chat_eval_state;
+#[allow(dead_code)]
 pub(crate) mod main_chat_event_stream;
 #[allow(dead_code)]
 pub(crate) mod main_chat_final_gate;
+#[allow(dead_code)]
 pub(crate) mod main_chat_generation_support;
 pub(crate) mod main_chat_hs_runtime;
 #[allow(dead_code)]
 pub(crate) mod main_chat_kernel;
+#[allow(dead_code)]
 pub(crate) mod main_chat_live_provider_harness;
 pub(crate) mod main_chat_memory_proposals;
+#[allow(dead_code)]
 pub(crate) mod main_chat_preprocess;
+#[allow(dead_code)]
 pub(crate) mod main_chat_proposal_support;
 pub(crate) mod main_chat_react_execution;
+#[allow(dead_code)]
 pub(crate) mod main_chat_react_runtime;
+#[allow(dead_code)]
 pub(crate) mod main_chat_react_tool_selection;
 #[allow(dead_code)]
 pub(crate) mod main_chat_runtime_facts;
+#[allow(dead_code)]
 pub(crate) mod main_chat_runtime_status;
 pub(crate) mod main_chat_runtime_support;
 pub(crate) mod main_chat_send;
 pub(crate) mod main_chat_skills_tools;
 pub(crate) mod main_chat_streaming;
 pub(crate) mod main_chat_task_controls;
+#[allow(dead_code)]
 pub(crate) mod main_chat_turn_pipeline;
+#[allow(dead_code)]
 pub mod main_chat_turn_runtime;
+#[allow(dead_code)]
 pub(crate) mod memory_gateway;
 pub(crate) mod provider_validation;
 pub mod runtime_build_info;

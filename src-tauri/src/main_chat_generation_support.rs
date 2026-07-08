@@ -206,19 +206,18 @@ pub(crate) async fn finalize_chat_agent_run(
         );
     }
 
-    if should_generate_chat_proposals(agent_run, reasoning_trace) {
-        if timeout(
+    if should_generate_chat_proposals(agent_run, reasoning_trace)
+        && timeout(
             Duration::from_secs(CHAT_PROPOSAL_GENERATION_TIMEOUT_SECS),
             generate_and_persist_chat_proposals(state, agent_run, reply, life_model),
         )
         .await
         .is_err()
-        {
-            eprintln!(
-                "[ChatProposal] Proposal generation timed out after {}s for run {}",
-                CHAT_PROPOSAL_GENERATION_TIMEOUT_SECS, agent_run.id
-            );
-        }
+    {
+        eprintln!(
+            "[ChatProposal] Proposal generation timed out after {}s for run {}",
+            CHAT_PROPOSAL_GENERATION_TIMEOUT_SECS, agent_run.id
+        );
     }
     Ok(())
 }

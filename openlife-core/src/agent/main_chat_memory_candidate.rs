@@ -335,6 +335,7 @@ pub fn plan_main_chat_memory_routing(user_text: &str) -> MainChatMemoryRoutingRe
     route_memory_candidates(&candidates)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_candidate(
     candidates: &mut Vec<MainChatMemoryCandidate>,
     source_span_id: &str,
@@ -373,7 +374,7 @@ fn push_candidate(
 
 fn split_spans(user_text: &str) -> Vec<String> {
     user_text
-        .split(|ch| matches!(ch, '。' | '.' | '!' | '！' | ';' | '；' | '\n'))
+        .split(['。', '.', '!', '！', ';', '；', '\n'])
         .map(compact_text)
         .filter(|span| !span.is_empty())
         .collect()

@@ -28,6 +28,7 @@ use openlife_core::mcp::McpRegistry;
 use openlife_core::scheduler::InferenceScheduler;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::main_chat_agent_state_payload::assemble_main_chat_agent_state_for_turn;
@@ -44,10 +45,13 @@ use crate::main_chat_generation_support::{
 };
 use crate::main_chat_hs_runtime::{build_chat_runtime_hs_packet, included_life_model_sections};
 use crate::main_chat_react_runtime::{
-    attach_main_chat_read_observation_metadata, bind_main_chat_observation_metadata_to_queue_action,
+    attach_main_chat_read_observation_metadata,
+    bind_main_chat_observation_metadata_to_queue_action, try_run_main_chat_react_agent_loop,
+    MainChatReactAgentLoopAttempt,
 };
 use crate::main_chat_react_tool_selection::{
-    main_chat_manifest_has_write_like_surface, main_chat_manifest_is_governed_read_candidate,
+    build_main_chat_react_action_plan, main_chat_manifest_has_write_like_surface,
+    main_chat_manifest_is_governed_read_candidate, MainChatReactActionPlan,
     MainChatReactToolCandidate,
 };
 use crate::main_chat_runtime_support::{
@@ -1481,6 +1485,69 @@ where
         state,
     ))));
 
+    if main_chat_react_turn_requires_governed_agent_loop_candidate_selection(
+        &main_chat_agent_turn.decision.selected_strategy,
+        &messages,
+        state,
+    )
+    .await
+    {
+        let plan = build_main_chat_react_action_plan(session_id, &user_text)?;
+        let privacy_engine = openlife_core::privacy::PrivacyEngine::new();
+        let privacy_map: HashMap<String, String> = HashMap::new();
+        let agent_loop_attempt = try_run_main_chat_react_agent_loop(
+            state,
+            &task_session_id,
+            session_id,
+            &user_text,
+            &messages,
+            &life_model,
+            &privacy_engine,
+            &privacy_map,
+            &plan,
+            main_chat_agent_turn
+                .decision
+                .privacy_risk
+                .local_only_required,
+        )
+        .await?;
+        execution_transcript.extend(agent_loop_attempt.transcript_entries.clone());
+        let kernel_result = kernel_turn_result_from_react_agent_loop_attempt(
+            &agent_loop_attempt,
+            &plan,
+            &scheduler,
+        );
+        let kernel_events = event_sink.events().to_vec();
+        if !kernel_result.blockers.is_empty() {
+            return build_blocked_kernel_command_surface_result(
+                session_id,
+                &task_session_id,
+                state,
+                main_chat_agent_turn,
+                execution_transcript,
+                kernel_result,
+                event_sink_label,
+                kernel_events,
+            )
+            .await;
+        }
+        return build_successful_kernel_command_surface_result(
+            session_id,
+            &user_text,
+            state,
+            main_chat_agent_turn,
+            execution_transcript,
+            kernel_result,
+            scheduler,
+            life_model,
+            false,
+            None,
+            event_sink_label,
+            kernel_events,
+        )
+        .await;
+    }
+
     if main_chat_agent_turn.decision.selected_strategy == MainChatAgentStrategy::PlanExecute {
         return build_kernel_plan_execute_command_surface_result(
             session_id,
@@ -2720,6 +2787,87 @@ where
             },
             system_prompt,
         )
+    }
+}
+
+fn kernel_turn_result_from_react_agent_loop_attempt(
+    attempt: &MainChatReactAgentLoopAttempt,
+    plan: &MainChatReactActionPlan,
+    scheduler: &InferenceScheduler,
+) -> MainChatTurnResult {
+    let mut route_metadata = route_metadata_from_scheduler(scheduler);
+    route_metadata.tools_enabled = true;
+    route_metadata.reason = "main_chat_governed_react_agent_loop".into();
+    let blocker = attempt.blocker_reason.clone();
+    let status = match attempt.queue_status {
+        Some(ExecutionQueueStatus::Completed) => "succeeded",
+        Some(ExecutionQueueStatus::PendingPermission) => "needs_confirmation",
+        Some(ExecutionQueueStatus::Failed) if blocker.is_some() => "blocked",
+        Some(ExecutionQueueStatus::Failed) => "failed",
+        _ if blocker.is_some() => "blocked",
+        _ => "succeeded",
+    };
+    let reply = attempt.reply.clone().unwrap_or_else(|| {
+        format!(
+            "That read action is blocked by governance: {}",
+            blocker
+                .clone()
+                .unwrap_or_else(|| "agent_loop_failed".into())
+        )
+    });
+    let metadata = attempt.metadata.clone();
+    let selected_target = metadata
+        .get("toolSelectionCandidateTarget")
+        .or_else(|| metadata.get("selectedCandidateTarget"))
+        .and_then(Value::as_str)
+        .unwrap_or(plan.target.as_str())
+        .to_string();
+    let action_type = metadata
+        .get("plannedActionType")
+        .and_then(Value::as_str)
+        .unwrap_or(plan.queue_action_type.as_str())
+        .to_string();
+    let tool_name = attempt
+        .tool_calls
+        .first()
+        .map(|call| call.name.clone())
+        .unwrap_or_else(|| action_type.clone());
+    let output_preview = metadata
+        .get("preview")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            metadata
+                .get("outputPreview")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| preview_text(&reply, MAX_TOOL_OBSERVATION_PREVIEW_CHARS));
+
+    MainChatTurnResult {
+        assistant_message: Some(ChatMessage {
+            role: "assistant".into(),
+            content: reply,
+        }),
+        blockers: blocker.into_iter().collect(),
+        proposals: Vec::new(),
+        tool_calls: vec![MainChatKernelToolCall {
+            name: tool_name,
+            action_type,
+            target: selected_target,
+            governed_input: plan.arguments.clone(),
+            status: status.into(),
+            output_preview: Some(output_preview),
+            blocker: attempt.blocker_reason.clone(),
+            observation_metadata: Some(metadata),
+            model_arguments_ignored: true,
+        }],
+        write_outcome: None,
+        memory_governance: None,
+        route_metadata: Some(route_metadata),
+        context_metadata: None,
+        direct_writes_executed: false,
+        legacy_fallback_used: false,
     }
 }
 
@@ -8243,12 +8391,12 @@ mod tests {
         let final_gate = ["main_chat_", "final_gate"].concat();
         let live_provider_harness = ["main_chat_", "live_provider_harness"].concat();
         let live_provider_tests = ["main_chat_", "live_provider_tests"].concat();
-        let react_agent_loop = ["Agent", "Loop"].concat();
-
         assert!(!source.contains(&final_gate));
         assert!(!source.contains(&live_provider_harness));
         assert!(!source.contains(&live_provider_tests));
         assert!(source.contains("main_chat_live_provider_eval_requires_provider_backed_react"));
-        assert!(!source.contains(&react_agent_loop));
+        assert!(source.contains("try_run_main_chat_react_agent_loop"));
+        assert!(source
+            .contains("main_chat_react_turn_requires_governed_agent_loop_candidate_selection"));
     }
 }

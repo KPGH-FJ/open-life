@@ -2077,7 +2077,7 @@ function copyObservedScenario(row) {
 }
 
 function loadStage1DogfoodScenarios() {
-  const sourcePath = path.resolve(frontendRoot, "src/stage1DogfoodScenarios.ts");
+  const sourcePath = path.resolve(frontendRoot, "src/test/archive/stage1DogfoodScenarios.ts");
   const source = fs.readFileSync(sourcePath, "utf8");
   const ids = [
     ...source.matchAll(

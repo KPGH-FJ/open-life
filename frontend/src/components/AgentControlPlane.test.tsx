@@ -259,7 +259,7 @@ describe("AgentControlPlane", () => {
       "timestamp",
     ]);
     expect(parsed).toMatchObject({
-      schemaVersion: "main-chat-stage3-reviewer-trace-v1",
+      schemaVersion: "main-chat-reviewer-trace-v1",
       taskId: "task-agent-control-plane-1",
       runId: "run-agent-control-plane-1",
       status: "blocked",

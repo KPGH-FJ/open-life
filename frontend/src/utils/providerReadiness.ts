@@ -28,10 +28,14 @@ function fallbackStatus(diagnostics: SystemDiagnostics | null): string {
   if (diagnostics.cloud_api_validation_status === "validated") return "validated";
   if (diagnostics.cloud_api_validation_status === "failed") return "failed";
   if (diagnostics.cloud_api_validation_status === "stale") return "stale";
-  if (diagnostics.cloud_api_validation_status === "scripted_provider_probe")
+  if (isScriptedProofStatus(diagnostics.cloud_api_validation_status))
     return "scripted_provider_probe";
   if (diagnostics.cloud_api_validated === true) return "validated";
   return "unvalidated";
+}
+
+function isScriptedProofStatus(status: string | null | undefined): boolean {
+  return status === "scripted_provider_probe" || status === "scripted_dogfood";
 }
 
 function routeDisplay(route?: RouteIdentity | null): { label: string; tone: ProductTone } {
@@ -132,7 +136,7 @@ export function buildProviderReadinessView(
     };
   }
 
-  if (status === "scripted_provider_probe") {
+  if (isScriptedProofStatus(status)) {
     return {
       providerLabel,
       status,
