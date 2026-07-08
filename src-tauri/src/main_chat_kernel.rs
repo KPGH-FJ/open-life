@@ -2263,7 +2263,14 @@ where
             });
         }
 
-        let memory_governance = if input.runtime_fact_direct_answer {
+        let external_read_required = latest_user_text(&input.messages)
+            .map(|user_text| {
+                classify_main_chat_governance_intent(user_text)
+                    .external_read_requirement
+                    .is_some()
+            })
+            .unwrap_or(false);
+        let memory_governance = if input.runtime_fact_direct_answer || external_read_required {
             None
         } else {
             plan_kernel_memory_governance(&input)

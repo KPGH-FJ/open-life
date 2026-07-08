@@ -592,6 +592,9 @@ fn main_chat_proposal_support_helpers_are_extracted_from_lib_rs() {
 fn main_chat_final_gate_aggregation_is_not_hidden_in_test_module() {
     let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
     let source = std::fs::read_to_string(&lib_rs_path).expect("read src/lib.rs");
+    let module_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_final_gate.rs");
+    let module_source = std::fs::read_to_string(&module_path).expect("read final gate module");
     let command_source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands/agent_runtime/mod.rs"),
     )
@@ -602,16 +605,18 @@ fn main_chat_final_gate_aggregation_is_not_hidden_in_test_module() {
         "pure Main Chat final-gate aggregation must live in a non-test module"
     );
     assert!(
-        command_source.contains(
-            "crate::main_chat_final_gate::build_main_chat_agent_execution_v1_final_gate_report("
-        ),
-        "the final acceptance runner must use the reusable final-gate aggregation module"
+        module_source
+            .contains("pub(crate) fn build_main_chat_agent_execution_v1_final_gate_report("),
+        "final-gate aggregation must be owned by the reusable final-gate module"
     );
     assert!(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/main_chat_final_gate.rs")
-            .is_file(),
+        module_path.is_file(),
         "final-gate aggregation module file must exist outside #[cfg(test)]"
+    );
+    assert!(
+        !command_source.contains("run_main_chat_agent_execution_v1_final_acceptance_gate")
+            && !command_source.contains("build_main_chat_agent_execution_v1_final_gate_report("),
+        "Phase7 command surface must not restore the retired final acceptance runner"
     );
 }
 
@@ -682,11 +687,13 @@ fn main_chat_live_provider_completed_report_builder_is_not_hidden_in_test_module
     let module_path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_final_gate.rs");
     let module_source = std::fs::read_to_string(&module_path).expect("read final gate module");
-    let final_acceptance_test_source = std::fs::read_to_string(
+    let live_provider_test_source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/main_chat_final_acceptance_tests.rs"),
+            .join("src/main_chat_live_provider_tests.rs"),
     )
-    .expect("read final acceptance tests module");
+    .expect("read live provider tests module");
+    let retired_final_acceptance_test_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/main_chat_final_acceptance_tests.rs");
 
     assert!(
         module_source
@@ -698,10 +705,14 @@ fn main_chat_live_provider_completed_report_builder_is_not_hidden_in_test_module
         "live-provider required-evidence list must not be duplicated in test helpers"
     );
     assert!(
-        final_acceptance_test_source.contains(
-            "main_chat_final_gate::completed_main_chat_live_provider_eval_harness_report("
+        live_provider_test_source.contains(
+            "crate::main_chat_final_gate::completed_main_chat_live_provider_eval_harness_report("
         ),
-        "final-gate tests must build completed live-provider reports through the reusable helper"
+        "live-provider tests must build completed report contract fixtures through the reusable helper"
+    );
+    assert!(
+        !retired_final_acceptance_test_path.exists(),
+        "retired final acceptance test owner must remain expected-absent under Phase7"
     );
 }
 

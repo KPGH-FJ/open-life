@@ -793,4 +793,77 @@ describe("BuilderPage", () => {
     expect(screen.queryByText("构建完成！")).not.toBeInTheDocument();
     expect(screen.getByText("继续未完成的会话")).toBeInTheDocument();
   });
+
+  it("submits quick build step 7 into review without claiming Life Model was updated", async () => {
+    const customMock = vi.fn((cmd: string, args?: Record<string, any>): Promise<any> => {
+      if (cmd === "builder_start") {
+        return Promise.resolve({
+          prompt: "【第 7 步/7：陪伴风格】",
+          progress: {
+            progress: 0.86,
+            current_step_label: "陪伴风格",
+            step_index: 7,
+            total_steps: 7,
+          },
+        });
+      }
+      if (cmd === "builder_step") {
+        return Promise.resolve({
+          prompt: "快速构建问题已完成！接下来请审阅 AI 生成的模型建议。",
+          finished: true,
+          progress: { progress: 1.0, current_step_label: "完成", step_index: 7, total_steps: 7 },
+          mode: "Quick",
+          pending_signals: [
+            {
+              id: "sig_comm_style",
+              source_step: 7,
+              source_question_id: "companion_style",
+              dimension: "Identity",
+              affected_path: "preferences.communication_style",
+              proposed_value: "直接高效型：少废话，直接给建议",
+              confidence: 0.9,
+              reason: "用户选择的陪伴风格",
+              risk_level: "low",
+              user_status: "Pending",
+            },
+          ],
+          model: mockLifeModel,
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+    vi.mocked(invoke).mockImplementation(customMock);
+
+    render(
+      <BrowserRouter>
+        <BuilderPage />
+      </BrowserRouter>
+    );
+
+    fireEvent.click((await screen.findByText("快速构建")).closest("button")!);
+    expect(await screen.findByText("【第 7 步/7：陪伴风格】")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("输入你的回答..."), {
+      target: { value: "直接高效型：少废话，直接给建议" },
+    });
+    fireEvent.click(screen.getByText("下一步"));
+
+    await waitFor(() => {
+      expect(customMock).toHaveBeenCalledWith(
+        "builder_step",
+        expect.objectContaining({
+          userReply: "直接高效型：少废话，直接给建议",
+          user_reply: "直接高效型：少废话，直接给建议",
+        })
+      );
+      expect(screen.getByText("发送到 Mailbox")).toBeInTheDocument();
+    });
+    expect(screen.getByText("OpenLife 准备这样理解你")).toBeInTheDocument();
+    expect(screen.getByText("直接高效型：少废话，直接给建议")).toBeInTheDocument();
+    expect(screen.queryByText("构建完成！")).not.toBeInTheDocument();
+    expect(screen.queryByText(/你的人生模型已更新/)).not.toBeInTheDocument();
+    expect(
+      customMock.mock.calls.find(call => call[0] === "builder_create_proposals")
+    ).toBeUndefined();
+  });
 });

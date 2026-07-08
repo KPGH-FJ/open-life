@@ -290,9 +290,15 @@ fn collect_external_read_requirement(normalized: &str, intent: &mut MainChatGove
         "can you check",
         "please check",
         "please look up",
+        "tell me",
+        "tell us",
         "查",
         "看一下",
         "看看",
+        "告诉",
+        "请告诉",
+        "说一下",
+        "说说",
         "会不会",
         "要不要",
         "需不需要",
@@ -678,6 +684,22 @@ mod tests {
     fn main_chat_governance_intent_classifies_chinese_current_weather_read() {
         let intent =
             classify_main_chat_governance_intent("帮我看一下今天上海会不会下雨，我要不要带伞");
+
+        assert_eq!(
+            intent.external_read_requirement,
+            Some(MainChatExternalReadRequirement::CurrentExternalFactRead)
+        );
+        assert!(intent.durable_write_requirement.is_none());
+        assert!(intent
+            .reason_codes
+            .contains(&"current_external_fact_read_required".to_string()));
+    }
+
+    #[test]
+    fn main_chat_governance_intent_classifies_stage6c_native_weather_prompt() {
+        let intent = classify_main_chat_governance_intent(
+            "请告诉我今天旧金山的天气。必须使用可审计的 web/weather 读取证据；如果当前没有可用外部读取工具，请明确 fail closed，不要猜。",
+        );
 
         assert_eq!(
             intent.external_read_requirement,

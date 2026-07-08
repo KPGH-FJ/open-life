@@ -129,9 +129,13 @@ function externalWritePath(proposal: AgentProposal): string | undefined {
   return proposal.proposalType === "external_write_action" ? proposal.after?.path : undefined;
 }
 
+function isReviewableStatus(status: ProposalStatus): boolean {
+  return status === "pending" || status === "postponed" || status === "edited";
+}
+
 function canAccept(proposal: AgentProposal, safeMode: boolean, safePaths: string[]): boolean {
   if (safeMode) return false;
-  if (proposal.status !== "pending") return false;
+  if (!isReviewableStatus(proposal.status)) return false;
   if (isUnsupportedType(proposal.proposalType)) return false;
   const path = externalWritePath(proposal);
   if (proposal.proposalType === "external_write_action" && !isPathInSafePaths(path, safePaths)) {
@@ -140,19 +144,31 @@ function canAccept(proposal: AgentProposal, safeMode: boolean, safePaths: string
   return true;
 }
 
-function actionBlockedReason(
+function canRejectOrPostpone(proposal: AgentProposal): boolean {
+  return isReviewableStatus(proposal.status);
+}
+
+function acceptBlockedReason(
   proposal: AgentProposal,
   safeModeActive: boolean,
   safePaths: string[]
 ): string | null {
   if (safeModeActive) return "Safe Mode 下无法同意或编辑。";
-  if (proposal.status !== "pending") return "只有待确认项可以同意。";
+  if (!isReviewableStatus(proposal.status)) return "只有待确认、已编辑或稍后再说的确认项可以同意。";
   if (isUnsupportedType(proposal.proposalType)) {
     return "这类确认当前尚未接入应用器，不能同意。";
   }
   const path = externalWritePath(proposal);
   if (proposal.proposalType === "external_write_action" && !isPathInSafePaths(path, safePaths)) {
     return "目标路径不在文件访问范围内，不能同意。";
+  }
+  return null;
+}
+
+function quickActionBlockedReason(proposal: AgentProposal, action: QuickAction): string | null {
+  if (action === "accept") return null;
+  if (!canRejectOrPostpone(proposal)) {
+    return "只有待确认、已编辑或稍后再说的确认项可以继续处理。";
   }
   return null;
 }
@@ -323,7 +339,14 @@ export default function MailboxPage() {
         : null;
 
     if (action === "accept") {
-      const blocker = actionBlockedReason(proposal, safeModeActive, safePaths);
+      const blocker = acceptBlockedReason(proposal, safeModeActive, safePaths);
+      if (blocker) {
+        setError(blocker);
+        setActingId(null);
+        return;
+      }
+    } else {
+      const blocker = quickActionBlockedReason(proposal, action);
       if (blocker) {
         setError(blocker);
         setActingId(null);
@@ -334,15 +357,24 @@ export default function MailboxPage() {
     try {
       if (action === "accept") {
         await acceptProposal(proposal.id);
+        setProposals(prev =>
+          prev.map(item => (item.id === proposal.id ? { ...item, status: "accepted" } : item))
+        );
         setNotice(appliedNotice(proposal));
         if (linkedMainChatTaskId) {
           setMainChatResumeTaskId(linkedMainChatTaskId);
         }
       } else if (action === "reject") {
         await rejectProposal(proposal.id);
+        setProposals(prev =>
+          prev.map(item => (item.id === proposal.id ? { ...item, status: "rejected" } : item))
+        );
         setNotice(`已不同意：${proposal.affectedPath}`);
       } else {
         await postponeProposal(proposal.id);
+        setProposals(prev =>
+          prev.map(item => (item.id === proposal.id ? { ...item, status: "postponed" } : item))
+        );
         setNotice(`已标记稍后再说：${proposal.affectedPath}`);
       }
       await load();
@@ -407,7 +439,7 @@ export default function MailboxPage() {
         parsed = editValue;
       }
       await editProposal(proposal.id, parsed);
-      setNotice(`已编辑并应用：${proposal.affectedPath}`);
+      setNotice(`已编辑，等待你同意或不同意：${proposal.affectedPath}`);
       setEditingId(null);
       setEditValue("");
       await load();
@@ -724,7 +756,7 @@ export default function MailboxPage() {
                           actingId === selectedProposal.id
                         }
                         title={
-                          actionBlockedReason(selectedProposal, safeModeActive, safePaths) ??
+                          acceptBlockedReason(selectedProposal, safeModeActive, safePaths) ??
                           undefined
                         }
                         className="inline-flex h-9 items-center gap-1.5 rounded-md bg-stone-900 px-3 text-sm font-medium text-white hover:bg-stone-800 disabled:cursor-not-allowed disabled:opacity-50"
@@ -735,7 +767,10 @@ export default function MailboxPage() {
                       <button
                         type="button"
                         onClick={() => runAction(selectedProposal, "reject")}
-                        disabled={actingId === selectedProposal.id}
+                        disabled={
+                          !canRejectOrPostpone(selectedProposal) || actingId === selectedProposal.id
+                        }
+                        title={quickActionBlockedReason(selectedProposal, "reject") ?? undefined}
                         className="inline-flex h-9 items-center gap-1.5 rounded-md border border-rose-200 bg-white px-3 text-sm font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-50"
                       >
                         <X size={15} aria-hidden="true" />
@@ -744,7 +779,10 @@ export default function MailboxPage() {
                       <button
                         type="button"
                         onClick={() => runAction(selectedProposal, "postpone")}
-                        disabled={actingId === selectedProposal.id}
+                        disabled={
+                          !canRejectOrPostpone(selectedProposal) || actingId === selectedProposal.id
+                        }
+                        title={quickActionBlockedReason(selectedProposal, "postpone") ?? undefined}
                         className="inline-flex h-9 items-center gap-1.5 rounded-md border border-stone-200 bg-white px-3 text-sm font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-50"
                       >
                         <Clock size={15} aria-hidden="true" />

@@ -1520,6 +1520,66 @@ async fn main_chat_kernel_goal_4_remember_this_send_stream_creates_memory_propos
 }
 
 #[tokio::test]
+async fn main_chat_kernel_stage6c_accepting_memory_proposal_clears_task_blocker() {
+    let user_text = "Remember this Stage6C acceptance check: accepted proposal should release the Main Chat task blocker.";
+
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let memory_records_before = active_memory_record_count(&state).await;
+    let send_response = invoke_send_message_for_kernel_goal_3(
+        state.clone(),
+        "stage6c-accept-memory-proposal",
+        user_text,
+    )
+    .await;
+    assert_eq!(send_response["legacy_fallback_used"], false);
+    let task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
+        .as_str()
+        .expect("memory proposal task session id");
+    let proposal = find_command_surface_proposal_for_task(
+        &state,
+        task_session_id,
+        openlife_core::agent::ProposalType::MemoryWrite,
+    )
+    .await;
+    let before_accept = load_command_surface_session(&state, task_session_id).await;
+    assert_eq!(
+        before_accept.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+    );
+    assert!(before_accept
+        .pending_blockers
+        .contains(&format!("proposal:{}", proposal.id)));
+
+    crate::commands::proposal::accept_proposal_with_state(proposal.id.clone(), &state)
+        .await
+        .expect("accept memory proposal");
+
+    let after_accept = load_command_surface_session(&state, task_session_id).await;
+    assert_eq!(
+        after_accept.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
+    );
+    assert!(
+        after_accept.pending_blockers.is_empty(),
+        "accepted memory proposal must clear the matching Main Chat proposal blocker"
+    );
+    assert_eq!(
+        active_memory_record_count(&state).await,
+        memory_records_before + 1
+    );
+    let stored = find_command_surface_proposal_for_task(
+        &state,
+        task_session_id,
+        openlife_core::agent::ProposalType::MemoryWrite,
+    )
+    .await;
+    assert_eq!(
+        stored.status,
+        openlife_core::agent::ProposalStatus::Accepted
+    );
+}
+
+#[tokio::test]
 async fn main_chat_kernel_chinese_life_event_capture_send_stream() {
     let user_text = "今天午饭吃了牛肉面，下午犯困";
 
@@ -2680,6 +2740,116 @@ async fn main_chat_kernel_chinese_weather_requires_tool_observation() {
         .any(|action| action.action.action_type == "web.search"
             && action.status
                 == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed));
+}
+
+#[tokio::test]
+async fn main_chat_kernel_stage6c_native_weather_prompt_fails_closed_without_life_event() {
+    let user_text = "请告诉我今天旧金山的天气。必须使用可审计的 web/weather 读取证据；如果当前没有可用外部读取工具，请明确 fail closed，不要猜。";
+
+    let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    {
+        let mut config = send_state.config.lock().await;
+        config.system.network_policy.enabled = false;
+    }
+    let send_response = invoke_send_message_for_kernel_goal_3(
+        send_state.clone(),
+        "stage6c-send-native-weather-fail-closed",
+        user_text,
+    )
+    .await;
+    assert_eq!(send_response["legacy_fallback_used"], false);
+    assert_eq!(
+        send_response["agent_ingress"]["selectedStrategy"],
+        "re_act_tool_execution"
+    );
+    assert_eq!(send_response["tool_calls"][0]["name"], "web.search");
+    let send_tool_status = send_response["tool_calls"][0]["status"]
+        .as_str()
+        .expect("send weather tool status");
+    assert!(
+        matches!(send_tool_status, "blocked" | "needs_confirmation"),
+        "weather request without read evidence must fail closed, got status {send_tool_status}"
+    );
+    let send_task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
+        .as_str()
+        .expect("send native weather task session id");
+    let send_session = load_command_surface_session(&send_state, send_task_session_id).await;
+    assert_ne!(
+        send_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
+    );
+    assert!(!send_session.pending_blockers.is_empty());
+    let send_actions = list_command_surface_actions(&send_state, send_task_session_id).await;
+    assert!(
+        send_actions
+            .iter()
+            .any(|action| action.action.action_type == "web.search"
+                && matches!(
+                    action.status,
+                    openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed
+                        | openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::PendingPermission
+                )),
+        "native weather request must attempt the governed read path and fail closed"
+    );
+    assert!(
+        !send_actions
+            .iter()
+            .any(|action| action.action.action_type == "life_event.create"),
+        "external fact requests must not be captured as local LifeEvents"
+    );
+    assert!(
+        list_command_surface_life_events(&send_state)
+            .await
+            .is_empty(),
+        "external fact fail-closed path must not persist local life events"
+    );
+    let send_proposals = list_command_surface_proposals(&send_state).await;
+    assert!(
+        send_proposals.iter().all(|proposal| {
+            proposal.proposal_type == openlife_core::agent::ProposalType::ToolPermission
+        }),
+        "external fact fail-closed path must not create local memory/lifemodel proposals"
+    );
+
+    let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    {
+        let mut config = stream_state.config.lock().await;
+        config.system.network_policy.enabled = false;
+    }
+    let stream_response = invoke_start_stream_message_for_kernel_goal_3(
+        stream_state.clone(),
+        "stage6c-stream-native-weather-fail-closed",
+        user_text,
+    )
+    .await;
+    assert_eq!(
+        stream_response["agent_ingress"]["selectedStrategy"],
+        "re_act_tool_execution"
+    );
+    assert_eq!(stream_response["tool_calls"][0]["name"], "web.search");
+    let stream_tool_status = stream_response["tool_calls"][0]["status"]
+        .as_str()
+        .expect("stream weather tool status");
+    assert!(
+        matches!(stream_tool_status, "blocked" | "needs_confirmation"),
+        "stream weather request without read evidence must fail closed, got status {stream_tool_status}"
+    );
+    let stream_task_session_id =
+        expected_task_session_id("stage6c-stream-native-weather-fail-closed", user_text);
+    let stream_actions = list_command_surface_actions(&stream_state, &stream_task_session_id).await;
+    assert!(
+        !stream_actions
+            .iter()
+            .any(|action| action.action.action_type == "life_event.create"),
+        "stream external fact fail-closed path must not capture LifeEvents"
+    );
+    assert!(list_command_surface_life_events(&stream_state)
+        .await
+        .is_empty());
+    let stream_proposals = list_command_surface_proposals(&stream_state).await;
+    assert!(stream_proposals.iter().all(|proposal| {
+        proposal.proposal_type == openlife_core::agent::ProposalType::ToolPermission
+    }));
 }
 
 #[tokio::test]

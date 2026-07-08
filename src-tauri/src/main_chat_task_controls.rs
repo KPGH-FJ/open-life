@@ -723,7 +723,8 @@ async fn continuity_diagnostics_for_task(
     let permission_scope_mismatch =
         permission_scope_mismatch_detected(state, session, actions).await?;
     let tool_unavailable = tool_unavailable_detected(state, actions).await?;
-    let provider_unavailable = provider_unavailable_detected(state).await;
+    let provider_unavailable = provider_unavailable_detected(state).await
+        && !has_provider_independent_replay_action(actions);
     let selected_skill_context_digest_mismatch =
         selected_skill_context_digest_mismatch_detected(transcript, selected_skill_digest);
     let plan_revision_mismatch = plan_revision_mismatch_detected(state, transcript).await?;
@@ -936,6 +937,20 @@ fn has_retryable_failed_action(
     })
 }
 
+fn has_provider_independent_replay_action(
+    actions: &[openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction],
+) -> bool {
+    actions.iter().any(|action| {
+        matches!(
+            action.status,
+            openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed
+                | openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::PendingPermission
+        ) && openlife_core::agent::main_chat_agent_v1::main_chat_action_type_supports_automatic_retry(
+            &action.action.action_type,
+        )
+    })
+}
+
 fn last_safe_resume_point_for_task(
     actions: &[openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction],
     diagnostics: &ContinuityDiagnostics,
@@ -1127,7 +1142,9 @@ async fn permission_scope_mismatch_detected(
         if resolution.blocker_reason.is_some() {
             return Ok(true);
         }
-        if !scope.matches_current_resolution(&plan, &resolution) {
+        if !scope.matches_current_resolution(&plan, &resolution)
+            && !scope.matches_original_action_metadata(&plan, &resolution, action)
+        {
             return Ok(true);
         }
     }
@@ -1413,16 +1430,23 @@ pub(crate) async fn resume_main_chat_agent_task_with_state(
                         action_ref,
                     )
                     .await?;
-                    mark_main_chat_action_resume_replay_metadata(state, &action_ref.id).await?;
+                    let replay_completed =
+                        mark_main_chat_action_resume_replay_metadata(state, &action_ref.id)
+                            .await?;
                     append_main_chat_agent_transcript(
                         state,
                         Some(task_session_id),
                         openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Observation,
-                        "Task resume replay completed through the governed executor.",
+                        if replay_completed {
+                            "Task resume replay completed through the governed executor."
+                        } else {
+                            "Task resume replay reached the governed executor but remains blocked."
+                        },
                         serde_json::json!({
                             "actionId": action_ref.id,
                             "resumeRequested": true,
-                            "automaticResumeReplayCompleted": true,
+                            "automaticResumeReplayCompleted": replay_completed,
+                            "automaticResumeReplayStillBlocked": !replay_completed,
                             "directWritesExecuted": false,
                         }),
                     )
@@ -1507,7 +1531,9 @@ async fn main_chat_pending_action_permission_ready_for_resume(
         if resolution.blocker_reason.is_some() {
             return Ok(false);
         }
-        if !accepted_scope.matches_current_resolution(&plan, &resolution) {
+        if !accepted_scope.matches_current_resolution(&plan, &resolution)
+            && !accepted_scope.matches_original_action_metadata(&plan, &resolution, action)
+        {
             return Ok(false);
         }
         let Some(manifest) = registry.list_manifests().into_iter().find(|manifest| {
@@ -1565,6 +1591,10 @@ impl AcceptedToolPermissionScope {
                 input_length_bytes: None,
             };
         };
+        let canonical_scope = proposal
+            .after
+            .get("canonical_scope")
+            .or_else(|| proposal.after.get("canonicalScope"));
 
         Self {
             blocked_action_scope_present: true,
@@ -1575,21 +1605,29 @@ impl AcceptedToolPermissionScope {
                 .map(str::to_string),
             requested_target: blocked_action
                 .get("target")
+                .or_else(|| canonical_scope.and_then(|scope| scope.get("tool_name")))
+                .or_else(|| canonical_scope.and_then(|scope| scope.get("toolName")))
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
             resolved_target: blocked_action
                 .get("resolved_target")
                 .or_else(|| blocked_action.get("resolvedTarget"))
+                .or_else(|| canonical_scope.and_then(|scope| scope.get("tool_name")))
+                .or_else(|| canonical_scope.and_then(|scope| scope.get("toolName")))
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
             input_hash: blocked_action
                 .get("input_hash")
                 .or_else(|| blocked_action.get("inputHash"))
+                .or_else(|| canonical_scope.and_then(|scope| scope.get("input_hash")))
+                .or_else(|| canonical_scope.and_then(|scope| scope.get("inputHash")))
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
             input_length_bytes: blocked_action
                 .get("input_length_bytes")
                 .or_else(|| blocked_action.get("inputLengthBytes"))
+                .or_else(|| canonical_scope.and_then(|scope| scope.get("input_length_bytes")))
+                .or_else(|| canonical_scope.and_then(|scope| scope.get("inputLengthBytes")))
                 .and_then(serde_json::Value::as_u64),
         }
     }
@@ -1620,12 +1658,73 @@ impl AcceptedToolPermissionScope {
         };
         let (current_length_bytes, current_input_hash) =
             openlife_core::agent::metadata_safe::metadata_safe_value_digest(&resolution.arguments);
-        action_type == plan.queue_action_type
+        (action_type == plan.queue_action_type || action_type == plan.executor_action_type)
             && requested_target == plan.target
             && resolved_target == resolution.target
             && input_hash == current_input_hash
             && input_length_bytes == current_length_bytes as u64
     }
+
+    fn matches_original_action_metadata(
+        &self,
+        plan: &crate::main_chat_react_tool_selection::MainChatReactActionPlan,
+        resolution: &crate::main_chat_react_tool_selection::MainChatMcpReadResolution,
+        action: &openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
+    ) -> bool {
+        if !self.blocked_action_scope_present {
+            return true;
+        }
+        let (
+            Some(action_type),
+            Some(requested_target),
+            Some(resolved_target),
+            Some(input_hash),
+            Some(input_length_bytes),
+        ) = (
+            self.action_type.as_deref(),
+            self.requested_target.as_deref(),
+            self.resolved_target.as_deref(),
+            self.input_hash.as_deref(),
+            self.input_length_bytes,
+        )
+        else {
+            return false;
+        };
+        let Some(metadata) = action.observation_metadata.as_ref() else {
+            return false;
+        };
+        let Some((original_input_length_bytes, original_input_hash)) =
+            governed_input_digest_from_action_metadata(metadata)
+        else {
+            return false;
+        };
+        let Some(original_target) = string_from_metadata(
+            metadata,
+            &[
+                "selectedCandidateTarget",
+                "target",
+                "toolName",
+                "requestedTarget",
+            ],
+        ) else {
+            return false;
+        };
+        (action_type == plan.queue_action_type || action_type == plan.executor_action_type)
+            && (requested_target == plan.target
+                || requested_target == resolution.target
+                || requested_target == original_target)
+            && (resolved_target == resolution.target || resolved_target == original_target)
+            && input_hash == original_input_hash
+            && input_length_bytes == original_input_length_bytes
+    }
+}
+
+fn governed_input_digest_from_action_metadata(metadata: &serde_json::Value) -> Option<(u64, &str)> {
+    let values = metadata.get("governedInputDigest")?.as_array()?;
+    let [length, hash] = values.as_slice() else {
+        return None;
+    };
+    Some((length.as_u64()?, hash.as_str()?))
 }
 
 async fn main_chat_pending_action_accepted_tool_permission_scope(
@@ -1690,7 +1789,7 @@ fn collect_main_chat_proposal_ids(value: &serde_json::Value, ids: &mut Vec<Strin
 async fn mark_main_chat_action_resume_replay_metadata(
     state: &Arc<AppState>,
     action_id: &str,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let queue_arc = state
         .main_chat_action_queue_store
         .as_ref()
@@ -1703,13 +1802,12 @@ async fn mark_main_chat_action_resume_replay_metadata(
     let mut metadata = action
         .observation_metadata
         .unwrap_or_else(|| serde_json::json!({}));
+    let completed =
+        action.status == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Completed;
     if let Some(object) = metadata.as_object_mut() {
         object.insert(
             "automaticResumeReplayCompleted".into(),
-            serde_json::json!(
-                action.status
-                    == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Completed
-            ),
+            serde_json::json!(completed),
         );
         object.insert("resumeRequested".into(), serde_json::json!(true));
         object.insert("directWritesExecuted".into(), serde_json::json!(false));
@@ -1717,7 +1815,7 @@ async fn mark_main_chat_action_resume_replay_metadata(
     queue
         .transition(&action.id, action.status, Some(metadata))
         .map_err(|err| format!("mark Main Chat resume replay metadata failed: {err}"))?;
-    Ok(())
+    Ok(completed)
 }
 
 #[tauri::command]

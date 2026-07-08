@@ -742,8 +742,14 @@ fn is_current_external_fact_request(lower: &str) -> bool {
             "should i",
             "do i need",
             "will it",
+            "tell me",
+            "tell us",
             "current",
             "latest",
+            "告诉",
+            "请告诉",
+            "说一下",
+            "说说",
             "?",
         ],
     )
@@ -970,6 +976,18 @@ mod tests {
     #[test]
     fn main_chat_memory_candidate_external_weather_read_is_not_user_memory() {
         let result = routed("帮我看一下今天上海会不会下雨，我要不要带伞");
+
+        assert!(result.candidates.is_empty());
+        assert!(result.life_event_candidate_ids.is_empty());
+        assert!(result.memory_proposal_candidate_ids.is_empty());
+        assert!(result.lifemodel_proposal_candidate_ids.is_empty());
+    }
+
+    #[test]
+    fn main_chat_memory_candidate_stage6c_native_weather_prompt_is_not_life_event() {
+        let result = routed(
+            "请告诉我今天旧金山的天气。必须使用可审计的 web/weather 读取证据；如果当前没有可用外部读取工具，请明确 fail closed，不要猜。",
+        );
 
         assert!(result.candidates.is_empty());
         assert!(result.life_event_candidate_ids.is_empty());

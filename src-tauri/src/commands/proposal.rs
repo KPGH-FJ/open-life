@@ -904,25 +904,7 @@ pub(crate) fn validate_proposal_payload(
                 .and_then(Value::as_str);
             match tool_name {
                 Some(name) if !name.is_empty() => {
-                    let permission = after
-                        .get("permission")
-                        .or_else(|| after.get("level"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("allow_until_revoked");
-                    let valid_permissions = [
-                        "allow",
-                        "allowed",
-                        "deny",
-                        "ask_every_time",
-                        "allow_once",
-                        "allow_until_revoked",
-                    ];
-                    if !valid_permissions.contains(&permission) {
-                        return Err(format!(
-                            "ToolPermission Proposal 的 permission 值 '{}' 无效。有效值: allow, deny, ask_every_time, allow_once, allow_until_revoked",
-                            permission
-                        ));
-                    }
+                    resolve_tool_permission_policy(after)?;
                     Ok(())
                 }
                 _ => {
@@ -967,6 +949,69 @@ pub(crate) fn validate_proposal_payload(
             Ok(())
         }
     }
+}
+
+fn resolve_tool_permission_policy(
+    after: &Value,
+) -> Result<
+    (
+        openlife_core::tool_permissions::ToolPermissionPolicy,
+        String,
+    ),
+    String,
+> {
+    let policy_label = after
+        .get("permission")
+        .or_else(|| after.get("policy"))
+        .or_else(|| after.get("level"))
+        .and_then(Value::as_str);
+    let label = if let Some(label) = policy_label {
+        label
+    } else {
+        match after
+            .get("permission_action")
+            .and_then(Value::as_str)
+            .unwrap_or("grant")
+        {
+            "grant" => "allow_until_revoked",
+            "deny" => "deny",
+            other => {
+                return Err(format!(
+                    "ToolPermission Proposal 的 permission_action 值 '{}' 无效。有效值: grant, deny",
+                    other
+                ));
+            }
+        }
+    };
+    let policy = match label {
+        "allowed" | "allow" => {
+            openlife_core::tool_permissions::ToolPermissionPolicy::AllowUntilRevoked
+        }
+        "deny" => openlife_core::tool_permissions::ToolPermissionPolicy::Deny,
+        "ask_every_time" => openlife_core::tool_permissions::ToolPermissionPolicy::AskEveryTime,
+        "allow_once" => openlife_core::tool_permissions::ToolPermissionPolicy::AllowOnce,
+        "allow_until_revoked" => {
+            openlife_core::tool_permissions::ToolPermissionPolicy::AllowUntilRevoked
+        }
+        other => {
+            return Err(format!(
+                "ToolPermission Proposal 的 permission 值 '{}' 无效。有效值: allow, allowed, deny, ask_every_time, allow_once, allow_until_revoked",
+                other
+            ));
+        }
+    };
+    Ok((policy, label.to_string()))
+}
+
+fn tool_permission_scope_field<'a>(after: &'a Value, field: &str) -> Option<&'a str> {
+    after
+        .get(field)
+        .or_else(|| {
+            after
+                .get("canonical_scope")
+                .and_then(|scope| scope.get(field))
+        })
+        .and_then(Value::as_str)
 }
 
 async fn apply_proposal_to_state(
@@ -1051,43 +1096,17 @@ async fn apply_proposal_to_state(
             _ => unreachable!(),
         },
         ProposalType::ToolPermission => {
-            let tool_name = after
-                .get("tool_name")
-                .or_else(|| after.get("toolName"))
-                .or_else(|| after.get("name"))
-                .and_then(Value::as_str)
+            let tool_name = tool_permission_scope_field(&after, "tool_name")
+                .or_else(|| tool_permission_scope_field(&after, "toolName"))
+                .or_else(|| tool_permission_scope_field(&after, "name"))
                 .ok_or_else(|| "ToolPermission Proposal 缺少 after.tool_name。".to_string())?;
-            let permission = after
-                .get("permission")
-                .or_else(|| after.get("permission_action"))
-                .or_else(|| after.get("policy"))
-                .or_else(|| after.get("level"))
-                .and_then(Value::as_str)
-                .unwrap_or("allow_until_revoked");
-            let policy = match permission {
-                "allowed" | "allow" => {
-                    openlife_core::tool_permissions::ToolPermissionPolicy::AllowUntilRevoked
-                }
-                "deny" => openlife_core::tool_permissions::ToolPermissionPolicy::Deny,
-                "ask_every_time" => {
-                    openlife_core::tool_permissions::ToolPermissionPolicy::AskEveryTime
-                }
-                "allow_once" => openlife_core::tool_permissions::ToolPermissionPolicy::AllowOnce,
-                "allow_until_revoked" => {
-                    openlife_core::tool_permissions::ToolPermissionPolicy::AllowUntilRevoked
-                }
-                other => return Err(format!("未知 ToolPermission policy: {}", other)),
-            };
-            let source = after.get("source").and_then(Value::as_str).unwrap_or("*");
-            let risk_level = after
-                .get("risk_level")
-                .or_else(|| after.get("riskLevel"))
-                .and_then(Value::as_str)
+            let (policy, permission) = resolve_tool_permission_policy(&after)?;
+            let source = tool_permission_scope_field(&after, "source").unwrap_or("*");
+            let risk_level = tool_permission_scope_field(&after, "risk_level")
+                .or_else(|| tool_permission_scope_field(&after, "riskLevel"))
                 .unwrap_or("*");
-            let action_type = after
-                .get("action_type")
-                .or_else(|| after.get("actionType"))
-                .and_then(Value::as_str)
+            let action_type = tool_permission_scope_field(&after, "action_type")
+                .or_else(|| tool_permission_scope_field(&after, "actionType"))
                 .unwrap_or("*");
             {
                 let permission_store = state.tool_permission_store.lock().await;
@@ -1474,6 +1493,8 @@ pub(crate) async fn accept_proposal_with_state(
         MaturationProposalOutcome::Accepted,
     )
     .await;
+    let main_chat_task_sync =
+        sync_main_chat_task_blockers_after_review_proposal_accept(state, &proposal).await;
     // Check for blocked_action in the patch result error field
     let blocked_action_info = if let Some(ref err) = result.error {
         if err.starts_with("__blocked_action__:") {
@@ -1489,6 +1510,9 @@ pub(crate) async fn accept_proposal_with_state(
         "success": true,
         "patch_result": result,
     });
+    if !main_chat_task_sync.is_empty() {
+        response["mainChatTaskSync"] = serde_json::Value::Array(main_chat_task_sync);
+    }
     if proposal.proposal_type == ProposalType::MemoryWrite {
         let decision = memory_gateway::memory_gateway_decision_for_proposal(
             &proposal,
@@ -1512,6 +1536,194 @@ pub(crate) async fn accept_proposal_with_state(
         }
     }
     Ok(response)
+}
+
+fn proposal_type_resolves_main_chat_review_blocker(proposal_type: ProposalType) -> bool {
+    matches!(
+        proposal_type,
+        ProposalType::MemoryWrite
+            | ProposalType::MemoryArchive
+            | ProposalType::LifeModelUpdate
+            | ProposalType::GoalUpdate
+            | ProposalType::StateUpdate
+            | ProposalType::PreferenceUpdate
+            | ProposalType::CapabilityUpdate
+    )
+}
+
+fn collect_main_chat_task_session_ids_from_proposal(proposal: &AgentProposal) -> Vec<String> {
+    let mut ids = Vec::new();
+    if let Some(task_session_id) = proposal
+        .after
+        .get("originatingTaskSessionId")
+        .or_else(|| proposal.after.get("originating_task_session_id"))
+        .and_then(Value::as_str)
+    {
+        push_main_chat_task_session_id(&mut ids, task_session_id);
+    }
+    if let Some(source_detail) = proposal.source_detail.as_deref() {
+        for segment in source_detail.split(';') {
+            if let Some(task_session_id) =
+                segment.trim().strip_prefix("main_chat_agent_task_session:")
+            {
+                push_main_chat_task_session_id(&mut ids, task_session_id);
+            } else {
+                push_main_chat_task_session_id(&mut ids, segment.trim());
+            }
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn push_main_chat_task_session_id(ids: &mut Vec<String>, value: &str) {
+    let trimmed = value.trim();
+    if trimmed.starts_with("mainchat_task_")
+        && !trimmed
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_whitespace())
+    {
+        ids.push(trimmed.to_string());
+    }
+}
+
+async fn sync_main_chat_task_blockers_after_review_proposal_accept(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+) -> Vec<serde_json::Value> {
+    if !proposal_type_resolves_main_chat_review_blocker(proposal.proposal_type) {
+        return Vec::new();
+    }
+    let task_session_ids = collect_main_chat_task_session_ids_from_proposal(proposal);
+    if task_session_ids.is_empty() {
+        return Vec::new();
+    }
+    let Some(store_arc) = state.main_chat_agent_session_store.as_ref() else {
+        return Vec::new();
+    };
+    let proposal_blocker = format!("proposal:{}", proposal.id);
+    let mut sync_reports = Vec::new();
+
+    for task_session_id in task_session_ids {
+        let Some((before_status, remaining_blockers)) = ({
+            let store = store_arc.lock().await;
+            let Ok(Some(session)) = store.load_session(&task_session_id) else {
+                continue;
+            };
+            let before_status = session.status;
+            let before_blockers = session.pending_blockers.clone();
+            let mut remaining_blockers = before_blockers.clone();
+            remaining_blockers.retain(|blocker| blocker != &proposal_blocker);
+            if remaining_blockers.len() == before_blockers.len() {
+                continue;
+            }
+            if let Err(err) =
+                store.set_pending_blockers(&task_session_id, remaining_blockers.clone())
+            {
+                log::warn!(
+                    "[proposal] failed to clear Main Chat proposal blocker for {}: {}",
+                    task_session_id,
+                    err
+                );
+                continue;
+            }
+            Some((before_status, remaining_blockers))
+        }) else {
+            continue;
+        };
+
+        let has_pending_permission_action =
+            main_chat_task_has_pending_permission_action(state, &task_session_id).await;
+        let completed = if remaining_blockers.is_empty()
+            && !has_pending_permission_action
+            && before_status
+                == openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+        {
+            let store = store_arc.lock().await;
+            match store.resume_session(&task_session_id) {
+                Ok(_) => match store.complete_session(
+                    &task_session_id,
+                    "Accepted Review proposal resolved the Main Chat task blocker.",
+                ) {
+                    Ok(_) => true,
+                    Err(err) => {
+                        log::warn!(
+                            "[proposal] failed to complete unblocked Main Chat task {}: {}",
+                            task_session_id,
+                            err
+                        );
+                        false
+                    }
+                },
+                Err(err) => {
+                    log::warn!(
+                        "[proposal] failed to resume unblocked Main Chat task {}: {}",
+                        task_session_id,
+                        err
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        {
+            let store = store_arc.lock().await;
+            if let Err(err) = store.append_transcript_entry(
+                openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryDraft {
+                    session_id: task_session_id.clone(),
+                    kind: openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Observation,
+                    summary: "Accepted Review proposal resolved a Main Chat proposal blocker."
+                        .into(),
+                    metadata: serde_json::json!({
+                        "proposalId": proposal.id,
+                        "proposalType": proposal.proposal_type,
+                        "proposalBlockerCleared": true,
+                        "remainingBlockerCount": remaining_blockers.len(),
+                        "taskCompletedAfterProposalAccept": completed,
+                        "directWritesExecuted": false,
+                    }),
+                },
+            ) {
+                log::warn!(
+                    "[proposal] failed to append Main Chat proposal accept sync transcript for {}: {}",
+                    task_session_id,
+                    err
+                );
+            }
+        }
+
+        let sync_report = serde_json::json!({
+            "taskSessionId": task_session_id,
+            "proposalBlockerCleared": true,
+            "remainingBlockerCount": remaining_blockers.len(),
+            "taskCompletedAfterProposalAccept": completed,
+        });
+        sync_reports.push(sync_report);
+    }
+
+    sync_reports
+}
+
+async fn main_chat_task_has_pending_permission_action(
+    state: &Arc<AppState>,
+    task_session_id: &str,
+) -> bool {
+    let Some(queue_arc) = state.main_chat_action_queue_store.as_ref() else {
+        return false;
+    };
+    let queue = queue_arc.lock().await;
+    queue
+        .list_for_session(task_session_id)
+        .map(|actions| {
+            actions.iter().any(|action| {
+                action.status
+                    == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::PendingPermission
+            })
+        })
+        .unwrap_or(false)
 }
 
 pub(crate) async fn reject_proposal_with_state(
@@ -2187,7 +2399,8 @@ mod tests {
     ) -> (PatchSource, serde_json::Value) {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
-        let proposal = test_lifemodel_source_proposal(source);
+        let mut proposal = test_lifemodel_source_proposal(source);
+        stamp_lifemodel_base_hash(&mut proposal, &state).await;
         let proposal_id = proposal.id.clone();
         state
             .proposal_store
@@ -2588,7 +2801,7 @@ mod tests {
         ] {
             let temp_dir = tempfile::tempdir().unwrap();
             let state = test_app_state(&temp_dir);
-            let proposal = AgentProposal::new(
+            let mut proposal = AgentProposal::new(
                 ProposalType::PreferenceUpdate,
                 alias,
                 serde_json::json!(format!("accepted via {alias}")),
@@ -2597,6 +2810,7 @@ mod tests {
                 RiskLevel::Low,
                 ProposalSource::FeedbackEvolution,
             );
+            stamp_lifemodel_base_hash(&mut proposal, &state).await;
             let id = proposal.id.clone();
             state
                 .proposal_store
@@ -2647,7 +2861,7 @@ mod tests {
     async fn accept_life_model_proposal_updates_model_and_marks_accepted() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
-        let proposal = AgentProposal::new(
+        let mut proposal = AgentProposal::new(
             ProposalType::GoalUpdate,
             "identity.name",
             serde_json::json!("Fujing"),
@@ -2656,6 +2870,7 @@ mod tests {
             RiskLevel::Low,
             ProposalSource::Manual,
         );
+        stamp_lifemodel_base_hash(&mut proposal, &state).await;
         let id = proposal.id.clone();
         state
             .proposal_store
@@ -2699,6 +2914,7 @@ mod tests {
         );
         proposal.run_id = Some("run-tauri-w75-accept".into());
         proposal.source_detail = Some("maturation:preference.communication".into());
+        stamp_lifemodel_base_hash(&mut proposal, &state).await;
         let proposal_id = proposal.id.clone();
         state
             .proposal_store
@@ -3583,10 +3799,79 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accept_invalid_life_model_path_keeps_proposal_pending() {
+    async fn accept_auto_tool_permission_proposal_uses_policy_and_canonical_scope() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
         let proposal = AgentProposal::new(
+            ProposalType::ToolPermission,
+            "tool_permission.builtin.web.search",
+            serde_json::json!({
+                "tool_name": "web.search",
+                "source": "builtin",
+                "risk_level": "medium",
+                "permission_action": "grant",
+                "policy": "allow_until_revoked",
+                "canonical_scope": {
+                    "tool_name": "web.search",
+                    "source": "builtin",
+                    "risk_level": "medium",
+                    "action_type": "read"
+                },
+                "blocked_action": {
+                    "action_type": "mcp_tool",
+                    "target": "web.search"
+                },
+                "auto_generated": true,
+                "directWritesExecuted": false
+            }),
+            "用户确认自动生成的工具权限",
+            0.7,
+            RiskLevel::Medium,
+            ProposalSource::ChatConversation,
+        );
+        let id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        accept_proposal_with_state(id.clone(), &state)
+            .await
+            .unwrap();
+
+        let stored = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ProposalStatus::Accepted);
+
+        let permissions = state.tool_permission_store.lock().await.list().unwrap();
+        assert_eq!(permissions.len(), 1);
+        let permission = &permissions[0];
+        assert_eq!(permission.tool_name, "web.search");
+        assert_eq!(permission.source, "builtin");
+        assert_eq!(permission.risk_level, "medium");
+        assert_eq!(permission.action_type, "read");
+        assert_eq!(
+            permission.policy,
+            openlife_core::tool_permissions::ToolPermissionPolicy::AllowUntilRevoked
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_invalid_life_model_path_keeps_proposal_pending() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut proposal = AgentProposal::new(
             ProposalType::LifeModelUpdate,
             "identity.no_such_field",
             serde_json::json!("bad"),
@@ -3595,6 +3880,7 @@ mod tests {
             RiskLevel::Medium,
             ProposalSource::Manual,
         );
+        stamp_lifemodel_base_hash(&mut proposal, &state).await;
         let id = proposal.id.clone();
         state
             .proposal_store

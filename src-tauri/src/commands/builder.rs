@@ -182,10 +182,17 @@ async fn builder_step_with_state(
     user_reply: String,
     state: &Arc<AppState>,
 ) -> Result<serde_json::Value, AppError> {
-    let mut session = {
+    let in_memory_session = {
         let mut sessions = state.builder_sessions.lock().await;
-        sessions
-            .remove(&session_id)
+        sessions.remove(&session_id)
+    };
+    let mut session = if let Some(session) = in_memory_session {
+        session
+    } else {
+        let store = state.builder_session_store.lock().await;
+        store
+            .get_session(&session_id)
+            .map_err(AppError::from)?
             .ok_or_else(|| AppError::not_found("Session not found"))?
     };
     let model = {
@@ -1036,6 +1043,90 @@ mod tests {
 
         let model = state.life_model_manager.lock().await.load().unwrap();
         assert!(model.is_effectively_empty());
+    }
+
+    #[tokio::test]
+    async fn stage6d_builder_step_restores_persisted_step7_session_into_review_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut session = BuilderSession::new("persisted-step7-session", BuilderMode::Quick);
+        session.step_index = 7;
+        session.finished = false;
+        session.current_prompt = "【第 7 步/7：陪伴风格】".into();
+        session.draft_yaml = [
+            "# step 1\nAlex",
+            "# step 2\n事业 / 学业",
+            "# step 3\n- 把 OpenLife 跑通",
+            "# step 4\n成为能持续创造产品的人",
+            "# step 5\n- 编程\n- 产品设计",
+            "# step 6\n精力不足和方向不清晰",
+        ]
+        .join("\n");
+        state
+            .builder_session_store
+            .lock()
+            .await
+            .save_session(&session)
+            .unwrap();
+
+        assert!(state.builder_sessions.lock().await.is_empty());
+
+        let res = builder_step_with_state(
+            "persisted-step7-session".into(),
+            "直接高效型：少废话，直接给建议".into(),
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(res.get("finished").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            res.get("prompt").and_then(|v| v.as_str()),
+            Some("快速构建问题已完成！接下来请审阅 AI 生成的模型建议。")
+        );
+        let pending_signals = res
+            .get("pending_signals")
+            .and_then(|v| v.as_array())
+            .expect("step 7 should enter review with pending signals");
+        assert!(pending_signals.iter().any(|signal| {
+            signal
+                .get("id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|id| id == "sig_comm_style")
+                && signal
+                    .get("source_step")
+                    .and_then(|v| v.as_u64())
+                    .is_some_and(|step| step == 7)
+        }));
+
+        let persisted = state
+            .builder_session_store
+            .lock()
+            .await
+            .get_session("persisted-step7-session")
+            .unwrap()
+            .expect("finished review session should remain persisted for proposal creation");
+        assert!(persisted.finished);
+        assert!(persisted
+            .draft_yaml
+            .contains("# step 7\n直接高效型：少废话，直接给建议"));
+        assert!(!persisted.pending_signals.is_empty());
+
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        assert!(model.is_effectively_empty());
+        let proposal_count = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_all_proposals(100, 0)
+            .unwrap()
+            .len();
+        assert_eq!(
+            proposal_count, 0,
+            "step 7 completion must stop at review and not create or accept proposals automatically"
+        );
     }
 
     #[tokio::test]

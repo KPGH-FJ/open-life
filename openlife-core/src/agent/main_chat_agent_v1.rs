@@ -1519,7 +1519,12 @@ fn action_retry_replayable(action: &QueuedExecutionAction) -> bool {
 pub fn main_chat_action_type_supports_automatic_retry(action_type: &str) -> bool {
     matches!(
         action_type,
-        "memory.search" | "session.search" | "file.read" | "mcp.read_only"
+        "memory.search"
+            | "session.search"
+            | "file.read"
+            | "mcp.read_only"
+            | "web.search"
+            | "web.fetch"
     )
 }
 

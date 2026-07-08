@@ -373,10 +373,12 @@ export default function BuilderPage() {
       setPrompt(res.prompt);
       setProgress(res.progress);
       if (res.analysis) setAnalysis(res.analysis);
-      if (res.finished && res.pending_signals && res.pending_signals.length > 0) {
-        setPendingSignals(res.pending_signals);
+      const restoredPendingSignals = res.pending_signals ?? [];
+      if (res.finished && restoredPendingSignals.length > 0) {
+        setPendingSignals(restoredPendingSignals);
         setReviewMode(true);
-        setFinished(true);
+        setFinished(false);
+        setResultModel(null);
       } else {
         setPendingSignals([]);
         setReviewMode(false);
@@ -431,21 +433,22 @@ export default function BuilderPage() {
     try {
       const res = await builderStep(sessionId, reply);
       setPrompt(res.prompt);
-      setFinished(res.finished);
       setProgress(res.progress);
       if (res.analysis) setAnalysis(res.analysis);
-      if (res.model) {
+      const nextPendingSignals = res.pending_signals ?? [];
+      const entersReview =
+        res.finished &&
+        (res.mode === "Quick" || res.mode === "Incremental") &&
+        nextPendingSignals.length > 0;
+      setFinished(Boolean(res.finished && !entersReview));
+      if (res.model && !entersReview) {
         setResultModel(res.model);
       }
       // For Quick and Incremental modes: when finished, enter review mode instead of auto-saving
-      if (
-        res.finished &&
-        (res.mode === "Quick" || res.mode === "Incremental") &&
-        res.pending_signals &&
-        res.pending_signals.length > 0
-      ) {
-        setPendingSignals(res.pending_signals);
+      if (entersReview) {
+        setPendingSignals(nextPendingSignals);
         setReviewMode(true);
+        setResultModel(null);
         // Keep session alive for review
       } else if (res.finished && res.mode === "Socratic") {
         // Socratic mode keeps existing behavior
@@ -1232,13 +1235,13 @@ export default function BuilderPage() {
           </div>
         )}
 
-        {finished && (
+        {finished && !reviewMode && (
           <div className="space-y-6">
             <div className="bg-green-50 border border-green-200 rounded-xl p-6 text-center space-y-3">
               <CheckCircle2 className="mx-auto text-green-600" size={40} />
               <div className="text-green-800 font-semibold">构建完成！</div>
               <p className="text-sm text-green-700">
-                你的人生模型已更新，可以到"人生模型"页面查看和编辑。
+                构建会话已结束；如有模型建议，必须先进入 Mailbox 确认，未确认前不会更新 Life Model。
               </p>
               <button
                 onClick={reset}
