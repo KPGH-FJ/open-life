@@ -498,14 +498,12 @@ describe("stage1 browser evidence report builder", () => {
     expect(script).toContain('"/session"');
     expect(script).toContain("stage1DogfoodScenarios.ts");
     expect(script).toContain("STAGE1_DOGFOOD_SCENARIOS");
-    expect(script).toContain("prepare_main_chat_agent_stage1_browser_dogfood_state");
-    expect(script).toContain("set_main_chat_agent_stage1_browser_network_policy");
-    expect(script).toContain("set_main_chat_agent_stage1_browser_scripted_response");
+    expect(script).not.toContain("prepare_main_chat_agent_stage1_browser_dogfood_state");
+    expect(script).not.toContain("set_main_chat_agent_stage1_browser_network_policy");
+    expect(script).not.toContain("set_main_chat_agent_stage1_browser_scripted_response");
+    expect(script).toContain("stage1_tauri_dogfood_runner_retired_after_phase7_cleanup");
     expect(script).toContain("D23_WEB_BLOCKER_SCRIPTED_RESPONSE");
     expect(script).toContain("restoreStage1ScenarioNetworkPolicy");
-    expect(script.indexOf("prepare_main_chat_agent_stage1_browser_dogfood_state")).toBeLessThan(
-      script.indexOf("await navigateToChat(sessionId);")
-    );
     expect(script).toContain("validateStage1BrowserPrepReport");
     expect(script).toContain("directWritesExecuted");
     expect(script).toContain("durableLifemodelWritesExecuted");
@@ -515,7 +513,7 @@ describe("stage1 browser evidence report builder", () => {
     expect(script).toContain("metadataSafeLabel(taskSessionId)");
     expect(script).toContain('"D35"');
     expect(script).toContain('"D36"');
-    expect(script).toContain("run_main_chat_agent_stage1_dogfood_gate");
+    expect(script).not.toContain("run_main_chat_agent_stage1_dogfood_gate");
     expect(script).toContain("executeChatScenarioWithWebDriver");
     expect(script).toContain("executeSeededControlScenarioWithWebDriver");
     expect(script).toContain("#/__stage1-dogfood-chat");
@@ -543,8 +541,8 @@ describe("stage1 browser evidence report builder", () => {
     expect(script).toContain("getAttribute('title')");
     expect(script).toContain("const label = await waitForScript(");
     expect(script).toContain('webdriver_visible_control_missing:${labels.join("|")}');
-    expect(script).toContain("[stage1_scenario:start]");
-    expect(script).toContain("scenario_${scenario.id}:");
+    expect(script).not.toContain("[stage1_scenario:start]");
+    expect(script).not.toContain("scenario_${scenario.id}:");
     expect(script).toContain("waitForControlPlaneDelivery(sessionId, previousTaskId, scenario)");
     expect(script).toContain("readControlPlaneTimeoutSnapshotWithWebDriver");
     expect(script).toContain("lastTaskChanged");
@@ -584,7 +582,7 @@ describe("stage1 browser evidence report builder", () => {
     expect(script).toContain("writePassingReport");
     expect(script).toContain("assertFinalStage1GateReadyWithBrowserEvidence");
     expect(script).toContain("readinessRecommendation");
-    expect(script).toContain("ready_for_engineering_dogfood");
+    expect(script).toContain("stage1_dogfood_gate_retired_after_phase7_cleanup");
     expect(script).toContain("configureWebDriverTimeouts(sessionId)");
     expect(script).toContain("`/session/${encodeURIComponent(sessionId)}/timeouts`");
     expect(script).toContain("script: 180_000");
@@ -593,7 +591,8 @@ describe("stage1 browser evidence report builder", () => {
     expect(script).toContain('pipeChildOutput(child, "frontend_dev_server")');
     expect(script).not.toContain('"--", "--host"');
     expect(script).toContain("browserE2ePassedJourneyCount");
-    expect(script).toContain("tauri_webdriver_final_gate_rejected");
+    expect(script).not.toContain("tauri_webdriver_final_gate_rejected");
+    expect(script).toContain("stage1_dogfood_gate_command_retired_after_phase7_cleanup");
     expect(script).toContain("finalGateBlockerFromError");
     expect(script).toContain("tauri_command_surface_browser_observed");
     expect(script).toContain("smokePassed: true");
@@ -603,7 +602,7 @@ describe("stage1 browser evidence report builder", () => {
     expect(script).toContain('const frontendDevUrl = "http://127.0.0.1:5173"');
     expect(script).toContain('"corepack"');
     expect(script).toContain('"pnpm", "dev", "--host", "127.0.0.1", "--port", "5173"');
-    expect(script).toContain("frontendDevServer.kill()");
+    expect(script).not.toContain("frontendDevServer.kill()");
     expect(script).toContain("fileURLToPath(import.meta.url)");
     expect(script).toContain('const repoRoot = path.resolve(frontendRoot, "..")');
     expect(script).toContain("cwd: frontendRoot");
@@ -631,7 +630,7 @@ describe("stage1 browser evidence report builder", () => {
     }
   });
 
-  it("exposes a Linux CI path for real Tauri WebDriver D01-D36 dogfood", () => {
+  it("keeps the retired Stage 1 Tauri workflow on static contract checks", () => {
     const workflowPath = path.resolve(
       process.cwd(),
       "..",
@@ -642,20 +641,20 @@ describe("stage1 browser evidence report builder", () => {
     const workflow = fs.readFileSync(workflowPath, "utf8");
 
     expect(workflow).toContain("runs-on: ubuntu-22.04");
-    expect(workflow).toContain("webkit2gtk-driver");
-    expect(workflow).toContain("xvfb");
+    expect(workflow).toContain("Retired Stage 1 Tauri Dogfood Contract");
+    expect(workflow).not.toContain("webkit2gtk-driver");
+    expect(workflow).not.toContain("xvfb");
     expect(workflow).toContain("corepack prepare pnpm@9.1.0 --activate");
-    expect(workflow).toContain("cargo install tauri-driver --locked");
-    expect(workflow).toContain("cargo build -p openlife-tauri --locked");
-    expect(workflow).toContain("pnpm --dir frontend test:e2e:tauri");
-    expect(workflow).toContain(
-      "cargo test -p openlife-tauri --locked main_chat_agent_stage1_dogfood -- --nocapture"
+    expect(workflow).not.toContain("cargo install tauri-driver --locked");
+    expect(workflow).not.toContain("cargo build -p openlife-tauri --locked");
+    expect(workflow).not.toContain("pnpm --dir frontend test:e2e:tauri");
+    expect(workflow).toContain("stage1-tauri-webdriver.mjs --validate-scenarios-only");
+    expect(workflow).not.toContain("main_chat_agent_stage1_dogfood");
+    expect(workflow).not.toContain(
+      "run_main_chat_agent_stage1_dogfood_command_returns_isolated_report"
     );
-    expect(workflow).toContain(
-      "cargo test -p openlife-tauri --locked run_main_chat_agent_stage1_dogfood_command_returns_isolated_report -- --nocapture"
-    );
-    expect(workflow).toContain("frontend/test-results/main-chat-stage1-dogfood-report.json");
-    expect(workflow).toContain("actions/upload-artifact");
+    expect(workflow).not.toContain("frontend/test-results/main-chat-stage1-dogfood-report.json");
+    expect(workflow).not.toContain("actions/upload-artifact");
     expect(workflow).not.toContain("macos-latest");
     expect(workflow).not.toContain("tauri_command_surface_browser_observed: true");
   });

@@ -35,35 +35,17 @@ env:
 
 jobs:
   stage1-tauri-dogfood:
-    name: Real Tauri Chat UI D01-D36
+    name: Retired Stage 1 Tauri Dogfood Contract
     runs-on: ubuntu-22.04
-    timeout-minutes: 90
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v6
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
           node-version: "20"
-
-      - name: Install Linux Tauri WebDriver dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            pkg-config \
-            libglib2.0-dev \
-            libgtk-3-dev \
-            libwebkit2gtk-4.1-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libssl-dev \
-            webkit2gtk-driver \
-            xvfb \
-            dbus-x11
 
       - name: Enable corepack
         run: corepack enable
@@ -74,66 +56,14 @@ jobs:
       - name: Install frontend dependencies
         run: corepack pnpm --dir frontend install --frozen-lockfile
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "openlife-stage1-tauri-dogfood"
-
-      - name: Install tauri-driver
-        run: cargo install tauri-driver --locked
-
       - name: Typecheck frontend
         run: corepack pnpm --dir frontend typecheck
 
-      - name: Run Stage 1 browser evidence unit tests
+      - name: Run retired Stage 1 contract unit tests
         run: corepack pnpm --dir frontend test -- src/stage1BrowserEvidence.test.ts src/tauri.test.ts
 
-      - name: Check Stage 1 Tauri WebDriver runner syntax
+      - name: Check retired Stage 1 runner syntax
         run: node --check frontend/scripts/stage1-tauri-webdriver.mjs
 
-      - name: Build debug Tauri app binary
-        run: cargo build -p openlife-tauri --locked
-
-      - name: Run real Tauri Chat UI D01-D36 dogfood
-        run: xvfb-run -a dbus-run-session -- corepack pnpm --dir frontend test:e2e:tauri
-
-      - name: Assert real browser pass evidence
-        run: |
-          node -e '
-            const fs = require("node:fs");
-            const reportPath = "frontend/test-results/main-chat-stage1-dogfood-report.json";
-            const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
-            const blockers = Array.isArray(report.blockers) ? report.blockers.join(",") : "";
-            if (report.evidenceSource !== "tauri_command_surface_browser_observed") {
-              throw new Error(`unexpected evidenceSource=${report.evidenceSource} blockers=${blockers}`);
-            }
-            if (report.smokePassed !== true || report.browserE2eEnvironmentReady !== true) {
-              throw new Error(`browser evidence not ready blockers=${blockers}`);
-            }
-            if (!Array.isArray(report.observedScenarios) || report.observedScenarios.length !== 36) {
-              throw new Error(`observedScenarios count mismatch blockers=${blockers}`);
-            }
-            if (!Array.isArray(report.passedJourneys) || report.passedJourneys.length !== 36) {
-              throw new Error(`passedJourneys count mismatch blockers=${blockers}`);
-            }
-            if (Array.isArray(report.failedJourneys) && report.failedJourneys.length > 0) {
-              throw new Error(`failedJourneys present blockers=${blockers}`);
-            }
-            if (Array.isArray(report.blockers) && report.blockers.length > 0) {
-              throw new Error(`browser report blockers present: ${blockers}`);
-            }
-          '
-
-      - name: Run Stage 1 Rust dogfood gate tests
-        run: cargo test -p openlife-tauri --locked main_chat_agent_stage1_dogfood -- --nocapture
-
-      - name: Run Stage 1 isolated report command test
-        run: cargo test -p openlife-tauri --locked run_main_chat_agent_stage1_dogfood_command_returns_isolated_report -- --nocapture
-
-      - name: Upload Stage 1 browser evidence report
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: stage1-tauri-browser-evidence
-          path: frontend/test-results/main-chat-stage1-dogfood-report.json
-          if-no-files-found: warn
+      - name: Validate retired Stage 1 static scenario matrix
+        run: node frontend/scripts/stage1-tauri-webdriver.mjs --validate-scenarios-only

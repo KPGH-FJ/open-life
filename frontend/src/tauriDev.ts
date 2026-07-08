@@ -108,18 +108,6 @@ export async function validateMainChatAgentStage2ManualDogfoodArtifact(): Promis
   return safeDevInvoke("validate_main_chat_agent_stage2_manual_dogfood_artifact");
 }
 
-export async function runMainChatAgentStage1DogfoodGate(): Promise<any> {
-  return safeDevInvoke("run_main_chat_agent_stage1_dogfood_gate");
-}
-
-export async function runMainChatAgentStep6ProductAcceptanceGate(): Promise<any> {
-  return safeDevInvoke("run_main_chat_agent_step6_product_acceptance_gate");
-}
-
-export async function prepareMainChatStep6LiveProviderEvalState(): Promise<any> {
-  return safeDevInvoke("prepare_main_chat_step6_live_provider_eval_state");
-}
-
 export async function checkRuntimeMigrationGate(
   input: RuntimeMigrationGateCheckInput = {}
 ): Promise<RuntimeMigrationGateReport> {

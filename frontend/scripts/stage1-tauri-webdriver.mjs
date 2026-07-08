@@ -153,121 +153,13 @@ function stage1TauriDebugAppBinaryPath() {
 }
 
 async function runStage1TauriDogfood() {
-  let driverProcess;
-  let frontendDevServer;
-  let sessionId;
-  try {
-    frontendDevServer = await startFrontendDevServer();
-    driverProcess = startTauriDriver();
-    const session = await createTauriWebDriverSession(stage1TauriDebugAppBinaryPath());
-    sessionId = session.sessionId;
-
-    const prepReport = await tauriInvoke(
-      sessionId,
-      "prepare_main_chat_agent_stage1_browser_dogfood_state"
-    );
-    const prepBlockers = validateStage1BrowserPrepReport(prepReport);
-    if (prepBlockers.length > 0) {
-      return {
-        ready: false,
-        sessionCreated: true,
-        observedCount: 0,
-        blockers: ["tauri_webdriver_stage1_prep_not_ready", ...prepBlockers],
-      };
-    }
-
-    await navigateToChat(sessionId);
-
-    const gateReport = await tauriInvoke(sessionId, "run_main_chat_agent_stage1_dogfood_gate");
-    const gateRows = new Map((gateReport?.scenarios ?? []).map(row => [row.scenarioId, row]));
-    const observedScenarios = [];
-    for (const scenario of STAGE1_DOGFOOD_SCENARIOS) {
-      console.error(`[stage1_scenario:start] ${scenario.id}`);
-      const gateRow = gateRows.get(scenario.id);
-      if (!gateRow) {
-        return {
-          ready: false,
-          sessionCreated: true,
-          observedCount: observedScenarios.length,
-          blockers: [metadataSafeBlocker(`tauri_webdriver_gate_row_missing:${scenario.id}`)],
-          observedScenarios,
-        };
-      }
-      try {
-        const observed =
-          scenario.scenarioType === "chat_e2e"
-            ? await executeChatScenarioWithWebDriver(sessionId, scenario, gateRow)
-            : await executeSeededControlScenarioWithWebDriver(
-                sessionId,
-                scenario,
-                gateRow,
-                prepReport
-              );
-        observedScenarios.push(observed);
-        console.error(`[stage1_scenario:ok] ${scenario.id}`);
-      } catch (error) {
-        return {
-          ready: false,
-          sessionCreated: true,
-          observedCount: observedScenarios.length,
-          blockers: [metadataSafeBlocker(`scenario_${scenario.id}:${error?.message ?? error}`)],
-          observedScenarios,
-        };
-      }
-    }
-
-    const observedBlockers = validateObservedScenariosForPassingReport(observedScenarios, gateRows);
-    if (observedBlockers.length === 0) {
-      if (!writePassingReport(observedScenarios, gateRows)) {
-        return {
-          ready: false,
-          sessionCreated: true,
-          observedCount: observedScenarios.length,
-          blockers: ["tauri_webdriver_passing_report_validation_failed"],
-          observedScenarios,
-        };
-      }
-      let finalGateReport;
-      try {
-        finalGateReport = await assertFinalStage1GateReadyWithBrowserEvidence(sessionId);
-      } catch (error) {
-        return {
-          ready: false,
-          sessionCreated: true,
-          observedCount: observedScenarios.length,
-          blockers: ["tauri_webdriver_final_gate_rejected", finalGateBlockerFromError(error)],
-          observedScenarios,
-        };
-      }
-      return {
-        ready: true,
-        sessionCreated: true,
-        observedCount: observedScenarios.length,
-        observedScenarios,
-        readinessRecommendation: finalGateReport.readinessRecommendation,
-        blockers: [],
-      };
-    }
-
-    return {
-      ready: false,
-      sessionCreated: true,
-      observedCount: observedScenarios.length,
-      blockers: ["tauri_webdriver_d01_d36_observation_not_completed", ...observedBlockers],
-      observedScenarios,
-    };
-  } catch (error) {
-    return {
-      ready: false,
-      sessionCreated: Boolean(sessionId),
-      observedCount: 0,
-      blockers: [metadataSafeBlocker(`tauri_webdriver_launch_failed:${error?.message ?? error}`)],
-    };
-  } finally {
-    if (sessionId) await deleteWebDriverSession(sessionId).catch(() => undefined);
-    if (driverProcess) driverProcess.kill();
-    if (frontendDevServer) frontendDevServer.kill();
-  }
+  return {
+    ready: false,
+    sessionCreated: false,
+    observedCount: 0,
+    observedScenarios: [],
+    blockers: ["stage1_tauri_dogfood_runner_retired_after_phase7_cleanup"],
+  };
 }
 
 function startTauriDriver() {
@@ -393,57 +285,15 @@ async function executeChatScenarioWithWebDriver(sessionId, scenario, gateRow) {
 
 async function prepareStage1ScenarioNetworkPolicy(sessionId, scenario) {
   if (scenario.id !== "D23") return null;
-  const previousNetworkPolicy = await tauriInvoke(
-    sessionId,
-    "set_main_chat_agent_stage1_browser_network_policy",
-    {
-      enabled: false,
-    }
-  );
-  const previousWebFixtureOutput = await tauriInvoke(
-    sessionId,
-    "set_main_chat_agent_stage1_browser_web_fixture_output",
-    {
-      output: null,
-    }
-  );
-  const previousScriptedResponse = await tauriInvoke(
-    sessionId,
-    "set_main_chat_agent_stage1_browser_scripted_response",
-    {
-      response: D23_WEB_BLOCKER_SCRIPTED_RESPONSE,
-    }
-  );
   return {
-    previousNetworkPolicy,
-    previousWebFixtureOutput,
-    previousScriptedResponse,
+    retired: true,
+    blocker: "stage1_network_policy_dev_command_retired_after_phase7_cleanup",
   };
 }
 
 async function restoreStage1ScenarioNetworkPolicy(sessionId, previousScenarioState) {
   if (previousScenarioState === null || previousScenarioState === undefined) return;
-  await tauriInvoke(sessionId, "set_main_chat_agent_stage1_browser_network_policy", {
-    enabled: Boolean(previousScenarioState.previousNetworkPolicy),
-  }).catch(error => {
-    console.error(
-      `[stage1_network_policy_restore:error] ${metadataSafeBlocker(error?.message ?? error)}`
-    );
-  });
-  await tauriInvoke(sessionId, "set_main_chat_agent_stage1_browser_web_fixture_output", {
-    output: previousScenarioState.previousWebFixtureOutput ?? null,
-  }).catch(error => {
-    console.error(
-      `[stage1_web_fixture_restore:error] ${metadataSafeBlocker(error?.message ?? error)}`
-    );
-  });
-  await tauriInvoke(sessionId, "set_main_chat_agent_stage1_browser_scripted_response", {
-    response: previousScenarioState.previousScriptedResponse ?? null,
-  }).catch(error => {
-    console.error(
-      `[stage1_scripted_response_restore:error] ${metadataSafeBlocker(error?.message ?? error)}`
-    );
-  });
+  if (previousScenarioState.retired) return;
 }
 
 async function executeSeededControlScenarioWithWebDriver(sessionId, scenario, gateRow, prepReport) {
@@ -1872,30 +1722,14 @@ function stage1BrowserReportOutputPath() {
 }
 
 async function assertFinalStage1GateReadyWithBrowserEvidence(sessionId) {
-  const report = await tauriInvoke(sessionId, "run_main_chat_agent_stage1_dogfood_gate");
-  const blockers = [];
-  if (report?.defaultReady !== true) blockers.push("tauri_webdriver_final_gate_default_not_ready");
-  if (report?.readinessRecommendation !== "ready_for_engineering_dogfood") {
-    blockers.push("tauri_webdriver_final_gate_recommendation_not_ready");
-  }
-  if (report?.browserE2eEnvironmentReady !== true) {
-    blockers.push("tauri_webdriver_final_gate_browser_environment_not_ready");
-  }
-  if (report?.browserE2ePassedJourneyCount !== requiredJourneys.length) {
-    blockers.push("tauri_webdriver_final_gate_browser_passed_count_mismatch");
-  }
-  if (report?.browserE2eFailedJourneyCount !== 0) {
-    blockers.push("tauri_webdriver_final_gate_browser_failed_count_nonzero");
-  }
-  if (Array.isArray(report?.blockers) && report.blockers.length > 0) {
-    blockers.push(
-      ...report.blockers.map(blocker => `tauri_webdriver_final_gate_blocker:${blocker}`)
-    );
-  }
-  if (blockers.length > 0) {
-    throw new Error(uniqueValues(blockers).map(metadataSafeBlocker).join(","));
-  }
-  return report;
+  return {
+    defaultReady: false,
+    browserE2eEnvironmentReady: false,
+    browserE2ePassedJourneyCount: 0,
+    browserE2eFailedJourneyCount: requiredJourneys.length,
+    readinessRecommendation: "stage1_dogfood_gate_retired_after_phase7_cleanup",
+    blockers: ["stage1_dogfood_gate_command_retired_after_phase7_cleanup"],
+  };
 }
 
 function finalGateBlockerFromError(error) {

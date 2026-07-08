@@ -491,12 +491,14 @@ describe("Step6 product acceptance evidence", () => {
     expect(script).toContain("S6_PERMISSION_ACCEPT");
     expect(script).toContain("permission.accepted");
     expect(script).toContain("automatic_resume_replay");
-    expect(script).toContain("prepare_main_chat_agent_stage1_browser_dogfood_state");
-    expect(script).toContain("prepare_main_chat_step6_live_provider_eval_state");
+    expect(script).not.toContain("prepare_main_chat_agent_stage1_browser_dogfood_state");
+    expect(script).not.toContain("prepare_main_chat_step6_live_provider_eval_state");
+    expect(script).toContain("step6_tauri_product_acceptance_runner_retired_after_phase7_cleanup");
     expect(script).toContain("step6LiveProviderStateReady");
     expect(script).toContain("step6_live_provider_state_not_ready");
     expect(script).toContain("external_provider_endpoint_required");
-    expect(script).toContain("run_main_chat_agent_step6_product_acceptance_gate");
+    expect(script).not.toContain("run_main_chat_agent_step6_product_acceptance_gate");
+    expect(script).toContain("step6_product_acceptance_gate_command_retired_after_phase7_cleanup");
     expect(script).toContain("tauri_webdriver_step6_final_gate_rejected");
     expect(script).toContain("expectedEntryPointForStep6Journey");
     expect(script).toContain("tauri_webdriver_step6_route_legacy_or_fallback");
@@ -510,13 +512,14 @@ describe("Step6 product acceptance evidence", () => {
     expect(script).toContain("localDeterministicReady");
     expect(script).not.toContain("step6_tauri_webdriver_executor_not_implemented");
     expect(script).toContain("tauri_webdriver_macos_not_supported_by_tauri_driver");
-    expect(playwrightSpec).toContain("prepare_main_chat_step6_live_provider_eval_state");
+    expect(playwrightSpec).not.toContain("prepare_main_chat_agent_stage1_browser_dogfood_state");
+    expect(playwrightSpec).not.toContain("prepare_main_chat_step6_live_provider_eval_state");
     expect(playwrightSpec).toContain("step6LiveProviderStateReady");
     expect(playwrightSpec).toContain("isExternalProviderLabel");
     expect(playwrightSpec).toContain("localFixtureCreditedAsExternalLive");
   });
 
-  it("exposes a Linux CI path for real Tauri Step 6 local acceptance without fake live credit", () => {
+  it("keeps the retired Step 6 workflow on static contract checks without fake live credit", () => {
     const workflowPath = path.resolve(
       process.cwd(),
       "..",
@@ -527,36 +530,30 @@ describe("Step6 product acceptance evidence", () => {
     const workflow = fs.readFileSync(workflowPath, "utf8");
 
     expect(workflow).toContain("runs-on: ubuntu-22.04");
+    expect(workflow).toContain("Retired Step 6 Tauri Acceptance Contract");
     expect(workflow).toContain("workflow_dispatch:");
     expect(workflow).toContain("run_external_live:");
-    expect(workflow).toContain("webkit2gtk-driver");
-    expect(workflow).toContain("xvfb");
+    expect(workflow).not.toContain("webkit2gtk-driver");
+    expect(workflow).not.toContain("xvfb");
     expect(workflow).toContain("corepack prepare pnpm@9.1.0 --activate");
-    expect(workflow).toContain("cargo install tauri-driver --locked");
-    expect(workflow).toContain("cargo build -p openlife-tauri");
-    expect(workflow).toContain("pnpm --dir frontend test:e2e:tauri:step6:local");
-    expect(workflow).toContain("tauri_command_surface_step6_browser_observed");
-    expect(workflow).toContain("localDeterministicReady !== true");
-    expect(workflow).toContain("acceptanceReady !== false");
-    expect(workflow).toContain("externalLiveReady !== false");
-    expect(workflow).toContain("S6-LIVE-WEB");
-    expect(workflow).toContain("S6-LIVE-MCP");
-    expect(workflow).toContain("OPENLIFE_MAIN_CHAT_LIVE_PROVIDER_EVAL");
-    expect(workflow).toContain("OPENLIFE_LIVE_EVAL_PROVIDER");
-    expect(workflow).toContain("OPENLIFE_LIVE_EVAL_BASE");
-    expect(workflow).toContain("OPENLIFE_LIVE_EVAL_MODEL");
-    expect(workflow).toContain("OPENLIFE_LIVE_EVAL_API_KEY");
-    expect(workflow).toContain("pnpm --dir frontend test:e2e:tauri:step6");
-    expect(workflow).toContain("acceptanceReady !== true");
-    expect(workflow).toContain("externalLiveReady !== true");
+    expect(workflow).not.toContain("cargo install tauri-driver --locked");
+    expect(workflow).not.toContain("cargo build -p openlife-tauri");
+    expect(workflow).not.toContain("pnpm --dir frontend test:e2e:tauri:step6:local");
+    expect(workflow).toContain("step6-tauri-webdriver.mjs --validate-journeys-only");
+    expect(workflow).toContain("step6-tauri-webdriver.mjs --validate-observed-rules-only");
+    expect(workflow).toContain("Step 6 strict external live Tauri acceptance is retired");
+    expect(workflow).not.toContain("OPENLIFE_MAIN_CHAT_LIVE_PROVIDER_EVAL");
+    expect(workflow).not.toContain("OPENLIFE_LIVE_EVAL_PROVIDER");
+    expect(workflow).not.toContain("OPENLIFE_LIVE_EVAL_BASE");
+    expect(workflow).not.toContain("OPENLIFE_LIVE_EVAL_MODEL");
+    expect(workflow).not.toContain("OPENLIFE_LIVE_EVAL_API_KEY");
+    expect(workflow).not.toContain("pnpm --dir frontend test:e2e:tauri:step6");
     expect(workflow).not.toContain("OPENAI_API_KEY");
-    expect(workflow).toContain(
-      "cargo test -p openlife-tauri --locked main_chat_final_acceptance -- --nocapture"
-    );
-    expect(workflow).toContain(
+    expect(workflow).not.toContain("main_chat_final_acceptance");
+    expect(workflow).not.toContain(
       "frontend/test-results/main-chat-step6-product-acceptance-report.json"
     );
-    expect(workflow).toContain("actions/upload-artifact");
+    expect(workflow).not.toContain("actions/upload-artifact");
     expect(workflow).not.toContain("macos-latest");
   });
 

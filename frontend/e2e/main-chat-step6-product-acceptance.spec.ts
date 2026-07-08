@@ -79,26 +79,13 @@ async function executeLocalJourney(
     return executeSeededPermissionAcceptanceJourney(page, journey, prepReport);
   }
   const previousTaskId = await readCurrentTaskId(page);
-  if (journey.id === "S6-BLOCKED") {
-    await tauriInvoke(page, "set_main_chat_agent_stage1_browser_network_policy", {
-      enabled: false,
-    }).catch(() => undefined);
-  }
 
-  try {
-    await page.getByTestId("chat-input").fill(journey.prompt);
-    await expect(page.getByTestId("send-button")).toBeEnabled({ timeout: 10_000 });
-    await page.getByTestId("send-button").click();
-    await openDiagnosticsIfAvailable(page);
-    const controlPlane = await waitForControlPlaneDelivery(page, previousTaskId, journey);
-    return observeStep6Journey(page, journey, controlPlane);
-  } finally {
-    if (journey.id === "S6-BLOCKED") {
-      await tauriInvoke(page, "set_main_chat_agent_stage1_browser_network_policy", {
-        enabled: true,
-      }).catch(() => undefined);
-    }
-  }
+  await page.getByTestId("chat-input").fill(journey.prompt);
+  await expect(page.getByTestId("send-button")).toBeEnabled({ timeout: 10_000 });
+  await page.getByTestId("send-button").click();
+  await openDiagnosticsIfAvailable(page);
+  const controlPlane = await waitForControlPlaneDelivery(page, previousTaskId, journey);
+  return observeStep6Journey(page, journey, controlPlane);
 }
 
 async function executeLiveJourney(
@@ -183,38 +170,36 @@ async function waitForControlPlaneDelivery(
 }
 
 async function prepareStep6BrowserState(page: Page): Promise<Step6BrowserPrepReport> {
-  return tauriInvoke<Step6BrowserPrepReport>(
-    page,
-    "prepare_main_chat_agent_stage1_browser_dogfood_state"
-  );
+  return {
+    prepared: false,
+    evidenceSource: "retired_after_phase7_cleanup",
+    directWritesExecuted: false,
+    durableLifemodelWritesExecuted: false,
+    fileOrExternalWritesExecuted: false,
+    taskSessionIds: {},
+    blockers: ["step6_browser_prep_command_retired_after_phase7_cleanup"],
+  };
 }
 
 async function prepareStep6LiveProviderState(
   page: Page
 ): Promise<Step6LiveProviderStatePrepReport> {
-  try {
-    return await tauriInvoke<Step6LiveProviderStatePrepReport>(
-      page,
-      "prepare_main_chat_step6_live_provider_eval_state"
-    );
-  } catch (error) {
-    return {
-      reportKind: "main_chat_step6_live_provider_eval_state_prep",
-      configured: false,
-      ready: false,
-      provider: "missing",
-      model: "missing",
-      baseConfigured: false,
-      apiKeyPresent: false,
-      networkEnabled: false,
-      providerEndpointKind: "missing",
-      preflightReady: false,
-      preflightBlockers: [],
-      appConfigPersisted: false,
-      directWritesExecuted: false,
-      blockers: [`step6_live_provider_state_command_error:${metadataSafeBlocker(String(error))}`],
-    };
-  }
+  return {
+    reportKind: "main_chat_step6_live_provider_eval_state_prep",
+    configured: false,
+    ready: false,
+    provider: "missing",
+    model: "missing",
+    baseConfigured: false,
+    apiKeyPresent: false,
+    networkEnabled: false,
+    providerEndpointKind: "missing",
+    preflightReady: false,
+    preflightBlockers: [],
+    appConfigPersisted: false,
+    directWritesExecuted: false,
+    blockers: ["step6_live_provider_state_command_retired_after_phase7_cleanup"],
+  };
 }
 
 function step6LiveProviderStateReady(report: Step6LiveProviderStatePrepReport | null): boolean {

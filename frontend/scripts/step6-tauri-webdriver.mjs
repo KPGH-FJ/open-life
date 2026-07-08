@@ -496,133 +496,16 @@ function tauriDebugAppBinaryPath() {
 }
 
 async function runStep6TauriProductAcceptance() {
-  let driverProcess;
-  let frontendDevServer;
-  let sessionId;
-  try {
-    frontendDevServer = await startFrontendDevServer();
-    driverProcess = startTauriDriver();
-    const session = await createTauriWebDriverSession(tauriDebugAppBinaryPath());
-    sessionId = session.sessionId;
-
-    const prepReport = await tauriInvoke(
-      sessionId,
-      "prepare_main_chat_agent_stage1_browser_dogfood_state"
-    );
-    const prepBlockers = validateStep6PrepReport(prepReport);
-    if (prepBlockers.length > 0) {
-      return {
-        ready: false,
-        localDeterministicReady: false,
-        blockedExternalLiveOnly: false,
-        reportWritten: false,
-        sessionCreated: true,
-        observedCount: 0,
-        blockers: ["tauri_webdriver_step6_prep_not_ready", ...prepBlockers],
-      };
-    }
-
-    await navigateToChat(sessionId);
-
-    const observedJourneys = [];
-    let liveProviderStateReport = null;
-    for (const row of journeys) {
-      console.error(`[step6_journey:start] ${row.id}`);
-      try {
-        if (
-          row.kind === "external_live" &&
-          liveProviderStateReport === null &&
-          process.env.OPENLIFE_MAIN_CHAT_LIVE_PROVIDER_EVAL === "1"
-        ) {
-          liveProviderStateReport = await prepareStep6LiveProviderEvalStateWithWebDriver(sessionId);
-          console.error(
-            [
-              "[step6_live_provider_state]",
-              `configured=${String(liveProviderStateReport?.configured === true)}`,
-              `ready=${String(liveProviderStateReport?.ready === true)}`,
-              `provider=${metadataSafeBlocker(liveProviderStateReport?.provider ?? "missing")}`,
-              `model=${metadataSafeBlocker(liveProviderStateReport?.model ?? "missing")}`,
-              `endpoint=${metadataSafeBlocker(
-                liveProviderStateReport?.providerEndpointKind ?? "missing"
-              )}`,
-              `blockers=${(liveProviderStateReport?.blockers ?? []).join(",")}`,
-            ].join(" ")
-          );
-        }
-        const observed =
-          row.kind === "external_live"
-            ? await executeStep6LiveJourneyWithWebDriver(sessionId, row, liveProviderStateReport)
-            : row.executionMode === "seeded_control"
-              ? await executeStep6SeededControlJourneyWithWebDriver(sessionId, row, prepReport)
-              : await executeStep6LocalJourneyWithWebDriver(sessionId, row);
-        observedJourneys.push(observed);
-        console.error(`[step6_journey:ok] ${row.id}`);
-      } catch (error) {
-        return {
-          ready: false,
-          localDeterministicReady: false,
-          blockedExternalLiveOnly: false,
-          reportWritten: false,
-          sessionCreated: true,
-          observedCount: observedJourneys.length,
-          blockers: [metadataSafeBlocker(`scenario_${row.id}:${error?.message ?? error}`)],
-          observedJourneys,
-        };
-      }
-    }
-
-    const report = buildObservedReport(observedJourneys);
-    writeReport(report);
-    const localDeterministicReady = localJourneys.every(id => report.passedJourneys.includes(id));
-    const blockedExternalLiveOnly =
-      externalLiveJourneys.every(id => report.blockedLiveJourneys.includes(id)) &&
-      !externalLiveJourneys.some(id => report.passedJourneys.includes(id)) &&
-      report.externalLiveBlockers.length > 0;
-
-    const observedBlockers = validateObservedJourneysForReport(observedJourneys);
-    if (observedBlockers.length > 0) {
-      return {
-        ready: false,
-        localDeterministicReady,
-        blockedExternalLiveOnly,
-        reportWritten: true,
-        sessionCreated: true,
-        observedCount: observedJourneys.length,
-        blockers: ["tauri_webdriver_step6_observation_not_completed", ...observedBlockers],
-        observedJourneys,
-      };
-    }
-
-    const finalGateAudit = await auditFinalStep6GateWithBrowserEvidence(sessionId);
-    writeReport(mergeFinalGateAuditIntoBrowserReport(report, finalGateAudit));
-
-    return {
-      ready: finalGateAudit.ready,
-      localDeterministicReady:
-        localDeterministicReady && finalGateAudit.report?.localDeterministicReady === true,
-      blockedExternalLiveOnly:
-        blockedExternalLiveOnly && finalGateAuditBlockedExternalLiveOnly(finalGateAudit),
-      reportWritten: true,
-      sessionCreated: true,
-      observedCount: observedJourneys.length,
-      observedJourneys,
-      blockers: finalGateAudit.blockers,
-    };
-  } catch (error) {
-    return {
-      ready: false,
-      localDeterministicReady: false,
-      blockedExternalLiveOnly: false,
-      reportWritten: false,
-      sessionCreated: Boolean(sessionId),
-      observedCount: 0,
-      blockers: [metadataSafeBlocker(`tauri_webdriver_launch_failed:${error?.message ?? error}`)],
-    };
-  } finally {
-    if (sessionId) await deleteWebDriverSession(sessionId).catch(() => undefined);
-    if (driverProcess) driverProcess.kill();
-    if (frontendDevServer) frontendDevServer.kill();
-  }
+  return {
+    ready: false,
+    localDeterministicReady: false,
+    blockedExternalLiveOnly: false,
+    reportWritten: false,
+    sessionCreated: false,
+    observedCount: 0,
+    observedJourneys: [],
+    blockers: ["step6_tauri_product_acceptance_runner_retired_after_phase7_cleanup"],
+  };
 }
 
 function startTauriDriver() {
@@ -755,30 +638,24 @@ async function executeStep6LiveJourneyWithWebDriver(sessionId, row, liveProvider
 }
 
 async function prepareStep6LiveProviderEvalStateWithWebDriver(sessionId) {
-  try {
-    return await tauriInvoke(sessionId, "prepare_main_chat_step6_live_provider_eval_state");
-  } catch (error) {
-    return {
-      reportKind: "main_chat_step6_live_provider_eval_state_prep",
-      configured: false,
-      ready: false,
-      debugBuild: false,
-      explicitLiveEvalRequested: true,
-      provider: "missing",
-      model: "missing",
-      baseConfigured: false,
-      apiKeyPresent: false,
-      networkEnabled: false,
-      providerEndpointKind: "missing",
-      preflightReady: false,
-      preflightBlockers: [],
-      appConfigPersisted: false,
-      directWritesExecuted: false,
-      blockers: [
-        metadataSafeBlocker(`step6_live_provider_state_command_error:${error?.message ?? error}`),
-      ],
-    };
-  }
+  return {
+    reportKind: "main_chat_step6_live_provider_eval_state_prep",
+    configured: false,
+    ready: false,
+    debugBuild: false,
+    explicitLiveEvalRequested: true,
+    provider: "missing",
+    model: "missing",
+    baseConfigured: false,
+    apiKeyPresent: false,
+    networkEnabled: false,
+    providerEndpointKind: "missing",
+    preflightReady: false,
+    preflightBlockers: [],
+    appConfigPersisted: false,
+    directWritesExecuted: false,
+    blockers: ["step6_live_provider_state_command_retired_after_phase7_cleanup"],
+  };
 }
 
 function step6LiveProviderStateReady(report) {
@@ -902,20 +779,15 @@ async function executeStep6PermissionAcceptanceJourneyWithWebDriver(sessionId, r
 
 async function prepareStep6NetworkPolicy(sessionId, row) {
   if (row.id !== "S6-BLOCKED") return null;
-  return await tauriInvoke(sessionId, "set_main_chat_agent_stage1_browser_network_policy", {
-    enabled: false,
-  });
+  return {
+    retired: true,
+    blocker: "step6_network_policy_dev_command_retired_after_phase7_cleanup",
+  };
 }
 
 async function restoreStep6NetworkPolicy(sessionId, previousNetworkPolicy) {
   if (previousNetworkPolicy === null || previousNetworkPolicy === undefined) return;
-  await tauriInvoke(sessionId, "set_main_chat_agent_stage1_browser_network_policy", {
-    enabled: Boolean(previousNetworkPolicy),
-  }).catch(error => {
-    console.error(
-      `[step6_network_policy_restore:error] ${metadataSafeBlocker(error?.message ?? error)}`
-    );
-  });
+  if (previousNetworkPolicy.retired) return;
 }
 
 async function navigateToChat(sessionId) {
@@ -1821,7 +1693,18 @@ async function taskEventsWithWebDriver(sessionId, taskSessionId) {
 }
 
 async function auditFinalStep6GateWithBrowserEvidence(sessionId) {
-  const report = await tauriInvoke(sessionId, "run_main_chat_agent_step6_product_acceptance_gate");
+  const report = {
+    browserE2eEnvironmentReady: false,
+    localDeterministicReady: false,
+    passedJourneyCount: 0,
+    noSilentDurableWrite: true,
+    noHiddenLegacyFallback: true,
+    noLocalEvidenceCreditedAsExternalLive: true,
+    noInventedUnavailableEvidence: true,
+    uiStatusFromStructuredEvidence: false,
+    overallReady: false,
+    blockers: ["step6_product_acceptance_gate_command_retired_after_phase7_cleanup"],
+  };
   const blockers = [];
   if (report?.browserE2eEnvironmentReady !== true) {
     blockers.push("tauri_webdriver_step6_gate_browser_environment_not_ready");

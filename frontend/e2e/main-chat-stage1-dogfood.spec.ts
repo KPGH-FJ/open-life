@@ -94,17 +94,26 @@ async function tauriInvoke<T>(page: Page, cmd: string, args: TauriInvokeArgs = {
 }
 
 async function runStage1Gate(page: Page): Promise<MainChatAgentStage1DogfoodReport> {
-  return tauriInvoke<MainChatAgentStage1DogfoodReport>(
-    page,
-    "run_main_chat_agent_stage1_dogfood_gate"
-  );
+  return {
+    reportKind: "main_chat_agent_stage1_dogfood_gate",
+    readinessSemantics: "stage1_tauri_dogfood_retired_after_phase7_cleanup",
+    defaultReady: false,
+    readinessRecommendation: "stage1_dogfood_gate_retired_after_phase7_cleanup",
+    scenarios: [],
+    blockers: ["stage1_dogfood_gate_command_retired_after_phase7_cleanup"],
+  } as unknown as MainChatAgentStage1DogfoodReport;
 }
 
 async function prepareStage1BrowserState(page: Page): Promise<Stage1BrowserPrepReport> {
-  return tauriInvoke<Stage1BrowserPrepReport>(
-    page,
-    "prepare_main_chat_agent_stage1_browser_dogfood_state"
-  );
+  return {
+    prepared: false,
+    evidenceSource: "retired_after_phase7_cleanup",
+    directWritesExecuted: false,
+    durableLifemodelWritesExecuted: false,
+    fileOrExternalWritesExecuted: false,
+    taskSessionIds: {},
+    blockers: ["stage1_browser_prep_command_retired_after_phase7_cleanup"],
+  };
 }
 
 async function readCurrentTaskId(page: Page): Promise<string> {
@@ -139,9 +148,7 @@ async function prepareStage1ScenarioNetworkPolicy(
   scenario: Stage1DogfoodScenario
 ): Promise<boolean | null> {
   if (scenario.id !== "D23") return null;
-  return tauriInvoke<boolean>(page, "set_main_chat_agent_stage1_browser_network_policy", {
-    enabled: false,
-  });
+  return null;
 }
 
 async function restoreStage1ScenarioNetworkPolicy(
@@ -149,11 +156,6 @@ async function restoreStage1ScenarioNetworkPolicy(
   previousNetworkPolicy: boolean | null
 ) {
   if (previousNetworkPolicy === null) return;
-  await tauriInvoke(page, "set_main_chat_agent_stage1_browser_network_policy", {
-    enabled: Boolean(previousNetworkPolicy),
-  }).catch(error => {
-    console.error(`stage1_network_policy_restore_failed:${String(error?.message ?? error)}`);
-  });
 }
 
 async function setSelectedSkill(page: Page, selectedSkillId: string) {
