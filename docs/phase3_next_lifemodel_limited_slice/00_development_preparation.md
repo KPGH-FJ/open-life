@@ -140,7 +140,7 @@ exist. Do not rebuild projection-covered truth from diagnostics.
 Follow `docs/phase2_viewmodel_contract/08_lifemodel_viewmodel_contract.md`, but
 mark unavailable fields as limited or unknown.
 
-Minimum output:
+Minimum `LifeModelViewModel` data output inside `ViewModelEnvelope.data`:
 
 - `truthMode`
 - `canonicalSummary`
@@ -154,11 +154,23 @@ Minimum output:
 - `manualOverrideState`
 - `relatedReviewItemRefs`
 - `memoryLinkage`
+- `sourceRefs`
+
+Envelope-level action and metadata lanes:
+
+- `status`
+- `lastUpdatedAt`
+- `evidenceRefs`
 - `actions.primary`
 - `actions.review`
 - `actions.debugOnly`
 - `warnings`
-- `sourceRefs`
+
+The adapter should return `ViewModelEnvelope<LifeModelViewModel>`. Do not put
+action lanes inside the `LifeModelViewModel` data object, and do not put
+LifeModel data fields directly on the envelope root. `debugRawControls` from
+the Phase 2 target contract maps to `actions.debugOnly` in the shared envelope
+for this limited frontend slice.
 
 Conservative mapping rules:
 
