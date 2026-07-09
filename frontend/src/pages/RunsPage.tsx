@@ -5,16 +5,16 @@ import {
   deleteAgentRun,
   getDangerActionPreflight,
   buildDangerActionConfirmationEvidence,
-  listMainChatAgentTasks,
+  getTasksViewModel,
   resumeMainChatAgentTask,
   cancelMainChatAgentTask,
   retryMainChatAgentAction,
   refreshMainChatAgentTaskContext,
-  getMainChatAgentTaskDetail,
   type AgentRun,
   type DangerActionPreflightView,
-  type MainChatTaskSummary,
-  type RunEvidenceView,
+  type TaskControl,
+  type TaskViewModelItem,
+  type TasksViewModel,
 } from "../tauri";
 import { safePreviewText } from "../utils/safePreview";
 import {
@@ -22,7 +22,6 @@ import {
   planExecuteProductSearchText,
   planExecuteProductSubtitle,
 } from "../utils/planExecuteProduct";
-import { buildRunDisplaySummary } from "../utils/runDisplaySummary";
 import { buildRuntimeDisclosure } from "../utils/runtimeDisclosure";
 import RuntimeDisclosureStrip from "../components/RuntimeDisclosureStrip";
 import ConfirmDangerDialog from "../components/ConfirmDangerDialog";
@@ -47,7 +46,10 @@ function statusIcon(status: string) {
   switch (status) {
     case "running":
       return <Activity size={16} className="text-blue-500 animate-pulse" />;
+    case "waiting_permission":
     case "blocked":
+    case "completed_with_pending_review":
+    case "completed_needs_evidence":
       return <AlertTriangle size={16} className="text-amber-500" />;
     case "timed_out":
       return <Clock size={16} className="text-red-500" />;
@@ -102,8 +104,25 @@ function taskStatusLabel(status: string): string {
     blocked: "已阻断",
     timed_out: "已超时",
     completed: "已完成",
+    completed_with_pending_review: "待审核，未完成",
+    completed_needs_evidence: "缺少完成证据",
     failed: "失败",
     cancelled: "已取消",
+    unknown: "未知",
+  };
+  return labels[status] ?? status.replace(/_/g, " ");
+}
+
+function terminalDeliveryLabel(status: string): string {
+  const labels: Record<string, string> = {
+    not_terminal: "未到终态",
+    delivered: "已交付",
+    missing_final_delivery_evidence: "缺少交付证据",
+    completed_with_pending_review: "待审核，未完成",
+    blocked: "已阻断",
+    failed: "失败",
+    cancelled: "已取消",
+    unknown: "未知",
   };
   return labels[status] ?? status.replace(/_/g, " ");
 }
@@ -118,18 +137,6 @@ function nextControlLabel(control: string): string {
     review_permission: "处理权限",
   };
   return labels[control] ?? control.replace(/_/g, " ");
-}
-
-function evidenceViewForSummary(summary?: MainChatTaskSummary): RunEvidenceView | null {
-  return summary?.evidenceView ?? null;
-}
-
-function lifecycleForRun(run: AgentRun, summary?: MainChatTaskSummary): string {
-  return evidenceViewForSummary(summary)?.lifecycleState ?? summary?.lifecycleState ?? run.status;
-}
-
-function allowedControlsForSummary(summary?: MainChatTaskSummary): string[] {
-  return evidenceViewForSummary(summary)?.allowedControls ?? summary?.allowedControls ?? [];
 }
 
 function reactTraceSearchText(run: AgentRun): string {
@@ -153,18 +160,50 @@ function reactTraceSearchText(run: AgentRun): string {
 const PAGE_SIZE = 20;
 const STALE_RUN_THRESHOLD_MS = 10 * 60 * 1000;
 
-function isPossiblyStaleRun(run: AgentRun, summary?: MainChatTaskSummary): boolean {
-  if (summary?.staleState && !["fresh", "none", "ok"].includes(summary.staleState)) {
-    return true;
-  }
+function isPossiblyStaleRun(run?: AgentRun): boolean {
+  if (!run) return false;
   if (run.status !== "running") return false;
   const startedAt = new Date(run.startedAt).getTime();
   return Number.isFinite(startedAt) && Date.now() - startedAt > STALE_RUN_THRESHOLD_MS;
 }
 
+function taskItemSearchText(item: TaskViewModelItem, run?: AgentRun): string {
+  return [
+    item.title,
+    item.strategy,
+    item.lifecycleStatus,
+    item.terminalDeliveryStatus,
+    item.latestResultPreview?.preview ?? "",
+    item.pendingBlockers.join(" "),
+    item.pendingReviewItemRefs.map(ref => ref.label).join(" "),
+    run ? `${run.kind} ${run.userInput ?? ""} ${run.outputPreview ?? ""}` : "",
+    run ? reactTraceSearchText(run) : "",
+  ].join(" ");
+}
+
+function enabledActionControls(item: TaskViewModelItem): TaskControl[] {
+  return item.allowedControls.filter(
+    control =>
+      control.enabled &&
+      [
+        "task_resume_request",
+        "task_retry_request",
+        "task_cancel_request",
+        "task_refresh_request",
+      ].includes(control.effect)
+  );
+}
+
+function commandForTaskControl(control: TaskControl): "resume" | "cancel" | "retry" | "refresh" {
+  if (control.kind === "resume") return "resume";
+  if (control.kind === "retry") return "retry";
+  if (control.kind === "cancel") return "cancel";
+  return "refresh";
+}
+
 export default function RunsPage() {
   const [runs, setRuns] = useState<AgentRun[]>([]);
-  const [taskSummaries, setTaskSummaries] = useState<MainChatTaskSummary[]>([]);
+  const [tasksViewModel, setTasksViewModel] = useState<TasksViewModel | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [taskActionBusy, setTaskActionBusy] = useState<string | null>(null);
@@ -186,42 +225,42 @@ export default function RunsPage() {
   async function loadRuns() {
     try {
       setLoading(true);
-      const [data, tasks] = await Promise.all([
-        listAgentRuns(100, 0),
-        listMainChatAgentTasks({ includeTerminal: true, includeStale: true }, 100, 0).catch(
-          () => []
-        ),
-      ]);
+      const [data, tasksEnvelope] = await Promise.all([listAgentRuns(100, 0), getTasksViewModel()]);
       setRuns(data);
-      setTaskSummaries(tasks);
+      setTasksViewModel(tasksEnvelope.data);
       setError(null);
     } catch (e) {
       setError(String(e));
+      setTasksViewModel(null);
     } finally {
       setLoading(false);
     }
   }
 
   async function handleTaskControl(
-    summary: MainChatTaskSummary,
-    control: "resume" | "cancel" | "retry" | "refresh"
+    item: TaskViewModelItem,
+    taskControl: TaskControl,
+    command: "resume" | "cancel" | "retry" | "refresh"
   ) {
-    setTaskActionBusy(`${summary.taskSessionId}:${control}`);
+    const taskSessionId = item.taskSessionId;
+    if (!taskSessionId) {
+      setError("任务控制不可用：缺少后端 task session。");
+      return;
+    }
+    setTaskActionBusy(`${taskSessionId}:${taskControl.id}`);
     setError(null);
     try {
-      if (control === "resume") {
-        await resumeMainChatAgentTask(summary.taskSessionId);
-      } else if (control === "cancel") {
-        await cancelMainChatAgentTask(summary.taskSessionId);
-      } else if (control === "refresh") {
-        await refreshMainChatAgentTaskContext(summary.taskSessionId);
+      if (command === "resume") {
+        await resumeMainChatAgentTask(taskSessionId);
+      } else if (command === "cancel") {
+        await cancelMainChatAgentTask(taskSessionId);
+      } else if (command === "refresh") {
+        await refreshMainChatAgentTaskContext(taskSessionId);
       } else {
-        const detail = await getMainChatAgentTaskDetail(summary.taskSessionId);
-        const failedAction = detail.actions.find(action => action.status === "failed");
-        if (!failedAction) {
-          throw new Error("没有可重试的失败 action");
+        if (!taskControl.targetActionId) {
+          throw new Error("后端 read model 未提供可重试 action");
         }
-        await retryMainChatAgentAction(summary.taskSessionId, failedAction.id);
+        await retryMainChatAgentAction(taskSessionId, taskControl.targetActionId);
       }
       await loadRuns();
     } catch (e) {
@@ -231,42 +270,42 @@ export default function RunsPage() {
     }
   }
 
-  const taskSummaryByRunId = new Map(taskSummaries.map(summary => [summary.runId, summary]));
+  const taskItems = tasksViewModel?.items ?? [];
+  const runById = new Map(runs.map(run => [run.id, run]));
 
-  const filteredRuns = runs.filter(run => {
-    const taskSummary = taskSummaryByRunId.get(run.id);
-    const lifecycle = lifecycleForRun(run, taskSummary);
+  const filteredItems = taskItems.filter(item => {
+    const run = item.relatedRunIds.map(runId => runById.get(runId)).find(Boolean);
+    const lifecycle = item.lifecycleStatus;
     // Trash filter
     if (showTrash) {
-      return !!run.deletedAt;
+      return !!run?.deletedAt;
     } else {
-      if (run.deletedAt) return false;
+      if (run?.deletedAt) return false;
     }
 
     // Status filter
     if (statusFilter !== "all" && lifecycle !== statusFilter) return false;
 
     // Kind filter
-    if (kindFilter !== "all" && run.kind !== kindFilter) return false;
+    if (kindFilter !== "all" && (run?.kind ?? item.strategy) !== kindFilter) return false;
 
     // Search
     if (searchQuery) {
       const query = searchQuery.toLowerCase();
-      const displaySummary = buildRunDisplaySummary(run, taskSummary);
-      const productTrace = getPlanExecuteProductTrace(run);
+      const productTrace = run ? getPlanExecuteProductTrace(run) : null;
       const productText = productTrace ? planExecuteProductSearchText(productTrace) : "";
-      const outputText = productTrace ? "" : "";
-      const traceText = reactTraceSearchText(run);
-      const text =
-        `${outputText} ${run.kind} ${displaySummary.searchableText} ${productText} ${traceText}`.toLowerCase();
+      const text = `${taskItemSearchText(item, run)} ${productText}`.toLowerCase();
       if (!text.includes(query)) return false;
     }
 
     return true;
   });
 
-  const paginatedRuns = filteredRuns.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
-  const totalPages = Math.ceil(filteredRuns.length / PAGE_SIZE);
+  const paginatedItems = filteredItems.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const totalPages = Math.ceil(filteredItems.length / PAGE_SIZE);
+  const paginatedSelectableRunIds = paginatedItems
+    .map(item => item.relatedRunIds.map(runId => runById.get(runId)).find(Boolean)?.id)
+    .filter((id): id is string => Boolean(id));
 
   function toggleSelect(runId: string) {
     const newSet = new Set(selectedRuns);
@@ -279,10 +318,13 @@ export default function RunsPage() {
   }
 
   function selectAll() {
-    if (selectedRuns.size === paginatedRuns.length) {
+    if (
+      paginatedSelectableRunIds.length > 0 &&
+      paginatedSelectableRunIds.every(id => selectedRuns.has(id))
+    ) {
       setSelectedRuns(new Set());
     } else {
-      setSelectedRuns(new Set(paginatedRuns.map(r => r.id)));
+      setSelectedRuns(new Set(paginatedSelectableRunIds));
     }
   }
 
@@ -332,8 +374,11 @@ export default function RunsPage() {
     { value: "blocked", label: "已阻断" },
     { value: "timed_out", label: "已超时" },
     { value: "completed", label: "已完成" },
+    { value: "completed_with_pending_review", label: "待审核，未完成" },
+    { value: "completed_needs_evidence", label: "缺少完成证据" },
     { value: "failed", label: "失败" },
     { value: "cancelled", label: "已取消" },
+    { value: "unknown", label: "未知" },
   ];
 
   const kindOptions = [
@@ -380,7 +425,7 @@ export default function RunsPage() {
               {showTrash ? "已删除记录" : "Runs"}
             </h1>
             <div className="text-sm text-stone-500">
-              运行记录 · 共 {filteredRuns.length} 条{showTrash && " (当前版本不可恢复)"}
+              后端任务视图 · 共 {filteredItems.length} 条{showTrash && " (当前版本不可恢复)"}
             </div>
           </div>
           <div className="flex gap-2">
@@ -511,7 +556,7 @@ export default function RunsPage() {
               重新加载
             </button>
           </div>
-        ) : paginatedRuns.length === 0 ? (
+        ) : paginatedItems.length === 0 ? (
           <div className="text-center py-12 text-stone-400">
             <Activity size={48} className="mx-auto mb-4 opacity-30" />
             <p>{showTrash ? "暂无已删除记录" : "暂无运行记录"}</p>
@@ -529,7 +574,8 @@ export default function RunsPage() {
                 <input
                   type="checkbox"
                   checked={
-                    paginatedRuns.length > 0 && paginatedRuns.every(r => selectedRuns.has(r.id))
+                    paginatedSelectableRunIds.length > 0 &&
+                    paginatedSelectableRunIds.every(runId => selectedRuns.has(runId))
                   }
                   onChange={selectAll}
                   className="rounded border-stone-300"
@@ -537,23 +583,23 @@ export default function RunsPage() {
                 <span className="text-xs text-stone-500">全选本页</span>
               </div>
 
-              {paginatedRuns.map(run => {
-                const productTrace = getPlanExecuteProductTrace(run);
-                const taskSummary = taskSummaryByRunId.get(run.id);
-                const evidenceView = evidenceViewForSummary(taskSummary);
-                const lifecycle = lifecycleForRun(run, taskSummary);
-                const allowedControls = allowedControlsForSummary(taskSummary);
-                const displaySummary = buildRunDisplaySummary(run, taskSummary);
-                const subtitle = productTrace ? runSubtitle(run) : displaySummary.subtitle;
-                const stale = isPossiblyStaleRun(run, taskSummary);
-                const actionControls = allowedControls.filter(control =>
-                  ["resume", "retry", "cancel", "refresh_context"].includes(control)
-                );
+              {paginatedItems.map(item => {
+                const run = item.relatedRunIds.map(runId => runById.get(runId)).find(Boolean);
+                const productTrace = run ? getPlanExecuteProductTrace(run) : null;
+                const lifecycle = item.lifecycleStatus;
+                const subtitle = productTrace
+                  ? runSubtitle(run!)
+                  : item.latestResultPreview?.preview
+                    ? safePreviewText(item.latestResultPreview.preview, 96)
+                    : terminalDeliveryLabel(item.terminalDeliveryStatus);
+                const stale = isPossiblyStaleRun(run);
+                const actionControls = enabledActionControls(item);
+                const checkboxRunId = run?.id;
                 return (
                   <div
-                    key={run.id}
+                    key={item.canonicalTaskId}
                     className={`bg-white rounded-xl border p-4 cursor-pointer hover:shadow-md transition-shadow ${
-                      selectedRuns.has(run.id)
+                      checkboxRunId && selectedRuns.has(checkboxRunId)
                         ? "border-stone-900 ring-1 ring-stone-900"
                         : "border-stone-200"
                     }`}
@@ -561,120 +607,103 @@ export default function RunsPage() {
                     <div className="flex items-start gap-3">
                       <input
                         type="checkbox"
-                        checked={selectedRuns.has(run.id)}
+                        checked={Boolean(checkboxRunId && selectedRuns.has(checkboxRunId))}
+                        disabled={!checkboxRunId}
                         onChange={e => {
                           e.stopPropagation();
-                          toggleSelect(run.id);
+                          if (checkboxRunId) toggleSelect(checkboxRunId);
                         }}
                         className="mt-1 rounded border-stone-300"
                       />
-                      <div className="flex-1" onClick={() => navigate(runDetailRoute(run.id))}>
+                      <div
+                        className="flex-1"
+                        onClick={() => {
+                          const targetRunId = item.relatedRunIds[0];
+                          if (targetRunId) navigate(runDetailRoute(targetRunId));
+                        }}
+                      >
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-3">
                             {statusIcon(lifecycle)}
                             <div>
-                              <div className="font-medium text-stone-900">{runKindLabel(run)}</div>
+                              <div className="font-medium text-stone-900">
+                                {run ? runKindLabel(run) : item.strategy.replace(/_/g, " ")}
+                              </div>
                               <div className="text-xs text-stone-500 mt-0.5">{subtitle}</div>
                             </div>
                           </div>
                           <div className="text-right">
-                            <div className="text-xs text-stone-400 flex items-center gap-1">
-                              <Clock size={12} />
-                              {new Date(run.startedAt).toLocaleString()}
-                            </div>
-                            {!productTrace && run.outputPreview && (
+                            {item.updatedAt && (
+                              <div className="text-xs text-stone-400 flex items-center gap-1">
+                                <Clock size={12} />
+                                {new Date(item.updatedAt).toLocaleString()}
+                              </div>
+                            )}
+                            {!productTrace && run?.outputPreview && (
                               <div className="text-xs text-stone-500 mt-1 max-w-xs truncate">
                                 {safePreviewText(run.outputPreview, 96)}
                               </div>
                             )}
                           </div>
                         </div>
-                        <div className="mt-3">
-                          <RuntimeDisclosureStrip
-                            view={buildRuntimeDisclosure(run, {
-                              taskSummary,
-                              evidenceView,
-                              runtimeRouteEvidence:
-                                evidenceView?.routeEvidence ?? taskSummary?.routeEvidence ?? null,
-                              strictRuntimeRouteEvidence: Boolean(evidenceView),
-                            })}
-                            runId={run.id}
-                            compact
-                          />
+                        {run && (
+                          <div className="mt-3">
+                            <RuntimeDisclosureStrip
+                              view={buildRuntimeDisclosure(run, {
+                                strictRuntimeRouteEvidence: false,
+                              })}
+                              runId={run.id}
+                              compact
+                            />
+                          </div>
+                        )}
+                        <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs text-stone-600">
+                          <span className="font-semibold text-stone-800">
+                            任务{taskStatusLabel(lifecycle)}
+                          </span>
+                          <span>
+                            下一步：
+                            {nextControlLabel(item.nextRecommendedControl)}
+                          </span>
+                          {stale && (
+                            <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 font-medium text-amber-800">
+                              连续性需复核
+                            </span>
+                          )}
+                          <span>
+                            交付：
+                            {terminalDeliveryLabel(item.terminalDeliveryStatus)}
+                          </span>
+                          {item.pendingBlockers.length > 0 && (
+                            <span>阻断：{item.pendingBlockers.slice(0, 3).join(", ")}</span>
+                          )}
+                          {item.pendingReviewItemRefs.length > 0 && (
+                            <span>待审核：{item.pendingReviewItemRefs.length}</span>
+                          )}
+                          {actionControls.length > 0 && (
+                            <div className="ml-auto flex items-center gap-1">
+                              {actionControls.map(control => (
+                                <button
+                                  key={control.id}
+                                  type="button"
+                                  onClick={event => {
+                                    event.stopPropagation();
+                                    void handleTaskControl(
+                                      item,
+                                      control,
+                                      commandForTaskControl(control)
+                                    );
+                                  }}
+                                  disabled={taskActionBusy !== null}
+                                  title={control.disabledReason ?? control.effect}
+                                  className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700 disabled:opacity-50"
+                                >
+                                  {control.label || nextControlLabel(control.kind)}
+                                </button>
+                              ))}
+                            </div>
+                          )}
                         </div>
-                        {taskSummary && (
-                          <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs text-stone-600">
-                            <span className="font-semibold text-stone-800">
-                              任务{taskStatusLabel(lifecycle)}
-                            </span>
-                            <span>
-                              下一步：
-                              {nextControlLabel(
-                                evidenceView?.nextRecommendedControl ??
-                                  taskSummary.nextRecommendedControl
-                              )}
-                            </span>
-                            {stale && (
-                              <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 font-medium text-amber-800">
-                                连续性需复核
-                              </span>
-                            )}
-                            {evidenceView && (
-                              <>
-                                <span>
-                                  事件：
-                                  {evidenceView.eventTimeline[evidenceView.eventTimeline.length - 1]
-                                    ?.summary ?? "无"}
-                                </span>
-                                <span>
-                                  证据：{evidenceView.actionCount} action /{" "}
-                                  {evidenceView.observationCount} observation
-                                </span>
-                                {evidenceView.blockers.length > 0 && (
-                                  <span>阻断：{evidenceView.blockers.join(", ")}</span>
-                                )}
-                                {evidenceView.proposals.length > 0 && (
-                                  <span>提案：{evidenceView.proposals.join(", ")}</span>
-                                )}
-                                {evidenceView.planRefs.length > 0 && (
-                                  <span>Refs：{evidenceView.planRefs.slice(0, 2).join(", ")}</span>
-                                )}
-                                <span>脱敏：{evidenceView.redactionState}</span>
-                              </>
-                            )}
-                            {actionControls.length > 0 && (
-                              <div className="ml-auto flex items-center gap-1">
-                                {actionControls.map(control => (
-                                  <button
-                                    key={control}
-                                    type="button"
-                                    onClick={event => {
-                                      event.stopPropagation();
-                                      const command =
-                                        control === "refresh_context"
-                                          ? "refresh"
-                                          : control === "resume"
-                                            ? "resume"
-                                            : control === "retry"
-                                              ? "retry"
-                                              : "cancel";
-                                      void handleTaskControl(taskSummary, command);
-                                    }}
-                                    disabled={taskActionBusy !== null}
-                                    className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700 disabled:opacity-50"
-                                  >
-                                    {nextControlLabel(control)}
-                                  </button>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                        )}
-                        {!taskSummary && run.status === "running" && (
-                          <div className="mt-3 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs text-stone-500">
-                            旧 run 或缺少 task session，当前无法直接控制。
-                          </div>
-                        )}
                         {productTrace && (
                           <div className="mt-2 flex flex-wrap gap-2 text-xs">
                             <span className="rounded bg-stone-100 px-2 py-1 text-stone-700">
@@ -708,12 +737,12 @@ export default function RunsPage() {
                               )}
                           </div>
                         )}
-                        {run.error && (
+                        {run?.error && (
                           <div className="mt-2 text-xs text-red-500 bg-red-50 rounded px-2 py-1">
                             {run.error.message}
                           </div>
                         )}
-                        {!productTrace && run.generatedProposals.length > 0 && (
+                        {!productTrace && run && run.generatedProposals.length > 0 && (
                           <div className="mt-2 text-xs text-blue-600 bg-blue-50 rounded px-2 py-1">
                             待确认 {run.generatedProposals.length}
                           </div>

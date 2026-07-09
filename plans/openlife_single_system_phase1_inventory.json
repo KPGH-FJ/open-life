@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
-  "last_updated": "2026-07-07",
-  "status": "phase7_old_system_deletion_manifest_synchronized",
+  "last_updated": "2026-07-09",
+  "status": "phase7_backend_readmodel_r4_tasks_workspace_synchronized",
   "product_authorities": [
     {
       "id": "agents_md",
@@ -661,62 +661,538 @@
       "expected_count": 12
     }
   ],
+  "backend_readmodel_review_authority_surfaces": [
+    {
+      "id": "r0_life_state_projection",
+      "path": "src-tauri/src/life_state_projection.rs",
+      "phase": 6,
+      "disposition": "keep",
+      "reason": "Backend-owned shared projection for pending/readiness/task/safe-mode/tool-permission/safe-path state; not a full surface-specific ViewModel.",
+      "concern": "shared_projection",
+      "backend_owner": true,
+      "r0_authority_classification": "backend_partial_projection_owner",
+      "read_model_status": "partial_backend_read_model"
+    },
+    {
+      "id": "r1_product_read_model_contract",
+      "path": "openlife-core/src/agent/product_read_model.rs",
+      "phase": 8,
+      "disposition": "keep",
+      "reason": "Backend-owned shared ViewModel envelope/action/evidence/review/provider-privacy contract introduced by R1; it defines shared types only and does not claim any surface-specific read model exists.",
+      "concern": "shared_viewmodel_contract",
+      "backend_owner": true,
+      "r0_authority_classification": "backend_shared_contract_owner",
+      "read_model_status": "implemented_backend_shared_contract"
+    },
+    {
+      "id": "r2_review_item_contract",
+      "path": "openlife-core/src/agent/review_item.rs",
+      "phase": 8,
+      "disposition": "keep",
+      "reason": "Backend-owned ReviewItem and ReviewCenterViewModel contract introduced by R2; owns review action eligibility, materialization status labels, target refs, evidence refs, and task resume request relation for review items. Resume eligibility is not inferred from Approved alone: durable proposal types require applied/not_applicable materialization evidence, while tool permission resume explicitly declares resumeRequiresMaterialization=false.",
+      "concern": "review_center_viewmodel",
+      "backend_owner": true,
+      "r0_authority_classification": "backend_review_center_owner",
+      "read_model_status": "implemented_review_item_contract"
+    },
+    {
+      "id": "r2_tauri_review_center_read_model",
+      "path": "src-tauri/src/read_models/review_center.rs",
+      "phase": 8,
+      "disposition": "keep",
+      "reason": "Tauri ReviewCenterViewModel command owner introduced by R2; assembles proposal records, safe-mode state, safe paths, and memory lifecycle materialization proof into backend-owned review items.",
+      "concern": "review_center_viewmodel",
+      "backend_owner": true,
+      "r0_authority_classification": "backend_review_center_command_owner",
+      "read_model_status": "implemented_review_center_view_model_command"
+    },
+    {
+      "id": "r3_lifemodel_view_model_contract",
+      "path": "openlife-core/src/agent/life_model_view_model.rs",
+      "phase": 8,
+      "disposition": "keep",
+      "reason": "Backend-owned LifeModelViewModel contract introduced by R3; owns LifeModel truth mode labels, dimension summaries, pending/update/materialization counts, manual override state, memory linkage summary, and fail-closed limitations.",
+      "concern": "lifemodel_viewmodel",
+      "backend_owner": true,
+      "r0_authority_classification": "backend_lifemodel_view_model_owner",
+      "read_model_status": "implemented_lifemodel_view_model_contract"
+    },
+    {
+      "id": "r3_tauri_lifemodel_read_model",
+      "path": "src-tauri/src/read_models/life_model.rs",
+      "phase": 8,
+      "disposition": "keep",
+      "reason": "Tauri LifeModelViewModel command owner introduced by R3; assembles existing LifeModel, current compatibility view, projection, ReviewCenter items, proposal records, memory counts, and memory tier summaries into a backend-owned fail-closed envelope.",
+      "concern": "lifemodel_viewmodel",
+      "backend_owner": true,
+      "r0_authority_classification": "backend_lifemodel_view_model_command_owner",
+      "read_model_status": "implemented_lifemodel_view_model_command"
+    },
+    {
+      "id": "r4_tasks_workspace_view_model_contract",
+      "path": "openlife-core/src/agent/tasks_view_model.rs",
+      "phase": 8,
+      "disposition": "keep",
+      "reason": "Backend-owned TasksViewModel and limited WorkspaceViewModel contract introduced by R4; owns merged Main Chat task/AgentRun identity, task lifecycle labels, terminal delivery fail-closed status, pending review refs, and request-only task controls. Missing final_delivery.status is not delivered; only completed/delivered status proves delivered, and completed_with_pending_items remains pending-review semantics.",
+      "concern": "tasks_workspace_viewmodel",
+      "backend_owner": true,
+      "r0_authority_classification": "backend_tasks_workspace_view_model_owner",
+      "read_model_status": "implemented_tasks_workspace_view_model_contract"
+    },
+    {
+      "id": "r4_tauri_tasks_workspace_read_model",
+      "path": "src-tauri/src/read_models/tasks.rs",
+      "phase": 8,
+      "disposition": "keep",
+      "reason": "Tauri TasksViewModel and WorkspaceViewModel command owner introduced by R4; assembles Main Chat task details, AgentRun evidence, ReviewCenter items, and fail-closed provider/privacy placeholder into backend-owned envelopes. TaskDetail final_delivery now requires a final-result transcript entry with explicit canonical status; stored final_summary alone is not final delivery proof.",
+      "concern": "tasks_workspace_viewmodel",
+      "backend_owner": true,
+      "r0_authority_classification": "backend_tasks_workspace_view_model_command_owner",
+      "read_model_status": "implemented_tasks_workspace_view_model_commands"
+    },
+    {
+      "id": "r0_review_workflow",
+      "path": "openlife-core/src/agent/review_workflow.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "reason": "ReviewWorkflow is the backend governance boundary for product proposal creation, but it is not yet a unified ReviewCenterViewModel owner.",
+      "concern": "review_governance",
+      "backend_owner": true,
+      "r0_authority_classification": "backend_review_governance_boundary",
+      "read_model_status": "review_governance_boundary_not_review_center"
+    },
+    {
+      "id": "r0_proposal_store",
+      "path": "openlife-core/src/agent/proposal_store.rs",
+      "phase": 4,
+      "disposition": "storage_only",
+      "reason": "ProposalStore remains storage only and must not decide review action eligibility or durable materialization truth.",
+      "concern": "review_storage",
+      "backend_owner": false,
+      "r0_authority_classification": "backend_storage_only",
+      "read_model_status": "storage_only_not_read_model_owner"
+    },
+    {
+      "id": "r0_proposal_review_read_model",
+      "path": "openlife-core/src/agent/backend_contract_freeze.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "reason": "ProposalReviewReadModel exists as a partial metadata-safe proposal review model; it is not the full ReviewItem/ReviewCenterViewModel contract.",
+      "concern": "review_read_model",
+      "backend_owner": true,
+      "r0_authority_classification": "backend_partial_review_read_model",
+      "read_model_status": "partial_proposal_review_read_model"
+    },
+    {
+      "id": "r0_memory_gateway",
+      "path": "openlife-core/src/memory_gateway.rs",
+      "phase": 5,
+      "disposition": "keep",
+      "reason": "MemoryGateway owns lane/write decisions and supplies primitives consumed by R5 MemoryViewModel; it is not the product memory summary owner.",
+      "concern": "memory_gateway",
+      "backend_owner": true,
+      "r0_authority_classification": "backend_memory_gateway_boundary",
+      "read_model_status": "memory_gateway_primitives_consumed_by_memory_view_model"
+    },
+    {
+      "id": "r5_memory_view_model_contract",
+      "path": "openlife-core/src/agent/memory_view_model.rs",
+      "phase": 5,
+      "disposition": "keep",
+      "reason": "R5 MemoryViewModel owns product memory lane, lifecycle, materialization, review refs, and LifeModel linkage summary; vector tier stats are supporting telemetry only.",
+      "concern": "memory_view_model",
+      "backend_owner": true,
+      "r0_authority_classification": "backend_memory_view_model_contract",
+      "read_model_status": "implemented_memory_view_model_contract"
+    },
+    {
+      "id": "r5_memory_view_model_command",
+      "path": "src-tauri/src/read_models/memory.rs",
+      "phase": 5,
+      "disposition": "keep",
+      "reason": "R5 Tauri command owner loads MemoryLifecycleStore, ReviewCenterViewModel, and vector telemetry into the backend MemoryViewModel envelope.",
+      "concern": "memory_view_model",
+      "backend_owner": true,
+      "r0_authority_classification": "backend_memory_view_model_command",
+      "read_model_status": "implemented_memory_view_model_command"
+    },
+    {
+      "id": "r0_memory_lifecycle_store",
+      "path": "openlife-core/src/agent/memory_lifecycle.rs",
+      "phase": 5,
+      "disposition": "storage_only",
+      "reason": "Memory lifecycle storage owns materialization records consumed by R5 MemoryViewModel; it remains storage and not the product memory summary owner.",
+      "concern": "memory_materialization_storage",
+      "backend_owner": false,
+      "r0_authority_classification": "backend_storage_only",
+      "read_model_status": "memory_lifecycle_storage_consumed_by_memory_view_model"
+    },
+    {
+      "id": "r0_core_lifemodel_write_gateway",
+      "path": "openlife-core/src/life_model_write_gateway.rs",
+      "phase": 5,
+      "disposition": "keep",
+      "reason": "Core LifeModelWriteGateway decides canonical write/materialization eligibility and stale conflicts; it is not a LifeModelViewModel.",
+      "concern": "lifemodel_materialization",
+      "backend_owner": true,
+      "r0_authority_classification": "backend_lifemodel_write_gateway_boundary",
+      "read_model_status": "materialization_gateway_not_view_model"
+    },
+    {
+      "id": "r0_tauri_lifemodel_write_gateway",
+      "path": "src-tauri/src/life_model_write_gateway.rs",
+      "phase": 5,
+      "disposition": "keep",
+      "reason": "Tauri LifeModelWriteGateway adapter applies governed writes and records conflicts; it is not a LifeModelViewModel command owner.",
+      "concern": "lifemodel_materialization",
+      "backend_owner": true,
+      "r0_authority_classification": "backend_lifemodel_write_gateway_adapter",
+      "read_model_status": "materialization_gateway_not_view_model"
+    },
+    {
+      "id": "r0_main_chat_runtime_contract",
+      "path": "openlife-core/src/agent/main_chat_runtime_contract.rs",
+      "phase": 6,
+      "disposition": "keep",
+      "reason": "Main Chat runtime contract carries task/session/final-delivery primitives consumed by R4 TasksViewModel; it remains a primitive source, not the merged task/workspace read-model owner.",
+      "concern": "task_runtime_primitives",
+      "backend_owner": true,
+      "r0_authority_classification": "backend_task_runtime_primitives",
+      "read_model_status": "task_runtime_primitives_consumed_by_tasks_view_model"
+    },
+    {
+      "id": "r0_tasks_store",
+      "path": "openlife-core/src/tasks.rs",
+      "phase": 6,
+      "disposition": "keep",
+      "reason": "Task storage primitives exist, but canonical merged AgentRun/Main Chat task identity is owned by R4 TasksViewModel.",
+      "concern": "task_store_primitives",
+      "backend_owner": true,
+      "r0_authority_classification": "backend_task_store_primitives",
+      "read_model_status": "task_store_primitives_not_tasks_view_model_owner"
+    },
+    {
+      "id": "r0_main_chat_task_controls",
+      "path": "src-tauri/src/main_chat_task_controls.rs",
+      "phase": 6,
+      "disposition": "keep",
+      "reason": "Task control commands and continuity diagnostics remain action/detail primitives; R4 TasksViewModel now owns product lifecycle and allowed-control read-model fields.",
+      "concern": "task_controls",
+      "backend_owner": true,
+      "r0_authority_classification": "backend_task_control_primitives",
+      "read_model_status": "task_control_primitives_consumed_by_tasks_view_model"
+    },
+    {
+      "id": "r0_provider_validation",
+      "path": "src-tauri/src/provider_validation.rs",
+      "phase": 6,
+      "disposition": "keep",
+      "reason": "Provider validation primitives are consumed by R5 ProviderPrivacyBoundarySummary; validation does not prove external transmission occurred.",
+      "concern": "provider_privacy_primitives",
+      "backend_owner": true,
+      "r0_authority_classification": "backend_provider_validation_primitives",
+      "read_model_status": "provider_validation_primitives_consumed_by_provider_privacy_boundary"
+    },
+    {
+      "id": "r5_provider_privacy_boundary_contract",
+      "path": "openlife-core/src/agent/provider_privacy_boundary.rs",
+      "phase": 6,
+      "disposition": "keep",
+      "reason": "R5 provider/privacy contract builds a fail-closed ProviderPrivacyBoundarySummary from config, validation, policy, and available route evidence. prefer_local_model and local_only_required are constraints/preferences, not proof of ExternalTransmissionStatus::NotSent without observed runtime route evidence.",
+      "concern": "provider_privacy_boundary",
+      "backend_owner": true,
+      "r0_authority_classification": "backend_provider_privacy_boundary_contract",
+      "read_model_status": "implemented_provider_privacy_boundary_contract"
+    },
+    {
+      "id": "r5_provider_privacy_boundary_command",
+      "path": "src-tauri/src/read_models/provider_privacy.rs",
+      "phase": 6,
+      "disposition": "keep",
+      "reason": "R5 Tauri command owner exposes ProviderPrivacyBoundarySummary as a backend read-model envelope for Settings, Today, and Workspace consumers. It does not translate prefer_local_model into localOnlyRequired or NotSent evidence; missing route evidence remains unknown with a warning.",
+      "concern": "provider_privacy_boundary",
+      "backend_owner": true,
+      "r0_authority_classification": "backend_provider_privacy_boundary_command",
+      "read_model_status": "implemented_provider_privacy_boundary_command"
+    },
+    {
+      "id": "r0_main_chat_runtime_status",
+      "path": "src-tauri/src/main_chat_runtime_status.rs",
+      "phase": 6,
+      "disposition": "keep",
+      "reason": "Runtime status supplies evidence, but it is not a reusable ProviderPrivacyBoundarySummary or SettingsViewModel owner.",
+      "concern": "provider_privacy_primitives",
+      "backend_owner": true,
+      "r0_authority_classification": "backend_runtime_status_primitives",
+      "read_model_status": "provider_privacy_primitives_only"
+    },
+    {
+      "id": "r0_privacy_policy_primitives",
+      "path": "openlife-core/src/privacy.rs",
+      "phase": 6,
+      "disposition": "keep",
+      "reason": "Privacy primitives exist, but product pages still need a backend-owned boundary summary rather than local route labels.",
+      "concern": "provider_privacy_primitives",
+      "backend_owner": true,
+      "r0_authority_classification": "backend_privacy_primitives",
+      "read_model_status": "provider_privacy_primitives_only"
+    },
+    {
+      "id": "r0_model_router",
+      "path": "openlife-core/src/agent/model_router.rs",
+      "phase": 6,
+      "disposition": "keep",
+      "reason": "ModelRouter is privacy-aware routing infrastructure, not the shared provider/privacy product summary.",
+      "concern": "provider_privacy_primitives",
+      "backend_owner": true,
+      "r0_authority_classification": "backend_model_router_primitives",
+      "read_model_status": "provider_privacy_primitives_only"
+    },
+    {
+      "id": "r0_frontend_tauri_bridge",
+      "path": "frontend/src/tauri.ts",
+      "phase": 7,
+      "disposition": "keep",
+      "reason": "Typed Tauri bridge declarations mirror the backend shared read-model contract and callable shapes; they are not proof that a surface-specific backend command or read-model owner exists.",
+      "concern": "frontend_bridge",
+      "backend_owner": false,
+      "r0_authority_classification": "frontend_product_bridge",
+      "read_model_status": "frontend_bridge_mirror_not_backend_owner"
+    },
+    {
+      "id": "r0_frontend_viewmodel_envelope",
+      "path": "frontend/src/viewmodels/shared/viewModelEnvelope.ts",
+      "phase": 8,
+      "disposition": "keep",
+      "reason": "Shared ViewModel envelope import path is now a type-only frontend alias to the Tauri mirror of the backend product_read_model contract.",
+      "concern": "shared_viewmodel_contract",
+      "backend_owner": false,
+      "r0_authority_classification": "frontend_transitional_adapter",
+      "read_model_status": "frontend_alias_to_backend_contract_mirror"
+    },
+    {
+      "id": "r0_today_viewmodel_adapter",
+      "path": "frontend/src/viewmodels/today/todayViewModelAdapter.ts",
+      "phase": 8,
+      "disposition": "keep",
+      "reason": "Today adapter is preview-only frontend assembly over LifeStateProjection and daily goals, not a backend TodayViewModel owner.",
+      "concern": "today_viewmodel_preview",
+      "backend_owner": false,
+      "r0_authority_classification": "frontend_preview_adapter",
+      "read_model_status": "frontend_only_preview_adapter"
+    },
+    {
+      "id": "r0_lifemodel_viewmodel_adapter",
+      "path": "frontend/src/viewmodels/lifemodel/lifeModelViewModelAdapter.ts",
+      "phase": 8,
+      "disposition": "keep",
+      "reason": "LifeModel frontend adapter is now a thin delegate/type alias to the backend LifeModelViewModel command; it must not rebuild truth from raw primitives.",
+      "concern": "lifemodel_viewmodel_frontend_alias",
+      "backend_owner": false,
+      "r0_authority_classification": "frontend_transitional_adapter",
+      "read_model_status": "frontend_alias_to_backend_lifemodel_view_model"
+    }
+  ],
   "frontend_multi_source_state_surfaces": [
     {
       "id": "frontend_today_multi_source_state",
       "path": "frontend/src/pages/TodayPage.tsx",
       "phase": 6,
       "disposition": "absorb_then_delete",
-      "reason": "Today assembles product state from diagnostics, daily goals, and proposals."
+      "reason": "Today reads LifeStateProjection and daily goals; Today-specific classification and next action remain limited until a backend Today read model exists, and R6 guards prevent raw proposal/diagnostic/provider reconstruction.",
+      "r0_surface_classification": "product_page_raw_read_convergence_target",
+      "r0_raw_source_scan_hit": true,
+      "backend_owner": false
     },
     {
       "id": "frontend_mailbox_multi_source_state",
       "path": "frontend/src/pages/MailboxPage.tsx",
       "phase": 6,
       "disposition": "absorb_then_delete",
-      "reason": "Mailbox assembles review state from proposals, config, and diagnostics."
+      "reason": "Mailbox still reads proposal payloads for display and LifeStateProjection for product pending count, but R2 moves review action eligibility and materialization status behind backend ReviewCenterViewModel.",
+      "r0_surface_classification": "product_page_raw_read_convergence_target",
+      "r0_raw_source_scan_hit": true,
+      "backend_owner": false
     },
     {
       "id": "frontend_chat_multi_source_state",
       "path": "frontend/src/pages/ChatPage.tsx",
       "phase": 6,
       "disposition": "absorb_then_delete",
-      "reason": "Chat composes diagnostics, scheduler config, LifeModel, daily goals, task state, skills, and snapshots."
+      "reason": "Chat still composes diagnostics, scheduler config, LifeModel, daily goals, projection, and raw trace panels, but R4 moves primary task lifecycle and task-control availability to backend TasksViewModel.",
+      "r0_surface_classification": "product_page_tasks_viewmodel_consumer_with_remaining_raw_reads",
+      "r0_raw_source_scan_hit": true,
+      "backend_owner": false
     },
     {
       "id": "frontend_companion_multi_source_state",
       "path": "frontend/src/pages/CompanionPage.tsx",
       "phase": 6,
       "disposition": "absorb_then_delete",
-      "reason": "Companion state should be folded into the product projection where shared."
+      "reason": "Companion is a product wrapper over ChatPage and inherits Chat reconstruction risks without directly calling raw read APIs.",
+      "r0_surface_classification": "product_page_wrapper",
+      "r0_raw_source_scan_hit": false,
+      "backend_owner": false
     },
     {
       "id": "frontend_lifemodel_multi_source_state",
       "path": "frontend/src/pages/LifeModelPage.tsx",
       "phase": 6,
       "disposition": "absorb_then_delete",
-      "reason": "LifeModel page combines current view, diagnostics, and proposal state."
+      "reason": "LifeModel page consumes backend LifeModelViewModel for truth, dimensions, review/update/materialization, and memory-linkage summaries; remaining raw scan hit is projection/build-session context for safe-mode and builder-session display.",
+      "r0_surface_classification": "product_page_backend_lifemodel_viewmodel_consumer_with_projection",
+      "r0_raw_source_scan_hit": true,
+      "backend_owner": false
     },
     {
       "id": "frontend_settings_multi_source_state",
       "path": "frontend/src/pages/SettingsPage.tsx",
       "phase": 6,
       "disposition": "absorb_then_delete",
-      "reason": "Settings presents readiness from diagnostics, runtime, router, permissions, provider config, and cache state."
+      "reason": "Settings still presents diagnostics and projection state for support/settings display; R5 MemoryViewModel and ProviderPrivacyBoundarySummary now own those product summaries, while a full SettingsViewModel remains missing.",
+      "r0_surface_classification": "product_page_raw_read_convergence_target",
+      "r0_raw_source_scan_hit": true,
+      "backend_owner": false
     },
     {
       "id": "frontend_lifemodel_editor_direct_save",
       "path": "frontend/src/pages/LifeModelEditor.tsx",
       "phase": 5,
       "disposition": "absorb_then_delete",
-      "reason": "LifeModel editor calls manual save and must remain an explicit governed override."
+      "reason": "LifeModel editor reads raw LifeModel and diagnostics around manual override flows; the override must remain explicit and governed.",
+      "r0_surface_classification": "manual_override_surface",
+      "r0_raw_source_scan_hit": true,
+      "backend_owner": false
+    },
+    {
+      "id": "frontend_runs_multi_source_state",
+      "path": "frontend/src/pages/RunsPage.tsx",
+      "phase": 8,
+      "disposition": "absorb_then_delete",
+      "reason": "Runs consumes backend TasksViewModel for merged lifecycle, terminal delivery status, review refs, and allowed task controls; remaining AgentRun reads are supporting evidence/delete targets, not lifecycle authority.",
+      "r0_surface_classification": "product_page_tasks_viewmodel_consumer_with_agentrun_evidence",
+      "r0_raw_source_scan_hit": true,
+      "backend_owner": false
+    },
+    {
+      "id": "frontend_agent_run_detail_multi_source_state",
+      "path": "frontend/src/pages/AgentRunDetail.tsx",
+      "phase": 8,
+      "disposition": "absorb_then_delete",
+      "reason": "AgentRun detail fetches Main Chat task summaries to relate run/task state locally; task identity should converge behind TasksViewModel.",
+      "r0_surface_classification": "product_detail_raw_read_convergence_target",
+      "r0_raw_source_scan_hit": true,
+      "backend_owner": false
+    },
+    {
+      "id": "frontend_memory_search_multi_source_state",
+      "path": "frontend/src/pages/MemorySearch.tsx",
+      "phase": 8,
+      "disposition": "absorb_then_delete",
+      "reason": "MemorySearch consumes backend MemoryViewModel for product memory lifecycle and materialization counts; remaining diagnostics/archive reads are technical action support, not product memory truth.",
+      "r0_surface_classification": "technical_memory_surface_memory_view_model_consumer",
+      "r0_raw_source_scan_hit": true,
+      "backend_owner": false
+    },
+    {
+      "id": "frontend_today_v2_preview_multi_source_state",
+      "path": "frontend/src/pages/TodayV2PreviewPage.tsx",
+      "phase": 8,
+      "disposition": "keep",
+      "reason": "Today V2 preview route reads projection and daily goals into a frontend-only adapter; it is unlisted preview evidence, not backend ViewModel authority.",
+      "r0_surface_classification": "frontend_preview_only",
+      "r0_raw_source_scan_hit": true,
+      "backend_owner": false
+    },
+    {
+      "id": "frontend_chat_context_multi_source_state",
+      "path": "frontend/src/pages/chat/useChatContext.ts",
+      "phase": 8,
+      "disposition": "absorb_then_delete",
+      "reason": "Chat context hook reads diagnostics, scheduler config, and LifeModel primitives for Chat; backend Workspace/Tasks/LifeModel read models should replace product-truth assembly.",
+      "r0_surface_classification": "product_hook_raw_read_convergence_target",
+      "r0_raw_source_scan_hit": true,
+      "backend_owner": false
+    },
+    {
+      "id": "frontend_builder_raw_diagnostics_state",
+      "path": "frontend/src/pages/BuilderPage.tsx",
+      "phase": 8,
+      "disposition": "absorb_then_delete",
+      "reason": "Builder reads diagnostics directly for domain/product setup state; any readiness claims must remain scoped until SettingsViewModel/provider summary exists.",
+      "r0_surface_classification": "domain_product_raw_diagnostics",
+      "r0_raw_source_scan_hit": true,
+      "backend_owner": false
+    },
+    {
+      "id": "frontend_calibration_raw_state",
+      "path": "frontend/src/pages/CalibrationPage.tsx",
+      "phase": 8,
+      "disposition": "absorb_then_delete",
+      "reason": "Calibration reads raw LifeModel primitives and must not be used as LifeModelViewModel authority.",
+      "r0_surface_classification": "domain_product_raw_lifemodel",
+      "r0_raw_source_scan_hit": true,
+      "backend_owner": false
+    },
+    {
+      "id": "frontend_version_control_raw_diagnostics_state",
+      "path": "frontend/src/pages/VersionControl.tsx",
+      "phase": 8,
+      "disposition": "absorb_then_delete",
+      "reason": "Version control reads diagnostics directly for support/admin status and is not a product read-model owner.",
+      "r0_surface_classification": "support_admin_raw_diagnostics",
+      "r0_raw_source_scan_hit": true,
+      "backend_owner": false
+    },
+    {
+      "id": "frontend_runtime_disclosure_display_helper",
+      "path": "frontend/src/utils/runtimeDisclosure.ts",
+      "phase": 8,
+      "disposition": "absorb_then_delete",
+      "reason": "Runtime disclosure formats run/task/route fragments locally and must remain display-only; R5 ProviderPrivacyBoundarySummary owns reusable product provider/privacy boundary truth.",
+      "r0_surface_classification": "frontend_display_helper",
+      "r0_raw_source_scan_hit": false,
+      "backend_owner": false
+    },
+    {
+      "id": "frontend_run_display_summary_helper",
+      "path": "frontend/src/utils/runDisplaySummary.ts",
+      "phase": 8,
+      "disposition": "absorb_then_delete",
+      "reason": "Run display summary formats AgentRun/task fragments locally and must remain display-only until TasksViewModel exists.",
+      "r0_surface_classification": "frontend_display_helper",
+      "r0_raw_source_scan_hit": false,
+      "backend_owner": false
+    },
+    {
+      "id": "frontend_capability_status_helper",
+      "path": "frontend/src/utils/capabilityStatus.ts",
+      "phase": 8,
+      "disposition": "absorb_then_delete",
+      "reason": "Capability status derives labels from diagnostics and pending counts; provider/privacy/settings readiness should move behind backend-owned summaries.",
+      "r0_surface_classification": "frontend_display_helper",
+      "r0_raw_source_scan_hit": false,
+      "backend_owner": false
+    },
+    {
+      "id": "frontend_life_state_projection_helper",
+      "path": "frontend/src/utils/lifeStateProjection.ts",
+      "phase": 6,
+      "disposition": "keep",
+      "reason": "Frontend helper formats backend LifeStateProjection and centralizes pending-count consumption; it is not the backend projection owner.",
+      "r0_surface_classification": "frontend_projection_helper",
+      "r0_raw_source_scan_hit": false,
+      "backend_owner": false
     },
     {
       "id": "frontend_tauri_monolithic_bridge",
       "path": "frontend/src/tauri.ts",
       "phase": 7,
       "disposition": "delete",
-      "reason": "Monolithic frontend bridge exposes product, dev, migration, and eval commands together."
+      "reason": "Monolithic frontend bridge mirrors IPC calls and types; a TypeScript declaration is not proof that a backend read-model command exists.",
+      "r0_surface_classification": "frontend_product_bridge",
+      "r0_raw_source_scan_hit": false,
+      "backend_owner": false
     }
   ],
   "product_command_allowlist": [

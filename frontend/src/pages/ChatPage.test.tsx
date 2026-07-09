@@ -6,7 +6,19 @@ import MailboxPage from "./MailboxPage";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { mockInvoke, mockLifeModel } from "@/test/mocks/tauri";
-import type { LifeStateProjection, MainChatAgentStateSnapshot, SystemDiagnostics } from "../tauri";
+import type {
+  LifeStateProjection,
+  MainChatAgentStateSnapshot,
+  SystemDiagnostics,
+  TaskControl,
+  TaskControlEffect,
+  TaskControlKind,
+  TaskLifecycleStatus,
+  TaskTerminalDeliveryStatus,
+  TaskViewModelItem,
+  TasksViewModel,
+  ViewModelEnvelope,
+} from "../tauri";
 import { FORBIDDEN_ORDINARY_CHAT_COMMANDS } from "@/test/ordinaryChatForbiddenCommands";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -137,6 +149,98 @@ function buildMainChatAgentStateSnapshot(
   };
 
   return { ...base, ...overrides };
+}
+
+function buildTaskControl(
+  taskId: string,
+  kind: TaskControlKind,
+  effect: TaskControlEffect,
+  overrides: Partial<TaskControl> = {}
+): TaskControl {
+  return {
+    id: `${taskId}:${kind}`,
+    label: kind,
+    kind,
+    effect,
+    enabled: true,
+    targetTaskId: taskId,
+    completionProofAfterDispatch: false,
+    ...overrides,
+  };
+}
+
+function buildTaskViewModelItem(overrides: Partial<TaskViewModelItem> = {}): TaskViewModelItem {
+  const taskId =
+    overrides.taskSessionId ?? overrides.canonicalTaskId ?? "mainchat-task-product-ui-1";
+  const lifecycleStatus = overrides.lifecycleStatus ?? "completed_needs_evidence";
+  const terminalDeliveryStatus =
+    overrides.terminalDeliveryStatus ?? "missing_final_delivery_evidence";
+
+  return {
+    canonicalTaskId: taskId,
+    taskSessionId: taskId,
+    relatedRunIds: ["run-product-ui-1"],
+    conversationId: "session-1",
+    title: "Workspace planning read",
+    strategy: "react_tool_execution",
+    lifecycleStatus,
+    terminalDeliveryStatus,
+    finalDeliveryEvidencePresent: false,
+    pendingBlockers: [],
+    pendingReviewItemRefs: [],
+    allowedControls: [],
+    nextRecommendedControl: "open_trace",
+    latestResultPreview: {
+      status: terminalDeliveryStatus,
+      label: terminalDeliveryStatus,
+      preview: "Workspace planning read",
+      evidenceRefs: [],
+    },
+    evidenceRefs: [],
+    updatedAt: "2026-06-16T00:00:02.000Z",
+    ...overrides,
+  };
+}
+
+function buildTasksViewModelEnvelope(
+  items: TaskViewModelItem[]
+): ViewModelEnvelope<TasksViewModel> {
+  const byLifecycleStatus = items.reduce<Record<string, number>>((acc, item) => {
+    acc[item.lifecycleStatus] = (acc[item.lifecycleStatus] ?? 0) + 1;
+    return acc;
+  }, {});
+  const countStatus = (status: TaskLifecycleStatus) =>
+    items.filter(item => item.lifecycleStatus === status).length;
+  const countTerminal = (status: TaskTerminalDeliveryStatus) =>
+    items.filter(item => item.terminalDeliveryStatus === status).length;
+
+  return {
+    data: {
+      items,
+      summary: {
+        total: items.length,
+        activeCount: countStatus("running"),
+        waitingPermissionCount: countStatus("waiting_permission"),
+        blockedCount: countStatus("blocked"),
+        pendingReviewCount: countStatus("completed_with_pending_review"),
+        completedCount: countStatus("completed"),
+        completedNeedsEvidenceCount:
+          countStatus("completed_needs_evidence") +
+          countTerminal("missing_final_delivery_evidence"),
+        failedCount: countStatus("failed"),
+        cancelledCount: countStatus("cancelled"),
+        byLifecycleStatus,
+      },
+      sourceRefs: [],
+      contractLimitations: [],
+    },
+    status: items.length > 0 ? "ready" : "empty",
+    lastUpdatedAt: "2026-06-16T00:00:02.000Z",
+    source: "backend-readmodel",
+    evidenceRefs: [],
+    warnings: [],
+    actions: { primary: [] },
+  };
 }
 
 function projectionWithEditedOnlyReview(): LifeStateProjection {
@@ -295,7 +399,19 @@ describe("ChatPage", () => {
         ...overrides,
       });
 
-    expect(viewFor({ completedResponse: true })?.status).toBe("completed");
+    expect(viewFor({ completedResponse: true })?.status).toBe("trace_gap");
+    expect(
+      viewFor(
+        {},
+        {
+          taskViewItem: buildTaskViewModelItem({
+            lifecycleStatus: "completed",
+            terminalDeliveryStatus: "delivered",
+            finalDeliveryEvidencePresent: true,
+          }),
+        }
+      )?.status
+    ).toBe("completed");
     expect(viewFor({}, { reasoningTrace: null, sending: true })?.status).toBe("running");
     expect(viewFor({ taskStatus: "waiting_permission" })?.status).toBe("waiting_for_user");
     expect(viewFor({ uiStatus: "restricted" })?.status).toBe("restricted");
@@ -1603,6 +1719,31 @@ describe("ChatPage", () => {
       listeners.set(event, handler as StreamListener);
       return Promise.resolve(() => {});
     });
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_tasks_view_model") {
+        return Promise.resolve(
+          buildTasksViewModelEnvelope([
+            buildTaskViewModelItem({
+              canonicalTaskId: "mainchat-task-product-ui-1",
+              taskSessionId: "mainchat-task-product-ui-1",
+              relatedRunIds: ["run-product-ui-1"],
+              title: "Workspace planning read",
+              strategy: "react_tool_execution",
+              lifecycleStatus: "completed",
+              terminalDeliveryStatus: "delivered",
+              finalDeliveryEvidencePresent: true,
+              latestResultPreview: {
+                status: "delivered",
+                label: "delivered",
+                preview: "Workspace guidance summarized",
+                evidenceRefs: [],
+              },
+            }),
+          ])
+        );
+      }
+      return mockInvoke(cmd, args);
+    });
 
     render(
       <BrowserRouter>
@@ -1982,11 +2123,41 @@ describe("ChatPage", () => {
       activeToolCount: 0,
       canCancel: false,
     };
+    let taskCancelled = false;
     vi.mocked(invoke).mockImplementation((cmd: string, args?: any) => {
+      if (cmd === "get_tasks_view_model") {
+        return Promise.resolve(
+          buildTasksViewModelEnvelope([
+            buildTaskViewModelItem({
+              canonicalTaskId: "mainchat-task-cancel-k5-1",
+              taskSessionId: "mainchat-task-cancel-k5-1",
+              relatedRunIds: ["run-cancel-k5-1"],
+              title: "Cancelable tool run",
+              strategy: "react_tool_execution",
+              lifecycleStatus: taskCancelled ? "cancelled" : "running",
+              terminalDeliveryStatus: taskCancelled ? "cancelled" : "not_terminal",
+              finalDeliveryEvidencePresent: false,
+              pendingBlockers: [],
+              allowedControls: taskCancelled
+                ? []
+                : [buildTaskControl("mainchat-task-cancel-k5-1", "cancel", "task_cancel_request")],
+              latestResultPreview: {
+                status: taskCancelled ? "cancelled" : "not_terminal",
+                label: taskCancelled ? "cancelled" : "running",
+                preview: taskCancelled
+                  ? "Cancelled from Main Chat controls."
+                  : "Read with cancel support.",
+                evidenceRefs: [],
+              },
+            }),
+          ])
+        );
+      }
       if (cmd === "get_main_chat_agent_task_state") {
-        return Promise.resolve(runningTaskState);
+        return Promise.resolve(taskCancelled ? canceledTaskState : runningTaskState);
       }
       if (cmd === "cancel_main_chat_agent_task") {
+        taskCancelled = true;
         return Promise.resolve(canceledTaskState);
       }
       return mockInvoke(cmd, args);
@@ -3070,7 +3241,49 @@ describe("ChatPage", () => {
       listeners.set(event, handler as StreamListener);
       return Promise.resolve(() => {});
     });
+    let toolPermissionAccepted = false;
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_tasks_view_model") {
+        return Promise.resolve(
+          buildTasksViewModelEnvelope([
+            buildTaskViewModelItem({
+              canonicalTaskId: "mainchat-task-permission-inline-1",
+              taskSessionId: "mainchat-task-permission-inline-1",
+              relatedRunIds: ["run-permission-inline-1"],
+              title: "Read a registered MCP note.",
+              strategy: "react_tool_execution",
+              lifecycleStatus: toolPermissionAccepted ? "running" : "waiting_permission",
+              terminalDeliveryStatus: "not_terminal",
+              finalDeliveryEvidencePresent: false,
+              pendingBlockers: toolPermissionAccepted ? [] : ["tool_permission_required"],
+              pendingReviewItemRefs: toolPermissionAccepted
+                ? []
+                : [
+                    {
+                      id: "proposal-tool-permission-inline-1",
+                      kind: "review_item",
+                      label: "tool_permission proposal",
+                    },
+                  ],
+              allowedControls: toolPermissionAccepted
+                ? [
+                    buildTaskControl(
+                      "mainchat-task-permission-inline-1",
+                      "resume",
+                      "task_resume_request"
+                    ),
+                  ]
+                : [],
+              latestResultPreview: {
+                status: "not_terminal",
+                label: toolPermissionAccepted ? "resume enabled" : "waiting permission",
+                preview: "Read registered MCP note",
+                evidenceRefs: [],
+              },
+            }),
+          ])
+        );
+      }
       if (cmd === "get_main_chat_agent_task_state") {
         return Promise.resolve({
           session: {
@@ -3122,6 +3335,7 @@ describe("ChatPage", () => {
         });
       }
       if (cmd === "accept_proposal") {
+        toolPermissionAccepted = true;
         return Promise.resolve({ success: true });
       }
       if (cmd === "resume_main_chat_agent_task") {
@@ -3418,6 +3632,37 @@ describe("ChatPage", () => {
       return Promise.resolve(() => {});
     });
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_tasks_view_model") {
+        return Promise.resolve(
+          buildTasksViewModelEnvelope([
+            buildTaskViewModelItem({
+              canonicalTaskId: "mainchat-task-ui-1",
+              taskSessionId: "mainchat-task-ui-1",
+              relatedRunIds: ["run-mainchat-ui-1"],
+              title: "Prepare a low energy weekly plan",
+              strategy: "react_tool_execution",
+              lifecycleStatus: "waiting_permission",
+              terminalDeliveryStatus: "not_terminal",
+              finalDeliveryEvidencePresent: false,
+              pendingBlockers: ["resumeBlockedByPendingPermission"],
+              pendingReviewItemRefs: [],
+              allowedControls: [
+                buildTaskControl("mainchat-task-ui-1", "resume", "task_resume_request"),
+                buildTaskControl("mainchat-task-ui-1", "retry", "task_retry_request", {
+                  targetActionId: "action-write-1",
+                }),
+                buildTaskControl("mainchat-task-ui-1", "cancel", "task_cancel_request"),
+              ],
+              latestResultPreview: {
+                status: "not_terminal",
+                label: "waiting permission",
+                preview: "Prepare a low energy weekly plan",
+                evidenceRefs: [],
+              },
+            }),
+          ])
+        );
+      }
       if (cmd === "get_main_chat_agent_task_state") {
         return Promise.resolve({
           session: {
@@ -3616,6 +3861,31 @@ describe("ChatPage", () => {
       listeners.set(event, handler as StreamListener);
       return Promise.resolve(() => {});
     });
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_tasks_view_model") {
+        return Promise.resolve(
+          buildTasksViewModelEnvelope([
+            buildTaskViewModelItem({
+              canonicalTaskId: "task-default-status-complete",
+              taskSessionId: "task-default-status-complete",
+              relatedRunIds: ["run-default-status-complete"],
+              title: "Structured completion evidence.",
+              strategy: "direct_answer",
+              lifecycleStatus: "completed",
+              terminalDeliveryStatus: "delivered",
+              finalDeliveryEvidencePresent: true,
+              latestResultPreview: {
+                status: "delivered",
+                label: "delivered",
+                preview: "Structured completion evidence.",
+                evidenceRefs: [],
+              },
+            }),
+          ])
+        );
+      }
+      return mockInvoke(cmd, args);
+    });
 
     render(
       <BrowserRouter>
@@ -3804,6 +4074,50 @@ describe("ChatPage", () => {
       return Promise.resolve(() => {});
     });
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_tasks_view_model") {
+        return Promise.resolve(
+          buildTasksViewModelEnvelope([
+            buildTaskViewModelItem({
+              canonicalTaskId: "task-default-actions",
+              taskSessionId: "task-default-actions",
+              relatedRunIds: ["run-default-actions"],
+              title: "Review permission before continuing",
+              strategy: "react_tool_execution",
+              lifecycleStatus: "waiting_permission",
+              terminalDeliveryStatus: "not_terminal",
+              finalDeliveryEvidencePresent: false,
+              pendingBlockers: ["tool_permission_required"],
+              pendingReviewItemRefs: [
+                {
+                  id: "proposal-default-tool",
+                  kind: "review_item",
+                  label: "tool_permission proposal",
+                },
+                {
+                  id: "proposal-default-memory",
+                  kind: "review_item",
+                  label: "memory proposal",
+                },
+              ],
+              allowedControls: [
+                buildTaskControl("task-default-actions", "resume", "task_resume_request"),
+                buildTaskControl("task-default-actions", "retry", "task_retry_request", {
+                  targetActionId: "action-default-failed",
+                }),
+                buildTaskControl("task-default-actions", "cancel", "task_cancel_request"),
+                buildTaskControl("task-default-actions", "refresh_context", "task_refresh_request"),
+              ],
+              nextRecommendedControl: "refresh_context",
+              latestResultPreview: {
+                status: "not_terminal",
+                label: "waiting permission",
+                preview: "Wait for review, then continue the safe read.",
+                evidenceRefs: [],
+              },
+            }),
+          ])
+        );
+      }
       if (
         cmd === "get_main_chat_agent_task_state" ||
         cmd === "resume_main_chat_agent_task" ||
@@ -3972,6 +4286,132 @@ describe("ChatPage", () => {
       return Promise.resolve(() => {});
     });
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_tasks_view_model") {
+        return Promise.resolve(
+          buildTasksViewModelEnvelope([
+            buildTaskViewModelItem({
+              canonicalTaskId: "mainchat-task-review-1",
+              taskSessionId: "mainchat-task-review-1",
+              relatedRunIds: ["run-review-flow-1"],
+              title: "Read a workspace file after permission approval",
+              strategy: "react_tool_execution",
+              lifecycleStatus: proposalAccepted ? "running" : "waiting_permission",
+              terminalDeliveryStatus: "not_terminal",
+              finalDeliveryEvidencePresent: false,
+              pendingBlockers: proposalAccepted ? [] : ["tool_permission_required"],
+              pendingReviewItemRefs: proposalAccepted
+                ? []
+                : [
+                    {
+                      id: "proposal-tool-permission-1",
+                      kind: "review_item",
+                      label: "tool_permission proposal",
+                    },
+                  ],
+              allowedControls: proposalAccepted
+                ? [buildTaskControl("mainchat-task-review-1", "resume", "task_resume_request")]
+                : [],
+              latestResultPreview: {
+                status: "not_terminal",
+                label: proposalAccepted ? "resume enabled" : "waiting permission",
+                preview: "Read a workspace file after permission approval",
+                evidenceRefs: [],
+              },
+            }),
+          ])
+        );
+      }
+      if (cmd === "get_review_center_view_model") {
+        return Promise.resolve({
+          data: {
+            items: [
+              {
+                id: "review:proposal-tool-permission-1",
+                type: "tool_permission",
+                source: {
+                  kind: "proposal",
+                  proposalId: "proposal-tool-permission-1",
+                  proposalSource: "chat_conversation",
+                  sourceDetail: "mainchat-task-review-1",
+                  runId: "run-tool-permission-1",
+                },
+                status: proposalAccepted ? "approved" : "pending",
+                materializationStatus: "not_started",
+                allowedActions: proposalAccepted
+                  ? [
+                      {
+                        id: "review:proposal-tool-permission-1:resume",
+                        label: "Request resume",
+                        kind: "resume",
+                        effect: "task_resume_request",
+                        enabled: true,
+                        targetReviewItemId: "review:proposal-tool-permission-1",
+                      },
+                    ]
+                  : [
+                      {
+                        id: "review:proposal-tool-permission-1:approve",
+                        label: "Approve",
+                        kind: "approve",
+                        effect: "decision_only",
+                        enabled: true,
+                        targetReviewItemId: "review:proposal-tool-permission-1",
+                        expectedMaterializationStatusAfterDispatch: "not_started",
+                      },
+                      {
+                        id: "review:proposal-tool-permission-1:reject",
+                        label: "Reject",
+                        kind: "reject",
+                        effect: "decision_only",
+                        enabled: true,
+                        targetReviewItemId: "review:proposal-tool-permission-1",
+                      },
+                      {
+                        id: "review:proposal-tool-permission-1:later",
+                        label: "Later",
+                        kind: "later",
+                        effect: "decision_only",
+                        enabled: true,
+                        targetReviewItemId: "review:proposal-tool-permission-1",
+                      },
+                    ],
+                risk: "medium",
+                evidenceRefs: [],
+                targetRefs: [
+                  {
+                    id: "mainchat-task-review-1",
+                    kind: "task",
+                    label: "Main Chat task",
+                  },
+                ],
+                taskResumeRelation: {
+                  taskSessionId: "mainchat-task-review-1",
+                  resumeRequiresMaterialization: false,
+                  canRequestResume: proposalAccepted,
+                  resumeActionId: proposalAccepted
+                    ? "review:proposal-tool-permission-1:resume"
+                    : undefined,
+                  blockedReason: proposalAccepted ? undefined : "pending_decision",
+                },
+              },
+            ],
+            summary: {
+              total: 1,
+              actionRequiredCount: proposalAccepted ? 0 : 1,
+              blockedActionCount: 0,
+              byStatus: { [proposalAccepted ? "approved" : "pending"]: 1 },
+              byRisk: { medium: 1 },
+              byMaterializationStatus: { not_started: 1 },
+            },
+          },
+          status: "ready",
+          lastUpdatedAt: "2026-06-08T00:00:02.000Z",
+          source: "backend-readmodel",
+          evidenceRefs: [],
+          warnings: [],
+          actions: { primary: [] },
+        });
+      }
       if (cmd === "get_main_chat_agent_task_state") {
         return Promise.resolve({
           session: {
@@ -4149,7 +4589,7 @@ describe("ChatPage", () => {
         })
       );
     });
-    fireEvent.click(await screen.findByRole("button", { name: "Resume Main Chat task" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Request resume" }));
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith(
@@ -4160,7 +4600,7 @@ describe("ChatPage", () => {
         })
       );
     });
-    expect(await screen.findByText(/Main Chat task resumed/)).toBeInTheDocument();
+    expect(await screen.findByText(/Main Chat task resume request sent/)).toBeInTheDocument();
   });
 
   it("keeps Send on the existing chat stream path without calling forbidden governed commands", async () => {

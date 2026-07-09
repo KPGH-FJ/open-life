@@ -17,11 +17,11 @@ import {
   archiveLowAccessMemories,
   restoreArchivedChunks,
   listArchivedChunks,
-  getMemoryTierStats,
+  getMemoryViewModel,
   getSystemDiagnostics,
   type ArchivedChunkSummary,
+  type MemoryViewModel,
   type SystemDiagnostics,
-  type TierStats,
 } from "../tauri";
 import EmptyState from "../components/EmptyState";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
@@ -50,19 +50,25 @@ export default function MemorySearch() {
   const [source, setSource] = useState("manual");
   const [indexing, setIndexing] = useState(false);
   const [indexMsg, setIndexMsg] = useState("");
-  const [tierStats, setTierStats] = useState<TierStats | null>(null);
+  const [memoryViewModel, setMemoryViewModel] = useState<MemoryViewModel | null>(null);
+  const [memoryViewModelStatus, setMemoryViewModelStatus] = useState("loading");
+  const [memoryViewModelWarnings, setMemoryViewModelWarnings] = useState<string[]>([]);
   const [archived, setArchived] = useState<ArchivedChunkSummary[]>([]);
   const [archiveMsg, setArchiveMsg] = useState("");
   const [archiveLoading, setArchiveLoading] = useState(false);
   const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
 
   const loadArchiveState = async () => {
-    const [stats, archivedList, diag] = await Promise.all([
-      getMemoryTierStats(),
+    const [memoryEnvelope, archivedList, diag] = await Promise.all([
+      getMemoryViewModel(),
       listArchivedChunks(20),
       getSystemDiagnostics().catch(() => null),
     ]);
-    setTierStats(stats);
+    setMemoryViewModel(memoryEnvelope.data);
+    setMemoryViewModelStatus(memoryEnvelope.status);
+    setMemoryViewModelWarnings(
+      (memoryEnvelope.warnings ?? []).map(warning => `${warning.code}: ${warning.message}`)
+    );
     setArchived(archivedList);
     setDiagnostics(diag);
   };
@@ -164,6 +170,9 @@ export default function MemorySearch() {
     result => showLowConfidenceResults || result.score >= 0.3
   );
   const hiddenLowConfidenceCount = sortedResults.length - visibleResults.length;
+  const tierStats = memoryViewModel?.summary.tierSummary ?? null;
+  const lifecycleSummary = memoryViewModel?.lifecycleSummary ?? null;
+  const memorySummary = memoryViewModel?.summary ?? null;
 
   return (
     <div className="h-full overflow-auto bg-white">
@@ -193,28 +202,37 @@ export default function MemorySearch() {
         <section className="rounded-2xl border border-slate-200 bg-slate-50/80 px-4 py-4">
           <div className="text-sm font-semibold text-slate-900">记忆治理说明</div>
           <div className="mt-1 text-xs leading-5 text-slate-600">
-            这个页面负责回答三个问题：系统现在记住了什么、哪些记忆已经沉到归档层、以及哪些内容值得重新恢复到活跃层。
+            这个页面从后台 MemoryViewModel 读取生命周期、Review
+            和物化状态；向量层级只是存储遥测，不代表长期记忆已经生效。
           </div>
           <div className="mt-3 grid gap-3 md:grid-cols-3">
             <div className="rounded-xl border border-white bg-white px-3 py-3">
-              <div className="text-[11px] font-medium text-slate-500">搜索记忆</div>
-              <div className="mt-1 text-xs leading-5 text-slate-700">
-                用语义检索确认系统到底记住了什么，避免“以为被记住，其实没有进入长期记忆”。
+              <div className="text-[11px] font-medium text-slate-500">ReadModel</div>
+              <div className="mt-1 text-lg font-semibold text-slate-900">
+                {memoryViewModelStatus}
               </div>
             </div>
             <div className="rounded-xl border border-white bg-white px-3 py-3">
-              <div className="text-[11px] font-medium text-slate-500">归档与恢复</div>
-              <div className="mt-1 text-xs leading-5 text-slate-700">
-                低访问记忆会逐渐沉到归档层；如果某段历史又重新重要，可以在这里恢复，而不是重新手工输入。
+              <div className="text-[11px] font-medium text-slate-500">已物化记忆</div>
+              <div className="mt-1 text-lg font-semibold text-slate-900">
+                {memorySummary?.materializedCount ?? 0}
               </div>
             </div>
             <div className="rounded-xl border border-white bg-white px-3 py-3">
-              <div className="text-[11px] font-medium text-slate-500">风险边界</div>
-              <div className="mt-1 text-xs leading-5 text-slate-700">
-                如果当前处于 Safe Mode，写入和层级维护会先暂停；先修复数据环境，再做记忆治理更安全。
+              <div className="text-[11px] font-medium text-slate-500">待确认/待物化</div>
+              <div className="mt-1 text-lg font-semibold text-slate-900">
+                {memorySummary?.reviewRequiredCount ?? 0} /{" "}
+                {memorySummary?.pendingMaterializationCount ?? 0}
               </div>
             </div>
           </div>
+          {memoryViewModelWarnings.length > 0 && (
+            <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
+              {memoryViewModelWarnings.slice(0, 2).map(warning => (
+                <div key={warning}>{warning}</div>
+              ))}
+            </div>
+          )}
         </section>
 
         <section className="space-y-3">
@@ -260,7 +278,21 @@ export default function MemorySearch() {
           </div>
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
             {[
-              ["活跃总数", tierStats?.total ?? 0],
+              ["候选", lifecycleSummary?.candidateCount ?? 0],
+              ["待审阅", lifecycleSummary?.pendingReviewCount ?? 0],
+              ["已确认", lifecycleSummary?.confirmedCount ?? 0],
+              ["已回滚", lifecycleSummary?.rolledBackCount ?? 0],
+              ["物化失败", lifecycleSummary?.materializationFailedCount ?? 0],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded-xl border border-slate-200 bg-white p-3">
+                <div className="text-xs text-slate-500">{label}</div>
+                <div className="mt-1 text-lg font-semibold text-slate-900">{value}</div>
+              </div>
+            ))}
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+            {[
+              ["向量总数", tierStats?.total ?? 0],
               ["Tier 1 热记忆", tierStats?.tier1 ?? 0],
               ["Tier 2 检索记忆", tierStats?.tier2 ?? 0],
               ["Tier 3 冷记忆", tierStats?.tier3 ?? 0],

@@ -310,6 +310,7 @@ fn single_system_phase1_inventory_has_required_categories_and_contract_fields() 
         "direct_proposal_write_surfaces",
         "phase4_proposal_creation_source_map",
         "direct_memory_lifemodel_write_surfaces",
+        "backend_readmodel_review_authority_surfaces",
         "frontend_multi_source_state_surfaces",
         "product_command_allowlist",
         "legacy_development_command_surfaces",
@@ -369,6 +370,1045 @@ fn single_system_phase1_inventory_has_required_categories_and_contract_fields() 
         assert!(
             !combined.contains(forbidden),
             "single-system deletion contracts must not use vague disposition wording: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn single_system_r0_readmodel_authority_map_keeps_frontend_adapters_transitional() {
+    let inventory = inventory();
+    let entries = inventory_entries(&inventory, "backend_readmodel_review_authority_surfaces");
+    let mut by_path = BTreeMap::new();
+    let frontend_allowed_classes = BTreeSet::from([
+        "frontend_product_bridge",
+        "frontend_transitional_adapter",
+        "frontend_preview_adapter",
+    ]);
+
+    for entry in entries {
+        let path = entry_str(entry, "path").to_string();
+        let classification = entry_str(entry, "r0_authority_classification").to_string();
+        let read_model_status = entry_str(entry, "read_model_status").to_string();
+        let backend_owner = entry_bool(entry, "backend_owner");
+
+        if path.starts_with("frontend/") {
+            assert!(
+                !backend_owner,
+                "R0 frontend path {path} must not be classified as a backend read-model owner"
+            );
+            assert!(
+                frontend_allowed_classes.contains(classification.as_str()),
+                "R0 frontend path {path} must use a transitional/frontend classification, got {classification}"
+            );
+            assert_ne!(
+                read_model_status, "implemented_backend_view_model",
+                "R0 frontend path {path} must not claim implemented backend ViewModel ownership"
+            );
+        }
+
+        by_path.insert(path, (classification, backend_owner, read_model_status));
+    }
+
+    for (path, backend_owner, status) in [
+        (
+            "src-tauri/src/life_state_projection.rs",
+            true,
+            "partial_backend_read_model",
+        ),
+        (
+            "openlife-core/src/agent/product_read_model.rs",
+            true,
+            "implemented_backend_shared_contract",
+        ),
+        (
+            "openlife-core/src/agent/review_item.rs",
+            true,
+            "implemented_review_item_contract",
+        ),
+        (
+            "src-tauri/src/read_models/review_center.rs",
+            true,
+            "implemented_review_center_view_model_command",
+        ),
+        (
+            "openlife-core/src/agent/life_model_view_model.rs",
+            true,
+            "implemented_lifemodel_view_model_contract",
+        ),
+        (
+            "src-tauri/src/read_models/life_model.rs",
+            true,
+            "implemented_lifemodel_view_model_command",
+        ),
+        (
+            "openlife-core/src/agent/tasks_view_model.rs",
+            true,
+            "implemented_tasks_workspace_view_model_contract",
+        ),
+        (
+            "src-tauri/src/read_models/tasks.rs",
+            true,
+            "implemented_tasks_workspace_view_model_commands",
+        ),
+        (
+            "openlife-core/src/agent/review_workflow.rs",
+            true,
+            "review_governance_boundary_not_review_center",
+        ),
+        (
+            "openlife-core/src/agent/proposal_store.rs",
+            false,
+            "storage_only_not_read_model_owner",
+        ),
+        (
+            "openlife-core/src/agent/backend_contract_freeze.rs",
+            true,
+            "partial_proposal_review_read_model",
+        ),
+        (
+            "openlife-core/src/memory_gateway.rs",
+            true,
+            "memory_gateway_primitives_consumed_by_memory_view_model",
+        ),
+        (
+            "openlife-core/src/agent/memory_view_model.rs",
+            true,
+            "implemented_memory_view_model_contract",
+        ),
+        (
+            "src-tauri/src/read_models/memory.rs",
+            true,
+            "implemented_memory_view_model_command",
+        ),
+        (
+            "openlife-core/src/life_model_write_gateway.rs",
+            true,
+            "materialization_gateway_not_view_model",
+        ),
+        (
+            "openlife-core/src/agent/main_chat_runtime_contract.rs",
+            true,
+            "task_runtime_primitives_consumed_by_tasks_view_model",
+        ),
+        (
+            "openlife-core/src/tasks.rs",
+            true,
+            "task_store_primitives_not_tasks_view_model_owner",
+        ),
+        (
+            "src-tauri/src/main_chat_task_controls.rs",
+            true,
+            "task_control_primitives_consumed_by_tasks_view_model",
+        ),
+        (
+            "src-tauri/src/provider_validation.rs",
+            true,
+            "provider_validation_primitives_consumed_by_provider_privacy_boundary",
+        ),
+        (
+            "openlife-core/src/agent/provider_privacy_boundary.rs",
+            true,
+            "implemented_provider_privacy_boundary_contract",
+        ),
+        (
+            "src-tauri/src/read_models/provider_privacy.rs",
+            true,
+            "implemented_provider_privacy_boundary_command",
+        ),
+        (
+            "frontend/src/tauri.ts",
+            false,
+            "frontend_bridge_mirror_not_backend_owner",
+        ),
+        (
+            "frontend/src/viewmodels/shared/viewModelEnvelope.ts",
+            false,
+            "frontend_alias_to_backend_contract_mirror",
+        ),
+        (
+            "frontend/src/viewmodels/today/todayViewModelAdapter.ts",
+            false,
+            "frontend_only_preview_adapter",
+        ),
+        (
+            "frontend/src/viewmodels/lifemodel/lifeModelViewModelAdapter.ts",
+            false,
+            "frontend_alias_to_backend_lifemodel_view_model",
+        ),
+    ] {
+        let (_, actual_backend_owner, actual_status) = by_path
+            .get(path)
+            .unwrap_or_else(|| panic!("R0 read-model authority inventory missing {path}"));
+        assert_eq!(
+            *actual_backend_owner, backend_owner,
+            "R0 read-model authority inventory has wrong backend_owner for {path}"
+        );
+        assert_eq!(
+            actual_status, status,
+            "R0 read-model authority inventory has wrong status for {path}"
+        );
+    }
+
+    for missing_backend_owner in ["src-tauri/src/read_models/workspace.rs"] {
+        assert!(
+            !repo_root().join(missing_backend_owner).exists(),
+            "R0 source map must be updated before treating {missing_backend_owner} as an existing backend read-model owner"
+        );
+    }
+}
+
+#[test]
+fn single_system_r1_shared_viewmodel_contract_is_backend_owned() {
+    let contract = read_repo_file("openlife-core/src/agent/product_read_model.rs");
+    for required in [
+        "pub struct ViewModelEnvelope",
+        "pub enum ViewModelStatus",
+        "pub struct EvidenceRef",
+        "pub struct ProductAction",
+        "pub struct DebugAction",
+        "pub struct ReviewAction",
+        "pub enum ReviewItemMaterializationStatus",
+        "pub struct ProviderPrivacyBoundarySummary",
+        "pub struct BackendEntityRef",
+    ] {
+        assert!(
+            contract.contains(required),
+            "R1 backend shared read-model contract must define {required}"
+        );
+    }
+    for invariant in [
+        "Self::Apply => ReviewActionEffect::MaterializationRequest",
+        "Self::Resume => ReviewActionEffect::TaskResumeRequest",
+        "Self::ViewEvidence => ReviewActionEffect::EvidenceOnly",
+        "Self::Approve | Self::Reject | Self::Edit | Self::Later | Self::Revoke",
+        "ReviewActionEffectMismatch",
+    ] {
+        assert!(
+            contract.contains(invariant),
+            "R1 ReviewAction kind/effect invariant must include {invariant}"
+        );
+    }
+
+    let agent_mod = read_repo_file("openlife-core/src/agent/mod.rs");
+    assert!(
+        agent_mod.contains("pub mod product_read_model;"),
+        "R1 backend shared contract module must be exported from agent::mod"
+    );
+    assert!(
+        agent_mod.contains("ViewModelEnvelope") && agent_mod.contains("ReviewActionEffect"),
+        "R1 backend shared contract types must be re-exported for downstream owners"
+    );
+
+    let tauri_bridge = read_repo_file("frontend/src/tauri.ts");
+    assert!(
+        tauri_bridge
+            .contains("Canonical Rust owner: openlife-core/src/agent/product_read_model.rs")
+            && tauri_bridge.contains("export type ViewModelEnvelope<T>")
+            && tauri_bridge.contains("export type ReviewActionKindEffectInvariant")
+            && tauri_bridge.contains("export type ProviderPrivacyBoundarySummary"),
+        "R1 frontend bridge must mirror backend shared contract types without claiming ownership"
+    );
+
+    let shared_frontend = read_repo_file("frontend/src/viewmodels/shared/viewModelEnvelope.ts");
+    assert!(
+        shared_frontend.contains("Transitional frontend import path")
+            && shared_frontend.contains("openlife-core/src/agent/product_read_model.rs")
+            && shared_frontend.contains("from \"../../tauri\""),
+        "R1 shared frontend ViewModel types must be a transitional alias to the backend mirror"
+    );
+    assert!(
+        !shared_frontend.contains("export type ViewModelStatus = \"loading\""),
+        "R1 shared frontend ViewModel file must not keep standalone canonical status definitions"
+    );
+}
+
+#[test]
+fn single_system_r2_review_center_readmodel_owns_review_actions() {
+    let review_item = read_repo_file("openlife-core/src/agent/review_item.rs");
+    for required in [
+        "pub struct ReviewItem",
+        "pub struct ReviewCenterViewModel",
+        "pub struct ReviewCenterBuildInput",
+        "pub struct ReviewItemTaskResumeRelation",
+        "pub fn build_review_center_view_model",
+        "pub fn build_review_item",
+        "pub materialization_status: ReviewItemMaterializationStatus",
+        "pub allowed_actions: Vec<ReviewAction>",
+        "pub task_resume_relation: Option<ReviewItemTaskResumeRelation>",
+        "pub resume_requires_materialization: bool",
+        "ReviewActionKind::Approve",
+        "ReviewActionKind::Apply",
+        "ReviewActionKind::Resume",
+    ] {
+        assert!(
+            review_item.contains(required),
+            "R2 backend ReviewItem contract must include {required}"
+        );
+    }
+    assert!(
+        review_item
+            .contains("ProposalStatus::Accepted => ReviewItemMaterializationStatus::Unknown"),
+        "R2 accepted proposal status must not become applied without backend materialization proof"
+    );
+    assert!(
+        review_item.contains("resume_requires_materialization(proposal.proposal_type)")
+            && review_item
+                .contains("Materialization evidence is unknown; cannot request task resume yet.")
+            && !review_item
+                .contains("let can_request_resume = status == ReviewItemDecisionStatus::Approved;"),
+        "R2 resume eligibility must not be inferred from Approved alone"
+    );
+
+    let review_center = read_repo_file("src-tauri/src/read_models/review_center.rs");
+    for required in [
+        "pub async fn get_review_center_view_model",
+        "build_review_center_view_model",
+        "list_all_proposals(100, 0)",
+        "get_record_by_proposal_id",
+        "materialization_status_from_memory_lifecycle",
+    ] {
+        assert!(
+            review_center.contains(required),
+            "R2 Tauri ReviewCenterViewModel command must include {required}"
+        );
+    }
+
+    let lib = read_repo_file("src-tauri/src/lib.rs");
+    assert!(
+        lib.contains("pub(crate) mod read_models;")
+            && lib.contains("use read_models::review_center::get_review_center_view_model;")
+            && lib.contains("get_review_center_view_model,"),
+        "R2 ReviewCenterViewModel must be an actual registered Tauri command, not only a frontend type"
+    );
+
+    let tauri_bridge = read_repo_file("frontend/src/tauri.ts");
+    assert!(
+        tauri_bridge.contains("export type ReviewItem =")
+            && tauri_bridge.contains("export type ReviewCenterViewModel")
+            && tauri_bridge.contains("getReviewCenterViewModel()")
+            && tauri_bridge.contains("\"get_review_center_view_model\""),
+        "R2 frontend bridge must mirror the ReviewCenterViewModel command shape"
+    );
+
+    let mailbox = read_repo_file("frontend/src/pages/MailboxPage.tsx");
+    for required in [
+        "getReviewCenterViewModel",
+        "allowedActions.find",
+        "actionBlockedReason(selectedReviewItem, \"approve\")",
+        "materializationStatus",
+        "ReviewCenterViewModel 尚未提供该确认项的后端操作状态",
+    ] {
+        assert!(
+            mailbox.contains(required),
+            "R2 Mailbox must consume backend ReviewItem action/materialization authority: {required}"
+        );
+    }
+    for forbidden in [
+        "function canAccept(",
+        "function isPathInSafePaths(",
+        "function acceptBlockedReason(",
+        "function appliedNotice(",
+        "setProposals(prev =>",
+    ] {
+        assert!(
+            !mailbox.contains(forbidden),
+            "R2 Mailbox must not keep local review action/materialization authority pattern: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn single_system_r3_lifemodel_viewmodel_is_backend_owned() {
+    let contract = read_repo_file("openlife-core/src/agent/life_model_view_model.rs");
+    for required in [
+        "pub struct LifeModelViewModel",
+        "pub struct LifeModelViewModelBuildInput",
+        "pub struct LifeModelPendingUpdateCounts",
+        "pub struct LifeModelManualOverrideState",
+        "pub struct LifeModelMemoryLinkageSummary",
+        "pub fn build_life_model_view_model_envelope",
+        "approved_not_applied",
+        "has_materialization_proof",
+        "patch_status.as_deref() == Some(\"applied\")",
+        "!self.snapshot_versions.is_empty()",
+        "current_matches_accepted_after",
+    ] {
+        assert!(
+            contract.contains(required),
+            "R3 backend LifeModelViewModel contract must include {required}"
+        );
+    }
+    assert!(
+        contract.contains("canonical_summary: None")
+            && contract.contains("Accepted proposal decisions remain approved-not-applied"),
+        "R3 LifeModelViewModel must fail closed on canonical and accepted proposal materialization claims"
+    );
+
+    let read_model = read_repo_file("src-tauri/src/read_models/life_model.rs");
+    for required in [
+        "pub async fn get_life_model_view_model",
+        "build_life_model_view_model_envelope",
+        "manager.load_existing()",
+        "get_life_model_current_view_for_model_with_state",
+        "get_review_center_view_model_with_state",
+        "count_memory_chunks_with_state",
+        "get_memory_tier_stats_with_state",
+    ] {
+        assert!(
+            read_model.contains(required),
+            "R3 Tauri LifeModelViewModel command must include {required}"
+        );
+    }
+    assert!(
+        !read_model.contains("get_life_model_with_state"),
+        "R3 LifeModel read model must not use the older load() helper that can create a default LifeModel during read"
+    );
+
+    let lib = read_repo_file("src-tauri/src/lib.rs");
+    assert!(
+        lib.contains("use read_models::life_model::get_life_model_view_model;")
+            && lib.contains("get_life_model_view_model,"),
+        "R3 LifeModelViewModel must be an actual registered Tauri command"
+    );
+
+    let tauri_bridge = read_repo_file("frontend/src/tauri.ts");
+    assert!(
+        tauri_bridge.contains("export type LifeModelViewModel =")
+            && tauri_bridge.contains("getLifeModelViewModel()")
+            && tauri_bridge.contains("\"get_life_model_view_model\""),
+        "R3 frontend bridge must mirror the LifeModelViewModel command shape"
+    );
+
+    let adapter = read_repo_file("frontend/src/viewmodels/lifemodel/lifeModelViewModelAdapter.ts");
+    assert!(
+        adapter.contains("getLifeModelViewModel")
+            && !adapter.contains("buildLifeModelViewModelEnvelope")
+            && !adapter.contains("BuildLifeModelViewModelInput"),
+        "R3 frontend adapter must delegate to backend LifeModelViewModel, not rebuild raw truth"
+    );
+
+    let page = read_repo_file("frontend/src/pages/LifeModelPage.tsx");
+    assert!(
+        page.contains("getLifeModelViewModel")
+            && page.contains("viewModel?.pendingUpdateCounts.pendingReview")
+            && page.contains("viewModel?.memoryLinkage")
+            && page.contains("viewModel?.candidateChanges"),
+        "R3 LifeModel page must consume backend LifeModelViewModel fields"
+    );
+    for forbidden in [
+        "getLifeModel(",
+        "getLifeModelCurrentView(",
+        "getSystemDiagnostics(",
+        "getModel4DCompletion(",
+        "countMemoryChunks(",
+        "getMemoryTierStats(",
+        "listProposals(",
+        "buildLifeModelViewModelEnvelope",
+        "getLifeModelQualityIssues",
+        "buildLifeModelTrustViews",
+    ] {
+        assert!(
+            !page.contains(forbidden),
+            "R3 LifeModel page must not reconstruct backend truth locally via {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn single_system_r4_tasks_workspace_viewmodel_owns_task_lifecycle_controls() {
+    let contract = read_repo_file("openlife-core/src/agent/tasks_view_model.rs");
+    for required in [
+        "pub struct TasksViewModel",
+        "pub struct WorkspaceViewModel",
+        "pub struct TaskViewModelItem",
+        "pub struct TaskControl",
+        "pub enum TaskLifecycleStatus",
+        "pub enum TaskTerminalDeliveryStatus",
+        "pub fn build_tasks_view_model",
+        "pub fn build_workspace_view_model",
+        "CompletedWithPendingReview",
+        "CompletedNeedsEvidence",
+        "TaskControlEffect::TaskResumeRequest",
+        "TaskControlEffect::TaskRetryRequest",
+        "TaskControlEffect::TaskCancelRequest",
+        "TaskControlEffect::TaskRefreshRequest",
+        "completion_proof_after_dispatch: false",
+        "ControlClaimsCompletionProof",
+    ] {
+        assert!(
+            contract.contains(required),
+            "R4 backend TasksViewModel contract must include {required}"
+        );
+    }
+    for invariant in [
+        "completed_task_without_final_delivery_fails_closed",
+        "completed_task_with_final_delivery_missing_status_fails_closed",
+        "completed_task_with_completed_status_is_delivered",
+        "completed_task_with_completed_with_pending_items_is_not_plain_completed",
+        "completed_task_with_pending_review_is_not_plain_completed",
+        "request_controls_do_not_claim_completion_after_dispatch",
+    ] {
+        assert!(
+            contract.contains(invariant),
+            "R4 backend TasksViewModel tests must lock fail-closed invariant {invariant}"
+        );
+    }
+    assert!(
+        !contract.contains(".unwrap_or(true)"),
+        "R4 final delivery completion must fail closed when final_delivery_status is missing"
+    );
+
+    let read_model = read_repo_file("src-tauri/src/read_models/tasks.rs");
+    for required in [
+        "pub async fn get_tasks_view_model",
+        "pub async fn get_workspace_view_model",
+        "list_main_chat_agent_tasks_with_state",
+        "get_main_chat_agent_task_detail_with_state",
+        "get_review_center_view_model_with_state",
+        "get_provider_privacy_boundary_summary_with_state",
+        "state.agent_run_store",
+        "build_tasks_view_model",
+        "WorkspaceViewModel consumes R5 ProviderPrivacyBoundarySummary",
+    ] {
+        assert!(
+            read_model.contains(required),
+            "R4 Tauri TasksViewModel command must include {required}"
+        );
+    }
+    let task_controls = read_repo_file("src-tauri/src/main_chat_task_controls.rs");
+    assert!(
+        task_controls.contains("\"status\": status")
+            && task_controls.contains("final_delivery_status_from_task")
+            && !task_controls.contains("\"source\": \"task_session_final_summary\""),
+        "R4 TaskDetail final_delivery must carry status evidence and must not treat final_summary alone as delivery proof"
+    );
+
+    let lib = read_repo_file("src-tauri/src/lib.rs");
+    assert!(
+        lib.contains("use read_models::tasks::{get_tasks_view_model, get_workspace_view_model};")
+            && lib.contains("get_tasks_view_model,")
+            && lib.contains("get_workspace_view_model,"),
+        "R4 TasksViewModel and WorkspaceViewModel must be actual registered Tauri commands"
+    );
+
+    let tauri_bridge = read_repo_file("frontend/src/tauri.ts");
+    assert!(
+        tauri_bridge.contains("export type TasksViewModel =")
+            && tauri_bridge.contains("export type WorkspaceViewModel =")
+            && tauri_bridge.contains("export type TaskControl =")
+            && tauri_bridge.contains("getTasksViewModel()")
+            && tauri_bridge.contains("getWorkspaceViewModel()")
+            && tauri_bridge.contains("\"get_tasks_view_model\""),
+        "R4 frontend bridge must mirror backend task/workspace read-model command shapes"
+    );
+
+    let runs = read_repo_file("frontend/src/pages/RunsPage.tsx");
+    for required in [
+        "getTasksViewModel",
+        "TaskViewModelItem",
+        "TaskControl",
+        "item.lifecycleStatus",
+        "item.terminalDeliveryStatus",
+        "enabledActionControls(item)",
+        "control.effect",
+        "taskControl.targetActionId",
+    ] {
+        assert!(
+            runs.contains(required),
+            "R4 Runs page must consume backend TasksViewModel authority: {required}"
+        );
+    }
+    for forbidden in [
+        "listMainChatAgentTasks",
+        "getMainChatAgentTaskDetail",
+        "taskSummaryByRunId",
+        "allowedControlsForSummary",
+        "lifecycleForRun",
+    ] {
+        assert!(
+            !runs.contains(forbidden),
+            "R4 Runs page must not locally merge raw task lifecycle/control authority via {forbidden}"
+        );
+    }
+
+    let chat = read_repo_file("frontend/src/pages/ChatPage.tsx");
+    for required in [
+        "getTasksViewModel",
+        "currentTaskViewItem",
+        "enabledTaskViewControl",
+        "taskViewItem?.lifecycleStatus",
+        "taskViewItem?.terminalDeliveryStatus",
+        "Backend task read model did not enable resume",
+        "canResumeCurrentMainChatTask",
+        "canRetryCurrentMainChatTask",
+        "canCancelCurrentMainChatTask",
+    ] {
+        assert!(
+            chat.contains(required),
+            "R4 Chat page must consume backend TasksViewModel authority: {required}"
+        );
+    }
+    for forbidden in [
+        "taskState?.canResume ? [\"resume\"]",
+        "taskState?.canRetry ? [\"retry\"]",
+        "canCancel ? [\"cancel\"]",
+        "taskStatus === \"completed\" ||",
+        "runStatus === \"completed\" ||",
+        "disabled={!taskState?.canResume",
+        "disabled={!currentAgentTaskState.canResume",
+    ] {
+        assert!(
+            !chat.contains(forbidden),
+            "R4 Chat page must not grant task control/completion authority from raw fragments: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn single_system_r5_memory_and_provider_privacy_readmodels_own_product_boundaries() {
+    let memory_contract = read_repo_file("openlife-core/src/agent/memory_view_model.rs");
+    for required in [
+        "pub struct MemoryViewModel",
+        "pub struct MemoryLifecycleSummary",
+        "pub struct MemoryLaneSummary",
+        "pub struct MemoryLifeModelLinkageSummary",
+        "pub fn build_memory_view_model",
+        "accepted_proposal_is_not_materialized_memory_proof",
+        "tier_stats_support_storage_but_do_not_create_active_memory_truth",
+        "rolled_back_memory_is_not_active",
+        "review_items_are_linked_by_proposal_id_without_claiming_materialization",
+    ] {
+        assert!(
+            memory_contract.contains(required),
+            "R5 backend MemoryViewModel contract must include {required}"
+        );
+    }
+
+    let provider_contract = read_repo_file("openlife-core/src/agent/provider_privacy_boundary.rs");
+    for required in [
+        "pub struct ProviderPrivacyBoundaryBuildInput",
+        "pub fn build_provider_privacy_boundary_summary",
+        "prefer_local_model_without_route_evidence_keeps_transmission_unknown",
+        "local_only_required_without_route_evidence_does_not_claim_not_sent",
+        "observed_not_sent_route_can_claim_not_sent",
+        "validated_cloud_route_is_possible_not_sent_proof",
+        "stale_provider_validation_blocks_cloud_readiness",
+        "observed_external_transmission_still_overrides_config",
+    ] {
+        assert!(
+            provider_contract.contains(required),
+            "R5 provider/privacy contract must include {required}"
+        );
+    }
+
+    let memory_read_model = read_repo_file("src-tauri/src/read_models/memory.rs");
+    for required in [
+        "pub async fn get_memory_view_model",
+        "get_memory_view_model_with_state",
+        "MemoryLifecycleStore",
+        "get_memory_tier_stats_with_state",
+        "get_review_center_view_model_with_state",
+        "build_memory_view_model",
+        "Accepted proposal decisions remain decision state",
+    ] {
+        assert!(
+            memory_read_model.contains(required),
+            "R5 Tauri MemoryViewModel command must include {required}"
+        );
+    }
+
+    let provider_read_model = read_repo_file("src-tauri/src/read_models/provider_privacy.rs");
+    for required in [
+        "pub async fn get_provider_privacy_boundary_summary",
+        "get_provider_privacy_boundary_summary_with_state",
+        "summarize_provider_validation",
+        "cloud_api_configured",
+        "build_provider_privacy_boundary_summary",
+        "external transmission remain fail-closed",
+    ] {
+        assert!(
+            provider_read_model.contains(required),
+            "R5 Tauri ProviderPrivacyBoundarySummary command must include {required}"
+        );
+    }
+    assert!(
+        !provider_read_model.contains("local_only_required: config.prefer_local_model"),
+        "R5 ProviderPrivacyBoundarySummary must not convert local preference into a LocalOnly runtime requirement"
+    );
+    let provider_contract = read_repo_file("openlife-core/src/agent/provider_privacy_boundary.rs");
+    for required in [
+        "prefer_local_model_without_route_evidence_keeps_transmission_unknown",
+        "local_only_required_without_route_evidence_does_not_claim_not_sent",
+        "observed_not_sent_route_can_claim_not_sent",
+        "observed_external_transmission_still_overrides_config",
+        "no runtime route evidence",
+    ] {
+        assert!(
+            provider_contract.contains(required),
+            "R5 provider/privacy contract must lock fail-closed route evidence invariant {required}"
+        );
+    }
+    assert!(
+        !provider_contract.contains("unwrap_or(ExternalTransmissionStatus::NotSent)"),
+        "R5 provider/privacy must not infer NotSent from config preference"
+    );
+
+    let lib = read_repo_file("src-tauri/src/lib.rs");
+    assert!(
+        lib.contains("use read_models::memory::get_memory_view_model;")
+            && lib.contains(
+                "use read_models::provider_privacy::get_provider_privacy_boundary_summary;"
+            )
+            && lib.contains("get_memory_view_model,")
+            && lib.contains("get_provider_privacy_boundary_summary,"),
+        "R5 MemoryViewModel and ProviderPrivacyBoundarySummary must be actual registered Tauri commands"
+    );
+
+    let tauri_bridge = read_repo_file("frontend/src/tauri.ts");
+    for required in [
+        "export type MemoryViewModel =",
+        "export type MemoryLifecycleSummary =",
+        "export type MemoryLaneSummary =",
+        "getMemoryViewModel()",
+        "getProviderPrivacyBoundarySummary()",
+        "\"get_memory_view_model\"",
+        "\"get_provider_privacy_boundary_summary\"",
+    ] {
+        assert!(
+            tauri_bridge.contains(required),
+            "R5 frontend bridge must mirror backend read-model command shape {required}"
+        );
+    }
+
+    let memory_page = read_repo_file("frontend/src/pages/MemorySearch.tsx");
+    assert!(
+        memory_page.contains("getMemoryViewModel")
+            && memory_page.contains("memoryViewModel?.summary")
+            && memory_page.contains("lifecycleSummary")
+            && !memory_page.contains("getMemoryTierStats("),
+        "R5 MemorySearch must consume MemoryViewModel and must not derive product counts from raw tier stats"
+    );
+
+    for (path, required) in [
+        (
+            "frontend/src/pages/settings/tabs/ProviderTab.tsx",
+            "providerPrivacyBoundary",
+        ),
+        (
+            "frontend/src/pages/settings/tabs/OverviewTab.tsx",
+            "providerPrivacyBoundary",
+        ),
+        (
+            "frontend/src/pages/settings/tabs/ReviewMemoryTab.tsx",
+            "memoryViewModel",
+        ),
+        (
+            "frontend/src/pages/TodayV2PreviewPage.tsx",
+            "getProviderPrivacyBoundarySummary",
+        ),
+        (
+            "frontend/src/viewmodels/today/todayViewModelAdapter.ts",
+            "providerPrivacyBoundary",
+        ),
+    ] {
+        let source = read_repo_file(path);
+        assert!(
+            source.contains(required),
+            "R5 frontend convergence target {path} must consume {required}"
+        );
+        assert!(
+            !source.contains("buildProviderReadinessView"),
+            "R5 frontend convergence target {path} must not locally rebuild provider/privacy boundary"
+        );
+    }
+}
+
+#[test]
+fn single_system_r6_frontend_convergence_guards_repaired_authority() {
+    let frontend_guard =
+        read_repo_file("frontend/src/pages/TodayPage.readModelConvergence.test.ts");
+    for required in [
+        "frontend read-model convergence guards",
+        "getReviewCenterViewModel",
+        "getTasksViewModel",
+        "getLifeModelViewModel",
+        "getMemoryViewModel",
+        "getProviderPrivacyBoundarySummary",
+        "reviewRequiredCountFromProjection",
+        "keeps frontend helpers display-only",
+    ] {
+        assert!(
+            frontend_guard.contains(required),
+            "R6 frontend static guard must cover {required}"
+        );
+    }
+
+    let mailbox = read_repo_file("frontend/src/pages/MailboxPage.tsx");
+    for required in [
+        "getReviewCenterViewModel",
+        "allowedActions.find",
+        "item.materializationStatus",
+        "ReviewCenterViewModel 尚未提供该确认项的后端操作状态",
+    ] {
+        assert!(
+            mailbox.contains(required),
+            "R6 Mailbox must keep review action/materialization authority in ReviewCenterViewModel: {required}"
+        );
+    }
+    for forbidden in [
+        "function canAccept(",
+        "function isPathInSafePaths(",
+        "function appliedNotice(",
+        "setProposals(prev =>",
+    ] {
+        assert!(
+            !mailbox.contains(forbidden),
+            "R6 Mailbox must not restore local review/materialization inference: {forbidden}"
+        );
+    }
+
+    let chat = read_repo_file("frontend/src/pages/ChatPage.tsx");
+    for required in [
+        "getTasksViewModel",
+        "currentTaskViewItem",
+        "enabledTaskViewControl",
+        "taskViewItem?.lifecycleStatus",
+        "taskViewItem?.terminalDeliveryStatus",
+    ] {
+        assert!(
+            chat.contains(required),
+            "R6 Chat must keep task lifecycle/control authority in TasksViewModel: {required}"
+        );
+    }
+    for forbidden in [
+        "taskState?.canResume ? [\"resume\"]",
+        "taskState?.canRetry ? [\"retry\"]",
+        "canCancel ? [\"cancel\"]",
+        "taskStatus === \"completed\" ||",
+        "runStatus === \"completed\" ||",
+    ] {
+        assert!(
+            !chat.contains(forbidden),
+            "R6 Chat must not restore raw task control/completion authority: {forbidden}"
+        );
+    }
+
+    let runs = read_repo_file("frontend/src/pages/RunsPage.tsx");
+    for required in [
+        "getTasksViewModel",
+        "TaskViewModelItem",
+        "item.lifecycleStatus",
+        "enabledActionControls(item)",
+        "control.effect",
+    ] {
+        assert!(
+            runs.contains(required),
+            "R6 Runs must keep lifecycle/control authority in TasksViewModel: {required}"
+        );
+    }
+    for forbidden in [
+        "listMainChatAgentTasks",
+        "getMainChatAgentTaskDetail",
+        "taskSummaryByRunId",
+        "allowedControlsForSummary",
+        "lifecycleForRun",
+    ] {
+        assert!(
+            !runs.contains(forbidden),
+            "R6 Runs must not restore raw task summary lifecycle reconstruction: {forbidden}"
+        );
+    }
+
+    let lifemodel = read_repo_file("frontend/src/pages/LifeModelPage.tsx");
+    assert!(
+        lifemodel.contains("getLifeModelViewModel")
+            && lifemodel.contains("viewModel?.pendingUpdateCounts.pendingReview")
+            && lifemodel.contains("viewModel?.memoryLinkage")
+            && lifemodel.contains("viewModel?.candidateChanges"),
+        "R6 LifeModel page must keep backend LifeModelViewModel as product truth source"
+    );
+    for forbidden in [
+        "getLifeModel(",
+        "getLifeModelCurrentView(",
+        "getSystemDiagnostics(",
+        "countMemoryChunks(",
+        "getMemoryTierStats(",
+        "listProposals(",
+        "buildLifeModelViewModelEnvelope",
+    ] {
+        assert!(
+            !lifemodel.contains(forbidden),
+            "R6 LifeModel page must not restore raw truth reconstruction: {forbidden}"
+        );
+    }
+
+    let memory_page = read_repo_file("frontend/src/pages/MemorySearch.tsx");
+    assert!(
+        memory_page.contains("getMemoryViewModel")
+            && memory_page.contains("memoryViewModel?.summary")
+            && memory_page.contains("lifecycleSummary")
+            && memory_page.contains("向量层级只是存储遥测")
+            && !memory_page.contains("getMemoryTierStats("),
+        "R6 MemorySearch must keep MemoryViewModel as product memory summary source"
+    );
+
+    let settings = read_repo_file("frontend/src/pages/SettingsPage.tsx");
+    assert!(
+        settings.contains("getMemoryViewModel")
+            && settings.contains("getProviderPrivacyBoundarySummary")
+            && settings.contains("providerPrivacyBoundary"),
+        "R6 Settings must consume backend MemoryViewModel and ProviderPrivacyBoundarySummary"
+    );
+    for path in [
+        "frontend/src/pages/settings/tabs/ProviderTab.tsx",
+        "frontend/src/pages/settings/tabs/OverviewTab.tsx",
+    ] {
+        let source = read_repo_file(path);
+        assert!(
+            source.contains("providerPrivacyBoundary") && !source.contains("buildProviderReadinessView"),
+            "R6 Settings tab {path} must use provider/privacy summary and not rebuild provider readiness locally"
+        );
+    }
+
+    let today = read_repo_file("frontend/src/pages/TodayPage.tsx");
+    assert!(
+        today.contains("getLifeStateProjection")
+            && today.contains("getDailyGoals")
+            && today.contains("reviewRequiredCountFromProjection"),
+        "R6 Today page must stay projection-backed until a backend TodayViewModel exists"
+    );
+    for forbidden in [
+        "listProposals(",
+        "getSystemDiagnostics(",
+        "getMemoryTierStats(",
+        "buildProviderReadinessView",
+        "getProviderPrivacyBoundarySummary",
+    ] {
+        assert!(
+            !today.contains(forbidden),
+            "R6 Today limited page must not invent missing backend owners via {forbidden}"
+        );
+    }
+
+    let runtime_disclosure = read_repo_file("frontend/src/utils/runtimeDisclosure.ts");
+    for forbidden in [
+        "safeInvoke",
+        "getSystemDiagnostics",
+        "getProviderPrivacyBoundarySummary",
+        "listMainChatAgentTasks",
+        "resumeMainChatAgentTask",
+        "ReviewCenterViewModel",
+        "TasksViewModel",
+        "MemoryViewModel",
+    ] {
+        assert!(
+            !runtime_disclosure.contains(forbidden),
+            "R6 runtimeDisclosure must remain display-only and not call/own {forbidden}"
+        );
+    }
+
+    let projection_helper = read_repo_file("frontend/src/utils/lifeStateProjection.ts");
+    for forbidden in [
+        "safeInvoke",
+        "getSystemDiagnostics",
+        "listProposals",
+        "getProviderPrivacyBoundarySummary",
+        "getMemoryTierStats",
+    ] {
+        assert!(
+            !projection_helper.contains(forbidden),
+            "R6 lifeStateProjection helper must remain a formatter over backend projection: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn single_system_r0_frontend_raw_reconstruction_hotspots_match_inventory() {
+    let raw_read_markers = [
+        "getSystemDiagnostics(",
+        "listProposals(",
+        "listAgentRuns(",
+        "listMainChatAgentTasks(",
+        "getLifeModel(",
+        "getLifeStateProjection(",
+        "getDailyGoals(",
+        "getSchedulerConfig(",
+        "getMemoryTierStats(",
+        "getLifeModelCurrentView(",
+        "getLifeModelCompletion(",
+    ];
+    let mut actual = BTreeSet::new();
+    for file in source_files(&["frontend/src/pages", "frontend/src/utils"]) {
+        let rel = to_repo_path(&file);
+        if rel.ends_with(".test.ts")
+            || rel.ends_with(".test.tsx")
+            || rel.contains("frontend/src/test/")
+            || rel == "frontend/src/tauriDev.ts"
+        {
+            continue;
+        }
+        let source = fs::read_to_string(&file).unwrap_or_else(|err| panic!("read {rel}: {err}"));
+        if raw_read_markers
+            .iter()
+            .any(|marker| source.contains(marker))
+        {
+            actual.insert(rel);
+        }
+    }
+
+    let inventory = inventory();
+    let entries = inventory_entries(&inventory, "frontend_multi_source_state_surfaces");
+    let mut expected = BTreeSet::new();
+    let mut classified = BTreeMap::new();
+    for entry in entries {
+        let path = entry_str(entry, "path").to_string();
+        let classification = entry_str(entry, "r0_surface_classification").to_string();
+        assert!(
+            !entry_bool(entry, "backend_owner"),
+            "frontend multi-source state surface {path} must not be classified as backend owner"
+        );
+        classified.insert(path.clone(), classification);
+        if entry_bool(entry, "r0_raw_source_scan_hit") {
+            expected.insert(path);
+        }
+    }
+
+    assert_eq!(
+        actual, expected,
+        "R0 frontend raw reconstruction scan must match classified inventory entries"
+    );
+
+    for required_helper in [
+        "frontend/src/utils/runtimeDisclosure.ts",
+        "frontend/src/utils/runDisplaySummary.ts",
+        "frontend/src/utils/capabilityStatus.ts",
+        "frontend/src/utils/lifeStateProjection.ts",
+    ] {
+        assert!(
+            classified.contains_key(required_helper),
+            "R0 source map must classify frontend helper {required_helper}"
+        );
+    }
+
+    for (path, expected_class) in [
+        (
+            "frontend/src/pages/TodayV2PreviewPage.tsx",
+            "frontend_preview_only",
+        ),
+        (
+            "frontend/src/pages/chat/useChatContext.ts",
+            "product_hook_raw_read_convergence_target",
+        ),
+        (
+            "frontend/src/pages/MemorySearch.tsx",
+            "technical_memory_surface_memory_view_model_consumer",
+        ),
+        ("frontend/src/tauri.ts", "frontend_product_bridge"),
+    ] {
+        assert_eq!(
+            classified.get(path).map(String::as_str),
+            Some(expected_class),
+            "R0 source map must classify {path} as {expected_class}"
         );
     }
 }
@@ -1006,11 +2046,16 @@ fn single_system_phase6_frontend_product_status_reads_life_state_projection() {
             "frontend/src/pages/TodayPage.tsx"
                 | "frontend/src/pages/MailboxPage.tsx"
                 | "frontend/src/pages/ChatPage.tsx"
-                | "frontend/src/pages/LifeModelPage.tsx"
         ) {
             assert!(
                 source.contains("reviewRequiredCountFromProjection"),
                 "Phase6 product pending state in {path} must use the LifeStateProjection helper"
+            );
+        }
+        if path == "frontend/src/pages/LifeModelPage.tsx" {
+            assert!(
+                source.contains("viewModel?.pendingUpdateCounts.pendingReview"),
+                "R3 LifeModel product pending state must use the backend LifeModelViewModel"
             );
         }
         for marker in forbidden_raw_status_markers {
@@ -1059,18 +2104,16 @@ fn single_system_phase6_frontend_product_status_reads_life_state_projection() {
     let lifemodel = read_repo_file("frontend/src/pages/LifeModelPage.tsx");
     let builder_review_counter = source_between(
         &lifemodel,
-        "function countBuilderReviewItems",
-        "function formatProjectionCount",
+        "function BuildSection",
+        "function CommunicationStyleCurrentView",
     );
     assert!(
-        lifemodel.contains(
-            "const pendingCount = reviewRequiredCountFromProjection(state.projection, \"life_model\")"
-        ),
-        "LifeModel product pending count must come from LifeStateProjection helper"
+        lifemodel.contains("const pendingCount = viewModel?.pendingUpdateCounts.pendingReview"),
+        "LifeModel product pending count must come from LifeModelViewModel"
     );
     assert!(
-        builder_review_counter.contains("projection.readiness.pendingBuilderReviewSessions"),
-        "LifeModel builder review state must come from projection readiness"
+        builder_review_counter.contains("viewModel?.pendingUpdateCounts.pendingReview"),
+        "LifeModel builder review state must come from LifeModelViewModel"
     );
     for forbidden in ["pendingProposals", "Math.max", "proposalCount"] {
         assert!(

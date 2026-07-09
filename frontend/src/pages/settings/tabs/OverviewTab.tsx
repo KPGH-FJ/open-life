@@ -2,9 +2,9 @@ import { Link } from "react-router-dom";
 import {
   runMemoryTierMaintenance,
   type LifeStateProjection,
+  type ProviderPrivacyBoundarySummary,
   type SystemDiagnostics,
 } from "../../../tauri";
-import { buildProviderReadinessView } from "../../../utils/providerReadiness";
 import { buildSafeModeBlockedMessage } from "../../../utils/runtimeMessages";
 import {
   advancedRoutePath,
@@ -27,6 +27,7 @@ function readableError(e: unknown): string {
 
 interface OverviewTabProps {
   diagnostics: SystemDiagnostics | null;
+  providerPrivacyBoundary?: ProviderPrivacyBoundarySummary | null;
   projection?: LifeStateProjection | null;
   safeMode: boolean;
   exportLoading: boolean;
@@ -44,6 +45,7 @@ interface OverviewTabProps {
 
 export default function OverviewTab({
   diagnostics,
+  providerPrivacyBoundary = null,
   projection,
   safeMode,
   exportLoading,
@@ -57,7 +59,6 @@ export default function OverviewTab({
   handleVectorRebuild,
 }: OverviewTabProps) {
   const runtime = diagnostics?.runtime_build_info;
-  const providerReadiness = buildProviderReadinessView(diagnostics);
   const readiness = projection?.readiness;
   const usageReady = readiness?.usageReady ?? false;
   const modelEmpty = readiness?.modelEmpty ?? true;
@@ -85,9 +86,17 @@ export default function OverviewTab({
   // ---- Trial checklist ----
   const trialChecks = [
     {
-      label: "云端模型",
-      ok: providerReadiness.cloudReady,
-      detail: `${providerReadiness.statusLabel} · ${providerReadiness.detail}`,
+      label: "模型边界",
+      ok: Boolean(
+        providerPrivacyBoundary &&
+        !providerPrivacyBoundary.blockedReason &&
+        providerPrivacyBoundary.risk !== "unknown"
+      ),
+      detail: providerPrivacyBoundary
+        ? `${providerPrivacyBoundary.providerLabel} · ${
+            providerPrivacyBoundary.blockedReason ?? providerPrivacyBoundary.privacyLabel
+          } · ${providerPrivacyBoundary.externalTransmission}`
+        : "等待 ProviderPrivacyBoundarySummary",
       action: "配置模型",
       href: "#llm-settings",
     },

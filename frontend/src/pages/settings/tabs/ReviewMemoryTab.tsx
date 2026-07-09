@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import type { AppConfig, LifeStateProjection } from "../../../tauri";
+import type { AppConfig, LifeStateProjection, MemoryViewModel } from "../../../tauri";
 import { CapabilityCard, StatusChip } from "../../../components/product/ProductPrimitives";
 import { mailboxRoute } from "../../../productShellContract";
 import { reviewRequiredCountFromProjection } from "../../../utils/lifeStateProjection";
@@ -8,12 +8,20 @@ interface ReviewMemoryTabProps {
   config: AppConfig;
   setConfig: React.Dispatch<React.SetStateAction<AppConfig>>;
   projection: LifeStateProjection | null;
+  memoryViewModel: MemoryViewModel | null;
 }
 
-export default function ReviewMemoryTab({ config, setConfig, projection }: ReviewMemoryTabProps) {
+export default function ReviewMemoryTab({
+  config,
+  setConfig,
+  projection,
+  memoryViewModel,
+}: ReviewMemoryTabProps) {
   const proposalEnabled = config.chat_proposal?.enabled ?? true;
   const pendingCount = reviewRequiredCountFromProjection(projection, "settings");
   const highRiskCount = projection?.pending.highRiskReviewRequiredCount ?? 0;
+  const memorySummary = memoryViewModel?.summary ?? null;
+  const lifecycle = memoryViewModel?.lifecycleSummary ?? null;
 
   return (
     <>
@@ -34,12 +42,18 @@ export default function ReviewMemoryTab({ config, setConfig, projection }: Revie
           </Link>
         </CapabilityCard>
         <CapabilityCard
-          title="Proposal-first"
-          description="长期记忆和 Life Model 更新只能先创建建议。"
-          tone="ready"
-          meta="强制"
+          title="MemoryViewModel"
+          description="记忆物化、回滚和待审阅数量来自后台生命周期读模型。"
+          tone={memoryViewModel ? "ready" : "warning"}
+          meta={memoryViewModel ? "backend" : "unknown"}
         >
-          <StatusChip label="silent write blocked" tone="ready" />
+          <div className="flex flex-wrap gap-1.5">
+            <StatusChip label={`${memorySummary?.materializedCount ?? 0} materialized`} />
+            <StatusChip
+              label={`${memorySummary?.pendingMaterializationCount ?? 0} pending apply`}
+              tone={(memorySummary?.pendingMaterializationCount ?? 0) > 0 ? "warning" : "ready"}
+            />
+          </div>
         </CapabilityCard>
         <CapabilityCard
           title="High Risk"
@@ -47,6 +61,20 @@ export default function ReviewMemoryTab({ config, setConfig, projection }: Revie
           tone={highRiskCount > 0 ? "danger" : "neutral"}
           meta={`${highRiskCount} 高风险`}
         />
+      </section>
+
+      <section className="grid gap-3 md:grid-cols-4">
+        {[
+          ["候选", lifecycle?.candidateCount ?? 0],
+          ["待确认", memorySummary?.reviewRequiredCount ?? 0],
+          ["已确认", lifecycle?.confirmedCount ?? 0],
+          ["已回滚", lifecycle?.rolledBackCount ?? 0],
+        ].map(([label, value]) => (
+          <div key={label} className="rounded-lg border border-stone-200 bg-white px-3 py-3">
+            <div className="text-[11px] font-medium text-stone-500">{label}</div>
+            <div className="mt-1 text-lg font-semibold text-stone-900">{value}</div>
+          </div>
+        ))}
       </section>
 
       <section className="space-y-4 border-t pt-4">

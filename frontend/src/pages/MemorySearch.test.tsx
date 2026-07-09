@@ -27,9 +27,9 @@ describe("MemorySearch", () => {
     );
 
     expect(await screen.findByText("记忆治理说明")).toBeInTheDocument();
-    expect(screen.getByText(/这个页面负责回答三个问题/)).toBeInTheDocument();
-    expect(screen.getByText("搜索记忆")).toBeInTheDocument();
-    expect(screen.getByText("归档与恢复")).toBeInTheDocument();
+    expect(screen.getByText(/后台 MemoryViewModel/)).toBeInTheDocument();
+    expect(screen.getByText("ReadModel")).toBeInTheDocument();
+    expect(screen.getByText("已物化记忆")).toBeInTheDocument();
   });
 
   it("shows safe mode prompt and blocks indexing when diagnostics are degraded", async () => {
@@ -63,9 +63,9 @@ describe("MemorySearch", () => {
 
     const contentInput = screen.getByPlaceholderText("输入要索引的记忆内容...");
     fireEvent.change(contentInput, { target: { value: "需要索引的记忆" } });
-    fireEvent.click(screen.getByRole("button", { name: "索引" }));
 
-    expect(await screen.findByText(/当前处于 Safe Mode/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "索引" })).toBeDisabled();
+    expect(screen.getByText(/memory.db 初始化失败/)).toBeInTheDocument();
     expect(invoke).not.toHaveBeenCalledWith("index_memory_chunk", expect.anything());
   });
 

@@ -15,6 +15,7 @@ import {
 import {
   acceptProposal,
   editProposal,
+  getReviewCenterViewModel,
   getLifeStateProjection,
   listProposals,
   postponeProposal,
@@ -23,10 +24,14 @@ import {
   type AgentProposal,
   type LifeStateProjection,
   type ProposalStatus,
+  type ReviewAction,
+  type ReviewCenterViewModel,
+  type ReviewItem,
+  type ReviewItemMaterializationStatus,
 } from "../tauri";
 import ReviewDecisionCard from "../components/ReviewDecisionCard";
 import type { MailboxRouteState } from "../productShellContract";
-import { canonicalLifeModelPath, proposalSubject } from "../utils/proposalDisplay";
+import { proposalSubject } from "../utils/proposalDisplay";
 import {
   buildReviewDecisionView,
   reviewGroupLabel,
@@ -37,6 +42,7 @@ import { reviewRequiredCountFromProjection } from "../utils/lifeStateProjection"
 type FolderId = "pending" | "accepted" | "archived" | "needs_edit";
 type QuickAction = "accept" | "reject" | "postpone";
 type ReviewGroupFilter = "all" | ReviewDecisionGroup;
+type ReviewActionKind = ReviewAction["kind"];
 
 const FOLDERS: Array<{ id: FolderId; label: string; icon: LucideIcon }> = [
   { id: "pending", label: "待确认", icon: ListChecks },
@@ -44,12 +50,6 @@ const FOLDERS: Array<{ id: FolderId; label: string; icon: LucideIcon }> = [
   { id: "archived", label: "已处理", icon: Archive },
   { id: "needs_edit", label: "已修改待处理", icon: Edit2 },
 ];
-
-function isUnsupportedType(type: string): boolean {
-  return ["plugin_permission", "model_policy_change", "schedule_checkin", "unsupported"].includes(
-    type
-  );
-}
 
 function editableProposalValue(value: unknown): string {
   if (typeof value === "string") return value;
@@ -116,82 +116,6 @@ function truncate(value: string, length = 88): string {
   return value.length > length ? `${value.slice(0, length)}...` : value;
 }
 
-function isPathInSafePaths(path: string | undefined, safePaths: string[]): boolean {
-  if (!path || safePaths.length === 0) return false;
-  const normalized = path.replace(/\\/g, "/");
-  return safePaths.some(safe => {
-    const safeNorm = safe.replace(/\\/g, "/");
-    return normalized === safeNorm || normalized.startsWith(`${safeNorm}/`);
-  });
-}
-
-function externalWritePath(proposal: AgentProposal): string | undefined {
-  return proposal.proposalType === "external_write_action" ? proposal.after?.path : undefined;
-}
-
-function isReviewableStatus(status: ProposalStatus): boolean {
-  return status === "pending" || status === "postponed" || status === "edited";
-}
-
-function canAccept(proposal: AgentProposal, safeMode: boolean, safePaths: string[]): boolean {
-  if (safeMode) return false;
-  if (!isReviewableStatus(proposal.status)) return false;
-  if (isUnsupportedType(proposal.proposalType)) return false;
-  const path = externalWritePath(proposal);
-  if (proposal.proposalType === "external_write_action" && !isPathInSafePaths(path, safePaths)) {
-    return false;
-  }
-  return true;
-}
-
-function canRejectOrPostpone(proposal: AgentProposal): boolean {
-  return isReviewableStatus(proposal.status);
-}
-
-function acceptBlockedReason(
-  proposal: AgentProposal,
-  safeModeActive: boolean,
-  safePaths: string[]
-): string | null {
-  if (safeModeActive) return "Safe Mode 下无法同意或编辑。";
-  if (!isReviewableStatus(proposal.status)) return "只有待确认、已编辑或稍后再说的确认项可以同意。";
-  if (isUnsupportedType(proposal.proposalType)) {
-    return "这类确认当前尚未接入应用器，不能同意。";
-  }
-  const path = externalWritePath(proposal);
-  if (proposal.proposalType === "external_write_action" && !isPathInSafePaths(path, safePaths)) {
-    return "目标路径不在文件访问范围内，不能同意。";
-  }
-  return null;
-}
-
-function quickActionBlockedReason(proposal: AgentProposal, action: QuickAction): string | null {
-  if (action === "accept") return null;
-  if (!canRejectOrPostpone(proposal)) {
-    return "只有待确认、已编辑或稍后再说的确认项可以继续处理。";
-  }
-  return null;
-}
-
-function appliedNotice(proposal: AgentProposal): string {
-  if (proposal.proposalType === "tool_permission") {
-    return `已更新工具权限：${proposal.affectedPath}`;
-  }
-  if (proposal.proposalType === "memory_write" || proposal.proposalType === "memory_archive") {
-    return `已应用到记忆治理：${proposal.affectedPath}`;
-  }
-  if (
-    proposal.proposalType === "plugin_permission" ||
-    proposal.proposalType === "scheduled_task" ||
-    proposal.proposalType === "external_write_action" ||
-    proposal.proposalType === "model_policy_change" ||
-    proposal.proposalType === "data_export"
-  ) {
-    return `已处理确认：${proposal.affectedPath}`;
-  }
-  return `已应用到人生模型：${canonicalLifeModelPath(proposal.affectedPath)}`;
-}
-
 function statusLabel(status: ProposalStatus): string {
   const labels: Record<ProposalStatus, string> = {
     pending: "待确认",
@@ -202,6 +126,46 @@ function statusLabel(status: ProposalStatus): string {
     expired: "已处理",
   };
   return labels[status];
+}
+
+function materializationLabel(status: ReviewItemMaterializationStatus): string {
+  const labels: Record<ReviewItemMaterializationStatus, string> = {
+    not_applicable: "无需应用",
+    not_started: "未应用",
+    applying: "应用中",
+    applied: "已应用",
+    failed: "应用失败",
+    rolled_back: "已回滚",
+    unknown: "应用状态未知",
+  };
+  return labels[status];
+}
+
+function materializationClass(status: ReviewItemMaterializationStatus): string {
+  if (status === "applied") return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  if (status === "failed" || status === "unknown")
+    return "border-rose-200 bg-rose-50 text-rose-800";
+  if (status === "applying" || status === "not_started")
+    return "border-amber-200 bg-amber-50 text-amber-800";
+  return "border-stone-200 bg-stone-100 text-stone-600";
+}
+
+function actionFor(item: ReviewItem | null, kind: ReviewActionKind): ReviewAction | null {
+  return item?.allowedActions.find(action => action.kind === kind) ?? null;
+}
+
+function actionBlockedReason(item: ReviewItem | null, kind: ReviewActionKind): string | null {
+  if (!item) return "ReviewCenterViewModel 尚未提供该确认项的后端操作状态。";
+  const action = actionFor(item, kind);
+  if (!action) return "后端没有为该确认项开放这个操作。";
+  if (!action.enabled) return action.disabledReason ?? "后端未开放这个操作。";
+  return null;
+}
+
+function quickActionKind(action: QuickAction): ReviewActionKind {
+  if (action === "accept") return "approve";
+  if (action === "reject") return "reject";
+  return "later";
 }
 
 export default function MailboxPage() {
@@ -223,7 +187,7 @@ export default function MailboxPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [projection, setProjection] = useState<LifeStateProjection | null>(null);
-  const [safePaths, setSafePaths] = useState<string[]>([]);
+  const [reviewCenter, setReviewCenter] = useState<ReviewCenterViewModel | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const [mainChatResumeTaskId, setMainChatResumeTaskId] = useState<string | null>(null);
@@ -233,19 +197,29 @@ export default function MailboxPage() {
   const safeModeReason = projection?.safeMode.reason ?? "系统当前处于 Safe Mode。";
   const mailboxReviewRequiredCount = reviewRequiredCountFromProjection(projection, "mailbox");
 
-  const load = async () => {
+  const load = async (): Promise<ReviewCenterViewModel | null> => {
     setLoading(true);
     setError(null);
     try {
-      const [data, lifeState] = await Promise.all([
+      const [data, lifeState, reviewEnvelope] = await Promise.all([
         listProposals(undefined, undefined, undefined, 100),
         getLifeStateProjection().catch(() => null),
+        getReviewCenterViewModel(),
       ]);
       setProposals(data);
       setProjection(lifeState);
-      setSafePaths(lifeState?.safePaths ?? []);
+      setReviewCenter(reviewEnvelope.data);
+      if (reviewEnvelope.status === "error") {
+        setError(
+          reviewEnvelope.warnings?.[0]?.message ??
+            "ReviewCenterViewModel 读取失败，确认操作已保持关闭。"
+        );
+      }
+      return reviewEnvelope.data;
     } catch (err) {
+      setReviewCenter(null);
       setError(`加载 Mailbox 失败：${String(err)}`);
+      return null;
     } finally {
       setLoading(false);
     }
@@ -296,6 +270,18 @@ export default function MailboxPage() {
     [folderProposals, groupFilter]
   );
 
+  const reviewItemsByProposalId = useMemo(() => {
+    const items = new Map<string, ReviewItem>();
+    for (const item of reviewCenter?.items ?? []) {
+      items.set(item.source.proposalId, item);
+      items.set(item.id, item);
+    }
+    return items;
+  }, [reviewCenter]);
+
+  const reviewItemForProposal = (proposal: AgentProposal): ReviewItem | null =>
+    reviewItemsByProposalId.get(proposal.id) ?? null;
+
   useEffect(() => {
     if (visibleProposals.length === 0) {
       setSelectedId(null);
@@ -326,6 +312,7 @@ export default function MailboxPage() {
   const selectedProposal =
     visibleProposals.find(proposal => proposal.id === selectedId) ?? visibleProposals[0] ?? null;
   const selectedDecision = selectedProposal ? buildReviewDecisionView(selectedProposal) : null;
+  const selectedReviewItem = selectedProposal ? reviewItemForProposal(selectedProposal) : null;
 
   const runAction = async (proposal: AgentProposal, action: QuickAction) => {
     setActingId(proposal.id);
@@ -338,46 +325,44 @@ export default function MailboxPage() {
         ? mainChatTaskSessionId
         : null;
 
-    if (action === "accept") {
-      const blocker = acceptBlockedReason(proposal, safeModeActive, safePaths);
-      if (blocker) {
-        setError(blocker);
-        setActingId(null);
-        return;
-      }
-    } else {
-      const blocker = quickActionBlockedReason(proposal, action);
-      if (blocker) {
-        setError(blocker);
-        setActingId(null);
-        return;
-      }
+    const reviewItem = reviewItemForProposal(proposal);
+    const blocker = actionBlockedReason(reviewItem, quickActionKind(action));
+    if (blocker) {
+      setError(blocker);
+      setActingId(null);
+      return;
     }
 
     try {
       if (action === "accept") {
         await acceptProposal(proposal.id);
-        setProposals(prev =>
-          prev.map(item => (item.id === proposal.id ? { ...item, status: "accepted" } : item))
-        );
-        setNotice(appliedNotice(proposal));
-        if (linkedMainChatTaskId) {
-          setMainChatResumeTaskId(linkedMainChatTaskId);
-        }
       } else if (action === "reject") {
         await rejectProposal(proposal.id);
-        setProposals(prev =>
-          prev.map(item => (item.id === proposal.id ? { ...item, status: "rejected" } : item))
-        );
-        setNotice(`已不同意：${proposal.affectedPath}`);
       } else {
         await postponeProposal(proposal.id);
-        setProposals(prev =>
-          prev.map(item => (item.id === proposal.id ? { ...item, status: "postponed" } : item))
-        );
-        setNotice(`已标记稍后再说：${proposal.affectedPath}`);
       }
-      await load();
+      const refreshed = await load();
+      const refreshedItem =
+        refreshed?.items.find(item => item.source.proposalId === proposal.id) ?? null;
+      if (action === "accept") {
+        const relation = refreshedItem?.taskResumeRelation;
+        if (
+          linkedMainChatTaskId &&
+          relation?.taskSessionId === linkedMainChatTaskId &&
+          relation.canRequestResume
+        ) {
+          setNotice("已提交同意请求；Mailbox 已刷新后端确认与应用状态。");
+          setMainChatResumeTaskId(linkedMainChatTaskId);
+        } else if (linkedMainChatTaskId && relation?.blockedReason) {
+          setNotice(`已提交同意请求；任务继续仍由后端保持关闭：${relation.blockedReason}`);
+        } else {
+          setNotice("已提交同意请求；Mailbox 已刷新后端确认与应用状态。");
+        }
+      } else if (action === "reject") {
+        setNotice(`已提交不同意请求：${proposal.affectedPath}`);
+      } else {
+        setNotice(`已提交稍后再说请求：${proposal.affectedPath}`);
+      }
       window.dispatchEvent(new Event("openlife:diagnostics-refresh"));
     } catch (err) {
       const message = String(err);
@@ -402,7 +387,7 @@ export default function MailboxPage() {
     try {
       const state = await resumeMainChatAgentTask(mainChatResumeTaskId);
       const status = state.session?.status?.replace(/_/g, " ") || "running";
-      setNotice(`Main Chat task resumed: ${status}`);
+      setNotice(`Main Chat task resume request sent: ${status}`);
     } catch (err) {
       setError(`恢复 Main Chat task 失败：${String(err)}`);
     } finally {
@@ -423,8 +408,9 @@ export default function MailboxPage() {
   };
 
   const saveEdit = async (proposal: AgentProposal) => {
-    if (safeModeActive) {
-      setError("Safe Mode 下无法同意或编辑。");
+    const blocker = actionBlockedReason(reviewItemForProposal(proposal), "edit");
+    if (blocker) {
+      setError(blocker);
       return;
     }
 
@@ -514,19 +500,21 @@ export default function MailboxPage() {
         {mainChatResumeTaskId && (
           <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-lg border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700 shadow-sm">
             <div>
-              <div className="font-semibold text-stone-950">Main Chat task ready to resume</div>
+              <div className="font-semibold text-stone-950">
+                Main Chat task resume request available
+              </div>
               <div className="mt-1 text-xs text-stone-500">
                 Session {mainChatResumeTaskId.slice(-8)}
               </div>
             </div>
             <button
               type="button"
-              aria-label="Resume Main Chat task"
+              aria-label="Request resume"
               onClick={handleResumeMainChatTask}
               disabled={mainChatResumeBusy}
               className="inline-flex h-9 items-center gap-1.5 rounded-md bg-stone-900 px-3 text-xs font-medium text-white hover:bg-stone-800 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {mainChatResumeBusy ? "Resuming..." : "Resume Main Chat task"}
+              {mainChatResumeBusy ? "Requesting..." : "Request resume"}
             </button>
           </div>
         )}
@@ -617,6 +605,8 @@ export default function MailboxPage() {
                 <div className="divide-y divide-stone-100">
                   {visibleProposals.map(proposal => {
                     const active = selectedProposal?.id === proposal.id;
+                    const item = reviewItemForProposal(proposal);
+                    const approveBlocker = actionBlockedReason(item, "approve");
                     return (
                       <button
                         key={proposal.id}
@@ -661,9 +651,18 @@ export default function MailboxPage() {
                           >
                             {statusLabel(proposal.status)}
                           </span>
-                          {isUnsupportedType(proposal.proposalType) && (
+                          {item && (
+                            <span
+                              className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${materializationClass(
+                                item.materializationStatus
+                              )}`}
+                            >
+                              {materializationLabel(item.materializationStatus)}
+                            </span>
+                          )}
+                          {approveBlocker && (
                             <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-800">
-                              暂不支持同意
+                              后端关闭同意
                             </span>
                           )}
                         </div>
@@ -713,6 +712,15 @@ export default function MailboxPage() {
                     <span className="rounded-full bg-stone-100 px-2.5 py-1 text-[11px] text-stone-600">
                       {selectedDecision?.groupLabel}
                     </span>
+                    {selectedReviewItem && (
+                      <span
+                        className={`rounded-full border px-2.5 py-1 text-[11px] font-medium ${materializationClass(
+                          selectedReviewItem.materializationStatus
+                        )}`}
+                      >
+                        应用状态：{materializationLabel(selectedReviewItem.materializationStatus)}
+                      </span>
+                    )}
                   </div>
                 </header>
 
@@ -733,11 +741,14 @@ export default function MailboxPage() {
                     {(selectedProposal.riskLevel === "high" ||
                       selectedProposal.riskLevel === "critical" ||
                       selectedProposal.proposalType === "external_write_action" ||
-                      isUnsupportedType(selectedProposal.proposalType)) && (
+                      actionBlockedReason(selectedReviewItem, "approve")) && (
                       <div className="mt-3 flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
                         <AlertTriangle size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
                         <span>
-                          这个确认项仍必须由你确认；暂不支持的类型和文件访问范围之外的写入不会被同意。
+                          这个确认项仍必须由你确认；操作可用性由后端 ReviewItem 决定。
+                          {actionBlockedReason(selectedReviewItem, "approve")
+                            ? ` ${actionBlockedReason(selectedReviewItem, "approve")}`
+                            : ""}
                         </span>
                       </div>
                     )}
@@ -752,13 +763,10 @@ export default function MailboxPage() {
                         type="button"
                         onClick={() => runAction(selectedProposal, "accept")}
                         disabled={
-                          !canAccept(selectedProposal, safeModeActive, safePaths) ||
+                          !!actionBlockedReason(selectedReviewItem, "approve") ||
                           actingId === selectedProposal.id
                         }
-                        title={
-                          acceptBlockedReason(selectedProposal, safeModeActive, safePaths) ??
-                          undefined
-                        }
+                        title={actionBlockedReason(selectedReviewItem, "approve") ?? undefined}
                         className="inline-flex h-9 items-center gap-1.5 rounded-md bg-stone-900 px-3 text-sm font-medium text-white hover:bg-stone-800 disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         <Check size={15} aria-hidden="true" />
@@ -768,9 +776,10 @@ export default function MailboxPage() {
                         type="button"
                         onClick={() => runAction(selectedProposal, "reject")}
                         disabled={
-                          !canRejectOrPostpone(selectedProposal) || actingId === selectedProposal.id
+                          !!actionBlockedReason(selectedReviewItem, "reject") ||
+                          actingId === selectedProposal.id
                         }
-                        title={quickActionBlockedReason(selectedProposal, "reject") ?? undefined}
+                        title={actionBlockedReason(selectedReviewItem, "reject") ?? undefined}
                         className="inline-flex h-9 items-center gap-1.5 rounded-md border border-rose-200 bg-white px-3 text-sm font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-50"
                       >
                         <X size={15} aria-hidden="true" />
@@ -780,9 +789,10 @@ export default function MailboxPage() {
                         type="button"
                         onClick={() => runAction(selectedProposal, "postpone")}
                         disabled={
-                          !canRejectOrPostpone(selectedProposal) || actingId === selectedProposal.id
+                          !!actionBlockedReason(selectedReviewItem, "later") ||
+                          actingId === selectedProposal.id
                         }
-                        title={quickActionBlockedReason(selectedProposal, "postpone") ?? undefined}
+                        title={actionBlockedReason(selectedReviewItem, "later") ?? undefined}
                         className="inline-flex h-9 items-center gap-1.5 rounded-md border border-stone-200 bg-white px-3 text-sm font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-50"
                       >
                         <Clock size={15} aria-hidden="true" />
@@ -792,10 +802,11 @@ export default function MailboxPage() {
                         type="button"
                         onClick={() => startEdit(selectedProposal)}
                         disabled={
-                          safeModeActive ||
+                          !!actionBlockedReason(selectedReviewItem, "edit") ||
                           actingId === selectedProposal.id ||
                           editingId === selectedProposal.id
                         }
+                        title={actionBlockedReason(selectedReviewItem, "edit") ?? undefined}
                         className="inline-flex h-9 items-center gap-1.5 rounded-md border border-stone-200 bg-white px-3 text-sm font-medium text-stone-700 hover:bg-stone-50 disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         <Edit2 size={15} aria-hidden="true" />

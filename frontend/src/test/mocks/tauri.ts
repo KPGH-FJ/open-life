@@ -7,6 +7,14 @@ import type {
   StateAlert,
   LifeModelVersion,
 } from "@/types";
+import type {
+  LifeModelViewModel,
+  MemoryViewModel,
+  ProviderPrivacyBoundarySummary,
+  TasksViewModel,
+  ViewModelEnvelope,
+  WorkspaceViewModel,
+} from "@/tauri";
 
 export const mockLifeModel: LifeModel = {
   metadata: {
@@ -182,6 +190,424 @@ export function createEmptyLifeModel(): LifeModel {
       decision_making_style: "",
     },
     evolution_rules: [],
+  };
+}
+
+export function createMockLifeModelViewModelEnvelope(
+  overrides: Partial<ViewModelEnvelope<LifeModelViewModel>> = {}
+): ViewModelEnvelope<LifeModelViewModel> {
+  const now = new Date().toISOString();
+  const base: ViewModelEnvelope<LifeModelViewModel> = {
+    data: {
+      truthMode: "current_compatibility",
+      canonicalSummary: null,
+      currentViewSummary: null,
+      dimensionSummaries: [
+        {
+          id: "identity",
+          label: "Identity",
+          summary: "测试用户 / 开发者 / 健康",
+          confidence: "high",
+          stale: false,
+          pendingReviewItemRefs: [],
+          evidenceRefs: [],
+          provenance: "limited",
+          ownerStatus: "PARTIAL",
+        },
+        {
+          id: "goals",
+          label: "Goals",
+          summary: "完成项目 / 早起",
+          confidence: "medium",
+          stale: false,
+          pendingReviewItemRefs: [
+            { id: "proposal-life-model-1", kind: "review_item", label: "Review item" },
+          ],
+          evidenceRefs: [],
+          provenance: "limited",
+          ownerStatus: "PARTIAL",
+        },
+        {
+          id: "capabilities",
+          label: "Capabilities",
+          summary: "编程 / 写作 / AI",
+          confidence: "medium",
+          stale: false,
+          pendingReviewItemRefs: [],
+          evidenceRefs: [],
+          provenance: "limited",
+          ownerStatus: "PARTIAL",
+        },
+        {
+          id: "state",
+          label: "State",
+          summary: "工作 / 学习 / 良好",
+          confidence: "medium",
+          stale: false,
+          pendingReviewItemRefs: [],
+          evidenceRefs: [],
+          provenance: "limited",
+          ownerStatus: "PARTIAL",
+        },
+      ],
+      trustQualityState: {
+        readiness: "usable_with_limits",
+        completionScore: 72.5,
+        missingDimensionCount: 0,
+        staleDimensionCount: 0,
+        warningRefs: [],
+        ownerStatus: "PARTIAL",
+      },
+      pendingUpdateCounts: {
+        candidate: 1,
+        pendingReview: 1,
+        approvedNotApplied: 0,
+        failedMaterialization: 0,
+        ownerStatus: "PARTIAL",
+      },
+      provenanceRefs: [],
+      candidateChanges: [
+        {
+          changeRef: {
+            id: "proposal:proposal-life-model-1",
+            kind: "proposal",
+            label: "LifeModel update",
+          },
+          title: "Life Model 更新",
+          changeKind: "update",
+          affectedDimensionIds: ["goals"],
+          reviewItemRefs: [
+            { id: "proposal-life-model-1", kind: "review_item", label: "Review item" },
+          ],
+          evidenceRefs: [
+            {
+              id: "proposal:proposal-life-model-1",
+              label: "Proposal record",
+              source: "review",
+              sensitivity: "local_private",
+            },
+          ],
+          decisionStatus: "pending",
+        },
+      ],
+      materializedChanges: [],
+      manualOverrideState: {
+        active: false,
+        blockedReason: "Manual override is governed separately.",
+        draftRef: null,
+        saveAction: null,
+        reviewItemRefs: [],
+        evidenceRefs: [],
+        ownerStatus: "PARTIAL",
+      },
+      relatedReviewItemRefs: [
+        { id: "proposal-life-model-1", kind: "review_item", label: "Review item" },
+      ],
+      memoryLinkage: {
+        linkedMemoryCount: 12,
+        candidateMemoryCount: 0,
+        materializedMemoryCount: 0,
+        conflictCount: 0,
+        memoryRefs: [],
+        evidenceRefs: [],
+        linkageStatus: "partial",
+        tierSummary: { total: 12, tier1: 5, tier2: 4, tier3: 3, archived: 0 },
+        ownerStatus: "PHASE_2_REQUIRED",
+      },
+      sourceRefs: [
+        {
+          id: "projection:diagnostics",
+          label: "LifeStateProjection",
+          source: "backend-readmodel",
+          sensitivity: "local_private",
+        },
+      ],
+      contractLimitations: [
+        "Accepted proposal decisions remain approved-not-applied unless backend evidence proves applied.",
+      ],
+    },
+    status: "ready",
+    lastUpdatedAt: now,
+    source: "backend-readmodel",
+    evidenceRefs: [],
+    warnings: [],
+    actions: { primary: [] },
+  };
+
+  return {
+    ...base,
+    ...overrides,
+    data:
+      overrides.data === undefined
+        ? base.data
+        : overrides.data === null
+          ? null
+          : { ...base.data!, ...overrides.data },
+  };
+}
+
+export function createMockTasksViewModelEnvelope(
+  overrides: Partial<ViewModelEnvelope<TasksViewModel>> = {}
+): ViewModelEnvelope<TasksViewModel> {
+  const now = new Date().toISOString();
+  const base: ViewModelEnvelope<TasksViewModel> = {
+    data: {
+      items: [
+        {
+          canonicalTaskId: "mainchat_task_mock",
+          taskSessionId: "mainchat_task_mock",
+          relatedRunIds: ["run_mainchat_mock"],
+          conversationId: "session-1",
+          title: "mock goal",
+          strategy: "direct_answer",
+          lifecycleStatus: "completed_needs_evidence",
+          terminalDeliveryStatus: "missing_final_delivery_evidence",
+          finalDeliveryEvidencePresent: false,
+          pendingBlockers: ["terminal_no_resume"],
+          pendingReviewItemRefs: [],
+          allowedControls: [
+            {
+              id: "mainchat_task_mock:open_trace",
+              label: "Open trace",
+              kind: "open_trace",
+              effect: "evidence_only",
+              enabled: true,
+              targetTaskId: "mainchat_task_mock",
+              completionProofAfterDispatch: false,
+            },
+          ],
+          nextRecommendedControl: "open_trace",
+          latestResultPreview: {
+            status: "missing_final_delivery_evidence",
+            label: "missing final delivery evidence",
+            preview: "mock complete",
+            evidenceRefs: [],
+          },
+          evidenceRefs: [],
+          updatedAt: now,
+        },
+      ],
+      summary: {
+        total: 1,
+        activeCount: 0,
+        waitingPermissionCount: 0,
+        blockedCount: 0,
+        pendingReviewCount: 0,
+        completedCount: 0,
+        completedNeedsEvidenceCount: 1,
+        failedCount: 0,
+        cancelledCount: 0,
+        byLifecycleStatus: { completed_needs_evidence: 1 },
+      },
+      sourceRefs: [],
+      contractLimitations: [
+        "Resume, retry, cancel, and refresh controls are request eligibility only.",
+      ],
+    },
+    status: "ready",
+    lastUpdatedAt: now,
+    source: "backend-readmodel",
+    evidenceRefs: [],
+    warnings: [],
+    actions: { primary: [] },
+  };
+
+  return {
+    ...base,
+    ...overrides,
+    data:
+      overrides.data === undefined
+        ? base.data
+        : overrides.data === null
+          ? null
+          : { ...base.data!, ...overrides.data },
+  };
+}
+
+export function createMockWorkspaceViewModelEnvelope(
+  overrides: Partial<ViewModelEnvelope<WorkspaceViewModel>> = {}
+): ViewModelEnvelope<WorkspaceViewModel> {
+  const now = new Date().toISOString();
+  const base: ViewModelEnvelope<WorkspaceViewModel> = {
+    data: {
+      activeTaskRef: {
+        id: "mainchat_task_mock",
+        kind: "task",
+        label: "mock goal",
+        href: "/runs/run_mainchat_mock",
+      },
+      recentTaskRefs: [
+        {
+          id: "mainchat_task_mock",
+          kind: "task",
+          label: "mock goal",
+          href: "/runs/run_mainchat_mock",
+        },
+      ],
+      pendingReviewItemRefs: [],
+      timeline: [
+        {
+          id: "mainchat_task_mock",
+          label: "mock goal",
+          status: "completed_needs_evidence",
+          evidenceRefs: [],
+          updatedAt: now,
+        },
+      ],
+      providerPrivacyBoundarySummary: {
+        routeType: "unknown",
+        externalTransmission: "unknown",
+        providerLabel: "provider unknown",
+        modelLabel: "model unknown",
+        privacyLabel: "privacy boundary unknown",
+        risk: "unknown",
+        localOnlyRequired: false,
+        evidenceRefs: [],
+      },
+      sourceRefs: [],
+      contractLimitations: ["WorkspaceViewModel is a limited R4 baseline."],
+    },
+    status: "ready",
+    lastUpdatedAt: now,
+    source: "backend-readmodel",
+    evidenceRefs: [],
+    warnings: [],
+    actions: { primary: [] },
+  };
+
+  return {
+    ...base,
+    ...overrides,
+    data:
+      overrides.data === undefined
+        ? base.data
+        : overrides.data === null
+          ? null
+          : { ...base.data!, ...overrides.data },
+  };
+}
+
+export function createMockProviderPrivacyBoundarySummaryEnvelope(
+  overrides: Partial<ViewModelEnvelope<ProviderPrivacyBoundarySummary>> = {}
+): ViewModelEnvelope<ProviderPrivacyBoundarySummary> {
+  const now = new Date().toISOString();
+  const base: ViewModelEnvelope<ProviderPrivacyBoundarySummary> = {
+    data: {
+      routeType: "local",
+      externalTransmission: "not_sent",
+      providerLabel: "local model",
+      modelLabel: "llama2",
+      privacyLabel: "LocalOnly route; external transmission not required",
+      risk: "low",
+      localOnlyRequired: true,
+      evidenceRefs: [],
+    },
+    status: "ready",
+    lastUpdatedAt: now,
+    source: "backend-readmodel",
+    evidenceRefs: [],
+    warnings: [],
+    actions: { primary: [] },
+  };
+
+  return {
+    ...base,
+    ...overrides,
+    data:
+      overrides.data === undefined
+        ? base.data
+        : overrides.data === null
+          ? null
+          : { ...base.data!, ...overrides.data },
+  };
+}
+
+export function createMockMemoryViewModelEnvelope(
+  overrides: Partial<ViewModelEnvelope<MemoryViewModel>> = {}
+): ViewModelEnvelope<MemoryViewModel> {
+  const now = new Date().toISOString();
+  const base: ViewModelEnvelope<MemoryViewModel> = {
+    data: {
+      summary: {
+        totalLifecycleRecords: 1,
+        activeMemoryCount: 1,
+        reviewRequiredCount: 0,
+        materializedCount: 1,
+        pendingMaterializationCount: 0,
+        failedMaterializationCount: 0,
+        rolledBackCount: 0,
+        archivedVectorCount: 0,
+        conflictCount: 0,
+        tierSummary: { total: 1, tier1: 1, tier2: 0, tier3: 0, archived: 0 },
+      },
+      lifecycleSummary: {
+        candidateCount: 0,
+        pendingReviewCount: 0,
+        editedPendingReviewCount: 0,
+        acceptedCount: 0,
+        confirmedCount: 1,
+        pendingMaterializationCount: 0,
+        materializedCount: 1,
+        materializationFailedCount: 0,
+        rejectedCount: 0,
+        deferredCount: 0,
+        supersededCount: 0,
+        rolledBackCount: 0,
+        expiredCount: 0,
+        archivedCount: 0,
+        byStatus: { materialized: 1 },
+        byMaterializationStatus: { materialized: 1 },
+      },
+      laneSummaries: [
+        {
+          lane: "semantic_fact_preference",
+          label: "Semantic facts and preferences",
+          totalCount: 1,
+          activeCount: 1,
+          candidateCount: 0,
+          pendingReviewCount: 0,
+          confirmedCount: 1,
+          materializedCount: 1,
+          rolledBackCount: 0,
+          archivedCount: 0,
+          reviewItemRefs: [],
+          evidenceRefs: [],
+        },
+      ],
+      recentMemoryRefs: [{ id: "memory:mock", kind: "memory", label: "preference · materialized" }],
+      reviewItemRefs: [],
+      lifeModelLinkage: {
+        linkedMemoryCount: 1,
+        candidateMemoryCount: 0,
+        materializedMemoryCount: 1,
+        conflictCount: 0,
+        boundaryMemoryCount: 0,
+        linkageStatus: "partial",
+        memoryRefs: [],
+        evidenceRefs: [],
+      },
+      sourceRefs: [],
+      contractLimitations: [
+        "Vector tier counts are supporting storage telemetry; lifecycle materialization status remains the product memory authority.",
+      ],
+    },
+    status: "ready",
+    lastUpdatedAt: now,
+    source: "backend-readmodel",
+    evidenceRefs: [],
+    warnings: [],
+    actions: { primary: [] },
+  };
+
+  return {
+    ...base,
+    ...overrides,
+    data:
+      overrides.data === undefined
+        ? base.data
+        : overrides.data === null
+          ? null
+          : { ...base.data!, ...overrides.data },
   };
 }
 
@@ -481,6 +907,16 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         currentValueSource: "unavailable",
         change: null,
       } as T);
+    case "get_life_model_view_model":
+      return Promise.resolve(createMockLifeModelViewModelEnvelope() as T);
+    case "get_memory_view_model":
+      return Promise.resolve(createMockMemoryViewModelEnvelope() as T);
+    case "get_provider_privacy_boundary_summary":
+      return Promise.resolve(createMockProviderPrivacyBoundarySummaryEnvelope() as T);
+    case "get_tasks_view_model":
+      return Promise.resolve(createMockTasksViewModelEnvelope() as T);
+    case "get_workspace_view_model":
+      return Promise.resolve(createMockWorkspaceViewModelEnvelope() as T);
     case "get_daily_goals":
       return Promise.resolve(mockDailyGoals as T);
     case "get_state_alerts":
@@ -2303,6 +2739,26 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       return Promise.resolve([] as T);
     case "list_proposals":
       return Promise.resolve([] as T);
+    case "get_review_center_view_model":
+      return Promise.resolve({
+        data: {
+          items: [],
+          summary: {
+            total: 0,
+            actionRequiredCount: 0,
+            blockedActionCount: 0,
+            byStatus: {},
+            byRisk: {},
+            byMaterializationStatus: {},
+          },
+        },
+        status: "empty",
+        lastUpdatedAt: new Date().toISOString(),
+        source: "backend-readmodel",
+        evidenceRefs: [],
+        warnings: [],
+        actions: { primary: [] },
+      } as T);
     case "batch_accept_low_risk_proposals":
       return Promise.resolve(0 as T);
     case "accept_proposal":

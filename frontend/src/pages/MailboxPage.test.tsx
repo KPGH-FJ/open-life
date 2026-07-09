@@ -4,7 +4,14 @@ import { MemoryRouter, Navigate, Route, Routes, useLocation } from "react-router
 import { invoke } from "@tauri-apps/api/core";
 import MailboxPage from "./MailboxPage";
 import { mockInvoke } from "@/test/mocks/tauri";
-import type { AgentProposal } from "../tauri";
+import type {
+  AgentProposal,
+  ReviewAction,
+  ReviewCenterViewModel,
+  ReviewItem,
+  ReviewItemDecisionStatus,
+  ReviewItemMaterializationStatus,
+} from "../tauri";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -202,6 +209,181 @@ function buildLifeStateProjection(proposals: AgentProposal[], safeMode = false) 
   };
 }
 
+function reviewStatusFor(proposal: AgentProposal): ReviewItemDecisionStatus {
+  if (proposal.status === "accepted") return "approved";
+  if (proposal.status === "rejected") return "rejected";
+  if (proposal.status === "edited") return "edited";
+  if (proposal.status === "postponed") return "deferred";
+  return "pending";
+}
+
+function materializationStatusFor(proposal: AgentProposal): ReviewItemMaterializationStatus {
+  if (proposal.status === "accepted") return "unknown";
+  if (proposal.status === "rejected") return "not_applicable";
+  return "not_started";
+}
+
+function reviewAction(
+  proposal: AgentProposal,
+  kind: ReviewAction["kind"],
+  enabled: boolean,
+  disabledReason?: string
+): ReviewAction {
+  const effect =
+    kind === "apply"
+      ? "materialization_request"
+      : kind === "resume"
+        ? "task_resume_request"
+        : kind === "view_evidence"
+          ? "evidence_only"
+          : "decision_only";
+  return {
+    id: `${proposal.id}:${kind}`,
+    label: kind,
+    kind,
+    effect,
+    enabled,
+    disabledReason,
+    requiresConfirmation: kind === "approve" || kind === "apply",
+    targetReviewItemId: proposal.id,
+    expectedMaterializationStatusAfterDispatch: kind === "approve" ? "unknown" : undefined,
+  } as ReviewAction;
+}
+
+function reviewable(proposal: AgentProposal): boolean {
+  return ["pending", "edited", "postponed"].includes(proposal.status);
+}
+
+function resumeRequiresMaterialization(proposal: AgentProposal): boolean {
+  return proposal.proposalType !== "tool_permission";
+}
+
+function approveBlocker(proposal: AgentProposal, safeMode: boolean): string | undefined {
+  if (safeMode) return "测试 Safe Mode：存储降级。";
+  if (!reviewable(proposal)) return "Only pending, edited, or deferred review items can approve.";
+  if (
+    ["plugin_permission", "model_policy_change", "schedule_checkin", "unsupported"].includes(
+      proposal.proposalType
+    )
+  ) {
+    return "This review item type has no backend apply pathway yet.";
+  }
+  if (
+    proposal.proposalType === "external_write_action" &&
+    typeof proposal.after?.path === "string" &&
+    !proposal.after.path.startsWith("/tmp/openlife-test")
+  ) {
+    return "The external write path is outside configured safe paths.";
+  }
+  return undefined;
+}
+
+function reviewItemFromProposal(proposal: AgentProposal, safeMode = false): ReviewItem {
+  const status = reviewStatusFor(proposal);
+  const approveReason = approveBlocker(proposal, safeMode);
+  const decisionReason = reviewable(proposal)
+    ? undefined
+    : "Only pending, edited, or deferred review items can receive a review decision.";
+  const actions: ReviewAction[] = [
+    reviewAction(proposal, "approve", !approveReason, approveReason),
+    reviewAction(proposal, "reject", !decisionReason, decisionReason),
+    reviewAction(proposal, "later", !decisionReason, decisionReason),
+    reviewAction(proposal, "edit", !approveReason, approveReason),
+    reviewAction(proposal, "view_evidence", true),
+  ];
+  const taskResumeRelation =
+    proposal.source === "chat_conversation" && proposal.sourceDetail
+      ? {
+          taskSessionId: proposal.sourceDetail,
+          resumeRequiresMaterialization: resumeRequiresMaterialization(proposal),
+          canRequestResume:
+            status === "approved" &&
+            (!resumeRequiresMaterialization(proposal) ||
+              materializationStatusFor(proposal) === "applied" ||
+              materializationStatusFor(proposal) === "not_applicable"),
+          resumeActionId: `${proposal.id}:resume`,
+          blockedReason:
+            status !== "approved"
+              ? "Approve before requesting task resume."
+              : resumeRequiresMaterialization(proposal) &&
+                  materializationStatusFor(proposal) === "unknown"
+                ? "Materialization evidence is unknown; cannot request task resume yet."
+                : undefined,
+        }
+      : undefined;
+  if (taskResumeRelation) {
+    actions.push(
+      reviewAction(
+        proposal,
+        "resume",
+        taskResumeRelation.canRequestResume,
+        taskResumeRelation.blockedReason
+      )
+    );
+  }
+  return {
+    id: proposal.id,
+    type:
+      proposal.proposalType === "life_model_update" ? "life_model_update" : proposal.proposalType,
+    source: {
+      kind: "proposal",
+      proposalId: proposal.id,
+      proposalSource: proposal.source,
+      sourceDetail: proposal.sourceDetail,
+      runId: proposal.runId,
+    },
+    status,
+    materializationStatus: materializationStatusFor(proposal),
+    allowedActions: actions,
+    risk: proposal.riskLevel,
+    expiresAt: proposal.expiresAt,
+    evidenceRefs: [],
+    targetRefs: [],
+    taskResumeRelation,
+  };
+}
+
+function buildReviewCenterViewModel(
+  proposals: AgentProposal[],
+  safeMode = false
+): ReviewCenterViewModel {
+  const items = proposals.map(proposal => reviewItemFromProposal(proposal, safeMode));
+  return {
+    items,
+    summary: {
+      total: items.length,
+      actionRequiredCount: items.filter(item =>
+        item.allowedActions.some(
+          action =>
+            action.enabled && ["approve", "reject", "edit", "later", "revoke"].includes(action.kind)
+        )
+      ).length,
+      blockedActionCount: items.reduce(
+        (count, item) =>
+          count +
+          item.allowedActions.filter(action => !action.enabled && action.disabledReason).length,
+        0
+      ),
+      byStatus: {},
+      byRisk: {},
+      byMaterializationStatus: {},
+    },
+  };
+}
+
+function buildReviewCenterEnvelope(proposals: AgentProposal[], safeMode = false) {
+  const data = buildReviewCenterViewModel(proposals, safeMode);
+  return {
+    data,
+    status: data.items.length === 0 ? "empty" : "ready",
+    lastUpdatedAt: new Date().toISOString(),
+    source: "backend-readmodel",
+    evidenceRefs: [],
+    warnings: [],
+    actions: { primary: [] },
+  };
+}
+
 function mockProposals(proposals: AgentProposal[], safeMode = false) {
   vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
     if (cmd === "list_proposals") {
@@ -209,6 +391,9 @@ function mockProposals(proposals: AgentProposal[], safeMode = false) {
     }
     if (cmd === "get_life_state_projection") {
       return Promise.resolve(buildLifeStateProjection(proposals, safeMode));
+    }
+    if (cmd === "get_review_center_view_model") {
+      return Promise.resolve(buildReviewCenterEnvelope(proposals, safeMode));
     }
     if (cmd === "get_system_diagnostics") {
       return Promise.resolve({
@@ -315,6 +500,9 @@ function mockMutableProposals(initialProposals: AgentProposal[], safeMode = fals
     }
     if (cmd === "get_life_state_projection") {
       return Promise.resolve(buildLifeStateProjection(mutableProposals, safeMode));
+    }
+    if (cmd === "get_review_center_view_model") {
+      return Promise.resolve(buildReviewCenterEnvelope(mutableProposals, safeMode));
     }
     if (cmd === "accept_proposal") {
       mutableProposals = mutableProposals.map(proposal =>
@@ -595,9 +783,11 @@ describe("MailboxPage", () => {
     window.removeEventListener("openlife:diagnostics-refresh", listener);
   });
 
-  it("resumes a Main Chat task after accepting the matching proposal route state", async () => {
+  it("keeps durable accepted proposals blocked from task resume while materialization is unknown", async () => {
     const taskId = "mainchat-task-resume-1";
-    mockProposals([{ ...lowRiskProposal, sourceDetail: taskId }]);
+    mockMutableProposals([
+      { ...lowRiskProposal, source: "chat_conversation", sourceDetail: taskId },
+    ]);
 
     renderMailboxPage([
       {
@@ -608,8 +798,41 @@ describe("MailboxPage", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "同意" }));
 
-    expect(await screen.findByText("Main Chat task ready to resume")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Resume Main Chat task" }));
+    expect(
+      await screen.findByText(/Materialization evidence is unknown; cannot request task resume yet/)
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Main Chat task resume request available")).not.toBeInTheDocument();
+    expect(
+      vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "resume_main_chat_agent_task")
+    ).toBe(false);
+  });
+
+  it("resumes a Main Chat task after accepting a backend-declared no-materialization proposal", async () => {
+    const taskId = "mainchat-task-resume-tool-1";
+    mockMutableProposals([
+      {
+        ...unsupportedProposal,
+        id: "proposal-tool-resume-1",
+        proposalType: "tool_permission",
+        source: "chat_conversation",
+        sourceDetail: taskId,
+        affectedPath: "tools.web.search",
+        after: { toolName: "web.search", permission: "read" },
+        status: "pending",
+      },
+    ]);
+
+    renderMailboxPage([
+      {
+        pathname: "/mailbox",
+        state: { mainChatTaskSessionId: taskId, returnTo: "/companion" },
+      },
+    ]);
+
+    fireEvent.click(await screen.findByRole("button", { name: "同意" }));
+
+    expect(await screen.findByText("Main Chat task resume request available")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Request resume" }));
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith(

@@ -122,6 +122,17 @@ describe("OverviewTab", () => {
 
   const baseProps = {
     diagnostics: defaultDiagnostics as any,
+    providerPrivacyBoundary: {
+      routeType: "auto",
+      externalTransmission: "possible",
+      providerLabel: "DeepSeek",
+      modelLabel: "deepseek-chat",
+      privacyLabel:
+        "cloud route configured; external transmission is possible, not proven by this summary",
+      risk: "medium",
+      localOnlyRequired: false,
+      evidenceRefs: [],
+    } as any,
     projection: defaultProjection as any,
     safeMode: false,
     exportLoading: false,
@@ -170,6 +181,20 @@ describe("OverviewTab", () => {
       <MemoryRouter>
         <OverviewTab
           {...baseProps}
+          providerPrivacyBoundary={
+            {
+              routeType: "auto",
+              externalTransmission: "possible",
+              providerLabel: "DeepSeek",
+              modelLabel: "deepseek-chat",
+              privacyLabel:
+                "cloud route configured but validation is not ready; transmission status remains possible",
+              risk: "medium",
+              localOnlyRequired: false,
+              blockedReason: "Provider validation is unvalidated; cloud route is not proven ready.",
+              evidenceRefs: [],
+            } as any
+          }
           diagnostics={
             {
               ...defaultDiagnostics,
@@ -200,8 +225,8 @@ describe("OverviewTab", () => {
       </MemoryRouter>
     );
 
-    expect(screen.getByText(/Configured, not validated/)).toBeInTheDocument();
-    expect(screen.getByText(/不能当作 cloud-ready/)).toBeInTheDocument();
+    expect(screen.getByText(/Provider validation is unvalidated/)).toBeInTheDocument();
+    expect(screen.getByText("模型边界")).toBeInTheDocument();
     expect(screen.queryByText(/云端模型 已配置/)).not.toBeInTheDocument();
   });
 });

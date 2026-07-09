@@ -9,6 +9,8 @@ import {
   getModelRouterStatus,
   getSystemDiagnostics,
   getLifeStateProjection,
+  getMemoryViewModel,
+  getProviderPrivacyBoundarySummary,
   getHotCache,
   exportMcpAuditLogs,
   cleanupMcpAuditLogs,
@@ -25,6 +27,8 @@ import {
   type ModelRouterStatus,
   type SystemDiagnostics,
   type LifeStateProjection,
+  type MemoryViewModel,
+  type ProviderPrivacyBoundarySummary,
   type DangerActionPreflightView,
   type DangerActionType,
   type DangerActionConfirmationEvidence,
@@ -121,6 +125,9 @@ export default function SettingsPage() {
   const [modelRouterStatus, setModelRouterStatus] = useState<ModelRouterStatus | null>(null);
   const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
   const [lifeStateProjection, setLifeStateProjection] = useState<LifeStateProjection | null>(null);
+  const [memoryViewModel, setMemoryViewModel] = useState<MemoryViewModel | null>(null);
+  const [providerPrivacyBoundary, setProviderPrivacyBoundary] =
+    useState<ProviderPrivacyBoundarySummary | null>(null);
   const [hotCache, setHotCache] = useState<HotMemoryCache | null>(null);
   const [privacyPolicy, setPrivacyPolicyState] = useState<PrivacyPolicy | null>(null);
   const [toolPermissions, setToolPermissions] = useState<ToolPermissionRecord[]>([]);
@@ -169,6 +176,8 @@ export default function SettingsPage() {
       modelRouter,
       diag,
       projection,
+      memoryEnvelope,
+      providerBoundaryEnvelope,
       cache,
       policy,
       permissions,
@@ -179,6 +188,8 @@ export default function SettingsPage() {
       getModelRouterStatus().catch(() => null),
       getSystemDiagnostics().catch(() => null),
       getLifeStateProjection().catch(() => null),
+      getMemoryViewModel().catch(() => null),
+      getProviderPrivacyBoundarySummary().catch(() => null),
       getHotCache().catch(() => null),
       getPrivacyPolicy().catch(() => null),
       listToolPermissions().catch(() => []),
@@ -189,6 +200,8 @@ export default function SettingsPage() {
     setModelRouterStatus(modelRouter);
     setDiagnostics(diag);
     setLifeStateProjection(projection);
+    setMemoryViewModel(memoryEnvelope?.data ?? null);
+    setProviderPrivacyBoundary(providerBoundaryEnvelope?.data ?? null);
     setHotCache(cache);
     setPrivacyPolicyState(policy);
     setToolPermissions(permissions);
@@ -583,6 +596,7 @@ export default function SettingsPage() {
         {activeTab === "overview" && (
           <OverviewTab
             diagnostics={diagnostics}
+            providerPrivacyBoundary={providerPrivacyBoundary}
             projection={lifeStateProjection}
             safeMode={safeMode}
             exportLoading={exportLoading}
@@ -605,6 +619,7 @@ export default function SettingsPage() {
             config={config}
             setConfig={setConfig}
             diagnostics={diagnostics}
+            providerPrivacyBoundary={providerPrivacyBoundary}
             policyRouterStatus={policyRouterStatus}
             modelRouterStatus={modelRouterStatus}
             showInternalDebug={showInternalDebug}
@@ -669,7 +684,12 @@ export default function SettingsPage() {
         )}
 
         {activeTab === "review_memory" && (
-          <ReviewMemoryTab config={config} setConfig={setConfig} projection={lifeStateProjection} />
+          <ReviewMemoryTab
+            config={config}
+            setConfig={setConfig}
+            projection={lifeStateProjection}
+            memoryViewModel={memoryViewModel}
+          />
         )}
 
         {activeTab === "advanced" && (

@@ -23,6 +23,7 @@ import type {
 export type BuildTodayViewModelEnvelopeInput = {
   projection: LifeStateProjection | null;
   dailyGoals?: DailyGoal[] | null;
+  providerPrivacyBoundary?: ProviderPrivacyBoundarySummary | null;
   status?: ViewModelStatus;
   errorMessage?: string;
   lastUpdatedAt?: string | null;
@@ -74,7 +75,8 @@ export function buildTodayViewModelEnvelope(
   const loadedStatus = deriveLoadedStatus(input.projection, dailyGoals, input.status);
   const workspaceLink = buildWorkspaceLink(loadedStatus);
   const reviewCenterLink = buildReviewCenterLink();
-  const providerPrivacyBoundary = buildProviderPrivacyBoundary(sourceRefs);
+  const providerPrivacyBoundary =
+    input.providerPrivacyBoundary ?? buildProviderPrivacyBoundary(sourceRefs);
   const primaryDailyGoal = buildPrimaryDailyGoal(dailyGoals);
   const safeMode = buildSafeModeSummary(input.projection);
   const currentTaskPressure = buildTaskPressure(input.projection, sourceRefs);

@@ -302,7 +302,7 @@ async fn build_main_chat_agent_task_detail(
     let next_recommended_control =
         next_recommended_control_for_task(&session, &actions, &continuity_diagnostics);
     let last_safe_resume_point = last_safe_resume_point_for_task(&actions, &continuity_diagnostics);
-    let final_delivery = final_delivery_from_task(&session, &transcript);
+    let final_delivery = final_delivery_from_task(&session, &transcript, &proposals, &blockers);
     let evidence_view = build_run_evidence_view(
         &session,
         &actions,
@@ -1042,27 +1042,61 @@ fn task_blockers_from_evidence(
 fn final_delivery_from_task(
     session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
     transcript: &[openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry],
+    proposals: &[openlife_core::agent::AgentProposal],
+    blockers: &[String],
 ) -> Option<serde_json::Value> {
     let final_entry = transcript.iter().rev().find(|entry| {
         entry.kind
             == openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::FinalResult
     });
-    final_entry
-        .map(|entry| {
-            serde_json::json!({
-                "transcriptEntryId": entry.id,
-                "summary": entry.summary,
-                "metadata": entry.metadata,
-            })
-        })
-        .or_else(|| {
-            session.final_summary.as_ref().map(|summary| {
-                serde_json::json!({
-                    "summary": summary,
-                    "source": "task_session_final_summary",
-                })
-            })
-        })
+    final_entry.and_then(|entry| {
+        let status = final_delivery_status_from_task(session, entry, proposals, blockers)?;
+        Some(serde_json::json!({
+            "transcriptEntryId": entry.id,
+            "summary": entry.summary,
+            "status": status,
+            "metadata": entry.metadata,
+        }))
+    })
+}
+
+fn final_delivery_status_from_task(
+    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
+    final_entry: &openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry,
+    proposals: &[openlife_core::agent::AgentProposal],
+    blockers: &[String],
+) -> Option<&'static str> {
+    if let Some(status) = string_from_metadata(&final_entry.metadata, &["status", "deliveryStatus"])
+    {
+        return match status.as_str() {
+            "completed" | "delivered" => Some("completed"),
+            "completed_with_pending_items" => Some("completed_with_pending_items"),
+            "blocked" => Some("blocked"),
+            "failed" => Some("failed"),
+            "cancelled" => Some("cancelled"),
+            _ => None,
+        };
+    }
+
+    match session.status {
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
+            if !proposals.is_empty() || !blockers.is_empty() =>
+        {
+            Some("completed_with_pending_items")
+        }
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed => {
+            Some("completed")
+        }
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
+        | openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission => {
+            Some("blocked")
+        }
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Failed => Some("failed"),
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Cancelled => {
+            Some("cancelled")
+        }
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Running => None,
+    }
 }
 
 fn last_observation_preview(

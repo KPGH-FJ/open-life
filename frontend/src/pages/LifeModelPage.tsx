@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import {
-  AlertTriangle,
   ArrowRight,
   Brain,
   CheckCircle2,
@@ -10,44 +9,23 @@ import {
   Inbox,
   ShieldCheck,
 } from "lucide-react";
-import type { LifeModel } from "../types";
 import {
   builderListUnfinished,
-  countMemoryChunks,
   getLifeStateProjection,
-  getLifeModel,
-  getLifeModelCurrentView,
-  getMemoryTierStats,
-  getModel4DCompletion,
-  getSystemDiagnostics,
-  listProposals,
-  type AgentProposal,
+  getLifeModelViewModel,
   type LifeStateProjection,
-  type LifeModelCurrentView,
-  type Model4DCompletion,
-  type SystemDiagnostics,
-  type TierStats,
+  type LifeModelCurrentViewSummary,
+  type LifeModelDimensionSummary,
+  type LifeModelViewModel,
   type UnfinishedBuilderSession,
+  type ViewModelEnvelope,
 } from "../tauri";
-import {
-  getLifeModelQualityIssues,
-  issuesForLifeModelDimension,
-  type LifeModelQualityIssue,
-} from "../utils/lifeModelQuality";
-import {
-  buildLifeModelTrustViews,
-  splitLifeModelItemsByDisplayQuality,
-  type LifeModelDimensionKey,
-  type LifeModelDisplayQualityIssue,
-} from "../utils/lifeModelTrust";
 import {
   StatusChip as ProductStatusChip,
   TechnicalDetails,
   TrustDrawer,
 } from "../components/product/ProductPrimitives";
-import { REVIEW_PENDING_PROPOSAL_LIMIT } from "../utils/reviewPendingCount";
-import { mailboxRoute, runDetailRoute, secondaryRoutePath } from "../productShellContract";
-import { reviewRequiredCountFromProjection } from "../utils/lifeStateProjection";
+import { mailboxRoute, secondaryRoutePath } from "../productShellContract";
 
 type LifeModelSection = "build" | "overview" | "evidence";
 
@@ -56,23 +34,10 @@ type SectionConfig = {
   label: string;
 };
 
-type ModelDimension = {
-  key: LifeModelDimensionKey;
-  title: string;
-  items: string[];
-  suppressedIssues: LifeModelDisplayQualityIssue[];
-};
-
 type LifeModelPageState = {
-  lifeModel: LifeModel | null;
-  diagnostics: SystemDiagnostics | null;
+  viewModelEnvelope: ViewModelEnvelope<LifeModelViewModel> | null;
   projection: LifeStateProjection | null;
-  completion: Model4DCompletion | null;
   unfinishedSessions: UnfinishedBuilderSession[];
-  memoryCount: number | null;
-  tierStats: TierStats | null;
-  pendingProposals: AgentProposal[];
-  currentView: LifeModelCurrentView | null;
   loading: boolean;
   error: string;
 };
@@ -84,15 +49,9 @@ const SECTIONS: SectionConfig[] = [
 ];
 
 const INITIAL_STATE: LifeModelPageState = {
-  lifeModel: null,
-  diagnostics: null,
+  viewModelEnvelope: null,
   projection: null,
-  completion: null,
   unfinishedSessions: [],
-  memoryCount: null,
-  tierStats: null,
-  pendingProposals: [],
-  currentView: null,
   loading: true,
   error: "",
 };
@@ -137,167 +96,64 @@ function uniqueShortItems(items: Array<string | null | undefined>, limit = 3): s
   return output;
 }
 
-function formatUpdatedAt(value: string | undefined): string {
+function formatUpdatedAt(value: string | undefined | null): string {
   if (!value) return "最近更新 未记录";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "最近更新 未记录";
   return `最近更新 ${date.toLocaleDateString("zh-CN")}`;
 }
 
-function typedReasonLabel(value: string | undefined | null): string | null {
-  return value?.trim() || null;
+function dataFromEnvelope(
+  envelope: ViewModelEnvelope<LifeModelViewModel> | null
+): LifeModelViewModel | null {
+  return envelope?.data ?? null;
 }
 
-function traceValue(value: string | undefined | null, fallback: string): string {
-  return value?.trim() || fallback;
+function readinessFromViewModel(viewModel: LifeModelViewModel | null): number | null {
+  return normalizePercent(viewModel?.trustQualityState.completionScore ?? null);
 }
 
-function sourceLabel(source: string): string {
-  const labels: Record<string, string> = {
-    builder_review: "构建",
-    calibration_run: "校准",
-    feedback_evolution: "反馈",
-    memory_governance: "记忆治理",
-    skill_runtime: "技能候选",
-    plugin: "插件确认",
-    manual: "手动调整",
-    chat_conversation: "对话",
-    proactive_agent: "OpenLife 主动提醒",
-    planning_session: "规划",
+function topStatusLabel(envelope: ViewModelEnvelope<LifeModelViewModel> | null): string {
+  if (!envelope) return "状态未读取";
+  if (envelope.status === "empty") return "待构建";
+  if (envelope.status === "error") return "状态读取失败";
+  if (envelope.status === "stale") return "状态需刷新";
+  const mode = envelope.data?.truthMode;
+  if (mode === "current_compatibility") return "Life Model 本地可读";
+  if (mode === "canonical") return "Life Model 已物化";
+  return "状态已读取";
+}
+
+function readinessStateLabel(value: LifeModelViewModel["trustQualityState"]["readiness"]): string {
+  const labels: Record<LifeModelViewModel["trustQualityState"]["readiness"], string> = {
+    not_built: "待构建",
+    limited: "受限可用",
+    usable_with_limits: "基本可用",
+    ready: "就绪",
+    stale: "需刷新",
+    unknown: "未知",
   };
-  return labels[source] ?? "待确认";
+  return labels[value] ?? "未知";
 }
 
-function proposalTypeLabel(type: string): string {
-  const labels: Record<string, string> = {
-    life_model_update: "Life Model 更新",
-    memory_update: "记忆更新",
-    scheduled_task: "任务",
-    external_write_action: "外部写入",
-    data_export: "数据导出",
-  };
-  return labels[type] ?? "待确认项";
-}
-
-function proposalRiskLabel(risk: AgentProposal["riskLevel"]): string {
-  const labels: Record<AgentProposal["riskLevel"], string> = {
-    low: "低",
-    medium: "中",
+function confidenceLabel(value: LifeModelDimensionSummary["confidence"]): string {
+  const labels: Record<LifeModelDimensionSummary["confidence"], string> = {
     high: "高",
-    critical: "严重",
+    medium: "中",
+    low: "低",
+    unknown: "未知",
   };
-  return labels[risk] ?? String(risk);
+  return labels[value] ?? "未知";
 }
 
-function currentValueSourceLabel(source: string | undefined | null): string {
-  const labels: Record<string, string> = {
-    accepted_proposal: "来自已确认更新",
-    manual: "手动记录",
-    imported: "来自导入",
-    builder_review: "来自构建确认",
-    feedback_evolution: "来自反馈确认",
-  };
-  if (!source?.trim()) return "来源未读取";
-  return labels[source] ?? "来源已记录";
+function ownerStatusLabel(value: string): string {
+  if (value === "PARTIAL") return "后端部分拥有";
+  if (value === "PHASE_2_REQUIRED") return "后续切片补全";
+  return "未知";
 }
 
-function reviewProposalSummary(proposal: AgentProposal): string {
-  const evidenceCount = proposal.evidenceSummaries?.length ?? 0;
-  const checkCount = proposal.behaviorChecks?.length ?? 0;
-  if (evidenceCount > 0 || checkCount > 0) {
-    return `有 ${evidenceCount} 条依据摘要和 ${checkCount} 条检查记录，进入 Mailbox 后可展开查看。`;
-  }
-  return "OpenLife 发现一条候选更新，需要你在 Mailbox 中确认后才会写入。";
-}
-
-function reviewProposalTraceRows(proposal: AgentProposal): Array<{ label: string; value: string }> {
-  const rows: Array<{ label: string; value: string }> = [
-    { label: "确认记录", value: proposal.id },
-    { label: "位置", value: proposal.affectedPath },
-    { label: "状态", value: proposal.status },
-    { label: "把握", value: `${Math.round(proposal.confidence * 100)}%` },
-  ];
-  if (proposal.sourceDetail?.trim()) rows.push({ label: "来源详情", value: proposal.sourceDetail });
-  if (proposal.reason?.trim()) rows.push({ label: "原因原文", value: proposal.reason });
-  if (proposal.whyOpenLifeThinksThis?.trim()) {
-    rows.push({ label: "判断原文", value: proposal.whyOpenLifeThinksThis });
-  }
-  if (proposal.runId?.trim()) rows.push({ label: "Run", value: proposal.runId });
-  return rows;
-}
-
-function completionOverall(
-  diagnostics: SystemDiagnostics | null,
-  completion: Model4DCompletion | null
-): number | null {
-  const diagnosticOverall = normalizePercent(diagnostics?.builder_completion?.overall);
-  if (diagnosticOverall != null) return diagnosticOverall;
-  const explicitOverall = normalizePercent(completion?.overall);
-  if (explicitOverall != null) return explicitOverall;
-  const values = [
-    normalizePercent(completion?.identity),
-    normalizePercent(completion?.goals),
-    normalizePercent(completion?.capabilities),
-    normalizePercent(completion?.state),
-  ].filter((value): value is number => value != null);
-  if (!values.length) return null;
-  return values.reduce((sum, value) => sum + value, 0) / values.length;
-}
-
-function isModelEmpty(model: LifeModel | null, projection: LifeStateProjection | null): boolean {
-  if (!model) return true;
-  if (projection?.readiness.modelEmpty) return true;
-  const dimensions = buildDimensions(model);
-  return dimensions.every(dimension => dimension.items.length === 0);
-}
-
-function buildDimensions(model: LifeModel): ModelDimension[] {
-  function dimension(
-    key: LifeModelDimensionKey,
-    title: string,
-    rawItems: Array<string | null | undefined>
-  ): ModelDimension {
-    const quality = splitLifeModelItemsByDisplayQuality(uniqueShortItems(rawItems, 8));
-    return {
-      key,
-      title,
-      items: quality.displayable.slice(0, 3),
-      suppressedIssues: quality.suppressed,
-    };
-  }
-
-  return [
-    dimension("identity", "Identity", [
-      model.identity.name,
-      model.identity.role_definition.primary_role,
-      ...model.identity.values.map(value => value.name),
-      model.identity.mission_statement,
-    ]),
-    dimension("goals", "Goals", [
-      ...model.goals.daily.map(goal => goal.name),
-      ...model.goals.short_term.map(goal => goal.name),
-      ...model.goals.medium_term.map(goal => goal.name),
-      ...model.goals.long_term.map(goal => goal.name),
-      ...model.goals.life_goals.map(goal => goal.name),
-    ]),
-    dimension("capabilities", "Capabilities", [
-      ...model.capabilities.skills.map(skill => skill.name),
-      ...model.capabilities.knowledge_domains.map(domain => domain.domain),
-      ...model.capabilities.resources.map(resource => resource.name),
-    ]),
-    dimension("state", "State", [
-      model.state.current_focus ? `当前专注：${model.state.current_focus}` : null,
-      ...model.state.focus_areas,
-      model.state.health_status.energy_level
-        ? `能量：${model.state.health_status.energy_level}/10`
-        : null,
-    ]),
-  ];
-}
-
-function countBuilderReviewItems(projection: LifeStateProjection | null): number | null {
-  if (!projection) return null;
-  return projection.readiness.pendingBuilderReviewSessions;
+function summaryItems(summary: string): string[] {
+  return uniqueShortItems(summary.split(/\s+\/\s+|\n/), 3);
 }
 
 function formatProjectionCount(value: number | null): string {
@@ -349,18 +205,16 @@ function SectionTabs({
 }
 
 function BuildSection({
-  diagnostics,
+  viewModel,
   projection,
-  completion,
   unfinishedSessions,
 }: {
-  diagnostics: SystemDiagnostics | null;
+  viewModel: LifeModelViewModel | null;
   projection: LifeStateProjection | null;
-  completion: Model4DCompletion | null;
   unfinishedSessions: UnfinishedBuilderSession[];
 }) {
-  const overall = completionOverall(diagnostics, completion);
-  const builderReviewCount = countBuilderReviewItems(projection);
+  const overall = readinessFromViewModel(viewModel);
+  const builderReviewCount = viewModel?.pendingUpdateCounts.pendingReview ?? null;
   const unfinishedCount = projection?.readiness.unfinishedBuilderSessions ?? null;
   const reviewReadyCount =
     projection == null
@@ -476,14 +330,11 @@ function BuildSection({
 function CommunicationStyleCurrentView({
   currentView,
 }: {
-  currentView: LifeModelCurrentView | null;
+  currentView: LifeModelCurrentViewSummary | null;
 }) {
-  const value = currentView?.value?.trim();
-  if (!value) return null;
-  const change = currentView?.change ?? null;
-  const patchUnavailableReason = typedReasonLabel(change?.patchUnavailableReason);
-  const snapshotUnavailableReason = typedReasonLabel(change?.snapshotUnavailableReason);
-  const sourceUnavailableReason = typedReasonLabel(change?.sourceUnavailableReason);
+  const value = currentView?.summary?.trim();
+  if (!currentView || !value) return null;
+  const view = currentView;
 
   return (
     <section
@@ -492,86 +343,39 @@ function CommunicationStyleCurrentView({
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <div className="text-xs font-medium text-stone-500">Preferences</div>
-          <h3 className="mt-1 text-sm font-semibold text-stone-950">
-            {currentView?.label ?? "沟通偏好"}
-          </h3>
+          <div className="text-xs font-medium text-stone-500">Current view</div>
+          <h3 className="mt-1 text-sm font-semibold text-stone-950">{view.label}</h3>
         </div>
         <div className="flex flex-wrap gap-1.5">
-          <ProductStatusChip label="已确认偏好" tone="ready" />
-          <ProductStatusChip label={currentValueSourceLabel(currentView?.currentValueSource)} />
+          <ProductStatusChip label="兼容视图" tone="ready" />
+          <ProductStatusChip label={ownerStatusLabel(view.ownerStatus)} />
         </div>
       </div>
       <div className="mt-3 rounded-md border border-stone-200 bg-stone-50 px-3 py-2 text-sm leading-6 text-stone-900">
         {value}
       </div>
       <p className="mt-2 text-xs leading-5 text-stone-500">
-        {change?.sourceExcerpt
-          ? "这条偏好有已确认来源摘录；原始记录和运行信息在技术详情中。"
-          : "来源摘录暂不可用；缺失原因和运行记录在技术详情中。"}
+        这条摘要来自后端 LifeModelViewModel；是否已物化由下方物化记录单独展示。
       </p>
 
       <div className="mt-3">
-        <TechnicalDetails summary="查看来源与记录">
+        <TechnicalDetails summary="查看后端依据">
           <div className="grid gap-2 md:grid-cols-2">
             <div>
               <span className="text-stone-400">位置：</span>
-              <span className="break-all">
-                {currentView?.path ?? "preferences.communication_style"}
-              </span>
+              <span className="break-all">{view.currentViewRef.id}</span>
             </div>
             <div>
-              <span className="text-stone-400">确认记录：</span>
-              <span className="break-all">
-                {traceValue(change?.proposalId, "accepted_proposal_missing")}
-              </span>
+              <span className="text-stone-400">发散状态：</span>
+              <span>{view.divergenceFromCanonical}</span>
             </div>
             <div>
-              <span className="text-stone-400">来源摘录：</span>
-              <span className="break-all">
-                {change?.sourceExcerpt ?? sourceUnavailableReason ?? "source_excerpt_unavailable"}
-              </span>
+              <span className="text-stone-400">依据数：</span>
+              <span>{view.evidenceRefs.length}</span>
             </div>
             <div>
-              <span className="text-stone-400">Run：</span>
-              {change?.proposalRunId ? (
-                <a
-                  className="break-all text-stone-900 underline"
-                  href={`#${runDetailRoute(change.proposalRunId)}`}
-                >
-                  {change.proposalRunId}
-                </a>
-              ) : (
-                <span>run_unavailable</span>
-              )}
-            </div>
-            <div>
-              <span className="text-stone-400">Patch：</span>
-              <span className="break-all">
-                {change?.patchId
-                  ? `${change.patchId} · ${change.patchStatus ?? "status_unavailable"}`
-                  : (patchUnavailableReason ?? "patch_unavailable")}
-              </span>
-            </div>
-            <div>
-              <span className="text-stone-400">Snapshot：</span>
-              <span className="break-all">
-                {change?.snapshotVersions?.length
-                  ? change.snapshotVersions.join(" / ")
-                  : (snapshotUnavailableReason ?? "snapshot_unavailable")}
-              </span>
-            </div>
-            <div>
-              <span className="text-stone-400">把握：</span>
-              <span>
-                {typeof change?.confidence === "number"
-                  ? `${Math.round(change.confidence * 100)}%`
-                  : "confidence_unavailable"}
-              </span>
-            </div>
-            <div>
-              <span className="text-stone-400">风险：</span>
-              <span>{change?.riskLevel ?? "risk_unavailable"}</span>
+              <span className="text-stone-400">所有者：</span>
+              <span>{ownerStatusLabel(view.ownerStatus)}</span>
             </div>
           </div>
         </TechnicalDetails>
@@ -580,58 +384,9 @@ function CommunicationStyleCurrentView({
   );
 }
 
-function OverviewSection({
-  lifeModel,
-  diagnostics,
-  projection,
-  completion,
-  pendingProposals,
-  currentView,
-}: {
-  lifeModel: LifeModel | null;
-  diagnostics: SystemDiagnostics | null;
-  projection: LifeStateProjection | null;
-  completion: Model4DCompletion | null;
-  pendingProposals: AgentProposal[];
-  currentView: LifeModelCurrentView | null;
-}) {
-  const [ignoredIssueIds, setIgnoredIssueIds] = useState<Set<string>>(new Set());
-  const [deferredIssueIds, setDeferredIssueIds] = useState<Set<string>>(new Set());
-  const hasCommunicationStyle = Boolean(currentView?.value?.trim());
-  const empty = isModelEmpty(lifeModel, projection) && !hasCommunicationStyle;
-  const dimensions = useMemo(() => (lifeModel ? buildDimensions(lifeModel) : []), [lifeModel]);
-  const suppressedByDimension = useMemo(
-    () =>
-      dimensions.reduce(
-        (acc, dimension) => {
-          acc[dimension.key] = dimension.suppressedIssues;
-          return acc;
-        },
-        {
-          identity: [],
-          goals: [],
-          capabilities: [],
-          state: [],
-        } as Record<LifeModelDimensionKey, LifeModelDisplayQualityIssue[]>
-      ),
-    [dimensions]
-  );
-  const trustViews = useMemo(
-    () =>
-      buildLifeModelTrustViews({
-        lifeModel,
-        diagnostics,
-        completion,
-        pendingProposals,
-        suppressedByDimension,
-      }),
-    [completion, diagnostics, lifeModel, pendingProposals, suppressedByDimension]
-  );
-  const qualityIssues = useMemo(() => getLifeModelQualityIssues(lifeModel), [lifeModel]);
-  const visibleQualityIssues = useMemo(
-    () => qualityIssues.filter(issue => !ignoredIssueIds.has(issue.id)),
-    [ignoredIssueIds, qualityIssues]
-  );
+function OverviewSection({ viewModel }: { viewModel: LifeModelViewModel | null }) {
+  const dimensions = useMemo(() => viewModel?.dimensionSummaries ?? [], [viewModel]);
+  const empty = !viewModel || (dimensions.length === 0 && !viewModel.currentViewSummary);
 
   if (empty) {
     return (
@@ -661,212 +416,101 @@ function OverviewSection({
       <div>
         <h2 className="text-sm font-semibold text-stone-950">四维摘要</h2>
         <p className="mt-1 text-sm text-stone-600">
-          只显示短摘要；完整构建和确认仍在 Builder 与 Mailbox 中完成。
+          只显示后端摘要；完整构建和确认仍在 Builder 与 Mailbox 中完成。
         </p>
       </div>
-      {visibleQualityIssues.length > 0 && (
-        <QualityIssuePanel
-          issues={visibleQualityIssues}
-          deferredIssueIds={deferredIssueIds}
-          onIgnore={issueId => {
-            setIgnoredIssueIds(current => {
-              const next = new Set(current);
-              next.add(issueId);
-              return next;
-            });
-          }}
-          onDefer={issueId => {
-            setDeferredIssueIds(current => {
-              const next = new Set(current);
-              next.add(issueId);
-              return next;
-            });
-          }}
-        />
-      )}
-      <CommunicationStyleCurrentView currentView={currentView} />
+      <CommunicationStyleCurrentView currentView={viewModel.currentViewSummary} />
       <div className="rounded-lg border border-stone-200 bg-white">
-        {dimensions.map((dimension, index) => (
-          <div
-            key={dimension.key}
-            className={[
-              "grid gap-3 px-4 py-4 sm:grid-cols-[170px_1fr]",
-              index === 0 ? "" : "border-t border-stone-100",
-            ].join(" ")}
-          >
-            <div>
-              <div className="text-sm font-semibold text-stone-950">{dimension.title}</div>
-              <div className="mt-0.5 text-xs text-stone-500">{dimension.items.length} 条摘要</div>
-              <div className="mt-2 flex flex-wrap gap-1">
-                {trustViews[dimension.key].pendingProposalCount > 0 && (
-                  <ProductStatusChip label="Mailbox 待确认" tone="warning" />
+        {dimensions.map((dimension, index) => {
+          const items = summaryItems(dimension.summary);
+          return (
+            <div
+              key={dimension.id}
+              className={[
+                "grid gap-3 px-4 py-4 sm:grid-cols-[170px_1fr]",
+                index === 0 ? "" : "border-t border-stone-100",
+              ].join(" ")}
+            >
+              <div>
+                <div className="text-sm font-semibold text-stone-950">{dimension.label}</div>
+                <div className="mt-0.5 text-xs text-stone-500">{items.length} 条摘要</div>
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {dimension.pendingReviewItemRefs.length > 0 && (
+                    <ProductStatusChip label="Mailbox 待确认" tone="warning" />
+                  )}
+                  {dimension.stale && <ProductStatusChip label="需刷新" tone="warning" />}
+                  <ProductStatusChip label={ownerStatusLabel(dimension.ownerStatus)} />
+                </div>
+              </div>
+              <div className="space-y-3">
+                {items.length ? (
+                  <ul className="grid gap-1.5 text-sm text-stone-700">
+                    {items.map(item => (
+                      <li key={item} className="flex items-center gap-2">
+                        <span
+                          className="h-1.5 w-1.5 rounded-full bg-stone-400"
+                          aria-hidden="true"
+                        />
+                        <span>{item}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="text-sm text-stone-500">暂无摘要</div>
                 )}
-                {dimension.suppressedIssues.length > 0 && (
-                  <ProductStatusChip label="原始抽取已降级" tone="warning" />
-                )}
-                {issuesForLifeModelDimension(visibleQualityIssues, dimension.key).length > 0 && (
-                  <ProductStatusChip label="需要修正" tone="warning" />
-                )}
+                <TrustDrawer
+                  title={`${dimension.label} 可信度`}
+                  subtitle={`${readinessStateLabel(viewModel.trustQualityState.readiness)} · ${confidenceLabel(dimension.confidence)}`}
+                >
+                  <div className="grid gap-2 text-xs text-stone-600 md:grid-cols-2">
+                    <div>来源：{dimension.provenance}</div>
+                    <div>待确认：{dimension.pendingReviewItemRefs.length}</div>
+                    <div>依据：{dimension.evidenceRefs.length}</div>
+                    <div>所有者：{ownerStatusLabel(dimension.ownerStatus)}</div>
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <Link
+                      to={mailboxRoute()}
+                      className="rounded-md bg-stone-900 px-2.5 py-1 text-xs font-semibold text-white hover:bg-stone-800"
+                    >
+                      Open Mailbox
+                    </Link>
+                    <Link
+                      to={secondaryRoutePath("LifeModelBuild")}
+                      className="rounded-md border border-stone-200 bg-white px-2.5 py-1 text-xs font-semibold text-stone-700 hover:bg-stone-50"
+                    >
+                      Correct
+                    </Link>
+                    <button
+                      type="button"
+                      disabled
+                      className="rounded-md border border-stone-200 bg-stone-50 px-2.5 py-1 text-xs font-semibold text-stone-400"
+                    >
+                      Forget
+                    </button>
+                  </div>
+                </TrustDrawer>
               </div>
             </div>
-            <div className="space-y-3">
-              {dimension.items.length ? (
-                <ul className="grid gap-1.5 text-sm text-stone-700">
-                  {dimension.items.slice(0, 3).map(item => (
-                    <li key={item} className="flex items-center gap-2">
-                      <span className="h-1.5 w-1.5 rounded-full bg-stone-400" aria-hidden="true" />
-                      <span>{item}</span>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <div className="text-sm text-stone-500">
-                  {dimension.suppressedIssues.length > 0
-                    ? "暂无已确认摘要；低质量抽取已放入依据。"
-                    : "暂无摘要"}
-                </div>
-              )}
-              <TrustDrawer
-                title={`${dimension.title} 可信度`}
-                subtitle={`${trustViews[dimension.key].statusLabel} · ${trustViews[dimension.key].confidenceLabel}`}
-              >
-                <div className="grid gap-2 text-xs text-stone-600 md:grid-cols-2">
-                  <div>来源：{trustViews[dimension.key].sourceSummary}</div>
-                  <div>{trustViews[dimension.key].updatedAtLabel}</div>
-                  <div>待确认：{trustViews[dimension.key].pendingProposalCount}</div>
-                  <div>依据：{trustViews[dimension.key].evidenceSummary}</div>
-                </div>
-                {dimension.suppressedIssues.length > 0 && (
-                  <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2">
-                    <div className="text-xs font-semibold text-amber-950">
-                      不进入正式摘要的原始抽取
-                    </div>
-                    <div className="mt-2 space-y-2">
-                      {dimension.suppressedIssues.slice(0, 3).map(issue => (
-                        <div key={issue.value} className="text-xs text-amber-900">
-                          <div className="font-medium">{issue.value}</div>
-                          <div className="mt-0.5">
-                            {issue.reason} {issue.recoveryAction}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <Link
-                    to={mailboxRoute()}
-                    className="rounded-md bg-stone-900 px-2.5 py-1 text-xs font-semibold text-white hover:bg-stone-800"
-                  >
-                    Open Mailbox
-                  </Link>
-                  <Link
-                    to={secondaryRoutePath("LifeModelBuild")}
-                    className="rounded-md border border-stone-200 bg-white px-2.5 py-1 text-xs font-semibold text-stone-700 hover:bg-stone-50"
-                  >
-                    Correct
-                  </Link>
-                  <button
-                    type="button"
-                    disabled
-                    className="rounded-md border border-stone-200 bg-stone-50 px-2.5 py-1 text-xs font-semibold text-stone-400"
-                  >
-                    Forget
-                  </button>
-                </div>
-              </TrustDrawer>
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </section>
   );
 }
 
-function QualityIssuePanel({
-  issues,
-  deferredIssueIds,
-  onIgnore,
-  onDefer,
-}: {
-  issues: LifeModelQualityIssue[];
-  deferredIssueIds: Set<string>;
-  onIgnore: (issueId: string) => void;
-  onDefer: (issueId: string) => void;
-}) {
-  return (
-    <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
-      <div className="flex items-start gap-2">
-        <AlertTriangle size={16} aria-hidden="true" className="mt-0.5 shrink-0 text-amber-800" />
-        <div>
-          <div className="text-sm font-semibold text-amber-950">发现可能影响画像可信度的字段</div>
-          <div className="mt-0.5 text-xs text-amber-800">
-            本次视图处理，不会改写 Life Model；正式更新仍需 Mailbox 确认。
-          </div>
-        </div>
-      </div>
-      <div className="mt-3 grid gap-2">
-        {issues.map((issue, index) => (
-          <div
-            key={`${issue.dimension}-${issue.label}-${index}`}
-            className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-200 bg-white/80 px-3 py-2"
-          >
-            <div>
-              <div className="text-sm font-medium text-amber-950">{issue.label}</div>
-              <div className="mt-0.5 text-xs text-amber-800">{issue.detail}</div>
-              {deferredIssueIds.has(issue.id) && (
-                <div className="mt-1 text-xs font-medium text-stone-600">已标记稍后处理</div>
-              )}
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <Link
-                to={issue.route}
-                className="rounded-md bg-amber-900 px-2.5 py-1 text-xs font-semibold text-white hover:bg-amber-950"
-              >
-                修正
-              </Link>
-              <button
-                type="button"
-                onClick={() => onIgnore(issue.id)}
-                className="rounded-md border border-amber-200 bg-white px-2.5 py-1 text-xs font-semibold text-amber-900 hover:bg-amber-50"
-              >
-                不采用
-              </button>
-              <button
-                type="button"
-                onClick={() => onDefer(issue.id)}
-                className="rounded-md border border-stone-200 bg-white px-2.5 py-1 text-xs font-semibold text-stone-700 hover:bg-stone-50"
-              >
-                稍后处理
-              </button>
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function EvidenceSection({
-  diagnostics,
-  memoryCount,
-  tierStats,
-  pendingProposals,
-  pendingReviewCount,
-}: {
-  diagnostics: SystemDiagnostics | null;
-  memoryCount: number | null;
-  tierStats: TierStats | null;
-  pendingProposals: AgentProposal[];
-  pendingReviewCount: number | null;
-}) {
-  const effectiveMemoryCount = memoryCount ?? diagnostics?.memory_chunk_count ?? 0;
-  const pendingCount = pendingReviewCount;
+function EvidenceSection({ viewModel }: { viewModel: LifeModelViewModel | null }) {
+  const memoryLinkage = viewModel?.memoryLinkage;
+  const effectiveMemoryCount = memoryLinkage?.linkedMemoryCount ?? 0;
+  const tierSummary = memoryLinkage?.tierSummary;
+  const pendingCount = viewModel?.pendingUpdateCounts.pendingReview ?? null;
   const sourceLabels = uniqueShortItems(
-    pendingProposals.map(proposal => sourceLabel(proposal.source)),
+    viewModel?.sourceRefs.map(ref => ref.label || ref.id) ?? [],
     3
   );
   const recentSources = sourceLabels.length ? sourceLabels.join(" / ") : "暂无待确认来源";
+  const candidateChanges = viewModel?.candidateChanges ?? [];
+  const materializedChanges = viewModel?.materializedChanges ?? [];
 
   return (
     <section id="life-model-evidence" role="tabpanel" className="space-y-5">
@@ -901,8 +545,8 @@ function EvidenceSection({
             <div className="text-xs font-medium text-stone-500">记忆条数</div>
             <div className="mt-1 text-lg font-semibold text-stone-950">{effectiveMemoryCount}</div>
             <div className="mt-1 text-xs text-stone-500">
-              {tierStats
-                ? `活跃 ${tierStats.tier1 + tierStats.tier2 + tierStats.tier3}`
+              {tierSummary?.total != null
+                ? `活跃 ${(tierSummary.tier1 ?? 0) + (tierSummary.tier2 ?? 0) + (tierSummary.tier3 ?? 0)}`
                 : "只读统计"}
             </div>
           </div>
@@ -923,35 +567,41 @@ function EvidenceSection({
         </div>
       </div>
 
-      {pendingProposals.length > 0 && (
+      {candidateChanges.length > 0 && (
         <div className="rounded-lg border border-stone-200 bg-white">
-          {pendingProposals.slice(0, 3).map((proposal, index) => (
+          {candidateChanges.slice(0, 3).map((change, index) => (
             <div
-              key={proposal.id}
+              key={change.changeRef.id}
               className={[
                 "flex flex-wrap items-center justify-between gap-3 px-4 py-3",
                 index === 0 ? "" : "border-t border-stone-100",
               ].join(" ")}
             >
               <div>
-                <div data-testid={`life-model-pending-proposal-primary-${proposal.id}`}>
-                  <div className="text-sm font-semibold text-stone-950">
-                    {proposalTypeLabel(proposal.proposalType)}
-                  </div>
+                <div data-testid={`life-model-pending-proposal-primary-${change.changeRef.id}`}>
+                  <div className="text-sm font-semibold text-stone-950">{change.title}</div>
                   <div className="mt-0.5 text-xs text-stone-500">
-                    {sourceLabel(proposal.source)} · 影响 {proposalRiskLabel(proposal.riskLevel)}
+                    {change.changeKind} · {change.affectedDimensionIds.join(" / ")}
                   </div>
                   <div className="mt-1 text-xs text-stone-600">
-                    {reviewProposalSummary(proposal)}
+                    OpenLife 发现一条候选更新，需要你在 Mailbox 中确认后才会写入。
                   </div>
                 </div>
                 <div className="mt-2 max-w-xl">
-                  <TechnicalDetails summary="来源与技术记录">
+                  <TechnicalDetails summary="后端依据">
                     <div className="space-y-1">
-                      {reviewProposalTraceRows(proposal).map(row => (
-                        <div key={`${proposal.id}-${row.label}`} className="min-w-0">
-                          <span className="text-stone-400">{row.label}：</span>
-                          <span className="break-all">{row.value}</span>
+                      <div className="min-w-0">
+                        <span className="text-stone-400">确认记录：</span>
+                        <span className="break-all">{change.changeRef.id}</span>
+                      </div>
+                      <div className="min-w-0">
+                        <span className="text-stone-400">状态：</span>
+                        <span>{change.decisionStatus}</span>
+                      </div>
+                      {change.evidenceRefs.map(ref => (
+                        <div key={ref.id} className="min-w-0">
+                          <span className="text-stone-400">{ref.label}：</span>
+                          <span className="break-all">{ref.id}</span>
                         </div>
                       ))}
                     </div>
@@ -964,6 +614,29 @@ function EvidenceSection({
               >
                 去 Mailbox 处理
               </Link>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {materializedChanges.length > 0 && (
+        <div className="rounded-lg border border-stone-200 bg-white">
+          {materializedChanges.slice(0, 3).map((change, index) => (
+            <div
+              key={change.changeRef.id}
+              className={[
+                "flex flex-wrap items-center justify-between gap-3 px-4 py-3",
+                index === 0 ? "" : "border-t border-stone-100",
+              ].join(" ")}
+            >
+              <div>
+                <div className="text-sm font-semibold text-stone-950">{change.title}</div>
+                <div className="mt-0.5 text-xs text-stone-500">
+                  {change.materializationStatus} ·{" "}
+                  {change.materializedAt ? formatUpdatedAt(change.materializedAt) : "时间未记录"}
+                </div>
+              </div>
+              <ProductStatusChip label="后端物化证据" tone="ready" />
             </div>
           ))}
         </div>
@@ -982,43 +655,19 @@ export default function LifeModelPage() {
     async function loadLifeModelSurface() {
       setState(current => ({ ...current, loading: true, error: "" }));
       try {
-        const [
-          lifeModel,
-          currentView,
-          diagnostics,
-          projection,
-          completion,
-          unfinishedSessions,
-          memoryCount,
-          tierStats,
-          pendingProposals,
-        ] = await Promise.all([
-          getLifeModel().catch(() => null),
-          getLifeModelCurrentView().catch(() => null),
-          getSystemDiagnostics().catch(() => null),
+        const [viewModelEnvelope, projection, unfinishedSessions] = await Promise.all([
+          getLifeModelViewModel().catch(() => null),
           getLifeStateProjection().catch(() => null),
-          getModel4DCompletion().catch(() => null),
           builderListUnfinished().catch(() => []),
-          countMemoryChunks().catch(() => null),
-          getMemoryTierStats().catch(() => null),
-          listProposals("pending", undefined, undefined, REVIEW_PENDING_PROPOSAL_LIMIT).catch(
-            () => []
-          ),
         ]);
 
         if (cancelled) return;
         setState({
-          lifeModel,
-          diagnostics,
+          viewModelEnvelope,
           projection,
-          completion,
           unfinishedSessions,
-          memoryCount,
-          tierStats,
-          pendingProposals,
-          currentView,
           loading: false,
-          error: "",
+          error: viewModelEnvelope ? "" : "Life Model 状态读取失败：后端读模型不可用",
         });
       } catch (error) {
         if (cancelled) return;
@@ -1037,14 +686,12 @@ export default function LifeModelPage() {
     };
   }, []);
 
-  const overall = completionOverall(state.diagnostics, state.completion);
+  const viewModel = dataFromEnvelope(state.viewModelEnvelope);
+  const overall = readinessFromViewModel(viewModel);
   const safeMode = state.projection?.safeMode.active ?? false;
   const safeModeReason = state.projection?.safeMode.reason ?? "系统当前处于 Safe Mode。";
-  const pendingCount = reviewRequiredCountFromProjection(state.projection, "life_model");
-  const topStatus =
-    state.projection?.readiness.lifeModelReady && !state.projection?.readiness.modelEmpty
-      ? "Life Model 本地可读"
-      : "待构建";
+  const pendingCount = viewModel?.pendingUpdateCounts.pendingReview ?? null;
+  const topStatus = topStatusLabel(state.viewModelEnvelope);
 
   return (
     <div
@@ -1063,7 +710,7 @@ export default function LifeModelPage() {
               <StatusChip
                 label={pendingCount == null ? "待确认状态读取中" : `待确认 ${pendingCount}`}
               />
-              <StatusChip label={formatUpdatedAt(state.lifeModel?.metadata.updated_at)} />
+              <StatusChip label={formatUpdatedAt(state.viewModelEnvelope?.lastUpdatedAt)} />
             </div>
           </div>
           <div className="flex items-center gap-2 rounded-lg border border-stone-200 bg-white px-3 py-2">
@@ -1104,31 +751,13 @@ export default function LifeModelPage() {
         <div className="pb-8">
           {activeSection === "build" && (
             <BuildSection
-              diagnostics={state.diagnostics}
+              viewModel={viewModel}
               projection={state.projection}
-              completion={state.completion}
               unfinishedSessions={state.unfinishedSessions}
             />
           )}
-          {activeSection === "overview" && (
-            <OverviewSection
-              lifeModel={state.lifeModel}
-              diagnostics={state.diagnostics}
-              projection={state.projection}
-              completion={state.completion}
-              pendingProposals={state.pendingProposals}
-              currentView={state.currentView}
-            />
-          )}
-          {activeSection === "evidence" && (
-            <EvidenceSection
-              diagnostics={state.diagnostics}
-              memoryCount={state.memoryCount}
-              tierStats={state.tierStats}
-              pendingProposals={state.pendingProposals}
-              pendingReviewCount={pendingCount}
-            />
-          )}
+          {activeSection === "overview" && <OverviewSection viewModel={viewModel} />}
+          {activeSection === "evidence" && <EvidenceSection viewModel={viewModel} />}
         </div>
       </div>
     </div>

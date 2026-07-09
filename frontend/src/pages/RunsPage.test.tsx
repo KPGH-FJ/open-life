@@ -155,6 +155,159 @@ describe("RunsPage contract", () => {
           },
         ]);
       }
+      if (cmd === "get_tasks_view_model") {
+        const now = new Date().toISOString();
+        return Promise.resolve({
+          data: {
+            items: [
+              {
+                canonicalTaskId: "task-1",
+                taskSessionId: null,
+                relatedRunIds: ["run-1"],
+                conversationId: "session-1",
+                title: "camel case user input",
+                strategy: "conversation",
+                lifecycleStatus: "completed_needs_evidence",
+                terminalDeliveryStatus: "missing_final_delivery_evidence",
+                finalDeliveryEvidencePresent: false,
+                pendingBlockers: [],
+                pendingReviewItemRefs: [],
+                allowedControls: [],
+                nextRecommendedControl: "open_trace",
+                latestResultPreview: {
+                  status: "missing_final_delivery_evidence",
+                  label: "missing final delivery evidence",
+                  preview: "camel case user input",
+                  evidenceRefs: [],
+                },
+                evidenceRefs: [],
+                updatedAt: now,
+              },
+              {
+                canonicalTaskId: "task-sensitive-1",
+                taskSessionId: "task-session-sensitive",
+                relatedRunIds: ["run-sensitive-1"],
+                conversationId: "session-sensitive",
+                title: "Sensitive running task",
+                strategy: "direct_answer",
+                lifecycleStatus: "failed",
+                terminalDeliveryStatus: "failed",
+                finalDeliveryEvidencePresent: false,
+                pendingBlockers: ["provider_timed_out"],
+                pendingReviewItemRefs: [],
+                allowedControls: [
+                  {
+                    id: "task-session-sensitive:open_trace",
+                    label: "Open trace",
+                    kind: "open_trace",
+                    effect: "evidence_only",
+                    enabled: true,
+                    targetTaskId: "task-session-sensitive",
+                    completionProofAfterDispatch: false,
+                  },
+                ],
+                nextRecommendedControl: "open_trace",
+                latestResultPreview: {
+                  status: "failed",
+                  label: "failed",
+                  preview: "Provider timed out",
+                  evidenceRefs: [],
+                },
+                evidenceRefs: [],
+                updatedAt: now,
+              },
+              {
+                canonicalTaskId: "task-preview-1",
+                taskSessionId: null,
+                relatedRunIds: ["run-preview-1"],
+                conversationId: "session-preview",
+                title: "Multi-strategy preview",
+                strategy: "multi_strategy_preview",
+                lifecycleStatus: "completed_needs_evidence",
+                terminalDeliveryStatus: "missing_final_delivery_evidence",
+                finalDeliveryEvidencePresent: false,
+                pendingBlockers: [],
+                pendingReviewItemRefs: [],
+                allowedControls: [],
+                nextRecommendedControl: "open_run",
+                latestResultPreview: {
+                  status: "missing_final_delivery_evidence",
+                  label: "missing final delivery evidence",
+                  preview: "Multi-strategy preview: planExecute / warn",
+                  evidenceRefs: [],
+                },
+                evidenceRefs: [],
+                updatedAt: now,
+              },
+              {
+                canonicalTaskId: "task-plan-1",
+                taskSessionId: null,
+                relatedRunIds: ["run-plan-1"],
+                conversationId: "workspace_weekly_planning",
+                title: "weekly_planning · 3 步 · 待确认 1",
+                strategy: "plan_execute_product",
+                lifecycleStatus: "completed_needs_evidence",
+                terminalDeliveryStatus: "missing_final_delivery_evidence",
+                finalDeliveryEvidencePresent: false,
+                pendingBlockers: [],
+                pendingReviewItemRefs: [],
+                allowedControls: [],
+                nextRecommendedControl: "open_run",
+                latestResultPreview: {
+                  status: "missing_final_delivery_evidence",
+                  label: "missing final delivery evidence",
+                  preview: "weekly_planning · 3 步 · 待确认 1",
+                  evidenceRefs: [],
+                },
+                evidenceRefs: [],
+                updatedAt: now,
+              },
+              {
+                canonicalTaskId: "task-2",
+                taskSessionId: null,
+                relatedRunIds: ["run-2"],
+                title: "deleted run",
+                strategy: "builder",
+                lifecycleStatus: "completed_needs_evidence",
+                terminalDeliveryStatus: "missing_final_delivery_evidence",
+                finalDeliveryEvidencePresent: false,
+                pendingBlockers: [],
+                pendingReviewItemRefs: [],
+                allowedControls: [],
+                nextRecommendedControl: "open_run",
+                latestResultPreview: {
+                  status: "missing_final_delivery_evidence",
+                  label: "missing final delivery evidence",
+                  preview: "deleted run",
+                  evidenceRefs: [],
+                },
+                evidenceRefs: [],
+                updatedAt: now,
+              },
+            ],
+            summary: {
+              total: 5,
+              activeCount: 0,
+              waitingPermissionCount: 0,
+              blockedCount: 0,
+              pendingReviewCount: 0,
+              completedCount: 0,
+              completedNeedsEvidenceCount: 4,
+              failedCount: 1,
+              cancelledCount: 0,
+              byLifecycleStatus: { completed_needs_evidence: 4, failed: 1 },
+            },
+            sourceRefs: [],
+            contractLimitations: [],
+          },
+          status: "ready",
+          lastUpdatedAt: now,
+          source: "backend-readmodel",
+          evidenceRefs: [],
+          warnings: [],
+          actions: { primary: [] },
+        });
+      }
       if (cmd === "list_main_chat_agent_tasks") {
         return Promise.resolve([
           {
@@ -290,13 +443,9 @@ describe("RunsPage contract", () => {
     expect(screen.getByText("camel case output preview")).toBeInTheDocument();
     expect(screen.queryByText(/qa@example\.com/)).not.toBeInTheDocument();
     expect(screen.queryByText(/sk-sensitive-token/)).not.toBeInTheDocument();
-    expect(screen.getAllByText(/\[email\]/).length).toBeGreaterThan(0);
-    expect(screen.getByText("任务已超时")).toBeInTheDocument();
-    expect(screen.getByText("下一步：查看记录")).toBeInTheDocument();
+    expect(screen.getByText("任务失败")).toBeInTheDocument();
+    expect(screen.getAllByText("下一步：查看记录").length).toBeGreaterThan(0);
     expect(screen.getByText("连续性需复核")).toBeInTheDocument();
-    expect(screen.getByText("证据：1 action / 2 observation")).toBeInTheDocument();
-    expect(screen.getByText("脱敏：metadata_only")).toBeInTheDocument();
-    expect(screen.getAllByText(/云端路线 · deepseek/).length).toBeGreaterThan(0);
     expect(screen.getAllByText("待确认 1").length).toBeGreaterThan(0);
     expect(screen.queryByText("策略预览")).not.toBeInTheDocument();
     expect(screen.queryByText("策略：planExecute")).not.toBeInTheDocument();

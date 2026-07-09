@@ -272,6 +272,102 @@ async fn main_chat_task_continuity_list_detail_and_refresh_are_evidence_backed()
 }
 
 #[tokio::test]
+async fn main_chat_task_detail_final_delivery_requires_status_evidence() {
+    use openlife_core::agent::main_chat_agent_v1::{
+        AgentTaskSessionDraft, ExecutionTranscriptEntryDraft, ExecutionTranscriptEntryKind,
+        MainChatAgentStrategy,
+    };
+
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let app = tauri::test::mock_builder()
+        .manage(state.clone())
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("build mock tauri app");
+
+    let with_final_result = {
+        let store = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("main chat session store")
+            .lock()
+            .await;
+        let session = store
+            .create_session(AgentTaskSessionDraft {
+                chat_session_id: "final-delivery-status-chat".into(),
+                user_goal: "Return an evidence-backed final result.".into(),
+                selected_strategy: MainChatAgentStrategy::DirectAnswer,
+                current_plan_summary: None,
+                context_snapshot_refs: vec![],
+            })
+            .expect("create final-result task");
+        store
+            .append_transcript_entry(ExecutionTranscriptEntryDraft {
+                session_id: session.id.clone(),
+                kind: ExecutionTranscriptEntryKind::FinalResult,
+                summary: "Final result transcript entry exists.".into(),
+                metadata: serde_json::json!({
+                    "runId": "run-final-delivery-status-1",
+                    "directWritesExecuted": false,
+                }),
+            })
+            .expect("append final result");
+        store
+            .complete_session(&session.id, "Done.")
+            .expect("complete final-result task")
+    };
+    let summary_only = {
+        let store = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("main chat session store")
+            .lock()
+            .await;
+        let session = store
+            .create_session(AgentTaskSessionDraft {
+                chat_session_id: "final-delivery-status-chat".into(),
+                user_goal: "Only a stored final summary exists.".into(),
+                selected_strategy: MainChatAgentStrategy::DirectAnswer,
+                current_plan_summary: None,
+                context_snapshot_refs: vec![],
+            })
+            .expect("create summary-only task");
+        store
+            .complete_session(
+                &session.id,
+                "Stored final summary without transcript evidence.",
+            )
+            .expect("complete summary-only task")
+    };
+
+    let with_final_result_detail = get_main_chat_agent_task_detail(
+        with_final_result.id.clone(),
+        app.state::<std::sync::Arc<crate::AppState>>(),
+    )
+    .await
+    .expect("load final-result detail");
+    assert_eq!(
+        with_final_result_detail
+            .final_delivery
+            .as_ref()
+            .and_then(|value| value.get("status"))
+            .and_then(|value| value.as_str()),
+        Some("completed"),
+        "TaskDetail.final_delivery must carry explicit status evidence"
+    );
+
+    let summary_only_detail = get_main_chat_agent_task_detail(
+        summary_only.id.clone(),
+        app.state::<std::sync::Arc<crate::AppState>>(),
+    )
+    .await
+    .expect("load summary-only detail");
+    assert!(
+        summary_only_detail.final_delivery.is_none(),
+        "stored final_summary alone must not become final_delivery evidence"
+    );
+}
+
+#[tokio::test]
 async fn failure_finalizer_records_timeout_run_session_and_transcript_evidence() {
     use openlife_core::agent::main_chat_agent_v1::{
         AgentTaskSessionDraft, AgentTaskSessionStatus, MainChatAgentStrategy,

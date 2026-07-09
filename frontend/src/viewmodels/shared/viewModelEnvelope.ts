@@ -1,128 +1,40 @@
-export type ViewModelStatus = "loading" | "ready" | "empty" | "error" | "stale";
+import type {
+  BackendEntityRef as BackendEntityRefContract,
+  DebugAction as DebugActionContract,
+  EvidenceRef as EvidenceRefContract,
+  EvidenceSensitivity as EvidenceSensitivityContract,
+  EvidenceSource as EvidenceSourceContract,
+  ProductAction as ProductActionContract,
+  ProductActionKind as ProductActionKindContract,
+  ProductRiskLevel as ProductRiskLevelContract,
+  ProviderPrivacyBoundarySummary as ProviderPrivacyBoundarySummaryContract,
+  ReviewAction as ReviewActionContract,
+  ReviewActionBase as ReviewActionBaseContract,
+  ReviewActionKindEffectInvariant as ReviewActionKindEffectInvariantContract,
+  ReviewItemMaterializationStatus as ReviewItemMaterializationStatusContract,
+  ViewModelEnvelope as ViewModelEnvelopeContract,
+  ViewModelStatus as ViewModelStatusContract,
+  ViewModelWarning as ViewModelWarningContract,
+  ViewModelWarningSeverity as ViewModelWarningSeverityContract,
+} from "../../tauri";
 
-export type EvidenceSource =
-  | "backend-readmodel"
-  | "audit"
-  | "task"
-  | "review"
-  | "memory"
-  | "lifemodel"
-  | "settings"
-  | "provider";
-
-export type EvidenceSensitivity = "public" | "local_private" | "sensitive" | "redacted";
-
-export type EvidenceRef = {
-  id: string;
-  label: string;
-  source: EvidenceSource;
-  sensitivity?: EvidenceSensitivity;
-};
-
-export type ViewModelWarningSeverity = "info" | "warning" | "error";
-
-export type ViewModelWarning = {
-  code: string;
-  message: string;
-  severity: ViewModelWarningSeverity;
-  evidenceRefs?: EvidenceRef[];
-};
-
-export type ProductActionKind =
-  | "open"
-  | "start"
-  | "continue"
-  | "retry"
-  | "cancel"
-  | "refresh"
-  | "inspect"
-  | "configure";
-
-export type ProductAction = {
-  id: string;
-  label: string;
-  kind: ProductActionKind;
-  enabled: boolean;
-  disabledReason?: string;
-  targetRef?: string;
-};
-
-export type ReviewItemMaterializationStatus =
-  | "not_applicable"
-  | "not_started"
-  | "applying"
-  | "applied"
-  | "failed"
-  | "rolled_back"
-  | "unknown";
-
-export type ReviewActionBase = {
-  id: string;
-  label: string;
-  enabled: boolean;
-  disabledReason?: string;
-  requiresConfirmation?: boolean;
-  targetReviewItemId: string;
-  expectedMaterializationStatusAfterDispatch?: ReviewItemMaterializationStatus;
-};
-
-export type ReviewActionKindEffectInvariant =
-  | { kind: "approve" | "reject" | "edit" | "later" | "revoke"; effect: "decision_only" }
-  | { kind: "apply"; effect: "materialization_request" }
-  | { kind: "resume"; effect: "task_resume_request" }
-  | { kind: "view_evidence"; effect: "evidence_only" };
-
-export type ReviewAction = ReviewActionBase & ReviewActionKindEffectInvariant;
-
-export type DebugAction = {
-  id: string;
-  label: string;
-  kind: "raw_trace" | "raw_json" | "export" | "provider_health" | "route_evidence" | "transcript";
-  enabled: boolean;
-  developerOnly?: boolean;
-  targetRef?: string;
-};
-
-export type ViewModelEnvelope<T> = {
-  data: T | null;
-  status: ViewModelStatus;
-  lastUpdatedAt: string | null;
-  source: "backend-readmodel";
-  evidenceRefs?: EvidenceRef[];
-  warnings?: ViewModelWarning[];
-  actions: {
-    primary: ProductAction[];
-    review?: ReviewAction[];
-    debugOnly?: DebugAction[];
-  };
-};
-
-export type RiskLevel = "low" | "medium" | "high" | "critical";
-
-export type ProviderPrivacyBoundarySummary = {
-  routeType: "local" | "cloud" | "hybrid" | "auto" | "unknown";
-  externalTransmission: "not_sent" | "sent" | "possible" | "unknown";
-  providerLabel: string;
-  modelLabel: string;
-  privacyLabel: string;
-  risk: RiskLevel | "none" | "unknown";
-  localOnlyRequired: boolean;
-  blockedReason?: string;
-  evidenceRefs: EvidenceRef[];
-};
-
-export type BackendEntityRef = {
-  id: string;
-  kind:
-    | "task"
-    | "run"
-    | "conversation"
-    | "review_item"
-    | "memory"
-    | "lifemodel"
-    | "proposal"
-    | "tool_permission"
-    | "evidence";
-  label: string;
-  href?: string;
-};
+// Transitional frontend import path. The canonical contract owner is
+// openlife-core/src/agent/product_read_model.rs and frontend/src/tauri.ts mirrors
+// its serialized shape for TypeScript consumers.
+export type ViewModelStatus = ViewModelStatusContract;
+export type EvidenceSource = EvidenceSourceContract;
+export type EvidenceSensitivity = EvidenceSensitivityContract;
+export type EvidenceRef = EvidenceRefContract;
+export type ViewModelWarningSeverity = ViewModelWarningSeverityContract;
+export type ViewModelWarning = ViewModelWarningContract;
+export type ProductActionKind = ProductActionKindContract;
+export type ProductAction = ProductActionContract;
+export type ReviewItemMaterializationStatus = ReviewItemMaterializationStatusContract;
+export type ReviewActionBase = ReviewActionBaseContract;
+export type ReviewActionKindEffectInvariant = ReviewActionKindEffectInvariantContract;
+export type ReviewAction = ReviewActionContract;
+export type DebugAction = DebugActionContract;
+export type ViewModelEnvelope<T> = ViewModelEnvelopeContract<T>;
+export type RiskLevel = Exclude<ProductRiskLevelContract, "none" | "unknown">;
+export type ProviderPrivacyBoundarySummary = ProviderPrivacyBoundarySummaryContract;
+export type BackendEntityRef = BackendEntityRefContract;

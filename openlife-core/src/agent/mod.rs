@@ -9,6 +9,7 @@ pub mod golden_paths;
 pub mod governor;
 pub mod heuristic_store;
 pub mod hs_selector;
+pub mod life_model_view_model;
 pub mod lifemodel_backend_completion;
 pub mod main_chat_agent_v1;
 pub mod main_chat_governance_intent;
@@ -18,23 +19,28 @@ pub mod maturation;
 mod maturation_domain;
 pub mod memory_lifecycle;
 pub mod memory_service;
+pub mod memory_view_model;
 pub mod metadata_safe;
 pub mod metrics;
 pub mod model_router;
 pub mod plan_execute;
 pub mod policy_store;
+pub mod product_read_model;
 pub mod proposal_engine;
 pub mod proposal_generators;
 pub mod proposal_outcome;
 pub mod proposal_store;
+pub mod provider_privacy_boundary;
 pub mod reasoning;
 pub mod regression_suite;
+pub mod review_item;
 pub mod review_workflow;
 pub mod runtime;
 pub mod runtime_contract;
 mod runtime_strategy_contract;
 pub mod store;
 pub mod strategy_runtime;
+pub mod tasks_view_model;
 pub mod tool_gateway;
 pub mod types;
 
@@ -104,6 +110,17 @@ pub use hs_selector::{
     HSSelectionAudit, HSSelector, HSSelectorInput, RuntimeHSPacket, RuntimeHSPacketBuildInput,
     SelectedGuidanceRef, SelectedHeuristic, SelectedPolicyRef,
 };
+pub use life_model_view_model::{
+    build_life_model_view_model_envelope, LifeModelCandidateChange,
+    LifeModelCandidateDecisionStatus, LifeModelCanonicalSummary, LifeModelChangeKind,
+    LifeModelConfidence, LifeModelCurrentChangeInput, LifeModelCurrentViewInput,
+    LifeModelCurrentViewSummary, LifeModelDimensionId, LifeModelDimensionSummary,
+    LifeModelDivergence, LifeModelManualOverrideState, LifeModelMemoryLinkageStatus,
+    LifeModelMemoryLinkageSummary, LifeModelMemoryTierStatsInput, LifeModelOwnerStatus,
+    LifeModelPendingUpdateCounts, LifeModelProjectionInput, LifeModelProvenance,
+    LifeModelReadiness, LifeModelTierSummary, LifeModelTrustQualityState, LifeModelTruthMode,
+    LifeModelViewModel, LifeModelViewModelBuildInput,
+};
 pub use lifemodel_backend_completion::{
     bridge_life_signal_to_evidence, evaluate_lifemodel_backend_completion_readiness,
     extract_life_signals, DroppedLifeSignal, LifeDomain, LifeEvent, LifeEventPrivacyLevel,
@@ -148,6 +165,11 @@ pub use memory_lifecycle::{
     MemoryMaterializedView, MemoryRollbackEvent, MemoryRollbackReport,
 };
 pub use memory_service::{EmbeddingConfig, MemoryContext, MemoryService};
+pub use memory_view_model::{
+    build_memory_view_model, MemoryLaneSummary, MemoryLifeModelLinkageStatus,
+    MemoryLifeModelLinkageSummary, MemoryLifecycleSummary, MemoryTierSummary, MemoryViewModel,
+    MemoryViewModelBuildInput, MemoryViewModelSummary,
+};
 pub use metadata_safe::{
     metadata_safe_text_digest, metadata_safe_text_preview, metadata_safe_value_digest,
     metadata_safe_value_preview,
@@ -171,6 +193,14 @@ pub use policy_store::{
     BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING, BUILTIN_HEURISTIC_REJECTED_REMINDER_DELAY,
     BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST, BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY,
 };
+pub use product_read_model::{
+    BackendEntityKind, BackendEntityRef, DebugAction, DebugActionKind, EvidenceRef,
+    EvidenceSensitivity, EvidenceSource, ExternalTransmissionStatus, ProductAction,
+    ProductActionKind, ProductReadModelContractError, ProductRiskLevel,
+    ProviderPrivacyBoundarySummary, ProviderRouteType, ReviewAction, ReviewActionEffect,
+    ReviewActionKind, ReviewItemMaterializationStatus, ViewModelActions, ViewModelEnvelope,
+    ViewModelSource, ViewModelStatus, ViewModelWarning, ViewModelWarningSeverity,
+};
 pub use proposal_engine::{
     BuilderProposalGenerator, CalibrationProposalGenerator, ChatProposalGeneratorAdapter,
     FeedbackProposalGenerator, MemoryProposalGenerator, ProposalEngine, ProposalGenerator,
@@ -182,6 +212,9 @@ pub use proposal_outcome::{
     MaturationProposalOutcome, MaturationProposalOutcomeEvidenceReport,
 };
 pub use proposal_store::ProposalStore;
+pub use provider_privacy_boundary::{
+    build_provider_privacy_boundary_summary, ProviderPrivacyBoundaryBuildInput,
+};
 pub use reasoning::layered::{SafetyCheckResult, SafetyChecker};
 pub use reasoning::{
     DirectReasoner, LayeredReasoner, ReasoningConfig, ReasoningError, ReasoningInput,
@@ -189,6 +222,11 @@ pub use reasoning::{
 };
 pub use regression_suite::{
     RegressionResult, RegressionScenario, RegressionSuite, RegressionVerdict,
+};
+pub use review_item::{
+    build_review_center_view_model, build_review_item, ReviewCenterBuildInput, ReviewCenterSummary,
+    ReviewCenterViewModel, ReviewItem, ReviewItemDecisionStatus, ReviewItemSource,
+    ReviewItemSourceKind, ReviewItemTaskResumeRelation, ReviewItemType,
 };
 pub use review_workflow::{
     proposal_status_semantics, DurableWriteDecision, DurableWriteDecisionKind, DurableWriteRequest,
@@ -210,6 +248,13 @@ pub use strategy_runtime::{
     RuntimeStrategyExecutionReport, RuntimeStrategyInput, RuntimeStrategyOutput,
     RuntimeStrategyPayload, RuntimeStrategyPayloadKind, RuntimeStrategyRegistry,
     RuntimeStrategyRegistryReadinessReport, RuntimeStrategySideEffectBudget,
+};
+pub use tasks_view_model::{
+    build_tasks_view_model, build_workspace_view_model, TaskControl, TaskControlEffect,
+    TaskControlKind, TaskLatestResultPreview, TaskLifecycleStatus, TaskTerminalDeliveryStatus,
+    TaskViewModelContractError, TaskViewModelItem, TaskViewModelRunInput, TaskViewModelTaskInput,
+    TasksViewModel, TasksViewModelBuildInput, TasksViewModelSummary, WorkspaceTimelineItem,
+    WorkspaceViewModel,
 };
 pub use tool_gateway::{
     validate_manifest_execution_contract, ToolGateway, ToolGatewayContractEvidence,

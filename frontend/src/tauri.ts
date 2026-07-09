@@ -1678,6 +1678,548 @@ export async function getLifeStateProjection(): Promise<LifeStateProjection> {
   return safeInvoke<LifeStateProjection>("get_life_state_projection");
 }
 
+// Backend-owned shared product read-model contract.
+// Canonical Rust owner: openlife-core/src/agent/product_read_model.rs.
+export type ViewModelStatus = "loading" | "ready" | "empty" | "error" | "stale";
+
+export type EvidenceSource =
+  | "backend-readmodel"
+  | "audit"
+  | "task"
+  | "review"
+  | "memory"
+  | "lifemodel"
+  | "settings"
+  | "provider";
+
+export type EvidenceSensitivity = "public" | "local_private" | "sensitive" | "redacted";
+
+export type EvidenceRef = {
+  id: string;
+  label: string;
+  source: EvidenceSource;
+  sensitivity?: EvidenceSensitivity;
+};
+
+export type ViewModelWarningSeverity = "info" | "warning" | "error";
+
+export type ViewModelWarning = {
+  code: string;
+  message: string;
+  severity: ViewModelWarningSeverity;
+  evidenceRefs?: EvidenceRef[];
+};
+
+export type ProductActionKind =
+  | "open"
+  | "start"
+  | "continue"
+  | "retry"
+  | "cancel"
+  | "refresh"
+  | "inspect"
+  | "configure";
+
+export type ProductAction = {
+  id: string;
+  label: string;
+  kind: ProductActionKind;
+  enabled: boolean;
+  disabledReason?: string;
+  targetRef?: string;
+};
+
+export type ReviewItemMaterializationStatus =
+  | "not_applicable"
+  | "not_started"
+  | "applying"
+  | "applied"
+  | "failed"
+  | "rolled_back"
+  | "unknown";
+
+export type ReviewActionBase = {
+  id: string;
+  label: string;
+  enabled: boolean;
+  disabledReason?: string;
+  requiresConfirmation?: boolean;
+  targetReviewItemId: string;
+  expectedMaterializationStatusAfterDispatch?: ReviewItemMaterializationStatus;
+};
+
+export type ReviewActionKindEffectInvariant =
+  | { kind: "approve" | "reject" | "edit" | "later" | "revoke"; effect: "decision_only" }
+  | { kind: "apply"; effect: "materialization_request" }
+  | { kind: "resume"; effect: "task_resume_request" }
+  | { kind: "view_evidence"; effect: "evidence_only" };
+
+export type ReviewAction = ReviewActionBase & ReviewActionKindEffectInvariant;
+
+export type DebugAction = {
+  id: string;
+  label: string;
+  kind: "raw_trace" | "raw_json" | "export" | "provider_health" | "route_evidence" | "transcript";
+  enabled: boolean;
+  developerOnly?: boolean;
+  targetRef?: string;
+};
+
+export type ViewModelEnvelope<T> = {
+  data: T | null;
+  status: ViewModelStatus;
+  lastUpdatedAt: string | null;
+  source: "backend-readmodel";
+  evidenceRefs?: EvidenceRef[];
+  warnings?: ViewModelWarning[];
+  actions: {
+    primary: ProductAction[];
+    review?: ReviewAction[];
+    debugOnly?: DebugAction[];
+  };
+};
+
+export type ProductRiskLevel = "none" | "low" | "medium" | "high" | "critical" | "unknown";
+
+export type ProviderPrivacyBoundarySummary = {
+  routeType: "local" | "cloud" | "hybrid" | "auto" | "unknown";
+  externalTransmission: "not_sent" | "sent" | "possible" | "unknown";
+  providerLabel: string;
+  modelLabel: string;
+  privacyLabel: string;
+  risk: ProductRiskLevel;
+  localOnlyRequired: boolean;
+  blockedReason?: string;
+  evidenceRefs: EvidenceRef[];
+};
+
+export type MemoryLane =
+  | "turn_context"
+  | "episodic_life_event"
+  | "semantic_fact_preference"
+  | "procedural_rule"
+  | "evidence_record"
+  | "canonical_lifemodel_truth";
+
+export type BackendEntityRef = {
+  id: string;
+  kind:
+    | "task"
+    | "run"
+    | "conversation"
+    | "review_item"
+    | "memory"
+    | "lifemodel"
+    | "proposal"
+    | "tool_permission"
+    | "evidence"
+    | "external_resource"
+    | "schedule"
+    | "policy";
+  label: string;
+  href?: string;
+};
+
+export type ReviewItemType =
+  | "goal_update"
+  | "state_update"
+  | "preference_update"
+  | "capability_update"
+  | "memory_write"
+  | "memory_archive"
+  | "tool_permission"
+  | "plugin_permission"
+  | "scheduled_task"
+  | "external_write_action"
+  | "model_policy_change"
+  | "data_export"
+  | "schedule_checkin"
+  | "life_model_update"
+  | "unsupported";
+
+export type ReviewItemDecisionStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "edited"
+  | "deferred"
+  | "unknown";
+
+export type ReviewItemSource = {
+  kind: "proposal";
+  proposalId: string;
+  proposalSource: string;
+  sourceDetail?: string;
+  runId?: string;
+};
+
+export type ReviewItemTaskResumeRelation = {
+  taskSessionId: string;
+  resumeRequiresMaterialization?: boolean;
+  canRequestResume: boolean;
+  resumeActionId?: string;
+  blockedReason?: string;
+};
+
+export type ReviewItem = {
+  id: string;
+  type: ReviewItemType;
+  source: ReviewItemSource;
+  status: ReviewItemDecisionStatus;
+  materializationStatus: ReviewItemMaterializationStatus;
+  allowedActions: ReviewAction[];
+  risk: ProductRiskLevel;
+  expiresAt?: string;
+  evidenceRefs: EvidenceRef[];
+  targetRefs: BackendEntityRef[];
+  taskResumeRelation?: ReviewItemTaskResumeRelation;
+};
+
+export type ReviewCenterSummary = {
+  total: number;
+  actionRequiredCount: number;
+  blockedActionCount: number;
+  byStatus: Record<string, number>;
+  byRisk: Record<string, number>;
+  byMaterializationStatus: Record<string, number>;
+};
+
+export type ReviewCenterViewModel = {
+  items: ReviewItem[];
+  summary: ReviewCenterSummary;
+};
+
+// Backend-owned LifeModel read-model contract.
+// Canonical Rust owner: openlife-core/src/agent/life_model_view_model.rs.
+export type LifeModelTruthMode =
+  | "canonical"
+  | "current_compatibility"
+  | "candidate"
+  | "pending_review"
+  | "manual_override"
+  | "unknown"
+  | "unavailable";
+
+export type LifeModelDimensionId = "identity" | "goals" | "capabilities" | "state";
+
+export type LifeModelConfidence = "low" | "medium" | "high" | "unknown";
+
+export type LifeModelOwnerStatus = "PARTIAL" | "PHASE_2_REQUIRED" | "UNKNOWN";
+
+export type LifeModelProvenance = "limited" | "unknown" | "PHASE_2_REQUIRED";
+
+export type LifeModelReviewItemRef = BackendEntityRef & {
+  kind: "review_item";
+};
+
+export type LifeModelCanonicalSummary = {
+  lifeModelRef: BackendEntityRef;
+  title: string;
+  summary: string;
+  versionLabel: string;
+  lastMaterializedAt: string | null;
+  evidenceRefs: EvidenceRef[];
+};
+
+export type LifeModelCurrentViewSummary = {
+  currentViewRef: BackendEntityRef;
+  compatibilityMode: boolean;
+  label: string;
+  summary: string;
+  divergenceFromCanonical: "none" | "minor" | "material" | "unknown";
+  evidenceRefs: EvidenceRef[];
+  ownerStatus: LifeModelOwnerStatus;
+};
+
+export type LifeModelDimensionSummary = {
+  id: LifeModelDimensionId;
+  label: string;
+  summary: string;
+  confidence: LifeModelConfidence;
+  stale: boolean;
+  pendingReviewItemRefs: LifeModelReviewItemRef[];
+  evidenceRefs: EvidenceRef[];
+  provenance: LifeModelProvenance;
+  ownerStatus: LifeModelOwnerStatus;
+};
+
+export type LifeModelTrustQualityState = {
+  readiness: "not_built" | "limited" | "usable_with_limits" | "ready" | "stale" | "unknown";
+  completionScore: number | null;
+  missingDimensionCount: number;
+  staleDimensionCount: number;
+  warningRefs: EvidenceRef[];
+  ownerStatus: LifeModelOwnerStatus;
+};
+
+export type LifeModelPendingUpdateCounts = {
+  candidate: number;
+  pendingReview: number;
+  approvedNotApplied: number;
+  failedMaterialization: number;
+  ownerStatus: LifeModelOwnerStatus;
+};
+
+export type LifeModelCandidateChange = {
+  changeRef: BackendEntityRef;
+  title: string;
+  changeKind: "add" | "update" | "remove" | "merge" | "manual_override" | "unknown";
+  affectedDimensionIds: string[];
+  reviewItemRefs: LifeModelReviewItemRef[];
+  evidenceRefs: EvidenceRef[];
+  decisionStatus: "pending" | "accepted" | "edited" | "postponed" | "unknown";
+};
+
+export type LifeModelMaterializedChange = {
+  changeRef: BackendEntityRef;
+  title: string;
+  materializationStatus: ReviewItemMaterializationStatus;
+  materializedAt: string | null;
+  rollbackAvailable: boolean;
+  evidenceRefs: EvidenceRef[];
+};
+
+export type LifeModelManualOverrideState = {
+  active: boolean;
+  blockedReason?: string;
+  draftRef: BackendEntityRef | null;
+  saveAction: ProductAction | null;
+  reviewItemRefs: LifeModelReviewItemRef[];
+  evidenceRefs: EvidenceRef[];
+  ownerStatus: LifeModelOwnerStatus;
+};
+
+export type LifeModelMemoryLinkageSummary = {
+  linkedMemoryCount: number;
+  candidateMemoryCount: number;
+  materializedMemoryCount: number;
+  conflictCount: number;
+  memoryRefs: BackendEntityRef[];
+  evidenceRefs: EvidenceRef[];
+  linkageStatus: "partial" | "unknown";
+  tierSummary: {
+    total: number | null;
+    tier1: number | null;
+    tier2: number | null;
+    tier3: number | null;
+    archived: number | null;
+  };
+  ownerStatus: LifeModelOwnerStatus;
+};
+
+export type LifeModelViewModel = {
+  truthMode: LifeModelTruthMode;
+  canonicalSummary: LifeModelCanonicalSummary | null;
+  currentViewSummary: LifeModelCurrentViewSummary | null;
+  dimensionSummaries: LifeModelDimensionSummary[];
+  trustQualityState: LifeModelTrustQualityState;
+  pendingUpdateCounts: LifeModelPendingUpdateCounts;
+  provenanceRefs: EvidenceRef[];
+  candidateChanges: LifeModelCandidateChange[];
+  materializedChanges: LifeModelMaterializedChange[];
+  manualOverrideState: LifeModelManualOverrideState | null;
+  relatedReviewItemRefs: LifeModelReviewItemRef[];
+  memoryLinkage: LifeModelMemoryLinkageSummary;
+  sourceRefs: EvidenceRef[];
+  contractLimitations: string[];
+};
+
+// Backend-owned task and workspace read-model contracts.
+// Canonical Rust owner: openlife-core/src/agent/tasks_view_model.rs.
+export type TaskLifecycleStatus =
+  | "running"
+  | "waiting_permission"
+  | "blocked"
+  | "failed"
+  | "cancelled"
+  | "completed"
+  | "completed_with_pending_review"
+  | "completed_needs_evidence"
+  | "unknown";
+
+export type TaskTerminalDeliveryStatus =
+  | "not_terminal"
+  | "delivered"
+  | "missing_final_delivery_evidence"
+  | "completed_with_pending_review"
+  | "blocked"
+  | "failed"
+  | "cancelled"
+  | "unknown";
+
+export type TaskControlKind =
+  | "resume"
+  | "retry"
+  | "cancel"
+  | "refresh_context"
+  | "open_trace"
+  | "open_run"
+  | "open_review_item"
+  | "view_evidence";
+
+export type TaskControlEffect =
+  | "task_resume_request"
+  | "task_retry_request"
+  | "task_cancel_request"
+  | "task_refresh_request"
+  | "navigation_only"
+  | "evidence_only";
+
+export type TaskControl = {
+  id: string;
+  label: string;
+  kind: TaskControlKind;
+  effect: TaskControlEffect;
+  enabled: boolean;
+  disabledReason?: string;
+  requiresConfirmation?: boolean;
+  targetTaskId: string;
+  targetActionId?: string;
+  completionProofAfterDispatch?: boolean;
+};
+
+export type TaskLatestResultPreview = {
+  status: TaskTerminalDeliveryStatus;
+  label: string;
+  preview?: string;
+  finalDeliveryRef?: BackendEntityRef;
+  evidenceRefs: EvidenceRef[];
+};
+
+export type TaskViewModelItem = {
+  canonicalTaskId: string;
+  taskSessionId?: string;
+  relatedRunIds: string[];
+  conversationId?: string;
+  title: string;
+  strategy: string;
+  lifecycleStatus: TaskLifecycleStatus;
+  terminalDeliveryStatus: TaskTerminalDeliveryStatus;
+  finalDeliveryEvidencePresent: boolean;
+  pendingBlockers: string[];
+  pendingReviewItemRefs: BackendEntityRef[];
+  allowedControls: TaskControl[];
+  nextRecommendedControl: string;
+  latestResultPreview?: TaskLatestResultPreview;
+  evidenceRefs: EvidenceRef[];
+  updatedAt?: string;
+};
+
+export type TasksViewModelSummary = {
+  total: number;
+  activeCount: number;
+  waitingPermissionCount: number;
+  blockedCount: number;
+  pendingReviewCount: number;
+  completedCount: number;
+  completedNeedsEvidenceCount: number;
+  failedCount: number;
+  cancelledCount: number;
+  byLifecycleStatus: Record<string, number>;
+};
+
+export type TasksViewModel = {
+  items: TaskViewModelItem[];
+  summary: TasksViewModelSummary;
+  sourceRefs: EvidenceRef[];
+  contractLimitations: string[];
+};
+
+export type WorkspaceTimelineItem = {
+  id: string;
+  label: string;
+  status: TaskLifecycleStatus;
+  evidenceRefs: EvidenceRef[];
+  updatedAt?: string;
+};
+
+export type WorkspaceViewModel = {
+  activeTaskRef?: BackendEntityRef;
+  recentTaskRefs: BackendEntityRef[];
+  pendingReviewItemRefs: BackendEntityRef[];
+  timeline: WorkspaceTimelineItem[];
+  providerPrivacyBoundarySummary: ProviderPrivacyBoundarySummary;
+  sourceRefs: EvidenceRef[];
+  contractLimitations: string[];
+};
+
+export type MemoryTierSummary = {
+  total: number;
+  tier1: number;
+  tier2: number;
+  tier3: number;
+  archived: number;
+};
+
+export type MemoryLifecycleSummary = {
+  candidateCount: number;
+  pendingReviewCount: number;
+  editedPendingReviewCount: number;
+  acceptedCount: number;
+  confirmedCount: number;
+  pendingMaterializationCount: number;
+  materializedCount: number;
+  materializationFailedCount: number;
+  rejectedCount: number;
+  deferredCount: number;
+  supersededCount: number;
+  rolledBackCount: number;
+  expiredCount: number;
+  archivedCount: number;
+  byStatus: Record<string, number>;
+  byMaterializationStatus: Record<string, number>;
+};
+
+export type MemoryLaneSummary = {
+  lane: MemoryLane;
+  label: string;
+  totalCount: number;
+  activeCount: number;
+  candidateCount: number;
+  pendingReviewCount: number;
+  confirmedCount: number;
+  materializedCount: number;
+  rolledBackCount: number;
+  archivedCount: number;
+  reviewItemRefs: BackendEntityRef[];
+  evidenceRefs: EvidenceRef[];
+};
+
+export type MemoryLifeModelLinkageSummary = {
+  linkedMemoryCount: number;
+  candidateMemoryCount: number;
+  materializedMemoryCount: number;
+  conflictCount: number;
+  boundaryMemoryCount: number;
+  linkageStatus: "partial" | "unknown";
+  memoryRefs: BackendEntityRef[];
+  evidenceRefs: EvidenceRef[];
+};
+
+export type MemoryViewModelSummary = {
+  totalLifecycleRecords: number;
+  activeMemoryCount: number;
+  reviewRequiredCount: number;
+  materializedCount: number;
+  pendingMaterializationCount: number;
+  failedMaterializationCount: number;
+  rolledBackCount: number;
+  archivedVectorCount: number;
+  conflictCount: number;
+  tierSummary?: MemoryTierSummary;
+};
+
+export type MemoryViewModel = {
+  summary: MemoryViewModelSummary;
+  lifecycleSummary: MemoryLifecycleSummary;
+  laneSummaries: MemoryLaneSummary[];
+  recentMemoryRefs: BackendEntityRef[];
+  reviewItemRefs: BackendEntityRef[];
+  lifeModelLinkage: MemoryLifeModelLinkageSummary;
+  sourceRefs: EvidenceRef[];
+  contractLimitations: string[];
+};
+
 export async function getRuntimeBuildInfo(): Promise<RuntimeBuildInfo> {
   return safeInvoke<RuntimeBuildInfo>("get_runtime_build_info");
 }
@@ -3058,6 +3600,36 @@ export async function listProposals(
   limit: number = 50
 ): Promise<AgentProposal[]> {
   return safeInvoke<AgentProposal[]>("list_proposals", { status, proposalType, riskLevel, limit });
+}
+
+export async function getReviewCenterViewModel(): Promise<
+  ViewModelEnvelope<ReviewCenterViewModel>
+> {
+  return safeInvoke<ViewModelEnvelope<ReviewCenterViewModel>>("get_review_center_view_model");
+}
+
+export async function getLifeModelViewModel(): Promise<ViewModelEnvelope<LifeModelViewModel>> {
+  return safeInvoke<ViewModelEnvelope<LifeModelViewModel>>("get_life_model_view_model");
+}
+
+export async function getMemoryViewModel(): Promise<ViewModelEnvelope<MemoryViewModel>> {
+  return safeInvoke<ViewModelEnvelope<MemoryViewModel>>("get_memory_view_model");
+}
+
+export async function getProviderPrivacyBoundarySummary(): Promise<
+  ViewModelEnvelope<ProviderPrivacyBoundarySummary>
+> {
+  return safeInvoke<ViewModelEnvelope<ProviderPrivacyBoundarySummary>>(
+    "get_provider_privacy_boundary_summary"
+  );
+}
+
+export async function getTasksViewModel(): Promise<ViewModelEnvelope<TasksViewModel>> {
+  return safeInvoke<ViewModelEnvelope<TasksViewModel>>("get_tasks_view_model");
+}
+
+export async function getWorkspaceViewModel(): Promise<ViewModelEnvelope<WorkspaceViewModel>> {
+  return safeInvoke<ViewModelEnvelope<WorkspaceViewModel>>("get_workspace_view_model");
 }
 
 export async function batchAcceptLowRiskProposals(proposalIds?: string[]): Promise<number> {

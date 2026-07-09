@@ -12,7 +12,13 @@ import {
   ShieldCheck,
   SlidersHorizontal,
 } from "lucide-react";
-import { getDailyGoals, getLifeStateProjection, type LifeStateProjection } from "../tauri";
+import {
+  getDailyGoals,
+  getLifeStateProjection,
+  getProviderPrivacyBoundarySummary,
+  type LifeStateProjection,
+  type ProviderPrivacyBoundarySummary,
+} from "../tauri";
 import type { DailyGoal } from "../types";
 import { mailboxRoute, productRoutePath } from "../productShellContract";
 import type {
@@ -27,6 +33,7 @@ import { buildTodayViewModelEnvelope } from "../viewmodels/today/todayViewModelA
 
 type TodayV2PreviewLoadState = {
   projection: LifeStateProjection | null;
+  providerPrivacyBoundary: ProviderPrivacyBoundarySummary | null;
   dailyGoals: DailyGoal[];
   loading: boolean;
   error: string;
@@ -34,6 +41,7 @@ type TodayV2PreviewLoadState = {
 
 const INITIAL_STATE: TodayV2PreviewLoadState = {
   projection: null,
+  providerPrivacyBoundary: null,
   dailyGoals: [],
   loading: true,
   error: "",
@@ -463,14 +471,16 @@ export default function TodayV2PreviewPage() {
     async function load() {
       setState(current => ({ ...current, loading: true, error: "" }));
 
-      const [projection, dailyGoals] = await Promise.all([
+      const [projection, providerBoundaryEnvelope, dailyGoals] = await Promise.all([
         getLifeStateProjection().catch(() => null),
+        getProviderPrivacyBoundarySummary().catch(() => null),
         getDailyGoals().catch(() => []),
       ]);
 
       if (cancelled) return;
       setState({
         projection,
+        providerPrivacyBoundary: providerBoundaryEnvelope?.data ?? null,
         dailyGoals,
         loading: false,
         error: projection ? "" : "LifeStateProjection failed to load.",
@@ -489,6 +499,7 @@ export default function TodayV2PreviewPage() {
       return buildTodayViewModelEnvelope({
         projection: state.projection,
         dailyGoals: state.dailyGoals,
+        providerPrivacyBoundary: state.providerPrivacyBoundary,
         status: "loading",
       });
     }
@@ -497,6 +508,7 @@ export default function TodayV2PreviewPage() {
       return buildTodayViewModelEnvelope({
         projection: state.projection,
         dailyGoals: state.dailyGoals,
+        providerPrivacyBoundary: state.providerPrivacyBoundary,
         status: "error",
         errorMessage: state.error || "LifeStateProjection failed to load.",
       });
@@ -505,6 +517,7 @@ export default function TodayV2PreviewPage() {
     return buildTodayViewModelEnvelope({
       projection: state.projection,
       dailyGoals: state.dailyGoals,
+      providerPrivacyBoundary: state.providerPrivacyBoundary,
     });
   }, [state]);
 

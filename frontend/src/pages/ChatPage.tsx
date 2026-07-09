@@ -59,6 +59,7 @@ import {
   draftEditMemoryProposal,
   postponeProposal,
   getMainChatAgentTaskState,
+  getTasksViewModel,
   resumeMainChatAgentTask,
   cancelMainChatAgentTask,
   retryMainChatAgentAction,
@@ -95,6 +96,8 @@ import type {
   MainChatAgentTaskState,
   MainChatTaskSummary,
   MainChatTaskDetail,
+  TaskControl,
+  TaskViewModelItem,
   MainChatAgentStateSnapshot,
   MainChatAgentDurableEvent,
   MainChatKernelEvent,
@@ -242,22 +245,33 @@ function buildCompanionInitialAssistantMessage(
 
 function CompanionTaskControlStrip({
   taskState,
+  taskViewItem,
   busy,
   error,
+  canResume,
+  canRetry,
+  canCancel,
   onResume,
   onRetry,
   onCancel,
   onRefresh,
 }: {
   taskState: MainChatAgentTaskState | null;
+  taskViewItem: TaskViewModelItem | null;
   busy: boolean;
   error: string | null;
+  canResume: boolean;
+  canRetry: boolean;
+  canCancel: boolean;
   onResume: () => void;
   onRetry: () => void;
   onCancel: () => void;
   onRefresh: () => void;
 }) {
-  const status = taskState?.session?.status?.replace(/_/g, " ") ?? "读取任务状态";
+  const status =
+    taskViewItem?.lifecycleStatus.replace(/_/g, " ") ??
+    taskState?.session?.status?.replace(/_/g, " ") ??
+    "读取任务状态";
   const activeToolCount = taskState?.activeToolCount ?? 0;
   const pendingApprovalCount = taskState?.pendingApprovalCount ?? 0;
   const displayError = error ? boundedProductText(error) || "Action failed" : "";
@@ -278,7 +292,7 @@ function CompanionTaskControlStrip({
             type="button"
             aria-label="Resume task"
             title="Resume task"
-            disabled={!taskState?.canResume || busy}
+            disabled={!canResume || busy}
             onClick={onResume}
             className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
           >
@@ -288,7 +302,7 @@ function CompanionTaskControlStrip({
             type="button"
             aria-label="Retry failed action"
             title="Retry failed action"
-            disabled={!taskState?.canRetry || busy}
+            disabled={!canRetry || busy}
             onClick={onRetry}
             className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
           >
@@ -298,7 +312,7 @@ function CompanionTaskControlStrip({
             type="button"
             aria-label="Cancel task"
             title="Cancel task"
-            disabled={!taskState?.canCancel || busy}
+            disabled={!canCancel || busy}
             onClick={onCancel}
             className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
           >
@@ -350,6 +364,70 @@ function taskContinuityFinalDeliverySections(
     recordArrayLength(metrics, "durableChanges") > 0 ? "Durable changes" : null,
     recordArrayLength(metrics, "nextSteps") > 0 ? "Next steps" : null,
   ].filter((section): section is string => Boolean(section));
+}
+
+function taskContinuityFinalDeliveryStatus(
+  value: Record<string, unknown> | null | undefined
+): string {
+  if (!value) return "missing_status";
+  const metadata = value.metadata;
+  const metadataStatus =
+    metadata && typeof metadata === "object" && !Array.isArray(metadata)
+      ? (metadata as Record<string, unknown>).status
+      : undefined;
+  const status = value.status ?? metadataStatus;
+  return typeof status === "string" && status.trim() ? status : "missing_status";
+}
+
+function taskContinuityFinalDeliveryStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    completed: "Completed",
+    delivered: "Delivered",
+    completed_with_pending_items: "Pending review items",
+    blocked: "Blocked",
+    failed: "Failed",
+    cancelled: "Cancelled",
+    missing_status: "Missing status evidence",
+  };
+  return labels[status] ?? status.replace(/_/g, " ");
+}
+
+function taskContinuityFinalDeliveryClass(status: string): string {
+  if (status === "completed" || status === "delivered") {
+    return "border-emerald-300 bg-white/80 text-emerald-900";
+  }
+  if (status === "blocked" || status === "failed" || status === "cancelled") {
+    return "border-rose-300 bg-rose-50 text-rose-900";
+  }
+  return "border-amber-300 bg-amber-50 text-amber-900";
+}
+
+function TaskContinuityFinalDeliveryPanel({ value }: { value: Record<string, unknown> }) {
+  const status = taskContinuityFinalDeliveryStatus(value);
+  const sections = taskContinuityFinalDeliverySections(value);
+  return (
+    <div
+      data-testid="task-continuity-final-delivery"
+      data-final-delivery-status={status}
+      data-final-delivery-section-titles={sections.join("|")}
+      className={`mt-2 border-l px-2 py-1 ${taskContinuityFinalDeliveryClass(status)}`}
+    >
+      <div className="font-semibold">Final delivery</div>
+      <div className="mt-1 flex flex-wrap gap-1 text-xs">
+        <span className="inline-flex h-5 items-center rounded-md border border-current/30 bg-white/70 px-1.5 font-medium">
+          {taskContinuityFinalDeliveryStatusLabel(status)}
+        </span>
+        {sections.map(section => (
+          <span
+            key={section}
+            className="inline-flex h-5 items-center rounded-md border border-current/20 bg-white/60 px-1.5"
+          >
+            {section}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function isStreamDonePayload(value: unknown): value is StreamMessageDonePayload {
@@ -606,11 +684,6 @@ function memoryGovernanceStatusLabels(
   return labels;
 }
 
-function includesAnyControl(controls: string[], candidates: string[]): boolean {
-  const normalized = new Set(controls.map(control => control.trim().toLowerCase()));
-  return candidates.some(candidate => normalized.has(candidate));
-}
-
 function productStatusLabel(status: MainChatAgentProductStatus): string {
   switch (status) {
     case "completed":
@@ -663,6 +736,7 @@ function isRestrictedEvidence(uiStatus: string, blockerLabels: string[]): boolea
 export function buildMainChatAgentStatusView({
   reasoningTrace,
   taskState,
+  taskViewItem,
   agentState,
   pendingProposals,
   sending,
@@ -670,6 +744,7 @@ export function buildMainChatAgentStatusView({
 }: {
   reasoningTrace: ReasoningTrace | null;
   taskState: MainChatAgentTaskState | null;
+  taskViewItem?: TaskViewModelItem | null;
   agentState: MainChatAgentStateSnapshot | null;
   pendingProposals: AgentProposal[];
   sending: boolean;
@@ -682,22 +757,29 @@ export function buildMainChatAgentStatusView({
       ? reasoningTrace.generation_result
       : null;
   const taskStatus = boundedProductLabel(
-    generation?.taskStatus || taskState?.session?.status || agentState?.task.status
+    taskViewItem?.lifecycleStatus ||
+      generation?.taskStatus ||
+      taskState?.session?.status ||
+      agentState?.task.status
   );
   const runStatus = boundedProductLabel(generation?.runStatus);
   const deliveryStatus = boundedProductLabel(
-    generation?.deliveryStatus || agentState?.finalDelivery?.status
+    taskViewItem?.terminalDeliveryStatus ||
+      generation?.deliveryStatus ||
+      agentState?.finalDelivery?.status
   );
   const uiStatus = boundedProductLabel(generation?.uiStatus);
   const sourceLabel =
     boundedProductLabel(generation?.uiPrimarySourceChip) ||
     boundedProductLabel(generation?.sourceType) ||
+    (taskViewItem ? "TasksViewModel" : "") ||
     (agentState?.route.strategy ? formatMainChatStrategy(agentState.route.strategy as any) : "") ||
     (taskState?.session?.selectedStrategy
       ? formatMainChatStrategy(taskState.session.selectedStrategy)
       : "") ||
     "Structured task evidence";
-  const taskSessionId = currentTaskSessionIdFromView(taskState, agentState);
+  const taskSessionId =
+    taskViewItem?.taskSessionId ?? currentTaskSessionIdFromView(taskState, agentState);
   const runId = agentState?.task.runId;
   const matchingPendingProposalCount = pendingProposals.filter(
     proposal =>
@@ -707,11 +789,13 @@ export function buildMainChatAgentStatusView({
   ).length;
   const pendingProposalCount = Math.max(
     productCount(generation?.pendingProposalCount),
+    taskViewItem?.pendingReviewItemRefs.length ?? 0,
     matchingPendingProposalCount,
     agentState?.proposals.filter(proposal => proposal.status === "pending").length ?? 0
   );
   const pendingPermissionCount = Math.max(
     productCount(generation?.pendingPermissionCount),
+    taskViewItem?.lifecycleStatus === "waiting_permission" ? 1 : 0,
     taskState?.pendingApprovalCount ?? 0,
     taskState?.actions.filter(action => action.status === "pending_permission").length ?? 0,
     agentState?.proposals.filter(
@@ -719,32 +803,28 @@ export function buildMainChatAgentStatusView({
     ).length ?? 0
   );
   const memoryGovernanceLabels = memoryGovernanceStatusLabels(generation?.memoryGovernance);
-  const safeNextControls = productStringArray(generation?.safeNextControls);
-  const taskControls = [
-    ...(agentState?.task.controls ?? []),
-    ...safeNextControls,
-    ...(taskState?.canResume ? ["resume"] : []),
-    ...(taskState?.canRetry ? ["retry"] : []),
-    ...(canCancel ? ["cancel"] : []),
-  ];
+  void canCancel;
+  const taskControls = taskViewItem?.allowedControls.filter(control => control.enabled) ?? [];
   const blockerLabels = Array.from(
     new Set(
       [
         ...productStringArray(generation?.blockerCodes),
+        ...(taskViewItem?.pendingBlockers ?? []),
+        ...(taskViewItem?.terminalDeliveryStatus === "missing_final_delivery_evidence"
+          ? ["missing_final_delivery_evidence"]
+          : []),
         ...productStringArray(taskState?.session?.pendingBlockers),
         ...(agentState?.blockers ?? []).map(blocker => boundedProductLabel(blocker.reasonCode)),
       ].filter(Boolean)
     )
   ).slice(0, 4);
   const hasTraceGap = generation?.runtimeFactTraceGap === true || Boolean(generation?.traceGapCode);
+  void runStatus;
   const hasCompletedEvidence =
-    generation?.completedResponse === true ||
-    generation?.finalDeliveryEvidence === true ||
-    taskStatus === "completed" ||
-    runStatus === "completed" ||
-    deliveryStatus === "delivered" ||
-    deliveryStatus === "completed" ||
-    agentState?.finalDelivery?.status === "delivered";
+    taskViewItem?.lifecycleStatus === "completed" &&
+    taskViewItem.finalDeliveryEvidencePresent &&
+    taskViewItem.pendingReviewItemRefs.length === 0 &&
+    (deliveryStatus === "delivered" || deliveryStatus === "completed");
 
   let status: MainChatAgentProductStatus | null = null;
   if (pendingPermissionCount > 0) {
@@ -755,6 +835,10 @@ export function buildMainChatAgentStatusView({
     status = "trace_gap";
   } else if (isRestrictedEvidence(uiStatus, blockerLabels)) {
     status = "restricted";
+  } else if (taskStatus === "completed_needs_evidence") {
+    status = "trace_gap";
+  } else if (taskStatus === "completed_with_pending_review") {
+    status = "proposal_pending";
   } else if (taskStatus === "blocked" || blockerLabels.length > 0) {
     status = "blocked";
   } else if (taskStatus === "waiting_permission" || taskStatus === "waiting_for_user") {
@@ -765,21 +849,38 @@ export function buildMainChatAgentStatusView({
     status = "completed";
   }
 
-  if (!status && !generation && !taskState?.session && !agentState) return null;
+  if (!status && !generation && !taskState?.session && !taskViewItem && !agentState) return null;
   const resolvedStatus = status ?? "trace_gap";
   const actions: MainChatAgentProductAction[] = [];
   if (pendingProposalCount > 0) actions.push("review_proposal");
   if (pendingPermissionCount > 0) actions.push("review_permission");
-  if (includesAnyControl(taskControls, ["resume", "resume_task", "resume_agent_task"])) {
+  if (
+    taskControls.some(
+      control => control.kind === "resume" && control.effect === "task_resume_request"
+    )
+  ) {
     actions.push("resume");
   }
-  if (includesAnyControl(taskControls, ["retry", "retry_action", "retry_failed_action"])) {
+  if (
+    taskControls.some(
+      control => control.kind === "retry" && control.effect === "task_retry_request"
+    )
+  ) {
     actions.push("retry");
   }
-  if (includesAnyControl(taskControls, ["cancel", "cancel_task"])) {
+  if (
+    taskControls.some(
+      control => control.kind === "cancel" && control.effect === "task_cancel_request"
+    )
+  ) {
     actions.push("cancel");
   }
-  if (taskSessionId && includesAnyControl(taskControls, ["refresh_context"])) {
+  if (
+    taskSessionId &&
+    taskControls.some(
+      control => control.kind === "refresh_context" && control.effect === "task_refresh_request"
+    )
+  ) {
     actions.push("refresh_context");
   }
   if (reasoningTrace) actions.push("show_trace");
@@ -821,6 +922,18 @@ function currentTaskSessionIdFromView(
   agentState: MainChatAgentStateSnapshot | null
 ): string | undefined {
   return taskState?.session?.id ?? agentState?.task.taskId;
+}
+
+function enabledTaskViewControl(
+  taskViewItem: TaskViewModelItem | null | undefined,
+  kind: TaskControl["kind"],
+  effect: TaskControl["effect"]
+): TaskControl | null {
+  return (
+    taskViewItem?.allowedControls.find(
+      control => control.enabled && control.kind === kind && control.effect === effect
+    ) ?? null
+  );
 }
 
 function mainChatAgentStatusClass(tone: MainChatAgentStatusView["tone"]): string {
@@ -1219,6 +1332,7 @@ export default function ChatPage({
   const [currentAgentTaskState, setCurrentAgentTaskState] = useState<MainChatAgentTaskState | null>(
     null
   );
+  const [currentTaskViewItem, setCurrentTaskViewItem] = useState<TaskViewModelItem | null>(null);
   const [taskContinuitySummaries, setTaskContinuitySummaries] = useState<MainChatTaskSummary[]>([]);
   const [taskContinuityDetail, setTaskContinuityDetail] = useState<MainChatTaskDetail | null>(null);
   const [taskContinuityBusy, setTaskContinuityBusy] = useState(false);
@@ -1475,6 +1589,7 @@ export default function ChatPage({
   ) => {
     if (!taskSessionId) {
       setCurrentAgentTaskState(null);
+      void loadCurrentTaskViewItem(undefined, sourceSessionId);
       return;
     }
     try {
@@ -1489,6 +1604,31 @@ export default function ChatPage({
       if (currentSessionIdRef.current === sourceSessionId) {
         setCurrentAgentTaskState(null);
       }
+    }
+    void loadCurrentTaskViewItem(taskSessionId, sourceSessionId);
+  };
+
+  const loadCurrentTaskViewItem = async (
+    taskSessionId: string | undefined,
+    sourceSessionId = currentSessionIdRef.current
+  ): Promise<TaskViewModelItem | null> => {
+    try {
+      const envelope = await getTasksViewModel();
+      const item =
+        envelope.data?.items.find(task => task.taskSessionId === taskSessionId) ??
+        envelope.data?.items.find(
+          task => sourceSessionId && task.conversationId === sourceSessionId
+        ) ??
+        null;
+      if (currentSessionIdRef.current === sourceSessionId) {
+        setCurrentTaskViewItem(item);
+      }
+      return item;
+    } catch {
+      if (currentSessionIdRef.current === sourceSessionId) {
+        setCurrentTaskViewItem(null);
+      }
+      return null;
     }
   };
 
@@ -2613,7 +2753,16 @@ export default function ChatPage({
 
   const handleResumeMainChatTask = useCallback(async () => {
     const taskSessionId = currentMainChatTaskSessionId();
+    const resumeControl = enabledTaskViewControl(
+      currentTaskViewItem,
+      "resume",
+      "task_resume_request"
+    );
     if (!taskSessionId || agentTaskControlBusy) return;
+    if (!resumeControl) {
+      setAgentTaskControlError("Resume is not enabled by the backend task read model.");
+      return;
+    }
     setAgentTaskControlBusy(true);
     setAgentTaskControlError(null);
     try {
@@ -2621,16 +2770,31 @@ export default function ChatPage({
       setCurrentAgentTaskState(state);
       setCurrentExecutionTranscript(state.transcript ?? []);
       await refreshPendingProposals();
+      await loadMainChatTaskState(taskSessionId, currentSessionIdRef.current);
     } catch (e) {
       setAgentTaskControlError(`Resume failed: ${readablePreviewError(e)}`);
     } finally {
       setAgentTaskControlBusy(false);
     }
-  }, [agentTaskControlBusy, currentMainChatTaskSessionId]);
+  }, [
+    agentTaskControlBusy,
+    currentMainChatTaskSessionId,
+    currentTaskViewItem,
+    loadMainChatTaskState,
+  ]);
 
   const handleCancelMainChatTask = useCallback(async () => {
     const taskSessionId = currentMainChatTaskSessionId();
+    const cancelControl = enabledTaskViewControl(
+      currentTaskViewItem,
+      "cancel",
+      "task_cancel_request"
+    );
     if (!taskSessionId || agentTaskControlBusy) return;
+    if (!cancelControl) {
+      setAgentTaskControlError("Cancel is not enabled by the backend task read model.");
+      return;
+    }
     setAgentTaskControlBusy(true);
     setAgentTaskControlError(null);
     try {
@@ -2640,39 +2804,47 @@ export default function ChatPage({
       setSending(false);
       setStreamingReply("");
       setStreamInterrupted(false);
+      await loadMainChatTaskState(taskSessionId, currentSessionIdRef.current);
     } catch (e) {
       setAgentTaskControlError(`Cancel failed: ${readablePreviewError(e)}`);
     } finally {
       setAgentTaskControlBusy(false);
     }
-  }, [agentTaskControlBusy, currentMainChatTaskSessionId]);
+  }, [
+    agentTaskControlBusy,
+    currentMainChatTaskSessionId,
+    currentTaskViewItem,
+    loadMainChatTaskState,
+  ]);
 
   const handleRetryMainChatAction = useCallback(
     async (target?: { actionId?: string }) => {
       const taskSessionId = currentMainChatTaskSessionId();
-      const actionId =
-        target?.actionId ??
-        currentAgentState?.blockers.find(blocker => blocker.affectedActionId)?.affectedActionId ??
-        currentAgentTaskState?.actions.find(action => action.status === "failed")?.id;
+      const retryControl = enabledTaskViewControl(
+        currentTaskViewItem,
+        "retry",
+        "task_retry_request"
+      );
+      const actionId = target?.actionId ?? retryControl?.targetActionId;
       if (!taskSessionId || !actionId || agentTaskControlBusy) return;
+      if (!retryControl) {
+        setAgentTaskControlError("Retry is not enabled by the backend task read model.");
+        return;
+      }
       setAgentTaskControlBusy(true);
       setAgentTaskControlError(null);
       try {
         const state = await retryMainChatAgentAction(taskSessionId, actionId);
         setCurrentAgentTaskState(state);
         setCurrentExecutionTranscript(state.transcript ?? []);
+        await loadMainChatTaskState(taskSessionId, currentSessionIdRef.current);
       } catch (e) {
         setAgentTaskControlError(`Retry failed: ${readablePreviewError(e)}`);
       } finally {
         setAgentTaskControlBusy(false);
       }
     },
-    [
-      agentTaskControlBusy,
-      currentAgentState?.blockers,
-      currentMainChatTaskSessionId,
-      currentAgentTaskState?.actions,
-    ]
+    [agentTaskControlBusy, currentTaskViewItem, currentMainChatTaskSessionId, loadMainChatTaskState]
   );
 
   const handleRefreshTaskContinuityContext = useCallback(async () => {
@@ -2803,12 +2975,22 @@ export default function ChatPage({
       setTaskContinuityError(null);
       try {
         await acceptProposal(proposalId);
+        await refreshPendingProposals();
+        const refreshedTaskViewItem = await loadCurrentTaskViewItem(
+          taskSessionId,
+          currentSessionIdRef.current
+        );
+        if (!enabledTaskViewControl(refreshedTaskViewItem, "resume", "task_resume_request")) {
+          throw new Error(
+            "Backend task read model did not enable resume after proposal acceptance."
+          );
+        }
         const state = await resumeMainChatAgentTask(taskSessionId);
         setCurrentAgentTaskState(state);
         setCurrentExecutionTranscript(state.transcript ?? []);
+        await loadMainChatTaskState(taskSessionId, currentSessionIdRef.current);
         await loadTaskContinuityDetail(taskSessionId);
         await loadTaskContinuityList();
-        await refreshPendingProposals();
       } catch (e) {
         setTaskContinuityError(`Accept proposal failed: ${readablePreviewError(e)}`);
       } finally {
@@ -2818,6 +3000,8 @@ export default function ChatPage({
     [
       loadTaskContinuityDetail,
       loadTaskContinuityList,
+      loadCurrentTaskViewItem,
+      loadMainChatTaskState,
       refreshPendingProposals,
       taskContinuityBusy,
       taskContinuityDetail?.proposals,
@@ -2858,6 +3042,15 @@ export default function ChatPage({
       setAgentTaskControlError(null);
       try {
         await acceptProposal(target.proposalId);
+        const refreshedTaskViewItem = await loadCurrentTaskViewItem(
+          taskSessionId,
+          currentSessionIdRef.current
+        );
+        if (!enabledTaskViewControl(refreshedTaskViewItem, "resume", "task_resume_request")) {
+          throw new Error(
+            "Backend task read model did not enable resume after permission approval."
+          );
+        }
         const state = await resumeMainChatAgentTask(taskSessionId);
         setCurrentAgentTaskState(state);
         setCurrentExecutionTranscript(state.transcript ?? []);
@@ -2868,7 +3061,12 @@ export default function ChatPage({
         setAgentTaskControlBusy(false);
       }
     },
-    [agentTaskControlBusy, currentMainChatTaskSessionId, refreshMainChatControlState]
+    [
+      agentTaskControlBusy,
+      currentMainChatTaskSessionId,
+      loadCurrentTaskViewItem,
+      refreshMainChatControlState,
+    ]
   );
 
   const handleDenyMainChatControl = useCallback(
@@ -2921,6 +3119,15 @@ export default function ChatPage({
           proposal.actionIds.length > 0 &&
           taskSessionId
         ) {
+          const refreshedTaskViewItem = await loadCurrentTaskViewItem(
+            taskSessionId,
+            currentSessionIdRef.current
+          );
+          if (!enabledTaskViewControl(refreshedTaskViewItem, "resume", "task_resume_request")) {
+            throw new Error(
+              "Backend task read model did not enable resume after proposal acceptance."
+            );
+          }
           const state = await resumeMainChatAgentTask(taskSessionId);
           setCurrentAgentTaskState(state);
           setCurrentExecutionTranscript(state.transcript ?? []);
@@ -2936,6 +3143,7 @@ export default function ChatPage({
       agentTaskControlBusy,
       currentAgentState?.proposals,
       currentMainChatTaskSessionId,
+      loadCurrentTaskViewItem,
       refreshMainChatControlState,
     ]
   );
@@ -3393,16 +3601,21 @@ export default function ChatPage({
     currentExecutionTranscript.length > 0 ||
     Boolean(agentEventStreamState?.events.length) ||
     toolCalls.length > 0;
+  const canResumeCurrentMainChatTask = Boolean(
+    enabledTaskViewControl(currentTaskViewItem, "resume", "task_resume_request")
+  );
+  const canRetryCurrentMainChatTask = Boolean(
+    enabledTaskViewControl(currentTaskViewItem, "retry", "task_retry_request")
+  );
   const canCancelCurrentMainChatTask = Boolean(
-    currentAgentTaskState?.canCancel ||
-    currentAgentState?.task.controls.includes("cancel_task") ||
-    currentAgentState?.task.controls.includes("cancel")
+    enabledTaskViewControl(currentTaskViewItem, "cancel", "task_cancel_request")
   );
   const mainChatAgentStatusView = useMemo(
     () =>
       buildMainChatAgentStatusView({
         reasoningTrace,
         taskState: currentAgentTaskState,
+        taskViewItem: currentTaskViewItem,
         agentState: currentAgentState,
         pendingProposals,
         sending,
@@ -3412,6 +3625,7 @@ export default function ChatPage({
       canCancelCurrentMainChatTask,
       currentAgentState,
       currentAgentTaskState,
+      currentTaskViewItem,
       pendingProposals,
       reasoningTrace,
       sending,
@@ -4034,8 +4248,12 @@ export default function ChatPage({
           {companionMode && (sending || currentAgentTaskState) && (
             <CompanionTaskControlStrip
               taskState={currentAgentTaskState}
+              taskViewItem={currentTaskViewItem}
               busy={agentTaskControlBusy}
               error={safeAgentTaskControlError}
+              canResume={canResumeCurrentMainChatTask}
+              canRetry={canRetryCurrentMainChatTask}
+              canCancel={canCancelCurrentMainChatTask}
               onResume={handleResumeMainChatTask}
               onRetry={() => handleRetryMainChatAction()}
               onCancel={handleCancelMainChatTask}
@@ -4047,9 +4265,9 @@ export default function ChatPage({
               <AgentControlPlane
                 state={currentAgentState}
                 busy={agentTaskControlBusy}
-                canResume={Boolean(currentAgentTaskState?.canResume)}
-                canRetry={Boolean(currentAgentTaskState?.canRetry)}
-                canCancel={Boolean(currentAgentTaskState?.canCancel)}
+                canResume={canResumeCurrentMainChatTask}
+                canRetry={canRetryCurrentMainChatTask}
+                canCancel={canCancelCurrentMainChatTask}
                 eventStream={agentEventStreamState ?? undefined}
                 onResume={handleResumeMainChatTask}
                 onRetry={handleRetryMainChatAction}
@@ -4154,7 +4372,7 @@ export default function ChatPage({
                           type="button"
                           aria-label="Resume task"
                           title="Resume task"
-                          disabled={!currentAgentTaskState.canResume || agentTaskControlBusy}
+                          disabled={!canResumeCurrentMainChatTask || agentTaskControlBusy}
                           onClick={handleResumeMainChatTask}
                           className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
                         >
@@ -4164,7 +4382,7 @@ export default function ChatPage({
                           type="button"
                           aria-label="Retry failed action"
                           title="Retry failed action"
-                          disabled={!currentAgentTaskState.canRetry || agentTaskControlBusy}
+                          disabled={!canRetryCurrentMainChatTask || agentTaskControlBusy}
                           onClick={() => handleRetryMainChatAction()}
                           className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
                         >
@@ -4174,7 +4392,7 @@ export default function ChatPage({
                           type="button"
                           aria-label="Cancel task"
                           title="Cancel task"
-                          disabled={!currentAgentTaskState.canCancel || agentTaskControlBusy}
+                          disabled={!canCancelCurrentMainChatTask || agentTaskControlBusy}
                           onClick={handleCancelMainChatTask}
                           className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
                         >
@@ -4820,32 +5038,9 @@ export default function ChatPage({
                         </div>
                       )}
                       {taskContinuityDetail.finalDelivery && (
-                        <div
-                          data-testid="task-continuity-final-delivery"
-                          data-final-delivery-section-titles={taskContinuityFinalDeliverySections(
-                            taskContinuityDetail.finalDelivery
-                          ).join("|")}
-                          className="mt-2 border-l border-emerald-300 bg-white/80 px-2 py-1"
-                        >
-                          <div className="font-semibold text-stone-950">Final delivery</div>
-                          <div className="mt-1 flex flex-wrap gap-1 text-stone-600">
-                            {taskContinuityFinalDeliverySections(taskContinuityDetail.finalDelivery)
-                              .length > 0 ? (
-                              taskContinuityFinalDeliverySections(
-                                taskContinuityDetail.finalDelivery
-                              ).map(section => (
-                                <span
-                                  key={section}
-                                  className="inline-flex h-5 items-center rounded-md border border-emerald-200 bg-emerald-50 px-1.5 text-emerald-900"
-                                >
-                                  {section}
-                                </span>
-                              ))
-                            ) : (
-                              <span>Recorded</span>
-                            )}
-                          </div>
-                        </div>
+                        <TaskContinuityFinalDeliveryPanel
+                          value={taskContinuityDetail.finalDelivery}
+                        />
                       )}
                     </div>
                   )}

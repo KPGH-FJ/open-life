@@ -290,6 +290,13 @@ pub(crate) async fn get_life_model_current_view_with_state(
     state: &Arc<AppState>,
 ) -> Result<LifeModelCurrentView, AppError> {
     let model = get_life_model_with_state(state).await?;
+    get_life_model_current_view_for_model_with_state(state, &model).await
+}
+
+pub(crate) async fn get_life_model_current_view_for_model_with_state(
+    state: &Arc<AppState>,
+    model: &LifeModel,
+) -> Result<LifeModelCurrentView, AppError> {
     let current_value = model.preferences.communication_style.trim().to_string();
     let current_value = if current_value.is_empty() {
         None

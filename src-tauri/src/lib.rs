@@ -61,6 +61,7 @@ pub mod main_chat_turn_runtime;
 #[allow(dead_code)]
 pub(crate) mod memory_gateway;
 pub(crate) mod provider_validation;
+pub(crate) mod read_models;
 pub mod runtime_build_info;
 pub mod scheduler_runner;
 pub mod state;
@@ -195,6 +196,11 @@ use main_chat_task_controls::{
     list_main_chat_agent_tasks, refresh_main_chat_agent_task_context, resume_main_chat_agent_task,
     retry_main_chat_agent_action,
 };
+use read_models::life_model::get_life_model_view_model;
+use read_models::memory::get_memory_view_model;
+use read_models::provider_privacy::get_provider_privacy_boundary_summary;
+use read_models::review_center::get_review_center_view_model;
+use read_models::tasks::{get_tasks_view_model, get_workspace_view_model};
 use storage::app_data_dir;
 
 #[derive(Clone, serde::Serialize)]
@@ -637,6 +643,12 @@ pub fn run() {
             get_life_model,
             get_life_model_current_view,
             get_life_state_projection,
+            get_life_model_view_model,
+            get_review_center_view_model,
+            get_memory_view_model,
+            get_provider_privacy_boundary_summary,
+            get_tasks_view_model,
+            get_workspace_view_model,
             save_life_model,
             get_config,
             save_config,
