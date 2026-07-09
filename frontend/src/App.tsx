@@ -12,6 +12,7 @@ const McpPage = React.lazy(() => import("./pages/McpPage"));
 const BuilderPage = React.lazy(() => import("./pages/BuilderPage"));
 const LifeModelPage = React.lazy(() => import("./pages/LifeModelPage"));
 const TodayPage = React.lazy(() => import("./pages/TodayPage"));
+const TodayV2PreviewPage = React.lazy(() => import("./pages/TodayV2PreviewPage"));
 const SettingsPage = React.lazy(() => import("./pages/SettingsPage"));
 const CalibrationPage = React.lazy(() => import("./pages/CalibrationPage"));
 const MailboxPage = React.lazy(() => import("./pages/MailboxPage"));
@@ -180,6 +181,7 @@ function App() {
           <Suspense fallback={<LoadingSpinner text="加载中..." />}>
             <Routes>
               <Route path={productRoutePath("Today")} element={<TodayPage />} />
+              <Route path="/today-v2-preview" element={<TodayV2PreviewPage />} />
               <Route path={productRoutePath("Companion")} element={<CompanionPage />} />
               <Route path={productRoutePath("Life Model")} element={<LifeModelPage />} />
               <Route path={productRoutePath("Mailbox")} element={<MailboxPage />} />
