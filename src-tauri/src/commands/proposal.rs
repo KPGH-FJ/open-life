@@ -3458,6 +3458,7 @@ pub async fn accept_proposal(
                 target_ids_for_new_challenge: std::slice::from_ref(&proposal_id),
                 requested_target: Some(proposal_id.as_str()),
                 affected_count: 1,
+                preflight_scope_arguments: None,
                 arguments: &serde_json::json!({
                     "proposal_snapshot_digest": snapshot_digest.clone(),
                     "proposal_type": proposal.proposal_type,

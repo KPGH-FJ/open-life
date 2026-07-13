@@ -102,6 +102,8 @@ const DANGER_ACTION_LABELS: Record<DangerActionType, string> = {
   vector_rebuild: "重建向量索引",
 };
 
+const MCP_AUDIT_RETENTION_DAYS = 90;
+
 export default function SettingsPage() {
   const [config, setConfig] = useState<AppConfig>(defaultConfig());
   const [loading, setLoading] = useState(true);
@@ -258,7 +260,8 @@ export default function SettingsPage() {
 
   const openDangerActionPreflight = async (
     actionType: DangerActionType,
-    channel: "data" | "security"
+    channel: "data" | "security",
+    options: { retentionDays?: number } = {}
   ) => {
     setDangerPreflightLoading(actionType);
     if (channel === "security") {
@@ -267,7 +270,7 @@ export default function SettingsPage() {
       setMessage(null);
     }
     try {
-      const view = await getDangerActionPreflight(actionType, safeMode);
+      const view = await getDangerActionPreflight(actionType, safeMode, options);
       setDangerPreflight(view);
       setDangerPreflightAction(actionType);
     } catch (e: any) {
@@ -377,13 +380,16 @@ export default function SettingsPage() {
     }
   };
 
-  const handleCleanupAudit = async () => openDangerActionPreflight("mcp_audit_cleanup", "security");
+  const handleCleanupAudit = async () =>
+    openDangerActionPreflight("mcp_audit_cleanup", "security", {
+      retentionDays: MCP_AUDIT_RETENTION_DAYS,
+    });
 
   const executeCleanupAudit = async (confirmationEvidence: DangerActionConfirmationEvidence) => {
     setSecurityLoading(true);
     setSecurityMessage(null);
     try {
-      const removed = await cleanupMcpAuditLogs(90, confirmationEvidence);
+      const removed = await cleanupMcpAuditLogs(MCP_AUDIT_RETENTION_DAYS, confirmationEvidence);
       setSecurityMessage(`已清理 ${removed} 条旧 MCP 审计日志`);
       await refreshSecurityState();
     } catch (e: any) {

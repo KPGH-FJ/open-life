@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import SettingsPage from "./SettingsPage";
 import { invoke } from "@tauri-apps/api/core";
@@ -354,7 +354,20 @@ describe("SettingsPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "返回" }));
 
     fireEvent.click(screen.getByRole("button", { name: "清理旧日志" }));
-    expect(await screen.findByRole("dialog", { name: "动作预检：清理旧日志" })).toBeInTheDocument();
+    const cleanupPreflight = await screen.findByRole("dialog", {
+      name: "动作预检：清理旧日志",
+    });
+    expect(within(cleanupPreflight).getByText("2")).toBeInTheDocument();
+    expect(within(cleanupPreflight).getByText(/影响数量来自后端候选快照/)).toBeInTheDocument();
+    expect(within(cleanupPreflight).queryByLabelText(/输入 CLEANUP/)).not.toBeInTheDocument();
+    expect(invoke).toHaveBeenCalledWith(
+      "get_danger_action_preflight",
+      expect.objectContaining({
+        actionType: "mcp_audit_cleanup",
+        retentionDays: 90,
+        retention_days: 90,
+      })
+    );
     expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "cleanup_mcp_audit_logs")).toBe(
       false
     );

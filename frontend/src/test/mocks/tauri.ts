@@ -2161,8 +2161,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           created_at: new Date(Date.now() - 60000).toISOString(),
         },
       ] as T);
-    case "clear_mcp_audit_logs":
-      return Promise.resolve(3 as T);
     case "list_mcp_tools":
       return Promise.resolve([
         { name: "read_file", description: "读取文件内容" },
@@ -3453,9 +3451,13 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       const actionType = String(_args?.actionType ?? _args?.action_type ?? "data_export");
       const safeMode = Boolean(_args?.safeMode ?? _args?.safe_mode);
       const targetIds = (_args?.targetIds ?? _args?.target_ids ?? []) as string[];
-      const affectedCount = Number(
-        _args?.affectedCount ?? _args?.affected_count ?? targetIds.length ?? 0
-      );
+      const retentionDays = Number(_args?.retentionDays ?? _args?.retention_days ?? 0);
+      const affectedCount =
+        actionType === "mcp_audit_cleanup"
+          ? retentionDays === 90
+            ? 2
+            : 0
+          : Number(_args?.affectedCount ?? _args?.affected_count ?? targetIds.length ?? 0);
       const mutating = [
         "data_import_overwrite",
         "mcp_audit_cleanup",
@@ -3466,7 +3468,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       ].includes(actionType);
       const confirmationPhrases: Record<string, string> = {
         data_import_overwrite: "IMPORT",
-        mcp_audit_cleanup: "CLEANUP",
         mcp_audit_key_rotation: "ROTATE",
         agent_run_delete: "DELETE RUN",
         agent_run_bulk_delete: "DELETE RUNS",
@@ -3478,7 +3479,8 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         data_import_overwrite: "覆盖当前 LifeModel、聊天记录和向量记忆。",
         mcp_audit_export:
           "导出最近 MCP 审计日志元数据，可能包含工具输入参数文本和工具执行结果文本。",
-        mcp_audit_cleanup: "删除超过保留期限的本地 MCP 审计日志。",
+        mcp_audit_cleanup:
+          "按服务端时钟删除创建时间早于当前请求时间减去 90 天的本地 MCP 审计日志；影响数量来自后端候选快照。",
         mcp_audit_key_rotation: "轮换本地 MCP 审计加密 epoch。",
         agent_run_delete: "删除选中的 AgentRun 运行记录；不展开 transcript。",
         agent_run_bulk_delete: "批量删除选中的 AgentRun 运行记录；不展开 transcript。",
@@ -3494,6 +3496,9 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         agent_run_bulk_delete: "delete_agent_run",
         vector_rebuild: "rebuild_memory_index",
       };
+      const confirmationPhrase = confirmationPhrases[actionType] ?? null;
+      const confirmationRequired =
+        actionType === "mcp_audit_cleanup" || Boolean(confirmationPhrase);
       return Promise.resolve({
         actionType,
         riskTier:
@@ -3522,9 +3527,9 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
               : mutating
                 ? "none"
                 : "not_required_read_only",
-        requiresTypedConfirmation: Boolean(confirmationPhrases[actionType]),
-        confirmationRequired: Boolean(confirmationPhrases[actionType]),
-        confirmationPhrase: confirmationPhrases[actionType] ?? null,
+        requiresTypedConfirmation: Boolean(confirmationPhrase),
+        confirmationRequired,
+        confirmationPhrase,
         confirmationScopeDigest: digest,
         preflightId: `danger-preflight:sha256:${"b".repeat(64)}`,
         affectedItemCount: affectedCount,

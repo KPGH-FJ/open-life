@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   Wrench,
   Plus,
@@ -29,7 +30,6 @@ import {
   listMcpTemplates,
   recommendMcpManifests,
   listMcpAuditLogs,
-  clearMcpAuditLogs,
   getPrivacyPolicy,
   getRuntimeBuildInfo,
   type McpServerInfo,
@@ -41,7 +41,6 @@ import {
 } from "../tauri";
 import EmptyState from "../components/EmptyState";
 import ErrorBanner from "../components/ErrorBanner";
-import ConfirmDangerDialog from "../components/ConfirmDangerDialog";
 
 type WizardStep = "select" | "preview" | "done";
 
@@ -122,7 +121,6 @@ export default function McpPage() {
   const [auditLogs, setAuditLogs] = useState<McpAuditLogEntry[]>([]);
   const [privacyRules, setPrivacyRules] = useState<PrivacyRule[]>([]);
   const [expandedLog, setExpandedLog] = useState<number | null>(null);
-  const [confirmAuditCleanup, setConfirmAuditCleanup] = useState(false);
   const arbitraryRegistrationEnabled =
     runtimeBuildInfo?.devExtensionsEnabled === true &&
     runtimeBuildInfo.arbitraryMcpRegistrationEnabled === true;
@@ -313,23 +311,6 @@ export default function McpPage() {
 
   return (
     <div className="h-full overflow-auto bg-white p-6">
-      <ConfirmDangerDialog
-        open={confirmAuditCleanup}
-        title="确认清理 MCP 审计日志"
-        description="这会删除 7 天前的本地 MCP 审计日志。清理后这些审计记录将不再出现在安全审计中心。"
-        confirmLabel="清理日志"
-        busy={loading}
-        onConfirm={async () => {
-          setConfirmAuditCleanup(false);
-          try {
-            await clearMcpAuditLogs(7);
-            await load();
-          } catch (e) {
-            setPageError("清理审计日志失败: " + String(e));
-          }
-        }}
-        onCancel={() => setConfirmAuditCleanup(false)}
-      />
       <div className="max-w-4xl mx-auto space-y-8">
         <ErrorBanner message={pageError} onClose={() => setPageError("")} />
         <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
@@ -538,12 +519,12 @@ export default function McpPage() {
               安全审计中心
             </h3>
             <div className="flex items-center gap-2">
-              <button
-                onClick={() => setConfirmAuditCleanup(true)}
+              <Link
+                to="/settings"
                 className="text-xs border border-gray-200 rounded-lg px-3 py-1.5 hover:bg-gray-50"
               >
-                清理 7 天前日志
-              </button>
+                在隐私设置中管理审计保留
+              </Link>
             </div>
           </div>
 

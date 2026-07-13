@@ -191,8 +191,8 @@ pub use openlife_core::privacy::PrivacyEngine;
 // Hermes module removed: replaced by AgentRuntime
 use commands::life_model::{get_life_model, get_life_model_current_view, save_life_model};
 use commands::mcp::{
-    clear_mcp_audit_logs, list_mcp_audit_logs, list_mcp_servers, list_mcp_templates,
-    list_mcp_tools, list_tool_manifests, recommend_mcp_manifests,
+    list_mcp_audit_logs, list_mcp_servers, list_mcp_templates, list_mcp_tools, list_tool_manifests,
+    recommend_mcp_manifests,
 };
 #[cfg(feature = "dev-extensions")]
 use commands::mcp::{register_mcp_server, unregister_mcp_server};
@@ -939,7 +939,6 @@ pub fn run() {
             recommend_mcp_manifests,
             list_tool_manifests,
             list_mcp_audit_logs,
-            clear_mcp_audit_logs,
             get_system_diagnostics,
             get_runtime_build_info,
             check_ollama_status,

@@ -134,6 +134,7 @@ pub async fn delete_agent_run(
             requested_target: Some(run_id.as_str()),
             affected_count: Some(affected_count),
             reference: confirmation_evidence.as_ref(),
+            preflight_scope_arguments: None,
             arguments: &confirmation_arguments,
             arguments_summary:
                 "删除 AgentRun 运行记录并写入删除原因；批量范围中的每个目标使用独立 single-use grant。",

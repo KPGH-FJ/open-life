@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -15,10 +15,82 @@ use ring::digest::{Context as DigestContext, SHA256};
 
 const MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION: i64 = 1;
 
-/// Product contract ceiling for MCP audit retention. The current raw `i64`
-/// cleanup path does not enforce this yet; D063 keeps that behavior RED until
-/// `McpAuditRetentionDays` becomes the domain mutation boundary.
+/// Product contract ceiling for MCP audit retention.
 pub const MCP_AUDIT_RETENTION_MAX_DAYS: i64 = 3_650;
+
+/// Validated retention period for destructive MCP audit cleanup.
+///
+/// Keeping the raw representation private makes it impossible for product
+/// callers to reach deletion SQL without first crossing the bounded domain
+/// conversion. The bound also keeps the chrono subtraction in a small,
+/// mechanically reviewed range.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpAuditRetentionDays {
+    days: i64,
+    cutoff_rfc3339: String,
+}
+
+impl McpAuditRetentionDays {
+    pub const fn get(&self) -> i64 {
+        self.days
+    }
+
+    /// Exact UTC cutoff captured when this bounded cleanup request is built.
+    /// Candidate counting and deletion must use this same value so time cannot
+    /// drift while the native confirmation dialog is open.
+    pub fn cutoff_rfc3339(&self) -> &str {
+        &self.cutoff_rfc3339
+    }
+}
+
+impl TryFrom<i64> for McpAuditRetentionDays {
+    type Error = anyhow::Error;
+
+    fn try_from(value: i64) -> std::result::Result<Self, Self::Error> {
+        anyhow::ensure!(
+            (1..=MCP_AUDIT_RETENTION_MAX_DAYS).contains(&value),
+            "invalid_mcp_audit_retention_days:{value}:expected_1_through_{MCP_AUDIT_RETENTION_MAX_DAYS}"
+        );
+        let cutoff = chrono::Utc::now()
+            .checked_sub_signed(chrono::Duration::days(value))
+            .context("compute bounded MCP audit retention cutoff")?;
+        Ok(Self {
+            days: value,
+            cutoff_rfc3339: cutoff.to_rfc3339(),
+        })
+    }
+}
+
+/// Typed conflict emitted when the candidate snapshot confirmed by the user no
+/// longer matches the rows eligible for deletion. The transaction is rolled
+/// back before this error escapes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpAuditCleanupScopeChanged {
+    expected_candidate_count: usize,
+    observed_candidate_count: usize,
+}
+
+impl McpAuditCleanupScopeChanged {
+    pub const fn expected_candidate_count(&self) -> usize {
+        self.expected_candidate_count
+    }
+
+    pub const fn observed_candidate_count(&self) -> usize {
+        self.observed_candidate_count
+    }
+}
+
+impl std::fmt::Display for McpAuditCleanupScopeChanged {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "mcp_audit_cleanup_scope_changed:expected_{}:observed_{}",
+            self.expected_candidate_count, self.observed_candidate_count
+        )
+    }
+}
+
+impl std::error::Error for McpAuditCleanupScopeChanged {}
 
 fn audit_payload_receipt(kind: &str, value_type: &str, bytes: &[u8]) -> String {
     let digest = ring::digest::digest(&SHA256, bytes);
@@ -469,9 +541,62 @@ impl McpAuditStore {
         })
     }
 
-    /// Cleanup strategy: remove logs older than retention_days and return count removed.
-    pub fn cleanup(&self, retention_days: i64) -> Result<usize> {
-        self.clear_old_logs(retention_days)
+    /// Count rows covered by the exact validated retention boundary without
+    /// copying audit payloads into the confirmation workflow.
+    pub fn count_cleanup_candidates(
+        &self,
+        retention_days: &McpAuditRetentionDays,
+    ) -> Result<usize> {
+        let conn = self.conn()?;
+        Self::count_cleanup_candidates_on(&conn, retention_days)
+    }
+
+    /// Remove logs covered by the confirmed candidate snapshot.
+    ///
+    /// An IMMEDIATE transaction owns the final count comparison and DELETE, so
+    /// another writer cannot change the predicate result between those steps.
+    pub fn cleanup(
+        &self,
+        retention_days: McpAuditRetentionDays,
+        expected_candidate_count: usize,
+    ) -> Result<usize> {
+        let mut conn = self.conn()?;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("start MCP audit cleanup transaction")?;
+        let observed_candidate_count =
+            Self::count_cleanup_candidates_on(&transaction, &retention_days)?;
+        if observed_candidate_count != expected_candidate_count {
+            return Err(McpAuditCleanupScopeChanged {
+                expected_candidate_count,
+                observed_candidate_count,
+            }
+            .into());
+        }
+        let rows = transaction.execute(
+            "DELETE FROM mcp_log WHERE created_at < ?1",
+            [retention_days.cutoff_rfc3339()],
+        )?;
+        anyhow::ensure!(
+            rows == observed_candidate_count,
+            "mcp_audit_cleanup_transaction_count_mismatch:expected_{observed_candidate_count}:deleted_{rows}"
+        );
+        transaction
+            .commit()
+            .context("commit MCP audit cleanup transaction")?;
+        Ok(rows)
+    }
+
+    fn count_cleanup_candidates_on(
+        conn: &Connection,
+        retention_days: &McpAuditRetentionDays,
+    ) -> Result<usize> {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM mcp_log WHERE created_at < ?1",
+            [retention_days.cutoff_rfc3339()],
+            |row| row.get(0),
+        )?;
+        usize::try_from(count).context("convert MCP audit cleanup candidate count")
     }
 
     fn conn(&self) -> Result<Connection> {
@@ -783,16 +908,6 @@ impl McpAuditStore {
         }
         Ok(out)
     }
-
-    pub fn clear_old_logs(&self, days: i64) -> Result<usize> {
-        let conn = self.conn()?;
-        let cutoff = chrono::Utc::now() - chrono::Duration::days(days);
-        let rows = conn.execute(
-            "DELETE FROM mcp_log WHERE created_at < ?1",
-            [cutoff.to_rfc3339()],
-        )?;
-        Ok(rows)
-    }
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -923,13 +1038,11 @@ mod tests {
         assert_eq!(export.entry_count, 1);
         assert_eq!(export.entries[0].tool_name, "tool_a");
 
-        let cleaned = store
-            .cleanup(
-                1_i64
-                    .try_into()
-                    .unwrap_or_else(|_| panic!("one day is valid MCP audit retention")),
-            )
-            .unwrap();
+        let retention = 1_i64
+            .try_into()
+            .unwrap_or_else(|_| panic!("one day is valid MCP audit retention"));
+        let candidate_count = store.count_cleanup_candidates(&retention).unwrap();
+        let cleaned = store.cleanup(retention, candidate_count).unwrap();
         assert_eq!(cleaned, 1);
         let logs = store.list_logs(10).unwrap();
         assert!(logs.is_empty());

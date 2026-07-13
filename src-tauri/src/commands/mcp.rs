@@ -250,12 +250,3 @@ pub async fn list_tool_manifests(
     let registry = state.mcp_registry.lock().await;
     Ok(registry.list_manifests())
 }
-
-#[tauri::command]
-pub async fn clear_mcp_audit_logs(
-    days: i64,
-    state: State<'_, Arc<AppState>>,
-) -> Result<usize, AppError> {
-    let store = state.mcp_audit_store.lock().await;
-    store.clear_old_logs(days).map_err(AppError::from)
-}
