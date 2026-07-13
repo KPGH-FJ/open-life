@@ -248,6 +248,39 @@ impl McpAuditStore {
         Ok(store)
     }
 
+    /// Seed a historical keychain-encrypted row without granting the legacy
+    /// reference current writable-owner authority. D064 uses this test-only
+    /// fixture to construct a real pre-migration SQLite artifact, then opens
+    /// that artifact through the product constructor with a new active key.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn write_historical_keychain_fixture(
+        db_path: impl Into<PathBuf>,
+        material: AuditKeyMaterial,
+        tool_name: &str,
+        arguments: &Value,
+        result: &str,
+        success: bool,
+        pii_found: bool,
+    ) -> Result<()> {
+        if material.config.mode != KeyMode::Keychain || material.config.key_ref.is_none() {
+            anyhow::bail!("historical MCP audit fixture requires keychain material");
+        }
+        let epoch = material.config.epoch;
+        let key = material.key;
+        let store = Self {
+            db_path: db_path.into(),
+            read_only: false,
+            unavailable_reason: None,
+            key,
+            key_config: material.config.clone(),
+            keyring: HashMap::from([(epoch, key)]),
+            key_configs: vec![material.config],
+        };
+        store.init_tables()?;
+        store.insert_log(tool_name, arguments, result, success, pii_found)?;
+        Ok(())
+    }
+
     pub fn open_read_only_existing_with_key_materials(
         db_path: impl Into<PathBuf>,
         mut materials: Vec<AuditKeyMaterial>,

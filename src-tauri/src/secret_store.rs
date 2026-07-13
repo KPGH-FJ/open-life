@@ -565,7 +565,7 @@ pub(crate) fn create_mcp_audit_key_material(
 ) -> Result<AuditKeyMaterial> {
     let secret_ref = format!("{MCP_AUDIT_KEY_REF_PREFIX}{epoch}");
     let key = rand::random::<[u8; 32]>();
-    store.set(&secret_ref, &general_purpose::STANDARD.encode(key))?;
+    write_new_mcp_audit_secret(&secret_ref, &general_purpose::STANDARD.encode(key), store)?;
     Ok(AuditKeyMaterial {
         config: AuditKeyConfig {
             mode: KeyMode::Keychain,
@@ -579,7 +579,50 @@ pub(crate) fn create_mcp_audit_key_material(
     })
 }
 
+/// Single product primitive for persisting newly generated MCP audit key
+/// material. D064 freezes create-only behavior at this exact boundary; the
+/// current replacement write is intentionally left unchanged for the RED slice.
+pub(crate) fn write_new_mcp_audit_secret(
+    secret_ref: &str,
+    encoded_key: &str,
+    store: &dyn SecretStore,
+) -> Result<()> {
+    store.set(secret_ref, encoded_key)
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static FIXED_MCP_AUDIT_EPOCH: std::cell::RefCell<Option<u64>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct FixedMcpAuditEpochGuard {
+    previous: Option<u64>,
+}
+
+#[cfg(test)]
+impl Drop for FixedMcpAuditEpochGuard {
+    fn drop(&mut self) {
+        FIXED_MCP_AUDIT_EPOCH.with(|slot| {
+            slot.replace(self.previous.take());
+        });
+    }
+}
+
+/// Fix only the audit epoch source while retaining the complete product key
+/// creation path. Thread-local scope prevents parallel-test contamination.
+#[cfg(test)]
+pub(crate) fn inject_fixed_mcp_audit_epoch_for_test(epoch: u64) -> FixedMcpAuditEpochGuard {
+    let previous = FIXED_MCP_AUDIT_EPOCH.with(|slot| slot.replace(Some(epoch)));
+    FixedMcpAuditEpochGuard { previous }
+}
+
 fn next_audit_epoch(previous: u64) -> u64 {
+    #[cfg(test)]
+    if let Some(epoch) = FIXED_MCP_AUDIT_EPOCH.with(|slot| *slot.borrow()) {
+        return epoch.max(previous.saturating_add(1));
+    }
     let timestamp = chrono::Utc::now().timestamp().max(0) as u64;
     timestamp.max(previous.saturating_add(1))
 }

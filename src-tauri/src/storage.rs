@@ -6,6 +6,46 @@ const RELEASE_APP_DIR_NAME: &str = "ai.openlife.app";
 const DEV_APP_DIR_NAME: &str = "ai.openlife.app.dev";
 const QA_APP_DIR_NAME: &str = "ai.openlife.app.qa";
 
+#[cfg(test)]
+std::thread_local! {
+    static MCP_AUDIT_KEYRING_SAVE_FAILURE_PATH: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Thread-local fault injection used by D064 to fail only the post-hydration
+/// reference save. This keeps the keyring path genuinely missing during load,
+/// which is distinct from an invalid/unreadable pre-existing reference store.
+#[cfg(test)]
+pub(crate) struct McpAuditKeyringSaveFailureGuard {
+    previous: Option<std::path::PathBuf>,
+}
+
+#[cfg(test)]
+impl Drop for McpAuditKeyringSaveFailureGuard {
+    fn drop(&mut self) {
+        MCP_AUDIT_KEYRING_SAVE_FAILURE_PATH.with(|slot| {
+            slot.replace(self.previous.take());
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn inject_mcp_audit_keyring_save_failure_for_test(
+    path: std::path::PathBuf,
+) -> McpAuditKeyringSaveFailureGuard {
+    let previous = MCP_AUDIT_KEYRING_SAVE_FAILURE_PATH.with(|slot| slot.replace(Some(path)));
+    McpAuditKeyringSaveFailureGuard { previous }
+}
+
+#[cfg(test)]
+fn mcp_audit_keyring_save_failure_injected(path: &std::path::Path) -> bool {
+    MCP_AUDIT_KEYRING_SAVE_FAILURE_PATH.with(|slot| {
+        slot.borrow()
+            .as_deref()
+            .is_some_and(|injected| injected == path)
+    })
+}
+
 pub fn openlife_profile() -> String {
     normalize_openlife_profile(std::env::var("OPENLIFE_PROFILE").ok().as_deref()).to_string()
 }
@@ -70,6 +110,12 @@ pub(crate) fn save_mcp_audit_keyring_to_path(
     path: &std::path::Path,
     configs: &[AuditKeyConfig],
 ) -> Result<(), AppError> {
+    #[cfg(test)]
+    if mcp_audit_keyring_save_failure_injected(path) {
+        return Err(AppError::db(
+            "injected_mcp_audit_keyring_reference_save_failure",
+        ));
+    }
     let text = serde_json::to_string_pretty(configs).map_err(AppError::from)?;
     openlife_core::atomic_file::write_atomic(path, text.as_bytes()).map_err(AppError::from)
 }
