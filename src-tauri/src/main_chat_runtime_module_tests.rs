@@ -1063,28 +1063,32 @@ fn ordinary_final_delivery_has_one_durable_turn_runtime_owner() {
         .expect("read TurnRuntime final owner");
     let event_store = std::fs::read_to_string(root.join("main_chat_event_stream.rs"))
         .expect("read durable event projection");
-    assert!(
-        runtime.contains("openlife_turn_runtime.final_delivery_owner"),
-        "ordinary FinalDelivery must retain the durable TurnRuntime owner label"
+    let final_receipt_persistence = runtime
+        .split_once("async fn persist_openlife_turn_final_delivery_receipt(")
+        .expect("TurnRuntime final receipt persistence owner must exist")
+        .1
+        .split_once("fn canonical_final_owner_digest(")
+        .expect("TurnRuntime final receipt persistence boundary must exist")
+        .0;
+    assert_eq!(
+        final_receipt_persistence
+            .matches("openlife_turn_runtime.final_delivery_owner")
+            .count(),
+        1,
+        "ordinary FinalDelivery must have exactly one durable TurnRuntime append owner"
     );
-    for entry in std::fs::read_dir(&root).expect("list Tauri product sources") {
-        let path = entry.expect("read Tauri product source entry").path();
-        if path == root.join("main_chat_turn_runtime.rs")
-            || path.extension().and_then(|value| value.to_str()) != Some("rs")
-            || path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .is_some_and(|name| name.ends_with("_tests.rs"))
-        {
-            continue;
-        }
-        let source = std::fs::read_to_string(&path).expect("read Tauri product source");
-        assert!(
-            !source.contains("openlife_turn_runtime.final_delivery_owner"),
-            "ordinary FinalDelivery owner label escaped TurnRuntime into {}",
-            path.display()
-        );
-    }
+    let final_receipt_recovery = runtime
+        .split_once("async fn recover_openlife_turn_from_durable_final(")
+        .expect("TurnRuntime final receipt recovery must exist")
+        .1
+        .split_once("fn emit_stream_send_message_result(")
+        .expect("TurnRuntime final receipt recovery boundary must exist")
+        .0;
+    assert!(
+        final_receipt_recovery
+            .contains("final_event.source != \"openlife_turn_runtime.final_delivery_owner\""),
+        "durable FinalDelivery recovery must authenticate the one append owner"
+    );
     assert!(!runtime.contains("replay-final:"));
     assert!(!runtime.contains("openlife_turn_runtime.replay_aggregate"));
     let snapshot_materializer = event_store

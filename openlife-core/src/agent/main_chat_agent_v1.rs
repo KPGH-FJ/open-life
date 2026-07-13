@@ -3018,6 +3018,7 @@ pub struct ExecutionTranscriptEntryDraft {
 pub const PRE_DISPATCH_PERSISTENCE_FAILURE_KIND: &str =
     "durable_event_store_unavailable_before_dispatch";
 const TASK_SESSION_PAYLOAD_VERSION: i64 = 2;
+const TASK_SESSION_CANONICAL_OWNER_VERSION: i64 = 1;
 const TRANSCRIPT_PAYLOAD_VERSION: i64 = 2;
 const TASK_SESSION_V2_PHYSICAL_PURGE_MARKER: &str =
     "task_session_transcript_v2_physical_purge_complete";
@@ -3770,6 +3771,7 @@ impl AgentTaskSessionStore {
             user_goal_receipt,
             current_plan_summary_receipt,
             final_summary_receipt,
+            ..
         } = persisted;
         if let Some(transient) = self
             .transient_user_goals
@@ -3877,6 +3879,62 @@ impl AgentTaskSessionStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(err) => Err(err.into()),
         }
+    }
+
+    /// Digest the durable TaskSession owner exactly as stored, without
+    /// hydrating transient bodies into the owner snapshot. The final event
+    /// may persist this digest, but never any of the private keyed receipts
+    /// used to derive it.
+    pub fn canonical_owner_digest(&self, id: &str) -> Result<Option<String>> {
+        let persisted = {
+            let conn = self.lock_conn()?;
+            let mut stmt = conn.prepare(
+                "SELECT id, chat_session_id, user_goal, selected_strategy, status,
+                        current_plan_summary, action_queue_ids_json, pending_blockers_json,
+                        context_snapshot_refs_json, created_at, updated_at, final_summary,
+                        user_goal_ref, user_goal_minimized_version, payload_minimized_version
+                 FROM agent_task_sessions
+                 WHERE id = ?1",
+            )?;
+            stmt.query_row([id], row_to_persisted_agent_task_session)
+                .optional()?
+        };
+        let Some(persisted) = persisted else {
+            return Ok(None);
+        };
+        let session = &persisted.session;
+        let owner = serde_json::json!({
+            "ownerKind": "agent_task_session",
+            "ownerVersion": TASK_SESSION_CANONICAL_OWNER_VERSION,
+            "identity": {
+                "id": session.id.as_str(),
+                "chatSessionId": session.chat_session_id.as_str(),
+            },
+            "route": {
+                "selectedStrategy": persisted.selected_strategy_value.as_str(),
+            },
+            "lifecycle": {
+                "status": persisted.status_value.as_str(),
+                "createdAt": persisted.created_at_value.as_str(),
+                "updatedAt": persisted.updated_at_value.as_str(),
+            },
+            "canonicalInput": {
+                "userGoalRef": persisted.user_goal_ref.as_deref(),
+                "userGoalReceipt": persisted.user_goal_receipt.as_str(),
+                "minimizedVersion": persisted.user_goal_minimized_version,
+            },
+            "durableMetadata": {
+                "currentPlanSummaryReceipt": persisted.current_plan_summary_receipt.as_deref(),
+                "actionQueueRefs": &session.action_queue_ids,
+                "pendingBlockerRefs": &session.pending_blockers,
+                "contextSnapshotRefs": &session.context_snapshot_refs,
+                "finalSummaryReceipt": persisted.final_summary_receipt.as_deref(),
+                "payloadMinimizedVersion": persisted.payload_minimized_version,
+            },
+        });
+        Ok(Some(
+            crate::agent::metadata_safe::metadata_safe_value_digest(&owner).1,
+        ))
     }
 
     pub fn list_sessions(
@@ -9417,10 +9475,16 @@ fn normalize_task_session_refs(
 
 struct PersistedAgentTaskSession {
     session: AgentTaskSession,
+    selected_strategy_value: String,
+    status_value: String,
+    created_at_value: String,
+    updated_at_value: String,
     user_goal_ref: Option<String>,
     user_goal_receipt: String,
     current_plan_summary_receipt: Option<String>,
     final_summary_receipt: Option<String>,
+    user_goal_minimized_version: i64,
+    payload_minimized_version: i64,
 }
 
 fn row_to_persisted_agent_task_session(
@@ -9486,10 +9550,16 @@ fn row_to_persisted_agent_task_session(
             updated_at: parse_rfc3339_utc(&updated_at)?,
             final_summary: None,
         },
+        selected_strategy_value: selected_strategy,
+        status_value: status,
+        created_at_value: created_at,
+        updated_at_value: updated_at,
         user_goal_ref: row.get(12)?,
         user_goal_receipt,
         current_plan_summary_receipt,
         final_summary_receipt,
+        user_goal_minimized_version: minimized_version,
+        payload_minimized_version: payload_version,
     })
 }
 
@@ -14904,6 +14974,71 @@ mod session_content_minimization_tests {
             .unwrap();
         let deleted_owner = reopened.load_session(&task_id).unwrap().unwrap();
         assert!(deleted_owner.user_goal.is_empty());
+    }
+
+    #[test]
+    fn task_session_canonical_owner_digest_is_reopen_stable_and_binds_durable_receipts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("task-session-canonical-owner.db");
+        let key = AgentRunReceiptKey::from_bytes([0x52; 32]).unwrap();
+        let store = AgentTaskSessionStore::new_with_receipt_key(&path, key.clone()).unwrap();
+        let session = store
+            .create_session(AgentTaskSessionDraft {
+                chat_session_id: "canonical-owner-chat".into(),
+                user_goal: "transient canonical owner goal".into(),
+                selected_strategy: MainChatAgentStrategy::DirectAnswer,
+                current_plan_summary: Some("transient canonical owner plan".into()),
+                context_snapshot_refs: vec!["mainchat_ctx_deadbeef".into()],
+            })
+            .unwrap();
+        store
+            .complete_session(&session.id, "transient canonical owner final")
+            .unwrap();
+        let before_reopen = store.canonical_owner_digest(&session.id).unwrap().unwrap();
+        assert!(before_reopen.starts_with("sha256:"));
+        drop(store);
+
+        let reopened = AgentTaskSessionStore::new_with_receipt_key(&path, key.clone()).unwrap();
+        assert_eq!(
+            reopened
+                .canonical_owner_digest(&session.id)
+                .unwrap()
+                .unwrap(),
+            before_reopen,
+            "transient body hydration must not affect the durable owner digest"
+        );
+        drop(reopened);
+
+        let durable_receipt = {
+            let conn = Connection::open(&path).unwrap();
+            let receipt: String = conn
+                .query_row(
+                    "SELECT final_summary FROM agent_task_sessions WHERE id = ?1",
+                    [&session.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let mut drifted = receipt.clone().into_bytes();
+            let last = drifted.last_mut().unwrap();
+            *last = if *last == b'0' { b'1' } else { b'0' };
+            conn.execute(
+                "UPDATE agent_task_sessions SET final_summary = ?2 WHERE id = ?1",
+                params![session.id, String::from_utf8(drifted).unwrap()],
+            )
+            .unwrap();
+            receipt
+        };
+        assert_ne!(before_reopen, durable_receipt);
+
+        let drifted = AgentTaskSessionStore::new_with_receipt_key(&path, key).unwrap();
+        assert_ne!(
+            drifted
+                .canonical_owner_digest(&session.id)
+                .unwrap()
+                .unwrap(),
+            before_reopen,
+            "same-ID durable receipt drift must alter the canonical owner digest"
+        );
     }
 
     #[test]
