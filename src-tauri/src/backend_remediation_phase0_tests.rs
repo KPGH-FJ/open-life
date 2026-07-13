@@ -74,29 +74,35 @@ fn assert_executable_test_reference(reference: &str) {
     let body = reference
         .strip_prefix("test:")
         .expect("test evidence prefix");
-    let (path, test_name) = body
+    let (path, test_names) = body
         .rsplit_once("::")
         .map_or((body, None), |(path, name)| (path, Some(name)));
     let source = read_repo_file(path);
-    let Some(test_name) = test_name else {
+    let Some(test_names) = test_names else {
         return;
     };
-    let sync_signature = format!("fn {test_name}(");
-    let async_signature = format!("async fn {test_name}(");
-    let offset = source
-        .find(&async_signature)
-        .or_else(|| source.find(&sync_signature))
-        .unwrap_or_else(|| panic!("test evidence does not resolve to a function: {reference}"));
-    let annotation_window = &source[offset.saturating_sub(500)..offset];
-    assert!(
-        annotation_window.contains("#[test]")
-            || annotation_window.contains("#[tokio::test]")
-            || annotation_window.contains("#[rstest]"),
-        "test evidence does not resolve to an annotated test: {reference}"
-    );
+    for test_name in test_names.split('+') {
+        let sync_signature = format!("fn {test_name}(");
+        let async_signature = format!("async fn {test_name}(");
+        let offset = source
+            .find(&async_signature)
+            .or_else(|| source.find(&sync_signature))
+            .unwrap_or_else(|| panic!("test evidence does not resolve to a function: {reference}"));
+        let annotation_window = &source[offset.saturating_sub(500)..offset];
+        assert!(
+            annotation_window.contains("#[test]")
+                || annotation_window.contains("#[tokio::test")
+                || annotation_window.contains("#[rstest"),
+            "test evidence does not resolve to an annotated test: {reference}"
+        );
+    }
 }
 
 fn assert_source_reference(reference: &str) {
+    if reference.starts_with("test:") {
+        assert_executable_test_reference(reference);
+        return;
+    }
     if let Some(body) = reference.strip_prefix("baseline-source:") {
         let path = body.split("::").next().expect("baseline source path");
         let object = format!("{PHASE0_BASELINE_REVISION}:{path}");
@@ -117,6 +123,37 @@ fn assert_source_reference(reference: &str) {
             repo_root().join(path).is_file(),
             "missing current fix: {reference}"
         );
+        return;
+    }
+    if let Some(body) = reference.strip_prefix("current-authority:") {
+        let (path, symbols) = body
+            .split_once("::")
+            .unwrap_or_else(|| panic!("current authority must identify symbols: {reference}"));
+        let source = read_repo_file(path);
+        for symbol in symbols.split('+').flat_map(|symbol| symbol.split('.')) {
+            assert!(
+                source.contains(symbol),
+                "current authority symbol is absent: {reference} ({symbol})"
+            );
+        }
+        return;
+    }
+    if let Some(body) = reference.strip_prefix("deleted-authority:") {
+        let (path, symbols) = body
+            .split_once("::")
+            .unwrap_or_else(|| panic!("deleted authority must identify symbols: {reference}"));
+        let path = repo_root().join(path);
+        if !path.is_file() {
+            return;
+        }
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read deleted-authority source {reference}: {error}"));
+        for symbol in symbols.split('+') {
+            assert!(
+                !source.contains(symbol),
+                "deleted authority symbol is still present: {reference} ({symbol})"
+            );
+        }
         return;
     }
     if let Some(body) = reference.strip_prefix("baseline-evidence:") {
@@ -362,6 +399,7 @@ fn backend_remediation_phase0_inventory_freezes_all_audit_findings() {
         "reproduced-phase3-pending",
         "reproduced-quality-gate-pending",
         "reproduced-test-architecture-pending",
+        "root-fix-focused-verification",
     ]);
     let traceability_ids = rows
         .iter()
