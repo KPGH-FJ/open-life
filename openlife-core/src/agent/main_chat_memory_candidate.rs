@@ -1245,30 +1245,12 @@ mod tests {
     }
 
     #[test]
-    fn inferred_stable_user_fact_matrix_is_semantic_not_fixture_token_shaped() {
-        for (text, expected_claim) in [
-            ("The user works in UTC.", "The user works in UTC"),
-            (
-                "My work timezone is Central European Time.",
-                "My work timezone is Central European Time",
-            ),
-            (
-                "我通常周五下午不安排高强度工作。",
-                "我通常周五下午不安排高强度工作",
-            ),
-            ("Coffee makes me anxious.", "Coffee makes me anxious"),
-        ] {
-            let result = routed(text);
-            let proposals = result
-                .candidates
-                .iter()
-                .filter(|candidate| candidate.destination == MemoryDestination::MemoryProposal)
-                .collect::<Vec<_>>();
-            assert_eq!(proposals.len(), 1, "stable user fact was missed: {text}");
-            assert_eq!(proposals[0].normalized_claim, expected_claim, "{text}");
-        }
-
+    fn d051_legacy_implicit_stable_fact_authority_is_deleted() {
         for text in [
+            "The user works in UTC.",
+            "My work timezone is Central European Time.",
+            "我通常周五下午不安排高强度工作。",
+            "Coffee makes me anxious.",
             "The build usually fails. Going forward, confirm build time before planning.",
             "This server normally uses UTC. Going forward, confirm its log time.",
             "Cargo.toml often changes. Going forward, confirm that file format.",
@@ -1282,7 +1264,7 @@ mod tests {
             let result = routed(text);
             assert!(
                 result.memory_proposal_candidate_ids.is_empty(),
-                "non-durable or non-user observation became Memory: {text}"
+                "untrusted observation text must not authorize Memory: {text}"
             );
         }
     }
