@@ -113,8 +113,11 @@ mod backend_remediation_phase0_tests;
 
 #[cfg(test)]
 mod backend_remediation_phase1_tests;
+
 #[cfg(test)]
 mod backend_remediation_phase2_tests;
+#[cfg(test)]
+mod d051_structured_memory_evidence_runtime_tests;
 
 #[cfg(test)]
 mod backend_remediation_frozen_scenario_tests;
