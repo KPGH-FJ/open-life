@@ -196,6 +196,29 @@ describe("McpPage", () => {
     expect(screen.getByText("隐私保护规则")).toBeInTheDocument();
   });
 
+  it("does not render unavailable audit truth as zero counts or an empty database", async () => {
+    vi.mocked(invoke).mockImplementation((command, args) => {
+      if (command === "get_runtime_build_info") return Promise.resolve(devRuntimeBuildInfo);
+      if (command === "list_mcp_audit_logs") {
+        return Promise.reject(new Error("persistence_store_unavailable"));
+      }
+      return mockInvoke(command, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <McpPage />
+      </BrowserRouter>
+    );
+
+    expect(await screen.findByText(/审计.*(未知|不可用)/)).toBeInTheDocument();
+    expect(screen.queryByText("暂无审计记录")).not.toBeInTheDocument();
+    for (const label of ["总调用次数", "成功", "失败", "PII 拦截"]) {
+      const card = screen.queryByText(label)?.parentElement;
+      expect(card?.textContent ?? "").not.toMatch(/0\s*$/);
+    }
+  });
+
   it("requires confirmation before clearing old audit logs", async () => {
     render(
       <BrowserRouter>
