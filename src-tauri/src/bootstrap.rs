@@ -2872,6 +2872,877 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct D057SecretStoreState {
+        values: std::collections::HashMap<String, String>,
+        set_refs: Vec<String>,
+        deleted_refs: Vec<String>,
+    }
+
+    #[derive(Default)]
+    struct D057RecordingSecretStore {
+        state: std::sync::Mutex<D057SecretStoreState>,
+    }
+
+    impl D057RecordingSecretStore {
+        fn preload_key(&self, secret_ref: &str, key: [u8; 32]) {
+            use base64::Engine as _;
+
+            self.state.lock().unwrap().values.insert(
+                secret_ref.to_string(),
+                base64::engine::general_purpose::STANDARD.encode(key),
+            );
+        }
+
+        fn mcp_set_refs(&self) -> Vec<String> {
+            self.state
+                .lock()
+                .unwrap()
+                .set_refs
+                .iter()
+                .filter(|secret_ref| {
+                    secret_ref.starts_with(crate::secret_store::MCP_AUDIT_KEY_REF_PREFIX)
+                })
+                .cloned()
+                .collect()
+        }
+
+        fn mcp_deleted_refs(&self) -> Vec<String> {
+            self.state
+                .lock()
+                .unwrap()
+                .deleted_refs
+                .iter()
+                .filter(|secret_ref| {
+                    secret_ref.starts_with(crate::secret_store::MCP_AUDIT_KEY_REF_PREFIX)
+                })
+                .cloned()
+                .collect()
+        }
+
+        fn live_mcp_refs(&self) -> Vec<String> {
+            let mut refs = self
+                .state
+                .lock()
+                .unwrap()
+                .values
+                .keys()
+                .filter(|secret_ref| {
+                    secret_ref.starts_with(crate::secret_store::MCP_AUDIT_KEY_REF_PREFIX)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            refs.sort();
+            refs
+        }
+    }
+
+    impl SecretStore for D057RecordingSecretStore {
+        fn get(&self, secret_ref: &str) -> anyhow::Result<Option<String>> {
+            Ok(self.state.lock().unwrap().values.get(secret_ref).cloned())
+        }
+
+        fn set(&self, secret_ref: &str, value: &str) -> anyhow::Result<()> {
+            let mut state = self.state.lock().unwrap();
+            state.set_refs.push(secret_ref.to_string());
+            state
+                .values
+                .insert(secret_ref.to_string(), value.to_string());
+            Ok(())
+        }
+
+        fn delete(&self, secret_ref: &str) -> anyhow::Result<()> {
+            let mut state = self.state.lock().unwrap();
+            state.deleted_refs.push(secret_ref.to_string());
+            state.values.remove(secret_ref);
+            Ok(())
+        }
+    }
+
+    fn d057_keychain_config(
+        epoch: u64,
+        secret_ref: impl Into<String>,
+    ) -> openlife_core::mcp_audit::AuditKeyConfig {
+        openlife_core::mcp_audit::AuditKeyConfig {
+            mode: openlife_core::mcp_audit::KeyMode::Keychain,
+            salt_b64: None,
+            env_var: None,
+            key_ref: Some(secret_ref.into()),
+            epoch,
+            created_at: format!("2026-07-13T00:00:{:02}Z", epoch % 60),
+        }
+    }
+
+    fn d057_key_ref(epoch: u64) -> String {
+        format!("{}{}", crate::secret_store::MCP_AUDIT_KEY_REF_PREFIX, epoch)
+    }
+
+    fn d057_write_keyring(
+        path: &std::path::Path,
+        configs: &[openlife_core::mcp_audit::AuditKeyConfig],
+    ) -> Vec<u8> {
+        let bytes = serde_json::to_vec_pretty(configs).expect("serialize D057 keyring fixture");
+        std::fs::write(path, &bytes).expect("write D057 keyring fixture");
+        bytes
+    }
+
+    fn d057_material(
+        config: openlife_core::mcp_audit::AuditKeyConfig,
+        key: [u8; 32],
+    ) -> openlife_core::mcp_audit::AuditKeyMaterial {
+        openlife_core::mcp_audit::AuditKeyMaterial { config, key }
+    }
+
+    fn d057_seed_audit_db(
+        db_path: &std::path::Path,
+        material: openlife_core::mcp_audit::AuditKeyMaterial,
+        tool_name: &str,
+    ) {
+        let store = McpAuditStore::with_key_materials(db_path, vec![material])
+            .expect("create real file-backed D057 audit fixture");
+        store
+            .insert_log(
+                tool_name,
+                &serde_json::json!({"fixture": tool_name}),
+                "fixture-result",
+                true,
+                false,
+            )
+            .expect("seed real encrypted D057 audit row");
+    }
+
+    fn d057_store_mode(
+        result: &BootstrapResult,
+        store_name: &str,
+    ) -> crate::persistence_coordinator::PersistenceStoreMode {
+        result
+            .state
+            .persistence_coordinator
+            .snapshot()
+            .stores
+            .into_iter()
+            .find(|health| health.store == store_name)
+            .unwrap_or_else(|| panic!("missing persistence health for {store_name}"))
+            .mode
+    }
+
+    fn d057_audit_reads_fail_closed(result: &BootstrapResult) -> bool {
+        result
+            .state
+            .mcp_audit_store
+            .try_lock()
+            .expect("D057 audit store is not concurrently held")
+            .list_logs(10)
+            .is_err()
+    }
+
+    #[test]
+    fn d057_malformed_keyring_never_creates_secret_or_overwrites_bytes() {
+        use crate::persistence_coordinator::PersistenceStoreMode;
+
+        let directory = tempfile::tempdir().unwrap();
+        let keyring_path = directory.path().join("mcp_audit_keys.json");
+        let malformed_bytes = b"{ definitely-not-a-keyring\n".to_vec();
+        std::fs::write(&keyring_path, &malformed_bytes).unwrap();
+        let secrets = D057RecordingSecretStore::default();
+
+        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        let observed = (
+            secrets.mcp_set_refs(),
+            std::fs::read(&keyring_path).unwrap() == malformed_bytes,
+            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
+            d057_store_mode(&result, "McpAuditStore"),
+            d057_audit_reads_fail_closed(&result),
+        );
+
+        assert_eq!(
+            observed,
+            (
+                Vec::<String>::new(),
+                true,
+                PersistenceStoreMode::Unavailable,
+                PersistenceStoreMode::Unavailable,
+                true,
+            ),
+            "malformed authority must be preserved for recovery and cannot mint or activate a replacement key"
+        );
+    }
+
+    #[test]
+    fn d057_present_empty_json_keyring_is_invalid_not_first_boot() {
+        use crate::persistence_coordinator::PersistenceStoreMode;
+
+        let directory = tempfile::tempdir().unwrap();
+        let keyring_path = directory.path().join("mcp_audit_keys.json");
+        let original_bytes = b"[]\n".to_vec();
+        std::fs::write(&keyring_path, &original_bytes).unwrap();
+        let secrets = D057RecordingSecretStore::default();
+
+        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        let observed = (
+            secrets.mcp_set_refs(),
+            std::fs::read(&keyring_path).unwrap() == original_bytes,
+            !directory.path().join("mcp_audit.db").exists(),
+            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
+            d057_store_mode(&result, "McpAuditStore"),
+            d057_audit_reads_fail_closed(&result),
+        );
+
+        assert_eq!(
+            observed,
+            (
+                Vec::<String>::new(),
+                true,
+                true,
+                PersistenceStoreMode::Unavailable,
+                PersistenceStoreMode::Unavailable,
+                true,
+            ),
+            "an explicitly present empty keyring is invalid authority, not an absent first-boot marker"
+        );
+    }
+
+    #[test]
+    fn d057_key_epoch_and_reference_epoch_mismatch_is_rejected() {
+        use crate::persistence_coordinator::PersistenceStoreMode;
+
+        let directory = tempfile::tempdir().unwrap();
+        let keyring_path = directory.path().join("mcp_audit_keys.json");
+        let mismatched_ref = d057_key_ref(62);
+        let mismatched_config = d057_keychain_config(61, mismatched_ref.clone());
+        let original_bytes = d057_write_keyring(&keyring_path, &[mismatched_config]);
+        let secrets = D057RecordingSecretStore::default();
+        secrets.preload_key(&mismatched_ref, [0x61; 32]);
+
+        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        let observed = (
+            secrets.mcp_set_refs(),
+            std::fs::read(&keyring_path).unwrap() == original_bytes,
+            !directory.path().join("mcp_audit.db").exists(),
+            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
+            d057_store_mode(&result, "McpAuditStore"),
+            d057_audit_reads_fail_closed(&result),
+        );
+
+        assert_eq!(
+            observed,
+            (
+                Vec::<String>::new(),
+                true,
+                true,
+                PersistenceStoreMode::Unavailable,
+                PersistenceStoreMode::Unavailable,
+                true,
+            ),
+            "a key reference naming a different epoch is not valid keyring authority"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn d057_unreadable_keyring_never_creates_secret_or_overwrites_bytes() {
+        use crate::persistence_coordinator::PersistenceStoreMode;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let keyring_path = directory.path().join("mcp_audit_keys.json");
+        let secret_ref = d057_key_ref(7);
+        let config = d057_keychain_config(7, secret_ref.clone());
+        let original_bytes = d057_write_keyring(&keyring_path, &[config]);
+        let secrets = D057RecordingSecretStore::default();
+        secrets.preload_key(&secret_ref, [0x07; 32]);
+        let mut unreadable = std::fs::metadata(&keyring_path).unwrap().permissions();
+        unreadable.set_mode(0o000);
+        std::fs::set_permissions(&keyring_path, unreadable).unwrap();
+
+        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        let mut readable = std::fs::metadata(&keyring_path).unwrap().permissions();
+        readable.set_mode(0o600);
+        std::fs::set_permissions(&keyring_path, readable).unwrap();
+        let observed = (
+            secrets.mcp_set_refs(),
+            std::fs::read(&keyring_path).unwrap() == original_bytes,
+            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
+            d057_store_mode(&result, "McpAuditStore"),
+            d057_audit_reads_fail_closed(&result),
+        );
+
+        assert_eq!(
+            observed,
+            (
+                Vec::<String>::new(),
+                true,
+                PersistenceStoreMode::Unavailable,
+                PersistenceStoreMode::Unavailable,
+                true,
+            ),
+            "an unreadable authority file must remain untouched and cannot be treated as first boot"
+        );
+    }
+
+    #[test]
+    fn d057_missing_keyring_with_nonempty_audit_db_fails_closed() {
+        use crate::persistence_coordinator::PersistenceStoreMode;
+
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("mcp_audit.db");
+        let historical_ref = d057_key_ref(10);
+        let historical_config = d057_keychain_config(10, historical_ref.clone());
+        d057_seed_audit_db(
+            &db_path,
+            d057_material(historical_config, [0x10; 32]),
+            "historical_nonempty_fixture",
+        );
+        let secrets = D057RecordingSecretStore::default();
+        secrets.preload_key(&historical_ref, [0x10; 32]);
+
+        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        let observed = (
+            secrets.mcp_set_refs(),
+            !directory.path().join("mcp_audit_keys.json").exists(),
+            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
+            d057_store_mode(&result, "McpAuditStore"),
+            d057_audit_reads_fail_closed(&result),
+        );
+
+        assert_eq!(
+            observed,
+            (
+                Vec::<String>::new(),
+                true,
+                PersistenceStoreMode::Unavailable,
+                PersistenceStoreMode::Unavailable,
+                true,
+            ),
+            "an existing nonempty audit database makes a missing keyring recovery-required, never first boot"
+        );
+    }
+
+    #[test]
+    fn d057_missing_keyring_with_existing_valid_empty_audit_db_is_true_first_boot() {
+        use crate::persistence_coordinator::PersistenceStoreMode;
+
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("mcp_audit.db");
+        let fixture_ref = d057_key_ref(11);
+        let fixture_config = d057_keychain_config(11, fixture_ref);
+        let empty_store = McpAuditStore::with_key_materials(
+            &db_path,
+            vec![d057_material(fixture_config, [0x11; 32])],
+        )
+        .expect("create a real, schema-valid empty audit database");
+        assert!(empty_store.list_logs(1).unwrap().is_empty());
+        drop(empty_store);
+        let secrets = D057RecordingSecretStore::default();
+
+        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        let keyring_bytes = std::fs::read(directory.path().join("mcp_audit_keys.json"))
+            .expect("true first boot persists the new key reference");
+        let keyring: Vec<openlife_core::mcp_audit::AuditKeyConfig> =
+            serde_json::from_slice(&keyring_bytes).expect("new keyring is valid JSON authority");
+        let logs = result
+            .state
+            .mcp_audit_store
+            .try_lock()
+            .expect("valid empty audit store lock")
+            .list_logs(10)
+            .expect("valid empty audit store remains available");
+
+        assert_eq!(secrets.mcp_set_refs().len(), 1);
+        assert_eq!(keyring.len(), 1);
+        assert_eq!(
+            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
+            PersistenceStoreMode::ReadWriteCanonical
+        );
+        assert_eq!(
+            d057_store_mode(&result, "McpAuditStore"),
+            PersistenceStoreMode::ReadWriteCanonical
+        );
+        assert!(logs.is_empty());
+    }
+
+    #[test]
+    fn d057_missing_keyring_with_untrusted_audit_db_fails_closed_without_mutation() {
+        use crate::persistence_coordinator::PersistenceStoreMode;
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mut observations = Vec::new();
+        let mut case_names = vec!["corrupt", "non_audit_sqlite"];
+        #[cfg(unix)]
+        case_names.push("unreadable");
+        for case_name in case_names {
+            let directory = tempfile::tempdir().unwrap();
+            let db_path = directory.path().join("mcp_audit.db");
+            match case_name {
+                "corrupt" => std::fs::write(&db_path, b"not-a-sqlite-database").unwrap(),
+                "non_audit_sqlite" => {
+                    let connection = rusqlite::Connection::open(&db_path).unwrap();
+                    connection
+                        .execute("CREATE TABLE unrelated_fact (id INTEGER PRIMARY KEY)", [])
+                        .unwrap();
+                }
+                "unreadable" => {
+                    #[cfg(unix)]
+                    {
+                        let fixture_ref = d057_key_ref(12);
+                        let fixture_config = d057_keychain_config(12, fixture_ref);
+                        let empty_store = McpAuditStore::with_key_materials(
+                            &db_path,
+                            vec![d057_material(fixture_config, [0x12; 32])],
+                        )
+                        .unwrap();
+                        drop(empty_store);
+                        let mut permissions = std::fs::metadata(&db_path).unwrap().permissions();
+                        permissions.set_mode(0o000);
+                        std::fs::set_permissions(&db_path, permissions).unwrap();
+                    }
+                    #[cfg(not(unix))]
+                    unreachable!("unreadable case is only registered on Unix");
+                }
+                _ => unreachable!(),
+            }
+            #[cfg(unix)]
+            let original_bytes = if case_name == "unreadable" {
+                let mut readable = std::fs::metadata(&db_path).unwrap().permissions();
+                readable.set_mode(0o600);
+                std::fs::set_permissions(&db_path, readable).unwrap();
+                let bytes = std::fs::read(&db_path).unwrap();
+                let mut unreadable = std::fs::metadata(&db_path).unwrap().permissions();
+                unreadable.set_mode(0o000);
+                std::fs::set_permissions(&db_path, unreadable).unwrap();
+                bytes
+            } else {
+                std::fs::read(&db_path).unwrap()
+            };
+            #[cfg(not(unix))]
+            let original_bytes = std::fs::read(&db_path).unwrap();
+            let secrets = D057RecordingSecretStore::default();
+
+            let result =
+                bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+            #[cfg(unix)]
+            if case_name == "unreadable" {
+                let mut readable = std::fs::metadata(&db_path).unwrap().permissions();
+                readable.set_mode(0o600);
+                std::fs::set_permissions(&db_path, readable).unwrap();
+            }
+            observations.push((
+                case_name,
+                secrets.mcp_set_refs(),
+                !directory.path().join("mcp_audit_keys.json").exists(),
+                std::fs::read(&db_path).unwrap() == original_bytes,
+                d057_store_mode(&result, "McpAuditKeyReferenceStore"),
+                d057_store_mode(&result, "McpAuditStore"),
+                d057_audit_reads_fail_closed(&result),
+            ));
+        }
+
+        let mut expected = vec![
+            (
+                "corrupt",
+                Vec::<String>::new(),
+                true,
+                true,
+                PersistenceStoreMode::Unavailable,
+                PersistenceStoreMode::Unavailable,
+                true,
+            ),
+            (
+                "non_audit_sqlite",
+                Vec::<String>::new(),
+                true,
+                true,
+                PersistenceStoreMode::Unavailable,
+                PersistenceStoreMode::Unavailable,
+                true,
+            ),
+        ];
+        #[cfg(unix)]
+        expected.push((
+            "unreadable",
+            Vec::<String>::new(),
+            true,
+            true,
+            PersistenceStoreMode::Unavailable,
+            PersistenceStoreMode::Unavailable,
+            true,
+        ));
+        assert_eq!(
+            observations,
+            expected,
+            "missing keyring cannot be treated as first boot unless an existing audit DB is proven schema-valid and empty"
+        );
+    }
+
+    #[test]
+    fn d057_duplicate_key_epochs_are_rejected_without_rewrite() {
+        use crate::persistence_coordinator::PersistenceStoreMode;
+
+        let directory = tempfile::tempdir().unwrap();
+        let keyring_path = directory.path().join("mcp_audit_keys.json");
+        let first_ref = format!("{}20-a", crate::secret_store::MCP_AUDIT_KEY_REF_PREFIX);
+        let second_ref = format!("{}20-b", crate::secret_store::MCP_AUDIT_KEY_REF_PREFIX);
+        let configs = vec![
+            d057_keychain_config(20, first_ref.clone()),
+            d057_keychain_config(20, second_ref.clone()),
+        ];
+        let original_bytes = d057_write_keyring(&keyring_path, &configs);
+        let secrets = D057RecordingSecretStore::default();
+        secrets.preload_key(&first_ref, [0x20; 32]);
+        secrets.preload_key(&second_ref, [0x21; 32]);
+
+        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        let observed = (
+            secrets.mcp_set_refs(),
+            std::fs::read(&keyring_path).unwrap() == original_bytes,
+            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
+            d057_store_mode(&result, "McpAuditStore"),
+            d057_audit_reads_fail_closed(&result),
+        );
+
+        assert_eq!(
+            observed,
+            (
+                Vec::<String>::new(),
+                true,
+                PersistenceStoreMode::Unavailable,
+                PersistenceStoreMode::Unavailable,
+                true,
+            ),
+            "duplicate epochs are ambiguous authority and must not be silently deduplicated"
+        );
+    }
+
+    #[test]
+    fn d057_nonmonotonic_key_epochs_are_rejected_without_rewrite() {
+        use crate::persistence_coordinator::PersistenceStoreMode;
+
+        let directory = tempfile::tempdir().unwrap();
+        let keyring_path = directory.path().join("mcp_audit_keys.json");
+        let newer_ref = d057_key_ref(31);
+        let older_ref = d057_key_ref(30);
+        let configs = vec![
+            d057_keychain_config(31, newer_ref.clone()),
+            d057_keychain_config(30, older_ref.clone()),
+        ];
+        let original_bytes = d057_write_keyring(&keyring_path, &configs);
+        let secrets = D057RecordingSecretStore::default();
+        secrets.preload_key(&newer_ref, [0x31; 32]);
+        secrets.preload_key(&older_ref, [0x30; 32]);
+
+        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        let observed = (
+            secrets.mcp_set_refs(),
+            std::fs::read(&keyring_path).unwrap() == original_bytes,
+            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
+            d057_store_mode(&result, "McpAuditStore"),
+            d057_audit_reads_fail_closed(&result),
+        );
+
+        assert_eq!(
+            observed,
+            (
+                Vec::<String>::new(),
+                true,
+                PersistenceStoreMode::Unavailable,
+                PersistenceStoreMode::Unavailable,
+                true,
+            ),
+            "keyring order is part of the epoch history and must not be silently normalized"
+        );
+    }
+
+    #[test]
+    fn d057_existing_db_epoch_not_covered_by_keyring_is_unavailable() {
+        use crate::persistence_coordinator::PersistenceStoreMode;
+
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("mcp_audit.db");
+        let historical_ref = d057_key_ref(40);
+        let historical_config = d057_keychain_config(40, historical_ref.clone());
+        let historical_material = d057_material(historical_config.clone(), [0x40; 32]);
+        d057_seed_audit_db(
+            &db_path,
+            historical_material.clone(),
+            "uncovered_epoch_fixture",
+        );
+        let current_ref = d057_key_ref(41);
+        let current_config = d057_keychain_config(41, current_ref.clone());
+        let keyring_path = directory.path().join("mcp_audit_keys.json");
+        let original_keyring = d057_write_keyring(&keyring_path, &[current_config]);
+        let secrets = D057RecordingSecretStore::default();
+        secrets.preload_key(&current_ref, [0x41; 32]);
+
+        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        let observed = (
+            secrets.mcp_set_refs(),
+            std::fs::read(&keyring_path).unwrap() == original_keyring,
+            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
+            d057_store_mode(&result, "McpAuditStore"),
+            d057_audit_reads_fail_closed(&result),
+        );
+
+        assert_eq!(
+            observed,
+            (
+                Vec::<String>::new(),
+                true,
+                PersistenceStoreMode::Unavailable,
+                PersistenceStoreMode::Unavailable,
+                true,
+            ),
+            "an incomplete keyring is not a healthy key-reference authority; every durable audit epoch must be covered before either owner can become available"
+        );
+        drop(result);
+
+        let original_store = McpAuditStore::with_key_materials(&db_path, vec![historical_material])
+            .expect("original authority still opens the unchanged database");
+        let logs = original_store
+            .list_logs(10)
+            .expect("the failed bootstrap must not corrupt historical rows");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].tool_name, "uncovered_epoch_fixture");
+    }
+
+    #[test]
+    fn d057_wrong_keychain_material_cannot_reencrypt_or_damage_historical_rows() {
+        use crate::persistence_coordinator::PersistenceStoreMode;
+
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("mcp_audit.db");
+        let control_db_path = directory.path().join("mcp_audit_control.db");
+        let secret_ref = d057_key_ref(50);
+        let config = d057_keychain_config(50, secret_ref.clone());
+        let correct_material = d057_material(config.clone(), [0x50; 32]);
+        d057_seed_audit_db(
+            &db_path,
+            correct_material.clone(),
+            "wrong_key_historical_fixture",
+        );
+        {
+            let connection = rusqlite::Connection::open(&db_path).unwrap();
+            assert_eq!(
+                connection
+                    .execute("UPDATE mcp_log SET payload_minimized_version = 0", [])
+                    .unwrap(),
+                1,
+                "fixture must exercise the legacy migration branch"
+            );
+        }
+        let original_db_bytes = std::fs::read(&db_path).unwrap();
+        std::fs::write(&control_db_path, &original_db_bytes).unwrap();
+        let expected_logs = {
+            let control =
+                McpAuditStore::with_key_materials(&control_db_path, vec![correct_material.clone()])
+                    .expect("the correct historical key performs the legitimate migration");
+            serde_json::to_string(&control.list_logs(10).unwrap()).unwrap()
+        };
+        let keyring_path = directory.path().join("mcp_audit_keys.json");
+        let original_keyring = d057_write_keyring(&keyring_path, &[config]);
+        let secrets = D057RecordingSecretStore::default();
+        secrets.preload_key(&secret_ref, [0x5F; 32]);
+
+        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        let reference_mode = d057_store_mode(&result, "McpAuditKeyReferenceStore");
+        let audit_mode = d057_store_mode(&result, "McpAuditStore");
+        let audit_reads_fail_closed = d057_audit_reads_fail_closed(&result);
+        let db_bytes_unchanged = std::fs::read(&db_path).unwrap() == original_db_bytes;
+        drop(result);
+        let original_authority =
+            McpAuditStore::with_key_materials(&db_path, vec![correct_material])
+                .expect("the correct historical key can still inspect the database");
+        let actual_logs =
+            serde_json::to_string(&original_authority.list_logs(10).unwrap()).unwrap();
+        let observed = (
+            secrets.mcp_set_refs(),
+            std::fs::read(&keyring_path).unwrap() == original_keyring,
+            db_bytes_unchanged,
+            reference_mode,
+            audit_mode,
+            audit_reads_fail_closed,
+            actual_logs == expected_logs,
+        );
+
+        assert_eq!(
+            observed,
+            (
+                Vec::<String>::new(),
+                true,
+                true,
+                PersistenceStoreMode::Unavailable,
+                PersistenceStoreMode::Unavailable,
+                true,
+                true,
+            ),
+            "a structurally valid but incorrect credential must fail closed before migration writes and preserve old-key readability"
+        );
+    }
+
+    #[test]
+    fn d057_true_first_boot_creates_one_key_and_restart_reuses_it() {
+        use crate::persistence_coordinator::PersistenceStoreMode;
+
+        let directory = tempfile::tempdir().unwrap();
+        let secrets = D057RecordingSecretStore::default();
+        let first = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        let first_keyring = std::fs::read(directory.path().join("mcp_audit_keys.json")).unwrap();
+        {
+            let audit = first
+                .state
+                .mcp_audit_store
+                .try_lock()
+                .expect("first-boot audit store lock");
+            audit
+                .insert_log(
+                    "first_boot_fixture",
+                    &serde_json::json!({"first": true}),
+                    "created-once",
+                    true,
+                    false,
+                )
+                .expect("true first boot activates the persisted key");
+        }
+        assert_eq!(
+            d057_store_mode(&first, "McpAuditKeyReferenceStore"),
+            PersistenceStoreMode::ReadWriteCanonical
+        );
+        assert_eq!(secrets.mcp_set_refs().len(), 1);
+        drop(first);
+
+        let restarted =
+            bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        assert_eq!(secrets.mcp_set_refs().len(), 1);
+        assert_eq!(
+            std::fs::read(directory.path().join("mcp_audit_keys.json")).unwrap(),
+            first_keyring
+        );
+        let logs = restarted
+            .state
+            .mcp_audit_store
+            .try_lock()
+            .expect("restart audit store lock")
+            .list_logs(10)
+            .expect("persisted first-boot key remains readable after restart");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].tool_name, "first_boot_fixture");
+    }
+
+    #[test]
+    fn d057_legal_legacy_and_keychain_restart_remains_readable() {
+        use crate::persistence_coordinator::PersistenceStoreMode;
+
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("mcp_audit.db");
+        let legacy_store = McpAuditStore::new(&db_path);
+        legacy_store
+            .insert_log(
+                "legacy_epoch_fixture",
+                &serde_json::json!({"legacy": true}),
+                "legacy-row",
+                true,
+                false,
+            )
+            .unwrap();
+        let legacy_config = legacy_store.key_config().clone();
+        drop(legacy_store);
+
+        let current_ref = d057_key_ref(legacy_config.epoch + 1);
+        let current_config = d057_keychain_config(legacy_config.epoch + 1, current_ref.clone());
+        d057_write_keyring(
+            &directory.path().join("mcp_audit_keys.json"),
+            &[legacy_config, current_config],
+        );
+        let secrets = D057RecordingSecretStore::default();
+        secrets.preload_key(&current_ref, [0x51; 32]);
+
+        let first_restart =
+            bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        assert_eq!(
+            d057_store_mode(&first_restart, "McpAuditStore"),
+            PersistenceStoreMode::ReadWriteCanonical
+        );
+        {
+            let audit = first_restart
+                .state
+                .mcp_audit_store
+                .try_lock()
+                .expect("legacy transition audit lock");
+            let logs = audit.list_logs(10).expect("legacy row remains readable");
+            assert_eq!(logs.len(), 1);
+            assert_eq!(logs[0].tool_name, "legacy_epoch_fixture");
+            audit
+                .insert_log(
+                    "keychain_epoch_fixture",
+                    &serde_json::json!({"keychain": true}),
+                    "keychain-row",
+                    true,
+                    false,
+                )
+                .expect("new rows use the persisted keychain epoch");
+        }
+        drop(first_restart);
+
+        let second_restart =
+            bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        let logs = second_restart
+            .state
+            .mcp_audit_store
+            .try_lock()
+            .expect("second legacy transition audit lock")
+            .list_logs(10)
+            .expect("both legal epochs remain readable after restart");
+        let mut tool_names = logs
+            .iter()
+            .map(|log| log.tool_name.as_str())
+            .collect::<Vec<_>>();
+        tool_names.sort();
+        assert_eq!(
+            tool_names,
+            vec!["keychain_epoch_fixture", "legacy_epoch_fixture"]
+        );
+        assert!(secrets.mcp_set_refs().is_empty());
+    }
+
+    #[test]
+    fn d057_reference_save_failure_rolls_back_secret_and_never_activates_it() {
+        use crate::persistence_coordinator::PersistenceStoreMode;
+
+        let directory = tempfile::tempdir().unwrap();
+        let keyring_path = directory.path().join("mcp_audit_keys.json");
+        std::fs::create_dir(&keyring_path).unwrap();
+        let secrets = D057RecordingSecretStore::default();
+
+        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        let set_refs = secrets.mcp_set_refs();
+        let deleted_refs = secrets.mcp_deleted_refs();
+        let observed = (
+            set_refs.len(),
+            deleted_refs == set_refs,
+            secrets.live_mcp_refs().is_empty(),
+            keyring_path.is_dir(),
+            !directory.path().join("mcp_audit.db").exists(),
+            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
+            d057_store_mode(&result, "McpAuditStore"),
+            d057_audit_reads_fail_closed(&result),
+        );
+
+        assert_eq!(
+            observed,
+            (
+                1,
+                true,
+                true,
+                true,
+                true,
+                PersistenceStoreMode::Unavailable,
+                PersistenceStoreMode::Unavailable,
+                true,
+            ),
+            "a key is not authoritative until its reference is durably saved; persistence failure must roll it back before audit-store construction"
+        );
+    }
+
     async fn seed_failed_main_chat_owner_fixture(
         state: &Arc<AppState>,
         chat_session_id: &str,
