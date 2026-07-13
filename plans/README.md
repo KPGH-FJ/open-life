@@ -48,6 +48,7 @@ The shipped product must have:
 - `plans/openlife_backend_remediation_v4_phase0_evidence.md`
 - `plans/openlife_backend_d068_authenticated_payload_red_matrix.md`
 - `plans/openlife_backend_d057_pre_manifest_epoch_waiver.md`
+- `plans/openlife_backend_d063_contract_adapter_waiver.md`
 - `plans/adr/0014-explicit-user-memory-write-lane.md`
 - `plans/adr/0015-transient-state-command-lane.md`
 

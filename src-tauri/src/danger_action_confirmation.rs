@@ -655,6 +655,73 @@ mod tests {
     }
 
     #[test]
+    fn d063_cleanup_native_grant_is_exact_scope_and_single_use() {
+        let authority = test_authority();
+        let session = authority.local_session_binding("main").unwrap();
+        let challenge = authority
+            .create_challenge("mcp_audit_cleanup", &[], 0, &session, 900)
+            .unwrap();
+        let arguments = arguments_digest(&serde_json::json!({"retention_days": 30}));
+
+        let missing = authority
+            .begin_or_consume(GrantConsumptionRequest {
+                challenge_id: "danger-challenge:missing",
+                action_type: "mcp_audit_cleanup",
+                requested_target: None,
+                expected_affected_count: 0,
+                arguments_digest: &arguments,
+                local_session_binding: &session,
+                now_millis: 901,
+            })
+            .unwrap_err();
+        assert!(missing.message().contains("fresh server-issued"));
+
+        let wrong_scope = authority
+            .begin_or_consume(GrantConsumptionRequest {
+                challenge_id: &challenge,
+                action_type: "mcp_audit_key_rotation",
+                requested_target: None,
+                expected_affected_count: 0,
+                arguments_digest: &arguments,
+                local_session_binding: &session,
+                now_millis: 901,
+            })
+            .unwrap_err();
+        assert!(wrong_scope.message().contains("scope does not match"));
+
+        let step = authority
+            .begin_or_consume(GrantConsumptionRequest {
+                challenge_id: &challenge,
+                action_type: "mcp_audit_cleanup",
+                requested_target: None,
+                expected_affected_count: 0,
+                arguments_digest: &arguments,
+                local_session_binding: &session,
+                now_millis: 902,
+            })
+            .unwrap();
+        let AuthorizationStep::NativePromptRequired(ticket) = step else {
+            panic!("D063 cleanup must require a Rust-owned native prompt");
+        };
+        authority
+            .confirm_and_consume(&ticket, &session, 903)
+            .unwrap();
+
+        let replay = authority
+            .begin_or_consume(GrantConsumptionRequest {
+                challenge_id: &challenge,
+                action_type: "mcp_audit_cleanup",
+                requested_target: None,
+                expected_affected_count: 0,
+                arguments_digest: &arguments,
+                local_session_binding: &session,
+                now_millis: 904,
+            })
+            .unwrap_err();
+        assert!(replay.message().contains("already consumed"));
+    }
+
+    #[test]
     fn random_native_grant_is_scope_bound_and_single_use() {
         let authority = test_authority();
         let (challenge, session) = issue_pending(&authority, &["run-1"], 1, 1_000);

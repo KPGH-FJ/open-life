@@ -124,6 +124,9 @@ mod backend_remediation_phase2_tests;
 mod backend_remediation_d064_tests;
 
 #[cfg(test)]
+mod backend_remediation_d063_tests;
+
+#[cfg(test)]
 mod backend_remediation_d068_tests;
 
 #[cfg(test)]
