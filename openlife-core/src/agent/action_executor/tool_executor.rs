@@ -2138,6 +2138,117 @@ fn manifest_risk_level(manifest: &ToolManifest) -> RiskLevel {
 }
 
 #[cfg(test)]
+pub(crate) struct SimulatedObservedReadContractFixture {
+    pub(crate) store: crate::agent::AgentRunStore,
+    pub(crate) run: crate::agent::AgentRun,
+    pub(crate) observed_body: String,
+    pub(crate) tool_receipt: crate::tool_execution_receipt::ToolExecutionReceipt,
+}
+
+/// Build a typed, simulated ToolExecutor -> BoundContentReceiptIssuer ->
+/// AgentRunStore graph for Core contract tests. The adapter result and
+/// ToolExecutionReceipt are test fixtures, not runtime-execution evidence and
+/// never receive product or live-provider credit. This helper does not mint an
+/// alternate receipt shape or evaluate any expected outcome.
+#[cfg(test)]
+pub(crate) fn build_simulated_observed_read_contract_fixture(
+    observed_body: &str,
+) -> SimulatedObservedReadContractFixture {
+    use crate::agent::action_executor::{
+        ActionExecutor, ActionExecutorConfig, AgentActionRequest, BoundContentReceiptIssuer,
+    };
+    use crate::tool_manifest::{ToolIdempotencyContract, ToolManifest, ToolSource};
+
+    let mut manifest = ToolManifest::new(
+        "d051.contract.read",
+        "Build one simulated read observation for a Core contract test",
+        serde_json::json!({"type": "object"}),
+        "low",
+        "1",
+        ToolSource::BuiltIn,
+    );
+    manifest.id = "builtin.d051.contract.read".into();
+    manifest.risk_level = "low".into();
+    manifest.capabilities = vec!["read".into()];
+    manifest.action_type = "read".into();
+    manifest.idempotency_contract = ToolIdempotencyContract::Idempotent;
+
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let request = AgentActionRequest {
+        action_type: "read".into(),
+        target: manifest.name.clone(),
+        input: serde_json::json!({"arguments": {}}),
+        source_run_id: Some(run_id.clone()),
+        step_index: 1,
+    };
+    let result = ToolCallInternalResult {
+        success: true,
+        output: Some(observed_body.to_string()),
+        error: None,
+    };
+    let store = crate::agent::AgentRunStore::new_in_memory().expect("D051 contract AgentRunStore");
+    let mut run = crate::agent::AgentRun::new_chat_run("d051-contract", "");
+    run.id = run_id.clone();
+    store.create_run(&run).expect("create D051 contract run");
+
+    let executor = ActionExecutor::new(ActionExecutorConfig::default());
+    let (mut action, mut observation, admission) = executor
+        .build_success_action_observation(
+            &manifest.name,
+            &serde_json::json!({}),
+            &result,
+            Some(&manifest),
+            &request,
+        )
+        .expect("build simulated D051 read adapter result");
+    let output_receipt = BoundContentReceiptIssuer::issue_bound_content_receipt(
+        &store,
+        admission.expect("D051 observed-body admission"),
+        &action,
+        &observation,
+    )
+    .expect("issue typed D051 bound-content receipt fixture");
+    action
+        .react_trace
+        .as_mut()
+        .expect("D051 action trace")
+        .output_receipt = Some(output_receipt);
+    observation.react_trace = None;
+
+    let tool_receipt =
+        crate::tool_execution_receipt::ToolExecutionReceipt::test_observed_local_read(
+            Some(run_id.clone()),
+            Some(manifest.id.clone()),
+            "d051 simulated local read fixture".into(),
+            true,
+        )
+        .test_bound_to_action(
+            &run_id,
+            &action.id,
+            &action.action_type,
+            action.target.as_deref(),
+            &action.input,
+        );
+    action.runtime_execution_receipt = Some(tool_receipt.clone());
+    run.actions.push(action);
+    run.observations.push(observation);
+    store
+        .update_run(&run)
+        .expect("persist D051 minimized action graph");
+    let run = store
+        .get_run(&run_id)
+        .expect("reload D051 contract run")
+        .expect("D051 contract run exists");
+
+    SimulatedObservedReadContractFixture {
+        store,
+        run,
+        observed_body: observed_body.to_string(),
+        tool_receipt,
+    }
+}
+
+#[cfg(test)]
 mod bound_content_receipt_tests {
     use super::*;
     use crate::agent::action_executor::{ActionExecutor, ActionExecutorConfig};

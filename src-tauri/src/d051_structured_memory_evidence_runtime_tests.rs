@@ -1,177 +1,825 @@
-use crate::main_chat_d051_test_support::{
-    run_d051_runtime_case, D051RuntimeMode, D051RuntimeTestOutcome,
-};
-use serde_json::Value;
+use openlife_core::agent::main_chat_agent_v1::{ExecutionTranscriptEntry, QueuedExecutionAction};
+use openlife_core::agent::{AgentProposal, AgentRun};
+use openlife_core::llm::ChatMessage;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-const FIXTURE: &str =
-    include_str!("../../openlife-core/tests/fixtures/d051_structured_memory_evidence_cases.json");
+const USER_PROMPT: &str = "Read file `src-tauri/test-fixtures/d051_useful_memory.md` and create a memory proposal only if the observation contains a useful supported personal fact.";
+const PROVIDER_CONTROL_PROMPT: &str = "Give one concise focus tip for the D051 provider control.";
+const PROVIDER_CONTROL_REPLY: &str = "D051_PROVIDER_CONTROL_OK";
+const OBSERVATION_BODY: &str = include_str!("../test-fixtures/d051_useful_memory.md");
+const RAW_SENTINEL: &str = "D051_RAW_OBSERVATION_SENTINEL";
+const CANDIDATE_TEXT: &str = "The user works in UTC.";
 
-fn fixture() -> Value {
-    serde_json::from_str(FIXTURE).expect("D051 structured-memory fixture must be valid JSON")
-}
-
-fn case(case_id: &str) -> Value {
-    fixture()["cases"]
-        .as_array()
-        .expect("D051 cases array")
+fn sha256(value: &[u8]) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, value);
+    let hex = digest
+        .as_ref()
         .iter()
-        .find(|candidate| candidate["id"] == case_id)
-        .unwrap_or_else(|| panic!("missing frozen D051 runtime case: {case_id}"))
-        .clone()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("sha256:{hex}")
 }
 
-fn memory_status(outcome: &D051RuntimeTestOutcome) -> Option<&str> {
-    outcome.terminal["finalDelivery"]["memoryEvidenceStatus"].as_str()
+fn observation_ref_placeholder() -> &'static str {
+    // This token exists only in the local HTTP server's response template. The
+    // server replaces it with the exact observation ref it captures from the
+    // real final provider request before any bytes are returned to OpenLife.
+    "$OPENLIFE_FINAL_CONTEXT_OBSERVATION_REF"
 }
 
-fn memory_reason(outcome: &D051RuntimeTestOutcome) -> Option<&str> {
-    outcome.terminal["finalDelivery"]["memoryEvidenceReason"].as_str()
+fn captured_observation_ref(request: &str) -> Option<&str> {
+    let start = request.find("agent-run://")?;
+    let tail = &request[start..];
+    let end = tail
+        .find(|ch: char| ch == '"' || ch == '\\' || ch.is_whitespace() || ch == ']')
+        .unwrap_or(tail.len());
+    (end > "agent-run://".len()).then_some(&tail[..end])
 }
 
-fn delivery_status(outcome: &D051RuntimeTestOutcome) -> Option<&str> {
-    outcome.terminal["finalDelivery"]["status"].as_str()
+fn positive_final_response() -> String {
+    let start = OBSERVATION_BODY
+        .find(CANDIDATE_TEXT)
+        .expect("D051 fixture candidate");
+    let end = start + CANDIDATE_TEXT.len();
+    serde_json::json!({
+        "final": "The governed read completed.",
+        "actions": [],
+        "thought_summary": "The observation is sufficient.",
+        "warnings": [],
+        "memory_evidence_schema": "openlife.memory_evidence.v1",
+        "memory_evidence": [{
+            "candidate_text": CANDIDATE_TEXT,
+            "subject": "current_user",
+            "assertion": "asserted_fact",
+            "modality": "asserted",
+            "confidence": 0.93,
+            "evidence": {
+                "observation_ref": observation_ref_placeholder(),
+                "start_byte": start,
+                "end_byte": end,
+                "sha256": sha256(&OBSERVATION_BODY.as_bytes()[start..end]),
+            }
+        }]
+    })
+    .to_string()
 }
 
-fn receipt_memory_status(outcome: &D051RuntimeTestOutcome) -> Option<&str> {
-    outcome.execution_receipt["memoryEvidenceStatus"].as_str()
+fn no_extractor_final_response() -> String {
+    serde_json::json!({
+        "final": "The governed read completed without structured Memory evidence.",
+        "actions": [],
+        "thought_summary": "The observation is sufficient for the answer only.",
+        "warnings": []
+    })
+    .to_string()
 }
 
-fn receipt_memory_reason(outcome: &D051RuntimeTestOutcome) -> Option<&str> {
-    outcome.execution_receipt["memoryEvidenceReason"].as_str()
+fn read_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+    let mut request_bytes = Vec::new();
+    let mut buffer = [0u8; 8192];
+    let mut expected_len = None;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match std::io::Read::read(stream, &mut buffer) {
+            Ok(0) => break,
+            Ok(read) => request_bytes.extend_from_slice(&buffer[..read]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                continue;
+            }
+            Err(_) => break,
+        }
+        let request = String::from_utf8_lossy(&request_bytes);
+        if expected_len.is_none() {
+            if let Some((headers, _)) = request.split_once("\r\n\r\n") {
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                expected_len = Some(headers.len() + 4 + content_length);
+            }
+        }
+        if expected_len.is_some_and(|expected| request_bytes.len() >= expected) {
+            break;
+        }
+    }
+    request_bytes
 }
 
-#[tokio::test]
-async fn d051_runtime_uses_the_existing_final_provider_request_without_a_third_call() {
-    let case = case("positive_same_final_exact_observation");
-    let outcome = run_d051_runtime_case(&fixture(), &case, D051RuntimeMode::Buffered)
-        .await
-        .expect("buffered D051 positive runtime case");
-
-    assert_eq!(memory_status(&outcome), Some("proposal_staged"));
-    assert_eq!(receipt_memory_status(&outcome), Some("proposal_staged"));
-    assert_eq!(
-        memory_reason(&outcome),
-        Some("same_final_provider_evidence_admitted")
-    );
-    assert_eq!(
-        receipt_memory_reason(&outcome),
-        Some("same_final_provider_evidence_admitted")
-    );
-    assert_eq!(
-        delivery_status(&outcome),
-        Some("completed_with_pending_items")
-    );
-    assert_eq!(outcome.proposal_count, 1);
-    assert_eq!(outcome.provider_request_count, 2);
-    assert_eq!(outcome.final_provider_request_ordinal, Some(2));
-    assert_eq!(outcome.exact_observation_manifest_matches, 1);
-    assert!(outcome.final_provider_receipt_matches_manifest);
-    assert!(outcome.canonical_answer_preserved);
-    assert_eq!(outcome.late_proposal_count, 0);
-}
-
-#[tokio::test]
-async fn d051_provider_extractor_or_parse_unavailable_is_partial_not_fake_completed() {
-    for case_id in [
-        "provider_unavailable",
-        "extractor_unavailable",
-        "extractor_parse_unavailable",
-    ] {
-        let case = case(case_id);
-        let outcome = run_d051_runtime_case(&fixture(), &case, D051RuntimeMode::Buffered)
-            .await
-            .unwrap_or_else(|error| panic!("{case_id} runtime outcome: {error}"));
-
-        assert_eq!(memory_status(&outcome), Some("unavailable"), "{case_id}");
-        assert_eq!(
-            receipt_memory_status(&outcome),
-            Some("unavailable"),
-            "{case_id}"
-        );
-        assert_eq!(
-            memory_reason(&outcome),
-            case["expectedReasonCode"].as_str(),
-            "{case_id}"
-        );
-        assert_eq!(
-            receipt_memory_reason(&outcome),
-            case["expectedReasonCode"].as_str(),
-            "{case_id}"
-        );
-        assert_eq!(
-            delivery_status(&outcome),
-            Some("completed_with_partial_evidence"),
-            "{case_id}"
-        );
-        assert_eq!(outcome.proposal_count, 0, "{case_id}");
-        assert!(outcome.canonical_answer_preserved, "{case_id}");
-        assert_eq!(outcome.provider_request_count, 2, "{case_id}");
-        assert_eq!(outcome.late_proposal_count, 0, "{case_id}");
+fn provider_http_response(request: &str, content: &str, index: usize) -> (String, String) {
+    let streaming = request
+        .split_once("\r\n\r\n")
+        .and_then(|(_, body)| serde_json::from_str::<serde_json::Value>(body).ok())
+        .and_then(|body| body.get("stream").and_then(serde_json::Value::as_bool))
+        .unwrap_or(false);
+    if streaming {
+        let chunk = serde_json::json!({
+            "id": format!("chatcmpl-d051-stream-{index}"),
+            "object": "chat.completion.chunk",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": content},
+                "finish_reason": null
+            }]
+        });
+        let terminal = serde_json::json!({
+            "id": format!("chatcmpl-d051-stream-{index}"),
+            "object": "chat.completion.chunk",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }]
+        });
+        (
+            "text/event-stream".into(),
+            format!("data: {chunk}\n\ndata: {terminal}\n\ndata: [DONE]\n\n"),
+        )
+    } else {
+        (
+            "application/json".into(),
+            serde_json::json!({
+                "id": format!("chatcmpl-d051-{index}"),
+                "object": "chat.completion",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": content},
+                    "finish_reason": "stop"
+                }]
+            })
+            .to_string(),
+        )
     }
 }
 
-#[tokio::test]
-async fn d051_buffered_and_streaming_have_identical_evidence_truth() {
-    let case = case("positive_same_final_exact_observation");
-    let buffered = run_d051_runtime_case(&fixture(), &case, D051RuntimeMode::Buffered)
-        .await
-        .expect("buffered D051 runtime case");
-    let streaming = run_d051_runtime_case(&fixture(), &case, D051RuntimeMode::Streaming)
-        .await
-        .expect("streaming D051 runtime case");
-
-    assert_eq!(memory_status(&buffered), memory_status(&streaming));
-    assert_eq!(memory_reason(&buffered), memory_reason(&streaming));
-    assert_eq!(
-        receipt_memory_status(&buffered),
-        receipt_memory_status(&streaming)
-    );
-    assert_eq!(
-        receipt_memory_reason(&buffered),
-        receipt_memory_reason(&streaming)
-    );
-    assert_eq!(delivery_status(&buffered), delivery_status(&streaming));
-    assert_eq!(buffered.proposal_count, streaming.proposal_count);
-    assert_eq!(
-        buffered.exact_observation_manifest_matches,
-        streaming.exact_observation_manifest_matches
-    );
-    assert_eq!(buffered.provider_request_count, 2);
-    assert_eq!(streaming.provider_request_count, 2);
-    assert!(buffered.final_provider_receipt_matches_manifest);
-    assert!(streaming.final_provider_receipt_matches_manifest);
+struct CapturedProvider {
+    requests: Arc<Mutex<Vec<String>>>,
+    control_count: Arc<AtomicUsize>,
+    generation_count: Arc<AtomicUsize>,
+    ranking_count: Arc<AtomicUsize>,
+    final_request_reached: Option<Arc<std::sync::atomic::AtomicBool>>,
+    final_response_release: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
-#[tokio::test]
-async fn d051_cancel_fences_review_commit_and_late_provider_output() {
-    let case = case("cancel_before_review_commit");
-    let outcome = run_d051_runtime_case(&fixture(), &case, D051RuntimeMode::Streaming)
-        .await
-        .expect("cancelled D051 runtime case");
+impl CapturedProvider {
+    fn request_count(&self) -> usize {
+        self.requests.lock().expect("D051 request capture").len()
+    }
 
-    assert_eq!(memory_status(&outcome), Some("cancelled"));
-    assert_eq!(receipt_memory_status(&outcome), Some("cancelled"));
-    assert_eq!(
-        memory_reason(&outcome),
-        Some("turn_cancelled_before_review_commit")
-    );
-    assert_eq!(delivery_status(&outcome), Some("cancelled"));
-    assert_eq!(outcome.proposal_count, 0);
-    assert_eq!(outcome.late_proposal_count, 0);
-    assert!(!outcome.review_commit_after_cancel_observed);
-    assert!(outcome.late_provider_output_was_released);
+    fn generation_count(&self) -> usize {
+        self.generation_count.load(Ordering::SeqCst)
+    }
+
+    fn control_count(&self) -> usize {
+        self.control_count.load(Ordering::SeqCst)
+    }
+
+    fn ranking_count(&self) -> usize {
+        self.ranking_count.load(Ordering::SeqCst)
+    }
+
+    fn captured(&self) -> Vec<String> {
+        self.requests.lock().expect("D051 request capture").clone()
+    }
 }
 
-#[tokio::test]
-async fn d051_scripted_envelope_never_receives_external_live_credit_or_product_commit() {
-    let case = case("scripted_positive_local_contract_only");
-    let outcome = run_d051_runtime_case(&fixture(), &case, D051RuntimeMode::ScriptedContract)
-        .await
-        .expect("scripted D051 contract case");
+async fn configure_captured_provider(
+    state: &Arc<crate::AppState>,
+    final_response: String,
+    hold_final_response: bool,
+) -> CapturedProvider {
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("bind D051 captured local provider");
+    let address = listener.local_addr().expect("D051 provider address");
+    listener
+        .set_nonblocking(true)
+        .expect("D051 provider nonblocking listener");
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let requests_for_server = Arc::clone(&requests);
+    let control_count = Arc::new(AtomicUsize::new(0));
+    let control_for_server = Arc::clone(&control_count);
+    let generation_count = Arc::new(AtomicUsize::new(0));
+    let generation_for_server = Arc::clone(&generation_count);
+    let ranking_count = Arc::new(AtomicUsize::new(0));
+    let ranking_for_server = Arc::clone(&ranking_count);
+    let final_request_reached =
+        hold_final_response.then(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let final_response_release =
+        hold_final_response.then(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
+    let reached_for_server = final_request_reached.as_ref().map(Arc::clone);
+    let release_for_server = final_response_release.as_ref().map(Arc::clone);
 
-    assert_eq!(memory_status(&outcome), Some("candidate_admitted"));
-    assert_eq!(outcome.evidence_credit, "local_contract_only");
-    assert!(!outcome.external_live_credit);
-    assert_eq!(outcome.proposal_count, 0);
-    assert_eq!(outcome.late_proposal_count, 0);
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            let (mut stream, _) = match listener.accept() {
+                Ok(accepted) => accepted,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                Err(_) => break,
+            };
+            stream
+                .set_nonblocking(false)
+                .expect("D051 provider request socket blocking");
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+            let request = String::from_utf8_lossy(&read_http_request(&mut stream)).to_string();
+            requests_for_server
+                .lock()
+                .expect("record D051 provider request")
+                .push(request.clone());
+            let is_control = request.contains(PROVIDER_CONTROL_PROMPT);
+            let is_ranking = request.contains("Return ranked_candidate_ids now")
+                || request.contains("Metadata-safe candidate contract");
+            let (reply, generation_index) = if is_control {
+                control_for_server.fetch_add(1, Ordering::SeqCst);
+                (PROVIDER_CONTROL_REPLY.to_string(), None)
+            } else if is_ranking {
+                ranking_for_server.fetch_add(1, Ordering::SeqCst);
+                (
+                    serde_json::json!({"ranked_candidate_ids":["file.read"]}).to_string(),
+                    None,
+                )
+            } else {
+                let index = generation_for_server.fetch_add(1, Ordering::SeqCst);
+                let exact_observation_ref = captured_observation_ref(&request)
+                    .expect("post-observation provider request carries exact observation ref");
+                let reply =
+                    final_response.replace(observation_ref_placeholder(), exact_observation_ref);
+                (reply, Some(index))
+            };
+            if generation_index == Some(0) {
+                if let Some(reached) = &reached_for_server {
+                    reached.store(true, Ordering::SeqCst);
+                }
+                if let Some(release) = &release_for_server {
+                    let release_deadline = std::time::Instant::now() + Duration::from_secs(30);
+                    while !release.load(Ordering::SeqCst)
+                        && std::time::Instant::now() < release_deadline
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+            }
+            let response_index = requests_for_server
+                .lock()
+                .expect("count D051 provider requests")
+                .len();
+            let (content_type, body) = provider_http_response(&request, &reply, response_index);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+        }
+    });
+
+    let mut config = state.config.lock().await.clone();
+    config.llm.provider = "openai".into();
+    config.llm.openai_base = format!("http://{address}/v1");
+    config.llm.openai_key = "d051-test-key".into();
+    config.llm.chat_model = "gpt-d051-captured-local".into();
+    config.prefer_local_model = false;
+    config.system.network_policy.enabled = true;
+    config.system.network_policy.default_decision = "allow".into();
+    state.replace_provider_runtime_config(config).await;
+
+    let capture = CapturedProvider {
+        requests,
+        control_count,
+        generation_count,
+        ranking_count,
+        final_request_reached,
+        final_response_release,
+    };
+
+    let control = crate::main_chat_send::send_message_with_operation_state(
+        uuid::Uuid::new_v4().to_string(),
+        "d051-provider-control".into(),
+        vec![ChatMessage {
+            role: "user".into(),
+            content: PROVIDER_CONTROL_PROMPT.into(),
+        }],
+        None,
+        state,
+    )
+    .await
+    .expect("D051 same-state provider control turn");
+    assert_eq!(
+        control.provider_invocation_status,
+        crate::main_chat_turn_runtime::ProviderInvocationState::Completed
+    );
+    assert!(control.reply.contains(PROVIDER_CONTROL_REPLY));
+    assert_eq!(capture.request_count(), 1);
+    assert_eq!(capture.control_count(), 1);
+    assert_eq!(capture.generation_count(), 0);
+    assert_eq!(capture.ranking_count(), 0);
+    capture
+}
+
+fn messages() -> Vec<ChatMessage> {
+    vec![ChatMessage {
+        role: "user".into(),
+        content: USER_PROMPT.into(),
+    }]
+}
+
+async fn canonical_state_digest(state: &Arc<crate::AppState>) -> String {
+    let memory = state
+        .memory_lifecycle_store
+        .as_ref()
+        .expect("D051 MemoryLifecycleStore")
+        .lock()
+        .await
+        .list_records(None, None, 200, 0)
+        .expect("list D051 canonical Memory records");
+    let manager = state.life_model_manager.lock().await;
+    let life_model = manager.load().expect("load D051 canonical LifeModel");
+    let hs_registry_path = manager.hs_asset_authority_registry_path();
+    drop(manager);
+    let hs_registry = std::fs::read(&hs_registry_path).unwrap_or_default();
+    openlife_core::agent::metadata_safe::metadata_safe_value_digest(&serde_json::json!({
+        "memory": memory,
+        "lifeModel": life_model,
+        "hsRegistryDigest": sha256(&hs_registry),
+    }))
+    .1
+}
+
+struct RuntimeArtifacts {
+    events: Vec<crate::main_chat_event_stream::MainChatAgentDurableEvent>,
+    proposals: Vec<AgentProposal>,
+    run: AgentRun,
+    actions: Vec<QueuedExecutionAction>,
+    transcript: Vec<ExecutionTranscriptEntry>,
+    audit: Vec<openlife_core::mcp_audit::McpLogEntry>,
+}
+
+impl RuntimeArtifacts {
+    fn final_event(&self) -> &crate::main_chat_event_stream::MainChatAgentDurableEvent {
+        self.events
+            .iter()
+            .find(|event| event.event_type == "final_delivery.created")
+            .expect("D051 durable final delivery receipt")
+    }
+
+    fn serialized_persistence(&self) -> String {
+        serde_json::json!({
+            "events": self.events,
+            "proposals": self.proposals,
+            "run": self.run,
+            "actions": self.actions,
+            "transcript": self.transcript,
+            "audit": self.audit,
+        })
+        .to_string()
+    }
+}
+
+async fn load_artifacts(state: &Arc<crate::AppState>, operation_id: &str) -> RuntimeArtifacts {
+    let events = crate::main_chat_event_stream::list_main_chat_agent_events_with_state(
+        state,
+        operation_id.to_string(),
+        Some(0),
+        Some(250),
+    )
+    .await
+    .expect("list D051 durable events");
+    let proposals = state
+        .proposal_store
+        .as_ref()
+        .expect("D051 ProposalStore")
+        .lock()
+        .await
+        .list_all_proposals(200, 0)
+        .expect("list D051 proposals");
+    let run = state
+        .agent_run_store
+        .as_ref()
+        .expect("D051 AgentRunStore")
+        .lock()
+        .await
+        .get_run(operation_id)
+        .expect("load D051 AgentRun")
+        .expect("D051 AgentRun exists");
+    let actions = state
+        .main_chat_action_queue_store
+        .as_ref()
+        .expect("D051 ActionQueue")
+        .lock()
+        .await
+        .list_for_session(operation_id)
+        .expect("list D051 action queue");
+    let transcript = state
+        .main_chat_agent_session_store
+        .as_ref()
+        .expect("D051 TaskSessionStore")
+        .lock()
+        .await
+        .list_transcript_entries(operation_id)
+        .expect("list D051 transcript");
+    let audit = state
+        .mcp_audit_store
+        .lock()
+        .await
+        .list_logs(200)
+        .expect("list D051 audit records");
+    RuntimeArtifacts {
+        events,
+        proposals,
+        run,
+        actions,
+        transcript,
+        audit,
+    }
+}
+
+async fn run_buffered(
+    state: &Arc<crate::AppState>,
+    operation_id: &str,
+    session_id: &str,
+) -> Result<serde_json::Value, String> {
+    crate::main_chat_send::send_message_with_operation_state(
+        operation_id.to_string(),
+        session_id.to_string(),
+        messages(),
+        None,
+        state,
+    )
+    .await
+    .and_then(|result| serde_json::to_value(result).map_err(|error| error.to_string()))
+}
+
+async fn run_streaming(
+    state: &Arc<crate::AppState>,
+    operation_id: &str,
+    session_id: &str,
+) -> Result<serde_json::Value, String> {
+    crate::main_chat_streaming::start_stream_message_with_operation_state(
+        operation_id.to_string(),
+        session_id.to_string(),
+        messages(),
+        None,
+        state,
+        |_, _| {},
+    )
+    .await
+}
+
+fn assert_one_post_observation_provider_call(capture: &CapturedProvider) {
+    assert_eq!(
+        capture.request_count(),
+        2,
+        "one proven control call plus exactly one post-observation target call is required"
+    );
+    assert_eq!(capture.control_count(), 1);
+    assert_eq!(capture.generation_count(), 1);
+    assert_eq!(
+        capture.ranking_count(),
+        0,
+        "one exact file.read candidate needs no ranking call"
+    );
+    let requests = capture.captured();
+    assert!(requests[0].contains(PROVIDER_CONTROL_PROMPT));
+    assert!(
+        requests[1].contains(CANDIDATE_TEXT),
+        "the sole target request must carry the exact post-read observation context"
+    );
+}
+
+fn assert_real_durable_file_read_receipt(artifacts: &RuntimeArtifacts, operation_id: &str) {
+    let receipt_event = artifacts
+        .events
+        .iter()
+        .find(|event| {
+            event.object_type == "tool_execution_receipt" && event.event_type == "tool.completed"
+        })
+        .expect("D051 durable event store contains the completed ToolGateway receipt");
+    assert_eq!(receipt_event.payload["sourceRunId"], operation_id);
+    assert_eq!(receipt_event.payload["dispatchKind"], "local");
+    assert_eq!(
+        receipt_event.payload["transportStatus"],
+        "response_observed"
+    );
+    assert_eq!(receipt_event.payload["executionOutcome"], "succeeded");
+    assert_eq!(receipt_event.payload["dispatchObserved"], true);
+
+    let body_receipt = artifacts
+        .run
+        .actions
+        .iter()
+        .find_map(|action| {
+            action
+                .react_trace
+                .as_ref()
+                .and_then(|trace| trace.output_receipt.as_ref())
+        })
+        .expect("D051 runtime persisted the bound observation-body receipt");
+    assert_eq!(body_receipt.version(), 2);
+    assert_eq!(
+        body_receipt.provenance(),
+        openlife_core::agent::ContentReceiptProvenance::ObservedToolAdapterBody
+    );
+    assert_eq!(body_receipt.byte_count(), OBSERVATION_BODY.len());
+}
+
+fn assert_positive_durable_truth(artifacts: &RuntimeArtifacts) {
+    let final_event = artifacts.final_event();
+    assert_eq!(
+        final_event.payload["status"],
+        "completed_with_pending_items"
+    );
+    assert_eq!(
+        final_event.payload["memoryEvidenceStatus"],
+        "proposal_staged"
+    );
+    assert_eq!(
+        final_event.payload["memoryEvidenceReason"],
+        "same_final_provider_evidence_admitted"
+    );
+    assert_eq!(
+        final_event.payload["memoryEvidenceCredit"],
+        "captured_local_http_contract"
+    );
+    assert_eq!(final_event.payload["externalLiveProviderCredit"], false);
+    assert_eq!(final_event.payload["proposalCount"], 1);
+    assert_eq!(final_event.payload["bodyStored"], false);
+    assert_eq!(artifacts.proposals.len(), 1);
+    assert_eq!(artifacts.proposals[0].status.to_string(), "pending");
+    assert_eq!(
+        artifacts.proposals[0].proposal_type,
+        openlife_core::agent::ProposalType::MemoryWrite
+    );
+    assert_eq!(
+        artifacts.proposals[0].run_id.as_deref(),
+        Some(artifacts.run.id.as_str())
+    );
+    assert_eq!(
+        artifacts.run.generated_proposals,
+        vec![artifacts.proposals[0].id.clone()]
+    );
+    assert_eq!(artifacts.proposals[0].after["content"], CANDIDATE_TEXT);
+    assert!(
+        !artifacts.serialized_persistence().contains(RAW_SENTINEL),
+        "raw observation body leaked into AgentRun/event/final receipt/audit/proposal persistence"
+    );
+}
+
+#[test]
+fn d051_authority_inventory_requires_one_production_admission_seam_and_no_raw_preview_router() {
+    let core_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../openlife-core/src/agent/structured_memory_evidence.rs");
+    let core = std::fs::read_to_string(&core_path).unwrap_or_else(|error| {
+        panic!(
+            "D051 production admission seam is missing at {}: {error}",
+            core_path.display()
+        )
+    });
+    let kernel = include_str!("main_chat_kernel.rs");
+    let stage = kernel
+        .split("async fn stage_conditional_observation_memory_review(")
+        .nth(1)
+        .and_then(|tail| tail.split("async fn create_kernel_write_proposal(").next())
+        .expect("D051 conditional review stage");
+    assert!(core.contains("pub fn admit_structured_memory_evidence"));
+    assert_eq!(
+        [core.as_str(), kernel]
+            .into_iter()
+            .map(|source| source.matches("admit_structured_memory_evidence(").count())
+            .sum::<usize>(),
+        2,
+        "one definition and one product caller are the complete D051 authority graph"
+    );
+    assert!(!stage.contains("extract_main_chat_memory_candidates"));
+    assert!(!stage.contains(".get(\"preview\")"));
+    assert!(!stage.contains("observed_body"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn d051_buffered_runtime_uses_real_http_event_proposal_and_canonical_stores() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let before = canonical_state_digest(&state).await;
+    let capture = configure_captured_provider(&state, positive_final_response(), false).await;
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let result = run_buffered(&state, &operation_id, "d051-buffered-positive")
+        .await
+        .expect("D051 buffered runtime");
+    let artifacts = load_artifacts(&state, &operation_id).await;
+    assert_real_durable_file_read_receipt(&artifacts, &operation_id);
+    assert_one_post_observation_provider_call(&capture);
+    assert_eq!(result["status"], "completed_with_pending_items");
+
+    assert_positive_durable_truth(&artifacts);
+    assert_eq!(canonical_state_digest(&state).await, before);
+
+    let retry = run_buffered(&state, &operation_id, "d051-buffered-positive")
+        .await
+        .expect("D051 durable retry recovery");
+    assert_eq!(retry["status"], "completed_with_pending_items");
+    assert_one_post_observation_provider_call(&capture);
+    let after_retry = load_artifacts(&state, &operation_id).await;
+    assert_eq!(
+        after_retry.proposals.len(),
+        1,
+        "retry must reuse one Proposal"
+    );
+    assert_eq!(
+        after_retry
+            .events
+            .iter()
+            .filter(|event| event.event_type == "final_delivery.created")
+            .count(),
+        1,
+        "retry must recover one durable final receipt"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn d051_buffered_and_streaming_project_identical_durable_evidence_truth() {
+    let buffered_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let buffered_capture =
+        configure_captured_provider(&buffered_state, positive_final_response(), false).await;
+    let buffered_operation = uuid::Uuid::new_v4().to_string();
+    run_buffered(&buffered_state, &buffered_operation, "d051-buffered-parity")
+        .await
+        .expect("D051 buffered parity run");
+
+    let streaming_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let streaming_capture =
+        configure_captured_provider(&streaming_state, positive_final_response(), false).await;
+    let streaming_operation = uuid::Uuid::new_v4().to_string();
+    run_streaming(
+        &streaming_state,
+        &streaming_operation,
+        "d051-streaming-parity",
+    )
+    .await
+    .expect("D051 streaming parity run");
+
+    assert_one_post_observation_provider_call(&buffered_capture);
+    assert_one_post_observation_provider_call(&streaming_capture);
+    let buffered = load_artifacts(&buffered_state, &buffered_operation).await;
+    let streaming = load_artifacts(&streaming_state, &streaming_operation).await;
+    for field in [
+        "status",
+        "memoryEvidenceStatus",
+        "memoryEvidenceReason",
+        "memoryEvidenceCredit",
+        "externalLiveProviderCredit",
+        "proposalCount",
+    ] {
+        assert_eq!(
+            buffered.final_event().payload[field],
+            streaming.final_event().payload[field],
+            "buffered/streaming field drift: {field}"
+        );
+    }
+    assert_positive_durable_truth(&buffered);
+    assert_positive_durable_truth(&streaming);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn d051_missing_structured_envelope_cannot_fall_back_to_observation_heuristics() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let capture = configure_captured_provider(&state, no_extractor_final_response(), false).await;
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let result = run_buffered(&state, &operation_id, "d051-no-extractor")
+        .await
+        .expect("D051 no-extractor runtime");
+    assert_one_post_observation_provider_call(&capture);
+    let artifacts = load_artifacts(&state, &operation_id).await;
+    assert!(artifacts.proposals.is_empty());
+    assert_eq!(result["status"], "completed_with_partial_evidence");
+    assert_eq!(
+        artifacts.final_event().payload["memoryEvidenceStatus"],
+        "unavailable"
+    );
+    assert_eq!(
+        artifacts.final_event().payload["memoryEvidenceReason"],
+        "structured_extractor_unavailable"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn d051_concurrent_same_operation_has_one_provider_execution_and_one_proposal() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let before = canonical_state_digest(&state).await;
+    let capture = configure_captured_provider(&state, positive_final_response(), false).await;
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let first = run_buffered(&state, &operation_id, "d051-concurrent");
+    let second = run_buffered(&state, &operation_id, "d051-concurrent");
+    let (first, second) = tokio::join!(first, second);
+    assert!(
+        first.is_ok() || second.is_ok(),
+        "one runtime owner must complete: first={first:?} second={second:?}"
+    );
+    match (&first, &second) {
+        (Ok(left), Ok(right)) => {
+            assert_eq!(left["run_id"], right["run_id"]);
+            assert_eq!(left["status"], right["status"]);
+            assert_eq!(left["reply"], right["reply"]);
+        }
+        (Ok(_), Err(error)) | (Err(error), Ok(_)) => assert!(
+            error.contains("execution owner")
+                || error.contains("operation_in_progress")
+                || error.contains("reconciliation_required"),
+            "competing call must receive typed owner/in-progress disposition: {error}"
+        ),
+        (Err(_), Err(_)) => unreachable!("at least one owner completed"),
+    }
+    assert_one_post_observation_provider_call(&capture);
+    let artifacts = load_artifacts(&state, &operation_id).await;
+    assert_eq!(artifacts.proposals.len(), 1);
+    assert_eq!(
+        artifacts
+            .events
+            .iter()
+            .filter(|event| event.event_type == "final_delivery.created")
+            .count(),
+        1
+    );
+    assert_eq!(canonical_state_digest(&state).await, before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn d051_real_cancel_barrier_releases_late_provider_output_without_durable_commit() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let before = canonical_state_digest(&state).await;
+    let capture = configure_captured_provider(&state, positive_final_response(), true).await;
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let state_for_turn = Arc::clone(&state);
+    let operation_for_turn = operation_id.clone();
+    let turn = tokio::spawn(async move {
+        run_streaming(&state_for_turn, &operation_for_turn, "d051-cancel-barrier").await
+    });
+
+    let reached = capture
+        .final_request_reached
+        .as_ref()
+        .expect("D051 final-request barrier")
+        .clone();
+    tokio::time::timeout(Duration::from_secs(10), async move {
+        while !reached.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("final provider request reached barrier");
+
+    let cancel = tokio::time::timeout(
+        Duration::from_secs(1),
+        crate::main_chat_task_controls::cancel_main_chat_agent_task_with_state(
+            &operation_id,
+            &state,
+        ),
+    )
+    .await;
+    let release = capture
+        .final_response_release
+        .as_ref()
+        .expect("D051 final-response release barrier")
+        .clone();
+    release.store(true, Ordering::SeqCst);
+    cancel
+        .expect("local cancellation must settle within one second")
+        .expect("D051 cancellation request");
+
+    let _ = tokio::time::timeout(Duration::from_secs(10), turn)
+        .await
+        .expect("cancelled D051 runtime settles")
+        .expect("join cancelled D051 runtime");
+    assert_one_post_observation_provider_call(&capture);
+    let artifacts = load_artifacts(&state, &operation_id).await;
+    assert!(artifacts.proposals.is_empty());
+    assert_eq!(canonical_state_digest(&state).await, before);
+    assert!(matches!(
+        artifacts.final_event().payload["status"].as_str(),
+        Some("cancelled" | "interrupted")
+    ));
+    assert!(matches!(
+        artifacts.final_event().payload["memoryEvidenceStatus"].as_str(),
+        Some("cancelled" | "unavailable")
+    ));
+    assert!(
+        !artifacts.serialized_persistence().contains(RAW_SENTINEL),
+        "late provider output or observation body was durably copied after cancellation"
+    );
 }
