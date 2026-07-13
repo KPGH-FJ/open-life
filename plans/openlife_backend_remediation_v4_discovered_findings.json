@@ -648,6 +648,57 @@
         "Continued healthy effect admission after a runtime MCP audit store failure"
       ],
       "immutable_fingerprint": "3ec8fd15d7d75461478bfbffac9b94334434a9b4abb26930e409a71a52551d13"
+    },
+    {
+      "id": "BR4-D068",
+      "discovered_at": "2026-07-13T20:00:00+08:00",
+      "severity_at_discovery": "P0",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P1-16",
+        "P1-17",
+        "P2-02",
+        "P2-11"
+      ],
+      "why_not_fully_subsumed": "The frozen audit-encryption, persistence, migration and runtime-truth findings, BR4-D057 key-authority work and BR4-D065 trusted-read work do not bind the plaintext payload_minimized_version or receipt schema to the authenticated ciphertext and do not test a version flip that reclassifies a legacy raw payload as current.",
+      "title": "Unauthenticated payload_minimized_version can expose legacy raw-sensitive ciphertext as a current receipt",
+      "observed_symptom": "A legacy row containing raw sensitive arguments and result under valid ciphertext can have payload_minimized_version changed from 0 to 1; restart then skips migrate_legacy_payloads, while list_logs neither selects the version nor validates the decrypted receipt schema and returns the raw plaintext through the current product audit shape.",
+      "root_cause_hypothesis": "AES-GCM authenticates only the encrypted plaintext bytes with no AAD or versioned envelope binding, while an independently mutable database column is treated as the migration and current-format authority and the read decoder accepts arbitrary decrypted UTF-8 as a minimized receipt.",
+      "affected_surfaces": [
+        "openlife-core/src/mcp_audit.rs::MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION",
+        "openlife-core/src/mcp_audit.rs::McpAuditStore::encrypt",
+        "openlife-core/src/mcp_audit.rs::McpAuditStore::decrypt_for_epoch",
+        "openlife-core/src/mcp_audit.rs::McpAuditStore::migrate_legacy_payloads",
+        "openlife-core/src/mcp_audit.rs::McpAuditStore::list_logs",
+        "openlife-core/src/mcp_audit.rs::McpAuditStore::export_logs",
+        "src-tauri/src/commands/mcp.rs::list_mcp_audit_logs",
+        "frontend/src/pages/McpPage.tsx"
+      ],
+      "broken_invariants": [
+        "I08",
+        "I12",
+        "I15",
+        "I17"
+      ],
+      "target_phase": "Phase 1, Phase 5 and Phase 6",
+      "owner_module": "Versioned authenticated MCP audit payload envelope and strict receipt decoder",
+      "acceptance": [
+        "Payload format version and exact minimized-receipt schema are cryptographically bound to each ciphertext through authenticated AAD or a versioned encrypted envelope; the plaintext database column alone never authorizes current-format interpretation",
+        "Changing only payload_minimized_version from 0 to 1 cannot skip required migration or return legacy raw arguments or result; the row fails closed as typed unavailable or unknown with zero product exposure",
+        "Every legal current minimized receipt remains exactly readable and every legal legacy row still migrates transactionally to an authenticated current receipt and remains readable after restart",
+        "Any authentication, envelope-schema or migration failure performs zero rewrite: ciphertext, payload version, key epoch, database main-file and sidecar bytes, and key-reference state remain unchanged",
+        "Strict read and export decoding reject wrong kind, payloadStored, valueType, bytes, digest, version and unknown fields before constructing McpLogEntry or product truth",
+        "BR4-D057 key-authority evidence and BR4-D065 trusted-read evidence remain separately open and cannot count as BR4-D068 closure"
+      ],
+      "deletion_targets": [
+        "Plaintext payload_minimized_version as the sole migration or current-format authority",
+        "AES-GCM audit payloads with no authenticated format-version and receipt-schema binding",
+        "Current-row decrypt-and-return without strict minimized-receipt decoding",
+        "Version-zero to version-one tamper path that skips migration and returns raw sensitive plaintext",
+        "Migration failure paths that rewrite ciphertext or version metadata",
+        "D057 or D065 completion credit reused as D068 closure"
+      ],
+      "immutable_fingerprint": "7f78be9990b20301fea9e5f7d69aed51893bd74468704153a6e0a51808b416ec"
     }
   ]
 }

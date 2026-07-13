@@ -578,6 +578,64 @@
           "fixed-commit-counterexample:tool-success-can-be-permanently-unaudited"
         ]
       }
+    },
+    {
+      "id": "BR4-D068",
+      "current_severity": "P0",
+      "triage_state": "root_cause_confirmed",
+      "implementation_state": "not_started",
+      "verification_state": "none",
+      "closure_state": "open",
+      "evidence": {
+        "reproduction": [
+          "source_trace:migrate-legacy-selects-only-plaintext-payload-version-less-than-one",
+          "source_trace:list-and-export-ignore-payload-version-and-receipt-schema",
+          "source_trace:AES-GCM-encrypt-and-decrypt-use-no-AAD-or-versioned-envelope",
+          "mechanical_counterexample:version-zero-legacy-row-flipped-to-one-skips-migration-and-returns-raw-sensitive-plaintext"
+        ],
+        "failing_test": [
+          "test_defined:D068-version-flip-cannot-skip-migration-or-return-raw-payload",
+          "test_defined:D068-auth-or-receipt-schema-failure-performs-zero-rewrite",
+          "test_defined:D068-list-and-export-reject-unbound-version-and-invalid-current-receipt"
+        ],
+        "positive": [
+          "source_proof:insert-log-already-materializes-minimized-argument-and-result-receipts",
+          "source_proof:legal-version-zero-payloads-already-have-a-legacy-migration-capability"
+        ],
+        "counterfactual": [
+          "test_defined:authenticated-current-minimized-receipts-remain-exactly-readable",
+          "test_defined:legal-legacy-rows-migrate-transactionally-and-remain-readable-after-restart",
+          "test_defined:wrong-kind-payloadStored-valueType-bytes-digest-version-or-unknown-fields-fail-closed"
+        ],
+        "deletion_or_absence": [
+          "deletion_required:plaintext-version-as-sole-current-format-authority",
+          "deletion_required:AEAD-without-format-and-schema-binding",
+          "deletion_required:decrypt-and-return-without-strict-receipt-decoder",
+          "absence_required:zero-to-one-version-flip-exposes-raw-sensitive-plaintext",
+          "absence_required:failed-auth-schema-or-migration-rewrites-any-durable-byte"
+        ],
+        "capability_non_regression": [
+          "test_defined:normal-current-audit-list-and-export-remain-available-with-minimized-receipts",
+          "test_defined:legal-legacy-audit-history-remains-readable-after-bounded-migration",
+          "test_defined:empty-and-bounded-nonempty-trusted-audit-reads-preserve-D065-semantics"
+        ],
+        "live_boundary": [
+          "root-cause-confirmed-by-fixed-source-trace-and-mechanical-SQLite-counterexample",
+          "BR4-D057-key-authority-remains-separately-open-and-earns-zero-D068-credit",
+          "BR4-D065-trusted-read-projection-remains-separately-open-and-earns-zero-D068-credit",
+          "authenticated-envelope-strict-decoder-and-zero-rewrite-fault-injection-not-implemented"
+        ]
+      },
+      "independent_review": {
+        "reviewer": "d057_green_independent_review",
+        "decision": "root-cause-confirmed-separate-audit-payload-authentication-blocker",
+        "evidence_refs": [
+          "fixed-base-source-trace:migration-trusts-unauthenticated-version-column",
+          "fixed-base-source-trace:list-returns-arbitrary-decrypted-UTF8-as-current-receipt",
+          "mechanical-counterexample:version-flip-bypasses-minimization",
+          "boundary:D057-and-D065-remain-independent-open-findings"
+        ]
+      }
     }
   ],
   "supplemental_scenarios": [
@@ -664,6 +722,15 @@
       ],
       "kind": "tool_terminal_audit_persistence_truth",
       "scenario": "A real tool success followed by audit persistence failure executes exactly once, preserves confirmed effect truth, records audit failed or unknown and degrades later effect admission without retry; tool failure plus audit failure preserves both outcomes, while normal execution writes one minimized audit row and pre-dispatch blockers write none.",
+      "frozen_denominator_credit": false
+    },
+    {
+      "id": "DISC-068",
+      "finding_ids": [
+        "BR4-D068"
+      ],
+      "kind": "authenticated_mcp_audit_payload_envelope",
+      "scenario": "Payload version and minimized-receipt schema are cryptographically bound to each audit ciphertext: changing only payload_minimized_version from 0 to 1 cannot skip migration or expose raw sensitive arguments or result, any authentication or schema failure performs zero rewrite, legal current receipts and legacy migration remain readable, and neither BR4-D057 nor BR4-D065 earns closure credit.",
       "frozen_denominator_credit": false
     }
   ]
