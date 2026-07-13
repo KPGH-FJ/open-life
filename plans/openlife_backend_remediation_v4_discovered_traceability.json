@@ -401,6 +401,42 @@
         "live_boundary": ["scope-correction-registered-before-production-change", "D058-RED-tests-being-rewritten-to-D062-boundary", "no-production-fix-implemented", "external-live-provider-credit-not-applicable"]
       },
       "independent_review": {"reviewer":"root-architecture-audit","decision":"root-cause-confirmed-scope-correction-required","evidence_refs":["invariant:I05-all-product-tool-calls-through-ToolGateway", "counterfactual:missing-file-requires-operating-system-observation", "anti-hallucination:do-not-green-current-boundary"]}
+    },
+    {
+      "id": "BR4-D063",
+      "current_severity": "P1",
+      "triage_state": "root_cause_confirmed",
+      "implementation_state": "not_started",
+      "verification_state": "none",
+      "closure_state": "open",
+      "evidence": {
+        "reproduction": ["source_trace:McpPage-client-dialog-to-clearMcpAuditLogs", "source_trace:clear_mcp_audit_logs-release-handler-to-public-clear_old_logs", "source_trace:second-Settings-cleanup-route-requires-effects-gate-and-native-confirmation", "source_trace:negative-days-produce-future-cutoff-and-delete-all-current-rows"],
+        "failing_test": ["test_defined:shipped-command-surface-has-one-governed-mcp-audit-delete-authority", "test_defined:negative-zero-overflow-retention-performs-zero-mutation", "test_defined:missing-or-invalid-native-grant-and-degraded-persistence-perform-zero-mutation", "test_defined:valid-grant-deletes-old-only-and-preserves-recent"],
+        "positive": ["source_proof:Settings-cleanup-command-already-uses-PersistenceCoordinator-effects-gate", "source_proof:Settings-cleanup-command-already-requires-Rust-owned-native-confirmation"],
+        "counterfactual": ["list-and-export-audit-capabilities-remain-separate-from-deletion-authority", "valid-bounded-cleanup-remains-available-through-the-governed-route", "page-local-confirmation-can-never-mint-durable-write-authority"],
+        "deletion_or_absence": ["deletion_required:clear_mcp_audit_logs-command-import-and-handler", "deletion_required:frontend-clearMcpAuditLogs-and-McpPage-direct-call", "deletion_required:public-second-clear_old_logs-mutation-entry", "absence_required:client-only-confirmation-authorizes-audit-deletion", "absence_required:unvalidated-retention-reaches-delete-SQL"],
+        "capability_non_regression": ["bounded-audit-retention-cleanup-remains-available-after-native-confirmation", "recent-audit-rows-remain-queryable", "McpPage-audit-list-and-separate-governed-export-capabilities-remain-available"],
+        "live_boundary": ["source-confirmed-second-shipped-deletion-authority", "negative-retention-delete-all-derived-from-current-cutoff-expression-and-SQL-predicate", "dynamic-RED-and-real-database-counterfactuals-pending", "no-production-fix-implemented"]
+      },
+      "independent_review": {"reviewer":"d063_d064_independent_inventory","decision":"root-cause-confirmed-second-deletion-authority","evidence_refs":["source-map:McpPage-tauri-lib-command-store", "working-contrast:governed-Settings-cleanup-route", "boundary:client-confirmation-is-not-Rust-owned-write-authority"]}
+    },
+    {
+      "id": "BR4-D064",
+      "current_severity": "P0",
+      "triage_state": "root_cause_confirmed",
+      "implementation_state": "not_started",
+      "verification_state": "none",
+      "closure_state": "open",
+      "evidence": {
+        "reproduction": ["source_trace:global-keychain-service-account-prefix-plus-numeric-epoch", "source_trace:create_mcp_audit_key_material-uses-epoch-reference-and-replacement-set_password", "source_trace:profile-and-custom-data-directories-share-secret-namespace", "source_trace:McpAuditStore-has-no-writable-owner-lease-and-opens-new-connections-per-operation"],
+        "failing_test": ["test_defined:two-store-identities-same-epoch-create-distinct-secret-references-without-overwrite", "test_defined:same-canonical-audit-slot-rejects-second-process-writer", "test_defined:missing-keyring-plus-nonempty-database-is-Unavailable-with-zero-guessing-or-secret-creation", "test_defined:key-reference-or-secret-activation-failure-leaves-all-three-authorities-unchanged", "test_defined:legacy-and-new-reference-generations-restart-read-with-legacy-never-overwritten"],
+        "positive": ["working_contrast:SqliteSlotOwnerLease-already-provides-cross-process-slot-ownership-for-other-stores", "source_proof:mcp_audit_keys-json-already-persists-versioned-audit-key-configs", "source_proof:valid-keychain-material-can-read-historical-epoch-ciphertext"],
+        "counterfactual": ["numeric-epoch-ordering-remains-deterministic-with-store-bound-random-reference-identity", "genuine-empty-first-boot-creates-one-reference-only-after-no-create-slot-reservation", "present-valid-keyring-may-enter-verified-read-only-recovery-without-creating-or-guessing-a-key", "existing-SqliteSlotOwnerLease-acquire-cannot-be-reused-blindly-before-BR4-D057-state-proof-because-it-can-create-an-absent-database"],
+        "deletion_or_absence": ["deletion_required:global-epoch-only-new-key-reference", "deletion_required:replacement-write-for-new-audit-secret", "deletion_required:lease-free-writable-McpAuditStore", "deletion_required:per-operation-detached-writable-Connection-open", "absence_required:database-or-lock-file-duplicates-canonical-key-reference-list", "absence_required:missing-keyring-triggers-reference-guessing-keychain-enumeration-or-read-only-claim", "absence_required:legacy-global-reference-is-overwritten-or-auto-deleted"],
+        "capability_non_regression": ["normal-audit-write-query-export-cleanup-and-restart-remain-available-for-one-valid-owner", "distinct-release-development-QA-and-custom-data-dir-stores-remain-independent", "valid-historical-ciphertext-remains-readable-after-versioned-migration"],
+        "live_boundary": ["source-confirmed-global-reference-collision-and-lease-gap", "same-second-cross-profile-and-two-process-dynamic-RED-pending", "missing-keyring-plus-nonempty-database-required-state-is-exactly-Unavailable", "BR4-D057-strict-loader-state-and-decrypt-proof-is-a-design-prerequisite-not-closure-credit", "no-production-fix-implemented"]
+      },
+      "independent_review": {"reviewer":"d063_d064_independent_inventory","decision":"root-cause-confirmed-global-secret-identity-and-writer-ownership-gap","evidence_refs":["source-map:storage-secret-store-bootstrap-settings-mcp-audit-sqlite-lease", "counterfactual:two-stores-same-epoch", "boundary:keyring-json-sole-reference-authority", "dependency:BR4-D057-state-proof-before-BR4-D064-activation"]}
     }
   ],
   "supplemental_scenarios": [
@@ -459,6 +495,8 @@
     {"id":"DISC-059","finding_ids":["BR4-D059"],"kind":"canonical_json_corruption_and_projection_truth","scenario":"Malformed required or present-optional JSON in Transcript, Patch, Proposal, Memory or MemoryLifecycle fails before typed materialization, digest, effect or version advance; the original bytes and whole migration batch remain unchanged, while derived views expose degraded and rebuild rather than healthy empty truth.","frozen_denominator_credit":false},
     {"id":"DISC-060","finding_ids":["BR4-D060"],"kind":"plugin_enable_authority_corruption","scenario":"After a user disables a manifest-default-enabled plugin, malformed or unreadable enabled_overrides.json cannot alias a missing file or restore enabled state; the registry exposes unavailable, preserves the bytes, and registers no executable plugin tool or skill, while valid overrides still survive restart.","frozen_denominator_credit":false},
     {"id":"DISC-061","finding_ids":["BR4-D061"],"kind":"non_json_persisted_enum_and_timestamp_corruption","scenario":"Unknown persisted Patch, Proposal and MemoryLifecycle enums and present-invalid timestamps fail before typed materialization or owner digest across current, legacy and read-only paths; every legal historical value round-trips and neither D054 nor D059 evidence counts as closure.","frozen_denominator_credit":false},
-    {"id":"DISC-062","finding_ids":["BR4-D062"],"kind":"filesystem_tool_admission_execution_and_owner_identity","scenario":"A lexical traversal is rejected before ToolGateway with a typed ActionQueue blocker and no receipt or terminal; a missing file reaches ToolGateway and owns one failed receipt plus one tool.failed terminal; quoted and successful reads keep real tool lifecycle, and final recovery matches every action-owner binding by stable identity while unknown, duplicate and conflicting bindings fail closed.","frozen_denominator_credit":false}
+    {"id":"DISC-062","finding_ids":["BR4-D062"],"kind":"filesystem_tool_admission_execution_and_owner_identity","scenario":"A lexical traversal is rejected before ToolGateway with a typed ActionQueue blocker and no receipt or terminal; a missing file reaches ToolGateway and owns one failed receipt plus one tool.failed terminal; quoted and successful reads keep real tool lifecycle, and final recovery matches every action-owner binding by stable identity while unknown, duplicate and conflicting bindings fail closed.","frozen_denominator_credit":false},
+    {"id":"DISC-063","finding_ids":["BR4-D063"],"kind":"governed_mcp_audit_cleanup_single_authority","scenario":"The shipped product exposes exactly one MCP audit deletion authority: degraded persistence, a missing or invalid native grant, and negative, zero or overflow retention perform zero mutation; a valid bounded grant deletes old records only and preserves recent records, while the former command, frontend wrapper, McpPage direct call and public second mutation remain absent.","frozen_denominator_credit":false},
+    {"id":"DISC-064","finding_ids":["BR4-D064"],"kind":"store_bound_mcp_audit_key_and_single_writer","scenario":"Two canonical audit stores creating a key in the same numeric epoch receive distinct store-bound create-only references, a second process cannot acquire the same writable database slot, and legacy references remain read-only; a missing keyring beside a non-empty database is exactly Unavailable with no secret creation, reference guessing, keychain enumeration or claimed read-only recovery, while present-valid verified keyrings retain restart readability after BR4-D057 state validation.","frozen_denominator_credit":false}
   ]
 }

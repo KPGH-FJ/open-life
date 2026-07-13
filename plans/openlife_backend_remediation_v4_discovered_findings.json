@@ -480,6 +480,42 @@
       "acceptance": ["Pure lexical traversal, absolute-path and outside-workspace policy violations may fail before ToolGateway with a typed ActionQueue blocker and no ToolExecutionReceipt or ToolEvent", "Canonicalize, metadata, open and read operations occur only inside ToolGateway or its bounded filesystem adapter", "A missing file produces one runtime-bound failed ToolExecutionReceipt, exactly one matching tool.failed terminal event and a versioned identity-keyed final owner binding", "Final persistence and recovery match each action to its owner by stable identity; missing, duplicate, conflicting and unknown bindings fail closed without positional zip or count inference", "Quoted and successful workspace reads retain real ToolGateway lifecycle, and legacy version-one finals containing real tool owners remain recoverable"],
       "deletion_targets": ["Filesystem canonicalize, metadata, open or read outside ToolGateway", "Missing-file pre-gateway no-receipt hypothesis", "Synthetic failed_before_dispatch ToolExecutionReceipt for lexical policy blockers", "Positional tool owner zip or count recovery model"],
       "immutable_fingerprint": "971e183ba25d91505eae948debdf3deecfad4c338ff7281ec0c9d858bd250c29"
+    },
+    {
+      "id": "BR4-D063",
+      "discovered_at": "2026-07-13T17:30:00+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": ["P1-17", "P1-20", "P2-03"],
+      "why_not_fully_subsumed": "The frozen dangerous-action, persistence and command-surface findings did not cover a second shipped MCP audit deletion command and page that bypass both the effects gate and Rust-owned native confirmation while a governed Settings cleanup command already exists.",
+      "title": "Shipped MCP page keeps an ungoverned second audit-log deletion authority",
+      "observed_symptom": "McpPage authorizes cleanup with a client-only dialog and invokes clear_mcp_audit_logs, a release-registered command that calls the public clear_old_logs mutation directly; negative days produce a future cutoff and can delete every audit row, while the separate Settings command uses the persistence effects gate and native confirmation.",
+      "root_cause_hypothesis": "MCP audit maintenance is split between commands/mcp.rs and commands/settings.rs, and a public store mutation plus a frontend wrapper lets page-local UX act as durable deletion authority instead of routing through one governed maintenance gateway.",
+      "affected_surfaces": ["frontend/src/pages/McpPage.tsx", "frontend/src/tauri.ts::clearMcpAuditLogs", "src-tauri/src/lib.rs", "src-tauri/src/commands/mcp.rs::clear_mcp_audit_logs", "src-tauri/src/commands/settings.rs::cleanup_mcp_audit_logs", "openlife-core/src/mcp_audit.rs::McpAuditStore::clear_old_logs"],
+      "broken_invariants": ["I06", "I08", "I18"],
+      "target_phase": "Phase 5 and Phase 6",
+      "owner_module": "Governed MCP audit maintenance gateway",
+      "acceptance": ["Exactly one shipped MCP audit deletion command and one domain mutation entry remain", "Degraded persistence, missing or invalid native confirmation, and invalid retention input perform zero deletion", "Negative, zero and overflow retention values fail closed before database mutation", "A valid native grant deletes only records older than the bounded retention cutoff and preserves recent records", "McpPage reuses or links to the governed workflow and has no independent client-confirmation write authority"],
+      "deletion_targets": ["clear_mcp_audit_logs backend command, import and shipped handler registration", "Frontend clearMcpAuditLogs wrapper and McpPage direct cleanup call", "Public second mutation entry McpAuditStore::clear_old_logs", "Client-only confirmation as durable deletion authorization", "Unvalidated negative, zero or overflow retention deletion semantics"],
+      "immutable_fingerprint": "92c6242909678d83dcade1755ce2322737470c584169f36fa9f404e7c2ebb1de"
+    },
+    {
+      "id": "BR4-D064",
+      "discovered_at": "2026-07-13T17:31:00+08:00",
+      "severity_at_discovery": "P0",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": ["P1-16", "P1-17", "P2-11"],
+      "why_not_fully_subsumed": "The frozen audit encryption and rotation findings and BR4-D057 cover keyring load corruption, but not the global epoch-only keychain namespace or the absence of one cross-process writable owner binding key-reference, database and secret activation.",
+      "title": "Global epoch-only MCP audit secret references and lease-free writers can orphan ciphertext across profiles and processes",
+      "observed_symptom": "Release, development, QA or custom-data-dir stores that create or rotate in the same epoch use the same global keychain reference; set_password overwrites that credential while each store can retain different in-memory key bytes, and multiple McpAuditStore instances or processes can independently open the same database for writes without an owner lease.",
+      "root_cause_hypothesis": "The implementation conflates numeric rotation order with globally unique store identity, permits replacement writes for newly generated audit secrets, does not bind key references to a canonical store identity, and activates JSON references, keychain material and SQLite state without one OS-backed ownership protocol.",
+      "affected_surfaces": ["src-tauri/src/secret_store.rs::MCP_AUDIT_KEY_REF_PREFIX", "src-tauri/src/secret_store.rs::create_mcp_audit_key_material", "src-tauri/src/secret_store.rs::KeyringSecretStore", "src-tauri/src/storage.rs::app_data_dir", "src-tauri/src/bootstrap.rs", "src-tauri/src/commands/settings.rs::rotate_mcp_audit_key", "openlife-core/src/mcp_audit.rs::McpAuditStore", "openlife-core/src/sqlite_migration.rs::SqliteSlotOwnerLease"],
+      "broken_invariants": ["I06", "I08", "I12", "I15"],
+      "target_phase": "Phase 1 and Phase 5",
+      "owner_module": "MCP audit key-reference authority and SQLite writable-owner protocol",
+      "acceptance": ["Each canonical audit store owns a durable random store identity and each new key uses a collision-resistant store-bound reference; numeric epoch is ordering metadata only", "Creating a new secret is create-only: a collision preserves existing keychain bytes, reference-file bytes and database state", "Exactly one OS-backed writable owner exists per canonical audit database across clones and processes, and connection identity is revalidated before use", "The versioned mcp_audit_keys.json remains the sole canonical key-reference owner; database and lease metadata may retain only version, digest and verifier data and cannot reconstruct or guess references", "A missing keyring beside a non-empty audit database enters exactly Unavailable, creates no secret and performs no reference guessing, keychain enumeration or claimed read-only recovery", "Read-only recovery is allowed only when the keyring is present and structurally valid, every referenced secret hydrates, and ciphertext verification succeeds; BR4-D057 strict loader-state validation is a prerequisite for the BR4-D064 migration", "Legacy epoch-only references are read-only recovery inputs and are never overwritten or automatically deleted; new writes use unique references and restart reads both generations"],
+      "deletion_targets": ["Global prefix-plus-epoch identity for newly created MCP audit keys", "Unconditional secret replacement for newly generated audit key material", "Writable McpAuditStore without SqliteSlotOwnerLease or equivalent no-create cross-process authority lease", "Per-operation writable Connection::open path detached from the held owner identity", "Missing-keyring reference guessing, keychain scanning or duplicate database key-reference authority", "Legacy global epoch references as active-write or automatic-delete targets", "Unleased key-reference, keychain and database activation sequence"],
+      "immutable_fingerprint": "0ff3398ef9c35c9616c09fd20f2fe6d1809cdcfe6ccf797ee70e42096a313296"
     }
   ]
 }
