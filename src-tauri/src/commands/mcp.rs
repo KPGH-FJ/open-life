@@ -3,6 +3,10 @@ use crate::AppState;
 use std::sync::Arc;
 use tauri::State;
 
+#[cfg(test)]
+#[path = "../mcp_audit_read_gateway_tests.rs"]
+mod mcp_audit_read_gateway_tests;
+
 #[tauri::command]
 pub async fn list_mcp_servers(
     state: State<'_, Arc<AppState>>,
