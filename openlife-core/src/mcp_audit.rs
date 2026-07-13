@@ -502,7 +502,7 @@ impl McpAuditStore {
     /// D068 RED-fixture seam for the exact historical, pre-envelope wire
     /// format. Keep this test-only helper bound to the production legacy
     /// decoder when the authenticated current envelope is introduced.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     fn d068_encrypt_legacy_payload_fixture_for_test(&self, plaintext: &str) -> Result<String> {
         self.encrypt(plaintext)
     }
@@ -652,6 +652,47 @@ impl McpAuditStore {
             ],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    /// Test-utils-only constructor for the source-backed version-zero payload
+    /// format used by the D068 bootstrap attack. The authenticated-envelope
+    /// implementation must keep this bound to the real legacy decoder; it is
+    /// not a product write path.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn d068_insert_legacy_payload_fixture_for_test(
+        &self,
+        tool_name: &str,
+        raw_arguments: &Value,
+        raw_result: &str,
+    ) -> Result<i64> {
+        let connection = self.conn()?;
+        connection.execute(
+            "INSERT INTO mcp_log (
+                tool_name, arguments_encrypted, result_encrypted, success, pii_found,
+                created_at, key_epoch, payload_minimized_version
+             ) VALUES (?1, ?2, ?3, 1, 1, ?4, ?5, 0)",
+            params![
+                tool_name,
+                self.d068_encrypt_legacy_payload_fixture_for_test(&serde_json::to_string(
+                    raw_arguments
+                )?)?,
+                self.d068_encrypt_legacy_payload_fixture_for_test(raw_result)?,
+                "2026-07-13T12:00:00Z",
+                self.key_config.epoch as i64,
+            ],
+        )?;
+        Ok(connection.last_insert_rowid())
+    }
+
+    /// Test-utils-only tamper operation: mutate only the plaintext format
+    /// column so a version-zero legacy ciphertext claims to be current.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn d068_flip_payload_version_to_current_for_test(&self, row_id: i64) -> Result<()> {
+        self.conn()?.execute(
+            "UPDATE mcp_log SET payload_minimized_version = ?1 WHERE id = ?2",
+            params![MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION, row_id],
+        )?;
+        Ok(())
     }
 
     pub fn list_logs(&self, limit: usize) -> Result<Vec<McpLogEntry>> {
