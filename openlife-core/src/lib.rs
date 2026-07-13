@@ -16,7 +16,7 @@ pub mod life_model_write_gateway;
 pub mod llm;
 pub mod mcp;
 pub mod mcp_audit;
-pub mod mcp_audit_payload_codec;
+pub(crate) mod mcp_audit_payload_codec;
 pub mod memory;
 pub mod memory_cache;
 pub mod memory_gateway;
