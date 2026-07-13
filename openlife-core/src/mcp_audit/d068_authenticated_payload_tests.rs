@@ -131,18 +131,17 @@ fn legal_receipts() -> (String, String) {
 
 #[derive(Debug)]
 struct ProductReadObservation {
-    open_error: Option<String>,
-    list: Option<std::result::Result<Vec<McpLogEntry>, String>>,
-    export: Option<std::result::Result<AuditExport, String>>,
+    list: std::result::Result<Vec<McpLogEntry>, String>,
+    export: std::result::Result<AuditExport, String>,
 }
 
 impl ProductReadObservation {
     fn list_failed_closed(&self) -> bool {
-        self.open_error.is_some() || self.list.as_ref().is_some_and(Result::is_err)
+        self.list.is_err()
     }
 
     fn export_failed_closed(&self) -> bool {
-        self.open_error.is_some() || self.export.as_ref().is_some_and(Result::is_err)
+        self.export.is_err()
     }
 
     fn both_failed_closed(&self) -> bool {
@@ -153,47 +152,33 @@ impl ProductReadObservation {
         let list = self
             .list
             .as_ref()
-            .and_then(|result| result.as_ref().ok())
+            .ok()
             .map(|logs| serde_json::to_value(logs).expect("serialize D068 list observation"));
-        let export = self
-            .export
-            .as_ref()
-            .and_then(|result| result.as_ref().ok())
-            .map(|export| serde_json::to_value(export).expect("serialize D068 export observation"));
+        let export =
+            self.export.as_ref().ok().map(|export| {
+                serde_json::to_value(export).expect("serialize D068 export observation")
+            });
         serde_json::to_string(&(list, export)).expect("serialize D068 successful product reads")
     }
 
     fn into_successes(self) -> (Vec<McpLogEntry>, AuditExport) {
-        assert!(
-            self.open_error.is_none(),
-            "audit store open failed: {:?}",
-            self.open_error
-        );
-        let logs = self
-            .list
-            .expect("D068 list was attempted")
-            .expect("D068 list succeeded");
-        let export = self
-            .export
-            .expect("D068 export was attempted")
-            .expect("D068 export succeeded");
+        let logs = self.list.expect("D068 list succeeded");
+        let export = self.export.expect("D068 export succeeded");
         (logs, export)
     }
 }
 
 fn restart_and_observe(path: &Path) -> ProductReadObservation {
-    match McpAuditStore::with_key_materials(path, vec![material()]) {
-        Err(error) => ProductReadObservation {
-            open_error: Some(error.to_string()),
-            list: None,
-            export: None,
-        },
-        Ok(store) => ProductReadObservation {
-            open_error: None,
-            list: Some(store.list_logs(100).map_err(|error| error.to_string())),
-            export: Some(store.export_logs(30).map_err(|error| error.to_string())),
-        },
-    }
+    let list = McpAuditStore::with_key_materials(path, vec![material()])
+        .map_err(|error| error.to_string())
+        .and_then(|store| store.list_logs(100).map_err(|error| error.to_string()));
+    // Export is deliberately attempted from a fresh product store. A failed
+    // list call must not be allowed to poison shared in-memory state and hide
+    // an independently vulnerable export path.
+    let export = McpAuditStore::with_key_materials(path, vec![material()])
+        .map_err(|error| error.to_string())
+        .and_then(|store| store.export_logs(30).map_err(|error| error.to_string()));
+    ProductReadObservation { list, export }
 }
 
 fn assert_no_raw_payload(value: &impl Serialize) {
@@ -373,6 +358,11 @@ fn invalid_current_receipt_variants() -> Vec<(&'static str, &'static str, Value)
             json!({"kind":"arguments","payloadStored":false,"valueType":"object","bytes":1}),
         ),
         (
+            "missing_payload_stored",
+            "arguments",
+            json!({"kind":"arguments","valueType":"object","bytes":1,"digest":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}),
+        ),
+        (
             "wrong_result_kind",
             "result",
             json!({"kind":"arguments","payloadStored":false,"valueType":"string","bytes":1,"digest":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}),
@@ -381,6 +371,36 @@ fn invalid_current_receipt_variants() -> Vec<(&'static str, &'static str, Value)
             "wrong_result_value_type",
             "result",
             json!({"kind":"result","payloadStored":false,"valueType":"object","bytes":1,"digest":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}),
+        ),
+        (
+            "result_payload_stored",
+            "result",
+            json!({"kind":"result","payloadStored":true,"valueType":"string","bytes":1,"digest":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}),
+        ),
+        (
+            "result_negative_bytes",
+            "result",
+            json!({"kind":"result","payloadStored":false,"valueType":"string","bytes":-1,"digest":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}),
+        ),
+        (
+            "result_bad_digest",
+            "result",
+            json!({"kind":"result","payloadStored":false,"valueType":"string","bytes":1,"digest":"sha256:not-a-sha256-digest"}),
+        ),
+        (
+            "result_unknown_field",
+            "result",
+            json!({"kind":"result","payloadStored":false,"valueType":"string","bytes":1,"digest":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","raw":"must-not-be-accepted"}),
+        ),
+        (
+            "result_missing_digest",
+            "result",
+            json!({"kind":"result","payloadStored":false,"valueType":"string","bytes":1}),
+        ),
+        (
+            "result_missing_payload_stored",
+            "result",
+            json!({"kind":"result","valueType":"string","bytes":1,"digest":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}),
         ),
     ]
 }
@@ -446,6 +466,57 @@ fn d068_strict_current_decoder_rejects_every_invalid_receipt_for_list_and_export
     assert!(
         accepted.is_empty() && rewritten.is_empty(),
         "invalid current receipts reached product truth or rewrote durable bytes: accepted={accepted:?}, rewritten={rewritten:?}"
+    );
+}
+
+#[test]
+fn d068_corrupt_current_ciphertext_fails_list_and_export_without_rewrite() {
+    let mut accepted = Vec::new();
+    let mut rewritten = Vec::new();
+    for corrupt_role in ["arguments", "result"] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mcp_audit.db");
+        let store = create_store(&path);
+        let (arguments_receipt, result_receipt) = legal_receipts();
+        let mut arguments = store
+            .d068_encrypt_current_payload_fixture_for_test(
+                "arguments",
+                MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION,
+                &arguments_receipt,
+            )
+            .unwrap();
+        let mut result = store
+            .d068_encrypt_current_payload_fixture_for_test(
+                "result",
+                MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION,
+                &result_receipt,
+            )
+            .unwrap();
+        if corrupt_role == "arguments" {
+            arguments = "not-valid-aead-ciphertext".to_string();
+        } else {
+            result = "not-valid-aead-ciphertext".to_string();
+        }
+        insert_encrypted_row(
+            &store,
+            &format!("d068_current_corrupt_{corrupt_role}"),
+            &arguments,
+            &result,
+            MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION,
+        );
+        drop(store);
+        let before = artifact_family(&path);
+        let observation = restart_and_observe(&path);
+        if !observation.both_failed_closed() {
+            accepted.push(corrupt_role);
+        }
+        if artifact_family(&path) != before {
+            rewritten.push(corrupt_role);
+        }
+    }
+    assert!(
+        accepted.is_empty() && rewritten.is_empty(),
+        "current ciphertext authentication failures reached product truth or rewrote durable bytes: accepted={accepted:?}, rewritten={rewritten:?}"
     );
 }
 
