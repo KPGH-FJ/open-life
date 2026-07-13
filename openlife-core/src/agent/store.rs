@@ -6672,6 +6672,52 @@ impl AgentRunStore {
     }
 }
 
+impl AgentRunStore {
+    /// Verify the exact transient adapter body against the AgentRunStore-owned
+    /// receipt key, then issue a body-carrying observation usable only by the
+    /// current structured-evidence turn. No raw body is persisted here.
+    pub(crate) fn prepare_structured_memory_observation(
+        &self,
+        context: crate::agent::ConditionalMemoryEvidenceContext,
+        action: &crate::agent::AgentAction,
+        observation: &crate::agent::AgentObservation,
+    ) -> Result<crate::agent::StructuredMemoryObservation> {
+        let receipt = action
+            .react_trace
+            .as_ref()
+            .and_then(|trace| trace.output_receipt.as_ref())
+            .context("structured_memory_output_receipt_missing")?;
+        if receipt.is_legacy_unverified()
+            || receipt.kind() != crate::agent::ContentReceiptKind::ToolOutput
+            || receipt.run_id() != context.operation_id()
+            || receipt.action_id() != action.id
+            || receipt.observation_id() != observation.id
+            || observation.action_id.as_deref() != Some(action.id.as_str())
+        {
+            anyhow::bail!("structured_memory_observation_receipt_owner_mismatch");
+        }
+        let binding = crate::agent::types::ContentReceiptBinding::from_action_graph(
+            context.operation_id(),
+            action,
+            observation,
+            receipt.field(),
+        )?;
+        let body = observed_bound_content_body(action, observation, receipt.field())?;
+        if !receipt.verify_observed_body(self.receipt_key.as_ref(), &binding, body) {
+            anyhow::bail!("structured_memory_observation_body_receipt_mismatch");
+        }
+        crate::agent::StructuredMemoryObservation::issue(
+            context,
+            receipt.run_id(),
+            receipt.action_id(),
+            receipt.observation_id(),
+            receipt.receipt_id(),
+            &receipt.public_digest(),
+            body,
+        )
+    }
+}
+
 impl BoundContentReceiptIssuer for AgentRunStore {
     fn issue_bound_content_receipt(
         &self,

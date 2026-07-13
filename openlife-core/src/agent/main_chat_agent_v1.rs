@@ -769,8 +769,17 @@ pub struct PolicyConditionalObservationReviewGrant {
     run_id: String,
     action_id: String,
     observation_id: String,
+    observation_ref: String,
+    execution_epoch_id: String,
     output_receipt_digest: String,
     tool_receipt_id: String,
+    evidence_start_byte: usize,
+    evidence_end_byte: usize,
+    evidence_digest: String,
+    provider_request_id: String,
+    provider_response_digest: String,
+    provider_receipt_digest: String,
+    context_manifest_digest: String,
     candidate_body: String,
     candidate_digest: String,
     policy_grant_id: String,
@@ -816,12 +825,48 @@ impl PolicyConditionalObservationReviewGrant {
         &self.observation_id
     }
 
+    pub(crate) fn observation_ref(&self) -> &str {
+        &self.observation_ref
+    }
+
+    pub(crate) fn execution_epoch_id(&self) -> &str {
+        &self.execution_epoch_id
+    }
+
     pub(crate) fn output_receipt_digest(&self) -> &str {
         &self.output_receipt_digest
     }
 
     pub(crate) fn tool_receipt_id(&self) -> &str {
         &self.tool_receipt_id
+    }
+
+    pub(crate) fn evidence_start_byte(&self) -> usize {
+        self.evidence_start_byte
+    }
+
+    pub(crate) fn evidence_end_byte(&self) -> usize {
+        self.evidence_end_byte
+    }
+
+    pub(crate) fn evidence_digest(&self) -> &str {
+        &self.evidence_digest
+    }
+
+    pub(crate) fn provider_request_id(&self) -> &str {
+        &self.provider_request_id
+    }
+
+    pub(crate) fn provider_response_digest(&self) -> &str {
+        &self.provider_response_digest
+    }
+
+    pub(crate) fn provider_receipt_digest(&self) -> &str {
+        &self.provider_receipt_digest
+    }
+
+    pub(crate) fn context_manifest_digest(&self) -> &str {
+        &self.context_manifest_digest
     }
 
     pub(crate) fn candidate_body(&self) -> &str {
@@ -899,18 +944,57 @@ impl PolicyDecision {
         crate::agent::metadata_safe::metadata_safe_value_digest(&contract).1
     }
 
+    pub fn conditional_memory_evidence_context(
+        &self,
+        operation_id: &str,
+        execution_epoch_id: &str,
+    ) -> Result<Option<crate::agent::ConditionalMemoryEvidenceContext>> {
+        if !self.has_valid_policy_router_authority() {
+            anyhow::bail!("structured memory context requires live PolicyRouter authority");
+        }
+        let plan = self
+            .governance_plan()
+            .context("structured memory context plan authority unavailable")?;
+        let Some(conditional) = plan.conditional_observation_reviews.first() else {
+            return Ok(None);
+        };
+        if plan.conditional_observation_reviews.len() != 1
+            || conditional.review_domain != PolicyGovernanceReviewDomain::Memory
+            || conditional.required_read_capability != AllowedCapability::WorkspaceFileRead
+            || conditional.usefulness_contract != "structured_memory_evidence_v2"
+            || !conditional.one_shot
+            || conditional.source_user_message_digest != self.authorized_user_message_digest
+            || self.route_kind != PolicyRouteKind::ReadOnlyTool
+            || !self.allows(AllowedCapability::WorkspaceFileRead)
+            || self.allows(AllowedCapability::MemoryProposal)
+            || matches!(self.risk, IntentRiskLevel::High | IntentRiskLevel::Critical)
+            || self.sensitivity != PolicySensitivity::Internal
+        {
+            anyhow::bail!("structured memory context plan is not executable");
+        }
+        if operation_id.trim().is_empty() {
+            anyhow::bail!("structured memory operation identity missing");
+        }
+        Ok(Some(crate::agent::ConditionalMemoryEvidenceContext::issue(
+            operation_id,
+            execution_epoch_id,
+            &self.authorized_user_message_id,
+            &self.authorized_user_message_digest,
+            &self.policy_version,
+            &self.contract_digest(),
+        )?))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn try_authorize_conditional_observation_memory_review(
         &self,
         operation_id: &str,
-        source_user_message_id: &str,
-        source_user_message_digest: &str,
-        run_id: &str,
+        execution_epoch_id: &str,
         action: &crate::agent::AgentAction,
         observation: &crate::agent::AgentObservation,
         output_receipt: &crate::agent::BoundContentReceipt,
         tool_receipt: &ToolExecutionReceipt,
-        observed_body: &str,
+        evidence: &crate::agent::StructuredMemoryEvidence,
     ) -> Result<Option<PolicyConditionalObservationReviewGrant>> {
         if !self.has_valid_policy_router_authority() {
             anyhow::bail!("conditional observation review requires live PolicyRouter authority");
@@ -924,7 +1008,7 @@ impl PolicyDecision {
         if plan.conditional_observation_reviews.len() != 1
             || conditional.review_domain != PolicyGovernanceReviewDomain::Memory
             || conditional.required_read_capability != AllowedCapability::WorkspaceFileRead
-            || conditional.usefulness_contract != "supported_inferred_memory_candidate_v1"
+            || conditional.usefulness_contract != "structured_memory_evidence_v2"
             || !conditional.one_shot
             || conditional.source_user_message_digest != self.authorized_user_message_digest
             || self.route_kind != PolicyRouteKind::ReadOnlyTool
@@ -938,13 +1022,18 @@ impl PolicyDecision {
         {
             return Ok(None);
         }
+        let context = evidence.context();
         let operation_uuid = uuid::Uuid::parse_str(operation_id)
             .context("conditional observation operation id invalid")?;
         if operation_uuid.get_version() != Some(uuid::Version::Random)
             || operation_uuid.hyphenated().to_string() != operation_id
-            || run_id != operation_id
-            || source_user_message_id != self.authorized_user_message_id
-            || source_user_message_digest != self.authorized_user_message_digest
+            || evidence.run_id() != operation_id
+            || context.operation_id() != operation_id
+            || context.execution_epoch_id() != execution_epoch_id
+            || context.current_user_message_ref() != self.authorized_user_message_id
+            || context.current_user_message_digest() != self.authorized_user_message_digest
+            || context.policy_version() != self.policy_version
+            || context.policy_contract_digest() != self.contract_digest()
         {
             anyhow::bail!("conditional observation canonical owner mismatch");
         }
@@ -958,62 +1047,41 @@ impl PolicyDecision {
             .context("conditional observation output receipt missing")?;
         if action.status != "succeeded"
             || observation.action_id.as_deref() != Some(action.id.as_str())
-            || action_trace.run_id.as_deref() != Some(run_id)
+            || action_trace.run_id.as_deref() != Some(operation_id)
             || action_trace.action_id != action.id
             || action_trace.observation_id.as_deref() != Some(observation.id.as_str())
             || attached_output_receipt != output_receipt
             || output_receipt.is_legacy_unverified()
             || output_receipt.kind() != crate::agent::ContentReceiptKind::ToolOutput
-            || output_receipt.run_id() != run_id
+            || output_receipt.run_id() != operation_id
             || output_receipt.action_id() != action.id
             || output_receipt.observation_id() != observation.id
             || output_receipt.byte_count() == 0
-            || tool_receipt.source_run_id.as_deref() != Some(run_id)
+            || tool_receipt.source_run_id.as_deref() != Some(operation_id)
             || tool_receipt.action_effect != ToolActionEffect::ReadOnly
             || !tool_receipt.is_runtime_issued()
             || !tool_receipt.proves_success()
+            || evidence.action_id() != action.id
+            || evidence.observation_id() != observation.id
+            || evidence.output_receipt_id() != output_receipt.receipt_id()
+            || evidence.output_receipt_digest() != output_receipt.public_digest()
         {
             anyhow::bail!("conditional observation success receipt mismatch");
         }
-        let compact_body = observed_body
-            .replace(['\r', '\n', '\t'], " ")
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        if compact_body.is_empty()
-            || compact_body.len() > 64 * 1024
-            || !extract_untrusted_instruction_spans(&compact_body).is_empty()
-            || contains_any(
-                &compact_body.to_ascii_lowercase(),
-                &[
-                    "ignore previous instructions",
-                    "ignore all instructions",
-                    "system prompt",
-                    "prompt injection",
-                    "忽略之前的指令",
-                    "忽略所有指令",
-                    "系统提示词",
-                ],
-            )
-        {
-            return Ok(None);
-        }
-        let mut candidates = crate::agent::extract_main_chat_memory_candidates(&compact_body)
-            .into_iter()
-            .filter(|candidate| {
-                candidate.destination == crate::agent::MemoryDestination::MemoryProposal
-                    && candidate.kind == crate::agent::MemoryCandidateKind::SemanticUserFact
-                    && candidate.explicitness == "implicit"
-                    && candidate.sensitivity == "internal"
-                    && candidate.confidence >= 0.85
-            })
-            .collect::<Vec<_>>();
-        candidates.sort_by(|left, right| left.candidate_id.cmp(&right.candidate_id));
-        if candidates.len() != 1 {
-            return Ok(None);
-        }
-        let candidate = candidates.remove(0);
-        let candidate_digest = policy_governance_candidate_digest(&candidate);
+        let candidate_digest = crate::agent::metadata_safe::metadata_safe_value_digest(
+            &serde_json::json!({
+                "schema": "structured_memory_evidence_v2",
+                "observationRef": evidence.observation_ref(),
+                "startByte": evidence.start_byte(),
+                "endByte": evidence.end_byte(),
+                "evidenceDigest": evidence.evidence_digest(),
+                "providerRequestId": evidence.provider_request_id(),
+                "providerResponseDigest": evidence.provider_response_digest(),
+                "providerReceiptDigest": evidence.provider_receipt_digest(),
+                "contextManifestDigest": evidence.context_manifest_digest(),
+            }),
+        )
+        .1;
         let output_receipt_digest = output_receipt.public_digest();
         let policy_contract_digest = self.contract_digest();
         let authority = match &self.authority {
@@ -1028,14 +1096,23 @@ impl PolicyDecision {
         }
         Ok(Some(PolicyConditionalObservationReviewGrant {
             operation_id: operation_id.to_string(),
-            source_user_message_id: source_user_message_id.to_string(),
-            source_user_message_digest: source_user_message_digest.to_string(),
-            run_id: run_id.to_string(),
+            source_user_message_id: self.authorized_user_message_id.clone(),
+            source_user_message_digest: self.authorized_user_message_digest.clone(),
+            run_id: operation_id.to_string(),
             action_id: action.id.clone(),
             observation_id: observation.id.clone(),
+            observation_ref: evidence.observation_ref().into(),
+            execution_epoch_id: execution_epoch_id.into(),
             output_receipt_digest,
             tool_receipt_id: tool_receipt.receipt_id.clone(),
-            candidate_body: candidate.normalized_claim,
+            evidence_start_byte: evidence.start_byte(),
+            evidence_end_byte: evidence.end_byte(),
+            evidence_digest: evidence.evidence_digest().into(),
+            provider_request_id: evidence.provider_request_id().into(),
+            provider_response_digest: evidence.provider_response_digest().into(),
+            provider_receipt_digest: evidence.provider_receipt_digest().into(),
+            context_manifest_digest: evidence.context_manifest_digest().into(),
+            candidate_body: evidence.exact_evidence().into(),
             candidate_digest,
             policy_grant_id: conditional.grant_id.clone(),
             policy_contract_digest,
@@ -1990,14 +2067,14 @@ fn build_policy_governance_plan(
                     "sourceUserMessageDigest": intent.current_user_message_digest,
                     "requiredReadCapability": AllowedCapability::WorkspaceFileRead,
                     "reviewDomain": PolicyGovernanceReviewDomain::Memory,
-                    "usefulnessContract": "supported_inferred_memory_candidate_v1",
+                    "usefulnessContract": "structured_memory_evidence_v2",
                 }))
                 .1;
             conditional_observation_reviews.push(PolicyConditionalObservationReview {
                 grant_id,
                 review_domain: PolicyGovernanceReviewDomain::Memory,
                 required_read_capability: AllowedCapability::WorkspaceFileRead,
-                usefulness_contract: "supported_inferred_memory_candidate_v1".into(),
+                usefulness_contract: "structured_memory_evidence_v2".into(),
                 source_user_message_digest: intent.current_user_message_digest.clone(),
                 one_shot: true,
             });

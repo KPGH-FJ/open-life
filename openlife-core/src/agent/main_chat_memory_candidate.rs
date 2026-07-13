@@ -77,6 +77,734 @@ pub struct MainChatMemoryRoutingResult {
     pub blockers: Vec<String>,
 }
 
+pub const STRUCTURED_MEMORY_OBSERVATION_MAX_BYTES: usize = 16 * 1024;
+pub const STRUCTURED_MEMORY_EVIDENCE_MAX_CANDIDATES: usize = 4;
+pub const STRUCTURED_MEMORY_EVIDENCE_MAX_SLICE_BYTES: usize = 2 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuredMemoryEvidenceSubject {
+    CurrentUser,
+    Other,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuredMemoryEvidenceAssertion {
+    AssertedFact,
+    Instruction,
+    Attribution,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuredMemoryEvidenceModality {
+    Asserted,
+    Conditional,
+    Hypothetical,
+    Question,
+    Quoted,
+    Code,
+    Unknown,
+}
+
+/// Model-authored data only. This type deliberately carries no execution or
+/// write authority; it can become evidence only after deterministic binding to
+/// one adapter-observed body and the same completed final provider request.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct StructuredMemoryEvidenceDraft {
+    observation_ref: String,
+    start_byte: usize,
+    end_byte: usize,
+    evidence_digest: String,
+    subject: StructuredMemoryEvidenceSubject,
+    assertion: StructuredMemoryEvidenceAssertion,
+    modality: StructuredMemoryEvidenceModality,
+    confidence: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryEvidenceStatus {
+    NotRequested,
+    CandidateAdmitted,
+    NoCandidate,
+    Unavailable,
+    Rejected,
+    ProposalStaged,
+    Cancelled,
+}
+
+impl MemoryEvidenceStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRequested => "not_requested",
+            Self::CandidateAdmitted => "candidate_admitted",
+            Self::NoCandidate => "no_candidate",
+            Self::Unavailable => "unavailable",
+            Self::Rejected => "rejected",
+            Self::ProposalStaged => "proposal_staged",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct StructuredMemoryEvidenceOutcome {
+    status: MemoryEvidenceStatus,
+    reason_code: String,
+    evidence: Option<StructuredMemoryEvidence>,
+}
+
+impl std::fmt::Debug for StructuredMemoryEvidenceOutcome {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StructuredMemoryEvidenceOutcome")
+            .field("status", &self.status)
+            .field("reason_code", &self.reason_code)
+            .field("evidence_present", &self.evidence.is_some())
+            .finish()
+    }
+}
+
+impl StructuredMemoryEvidenceOutcome {
+    pub fn not_requested() -> Self {
+        Self::without_evidence(MemoryEvidenceStatus::NotRequested, "not_requested")
+    }
+
+    pub fn unavailable(reason_code: impl Into<String>) -> Self {
+        Self::without_evidence(MemoryEvidenceStatus::Unavailable, reason_code)
+    }
+
+    pub fn rejected(reason_code: impl Into<String>) -> Self {
+        Self::without_evidence(MemoryEvidenceStatus::Rejected, reason_code)
+    }
+
+    pub fn no_candidate() -> Self {
+        Self::without_evidence(MemoryEvidenceStatus::NoCandidate, "no_supported_candidate")
+    }
+
+    fn admitted(evidence: StructuredMemoryEvidence) -> Self {
+        Self {
+            status: MemoryEvidenceStatus::CandidateAdmitted,
+            reason_code: "structured_evidence_admitted_for_review".into(),
+            evidence: Some(evidence),
+        }
+    }
+
+    fn without_evidence(status: MemoryEvidenceStatus, reason_code: impl Into<String>) -> Self {
+        Self {
+            status,
+            reason_code: reason_code.into(),
+            evidence: None,
+        }
+    }
+
+    pub fn status(&self) -> MemoryEvidenceStatus {
+        self.status
+    }
+
+    pub fn reason_code(&self) -> &str {
+        &self.reason_code
+    }
+
+    pub fn evidence(&self) -> Option<&StructuredMemoryEvidence> {
+        self.evidence.as_ref()
+    }
+
+    pub fn mark_proposal_staged(&mut self) {
+        if self.evidence.is_some() {
+            self.status = MemoryEvidenceStatus::ProposalStaged;
+            self.reason_code = "review_workflow_proposal_staged".into();
+        }
+    }
+}
+
+/// PolicyRouter-issued request binding for exactly one conditional observation
+/// review lane. Public callers can carry it but cannot construct or mutate it.
+#[derive(Clone)]
+pub struct ConditionalMemoryEvidenceContext {
+    operation_id: String,
+    execution_epoch_id: String,
+    current_user_message_ref: String,
+    current_user_message_digest: String,
+    policy_version: String,
+    policy_contract_digest: String,
+    runtime_nonce: Uuid,
+    runtime_seal: String,
+}
+
+impl std::fmt::Debug for ConditionalMemoryEvidenceContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConditionalMemoryEvidenceContext")
+            .field("operation_id", &self.operation_id)
+            .field("execution_epoch_id", &self.execution_epoch_id)
+            .field("authority", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl ConditionalMemoryEvidenceContext {
+    pub(crate) fn issue(
+        operation_id: &str,
+        execution_epoch_id: &str,
+        current_user_message_ref: &str,
+        current_user_message_digest: &str,
+        policy_version: &str,
+        policy_contract_digest: &str,
+    ) -> Result<Self> {
+        for value in [
+            operation_id,
+            execution_epoch_id,
+            current_user_message_ref,
+            current_user_message_digest,
+            policy_version,
+            policy_contract_digest,
+        ] {
+            if value.trim().is_empty() {
+                anyhow::bail!("structured_memory_context_identity_missing");
+            }
+        }
+        for value in [operation_id, execution_epoch_id] {
+            let parsed = Uuid::parse_str(value)
+                .context("structured memory context UUID identity invalid")?;
+            if parsed.get_version() != Some(uuid::Version::Random)
+                || parsed.hyphenated().to_string() != value
+            {
+                anyhow::bail!("structured_memory_context_uuid_not_canonical_v4");
+            }
+        }
+        let mut context = Self {
+            operation_id: operation_id.into(),
+            execution_epoch_id: execution_epoch_id.into(),
+            current_user_message_ref: current_user_message_ref.into(),
+            current_user_message_digest: current_user_message_digest.into(),
+            policy_version: policy_version.into(),
+            policy_contract_digest: policy_contract_digest.into(),
+            runtime_nonce: Uuid::new_v4(),
+            runtime_seal: String::new(),
+        };
+        context.runtime_seal = sha256_hex(context.runtime_material().as_bytes());
+        Ok(context)
+    }
+
+    fn runtime_material(&self) -> String {
+        format!(
+            "operation\0{}\0epoch\0{}\0user_ref\0{}\0user_digest\0{}\0policy_version\0{}\0policy_contract\0{}\0nonce\0{}",
+            self.operation_id,
+            self.execution_epoch_id,
+            self.current_user_message_ref,
+            self.current_user_message_digest,
+            self.policy_version,
+            self.policy_contract_digest,
+            self.runtime_nonce,
+        )
+    }
+
+    pub(crate) fn runtime_seal_is_valid(&self) -> bool {
+        self.runtime_seal == sha256_hex(self.runtime_material().as_bytes())
+    }
+
+    pub fn operation_id(&self) -> &str {
+        &self.operation_id
+    }
+
+    pub fn execution_epoch_id(&self) -> &str {
+        &self.execution_epoch_id
+    }
+
+    pub fn current_user_message_ref(&self) -> &str {
+        &self.current_user_message_ref
+    }
+
+    pub fn current_user_message_digest(&self) -> &str {
+        &self.current_user_message_digest
+    }
+
+    pub fn policy_version(&self) -> &str {
+        &self.policy_version
+    }
+
+    pub fn policy_contract_digest(&self) -> &str {
+        &self.policy_contract_digest
+    }
+}
+
+/// Transient verified observation. The original body is retained only for the
+/// current AgentLoop turn and is never serializable or debuggable.
+#[derive(Clone)]
+pub struct StructuredMemoryObservation {
+    context: ConditionalMemoryEvidenceContext,
+    observation_ref: String,
+    run_id: String,
+    action_id: String,
+    observation_id: String,
+    output_receipt_id: String,
+    output_receipt_digest: String,
+    body: String,
+}
+
+impl std::fmt::Debug for StructuredMemoryObservation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StructuredMemoryObservation")
+            .field("observation_ref", &self.observation_ref)
+            .field("body_bytes", &self.body.len())
+            .field("body", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl StructuredMemoryObservation {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn issue(
+        context: ConditionalMemoryEvidenceContext,
+        run_id: &str,
+        action_id: &str,
+        observation_id: &str,
+        output_receipt_id: &str,
+        output_receipt_digest: &str,
+        body: &str,
+    ) -> Result<Self> {
+        if !context.runtime_seal_is_valid()
+            || run_id != context.operation_id()
+            || body.is_empty()
+            || body.len() > STRUCTURED_MEMORY_OBSERVATION_MAX_BYTES
+        {
+            anyhow::bail!("structured_memory_observation_owner_or_bound_invalid");
+        }
+        let observation_ref = format!(
+            "agent-run://{run_id}/action/{action_id}/observation/{observation_id}/bound-content/{output_receipt_id}"
+        );
+        Ok(Self {
+            context,
+            observation_ref,
+            run_id: run_id.into(),
+            action_id: action_id.into(),
+            observation_id: observation_id.into(),
+            output_receipt_id: output_receipt_id.into(),
+            output_receipt_digest: output_receipt_digest.into(),
+            body: body.into(),
+        })
+    }
+
+    pub fn observation_ref(&self) -> &str {
+        &self.observation_ref
+    }
+
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+
+    pub fn context(&self) -> &ConditionalMemoryEvidenceContext {
+        &self.context
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct StructuredMemoryPreparedBinding {
+    observation: StructuredMemoryObservation,
+    request_id: String,
+    context_manifest_digest: String,
+}
+
+impl StructuredMemoryPreparedBinding {
+    pub(crate) fn capture(
+        request: &crate::llm::PreparedProviderRequest,
+        observation: &StructuredMemoryObservation,
+    ) -> Result<Self> {
+        request.validate()?;
+        let matching_blocks = request
+            .context_blocks
+            .iter()
+            .filter(|block| {
+                block.source_ref == observation.observation_ref
+                    && block.category == "untrusted_tool_observation"
+                    && block.content == observation.body
+            })
+            .count();
+        if matching_blocks != 1
+            || !request
+                .context_manifest
+                .selected_context_refs
+                .iter()
+                .any(|value| value == observation.observation_ref())
+            || !request
+                .context_manifest
+                .included_context_categories
+                .iter()
+                .any(|value| value == "untrusted_tool_observation")
+            || !request
+                .context_manifest
+                .declared_payload_categories
+                .contains(&crate::llm::ProviderPayloadCategory::UntrustedToolObservation)
+        {
+            anyhow::bail!("structured_memory_final_request_observation_context_missing");
+        }
+        let policy_evidence = request.policy_receipt_evidence();
+        if policy_evidence.policy_version != observation.context.policy_version() {
+            anyhow::bail!("structured_memory_final_request_policy_version_mismatch");
+        }
+        Ok(Self {
+            observation: observation.clone(),
+            request_id: request.context_manifest.request_id.clone(),
+            context_manifest_digest: policy_evidence.context_manifest_digest,
+        })
+    }
+
+    pub(crate) fn complete(
+        self,
+        receipt: &crate::llm::ProviderInvocationReceipt,
+        response: &str,
+    ) -> Result<StructuredMemoryProviderProvenance> {
+        let receipt_policy = receipt
+            .policy_evidence
+            .as_ref()
+            .context("structured memory final receipt policy evidence missing")?;
+        if receipt.status != crate::llm::ProviderInvocationStatus::Completed
+            || receipt.simulated
+            || receipt.request_id != self.request_id
+            || receipt_policy.context_manifest_digest != self.context_manifest_digest
+            || receipt_policy.policy_version != self.observation.context.policy_version()
+        {
+            anyhow::bail!("structured_memory_final_provider_receipt_mismatch");
+        }
+        let (_, response_digest) =
+            crate::agent::metadata_safe::metadata_safe_text_digest(response);
+        Ok(StructuredMemoryProviderProvenance {
+            observation: self.observation,
+            request_id: receipt.request_id.clone(),
+            response_digest,
+            context_manifest_digest: self.context_manifest_digest,
+            provider_receipt_digest: crate::agent::metadata_safe::metadata_safe_value_digest(
+                &serde_json::to_value(receipt)?,
+            )
+            .1,
+        })
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct StructuredMemoryProviderProvenance {
+    observation: StructuredMemoryObservation,
+    request_id: String,
+    response_digest: String,
+    context_manifest_digest: String,
+    provider_receipt_digest: String,
+}
+
+impl std::fmt::Debug for StructuredMemoryProviderProvenance {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StructuredMemoryProviderProvenance")
+            .field("request_id", &self.request_id)
+            .field("response_digest", &self.response_digest)
+            .field("body", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+pub struct StructuredMemoryEvidence {
+    context: ConditionalMemoryEvidenceContext,
+    observation_ref: String,
+    run_id: String,
+    action_id: String,
+    observation_id: String,
+    output_receipt_id: String,
+    output_receipt_digest: String,
+    start_byte: usize,
+    end_byte: usize,
+    evidence_digest: String,
+    exact_evidence: String,
+    confidence: f32,
+    provider_request_id: String,
+    provider_response_digest: String,
+    provider_receipt_digest: String,
+    context_manifest_digest: String,
+}
+
+impl std::fmt::Debug for StructuredMemoryEvidence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StructuredMemoryEvidence")
+            .field("observation_ref", &self.observation_ref)
+            .field("evidence_digest", &self.evidence_digest)
+            .field("exact_evidence", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl StructuredMemoryEvidence {
+    pub(crate) fn validate_batch(
+        provenance: StructuredMemoryProviderProvenance,
+        drafts: Vec<StructuredMemoryEvidenceDraft>,
+    ) -> StructuredMemoryEvidenceOutcome {
+        if drafts.is_empty() {
+            return StructuredMemoryEvidenceOutcome::no_candidate();
+        }
+        if drafts.len() > STRUCTURED_MEMORY_EVIDENCE_MAX_CANDIDATES {
+            return StructuredMemoryEvidenceOutcome::rejected(
+                "structured_memory_candidate_limit_exceeded",
+            );
+        }
+        let body = provenance.observation.body();
+        if body.len() > STRUCTURED_MEMORY_OBSERVATION_MAX_BYTES {
+            return StructuredMemoryEvidenceOutcome::rejected(
+                "structured_memory_observation_limit_exceeded",
+            );
+        }
+        let untrusted_ranges = structural_untrusted_ranges(body);
+        let mut admitted = Vec::new();
+        for draft in drafts {
+            if draft.observation_ref != provenance.observation.observation_ref
+                || draft.start_byte >= draft.end_byte
+                || draft.end_byte > body.len()
+                || !body.is_char_boundary(draft.start_byte)
+                || !body.is_char_boundary(draft.end_byte)
+                || draft.end_byte - draft.start_byte
+                    > STRUCTURED_MEMORY_EVIDENCE_MAX_SLICE_BYTES
+                || !draft.confidence.is_finite()
+                || !(0.85..=1.0).contains(&draft.confidence)
+                || draft.subject != StructuredMemoryEvidenceSubject::CurrentUser
+                || draft.assertion != StructuredMemoryEvidenceAssertion::AssertedFact
+                || draft.modality != StructuredMemoryEvidenceModality::Asserted
+                || range_intersects_any(draft.start_byte, draft.end_byte, &untrusted_ranges)
+            {
+                return StructuredMemoryEvidenceOutcome::rejected(
+                    "structured_memory_draft_contract_rejected",
+                );
+            }
+            let exact_evidence = &body[draft.start_byte..draft.end_byte];
+            if exact_evidence.trim() != exact_evidence || exact_evidence.is_empty() {
+                return StructuredMemoryEvidenceOutcome::rejected(
+                    "structured_memory_exact_slice_not_canonical",
+                );
+            }
+            let (_, exact_digest) =
+                crate::agent::metadata_safe::metadata_safe_text_digest(exact_evidence);
+            if exact_digest != draft.evidence_digest {
+                return StructuredMemoryEvidenceOutcome::rejected(
+                    "structured_memory_exact_slice_digest_mismatch",
+                );
+            }
+            admitted.push(Self {
+                context: provenance.observation.context.clone(),
+                observation_ref: provenance.observation.observation_ref.clone(),
+                run_id: provenance.observation.run_id.clone(),
+                action_id: provenance.observation.action_id.clone(),
+                observation_id: provenance.observation.observation_id.clone(),
+                output_receipt_id: provenance.observation.output_receipt_id.clone(),
+                output_receipt_digest: provenance.observation.output_receipt_digest.clone(),
+                start_byte: draft.start_byte,
+                end_byte: draft.end_byte,
+                evidence_digest: exact_digest,
+                exact_evidence: exact_evidence.into(),
+                confidence: draft.confidence,
+                provider_request_id: provenance.request_id.clone(),
+                provider_response_digest: provenance.response_digest.clone(),
+                provider_receipt_digest: provenance.provider_receipt_digest.clone(),
+                context_manifest_digest: provenance.context_manifest_digest.clone(),
+            });
+        }
+        if admitted.len() != 1 {
+            return StructuredMemoryEvidenceOutcome::rejected(
+                "structured_memory_multiple_candidates_ambiguous",
+            );
+        }
+        StructuredMemoryEvidenceOutcome::admitted(admitted.remove(0))
+    }
+
+    pub fn context(&self) -> &ConditionalMemoryEvidenceContext {
+        &self.context
+    }
+
+    pub fn observation_ref(&self) -> &str {
+        &self.observation_ref
+    }
+
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    pub fn action_id(&self) -> &str {
+        &self.action_id
+    }
+
+    pub fn observation_id(&self) -> &str {
+        &self.observation_id
+    }
+
+    pub fn output_receipt_id(&self) -> &str {
+        &self.output_receipt_id
+    }
+
+    pub fn output_receipt_digest(&self) -> &str {
+        &self.output_receipt_digest
+    }
+
+    pub fn start_byte(&self) -> usize {
+        self.start_byte
+    }
+
+    pub fn end_byte(&self) -> usize {
+        self.end_byte
+    }
+
+    pub fn evidence_digest(&self) -> &str {
+        &self.evidence_digest
+    }
+
+    pub fn exact_evidence(&self) -> &str {
+        &self.exact_evidence
+    }
+
+    pub fn confidence(&self) -> f32 {
+        self.confidence
+    }
+
+    pub fn provider_request_id(&self) -> &str {
+        &self.provider_request_id
+    }
+
+    pub fn provider_response_digest(&self) -> &str {
+        &self.provider_response_digest
+    }
+
+    pub fn provider_receipt_digest(&self) -> &str {
+        &self.provider_receipt_digest
+    }
+
+    pub fn context_manifest_digest(&self) -> &str {
+        &self.context_manifest_digest
+    }
+}
+
+fn range_intersects_any(start: usize, end: usize, ranges: &[(usize, usize)]) -> bool {
+    ranges
+        .iter()
+        .any(|(range_start, range_end)| start < *range_end && end > *range_start)
+}
+
+/// Linear structural scan. It intentionally does not try to recognize prompt
+/// language: fenced/inline code, block quotes, quoted strings, and balanced
+/// JSON-like containers are untrusted regardless of their words.
+fn structural_untrusted_ranges(value: &str) -> Vec<(usize, usize)> {
+    let bytes = value.as_bytes();
+    let mut ranges = Vec::new();
+    let mut line_start = 0;
+    let mut fenced_start = None;
+    while line_start < bytes.len() {
+        let line_end = value[line_start..]
+            .find('\n')
+            .map(|offset| line_start + offset + 1)
+            .unwrap_or(bytes.len());
+        let line = &value[line_start..line_end];
+        let trimmed = line.trim_start();
+        let fence = trimmed.starts_with("```") || trimmed.starts_with("~~~");
+        if let Some(start) = fenced_start {
+            if fence {
+                ranges.push((start, line_end));
+                fenced_start = None;
+            }
+        } else if fence {
+            fenced_start = Some(line_start);
+        } else if trimmed.starts_with('>') || line.starts_with("    ") || line.starts_with('\t') {
+            ranges.push((line_start, line_end));
+        }
+        line_start = line_end;
+    }
+    if let Some(start) = fenced_start {
+        ranges.push((start, bytes.len()));
+    }
+
+    let mut inline_start = None;
+    for (index, ch) in value.char_indices() {
+        if ch == '`' {
+            if let Some(start) = inline_start.take() {
+                ranges.push((start, index + ch.len_utf8()));
+            } else {
+                inline_start = Some(index);
+            }
+        }
+    }
+    if let Some(start) = inline_start {
+        ranges.push((start, bytes.len()));
+    }
+
+    for (open, close) in [('"', '"'), ('“', '”'), ('‘', '’')] {
+        let mut start = None;
+        let mut escaped = false;
+        for (index, ch) in value.char_indices() {
+            if open == '"' && ch == '\\' && !escaped {
+                escaped = true;
+                continue;
+            }
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if start.is_none() && ch == open {
+                start = Some(index);
+            } else if let Some(range_start) = start {
+                if ch == close {
+                    ranges.push((range_start, index + ch.len_utf8()));
+                    start = None;
+                }
+            }
+        }
+        if let Some(start) = start {
+            ranges.push((start, bytes.len()));
+        }
+    }
+
+    let mut stack: Vec<(u8, usize)> = Vec::new();
+    let mut json_string = false;
+    let mut escaped = false;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if json_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                json_string = false;
+            }
+            continue;
+        }
+        if byte == b'"' && !stack.is_empty() {
+            json_string = true;
+            continue;
+        }
+        if matches!(byte, b'{' | b'[') {
+            stack.push((byte, index));
+            continue;
+        }
+        if matches!(byte, b'}' | b']') {
+            let Some((open, start)) = stack.pop() else {
+                continue;
+            };
+            let matched = (open == b'{' && byte == b'}') || (open == b'[' && byte == b']');
+            if !matched {
+                stack.clear();
+                continue;
+            }
+            if stack.is_empty() {
+                ranges.push((start, index + 1));
+            }
+        }
+    }
+    if let Some((_, start)) = stack.first() {
+        ranges.push((*start, bytes.len()));
+    }
+    ranges.sort_unstable();
+    ranges
+}
+
 /// Opaque proof that the deterministic candidate router selected one exact,
 /// internal, low-risk LifeEvent candidate from the canonical user message.
 /// It is neither cloneable nor serializable and cannot be constructed by an
@@ -1245,30 +1973,12 @@ mod tests {
     }
 
     #[test]
-    fn inferred_stable_user_fact_matrix_is_semantic_not_fixture_token_shaped() {
-        for (text, expected_claim) in [
-            ("The user works in UTC.", "The user works in UTC"),
-            (
-                "My work timezone is Central European Time.",
-                "My work timezone is Central European Time",
-            ),
-            (
-                "我通常周五下午不安排高强度工作。",
-                "我通常周五下午不安排高强度工作",
-            ),
-            ("Coffee makes me anxious.", "Coffee makes me anxious"),
-        ] {
-            let result = routed(text);
-            let proposals = result
-                .candidates
-                .iter()
-                .filter(|candidate| candidate.destination == MemoryDestination::MemoryProposal)
-                .collect::<Vec<_>>();
-            assert_eq!(proposals.len(), 1, "stable user fact was missed: {text}");
-            assert_eq!(proposals[0].normalized_claim, expected_claim, "{text}");
-        }
-
+    fn d051_implicit_observation_text_never_authorizes_a_memory_candidate() {
         for text in [
+            "The user works in UTC.",
+            "My work timezone is Central European Time.",
+            "我通常周五下午不安排高强度工作。",
+            "Coffee makes me anxious.",
             "The build usually fails. Going forward, confirm build time before planning.",
             "This server normally uses UTC. Going forward, confirm its log time.",
             "Cargo.toml often changes. Going forward, confirm that file format.",
@@ -1282,7 +1992,7 @@ mod tests {
             let result = routed(text);
             assert!(
                 result.memory_proposal_candidate_ids.is_empty(),
-                "non-durable or non-user observation became Memory: {text}"
+                "untrusted observation text must not authorize Memory: {text}"
             );
         }
     }

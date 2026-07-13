@@ -155,7 +155,11 @@ pub use main_chat_governance_intent::{
 };
 pub use main_chat_memory_candidate::{
     extract_main_chat_memory_candidates, plan_main_chat_memory_routing, route_memory_candidates,
-    MainChatMemoryCandidate, MainChatMemoryRoutingResult, MemoryCandidateKind, MemoryDestination,
+    ConditionalMemoryEvidenceContext, MainChatMemoryCandidate, MainChatMemoryRoutingResult,
+    MemoryCandidateKind, MemoryDestination, MemoryEvidenceStatus, StructuredMemoryEvidence,
+    StructuredMemoryEvidenceAssertion, StructuredMemoryEvidenceDraft,
+    StructuredMemoryEvidenceModality, StructuredMemoryEvidenceOutcome,
+    StructuredMemoryEvidenceSubject, StructuredMemoryObservation,
 };
 pub use maturation::{
     ensure_accepted_low_energy_rule_selection, ensure_lifemodel_maturation_non_default_invocation,
