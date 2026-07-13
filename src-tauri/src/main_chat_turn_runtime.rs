@@ -6574,6 +6574,341 @@ mod turn_admission_tests {
         );
     }
 
+    struct D058DurableRealToolFixture {
+        action_id: String,
+        receipt_id: String,
+        terminal_event: crate::main_chat_event_stream::MainChatAgentDurableEvent,
+        final_event: crate::main_chat_event_stream::MainChatAgentDurableEvent,
+    }
+
+    async fn d058_send_real_tool_turn(
+        state: &std::sync::Arc<crate::AppState>,
+        operation_id: &str,
+        session_id: &str,
+    ) -> Result<crate::SendMessageResult, String> {
+        crate::main_chat_send::send_message_with_operation_state(
+            operation_id.to_string(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: "Please read file `Cargo.toml`.".into(),
+            }],
+            None,
+            state,
+        )
+        .await
+    }
+
+    async fn d058_seed_durable_real_tool_final(
+        state: &std::sync::Arc<crate::AppState>,
+        operation_id: &str,
+        session_id: &str,
+    ) -> D058DurableRealToolFixture {
+        fail_main_chat_once_after_durable_final_for_test(&operation_id);
+        let first_error = d058_send_real_tool_turn(state, operation_id, session_id)
+            .await
+            .expect_err("lose only the live response after the canonical final is durable");
+        assert_eq!(
+            first_error,
+            "injected_turn_failure_after_durable_final_before_live_delivery"
+        );
+        let actions_before = state
+            .main_chat_action_queue_store
+            .as_ref()
+            .expect("action queue")
+            .lock()
+            .await
+            .list_for_session(operation_id)
+            .expect("list runtime-owned read action");
+        assert_eq!(actions_before.len(), 1);
+        assert!(actions_before[0].replay_authority.is_some());
+        let receipt_id = actions_before[0]
+            .observation_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("toolExecutionReceipt"))
+            .and_then(|receipt| receipt.get("receiptId"))
+            .and_then(serde_json::Value::as_str)
+            .expect("runtime-issued receipt id")
+            .to_string();
+        let event_store = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("event store")
+            .lock()
+            .await;
+        let terminal_event = event_store
+            .get_unique_tool_terminal_event(operation_id, operation_id, &receipt_id)
+            .expect("query exact terminal")
+            .expect("runtime-issued receipt has a terminal before fault injection");
+        assert_eq!(terminal_event.event_type, "tool.completed");
+        let final_event = event_store
+            .list(operation_id, 0, 250)
+            .expect("list durable real-tool final")
+            .into_iter()
+            .find(|event| event.event_type == "final_delivery.created")
+            .expect("durable real-tool final");
+        D058DurableRealToolFixture {
+            action_id: actions_before[0].id.clone(),
+            receipt_id,
+            terminal_event,
+            final_event,
+        }
+    }
+
+    fn d058_v2_tool_execution_binding(
+        fixture: &D058DurableRealToolFixture,
+        action_id: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "actionId": action_id,
+            "kind": "tool_execution",
+            "receiptId": fixture.receipt_id,
+            "terminalEventId": fixture.terminal_event.event_id,
+            "terminalEventDigest": fixture.terminal_event.payload_digest,
+        })
+    }
+
+    async fn d058_override_final_payload(
+        state: &std::sync::Arc<crate::AppState>,
+        fixture: &D058DurableRealToolFixture,
+        payload: serde_json::Value,
+    ) {
+        state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("event store")
+            .lock()
+            .await
+            .override_final_payload_for_recovery_test(&fixture.final_event.event_id, payload)
+            .expect("install parser-boundary durable-final fixture");
+    }
+
+    #[tokio::test]
+    async fn d058_runtime_issued_receipt_missing_its_unique_terminal_fails_closed_without_redispatch(
+    ) {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let session_id = "d058-runtime-receipt-terminal-missing";
+        let fixture = d058_seed_durable_real_tool_final(&state, &operation_id, session_id).await;
+        state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("event store")
+            .lock()
+            .await
+            .hide_tool_terminal_lookup_for_recovery_test(
+                &operation_id,
+                &operation_id,
+                &fixture.receipt_id,
+            )
+            .expect("inject exact terminal lookup loss");
+
+        let recovery_error = d058_send_real_tool_turn(&state, &operation_id, session_id)
+            .await
+            .expect_err("a referenced runtime receipt without its terminal must fail closed");
+        assert_eq!(
+            recovery_error,
+            "turn_operation_final_reconciliation_required:durable_tool_terminal_missing"
+        );
+        assert_eq!(
+            state
+                .main_chat_action_queue_store
+                .as_ref()
+                .expect("action queue")
+                .lock()
+                .await
+                .list_for_session(&operation_id)
+                .expect("list actions after failed recovery")
+                .len(),
+            1,
+            "missing terminal recovery must not enqueue or dispatch a replacement action"
+        );
+        let remaining_events = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("event store")
+            .lock()
+            .await
+            .list(&operation_id, 0, 250)
+            .expect("list events after terminal fault injection");
+        assert_eq!(
+            remaining_events
+                .iter()
+                .filter(|event| {
+                    event.object_id == fixture.receipt_id
+                        && event.event_type == "tool.dispatch_prepared"
+                })
+                .count(),
+            1,
+            "recovery must not prepare the real tool a second time"
+        );
+        assert_eq!(
+            remaining_events
+                .iter()
+                .filter(|event| event.event_id == fixture.terminal_event.event_id)
+                .count(),
+            1,
+            "the lookup fault must not corrupt or delete the durable terminal fact"
+        );
+        assert_eq!(
+            remaining_events
+                .iter()
+                .filter(|event| event.event_type == "final_delivery.created")
+                .count(),
+            1,
+            "the immutable final is not rewritten to hide its missing terminal owner"
+        );
+    }
+
+    #[tokio::test]
+    async fn d058_v2_duplicate_action_owner_binding_fails_closed_without_redispatch() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let session_id = "d058-duplicate-action-owner-binding";
+        let fixture = d058_seed_durable_real_tool_final(&state, &operation_id, session_id).await;
+        let binding = d058_v2_tool_execution_binding(&fixture, &fixture.action_id);
+        let mut payload = fixture.final_event.payload.clone();
+        let object = payload.as_object_mut().expect("final payload object");
+        object.insert("toolOwnerBindingsVersion".into(), serde_json::json!(2));
+        object.insert(
+            "toolOwnerBindings".into(),
+            serde_json::json!([binding.clone(), binding]),
+        );
+        d058_override_final_payload(&state, &fixture, payload).await;
+
+        let recovery_error = d058_send_real_tool_turn(&state, &operation_id, session_id)
+            .await
+            .expect_err("duplicate action owner bindings must fail closed");
+        assert_eq!(
+            recovery_error,
+            "turn_operation_final_reconciliation_required:tool_owner_binding_duplicate_action"
+        );
+        assert_eq!(
+            state
+                .main_chat_action_queue_store
+                .as_ref()
+                .expect("action queue")
+                .lock()
+                .await
+                .list_for_session(&operation_id)
+                .expect("list actions after duplicate binding")
+                .len(),
+            1,
+            "duplicate binding rejection cannot redispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn d058_v2_unknown_action_owner_binding_fails_closed_without_redispatch() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let session_id = "d058-unknown-action-owner-binding";
+        let fixture = d058_seed_durable_real_tool_final(&state, &operation_id, session_id).await;
+        let mut payload = fixture.final_event.payload.clone();
+        let object = payload.as_object_mut().expect("final payload object");
+        object.insert("toolOwnerBindingsVersion".into(), serde_json::json!(2));
+        object.insert(
+            "toolOwnerBindings".into(),
+            serde_json::json!([d058_v2_tool_execution_binding(
+                &fixture,
+                "unknown-action-owner"
+            )]),
+        );
+        d058_override_final_payload(&state, &fixture, payload).await;
+
+        let recovery_error = d058_send_real_tool_turn(&state, &operation_id, session_id)
+            .await
+            .expect_err("unknown action owner binding must fail closed");
+        assert_eq!(
+            recovery_error,
+            "turn_operation_final_reconciliation_required:tool_owner_binding_unknown_action"
+        );
+        assert_eq!(
+            state
+                .main_chat_action_queue_store
+                .as_ref()
+                .expect("action queue")
+                .lock()
+                .await
+                .list_for_session(&operation_id)
+                .expect("list actions after unknown binding")
+                .len(),
+            1,
+            "unknown binding rejection cannot redispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn d058_legacy_v1_real_tool_final_remains_recoverable_without_redispatch() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let session_id = "d058-legacy-v1-real-tool-final";
+        let fixture = d058_seed_durable_real_tool_final(&state, &operation_id, session_id).await;
+        let mut legacy_payload = fixture.final_event.payload.clone();
+        let object = legacy_payload
+            .as_object_mut()
+            .expect("final payload object");
+        object.remove("toolOwnerBindingsVersion");
+        object.remove("toolOwnerBindings");
+        object.insert(
+            "toolReceiptRefs".into(),
+            serde_json::json!([fixture.receipt_id.clone()]),
+        );
+        object.insert(
+            "toolTerminalEventRefs".into(),
+            serde_json::json!([fixture.terminal_event.event_id.clone()]),
+        );
+        object.insert(
+            "toolTerminalEventDigests".into(),
+            serde_json::json!([fixture.terminal_event.payload_digest.clone()]),
+        );
+        object.insert("toolCallCount".into(), serde_json::json!(1));
+        d058_override_final_payload(&state, &fixture, legacy_payload).await;
+
+        let recovered = d058_send_real_tool_turn(&state, &operation_id, session_id)
+            .await
+            .expect("absence of v2 fields means a legal historic v1 real-tool final");
+        assert_eq!(recovered.status, "completed");
+        assert_eq!(
+            state
+                .main_chat_action_queue_store
+                .as_ref()
+                .expect("action queue")
+                .lock()
+                .await
+                .list_for_session(&operation_id)
+                .expect("list actions after legacy recovery")
+                .len(),
+            1,
+            "legacy compatibility cannot redispatch"
+        );
+        let events = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("event store")
+            .lock()
+            .await
+            .list(&operation_id, 0, 250)
+            .expect("list events after legacy recovery");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| {
+                    event.object_id == fixture.receipt_id
+                        && event.event_type == "tool.dispatch_prepared"
+                })
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == "final_delivery.created")
+                .count(),
+            1
+        );
+    }
+
     #[tokio::test]
     async fn long_turn_recovers_exact_tool_terminal_beyond_bounded_ui_event_window() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();

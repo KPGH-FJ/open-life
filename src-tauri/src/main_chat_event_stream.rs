@@ -10,6 +10,8 @@ use rusqlite::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -303,6 +305,10 @@ impl MainChatAgentRuntimeEventInput {
 pub struct MainChatAgentEventStore {
     conn: Mutex<Connection>,
     digest_key: Arc<MainChatEventDigestKey>,
+    #[cfg(test)]
+    hidden_tool_terminal_lookups: Mutex<HashSet<(String, String, String)>>,
+    #[cfg(test)]
+    immutable_event_payload_overrides: Mutex<HashMap<String, Value>>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -545,6 +551,10 @@ impl MainChatAgentEventStore {
                 format!("failed to open main chat agent event db at {:?}", db_path)
             })?),
             digest_key: Arc::new(digest_key),
+            #[cfg(test)]
+            hidden_tool_terminal_lookups: Mutex::new(HashSet::new()),
+            #[cfg(test)]
+            immutable_event_payload_overrides: Mutex::new(HashMap::new()),
         };
         store.configure_connection()?;
         store.init_tables()?;
@@ -558,6 +568,10 @@ impl MainChatAgentEventStore {
                     .context("failed to open in-memory main chat agent event db")?,
             ),
             digest_key: Arc::new(MainChatEventDigestKey::random()?),
+            #[cfg(test)]
+            hidden_tool_terminal_lookups: Mutex::new(HashSet::new()),
+            #[cfg(test)]
+            immutable_event_payload_overrides: Mutex::new(HashMap::new()),
         };
         store.configure_connection()?;
         store.init_tables()?;
@@ -1937,6 +1951,55 @@ impl MainChatAgentEventStore {
         Ok(event)
     }
 
+    /// Parser-boundary fault injection for durable-final recovery tests. This
+    /// leaves the database row, sequence domain, digest, and immutable identity
+    /// untouched while presenting an alternate final payload to the recovery
+    /// reader. It therefore tests schema validation rather than store damage.
+    #[cfg(test)]
+    pub(crate) fn override_final_payload_for_recovery_test(
+        &self,
+        event_id: &str,
+        payload: Value,
+    ) -> Result<()> {
+        let event_type = self
+            .lock_conn()?
+            .query_row(
+                "SELECT event_type FROM main_chat_agent_events WHERE event_id = ?1",
+                [event_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if event_type.as_deref() != Some("final_delivery.created") || !payload.is_object() {
+            anyhow::bail!("main_chat_event_test_final_payload_override_invalid");
+        }
+        self.immutable_event_payload_overrides
+            .lock()
+            .map_err(|_| anyhow::anyhow!("main_chat_event_test_fault_lock_poisoned"))?
+            .insert(event_id.to_string(), payload);
+        Ok(())
+    }
+
+    /// Exact lookup fault injection for recovery tests. The immutable event and
+    /// its integrity chain remain untouched; only the named receipt's terminal
+    /// lookup is hidden so the recovery owner can be tested in isolation.
+    #[cfg(test)]
+    pub(crate) fn hide_tool_terminal_lookup_for_recovery_test(
+        &self,
+        task_session_id: &str,
+        run_id: &str,
+        receipt_id: &str,
+    ) -> Result<()> {
+        self.hidden_tool_terminal_lookups
+            .lock()
+            .map_err(|_| anyhow::anyhow!("main_chat_event_test_fault_lock_poisoned"))?
+            .insert((
+                task_session_id.to_string(),
+                run_id.to_string(),
+                receipt_id.to_string(),
+            ));
+        Ok(())
+    }
+
     pub(crate) fn list(
         &self,
         task_session_id: &str,
@@ -1988,7 +2051,25 @@ impl MainChatAgentEventStore {
         validate_task_sequence_domain(&conn, task_session_id)?;
         validate_task_run_binding(&conn, task_session_id)?;
         validate_persisted_provider_lifecycles_for_task(&conn, task_session_id)?;
-        select_event_by_immutable_identity(&conn, task_session_id, event_type, object_id)
+        let event =
+            select_event_by_immutable_identity(&conn, task_session_id, event_type, object_id)?;
+        #[cfg(test)]
+        let event = {
+            let mut event = event;
+            if let Some(event) = event.as_mut() {
+                if let Some(payload) = self
+                    .immutable_event_payload_overrides
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("main_chat_event_test_fault_lock_poisoned"))?
+                    .get(&event.event_id)
+                    .cloned()
+                {
+                    event.payload = payload;
+                }
+            }
+            event
+        };
+        Ok(event)
     }
 
     pub(crate) fn get_unique_tool_terminal_event(
@@ -1998,6 +2079,19 @@ impl MainChatAgentEventStore {
         receipt_id: &str,
     ) -> Result<Option<MainChatAgentDurableEvent>> {
         self.quarantine_run_derived_backfill_facts(task_session_id, None)?;
+        #[cfg(test)]
+        if self
+            .hidden_tool_terminal_lookups
+            .lock()
+            .map_err(|_| anyhow::anyhow!("main_chat_event_test_fault_lock_poisoned"))?
+            .contains(&(
+                task_session_id.to_string(),
+                run_id.to_string(),
+                receipt_id.to_string(),
+            ))
+        {
+            return Ok(None);
+        }
         let conn = self.lock_conn()?;
         if event_scope_hidden(&conn, "task", task_session_id)?
             || event_scope_hidden(&conn, "run", run_id)?

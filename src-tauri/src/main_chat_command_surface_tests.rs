@@ -1156,6 +1156,21 @@ async fn invoke_send_message_for_kernel_goal_3(
     session_id: &str,
     user_text: &str,
 ) -> serde_json::Value {
+    invoke_send_message_for_kernel_goal_3_with_operation(
+        state,
+        &uuid::Uuid::new_v4().to_string(),
+        session_id,
+        user_text,
+    )
+    .await
+}
+
+async fn invoke_send_message_for_kernel_goal_3_with_operation(
+    state: std::sync::Arc<crate::AppState>,
+    operation_id: &str,
+    session_id: &str,
+    user_text: &str,
+) -> serde_json::Value {
     let app = tauri::test::mock_builder()
         .manage(state)
         .invoke_handler(tauri::generate_handler![crate::send_message])
@@ -1170,6 +1185,8 @@ async fn invoke_send_message_for_kernel_goal_3(
         main_chat_invoke_request(
             "send_message",
             serde_json::json!({
+                "operationId": operation_id,
+                "operation_id": operation_id,
                 "sessionId": session_id,
                 "session_id": session_id,
                 "messages": [{ "role": "user", "content": user_text }]
@@ -1183,6 +1200,21 @@ async fn invoke_send_message_for_kernel_goal_3(
 
 async fn invoke_start_stream_message_for_kernel_goal_3(
     state: std::sync::Arc<crate::AppState>,
+    session_id: &str,
+    user_text: &str,
+) -> serde_json::Value {
+    invoke_start_stream_message_for_kernel_goal_3_with_operation(
+        state,
+        &uuid::Uuid::new_v4().to_string(),
+        session_id,
+        user_text,
+    )
+    .await
+}
+
+async fn invoke_start_stream_message_for_kernel_goal_3_with_operation(
+    state: std::sync::Arc<crate::AppState>,
+    operation_id: &str,
     session_id: &str,
     user_text: &str,
 ) -> serde_json::Value {
@@ -1201,10 +1233,14 @@ async fn invoke_start_stream_message_for_kernel_goal_3(
         main_chat_invoke_request(
             "start_stream_message",
             serde_json::json!({
+                "operationId": operation_id,
+                "operation_id": operation_id,
                 "sessionId": session_id,
                 "session_id": session_id,
                 "messages": messages,
                 "args": {
+                    "operationId": operation_id,
+                    "operation_id": operation_id,
                     "sessionId": session_id,
                     "session_id": session_id,
                     "messages": messages
@@ -1527,6 +1563,217 @@ async fn list_command_surface_proposals(
     store
         .list_all_proposals(100, 0)
         .expect("list command-surface proposals")
+}
+
+async fn list_command_surface_events(
+    state: &std::sync::Arc<crate::AppState>,
+    task_session_id: &str,
+) -> Vec<crate::main_chat_event_stream::MainChatAgentDurableEvent> {
+    let store_arc = state
+        .main_chat_agent_event_store
+        .as_ref()
+        .expect("main chat event store");
+    let store = store_arc.lock().await;
+    store
+        .list(task_session_id, 0, 250)
+        .expect("list command-surface durable events")
+}
+
+fn value_contains_key(value: &serde_json::Value, expected_key: &str) -> bool {
+    match value {
+        serde_json::Value::Object(object) => {
+            object.contains_key(expected_key)
+                || object
+                    .values()
+                    .any(|child| value_contains_key(child, expected_key))
+        }
+        serde_json::Value::Array(items) => items
+            .iter()
+            .any(|child| value_contains_key(child, expected_key)),
+        _ => false,
+    }
+}
+
+fn assert_pre_gateway_blocker_has_no_tool_receipt_owner(
+    action: &openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
+) {
+    assert_eq!(
+        action.status,
+        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed
+    );
+    assert!(
+        action.replay_authority.is_none(),
+        "pre-ToolGateway blocker cannot own replay authority: {action:#?}"
+    );
+    let metadata = action
+        .observation_metadata
+        .as_ref()
+        .expect("pre-ToolGateway blocker metadata");
+    assert!(
+        !value_contains_key(metadata, "toolExecutionReceipt"),
+        "pre-ToolGateway blocker must not mint a render-only ToolExecutionReceipt: {metadata:#?}"
+    );
+    assert!(
+        !value_contains_key(metadata, "replayExecutionEnvelope"),
+        "pre-ToolGateway blocker must not claim an executable replay envelope: {metadata:#?}"
+    );
+}
+
+fn assert_one_durable_final_is_last(
+    events: &[crate::main_chat_event_stream::MainChatAgentDurableEvent],
+) {
+    let finals = events
+        .iter()
+        .filter(|event| event.event_type == "final_delivery.created")
+        .collect::<Vec<_>>();
+    assert_eq!(finals.len(), 1, "exactly one durable final: {events:#?}");
+    assert_eq!(
+        events.last().map(|event| event.event_id.as_str()),
+        Some(finals[0].event_id.as_str()),
+        "durable final must be the last event"
+    );
+}
+
+fn assert_no_tool_receipt_events(
+    events: &[crate::main_chat_event_stream::MainChatAgentDurableEvent],
+) {
+    assert!(
+        events
+            .iter()
+            .all(|event| event.object_type != "tool_execution_receipt"),
+        "a pre-ToolGateway blocker cannot create a ToolEvent owner: {events:#?}"
+    );
+}
+
+fn assert_pre_gateway_final_owner_shape(
+    events: &[crate::main_chat_event_stream::MainChatAgentDurableEvent],
+    action_id: &str,
+    blocker_reason: &str,
+) {
+    let final_event = events
+        .iter()
+        .find(|event| event.event_type == "final_delivery.created")
+        .expect("pre-ToolGateway blocker durable final");
+    assert_eq!(
+        final_event.payload["actionQueueRefs"]
+            .as_array()
+            .map(Vec::len),
+        Some(1),
+        "the failed ActionQueue owner remains part of the terminal graph"
+    );
+    assert_eq!(
+        final_event.payload["toolCallCount"],
+        serde_json::json!(1),
+        "the product blocker remains visible as one attempted action"
+    );
+    for field in [
+        "toolReceiptRefs",
+        "toolTerminalEventRefs",
+        "toolTerminalEventDigests",
+    ] {
+        assert_eq!(
+            final_event.payload[field].as_array().map(Vec::len),
+            Some(0),
+            "pre-ToolGateway action has no durable tool receipt owner: {field}"
+        );
+    }
+    assert_eq!(
+        final_event.payload["toolOwnerBindingsVersion"],
+        serde_json::json!(2),
+        "absence means the legacy positional v1 owner schema; new mixed-owner finals require v2"
+    );
+    let bindings = final_event.payload["toolOwnerBindings"]
+        .as_array()
+        .expect("versioned per-action tool owner bindings");
+    assert_eq!(
+        bindings.len(),
+        1,
+        "one ActionQueue owner, one typed binding"
+    );
+    let binding = &bindings[0];
+    assert_eq!(binding["actionId"], action_id);
+    assert_eq!(binding["kind"], "pre_gateway_blocker");
+    assert_eq!(binding["blockerReason"], blocker_reason);
+    for forbidden in ["receiptId", "terminalEventId", "terminalEventDigest"] {
+        assert!(
+            binding.get(forbidden).is_none(),
+            "pre-gateway blocker cannot claim a tool-execution owner: {forbidden}"
+        );
+    }
+}
+
+fn assert_tool_execution_final_owner_binding(
+    events: &[crate::main_chat_event_stream::MainChatAgentDurableEvent],
+    action_id: &str,
+    receipt_id: &str,
+    terminal_event_id: &str,
+    terminal_event_digest: &str,
+) {
+    let final_event = events
+        .iter()
+        .find(|event| event.event_type == "final_delivery.created")
+        .expect("tool-execution durable final");
+    assert_eq!(
+        final_event.payload["toolOwnerBindingsVersion"],
+        serde_json::json!(2)
+    );
+    let bindings = final_event.payload["toolOwnerBindings"]
+        .as_array()
+        .expect("versioned per-action tool owner bindings");
+    assert_eq!(bindings.len(), 1);
+    let binding = &bindings[0];
+    assert_eq!(binding["actionId"], action_id);
+    assert_eq!(binding["kind"], "tool_execution");
+    assert_eq!(binding["receiptId"], receipt_id);
+    assert_eq!(binding["terminalEventId"], terminal_event_id);
+    assert_eq!(binding["terminalEventDigest"], terminal_event_digest);
+    assert!(binding.get("blockerReason").is_none());
+}
+
+async fn assert_d058_pre_gateway_file_blocker_turn(
+    state: &std::sync::Arc<crate::AppState>,
+    response: &serde_json::Value,
+    operation_id: &str,
+    blocker_reason: &str,
+) {
+    assert_eq!(response["legacy_fallback_used"], false);
+    assert_eq!(response["tool_calls"].as_array().map(Vec::len), Some(1));
+    assert!(response["tool_calls"][0].get("executionReceipt").is_none());
+    let task_session_id = task_session_id_from_response(response);
+    assert_eq!(task_session_id, operation_id);
+    let session = load_command_surface_session(state, &task_session_id).await;
+    assert_eq!(
+        session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
+    );
+    assert!(session
+        .pending_blockers
+        .contains(&blocker_reason.to_string()));
+    let actions = list_command_surface_actions(state, &task_session_id).await;
+    let file_action = actions
+        .iter()
+        .find(|action| action.action.action_type == "file.read")
+        .expect("pre-gateway file.read action");
+    assert_kernel_goal_3_read_action_metadata(
+        file_action,
+        "file",
+        "file_system_read",
+        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed,
+    );
+    assert_eq!(
+        file_action
+            .observation_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("stopReason"))
+            .and_then(serde_json::Value::as_str),
+        Some(blocker_reason)
+    );
+    assert_pre_gateway_blocker_has_no_tool_receipt_owner(file_action);
+    let events = list_command_surface_events(state, &task_session_id).await;
+    assert_no_tool_receipt_events(&events);
+    assert_one_durable_final_is_last(&events);
+    assert_pre_gateway_final_owner_shape(&events, &file_action.id, blocker_reason);
+    assert!(list_command_surface_proposals(state).await.is_empty());
 }
 
 #[tokio::test]
@@ -2100,102 +2347,306 @@ async fn d051_useful_proposal_body_and_evidence_are_bound_to_canonical_observati
 }
 
 #[tokio::test]
-async fn d051_failed_or_quoted_read_creates_zero_memory_proposals() {
-    for (session_id, path) in [
-        (
-            "d051-missing-observation",
-            "src-tauri/test-fixtures/d051_missing_memory.md",
-        ),
-        (
-            "d051-quoted-observation",
-            "src-tauri/test-fixtures/d051_quoted_memory.md",
-        ),
-    ] {
-        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        let prompt = format!(
-            "Read file `{path}` and create a memory proposal only if the observation contains a useful supported personal fact."
-        );
-        let _response =
-            invoke_send_message_for_kernel_goal_3(state.clone(), session_id, &prompt).await;
-        assert!(
-            list_command_surface_proposals(&state).await.is_empty(),
-            "failed or quoted observations have zero proposal authority: {path}"
-        );
-    }
-}
+async fn d058_d051_missing_file_has_one_real_failed_tool_owner_and_final_recovers() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let session_id = "d058-d051-missing-observation";
+    let prompt = "Read file `src-tauri/test-fixtures/d051_missing_memory.md` and create a memory proposal only if the observation contains a useful supported personal fact.";
 
-#[tokio::test]
-async fn main_chat_kernel_goal_3_path_traversal_send_stream_blocks_filesystem_read() {
-    let user_text = "Please read file `../AGENTS.md`.";
-
-    let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-    let send_response =
-        invoke_send_message_for_kernel_goal_3(send_state.clone(), "k3-send-traversal", user_text)
-            .await;
-    assert_eq!(send_response["legacy_fallback_used"], false);
-    assert_eq!(
-        send_response["tool_calls"].as_array().map(Vec::len),
-        Some(1)
+    let response = invoke_send_message_for_kernel_goal_3_with_operation(
+        state.clone(),
+        &operation_id,
+        session_id,
+        prompt,
+    )
+    .await;
+    assert_eq!(response["run_id"], serde_json::json!(operation_id));
+    assert_eq!(response["tool_calls"].as_array().map(Vec::len), Some(1));
+    assert!(
+        list_command_surface_proposals(&state).await.is_empty(),
+        "a failed read has zero Memory proposal authority"
     );
-    assert_unverified_product_tool_evidence(&send_response["tool_calls"][0]);
-    let send_task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
-        .as_str()
-        .expect("send traversal task session id");
-    let send_session = load_command_surface_session(&send_state, send_task_session_id).await;
+
+    let task_session_id = task_session_id_from_response(&response);
+    assert_eq!(task_session_id, operation_id);
+    let task = load_command_surface_session(&state, &task_session_id).await;
     assert_eq!(
-        send_session.status,
+        task.status,
         openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
     );
-    assert!(send_session
+    assert!(task
         .pending_blockers
-        .contains(&"filesystem_path_traversal_blocked".to_string()));
-    let send_actions = list_command_surface_actions(&send_state, send_task_session_id).await;
-    let send_file_action = send_actions
-        .iter()
-        .find(|action| action.action.action_type == "file.read")
-        .expect("send traversal file.read action");
-    assert_kernel_goal_3_read_action_metadata(
-        send_file_action,
-        "file",
-        "file_system_read",
-        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed,
-    );
+        .contains(&"filesystem_read_blocked".to_string()));
+    let actions = list_command_surface_actions(&state, &task_session_id).await;
+    assert_eq!(actions.len(), 1);
     assert_eq!(
-        send_file_action
+        actions[0].status,
+        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed
+    );
+    assert!(
+        actions[0].replay_authority.is_some(),
+        "canonicalize/metadata/read are real I/O and must enter ToolGateway before failing"
+    );
+    let receipt_value = actions[0]
+        .observation_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("toolExecutionReceipt"))
+        .cloned()
+        .expect("missing-file ToolGateway failure receipt");
+    let receipt: openlife_core::tool_execution_receipt::ToolExecutionReceipt =
+        serde_json::from_value(receipt_value).expect("valid failed ToolGateway receipt");
+    assert_eq!(
+        receipt.source_run_id.as_deref(),
+        Some(operation_id.as_str())
+    );
+    assert!(receipt.manifest_id.is_some());
+    assert!(receipt.dispatch_observed);
+    assert_eq!(receipt.dispatch_attempt_count, 1);
+    receipt
+        .mechanically_valid_terminal()
+        .expect("failed ToolGateway receipt has a mechanically valid terminal");
+    assert_eq!(
+        actions[0]
             .observation_metadata
             .as_ref()
             .and_then(|metadata| metadata.get("stopReason"))
             .and_then(serde_json::Value::as_str),
-        Some("filesystem_path_traversal_blocked")
+        Some("filesystem_read_blocked")
+    );
+    let before_retry_events = list_command_surface_events(&state, &task_session_id).await;
+    let terminal_events = before_retry_events
+        .iter()
+        .filter(|event| {
+            event.object_type == "tool_execution_receipt"
+                && event.object_id == receipt.receipt_id
+                && matches!(
+                    event.event_type.as_str(),
+                    "tool.completed"
+                        | "tool.failed"
+                        | "tool.effect_unknown"
+                        | "tool.local_aborted"
+                        | "tool.remote_unknown"
+                        | "tool.not_dispatched"
+                )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        terminal_events.len(),
+        1,
+        "one failed receipt, one terminal owner"
+    );
+    assert_eq!(terminal_events[0].event_type, "tool.failed");
+    assert_eq!(
+        before_retry_events
+            .iter()
+            .filter(|event| {
+                event.object_id == receipt.receipt_id
+                    && event.event_type == "tool.dispatch_prepared"
+            })
+            .count(),
+        1,
+        "the real ToolGateway request is durably prepared exactly once"
+    );
+    assert_one_durable_final_is_last(&before_retry_events);
+    assert_tool_execution_final_owner_binding(
+        &before_retry_events,
+        &actions[0].id,
+        &receipt.receipt_id,
+        &terminal_events[0].event_id,
+        &terminal_events[0].payload_digest,
     );
 
-    let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-    let stream_response = invoke_start_stream_message_for_kernel_goal_3(
-        stream_state.clone(),
-        "k3-stream-traversal",
+    let recovered = invoke_send_message_for_kernel_goal_3_with_operation(
+        state.clone(),
+        &operation_id,
+        session_id,
+        prompt,
+    )
+    .await;
+    assert_eq!(recovered["run_id"], response["run_id"]);
+    assert_eq!(recovered["tool_calls"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        list_command_surface_actions(&state, &task_session_id)
+            .await
+            .len(),
+        1,
+        "same-operation recovery must not enqueue the blocker again"
+    );
+    let after_retry_events = list_command_surface_events(&state, &task_session_id).await;
+    assert_eq!(after_retry_events, before_retry_events);
+    assert!(list_command_surface_proposals(&state).await.is_empty());
+}
+
+#[tokio::test]
+async fn d058_d051_quoted_file_has_one_real_tool_terminal_and_zero_memory_proposals() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let session_id = "d058-d051-quoted-observation";
+    let prompt = "Read file `src-tauri/test-fixtures/d051_quoted_memory.md` and create a memory proposal only if the observation contains a useful supported personal fact.";
+
+    let response = invoke_send_message_for_kernel_goal_3_with_operation(
+        state.clone(),
+        &operation_id,
+        session_id,
+        prompt,
+    )
+    .await;
+    assert_eq!(response["run_id"], serde_json::json!(operation_id));
+    assert_eq!(response["tool_calls"].as_array().map(Vec::len), Some(1));
+    assert_eq!(response["status"], "completed");
+    assert_eq!(response["tool_invoked"], true);
+    assert!(
+        list_command_surface_proposals(&state).await.is_empty(),
+        "quoted file content has zero Memory proposal authority"
+    );
+
+    let task_session_id = task_session_id_from_response(&response);
+    let task = load_command_surface_session(&state, &task_session_id).await;
+    assert_eq!(
+        task.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
+    );
+    let actions = list_command_surface_actions(&state, &task_session_id).await;
+    assert_eq!(actions.len(), 1);
+    assert!(
+        actions[0].replay_authority.is_some(),
+        "a real ToolGateway dispatch owns replay authority"
+    );
+    let receipt_value = actions[0]
+        .observation_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("toolExecutionReceipt"))
+        .cloned()
+        .expect("real ToolGateway receipt");
+    let receipt: openlife_core::tool_execution_receipt::ToolExecutionReceipt =
+        serde_json::from_value(receipt_value).expect("valid canonical ToolGateway receipt");
+    assert_eq!(
+        receipt.source_run_id.as_deref(),
+        Some(operation_id.as_str())
+    );
+    receipt
+        .mechanically_valid_terminal()
+        .expect("canonical receipt has a valid terminal state");
+    let receipt_id = receipt.receipt_id;
+    let before_retry_events = list_command_surface_events(&state, &task_session_id).await;
+    let terminal_events = before_retry_events
+        .iter()
+        .filter(|event| {
+            event.object_id == receipt_id
+                && matches!(
+                    event.event_type.as_str(),
+                    "tool.completed"
+                        | "tool.failed"
+                        | "tool.effect_unknown"
+                        | "tool.local_aborted"
+                        | "tool.remote_unknown"
+                        | "tool.not_dispatched"
+                )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(terminal_events.len(), 1, "one receipt, one terminal owner");
+    assert_eq!(terminal_events[0].event_type, "tool.completed");
+    assert_one_durable_final_is_last(&before_retry_events);
+    assert_tool_execution_final_owner_binding(
+        &before_retry_events,
+        &actions[0].id,
+        &receipt_id,
+        &terminal_events[0].event_id,
+        &terminal_events[0].payload_digest,
+    );
+
+    let recovered = invoke_send_message_for_kernel_goal_3_with_operation(
+        state.clone(),
+        &operation_id,
+        session_id,
+        prompt,
+    )
+    .await;
+    assert_eq!(recovered["run_id"], response["run_id"]);
+    assert_eq!(recovered["status"], "completed");
+    assert_eq!(
+        list_command_surface_actions(&state, &task_session_id)
+            .await
+            .len(),
+        1,
+        "same-operation recovery must not dispatch the quoted read again"
+    );
+    assert_eq!(
+        list_command_surface_events(&state, &task_session_id).await,
+        before_retry_events
+    );
+    assert!(list_command_surface_proposals(&state).await.is_empty());
+}
+
+#[test]
+fn d058_kernel_does_not_mint_failed_before_dispatch_receipt_owners() {
+    let source = include_str!("main_chat_kernel.rs");
+    assert!(
+        !source.contains("ToolExecutionReceipt::failed_before_dispatch("),
+        "deletion guard: only TurnRuntime/ToolGateway may issue product tool receipt owners"
+    );
+}
+
+#[tokio::test]
+async fn d058_path_traversal_send_returns_structured_blocker_without_fake_tool_owner() {
+    let user_text = "Please read file `../AGENTS.md`.";
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let send_response = invoke_send_message_for_kernel_goal_3_with_operation(
+        send_state.clone(),
+        &operation_id,
+        "d058-k3-send-traversal",
         user_text,
     )
     .await;
-    assert_eq!(
-        stream_response["tool_calls"].as_array().map(Vec::len),
-        Some(1)
-    );
-    assert_unverified_product_tool_evidence(&stream_response["tool_calls"][0]);
-    let stream_task_session_id = task_session_id_from_response(&stream_response);
-    let stream_session = load_command_surface_session(&stream_state, &stream_task_session_id).await;
-    assert_eq!(
-        stream_session.status,
-        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
-    );
-    assert!(stream_session
-        .pending_blockers
-        .contains(&"filesystem_path_traversal_blocked".to_string()));
-    let stream_actions = list_command_surface_actions(&stream_state, &stream_task_session_id).await;
-    assert!(stream_actions
-        .iter()
-        .any(|action| action.action.action_type == "file.read"
-            && action.status
-                == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed));
+    assert_d058_pre_gateway_file_blocker_turn(
+        &send_state,
+        &send_response,
+        &operation_id,
+        "filesystem_path_traversal_blocked",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn d058_path_traversal_stream_returns_structured_blocker_without_fake_tool_owner() {
+    let user_text = "Please read file `../AGENTS.md`.";
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let stream_response = invoke_start_stream_message_for_kernel_goal_3_with_operation(
+        stream_state.clone(),
+        &operation_id,
+        "d058-k3-stream-traversal",
+        user_text,
+    )
+    .await;
+    assert_d058_pre_gateway_file_blocker_turn(
+        &stream_state,
+        &stream_response,
+        &operation_id,
+        "filesystem_path_traversal_blocked",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn d058_absolute_path_send_returns_structured_blocker_without_fake_tool_owner() {
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let response = invoke_send_message_for_kernel_goal_3_with_operation(
+        state.clone(),
+        &operation_id,
+        "d058-k3-send-absolute",
+        "Please read file `/etc/passwd`.",
+    )
+    .await;
+    assert_d058_pre_gateway_file_blocker_turn(
+        &state,
+        &response,
+        &operation_id,
+        "filesystem_outside_workspace_blocked",
+    )
+    .await;
 }
 
 #[tokio::test]
