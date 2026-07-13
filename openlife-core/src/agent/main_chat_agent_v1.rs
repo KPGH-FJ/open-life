@@ -3018,7 +3018,7 @@ pub struct ExecutionTranscriptEntryDraft {
 pub const PRE_DISPATCH_PERSISTENCE_FAILURE_KIND: &str =
     "durable_event_store_unavailable_before_dispatch";
 const TASK_SESSION_PAYLOAD_VERSION: i64 = 2;
-const TASK_SESSION_CANONICAL_OWNER_VERSION: i64 = 1;
+const TASK_SESSION_CANONICAL_OWNER_VERSION: u64 = 1;
 const TRANSCRIPT_PAYLOAD_VERSION: i64 = 2;
 const TASK_SESSION_V2_PHYSICAL_PURGE_MARKER: &str =
     "task_session_transcript_v2_physical_purge_complete";
@@ -3041,6 +3041,22 @@ pub struct AgentTaskSessionStore {
     transient_user_goals: Mutex<HashMap<String, String>>,
     transient_session_content: Mutex<HashMap<String, TransientTaskSessionContent>>,
     canonical_memory_store: Mutex<Option<crate::memory::MemoryStore>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentTaskSessionCanonicalOwnerReceipt {
+    version: u64,
+    digest: String,
+}
+
+impl AgentTaskSessionCanonicalOwnerReceipt {
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -3881,11 +3897,14 @@ impl AgentTaskSessionStore {
         }
     }
 
-    /// Digest the durable TaskSession owner exactly as stored, without
-    /// hydrating transient bodies into the owner snapshot. The final event
-    /// may persist this digest, but never any of the private keyed receipts
-    /// used to derive it.
-    pub fn canonical_owner_digest(&self, id: &str) -> Result<Option<String>> {
+    /// Issue a versioned receipt for the durable TaskSession owner exactly as
+    /// stored, without hydrating transient bodies into the owner snapshot.
+    /// The final event may persist the version and digest, but never any of
+    /// the private keyed receipts used to derive them.
+    pub fn canonical_owner_receipt(
+        &self,
+        id: &str,
+    ) -> Result<Option<AgentTaskSessionCanonicalOwnerReceipt>> {
         let persisted = {
             let conn = self.lock_conn()?;
             let mut stmt = conn.prepare(
@@ -3932,9 +3951,10 @@ impl AgentTaskSessionStore {
                 "payloadMinimizedVersion": persisted.payload_minimized_version,
             },
         });
-        Ok(Some(
-            crate::agent::metadata_safe::metadata_safe_value_digest(&owner).1,
-        ))
+        Ok(Some(AgentTaskSessionCanonicalOwnerReceipt {
+            version: TASK_SESSION_CANONICAL_OWNER_VERSION,
+            digest: crate::agent::metadata_safe::metadata_safe_value_digest(&owner).1,
+        }))
     }
 
     pub fn list_sessions(
@@ -14977,7 +14997,7 @@ mod session_content_minimization_tests {
     }
 
     #[test]
-    fn task_session_canonical_owner_digest_is_reopen_stable_and_binds_durable_receipts() {
+    fn task_session_canonical_owner_receipt_is_reopen_stable_and_binds_durable_receipts() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("task-session-canonical-owner.db");
         let key = AgentRunReceiptKey::from_bytes([0x52; 32]).unwrap();
@@ -14994,14 +15014,15 @@ mod session_content_minimization_tests {
         store
             .complete_session(&session.id, "transient canonical owner final")
             .unwrap();
-        let before_reopen = store.canonical_owner_digest(&session.id).unwrap().unwrap();
-        assert!(before_reopen.starts_with("sha256:"));
+        let before_reopen = store.canonical_owner_receipt(&session.id).unwrap().unwrap();
+        assert_eq!(before_reopen.version(), 1);
+        assert!(before_reopen.digest().starts_with("sha256:"));
         drop(store);
 
         let reopened = AgentTaskSessionStore::new_with_receipt_key(&path, key.clone()).unwrap();
         assert_eq!(
             reopened
-                .canonical_owner_digest(&session.id)
+                .canonical_owner_receipt(&session.id)
                 .unwrap()
                 .unwrap(),
             before_reopen,
@@ -15028,15 +15049,17 @@ mod session_content_minimization_tests {
             .unwrap();
             receipt
         };
-        assert_ne!(before_reopen, durable_receipt);
+        assert_ne!(before_reopen.digest(), durable_receipt);
 
         let drifted = AgentTaskSessionStore::new_with_receipt_key(&path, key).unwrap();
+        let drifted_receipt = drifted
+            .canonical_owner_receipt(&session.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(drifted_receipt.version(), before_reopen.version());
         assert_ne!(
-            drifted
-                .canonical_owner_digest(&session.id)
-                .unwrap()
-                .unwrap(),
-            before_reopen,
+            drifted_receipt.digest(),
+            before_reopen.digest(),
             "same-ID durable receipt drift must alter the canonical owner digest"
         );
     }

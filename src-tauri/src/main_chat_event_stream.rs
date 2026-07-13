@@ -6802,6 +6802,7 @@ const FINAL_DELIVERY_FIELDS: &[PayloadFieldSchema] = &[
     PayloadFieldSchema::optional("bodyStored", PayloadValueSchema::Bool),
     PayloadFieldSchema::optional("runtimeOwner", PayloadValueSchema::MetadataString),
     PayloadFieldSchema::optional("taskOwnerStatus", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::optional("taskOwnerDigestVersion", PayloadValueSchema::Count),
     PayloadFieldSchema::optional("taskOwnerDigest", PayloadValueSchema::OpaqueDigest),
     PayloadFieldSchema::optional("runOwnerStatus", PayloadValueSchema::MetadataString),
     PayloadFieldSchema::optional("runOwnerRevision", PayloadValueSchema::Count),
