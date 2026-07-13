@@ -6,13 +6,15 @@ use crate::main_chat_event_stream::{MainChatAgentEventStore, MainChatEventDigest
 use crate::persistence_coordinator::PersistenceCoordinator;
 use crate::secret_store::{
     hydrate_config_secrets, hydrate_or_create_canonical_store_integrity_key,
-    hydrate_or_create_integrity_key, hydrate_or_create_mcp_audit_keys, KeyringSecretStore,
-    SecretStore, ACTION_QUEUE_AUTHORITY_KEY_REF, AGENT_RUN_RECEIPT_KEY_REF,
+    hydrate_or_create_integrity_key, hydrate_or_create_store_bound_mcp_audit_keys,
+    KeyringSecretStore, SecretStore, ACTION_QUEUE_AUTHORITY_KEY_REF, AGENT_RUN_RECEIPT_KEY_REF,
     MAIN_CHAT_EVENT_INTEGRITY_KEY_REF, TASK_STORE_AUTHORITY_KEY_REF,
 };
 use crate::state::AppState;
 use crate::storage::{
-    load_mcp_audit_keyring_from_path, privacy_policy_path, save_mcp_audit_keyring_to_path,
+    load_mcp_audit_key_reference_state_from_path, privacy_policy_path,
+    save_mcp_audit_key_reference_document_to_path, McpAuditKeyReferenceDocument,
+    McpAuditKeyReferenceLoadState,
 };
 use openlife_core::agent::{
     main_chat_agent_v1::{ActionQueueAuthorityKey, ActionQueueStore, AgentTaskSessionStore},
@@ -929,6 +931,157 @@ fn required_store_or_unavailable<T>(
             })
         }
     }
+}
+
+fn unavailable_mcp_audit_authority(
+    persistence: &PersistenceCoordinator,
+    startup_warnings: &std::cell::RefCell<Vec<String>>,
+    reason_code: &str,
+    detail: &str,
+) -> McpAuditStore {
+    persistence.register_unavailable("McpAuditKeyReferenceStore", reason_code, detail);
+    persistence.register_unavailable("McpAuditStore", reason_code, detail);
+    startup_warnings.borrow_mut().push(format!(
+        "MCP audit authority is unavailable; audit truth is unknown and all effects are disabled: {detail}"
+    ));
+    McpAuditStore::unavailable_sentinel(detail)
+}
+
+fn initialize_mcp_audit_authority(
+    data_dir: &Path,
+    secret_store: &dyn SecretStore,
+    startup_warnings: &std::cell::RefCell<Vec<String>>,
+    persistence: &PersistenceCoordinator,
+) -> McpAuditStore {
+    let database_path = data_dir.join("mcp_audit.db");
+    let key_reference_path = data_dir.join("mcp_audit_keys.json");
+
+    // The OS owner slot is intentionally the first mutating action in this
+    // authority graph. Reservation creates only the lock sidecar; it never
+    // creates SQLite or secret/key-reference state.
+    let reservation = match McpAuditStore::reserve_writable_owner(&database_path) {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            return unavailable_mcp_audit_authority(
+                persistence,
+                startup_warnings,
+                "mcp_audit_owner_reservation_failed",
+                &error.to_string(),
+            );
+        }
+    };
+
+    let (mut document, document_requires_save) =
+        match load_mcp_audit_key_reference_state_from_path(&key_reference_path) {
+            McpAuditKeyReferenceLoadState::Versioned(document) => (document, false),
+            McpAuditKeyReferenceLoadState::Legacy(configs) => {
+                (McpAuditKeyReferenceDocument::new(configs), true)
+            }
+            McpAuditKeyReferenceLoadState::Missing => {
+                let existing_len = match reservation.existing_database_len() {
+                    Ok(existing_len) => existing_len,
+                    Err(error) => {
+                        return unavailable_mcp_audit_authority(
+                            persistence,
+                            startup_warnings,
+                            "mcp_audit_existing_database_identity_failed",
+                            &error.to_string(),
+                        );
+                    }
+                };
+                if existing_len.is_some_and(|length| length > 0) {
+                    return unavailable_mcp_audit_authority(
+                        persistence,
+                        startup_warnings,
+                        "mcp_audit_key_reference_missing_for_nonempty_database",
+                        "a non-empty canonical MCP audit database has no key-reference document",
+                    );
+                }
+                (McpAuditKeyReferenceDocument::new(Vec::new()), true)
+            }
+            McpAuditKeyReferenceLoadState::Invalid(error) => {
+                return unavailable_mcp_audit_authority(
+                    persistence,
+                    startup_warnings,
+                    "mcp_audit_key_reference_invalid",
+                    &error,
+                );
+            }
+            McpAuditKeyReferenceLoadState::Unreadable(error) => {
+                return unavailable_mcp_audit_authority(
+                    persistence,
+                    startup_warnings,
+                    "mcp_audit_key_reference_unreadable",
+                    &error,
+                );
+            }
+        };
+
+    let hydration = match hydrate_or_create_store_bound_mcp_audit_keys(
+        document.keys.clone(),
+        &document.store_identity,
+        secret_store,
+    ) {
+        Ok(hydration) => hydration,
+        Err(error) => {
+            return unavailable_mcp_audit_authority(
+                persistence,
+                startup_warnings,
+                "mcp_audit_key_hydration_failed",
+                &error.to_string(),
+            );
+        }
+    };
+    document.keys = hydration.configs.clone();
+
+    if document_requires_save || hydration.config_changed {
+        if let Err(save_error) =
+            save_mcp_audit_key_reference_document_to_path(&key_reference_path, &document)
+        {
+            let rollback_error = hydration.rollback_created_secret(secret_store).err();
+            let detail = match rollback_error {
+                Some(rollback_error) => format!(
+                    "key-reference save failed: {save_error}; new secret rollback also failed: {rollback_error}"
+                ),
+                None => format!("key-reference save failed: {save_error}"),
+            };
+            return unavailable_mcp_audit_authority(
+                persistence,
+                startup_warnings,
+                "mcp_audit_key_reference_persistence_failed",
+                &detail,
+            );
+        }
+    }
+    persistence.register_read_write("McpAuditKeyReferenceStore");
+
+    let materials = hydration.materials;
+    let initialized = init_store(
+        || {
+            McpAuditStore::with_key_materials_and_reservation(
+                &database_path,
+                materials.clone(),
+                reservation,
+            )
+            .map_err(|error| error.to_string())
+        },
+        || {
+            McpAuditStore::open_read_only_existing_with_key_materials(
+                &database_path,
+                materials.clone(),
+            )
+            .map_err(|error| error.to_string())
+        },
+        || Err("MCP audit recovery database is not a canonical store-bound authority".into()),
+        "McpAuditStore",
+        startup_warnings,
+        persistence,
+    );
+    required_store_or_unavailable(initialized, "McpAuditStore", startup_warnings, || {
+        Ok(McpAuditStore::unavailable_sentinel(
+            "canonical and verified read-only audit store open failed",
+        ))
+    })
 }
 
 fn init_memory_store(
@@ -2213,79 +2366,8 @@ fn bootstrap_with_secret_store(
     };
     let privacy_engine = PrivacyEngine::with_policy(privacy_policy);
     let version_manager = VersionManager::new(data_dir.join("life-model").join("versions"));
-    let audit_keyring_path = data_dir.join("mcp_audit_keys.json");
-    let audit_key_hydration = hydrate_or_create_mcp_audit_keys(
-        load_mcp_audit_keyring_from_path(&audit_keyring_path),
-        secret_store,
-    );
-    let audit_key_hydration = match audit_key_hydration {
-        Ok(hydration) => {
-            persistence.register_read_write("McpAuditKeyReferenceStore");
-            Some(hydration)
-        }
-        Err(error) => {
-            persistence.register_unavailable(
-                "McpAuditKeyReferenceStore",
-                "mcp_audit_key_hydration_failed",
-                &error.to_string(),
-            );
-            startup_warnings.borrow_mut().push(format!(
-                "MCP audit key material is unavailable; audit reads are unknown and all effects are disabled: {error}"
-            ));
-            None
-        }
-    };
-    if audit_key_hydration
-        .as_ref()
-        .is_some_and(|hydration| hydration.config_changed)
-    {
-        if let Err(error) = save_mcp_audit_keyring_to_path(
-            &audit_keyring_path,
-            &audit_key_hydration.as_ref().expect("checked Some").configs,
-        ) {
-            persistence.register_unavailable(
-                "McpAuditKeyReferenceStore",
-                "mcp_audit_key_reference_persistence_failed",
-                &error.to_string(),
-            );
-            startup_warnings.borrow_mut().push(format!(
-                "MCP audit key reference persistence failed; effects disabled: {error}"
-            ));
-        }
-    }
-    let mcp_audit_db_path = data_dir.join("mcp_audit.db");
-    let audit_materials = audit_key_hydration
-        .map(|hydration| hydration.materials)
-        .unwrap_or_default();
-    let mcp_audit_store = init_store(
-        || {
-            McpAuditStore::with_key_materials(&mcp_audit_db_path, audit_materials.clone())
-                .map_err(|error| error.to_string())
-        },
-        || {
-            McpAuditStore::open_read_only_existing_with_key_materials(
-                &mcp_audit_db_path,
-                audit_materials.clone(),
-            )
-            .map_err(|error| error.to_string())
-        },
-        || {
-            McpAuditStore::with_key_materials(
-                recovery_db_path("mcp_audit.db"),
-                audit_materials.clone(),
-            )
-            .map_err(|error| error.to_string())
-        },
-        "McpAuditStore",
-        &startup_warnings,
-        &persistence,
-    );
     let mcp_audit_store =
-        required_store_or_unavailable(mcp_audit_store, "McpAuditStore", &startup_warnings, || {
-            Ok(McpAuditStore::unavailable_sentinel(
-                "canonical and read-only audit store open failed",
-            ))
-        });
+        initialize_mcp_audit_authority(&data_dir, secret_store, &startup_warnings, &persistence);
 
     let hot_cache: SharedHotCache = {
         let initial_cache = match life_model_manager.load() {

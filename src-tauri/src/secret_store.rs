@@ -13,6 +13,7 @@ const ACTION_QUEUE_AUTHORITY_ACCOUNT: &str = "action-queue-authority-key-v1";
 const TASK_STORE_AUTHORITY_ACCOUNT: &str = "task-store-authority-key-v1";
 const AGENT_RUN_RECEIPT_ACCOUNT: &str = "agent-run-receipt-key-v1";
 const MCP_AUDIT_ACCOUNT_PREFIX: &str = "mcp-audit-key-epoch-";
+const MCP_AUDIT_STORE_ACCOUNT_PREFIX: &str = "mcp-audit-key-store-";
 const PROVIDER_SECRET_ENVELOPE_VERSION: &str = "openlife_provider_secret_v1";
 
 pub(crate) const PROVIDER_KEY_REF: &str = "keychain://com.openlife.desktop/provider-api-key";
@@ -27,6 +28,8 @@ pub(crate) const AGENT_RUN_RECEIPT_KEY_REF: &str =
     "keychain://com.openlife.desktop/agent-run-receipt-key-v1";
 pub(crate) const MCP_AUDIT_KEY_REF_PREFIX: &str =
     "keychain://com.openlife.desktop/mcp-audit-key-epoch-";
+pub(crate) const MCP_AUDIT_STORE_KEY_REF_PREFIX: &str =
+    "keychain://com.openlife.desktop/mcp-audit-key-store-";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -123,24 +126,55 @@ pub(crate) trait SecretStore {
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct KeyringSecretStore;
 
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-fn keyring_entry(secret_ref: &str) -> Result<keyring::Entry> {
-    let account = match secret_ref {
+fn keyring_account_for_secret_ref(secret_ref: &str) -> Result<String> {
+    Ok(match secret_ref {
         PROVIDER_KEY_REF => PROVIDER_ACCOUNT.to_string(),
         SEARCH_KEY_REF => SEARCH_ACCOUNT.to_string(),
         MAIN_CHAT_EVENT_INTEGRITY_KEY_REF => MAIN_CHAT_EVENT_INTEGRITY_ACCOUNT.to_string(),
         ACTION_QUEUE_AUTHORITY_KEY_REF => ACTION_QUEUE_AUTHORITY_ACCOUNT.to_string(),
         TASK_STORE_AUTHORITY_KEY_REF => TASK_STORE_AUTHORITY_ACCOUNT.to_string(),
         AGENT_RUN_RECEIPT_KEY_REF => AGENT_RUN_RECEIPT_ACCOUNT.to_string(),
+        value if value.starts_with(MCP_AUDIT_STORE_KEY_REF_PREFIX) => {
+            let suffix = value
+                .strip_prefix(MCP_AUDIT_STORE_KEY_REF_PREFIX)
+                .ok_or_else(|| anyhow::anyhow!("invalid store-bound MCP audit secret reference"))?;
+            let (store_identity, epoch) = suffix
+                .rsplit_once("-epoch-")
+                .ok_or_else(|| anyhow::anyhow!("invalid store-bound MCP audit secret reference"))?;
+            let parsed_identity = parse_random_mcp_audit_store_identity(store_identity)?;
+            if store_identity != parsed_identity.simple().to_string()
+                || epoch.is_empty()
+                || !epoch.chars().all(|character| character.is_ascii_digit())
+            {
+                anyhow::bail!("invalid store-bound MCP audit secret reference");
+            }
+            format!("{MCP_AUDIT_STORE_ACCOUNT_PREFIX}{store_identity}-epoch-{epoch}")
+        }
         value if value.starts_with(MCP_AUDIT_KEY_REF_PREFIX) => {
-            let epoch = value.trim_start_matches(MCP_AUDIT_KEY_REF_PREFIX);
+            let epoch = value
+                .strip_prefix(MCP_AUDIT_KEY_REF_PREFIX)
+                .ok_or_else(|| anyhow::anyhow!("invalid MCP audit secret reference"))?;
             if epoch.is_empty() || !epoch.chars().all(|character| character.is_ascii_digit()) {
                 anyhow::bail!("invalid MCP audit secret reference");
             }
             format!("{MCP_AUDIT_ACCOUNT_PREFIX}{epoch}")
         }
         _ => anyhow::bail!("unsupported OpenLife secret reference"),
-    };
+    })
+}
+
+fn parse_random_mcp_audit_store_identity(value: &str) -> Result<uuid::Uuid> {
+    let identity =
+        uuid::Uuid::parse_str(value).context("validate MCP audit canonical store identity")?;
+    if identity.is_nil() || identity.get_version_num() != 4 {
+        anyhow::bail!("MCP audit canonical store identity must be a random UUIDv4");
+    }
+    Ok(identity)
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn keyring_entry(secret_ref: &str) -> Result<keyring::Entry> {
+    let account = keyring_account_for_secret_ref(secret_ref)?;
     keyring::Entry::new(SERVICE, &account).context("initialize OS credential entry")
 }
 
@@ -506,14 +540,29 @@ pub(crate) struct McpAuditKeyHydration {
     pub(crate) configs: Vec<AuditKeyConfig>,
     pub(crate) materials: Vec<AuditKeyMaterial>,
     pub(crate) config_changed: bool,
+    pub(crate) created_secret_ref: Option<String>,
 }
 
+impl McpAuditKeyHydration {
+    pub(crate) fn rollback_created_secret(&self, store: &dyn SecretStore) -> Result<()> {
+        if let Some(secret_ref) = self.created_secret_ref.as_deref() {
+            store.delete(secret_ref)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn hydrate_or_create_mcp_audit_keys(
     mut configs: Vec<AuditKeyConfig>,
     store: &dyn SecretStore,
 ) -> Result<McpAuditKeyHydration> {
     configs.sort_by_key(|config| config.epoch);
-    configs.dedup_by_key(|config| config.epoch);
+    for pair in configs.windows(2) {
+        if pair[0].epoch == pair[1].epoch {
+            anyhow::bail!("duplicate MCP audit key epoch");
+        }
+    }
     let mut materials = Vec::new();
     for config in &configs {
         if config.mode == KeyMode::Keychain {
@@ -545,9 +594,11 @@ pub(crate) fn hydrate_or_create_mcp_audit_keys(
         Some(config) => config.mode != KeyMode::Keychain,
         None => true,
     };
+    let mut created_secret_ref = None;
     if needs_keychain_epoch {
         let epoch = next_audit_epoch(latest_epoch);
-        let material = create_mcp_audit_key_material(epoch, store)?;
+        let material = create_legacy_test_mcp_audit_key_material(epoch, store)?;
+        created_secret_ref = material.config.key_ref.clone();
         configs.push(material.config.clone());
         materials.push(material);
     }
@@ -556,10 +607,76 @@ pub(crate) fn hydrate_or_create_mcp_audit_keys(
         configs,
         materials,
         config_changed: needs_keychain_epoch,
+        created_secret_ref,
     })
 }
 
-pub(crate) fn create_mcp_audit_key_material(
+pub(crate) fn hydrate_or_create_store_bound_mcp_audit_keys(
+    mut configs: Vec<AuditKeyConfig>,
+    store_identity: &str,
+    store: &dyn SecretStore,
+) -> Result<McpAuditKeyHydration> {
+    let store_identity = parse_random_mcp_audit_store_identity(store_identity)?;
+    configs.sort_by_key(|config| config.epoch);
+    for pair in configs.windows(2) {
+        if pair[0].epoch == pair[1].epoch {
+            anyhow::bail!("duplicate MCP audit key epoch");
+        }
+    }
+    let mut materials = Vec::with_capacity(configs.len().saturating_add(1));
+    for config in &configs {
+        if config.mode == KeyMode::Keychain {
+            let secret_ref = config.key_ref.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("MCP audit keychain config has no secret reference")
+            })?;
+            let encoded = store
+                .get(secret_ref)?
+                .ok_or_else(|| anyhow::anyhow!("MCP audit keychain reference has no credential"))?;
+            let decoded = general_purpose::STANDARD
+                .decode(encoded)
+                .context("decode MCP audit key material")?;
+            let key: [u8; 32] = decoded
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("MCP audit key must contain exactly 32 bytes"))?;
+            materials.push(AuditKeyMaterial {
+                config: config.clone(),
+                key,
+            });
+        } else {
+            materials.push(McpAuditStore::legacy_read_only_key_material(
+                config.clone(),
+            )?);
+        }
+    }
+
+    let store_identity = store_identity.simple().to_string();
+    let active_is_store_bound = configs.last().is_some_and(|config| {
+        let expected_reference = format!(
+            "{MCP_AUDIT_STORE_KEY_REF_PREFIX}{store_identity}-epoch-{}",
+            config.epoch
+        );
+        config.mode == KeyMode::Keychain
+            && config.key_ref.as_deref() == Some(expected_reference.as_str())
+    });
+    let mut created_secret_ref = None;
+    if !active_is_store_bound {
+        let latest_epoch = configs.last().map_or(0, |config| config.epoch);
+        let epoch = next_audit_epoch(latest_epoch);
+        let material = create_store_bound_mcp_audit_key_material(epoch, &store_identity, store)?;
+        created_secret_ref = material.config.key_ref.clone();
+        configs.push(material.config.clone());
+        materials.push(material);
+    }
+    Ok(McpAuditKeyHydration {
+        configs,
+        materials,
+        config_changed: !active_is_store_bound,
+        created_secret_ref,
+    })
+}
+
+#[cfg(test)]
+fn create_legacy_test_mcp_audit_key_material(
     epoch: u64,
     store: &dyn SecretStore,
 ) -> Result<AuditKeyMaterial> {
@@ -579,14 +696,43 @@ pub(crate) fn create_mcp_audit_key_material(
     })
 }
 
+pub(crate) fn create_store_bound_mcp_audit_key_material(
+    epoch: u64,
+    store_identity: &str,
+    store: &dyn SecretStore,
+) -> Result<AuditKeyMaterial> {
+    let store_identity = parse_random_mcp_audit_store_identity(store_identity)?;
+    let secret_ref = format!(
+        "{MCP_AUDIT_STORE_KEY_REF_PREFIX}{}-epoch-{epoch}",
+        store_identity.simple()
+    );
+    let key = rand::random::<[u8; 32]>();
+    write_new_mcp_audit_secret(&secret_ref, &general_purpose::STANDARD.encode(key), store)?;
+    Ok(AuditKeyMaterial {
+        config: AuditKeyConfig {
+            mode: KeyMode::Keychain,
+            salt_b64: None,
+            env_var: None,
+            key_ref: Some(secret_ref),
+            epoch,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        },
+        key,
+    })
+}
+
 /// Single product primitive for persisting newly generated MCP audit key
-/// material. D064 freezes create-only behavior at this exact boundary; the
-/// current replacement write is intentionally left unchanged for the RED slice.
+/// material. Creation is fail-if-present; the canonical store owner lease
+/// serializes this read-before-create boundary for one store, while store-bound
+/// random identities keep different stores in disjoint keychain namespaces.
 pub(crate) fn write_new_mcp_audit_secret(
     secret_ref: &str,
     encoded_key: &str,
     store: &dyn SecretStore,
 ) -> Result<()> {
+    if store.get(secret_ref)?.is_some() {
+        anyhow::bail!("mcp_audit_secret_reference_already_exists:{secret_ref}");
+    }
     store.set(secret_ref, encoded_key)
 }
 
@@ -870,6 +1016,36 @@ mod tests {
         let restarted = hydrate_or_create_mcp_audit_keys(first.configs, &store).unwrap();
         assert!(!restarted.config_changed);
         assert_eq!(restarted.materials[0].key, original_key);
+    }
+
+    #[test]
+    fn store_bound_audit_reference_maps_to_a_distinct_valid_keychain_account() {
+        let store_identity = uuid::Uuid::new_v4();
+        let secret_ref = format!(
+            "{MCP_AUDIT_STORE_KEY_REF_PREFIX}{}-epoch-44",
+            store_identity.simple()
+        );
+        assert_eq!(
+            keyring_account_for_secret_ref(&secret_ref).unwrap(),
+            format!(
+                "{MCP_AUDIT_STORE_ACCOUNT_PREFIX}{}-epoch-44",
+                store_identity.simple()
+            )
+        );
+        assert!(keyring_account_for_secret_ref(&format!("{secret_ref}-trailing")).is_err());
+        assert!(keyring_account_for_secret_ref(
+            "keychain://com.openlife.desktop/mcp-audit-key-store-not-a-uuid-epoch-44"
+        )
+        .is_err());
+        assert!(keyring_account_for_secret_ref(&format!(
+            "{MCP_AUDIT_STORE_KEY_REF_PREFIX}{MCP_AUDIT_STORE_KEY_REF_PREFIX}{}-epoch-44",
+            store_identity.simple()
+        ))
+        .is_err());
+        assert!(keyring_account_for_secret_ref(
+            "keychain://com.openlife.desktop/mcp-audit-key-store-00000000000010008000000000000000-epoch-44"
+        )
+        .is_err());
     }
 
     #[test]

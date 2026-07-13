@@ -26,11 +26,13 @@ use crate::provider_network_consent::{
     authorize_explicit_provider_probe, ExplicitProviderProbeAuthorization,
 };
 use crate::secret_store::{
-    create_mcp_audit_key_material, stage_config_secrets, KeyringSecretStore, SecretStore,
+    create_store_bound_mcp_audit_key_material, stage_config_secrets, KeyringSecretStore,
+    SecretStore,
 };
 use crate::storage::{
-    app_data_dir, mcp_audit_keyring_path, privacy_policy_path, save_mcp_audit_keyring_to_path,
-    save_privacy_policy_to_path,
+    app_data_dir, load_mcp_audit_key_reference_state_from_path, mcp_audit_keyring_path,
+    privacy_policy_path, save_mcp_audit_key_reference_document_to_path,
+    save_privacy_policy_to_path, McpAuditKeyReferenceLoadState,
 };
 use crate::AppState;
 use crate::{life_model_write_gateway, memory_gateway};
@@ -1582,19 +1584,67 @@ pub async fn rotate_mcp_audit_key(
         state.inner(),
     )
     .await?;
+    let key_reference_path = mcp_audit_keyring_path();
+    let mut key_reference_document = match load_mcp_audit_key_reference_state_from_path(
+        &key_reference_path,
+    ) {
+        McpAuditKeyReferenceLoadState::Versioned(document) => document,
+        McpAuditKeyReferenceLoadState::Missing => {
+            return Err(AppError::db(
+                "MCP audit key reference document is missing; rotation is unavailable",
+            ));
+        }
+        McpAuditKeyReferenceLoadState::Legacy(_) => {
+            return Err(AppError::db(
+                    "legacy MCP audit key references are read-only; restart through governed migration before rotation",
+                ));
+        }
+        McpAuditKeyReferenceLoadState::Invalid(error) => {
+            return Err(AppError::db(format!(
+                "MCP audit key reference document is invalid: {error}"
+            )));
+        }
+        McpAuditKeyReferenceLoadState::Unreadable(error) => {
+            return Err(AppError::db(format!(
+                "MCP audit key reference document is unreadable: {error}"
+            )));
+        }
+    };
     let mut store = state.mcp_audit_store.lock().await;
+    let store_configs_match_document = store.key_configs().len()
+        == key_reference_document.keys.len()
+        && store
+            .key_configs()
+            .iter()
+            .zip(&key_reference_document.keys)
+            .all(|(active, durable)| {
+                active.epoch == durable.epoch
+                    && active.mode == durable.mode
+                    && active.key_ref == durable.key_ref
+            });
+    if !store_configs_match_document {
+        return Err(AppError::db(
+            "MCP audit in-memory key authority differs from the durable reference document",
+        ));
+    }
     let timestamp_epoch = chrono::Utc::now().timestamp().max(0) as u64;
     let epoch = timestamp_epoch.max(store.key_config().epoch.saturating_add(1));
     let secret_store = KeyringSecretStore;
-    let material = create_mcp_audit_key_material(epoch, &secret_store).map_err(AppError::from)?;
+    let material = create_store_bound_mcp_audit_key_material(
+        epoch,
+        &key_reference_document.store_identity,
+        &secret_store,
+    )
+    .map_err(AppError::from)?;
     let secret_ref = material.config.key_ref.clone().unwrap_or_default();
     let snapshot = store.clone();
     if let Err(error) = store.rotate_key_material(material) {
         let _ = secret_store.delete(&secret_ref);
         return Err(AppError::from(error));
     }
+    key_reference_document.keys = store.key_configs().to_vec();
     if let Err(error) =
-        save_mcp_audit_keyring_to_path(&mcp_audit_keyring_path(), store.key_configs())
+        save_mcp_audit_key_reference_document_to_path(&key_reference_path, &key_reference_document)
     {
         *store = snapshot;
         let _ = secret_store.delete(&secret_ref);
