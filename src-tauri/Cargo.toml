@@ -61,6 +61,7 @@ keyring = { version = "3.6.3", default-features = false, features = ["sync-secre
 tauri = { version = "2.5", features = ["test"] }
 tempfile = "3.14"
 openlife-core = { path = "../openlife-core", features = ["test-utils"] }
+syn = { version = "2", features = ["full", "visit"] }
 
 [[bin]]
 name = "openlife-a2a-server"

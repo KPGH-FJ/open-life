@@ -16,6 +16,123 @@ static LAST_SEARCH_AT: Mutex<Option<Instant>> = Mutex::new(None);
 pub const EXTERNAL_WRITE_PROPOSAL_MAX_SIZE_BYTES: usize = 100 * 1024;
 pub const EXTERNAL_WRITE_PROPOSAL_PREVIEW_CHARS: usize = 4000;
 
+#[cfg(feature = "test-utils")]
+tokio::task_local! {
+    static FILESYSTEM_OBSERVATION_TEST_CAPTURE: FilesystemObservationTestCapture;
+}
+
+#[cfg(feature = "test-utils")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilesystemObservationTestRecord {
+    pub owner: String,
+    pub api: String,
+    pub target: String,
+}
+
+#[cfg(feature = "test-utils")]
+#[derive(Debug)]
+struct FilesystemObservationTestState {
+    records: std::sync::Mutex<Vec<FilesystemObservationTestRecord>>,
+    first_observation_seen: std::sync::atomic::AtomicBool,
+    first_observation_notify: tokio::sync::Notify,
+    released: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(feature = "test-utils")]
+#[derive(Debug, Clone)]
+pub struct FilesystemObservationTestCapture {
+    state: std::sync::Arc<FilesystemObservationTestState>,
+}
+
+#[cfg(feature = "test-utils")]
+impl FilesystemObservationTestCapture {
+    pub fn pause_before_first_os_observation() -> Self {
+        Self {
+            state: std::sync::Arc::new(FilesystemObservationTestState {
+                records: std::sync::Mutex::new(Vec::new()),
+                first_observation_seen: std::sync::atomic::AtomicBool::new(false),
+                first_observation_notify: tokio::sync::Notify::new(),
+                released: std::sync::atomic::AtomicBool::new(false),
+            }),
+        }
+    }
+
+    pub async fn scope<F>(&self, future: F) -> F::Output
+    where
+        F: std::future::Future,
+    {
+        FILESYSTEM_OBSERVATION_TEST_CAPTURE
+            .scope(self.clone(), future)
+            .await
+    }
+
+    pub async fn wait_for_first_observation(&self) {
+        loop {
+            let notified = self.state.first_observation_notify.notified();
+            if self
+                .state
+                .first_observation_seen
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    pub fn release(&self) {
+        self.state
+            .released
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn records(&self) -> Vec<FilesystemObservationTestRecord> {
+        self.state
+            .records
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    fn record_before_os_observation(&self, owner: &str, api: &str, target: &str) {
+        let is_first = {
+            let mut records = self
+                .state
+                .records
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            records.push(FilesystemObservationTestRecord {
+                owner: owner.to_string(),
+                api: api.to_string(),
+                target: target.to_string(),
+            });
+            records.len() == 1
+        };
+        if !is_first {
+            return;
+        }
+
+        self.state
+            .first_observation_seen
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.state.first_observation_notify.notify_one();
+        while !self
+            .state
+            .released
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            std::thread::park_timeout(std::time::Duration::from_millis(1));
+        }
+    }
+}
+
+#[cfg(feature = "test-utils")]
+pub fn capture_filesystem_observation_for_test(owner: &str, api: &str, target: &str) {
+    let _ = FILESYSTEM_OBSERVATION_TEST_CAPTURE.try_with(|capture| {
+        capture.record_before_os_observation(owner, api, target);
+    });
+}
+
 /// Search provider configuration (set at startup from SystemConfig).
 #[derive(Clone)]
 pub struct SearchProviderConfig {
@@ -891,6 +1008,12 @@ pub fn is_path_in_safe_paths(path: &str, safe_paths: &[String]) -> bool {
         }
     }
 
+    #[cfg(feature = "test-utils")]
+    capture_filesystem_observation_for_test(
+        "action_executor.helpers.is_path_in_safe_paths",
+        "Path::canonicalize",
+        &path.to_string_lossy(),
+    );
     let canonical_base = if let Ok(canonical) = path.canonicalize() {
         canonical
     } else {
@@ -899,6 +1022,12 @@ pub fn is_path_in_safe_paths(path: &str, safe_paths: &[String]) -> bool {
             _ => return false,
         };
 
+        #[cfg(feature = "test-utils")]
+        capture_filesystem_observation_for_test(
+            "action_executor.helpers.is_path_in_safe_paths",
+            "Path::canonicalize",
+            &parent.to_string_lossy(),
+        );
         let canonical_parent = match parent.canonicalize() {
             Ok(p) => p,
             Err(_) => return false,
@@ -923,11 +1052,23 @@ pub fn is_path_in_safe_paths(path: &str, safe_paths: &[String]) -> bool {
         .iter()
         .filter_map(|safe| {
             let safe_path = std::path::Path::new(safe);
+            #[cfg(feature = "test-utils")]
+            capture_filesystem_observation_for_test(
+                "action_executor.helpers.is_path_in_safe_paths",
+                "Path::symlink_metadata",
+                &safe_path.to_string_lossy(),
+            );
             if let Ok(meta) = safe_path.symlink_metadata() {
                 if meta.file_type().is_symlink() {
                     return None;
                 }
             }
+            #[cfg(feature = "test-utils")]
+            capture_filesystem_observation_for_test(
+                "action_executor.helpers.is_path_in_safe_paths",
+                "Path::canonicalize",
+                &safe_path.to_string_lossy(),
+            );
             safe_path.canonicalize().ok()
         })
         .collect();
@@ -957,6 +1098,12 @@ pub async fn is_path_in_safe_paths_async(path: &str, safe_paths: &[String]) -> b
         return false;
     }
 
+    #[cfg(feature = "test-utils")]
+    capture_filesystem_observation_for_test(
+        "action_executor.helpers.is_path_in_safe_paths_async",
+        "tokio::fs::canonicalize",
+        &path.to_string_lossy(),
+    );
     let canonical_base = if let Ok(canonical) = tokio::fs::canonicalize(path).await {
         canonical
     } else {
@@ -964,6 +1111,12 @@ pub async fn is_path_in_safe_paths_async(path: &str, safe_paths: &[String]) -> b
             Some(parent) if !parent.as_os_str().is_empty() => parent,
             _ => return false,
         };
+        #[cfg(feature = "test-utils")]
+        capture_filesystem_observation_for_test(
+            "action_executor.helpers.is_path_in_safe_paths_async",
+            "tokio::fs::canonicalize",
+            &parent.to_string_lossy(),
+        );
         let canonical_parent = match tokio::fs::canonicalize(parent).await {
             Ok(parent) => parent,
             Err(_) => return false,
@@ -976,6 +1129,12 @@ pub async fn is_path_in_safe_paths_async(path: &str, safe_paths: &[String]) -> b
 
     for safe in safe_paths {
         let safe_path = std::path::Path::new(safe);
+        #[cfg(feature = "test-utils")]
+        capture_filesystem_observation_for_test(
+            "action_executor.helpers.is_path_in_safe_paths_async",
+            "tokio::fs::symlink_metadata",
+            &safe_path.to_string_lossy(),
+        );
         let metadata = match tokio::fs::symlink_metadata(safe_path).await {
             Ok(metadata) => metadata,
             Err(_) => continue,
@@ -983,6 +1142,12 @@ pub async fn is_path_in_safe_paths_async(path: &str, safe_paths: &[String]) -> b
         if metadata.file_type().is_symlink() {
             continue;
         }
+        #[cfg(feature = "test-utils")]
+        capture_filesystem_observation_for_test(
+            "action_executor.helpers.is_path_in_safe_paths_async",
+            "tokio::fs::canonicalize",
+            &safe_path.to_string_lossy(),
+        );
         if let Ok(canonical_safe) = tokio::fs::canonicalize(safe_path).await {
             if canonical_base.starts_with(canonical_safe) {
                 return true;

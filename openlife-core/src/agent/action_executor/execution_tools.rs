@@ -114,6 +114,12 @@ impl super::ActionExecutor {
                 }
 
                 // Check file size before reading
+                #[cfg(feature = "test-utils")]
+                crate::agent::action_executor::helpers::capture_filesystem_observation_for_test(
+                    "action_executor.execution_tools.file_read",
+                    "tokio::fs::metadata",
+                    path,
+                );
                 let metadata = tokio::fs::metadata(path)
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to read file metadata: {}", e))?;
@@ -134,6 +140,12 @@ impl super::ActionExecutor {
                     .await?;
                 receipt_tracker.mark_local_dispatched();
                 ctx.observe_tool_started(&receipt_tracker).await?;
+                #[cfg(feature = "test-utils")]
+                crate::agent::action_executor::helpers::capture_filesystem_observation_for_test(
+                    "action_executor.execution_tools.file_read",
+                    "tokio::fs::read_to_string",
+                    path,
+                );
                 match tokio::fs::read_to_string(path).await {
                     Ok(content) => Ok(ToolCallInternalResult {
                         success: true,
@@ -165,6 +177,12 @@ impl super::ActionExecutor {
                             error: Some(filesystem_access_error(path, &all_calendar_paths)),
                         });
                     }
+                    #[cfg(feature = "test-utils")]
+                    crate::agent::action_executor::helpers::capture_filesystem_observation_for_test(
+                        "action_executor.execution_tools.calendar_read",
+                        "tokio::fs::metadata",
+                        path,
+                    );
                     let metadata = match tokio::fs::metadata(path).await {
                         Ok(m) => m,
                         Err(e) => {
@@ -191,6 +209,12 @@ impl super::ActionExecutor {
                         .await?;
                     receipt_tracker.mark_local_dispatched();
                     ctx.observe_tool_started(&receipt_tracker).await?;
+                    #[cfg(feature = "test-utils")]
+                    crate::agent::action_executor::helpers::capture_filesystem_observation_for_test(
+                        "action_executor.execution_tools.calendar_read",
+                        "tokio::fs::read_to_string",
+                        path,
+                    );
                     match tokio::fs::read_to_string(path).await {
                         Ok(content) => crate::calendar::parse_ics(&content, range_start, range_end),
                         Err(e) => {
@@ -220,10 +244,22 @@ impl super::ActionExecutor {
                     ctx.observe_tool_started(&receipt_tracker).await?;
                     let mut all_events = Vec::new();
                     for search_path in &ics_search_paths {
+                        #[cfg(feature = "test-utils")]
+                        crate::agent::action_executor::helpers::capture_filesystem_observation_for_test(
+                            "action_executor.execution_tools.calendar_read",
+                            "tokio::fs::read_dir",
+                            search_path,
+                        );
                         if let Ok(mut entries) = tokio::fs::read_dir(search_path).await {
                             while let Ok(Some(entry)) = entries.next_entry().await {
                                 let path = entry.path();
                                 if path.extension() == Some(std::ffi::OsStr::new("ics")) {
+                                    #[cfg(feature = "test-utils")]
+                                    crate::agent::action_executor::helpers::capture_filesystem_observation_for_test(
+                                        "action_executor.execution_tools.calendar_read",
+                                        "tokio::fs::read_to_string",
+                                        &path.to_string_lossy(),
+                                    );
                                     if let Ok(content) = tokio::fs::read_to_string(&path).await {
                                         all_events.extend(crate::calendar::parse_ics(
                                             &content,
@@ -557,6 +593,12 @@ impl super::ActionExecutor {
                 let content_hash: String =
                     hash.as_ref().iter().map(|b| format!("{:02x}", b)).collect();
                 let size_bytes = content.len();
+                #[cfg(feature = "test-utils")]
+                crate::agent::action_executor::helpers::capture_filesystem_observation_for_test(
+                    "action_executor.execution_tools.file_write_proposal",
+                    "tokio::fs::try_exists",
+                    path,
+                );
                 let operation = if tokio::fs::try_exists(path).await.unwrap_or(false) {
                     "overwrite"
                 } else {

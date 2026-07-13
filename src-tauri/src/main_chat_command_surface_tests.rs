@@ -2346,20 +2346,81 @@ async fn d051_useful_proposal_body_and_evidence_are_bound_to_canonical_observati
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn d058_d051_missing_file_has_one_real_failed_tool_owner_and_final_recovers() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let operation_id = uuid::Uuid::new_v4().to_string();
     let session_id = "d058-d051-missing-observation";
     let prompt = "Read file `src-tauri/test-fixtures/d051_missing_memory.md` and create a memory proposal only if the observation contains a useful supported personal fact.";
 
-    let response = invoke_send_message_for_kernel_goal_3_with_operation(
-        state.clone(),
-        &operation_id,
-        session_id,
-        prompt,
+    let observation_capture = openlife_core::agent::action_executor::helpers::FilesystemObservationTestCapture::pause_before_first_os_observation();
+    let turn_capture = observation_capture.clone();
+    let turn_state = state.clone();
+    let turn_operation_id = operation_id.clone();
+    let turn_session_id = session_id.to_string();
+    let turn_prompt = prompt.to_string();
+    let turn = tokio::spawn(async move {
+        turn_capture
+            .scope(crate::main_chat_send::send_message_with_operation_state(
+                turn_operation_id,
+                turn_session_id,
+                vec![openlife_core::llm::ChatMessage {
+                    role: "user".into(),
+                    content: turn_prompt,
+                }],
+                None,
+                &turn_state,
+            ))
+            .await
+    });
+    if tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        observation_capture.wait_for_first_observation(),
     )
-    .await;
+    .await
+    .is_err()
+    {
+        observation_capture.release();
+        let _ = turn.await;
+        panic!("missing-file path reached no captured filesystem observation");
+    }
+    let captured_records = observation_capture.records();
+    let events_at_first_observation = match state.main_chat_agent_event_store.as_ref() {
+        Some(store) => store
+            .lock()
+            .await
+            .list(&operation_id, 0, 250)
+            .map_err(|error| format!("list durable events at OS barrier failed: {error}")),
+        None => Err("main_chat_agent_event_store_unavailable_at_os_barrier".to_string()),
+    };
+    observation_capture.release();
+    let turn_result = turn.await.expect("join captured missing-file turn");
+    let first_observation = captured_records
+        .into_iter()
+        .next()
+        .expect("first filesystem observation record");
+    let events_at_first_observation = events_at_first_observation
+        .expect("durable event store remains readable while the OS observation is paused");
+    let prepared_at_first_observation = events_at_first_observation
+        .iter()
+        .filter(|event| event.event_type == "tool.dispatch_prepared")
+        .count();
+    assert!(
+        matches!(
+            first_observation.owner.as_str(),
+            "action_executor.helpers.is_path_in_safe_paths_async"
+                | "action_executor.execution_tools.file_read"
+        ),
+        "the first OS observation escaped the ToolGateway filesystem adapter: {first_observation:?}"
+    );
+    assert_eq!(
+        prepared_at_first_observation, 1,
+        "the durable store must already contain exactly one gateway dispatch when the first OS observation is paused: {events_at_first_observation:#?}"
+    );
+    let response = serde_json::to_value(
+        turn_result.expect("missing file becomes a structured ToolGateway failure"),
+    )
+    .expect("serialize captured missing-file response");
     assert_eq!(response["run_id"], serde_json::json!(operation_id));
     assert_eq!(response["tool_calls"].as_array().map(Vec::len), Some(1));
     assert!(
@@ -2446,10 +2507,6 @@ async fn d058_d051_missing_file_has_one_real_failed_tool_owner_and_final_recover
         dispatch_events.len(),
         1,
         "the real ToolGateway request is durably prepared exactly once"
-    );
-    assert!(
-        dispatch_events[0].sequence < terminal_events[0].sequence,
-        "a missing-path terminal proves an OS observation occurred only after the ToolGateway dispatch was durably prepared"
     );
     assert_one_durable_final_is_last(&before_retry_events);
     assert_tool_execution_final_owner_binding(
@@ -2610,8 +2667,197 @@ fn d058_collect_production_rust_files(
     }
 }
 
+fn d058_cfg_test_only(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attribute| {
+        if attribute.path().is_ident("test") {
+            return true;
+        }
+        if !attribute.path().is_ident("cfg") {
+            return false;
+        }
+        matches!(
+            &attribute.meta,
+            syn::Meta::List(list) if list.tokens.to_string().trim() == "test"
+        )
+    })
+}
+
+fn d058_item_attrs(item: &syn::Item) -> &[syn::Attribute] {
+    match item {
+        syn::Item::Const(item) => &item.attrs,
+        syn::Item::Enum(item) => &item.attrs,
+        syn::Item::ExternCrate(item) => &item.attrs,
+        syn::Item::Fn(item) => &item.attrs,
+        syn::Item::ForeignMod(item) => &item.attrs,
+        syn::Item::Impl(item) => &item.attrs,
+        syn::Item::Macro(item) => &item.attrs,
+        syn::Item::Mod(item) => &item.attrs,
+        syn::Item::Static(item) => &item.attrs,
+        syn::Item::Struct(item) => &item.attrs,
+        syn::Item::Trait(item) => &item.attrs,
+        syn::Item::TraitAlias(item) => &item.attrs,
+        syn::Item::Type(item) => &item.attrs,
+        syn::Item::Union(item) => &item.attrs,
+        syn::Item::Use(item) => &item.attrs,
+        _ => &[],
+    }
+}
+
+fn d058_impl_item_attrs(item: &syn::ImplItem) -> &[syn::Attribute] {
+    match item {
+        syn::ImplItem::Const(item) => &item.attrs,
+        syn::ImplItem::Fn(item) => &item.attrs,
+        syn::ImplItem::Type(item) => &item.attrs,
+        syn::ImplItem::Macro(item) => &item.attrs,
+        _ => &[],
+    }
+}
+
+fn d058_trait_item_attrs(item: &syn::TraitItem) -> &[syn::Attribute] {
+    match item {
+        syn::TraitItem::Const(item) => &item.attrs,
+        syn::TraitItem::Fn(item) => &item.attrs,
+        syn::TraitItem::Type(item) => &item.attrs,
+        syn::TraitItem::Macro(item) => &item.attrs,
+        _ => &[],
+    }
+}
+
+fn d058_foreign_item_attrs(item: &syn::ForeignItem) -> &[syn::Attribute] {
+    match item {
+        syn::ForeignItem::Fn(item) => &item.attrs,
+        syn::ForeignItem::Static(item) => &item.attrs,
+        syn::ForeignItem::Type(item) => &item.attrs,
+        syn::ForeignItem::Macro(item) => &item.attrs,
+        _ => &[],
+    }
+}
+
+#[derive(Default)]
+struct D058FilesystemObservationVisitor {
+    calls: std::collections::BTreeSet<String>,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for D058FilesystemObservationVisitor {
+    fn visit_item(&mut self, item: &'ast syn::Item) {
+        if !d058_cfg_test_only(d058_item_attrs(item)) {
+            syn::visit::visit_item(self, item);
+        }
+    }
+
+    fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
+        if !d058_cfg_test_only(d058_impl_item_attrs(item)) {
+            syn::visit::visit_impl_item(self, item);
+        }
+    }
+
+    fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
+        if !d058_cfg_test_only(d058_trait_item_attrs(item)) {
+            syn::visit::visit_trait_item(self, item);
+        }
+    }
+
+    fn visit_foreign_item(&mut self, item: &'ast syn::ForeignItem) {
+        if !d058_cfg_test_only(d058_foreign_item_attrs(item)) {
+            syn::visit::visit_foreign_item(self, item);
+        }
+    }
+
+    fn visit_expr_method_call(&mut self, expression: &'ast syn::ExprMethodCall) {
+        let method = expression.method.to_string();
+        if matches!(
+            method.as_str(),
+            "canonicalize"
+                | "metadata"
+                | "symlink_metadata"
+                | "exists"
+                | "try_exists"
+                | "is_file"
+                | "is_dir"
+                | "read_dir"
+                | "read_link"
+                | "open"
+        ) {
+            self.calls.insert(format!("method::{method}"));
+        }
+        syn::visit::visit_expr_method_call(self, expression);
+    }
+
+    fn visit_expr_call(&mut self, expression: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = expression.func.as_ref() {
+            let segments = path
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>();
+            let function = segments.last().map(String::as_str).unwrap_or_default();
+            let is_fs_function = segments.len() >= 3
+                && matches!(segments[0].as_str(), "std" | "tokio")
+                && segments[1] == "fs"
+                && matches!(
+                    function,
+                    "canonicalize"
+                        | "metadata"
+                        | "symlink_metadata"
+                        | "exists"
+                        | "try_exists"
+                        | "read"
+                        | "read_to_string"
+                        | "read_dir"
+                        | "read_link"
+                        | "open"
+                );
+            let is_current_dir = segments
+                == [
+                    "std".to_string(),
+                    "env".to_string(),
+                    "current_dir".to_string(),
+                ];
+            if is_fs_function || is_current_dir {
+                self.calls.insert(format!("call::{}", segments.join("::")));
+            }
+        }
+        syn::visit::visit_expr_call(self, expression);
+    }
+}
+
 #[test]
 fn d058_d062_workspace_file_os_observation_has_only_gateway_owned_adapters() {
+    let cfg_fixture = syn::parse_file(
+        r#"
+        #[cfg(test)]
+        fn hidden_test_item() {
+            let _ = std::path::Path::new("hidden").canonicalize();
+        }
+        struct Probe;
+        impl Probe {
+            #[cfg(test)]
+            fn hidden_test_impl_item() {
+                let _ = std::path::Path::new("hidden").is_file();
+            }
+            fn production_item() {
+                let _ = std::path::Path::new("visible").exists();
+            }
+        }
+        #[cfg(not(test))]
+        fn explicit_non_test_item() {
+            let _ = std::path::Path::new("visible").metadata();
+        }
+        "#,
+    )
+    .expect("parse cfg(test) AST guard fixture");
+    let mut cfg_visitor = D058FilesystemObservationVisitor::default();
+    syn::visit::Visit::visit_file(&mut cfg_visitor, &cfg_fixture);
+    assert_eq!(
+        cfg_visitor.calls,
+        std::collections::BTreeSet::from([
+            "method::exists".to_string(),
+            "method::metadata".to_string(),
+        ]),
+        "AST guard must exclude arbitrary cfg(test) items without hiding cfg(not(test)) production"
+    );
+
     let repository_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("repository root");
@@ -2620,23 +2866,6 @@ fn d058_d062_workspace_file_os_observation_has_only_gateway_owned_adapters() {
         d058_collect_production_rust_files(&repository_root.join(relative_root), &mut files);
     }
 
-    let observation_markers = [
-        ".canonicalize(",
-        ".is_file(",
-        ".is_dir(",
-        ".symlink_metadata(",
-        "std::env::current_dir(",
-        "std::fs::metadata(",
-        "tokio::fs::metadata(",
-        "std::fs::File::open(",
-        "tokio::fs::File::open(",
-        "std::fs::read(",
-        "tokio::fs::read(",
-        "std::fs::read_to_string(",
-        "tokio::fs::read_to_string(",
-        "tokio::fs::canonicalize(",
-        "tokio::fs::symlink_metadata(",
-    ];
     let allowed_observation_owners = [
         "openlife-core/src/agent/action_executor/execution_tools.rs",
         "openlife-core/src/agent/action_executor/helpers.rs",
@@ -2650,29 +2879,25 @@ fn d058_d062_workspace_file_os_observation_has_only_gateway_owned_adapters() {
             .to_string_lossy()
             .replace('\\', "/");
         let source = std::fs::read_to_string(&path).expect("read production Rust source");
-        let production_source = source
-            .split("\n#[cfg(test)]\nmod tests")
-            .next()
-            .unwrap_or(&source);
-        let observed_markers = observation_markers
-            .iter()
-            .filter(|marker| production_source.contains(*marker))
-            .copied()
-            .collect::<Vec<_>>();
-        if observed_markers.is_empty() {
+        let syntax = syn::parse_file(&source).expect("parse production Rust source");
+        let mut visitor = D058FilesystemObservationVisitor::default();
+        syn::visit::Visit::visit_file(&mut visitor, &syntax);
+        if visitor.calls.is_empty() {
             continue;
         }
 
         let allowed = allowed_observation_owners.contains(&relative.as_str());
         let is_workspace_route_owner = relative == "src-tauri/src/workspace_file_resolver.rs"
-            || production_source
-                .contains("workspace_file_resolver::resolve_main_chat_workspace_file_target")
-            || (production_source.contains("workspace_file_resolver::resolve_workspace_root")
-                && production_source.contains("\"file.read\""));
+            || source.contains("workspace_file_resolver::resolve_main_chat_workspace_file_target")
+            || (source.contains("workspace_file_resolver::resolve_workspace_root")
+                && source.contains("\"file.read\""));
         let is_tool_gateway_adapter_area =
             relative.starts_with("openlife-core/src/agent/action_executor/");
         if (is_workspace_route_owner || is_tool_gateway_adapter_area) && !allowed {
-            violations.push(format!("{relative}: {}", observed_markers.join(", ")));
+            violations.push(format!(
+                "{relative}: {}",
+                visitor.calls.into_iter().collect::<Vec<_>>().join(", ")
+            ));
         }
     }
 

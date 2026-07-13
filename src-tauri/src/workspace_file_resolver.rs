@@ -7,6 +7,12 @@ pub(crate) fn resolve_main_chat_workspace_file_target(
     let relative = select_workspace_file_relative_path(user_text);
     let safe_relative = validate_relative_workspace_path(&relative)?;
     let path = workspace.join(&safe_relative);
+    #[cfg(test)]
+    openlife_core::agent::action_executor::helpers::capture_filesystem_observation_for_test(
+        "workspace_file_resolver.resolve_main_chat_workspace_file_target",
+        "Path::canonicalize",
+        &path.to_string_lossy(),
+    );
     let canonical = path
         .canonicalize()
         .map_err(|err| format!("file is not readable in workspace: {err}"))?;
@@ -20,15 +26,46 @@ pub(crate) fn resolve_main_chat_workspace_file_target(
 }
 
 pub(crate) fn resolve_workspace_root() -> Result<PathBuf, String> {
+    #[cfg(test)]
+    openlife_core::agent::action_executor::helpers::capture_filesystem_observation_for_test(
+        "workspace_file_resolver.resolve_workspace_root",
+        "std::env::current_dir",
+        ".",
+    );
     let cwd =
         std::env::current_dir().map_err(|err| format!("workspace path unavailable: {err}"))?;
     for candidate in cwd.ancestors() {
+        #[cfg(test)]
+        {
+            openlife_core::agent::action_executor::helpers::capture_filesystem_observation_for_test(
+                "workspace_file_resolver.resolve_workspace_root",
+                "Path::is_file",
+                &candidate.join("AGENTS.md").to_string_lossy(),
+            );
+            openlife_core::agent::action_executor::helpers::capture_filesystem_observation_for_test(
+                "workspace_file_resolver.resolve_workspace_root",
+                "Path::is_dir",
+                &candidate.join("plans").to_string_lossy(),
+            );
+        }
         if candidate.join("AGENTS.md").is_file() && candidate.join("plans").is_dir() {
+            #[cfg(test)]
+            openlife_core::agent::action_executor::helpers::capture_filesystem_observation_for_test(
+                "workspace_file_resolver.resolve_workspace_root",
+                "Path::canonicalize",
+                &candidate.to_string_lossy(),
+            );
             return candidate
                 .canonicalize()
                 .map_err(|err| format!("workspace canonicalization failed: {err}"));
         }
     }
+    #[cfg(test)]
+    openlife_core::agent::action_executor::helpers::capture_filesystem_observation_for_test(
+        "workspace_file_resolver.resolve_workspace_root",
+        "Path::canonicalize",
+        &cwd.to_string_lossy(),
+    );
     cwd.canonicalize()
         .map_err(|err| format!("workspace canonicalization failed: {err}"))
 }

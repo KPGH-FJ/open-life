@@ -1990,6 +1990,14 @@ impl super::ActionExecutor {
         let content_preview = external_write_content_preview(&content_text);
         let minimized_arguments =
             minimized_external_write_arguments(args, &content_hash, size_bytes, &content_preview);
+        #[cfg(feature = "test-utils")]
+        if !path.is_empty() {
+            crate::agent::action_executor::helpers::capture_filesystem_observation_for_test(
+                "action_executor.tool_executor.create_external_write_action_proposal_record",
+                "Path::exists",
+                path,
+            );
+        }
         let operation = if !path.is_empty() && std::path::Path::new(path).exists() {
             "overwrite"
         } else {

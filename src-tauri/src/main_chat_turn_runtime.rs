@@ -6730,6 +6730,21 @@ mod turn_admission_tests {
             "toolOwnerBindings".into(),
             serde_json::Value::Array(bindings),
         );
+        for legacy_field in [
+            "toolReceiptRefs",
+            "toolTerminalEventRefs",
+            "toolTerminalEventDigests",
+        ] {
+            let legacy_values = object
+                .get_mut(legacy_field)
+                .and_then(serde_json::Value::as_array_mut)
+                .expect("legacy v1 owner array remains present for compatibility testing");
+            assert!(
+                legacy_values.len() >= 2,
+                "the v2 identity fixture requires at least two legacy positions"
+            );
+            legacy_values.rotate_left(1);
+        }
         d058_override_final_payload(state, &fixture.final_event.event_id, payload).await;
     }
 
