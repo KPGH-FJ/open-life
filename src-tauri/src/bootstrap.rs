@@ -3036,6 +3036,34 @@ mod tests {
             .is_err()
     }
 
+    fn d057_all_logs_json(store: &McpAuditStore) -> Result<String, String> {
+        store
+            .list_logs(i64::MAX as usize)
+            .map_err(|error| error.to_string())
+            .and_then(|logs| serde_json::to_string(&logs).map_err(|error| error.to_string()))
+    }
+
+    fn d057_audit_artifact_snapshot(data_dir: &std::path::Path) -> Vec<(String, Option<Vec<u8>>)> {
+        let database_path = data_dir.join("mcp_audit.db");
+        ["", "-wal", "-shm", "-journal"]
+            .into_iter()
+            .map(|suffix| {
+                let mut artifact_path = database_path.as_os_str().to_os_string();
+                artifact_path.push(suffix);
+                let artifact_path = std::path::PathBuf::from(artifact_path);
+                let bytes = match std::fs::read(&artifact_path) {
+                    Ok(bytes) => Some(bytes),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => panic!(
+                        "snapshot D057 audit artifact {} failed: {error}",
+                        artifact_path.display()
+                    ),
+                };
+                (format!("mcp_audit.db{suffix}"), bytes)
+            })
+            .collect()
+    }
+
     #[test]
     fn d057_malformed_keyring_never_creates_secret_or_overwrites_bytes() {
         use crate::persistence_coordinator::PersistenceStoreMode;
@@ -3184,37 +3212,123 @@ mod tests {
     fn d057_missing_keyring_with_nonempty_audit_db_fails_closed() {
         use crate::persistence_coordinator::PersistenceStoreMode;
 
+        #[derive(Debug)]
+        struct Observation {
+            secret_sets_zero: bool,
+            secret_deletes_zero: bool,
+            keyring_remains_absent: bool,
+            reference_mode: PersistenceStoreMode,
+            audit_mode: PersistenceStoreMode,
+            audit_state_oracle_satisfied: bool,
+            write_attempt_failed: bool,
+            artifacts_unchanged_after_bootstrap: bool,
+            artifacts_unchanged_after_write_attempt: bool,
+            canonical_writes_blocked: bool,
+            provider_dispatch_blocked: bool,
+            tool_dispatch_blocked: bool,
+            historical_logs_exact: bool,
+        }
+
         let directory = tempfile::tempdir().unwrap();
         let db_path = directory.path().join("mcp_audit.db");
         let historical_ref = d057_key_ref(10);
         let historical_config = d057_keychain_config(10, historical_ref.clone());
+        let historical_material = d057_material(historical_config, [0x10; 32]);
         d057_seed_audit_db(
             &db_path,
-            d057_material(historical_config, [0x10; 32]),
+            historical_material.clone(),
             "historical_nonempty_fixture",
         );
+        let expected_logs = {
+            let owner =
+                McpAuditStore::with_key_materials(&db_path, vec![historical_material.clone()])
+                    .expect("historical authority opens the control database");
+            d057_all_logs_json(&owner).expect("serialize the complete historical control logs")
+        };
+        let artifacts_before_bootstrap = d057_audit_artifact_snapshot(directory.path());
         let secrets = D057RecordingSecretStore::default();
         secrets.preload_key(&historical_ref, [0x10; 32]);
 
         let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
-        let observed = (
-            secrets.mcp_set_refs(),
-            !directory.path().join("mcp_audit_keys.json").exists(),
-            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
-            d057_store_mode(&result, "McpAuditStore"),
-            d057_audit_reads_fail_closed(&result),
-        );
+        let artifacts_after_bootstrap = d057_audit_artifact_snapshot(directory.path());
+        let reference_mode = d057_store_mode(&result, "McpAuditKeyReferenceStore");
+        let audit_mode = d057_store_mode(&result, "McpAuditStore");
+        let (logs_before_write, write_attempt_failed, logs_after_write) = {
+            let audit = result
+                .state
+                .mcp_audit_store
+                .try_lock()
+                .expect("missing-keyring audit store lock");
+            let logs_before_write = d057_all_logs_json(&audit);
+            let write_attempt_failed = audit
+                .insert_log(
+                    "must_not_write_without_keyring",
+                    &serde_json::json!({"forbidden": true}),
+                    "must-not-commit",
+                    true,
+                    false,
+                )
+                .is_err();
+            let logs_after_write = d057_all_logs_json(&audit);
+            (logs_before_write, write_attempt_failed, logs_after_write)
+        };
+        let artifacts_after_write_attempt = d057_audit_artifact_snapshot(directory.path());
+        result.state.persistence_coordinator.seal();
+        let persistence = result.state.persistence_coordinator.snapshot();
+        let audit_state_oracle_satisfied = match audit_mode {
+            PersistenceStoreMode::Unavailable => {
+                logs_before_write.is_err() && logs_after_write.is_err()
+            }
+            PersistenceStoreMode::ReadOnlyCanonical => {
+                logs_before_write.as_ref() == Ok(&expected_logs)
+                    && logs_after_write.as_ref() == Ok(&expected_logs)
+            }
+            _ => false,
+        };
+        drop(result);
+        let historical_logs_exact = {
+            let owner = McpAuditStore::with_key_materials(&db_path, vec![historical_material])
+                .expect("correct historical authority still opens after rejected bootstrap");
+            d057_all_logs_json(&owner)
+                .map(|actual| actual == expected_logs)
+                .unwrap_or(false)
+        };
+        let observation = Observation {
+            secret_sets_zero: secrets.mcp_set_refs().is_empty(),
+            secret_deletes_zero: secrets.mcp_deleted_refs().is_empty(),
+            keyring_remains_absent: !directory.path().join("mcp_audit_keys.json").exists(),
+            reference_mode,
+            audit_mode,
+            audit_state_oracle_satisfied,
+            write_attempt_failed,
+            artifacts_unchanged_after_bootstrap: artifacts_before_bootstrap
+                == artifacts_after_bootstrap,
+            artifacts_unchanged_after_write_attempt: artifacts_before_bootstrap
+                == artifacts_after_write_attempt,
+            canonical_writes_blocked: !persistence.canonical_writes_allowed,
+            provider_dispatch_blocked: !persistence.provider_dispatch_allowed,
+            tool_dispatch_blocked: !persistence.tool_dispatch_allowed,
+            historical_logs_exact,
+        };
 
-        assert_eq!(
-            observed,
-            (
-                Vec::<String>::new(),
-                true,
-                PersistenceStoreMode::Unavailable,
-                PersistenceStoreMode::Unavailable,
-                true,
-            ),
-            "an existing nonempty audit database makes a missing keyring recovery-required, never first boot"
+        assert!(
+            observation.secret_sets_zero
+                && observation.secret_deletes_zero
+                && observation.keyring_remains_absent
+                && observation.reference_mode == PersistenceStoreMode::Unavailable
+                && matches!(
+                    observation.audit_mode,
+                    PersistenceStoreMode::Unavailable | PersistenceStoreMode::ReadOnlyCanonical
+                )
+                && observation.audit_state_oracle_satisfied
+                && observation.write_attempt_failed
+                && observation.artifacts_unchanged_after_bootstrap
+                && observation.artifacts_unchanged_after_write_attempt
+                && observation.canonical_writes_blocked
+                && observation.provider_dispatch_blocked
+                && observation.tool_dispatch_blocked
+                && observation.historical_logs_exact,
+            "an absent keyring with nonempty audit history must be fully unavailable or strictly read-only without creating authority or mutating any durable artifact: {observation:#?}"
         );
     }
 
@@ -3457,6 +3571,24 @@ mod tests {
     fn d057_existing_db_epoch_not_covered_by_keyring_is_unavailable() {
         use crate::persistence_coordinator::PersistenceStoreMode;
 
+        #[derive(Debug)]
+        struct Observation {
+            secret_sets_zero: bool,
+            secret_deletes_zero: bool,
+            keyring_unchanged: bool,
+            reference_mode: PersistenceStoreMode,
+            audit_mode: PersistenceStoreMode,
+            reads_fail_closed_before_write: bool,
+            write_attempt_failed: bool,
+            reads_fail_closed_after_write: bool,
+            artifacts_unchanged_after_bootstrap: bool,
+            artifacts_unchanged_after_write_attempt: bool,
+            canonical_writes_blocked: bool,
+            provider_dispatch_blocked: bool,
+            tool_dispatch_blocked: bool,
+            historical_logs_exact: bool,
+        }
+
         let directory = tempfile::tempdir().unwrap();
         let db_path = directory.path().join("mcp_audit.db");
         let historical_ref = d057_key_ref(40);
@@ -3467,6 +3599,13 @@ mod tests {
             historical_material.clone(),
             "uncovered_epoch_fixture",
         );
+        let expected_logs = {
+            let owner =
+                McpAuditStore::with_key_materials(&db_path, vec![historical_material.clone()])
+                    .expect("covered historical authority opens the control database");
+            d057_all_logs_json(&owner).expect("serialize the complete uncovered-epoch control")
+        };
+        let artifacts_before_bootstrap = d057_audit_artifact_snapshot(directory.path());
         let current_ref = d057_key_ref(41);
         let current_config = d057_keychain_config(41, current_ref.clone());
         let keyring_path = directory.path().join("mcp_audit_keys.json");
@@ -3475,34 +3614,79 @@ mod tests {
         secrets.preload_key(&current_ref, [0x41; 32]);
 
         let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
-        let observed = (
-            secrets.mcp_set_refs(),
-            std::fs::read(&keyring_path).unwrap() == original_keyring,
-            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
-            d057_store_mode(&result, "McpAuditStore"),
-            d057_audit_reads_fail_closed(&result),
-        );
-
-        assert_eq!(
-            observed,
+        let artifacts_after_bootstrap = d057_audit_artifact_snapshot(directory.path());
+        let reference_mode = d057_store_mode(&result, "McpAuditKeyReferenceStore");
+        let audit_mode = d057_store_mode(&result, "McpAuditStore");
+        let (reads_fail_closed_before_write, write_attempt_failed, reads_fail_closed_after_write) = {
+            let audit = result
+                .state
+                .mcp_audit_store
+                .try_lock()
+                .expect("uncovered-epoch audit store lock");
+            let reads_fail_closed_before_write = d057_all_logs_json(&audit).is_err();
+            let write_attempt_failed = audit
+                .insert_log(
+                    "must_not_write_with_uncovered_epoch",
+                    &serde_json::json!({"forbidden": true}),
+                    "must-not-commit",
+                    true,
+                    false,
+                )
+                .is_err();
+            let reads_fail_closed_after_write = d057_all_logs_json(&audit).is_err();
             (
-                Vec::<String>::new(),
-                true,
-                PersistenceStoreMode::Unavailable,
-                PersistenceStoreMode::Unavailable,
-                true,
-            ),
-            "an incomplete keyring is not a healthy key-reference authority; every durable audit epoch must be covered before either owner can become available"
-        );
+                reads_fail_closed_before_write,
+                write_attempt_failed,
+                reads_fail_closed_after_write,
+            )
+        };
+        let artifacts_after_write_attempt = d057_audit_artifact_snapshot(directory.path());
+        result.state.persistence_coordinator.seal();
+        let persistence = result.state.persistence_coordinator.snapshot();
         drop(result);
+        let historical_logs_exact = {
+            let owner = McpAuditStore::with_key_materials(&db_path, vec![historical_material])
+                .expect("original authority still opens the unchanged database");
+            d057_all_logs_json(&owner)
+                .map(|actual| actual == expected_logs)
+                .unwrap_or(false)
+        };
+        let observation = Observation {
+            secret_sets_zero: secrets.mcp_set_refs().is_empty(),
+            secret_deletes_zero: secrets.mcp_deleted_refs().is_empty(),
+            keyring_unchanged: std::fs::read(&keyring_path).unwrap() == original_keyring,
+            reference_mode,
+            audit_mode,
+            reads_fail_closed_before_write,
+            write_attempt_failed,
+            reads_fail_closed_after_write,
+            artifacts_unchanged_after_bootstrap: artifacts_before_bootstrap
+                == artifacts_after_bootstrap,
+            artifacts_unchanged_after_write_attempt: artifacts_before_bootstrap
+                == artifacts_after_write_attempt,
+            canonical_writes_blocked: !persistence.canonical_writes_allowed,
+            provider_dispatch_blocked: !persistence.provider_dispatch_allowed,
+            tool_dispatch_blocked: !persistence.tool_dispatch_allowed,
+            historical_logs_exact,
+        };
 
-        let original_store = McpAuditStore::with_key_materials(&db_path, vec![historical_material])
-            .expect("original authority still opens the unchanged database");
-        let logs = original_store
-            .list_logs(10)
-            .expect("the failed bootstrap must not corrupt historical rows");
-        assert_eq!(logs.len(), 1);
-        assert_eq!(logs[0].tool_name, "uncovered_epoch_fixture");
+        assert!(
+            observation.secret_sets_zero
+                && observation.secret_deletes_zero
+                && observation.keyring_unchanged
+                && observation.reference_mode == PersistenceStoreMode::Unavailable
+                && observation.audit_mode == PersistenceStoreMode::Unavailable
+                && observation.reads_fail_closed_before_write
+                && observation.write_attempt_failed
+                && observation.reads_fail_closed_after_write
+                && observation.artifacts_unchanged_after_bootstrap
+                && observation.artifacts_unchanged_after_write_attempt
+                && observation.canonical_writes_blocked
+                && observation.provider_dispatch_blocked
+                && observation.tool_dispatch_blocked
+                && observation.historical_logs_exact,
+            "an incomplete keyring must not expose reads, writes, or mutate main/sidecar artifacts; exact historical log JSON must remain recoverable with the complete authority: {observation:#?}"
+        );
     }
 
     #[test]
