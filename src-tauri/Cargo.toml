@@ -12,6 +12,7 @@ default-run = "openlife-tauri"
 [features]
 default = []
 dev-extensions = []
+test-utils = ["openlife-core/test-utils"]
 
 [lib]
 name = "openlife_tauri_lib"

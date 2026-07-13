@@ -113,6 +113,80 @@ async fn pause_main_chat_before_cancellation_registration_for_test(chat_session_
 async fn pause_main_chat_before_cancellation_registration_for_test(_chat_session_id: &str) {}
 
 #[cfg(test)]
+#[derive(Clone)]
+struct MainChatFinalOwnerSnapshotBarrier {
+    reached: Arc<tokio::sync::Barrier>,
+    release: Arc<tokio::sync::Barrier>,
+}
+
+#[cfg(test)]
+fn main_chat_final_owner_snapshot_barrier_slot(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, MainChatFinalOwnerSnapshotBarrier>>
+{
+    static SLOT: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, MainChatFinalOwnerSnapshotBarrier>>,
+    > = std::sync::OnceLock::new();
+    SLOT.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+pub(crate) struct MainChatFinalOwnerSnapshotBarrierGuard {
+    operation_id: String,
+}
+
+#[cfg(test)]
+impl Drop for MainChatFinalOwnerSnapshotBarrierGuard {
+    fn drop(&mut self) {
+        main_chat_final_owner_snapshot_barrier_slot()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.operation_id);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn install_main_chat_final_owner_snapshot_barrier_for_test(
+    operation_id: &str,
+) -> (
+    MainChatFinalOwnerSnapshotBarrierGuard,
+    Arc<tokio::sync::Barrier>,
+    Arc<tokio::sync::Barrier>,
+) {
+    let reached = Arc::new(tokio::sync::Barrier::new(2));
+    let release = Arc::new(tokio::sync::Barrier::new(2));
+    main_chat_final_owner_snapshot_barrier_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            operation_id.to_string(),
+            MainChatFinalOwnerSnapshotBarrier {
+                reached: Arc::clone(&reached),
+                release: Arc::clone(&release),
+            },
+        );
+    (
+        MainChatFinalOwnerSnapshotBarrierGuard {
+            operation_id: operation_id.to_string(),
+        },
+        reached,
+        release,
+    )
+}
+
+#[cfg(test)]
+async fn pause_main_chat_after_final_owner_snapshot_for_test(operation_id: &str) {
+    let barrier = main_chat_final_owner_snapshot_barrier_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(operation_id)
+        .cloned();
+    if let Some(barrier) = barrier {
+        barrier.reached.wait().await;
+        barrier.release.wait().await;
+    }
+}
+
+#[cfg(test)]
 fn main_chat_fail_after_message_commit_operations_for_test(
 ) -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     static OPERATIONS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
@@ -4407,6 +4481,9 @@ async fn persist_openlife_turn_final_delivery_receipt(
     for (field, value) in owner_graph_fields {
         payload_object.insert(field.into(), value);
     }
+
+    #[cfg(test)]
+    pause_main_chat_after_final_owner_snapshot_for_test(task_session_id).await;
 
     crate::main_chat_event_stream::append_main_chat_agent_runtime_event(
         state,
