@@ -3927,6 +3927,152 @@ mod tests {
         );
     }
 
+    #[derive(Debug)]
+    struct D057PreManifestEpochScanMetrics {
+        row_count: usize,
+        schema_version: i64,
+        epochs: Vec<i64>,
+        index_names: Vec<String>,
+        query_plan: Vec<String>,
+        fullscan_steps: i32,
+        vm_steps: i32,
+    }
+
+    fn d057_observe_pre_manifest_epoch_scan(row_count: usize) -> D057PreManifestEpochScanMetrics {
+        use rusqlite::StatementStatus;
+
+        let directory = tempfile::tempdir().expect("D057 pre-manifest temp directory");
+        let database_path = directory.path().join("mcp_audit.db");
+        let mut connection = rusqlite::Connection::open(&database_path)
+            .expect("open D057 pre-manifest SQLite fixture");
+        connection
+            .execute_batch(
+                "CREATE TABLE mcp_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tool_name TEXT NOT NULL,
+                    arguments_encrypted TEXT NOT NULL,
+                    result_encrypted TEXT NOT NULL,
+                    success INTEGER NOT NULL,
+                    pii_found INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    key_epoch INTEGER NOT NULL DEFAULT 0,
+                    payload_minimized_version INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE openlife_schema_versions (
+                    component TEXT PRIMARY KEY,
+                    version INTEGER NOT NULL,
+                    applied_at TEXT NOT NULL
+                );
+                INSERT INTO openlife_schema_versions (component, version, applied_at)
+                VALUES ('mcp_audit_store', 3, '2026-07-13T00:00:00Z');",
+            )
+            .expect("create source-exact pre-manifest current-v3 audit schema");
+        let transaction = connection
+            .transaction()
+            .expect("begin D057 pre-manifest fixture transaction");
+        {
+            let mut insert = transaction
+                .prepare(
+                    "INSERT INTO mcp_log (
+                        tool_name, arguments_encrypted, result_encrypted, success,
+                        pii_found, created_at, key_epoch, payload_minimized_version
+                     ) VALUES ('d057_pre_manifest', 'fixture', 'fixture', 1, 0,
+                        '2026-07-13T00:00:00Z', ?1, 1)",
+                )
+                .expect("prepare D057 pre-manifest rows");
+            for ordinal in 0..row_count {
+                let epoch = if ordinal % 2 == 0 { 80_i64 } else { 81_i64 };
+                insert
+                    .execute([epoch])
+                    .expect("insert D057 pre-manifest row");
+            }
+        }
+        transaction
+            .commit()
+            .expect("commit D057 pre-manifest fixture");
+
+        let schema_version = connection
+            .query_row(
+                "SELECT version FROM openlife_schema_versions
+                 WHERE component = 'mcp_audit_store'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("read D057 pre-manifest schema version");
+
+        let index_names = {
+            let mut statement = connection
+                .prepare("PRAGMA index_list('mcp_log')")
+                .expect("inspect D057 pre-manifest indexes");
+            statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .expect("query D057 pre-manifest indexes")
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .expect("collect D057 pre-manifest indexes")
+        };
+        let query_plan = {
+            let mut statement = connection
+                .prepare(
+                    "EXPLAIN QUERY PLAN
+                     SELECT DISTINCT key_epoch FROM mcp_log ORDER BY key_epoch",
+                )
+                .expect("prepare D057 pre-manifest query plan");
+            statement
+                .query_map([], |row| row.get::<_, String>(3))
+                .expect("query D057 pre-manifest plan")
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .expect("collect D057 pre-manifest plan")
+        };
+        let mut statement = connection
+            .prepare("SELECT DISTINCT key_epoch FROM mcp_log ORDER BY key_epoch")
+            .expect("prepare exact D057 epoch discovery");
+        let epochs = statement
+            .query_map([], |row| row.get::<_, i64>(0))
+            .expect("query exact D057 epoch set")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect exact D057 epoch set");
+        let fullscan_steps = statement.get_status(StatementStatus::FullscanStep);
+        let vm_steps = statement.get_status(StatementStatus::VmStep);
+
+        D057PreManifestEpochScanMetrics {
+            row_count,
+            schema_version,
+            epochs,
+            index_names,
+            query_plan,
+            fullscan_steps,
+            vm_steps,
+        }
+    }
+
+    #[test]
+    fn d057_pre_manifest_epoch_discovery_has_linear_work_without_authenticated_metadata() {
+        let small = d057_observe_pre_manifest_epoch_scan(32);
+        let large = d057_observe_pre_manifest_epoch_scan(2_048);
+
+        assert!(
+            small.schema_version == 3
+                && large.schema_version == 3
+                && small.epochs == vec![80, 81]
+                && large.epochs == vec![80, 81]
+                && small.index_names.is_empty()
+                && large.index_names.is_empty()
+                && small
+                    .query_plan
+                    .iter()
+                    .any(|step| step.contains("SCAN mcp_log"))
+                && large
+                    .query_plan
+                    .iter()
+                    .any(|step| step.contains("SCAN mcp_log"))
+                && small.fullscan_steps >= small.row_count as i32 - 1
+                && large.fullscan_steps >= large.row_count as i32 - 1
+                && large.fullscan_steps > small.fullscan_steps + 1_900
+                && large.vm_steps > small.vm_steps,
+            "D057 waiver proof: exact epoch discovery over pre-manifest current-v3 has row-linear work; this one-time scan cannot be replaced by epoch sampling: small={small:#?}, large={large:#?}"
+        );
+    }
+
     async fn seed_failed_main_chat_owner_fixture(
         state: &Arc<AppState>,
         chat_session_id: &str,
