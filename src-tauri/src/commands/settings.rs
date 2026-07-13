@@ -1529,12 +1529,11 @@ pub async fn export_mcp_audit_logs(
     Ok(export)
 }
 
-pub(crate) async fn export_mcp_audit_logs_with_state(
+async fn export_mcp_audit_logs_with_state(
     days: i64,
     state: &Arc<AppState>,
 ) -> Result<AuditExport, AppError> {
-    let store = state.mcp_audit_store.lock().await;
-    store.export_logs(days).map_err(AppError::from)
+    state.mcp_audit_read_gateway.export_logs(state, days).await
 }
 
 #[tauri::command]

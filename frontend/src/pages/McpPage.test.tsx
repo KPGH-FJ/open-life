@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { BrowserRouter } from "react-router-dom";
 import McpPage from "./McpPage";
 import { invoke } from "@tauri-apps/api/core";
@@ -196,7 +196,7 @@ describe("McpPage", () => {
     expect(screen.getByText("隐私保护规则")).toBeInTheDocument();
   });
 
-  it("does not render unavailable audit truth as zero counts or an empty database", async () => {
+  it("keeps non-audit capabilities while rendering unavailable audit stats as unknown", async () => {
     vi.mocked(invoke).mockImplementation((command, args) => {
       if (command === "get_runtime_build_info") return Promise.resolve(devRuntimeBuildInfo);
       if (command === "list_mcp_audit_logs") {
@@ -211,12 +211,18 @@ describe("McpPage", () => {
       </BrowserRouter>
     );
 
-    expect(await screen.findByText(/审计.*(未知|不可用)/)).toBeInTheDocument();
+    expect(await screen.findByText("审计状态：不可用")).toBeInTheDocument();
     expect(screen.queryByText("暂无审计记录")).not.toBeInTheDocument();
     for (const label of ["总调用次数", "成功", "失败", "PII 拦截"]) {
-      const card = screen.queryByText(label)?.parentElement;
+      const card = screen.getByText(label).parentElement;
+      expect(card).not.toBeNull();
+      expect(within(card as HTMLElement).getByText("未知")).toBeInTheDocument();
       expect(card?.textContent ?? "").not.toMatch(/0\s*$/);
     }
+
+    expect(await screen.findByText(/工具数量:\s*2/)).toBeInTheDocument();
+    expect(screen.getByText("read_file")).toBeInTheDocument();
+    expect(screen.getByText("Phone")).toBeInTheDocument();
   });
 
   it("requires confirmation before clearing old audit logs", async () => {

@@ -237,8 +237,10 @@ pub async fn list_mcp_audit_logs(
     limit: usize,
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<openlife_core::mcp_audit::McpLogEntry>, AppError> {
-    let store = state.mcp_audit_store.lock().await;
-    store.list_logs(limit).map_err(AppError::from)
+    state
+        .mcp_audit_read_gateway
+        .list_logs(state.inner(), limit)
+        .await
 }
 
 #[tauri::command]

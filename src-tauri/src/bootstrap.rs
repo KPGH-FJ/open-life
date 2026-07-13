@@ -2546,6 +2546,9 @@ fn bootstrap_with_secret_store(
         ))),
         last_snapshot_date: Arc::new(Mutex::new(None)),
         mcp_audit_store: Arc::new(Mutex::new(mcp_audit_store)),
+        mcp_audit_read_gateway: Arc::new(
+            crate::mcp_audit_read_gateway::McpAuditReadGateway::default(),
+        ),
         agent_run_store: agent_run_store.map(|store| Arc::new(Mutex::new(store))),
         evidence_store: Arc::new(Mutex::new(evidence_store)),
         life_event_store: life_event_store.map(|store| Arc::new(Mutex::new(store))),

@@ -151,6 +151,7 @@ pub struct AppState {
     pub a2a_sidecar: Arc<Mutex<a2a_sidecar::A2ASidecar>>,
     pub last_snapshot_date: Arc<Mutex<Option<String>>>,
     pub mcp_audit_store: Arc<Mutex<McpAuditStore>>,
+    pub(crate) mcp_audit_read_gateway: Arc<crate::mcp_audit_read_gateway::McpAuditReadGateway>,
     pub agent_run_store: Option<Arc<Mutex<openlife_core::agent::AgentRunStore>>>,
     pub evidence_store: Arc<Mutex<openlife_core::agent::EvidenceStore>>,
     pub life_event_store: Option<Arc<Mutex<openlife_core::agent::LifeEventStore>>>,

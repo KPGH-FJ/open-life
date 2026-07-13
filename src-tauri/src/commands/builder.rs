@@ -920,6 +920,9 @@ mod tests {
             mcp_audit_store: Arc::new(tokio::sync::Mutex::new(McpAuditStore::new(
                 temp_dir.path().join("mcp_audit.db"),
             ))),
+            mcp_audit_read_gateway: Arc::new(
+                crate::mcp_audit_read_gateway::McpAuditReadGateway::default(),
+            ),
             agent_run_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::AgentRunStore::new_in_memory().unwrap(),
             ))),
