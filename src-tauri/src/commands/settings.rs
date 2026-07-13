@@ -1535,27 +1535,118 @@ pub async fn cleanup_mcp_audit_logs(
     window: tauri::WebviewWindow,
     state: State<'_, Arc<AppState>>,
 ) -> Result<usize, AppError> {
-    state
-        .persistence_coordinator
-        .require_effects_allowed()
-        .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))?;
-    let confirmation_arguments = serde_json::json!({ "retention_days": retention_days });
-    require_danger_action_confirmation(
-        DangerActionConfirmationRequest {
-            action_type: "mcp_audit_cleanup",
-            target_ids_for_new_challenge: &[],
-            requested_target: None,
-            affected_count: None,
-            reference: confirmation_evidence.as_ref(),
-            arguments: &confirmation_arguments,
-            arguments_summary: &format!("删除超过 {retention_days} 天保留期的 MCP 审计记录。"),
+    let app_state = state.inner();
+    let window = &window;
+    let confirmation_evidence = confirmation_evidence.as_ref();
+    orchestrate_mcp_audit_cleanup(
+        retention_days,
+        // D063 RED: this identity conversion intentionally preserves the current
+        // defect. Production GREEN replaces this validator; the orchestration
+        // seam and its frozen behavior tests stay stable.
+        |days| Ok(days),
+        || {
+            app_state
+                .persistence_coordinator
+                .require_effects_allowed()
+                .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))
         },
-        &window,
-        state.inner(),
+        |retention| async move {
+            let confirmation_arguments = serde_json::json!({ "retention_days": retention });
+            require_danger_action_confirmation(
+                DangerActionConfirmationRequest {
+                    action_type: "mcp_audit_cleanup",
+                    target_ids_for_new_challenge: &[],
+                    requested_target: None,
+                    affected_count: None,
+                    reference: confirmation_evidence,
+                    arguments: &confirmation_arguments,
+                    arguments_summary: &format!("删除超过 {retention} 天保留期的 MCP 审计记录。"),
+                },
+                window,
+                app_state,
+            )
+            .await
+        },
+        |retention| async move {
+            let store = app_state.mcp_audit_store.lock().await;
+            store.cleanup(retention).map_err(AppError::from)
+        },
     )
-    .await?;
-    let store = state.mcp_audit_store.lock().await;
-    store.cleanup(retention_days).map_err(AppError::from)
+    .await
+}
+
+/// Stable product orchestration seam for governed audit cleanup.
+///
+/// The command above is the production caller. Keeping validation, the global
+/// effects gate, Rust-owned confirmation, and the mutation as explicit ports
+/// lets the frozen D063 suite exercise every fail-closed transition without
+/// pretending a concrete `WebviewWindow` command is a MockRuntime command.
+async fn orchestrate_mcp_audit_cleanup<
+    Retention,
+    Validate,
+    Effects,
+    Confirm,
+    ConfirmFuture,
+    Mutate,
+    MutateFuture,
+>(
+    retention_days: i64,
+    validate: Validate,
+    require_effects_allowed: Effects,
+    require_native_confirmation: Confirm,
+    mutate: Mutate,
+) -> Result<usize, AppError>
+where
+    Retention: Clone,
+    Validate: FnOnce(i64) -> Result<Retention, AppError>,
+    Effects: FnOnce() -> Result<(), AppError>,
+    Confirm: FnOnce(Retention) -> ConfirmFuture,
+    ConfirmFuture: std::future::Future<Output = Result<(), AppError>>,
+    Mutate: FnOnce(Retention) -> MutateFuture,
+    MutateFuture: std::future::Future<Output = Result<usize, AppError>>,
+{
+    let retention = validate(retention_days)?;
+    require_effects_allowed()?;
+    require_native_confirmation(retention.clone()).await?;
+    mutate(retention).await
+}
+
+/// Test-only access to the exact production-called orchestration seam. This
+/// forwarding surface is not compiled into release builds, so sibling modules
+/// cannot inject alternate effects, confirmation, or mutation authorities.
+#[cfg(test)]
+pub(crate) async fn run_d063_cleanup_orchestration_harness<
+    Retention,
+    Validate,
+    Effects,
+    Confirm,
+    ConfirmFuture,
+    Mutate,
+    MutateFuture,
+>(
+    retention_days: i64,
+    validate: Validate,
+    require_effects_allowed: Effects,
+    require_native_confirmation: Confirm,
+    mutate: Mutate,
+) -> Result<usize, AppError>
+where
+    Retention: Clone,
+    Validate: FnOnce(i64) -> Result<Retention, AppError>,
+    Effects: FnOnce() -> Result<(), AppError>,
+    Confirm: FnOnce(Retention) -> ConfirmFuture,
+    ConfirmFuture: std::future::Future<Output = Result<(), AppError>>,
+    Mutate: FnOnce(Retention) -> MutateFuture,
+    MutateFuture: std::future::Future<Output = Result<usize, AppError>>,
+{
+    orchestrate_mcp_audit_cleanup(
+        retention_days,
+        validate,
+        require_effects_allowed,
+        require_native_confirmation,
+        mutate,
+    )
+    .await
 }
 
 #[tauri::command]

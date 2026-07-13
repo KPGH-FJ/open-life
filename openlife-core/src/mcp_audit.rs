@@ -15,6 +15,11 @@ use ring::digest::{Context as DigestContext, SHA256};
 
 const MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION: i64 = 1;
 
+/// Product contract ceiling for MCP audit retention. The current raw `i64`
+/// cleanup path does not enforce this yet; D063 keeps that behavior RED until
+/// `McpAuditRetentionDays` becomes the domain mutation boundary.
+pub const MCP_AUDIT_RETENTION_MAX_DAYS: i64 = 3_650;
+
 fn audit_payload_receipt(kind: &str, value_type: &str, bytes: &[u8]) -> String {
     let digest = ring::digest::digest(&SHA256, bytes);
     serde_json::json!({
@@ -900,16 +905,31 @@ mod tests {
     #[test]
     fn audit_store_export_and_cleanup() {
         let dir = tempfile::tempdir().unwrap();
-        let store = McpAuditStore::new(dir.path().join("audit.db"));
+        let path = dir.path().join("audit.db");
+        let store = McpAuditStore::new(&path);
         store
             .insert_log("tool_a", &serde_json::json!({}), "result", true, false)
+            .unwrap();
+        let old_timestamp = (chrono::Utc::now() - chrono::Duration::days(2)).to_rfc3339();
+        Connection::open(&path)
+            .unwrap()
+            .execute(
+                "UPDATE mcp_log SET created_at = ?1 WHERE tool_name = ?2",
+                params![old_timestamp, "tool_a"],
+            )
             .unwrap();
 
         let export = store.export_logs(30).unwrap();
         assert_eq!(export.entry_count, 1);
         assert_eq!(export.entries[0].tool_name, "tool_a");
 
-        let cleaned = store.cleanup(0).unwrap();
+        let cleaned = store
+            .cleanup(
+                1_i64
+                    .try_into()
+                    .unwrap_or_else(|_| panic!("one day is valid MCP audit retention")),
+            )
+            .unwrap();
         assert_eq!(cleaned, 1);
         let logs = store.list_logs(10).unwrap();
         assert!(logs.is_empty());

@@ -49,6 +49,17 @@ describe("McpPage", () => {
     });
   };
 
+  const expectGovernedAuditRetentionLink = () => {
+    expect(screen.getByRole("link", { name: "在隐私设置中管理审计保留" })).toHaveAttribute(
+      "href",
+      "/settings"
+    );
+    expect(screen.queryByRole("button", { name: "清理 7 天前日志" })).not.toBeInTheDocument();
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "clear_mcp_audit_logs")).toBe(
+      false
+    );
+  };
+
   beforeEach(() => {
     useRuntimeBuildInfo(devRuntimeBuildInfo);
   });
@@ -204,14 +215,7 @@ describe("McpPage", () => {
     );
 
     await screen.findByText("安全审计中心");
-    const settingsLink = screen.getByRole("link", {
-      name: "在隐私设置中管理审计保留",
-    });
-    expect(settingsLink).toHaveAttribute("href", "/settings");
-    expect(screen.queryByRole("button", { name: "清理 7 天前日志" })).not.toBeInTheDocument();
-    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "clear_mcp_audit_logs")).toBe(
-      false
-    );
+    expectGovernedAuditRetentionLink();
   });
 
   it("keeps arbitrary MCP registration unavailable in release builds", async () => {
@@ -229,6 +233,7 @@ describe("McpPage", () => {
     expect(screen.queryByTitle("删除")).not.toBeInTheDocument();
     expect(screen.getByText("安全审计中心")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "刷新" })).toBeInTheDocument();
+    expectGovernedAuditRetentionLink();
 
     await waitFor(() => {
       expect(vi.mocked(invoke).mock.calls.map(([command]) => command)).toContain(
@@ -264,7 +269,7 @@ describe("McpPage", () => {
 
     await screen.findByText("unavailable");
     expect(screen.queryByText("注册新 MCP Server")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "清理 7 天前日志" })).toBeInTheDocument();
+    expectGovernedAuditRetentionLink();
 
     const invokedCommands = vi.mocked(invoke).mock.calls.map(([command]) => command);
     expect(invokedCommands).not.toContain("register_mcp_server");
