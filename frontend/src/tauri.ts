@@ -2561,10 +2561,6 @@ export async function listMcpAuditLogs(limit = 20): Promise<McpAuditLogEntry[]> 
   return safeInvoke<McpAuditLogEntry[]>("list_mcp_audit_logs", { limit });
 }
 
-export async function clearMcpAuditLogs(days: number): Promise<number> {
-  return safeInvoke<number>("clear_mcp_audit_logs", { days });
-}
-
 export async function listMcpTools(): Promise<any[]> {
   return safeInvoke<any[]>("list_mcp_tools");
 }
@@ -3315,7 +3311,7 @@ export function buildDangerActionConfirmationEvidence(
 export async function getDangerActionPreflight(
   actionType: DangerActionType,
   safeMode: boolean,
-  options: { targetIds?: string[]; affectedCount?: number } = {}
+  options: { targetIds?: string[]; affectedCount?: number; retentionDays?: number } = {}
 ): Promise<DangerActionPreflightView> {
   return safeInvoke<DangerActionPreflightView>("get_danger_action_preflight", {
     actionType,
@@ -3325,6 +3321,9 @@ export async function getDangerActionPreflight(
     ...(options.targetIds ? { targetIds: options.targetIds, target_ids: options.targetIds } : {}),
     ...(options.affectedCount !== undefined
       ? { affectedCount: options.affectedCount, affected_count: options.affectedCount }
+      : {}),
+    ...(options.retentionDays !== undefined
+      ? { retentionDays: options.retentionDays, retention_days: options.retentionDays }
       : {}),
   });
 }

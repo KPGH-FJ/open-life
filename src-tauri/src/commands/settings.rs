@@ -5,7 +5,9 @@ use openlife_core::llm::{
     chat_completions_url, default_base_for_provider, effective_api_key_for_endpoint,
     provider_label, ProviderInvocationReceipt, ProviderInvocationStatus,
 };
-use openlife_core::mcp_audit::AuditExport;
+use openlife_core::mcp_audit::{
+    AuditExport, McpAuditCleanupScopeChanged, McpAuditRetentionDays, MCP_AUDIT_RETENTION_MAX_DAYS,
+};
 use openlife_core::network_client::resolve_network_policy_decision;
 use openlife_core::privacy::PrivacyPolicy;
 use openlife_core::scheduler::InferenceScheduler;
@@ -44,6 +46,52 @@ static GOVERNED_DATA_IMPORT_LOCK: LazyLock<tokio::sync::Mutex<()>> =
 pub(crate) static CONFIG_WRITE_COORDINATOR: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 
+const MCP_AUDIT_CLEANUP_PREDICATE_VERSION: &str = "mcp-audit-created-before-request-cutoff-v1";
+
+fn invalid_mcp_audit_retention_error() -> AppError {
+    AppError::Config {
+        message: "invalid_mcp_audit_retention_days".into(),
+        hint: Some(format!(
+            "retention_days_must_be_1_through_{MCP_AUDIT_RETENTION_MAX_DAYS}"
+        )),
+    }
+}
+
+fn validate_mcp_audit_retention_days(
+    retention_days: i64,
+) -> Result<McpAuditRetentionDays, AppError> {
+    McpAuditRetentionDays::try_from(retention_days).map_err(|_| invalid_mcp_audit_retention_error())
+}
+
+fn mcp_audit_cleanup_preflight_scope_arguments(
+    retention_days: i64,
+    candidate_count: usize,
+) -> serde_json::Value {
+    serde_json::json!({
+        "retention_days": retention_days,
+        "predicate_version": MCP_AUDIT_CLEANUP_PREDICATE_VERSION,
+        "candidate_count": candidate_count,
+    })
+}
+
+fn map_mcp_audit_cleanup_error(error: anyhow::Error) -> AppError {
+    if error
+        .downcast_ref::<McpAuditCleanupScopeChanged>()
+        .is_some()
+    {
+        AppError::permission("mcp_audit_cleanup_scope_changed_refresh_preflight")
+    } else {
+        AppError::db_with_hint(error.to_string(), "mcp_audit_store_error")
+    }
+}
+
+fn require_mcp_audit_cleanup_effects_allowed(state: &Arc<AppState>) -> Result<(), AppError> {
+    state
+        .persistence_coordinator
+        .require_effects_allowed()
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct GovernedDataImportRequest {
@@ -71,6 +119,7 @@ pub(crate) struct DangerActionConfirmationRequest<'a> {
     pub requested_target: Option<&'a str>,
     pub affected_count: Option<usize>,
     pub reference: Option<&'a DangerActionConfirmationReference>,
+    pub preflight_scope_arguments: Option<&'a serde_json::Value>,
     pub arguments: &'a serde_json::Value,
     pub arguments_summary: &'a str,
 }
@@ -104,6 +153,7 @@ pub struct DangerActionPreflightView {
 struct DangerActionPreflightScope {
     target_ids: Vec<String>,
     affected_count: Option<usize>,
+    preflight_scope_arguments: Option<serde_json::Value>,
 }
 
 fn validate_scope_target_ids(target_ids: &[String]) -> Result<Vec<String>, AppError> {
@@ -148,12 +198,14 @@ fn danger_action_scope_digest(
     action_type: &str,
     target_ids: &[String],
     affected_count: usize,
+    preflight_scope_arguments: Option<&serde_json::Value>,
 ) -> Result<String, AppError> {
     let canonical = serde_json::json!({
         "action_type": action_type,
         "affected_count": affected_count,
         "target_id_count": target_ids.len(),
         "target_ids": target_ids,
+        "preflight_scope_arguments": preflight_scope_arguments,
     });
     let bytes = serde_json::to_vec(&canonical)?;
     let mut hasher = Sha256::new();
@@ -187,7 +239,12 @@ fn danger_action_preflight_for_action_scoped(
         .affected_count
         .unwrap_or(safe_target_ids.len())
         .max(safe_target_ids.len());
-    let scope_digest = danger_action_scope_digest(action_type, &safe_target_ids, affected_count)?;
+    let scope_digest = danger_action_scope_digest(
+        action_type,
+        &safe_target_ids,
+        affected_count,
+        scope.preflight_scope_arguments.as_ref(),
+    )?;
     let confirmation_phrase = None;
     let requires_typed_confirmation = false;
     let confirmation_required = danger_action_requires_native_confirmation(action_type);
@@ -461,6 +518,7 @@ pub(crate) async fn require_danger_action_confirmation(
     let scope = DangerActionPreflightScope {
         target_ids: request.target_ids_for_new_challenge.to_vec(),
         affected_count: request.affected_count,
+        preflight_scope_arguments: request.preflight_scope_arguments.cloned(),
     };
     let expected = danger_action_preflight_for_action_scoped(request.action_type, false, scope)?;
     if expected.writes_durable_state && danger_action_safe_mode_active(state).await {
@@ -478,6 +536,7 @@ pub(crate) async fn require_danger_action_confirmation(
             target_ids_for_new_challenge: request.target_ids_for_new_challenge,
             requested_target: request.requested_target,
             affected_count: expected.affected_item_count,
+            preflight_scope_arguments: request.preflight_scope_arguments,
             arguments: request.arguments,
             arguments_summary: request.arguments_summary,
             scope_summary: &expected.scope_summary,
@@ -495,6 +554,7 @@ pub async fn get_danger_action_preflight(
     safe_mode: Option<bool>,
     target_ids: Option<Vec<String>>,
     affected_count: Option<usize>,
+    retention_days: Option<i64>,
     window: tauri::WebviewWindow,
     state: State<'_, Arc<AppState>>,
 ) -> Result<DangerActionPreflightView, AppError> {
@@ -503,7 +563,22 @@ pub async fn get_danger_action_preflight(
         effective_safe_mode = true;
     }
     let target_ids = target_ids.unwrap_or_default();
-    let effective_affected_count = if action_type == "vector_rebuild" && affected_count.is_none() {
+    let mut preflight_scope_arguments = None;
+    let effective_affected_count = if action_type == "mcp_audit_cleanup" {
+        let retention_days = retention_days.ok_or_else(invalid_mcp_audit_retention_error)?;
+        let retention = validate_mcp_audit_retention_days(retention_days)?;
+        let candidate_count = {
+            let store = state.mcp_audit_store.lock().await;
+            store
+                .count_cleanup_candidates(&retention)
+                .map_err(map_mcp_audit_cleanup_error)?
+        };
+        preflight_scope_arguments = Some(mcp_audit_cleanup_preflight_scope_arguments(
+            retention_days,
+            candidate_count,
+        ));
+        Some(candidate_count)
+    } else if action_type == "vector_rebuild" && affected_count.is_none() {
         let store = state.memory_store.lock().await;
         Some(store.export_all_messages().map_err(AppError::from)?.len())
     } else {
@@ -515,14 +590,27 @@ pub async fn get_danger_action_preflight(
         DangerActionPreflightScope {
             target_ids: target_ids.clone(),
             affected_count: effective_affected_count,
+            preflight_scope_arguments: preflight_scope_arguments.clone(),
         },
     )?;
+    if action_type == "mcp_audit_cleanup" {
+        let retention_days = retention_days.ok_or_else(invalid_mcp_audit_retention_error)?;
+        view.scope_summary = format!(
+            "按服务端时钟删除创建时间早于当前请求时间减去 {retention_days} 天的本地 MCP 审计日志；影响数量来自后端候选快照。"
+        );
+        view.source_refs
+            .push("mcp_audit_store:server_candidate_snapshot".into());
+        view.source_refs.push(format!(
+            "cleanup_predicate:{MCP_AUDIT_CLEANUP_PREDICATE_VERSION}"
+        ));
+    }
     if view.confirmation_required && view.final_action_enabled {
         view.preflight_id = issue_danger_action_challenge(
             window.label(),
             &action_type,
             &target_ids,
             view.affected_item_count,
+            preflight_scope_arguments.as_ref(),
         )?;
         view.source_refs
             .push("native_confirmation:server_challenge_pending".into());
@@ -805,6 +893,7 @@ pub async fn export_all_data(
             requested_target: None,
             affected_count: None,
             reference: None,
+            preflight_scope_arguments: None,
             arguments: &serde_json::json!({
                 "export_digest": export_digest,
                 "data_categories": ["life_model", "messages", "vectors"],
@@ -870,6 +959,7 @@ pub async fn import_all_data(
             requested_target: None,
             affected_count: None,
             reference: confirmation_evidence.as_ref(),
+            preflight_scope_arguments: None,
             arguments: &confirmation_arguments,
             arguments_summary:
                 "覆盖导入已校验的 OpenLife 备份；参数已绑定到 payload digest 和 governed request。",
@@ -1514,6 +1604,7 @@ pub async fn export_mcp_audit_logs(
             requested_target: None,
             affected_count: None,
             reference: None,
+            preflight_scope_arguments: None,
             arguments: &serde_json::json!({
                 "days": days,
                 "export_digest": hash_json_value(&export_value)?,
@@ -1548,36 +1639,57 @@ pub async fn cleanup_mcp_audit_logs(
     let confirmation_evidence = confirmation_evidence.as_ref();
     orchestrate_mcp_audit_cleanup(
         retention_days,
-        // D063 RED: this identity conversion intentionally preserves the current
-        // defect. Production GREEN replaces this validator; the orchestration
-        // seam and its frozen behavior tests stay stable.
-        |days| Ok(days),
-        || {
-            app_state
-                .persistence_coordinator
-                .require_effects_allowed()
-                .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))
+        |days| {
+            McpAuditRetentionDays::try_from(days)
+                .map_err(|_| invalid_mcp_audit_retention_error())
         },
+        || require_mcp_audit_cleanup_effects_allowed(app_state),
         |retention| async move {
-            let confirmation_arguments = serde_json::json!({ "retention_days": retention });
+            let store = app_state.mcp_audit_store.lock().await;
+            store
+                .count_cleanup_candidates(&retention)
+                .map_err(map_mcp_audit_cleanup_error)
+        },
+        |retention, candidate_count| async move {
+            let retention_days = retention.get();
+            let preflight_scope_arguments = mcp_audit_cleanup_preflight_scope_arguments(
+                retention_days,
+                candidate_count,
+            );
+            let confirmation_arguments = serde_json::json!({
+                "retention_days": retention_days,
+                "predicate_version": MCP_AUDIT_CLEANUP_PREDICATE_VERSION,
+                "candidate_count": candidate_count,
+                "cutoff_utc": retention.cutoff_rfc3339(),
+            });
             require_danger_action_confirmation(
                 DangerActionConfirmationRequest {
                     action_type: "mcp_audit_cleanup",
                     target_ids_for_new_challenge: &[],
                     requested_target: None,
-                    affected_count: None,
+                    affected_count: Some(candidate_count),
                     reference: confirmation_evidence,
+                    preflight_scope_arguments: Some(&preflight_scope_arguments),
                     arguments: &confirmation_arguments,
-                    arguments_summary: &format!("删除超过 {retention} 天保留期的 MCP 审计记录。"),
+                    arguments_summary: &format!(
+                        "删除创建时间早于 {} 的 MCP 审计记录；保留期 {retention_days} 天，后端候选数量 {candidate_count}。",
+                        retention.cutoff_rfc3339()
+                    ),
                 },
                 window,
                 app_state,
             )
             .await
         },
-        |retention| async move {
+        |retention, candidate_count| async move {
             let store = app_state.mcp_audit_store.lock().await;
-            store.cleanup(retention).map_err(AppError::from)
+            // Confirmation can await while persistence degrades. Re-check only
+            // after owning the store guard, then let the domain transaction
+            // atomically compare the confirmed count and delete predicate.
+            require_mcp_audit_cleanup_effects_allowed(app_state)?;
+            store
+                .cleanup(retention, candidate_count)
+                .map_err(map_mcp_audit_cleanup_error)
         },
     )
     .await
@@ -1593,6 +1705,9 @@ async fn orchestrate_mcp_audit_cleanup<
     Retention,
     Validate,
     Effects,
+    Prepare,
+    PrepareFuture,
+    Prepared,
     Confirm,
     ConfirmFuture,
     Mutate,
@@ -1601,22 +1716,28 @@ async fn orchestrate_mcp_audit_cleanup<
     retention_days: i64,
     validate: Validate,
     require_effects_allowed: Effects,
+    prepare: Prepare,
     require_native_confirmation: Confirm,
     mutate: Mutate,
 ) -> Result<usize, AppError>
 where
     Retention: Clone,
+    Prepared: Clone,
     Validate: FnOnce(i64) -> Result<Retention, AppError>,
-    Effects: FnOnce() -> Result<(), AppError>,
-    Confirm: FnOnce(Retention) -> ConfirmFuture,
+    Effects: Fn() -> Result<(), AppError>,
+    Prepare: FnOnce(Retention) -> PrepareFuture,
+    PrepareFuture: std::future::Future<Output = Result<Prepared, AppError>>,
+    Confirm: FnOnce(Retention, Prepared) -> ConfirmFuture,
     ConfirmFuture: std::future::Future<Output = Result<(), AppError>>,
-    Mutate: FnOnce(Retention) -> MutateFuture,
+    Mutate: FnOnce(Retention, Prepared) -> MutateFuture,
     MutateFuture: std::future::Future<Output = Result<usize, AppError>>,
 {
     let retention = validate(retention_days)?;
     require_effects_allowed()?;
-    require_native_confirmation(retention.clone()).await?;
-    mutate(retention).await
+    let prepared = prepare(retention.clone()).await?;
+    require_native_confirmation(retention.clone(), prepared.clone()).await?;
+    require_effects_allowed()?;
+    mutate(retention, prepared).await
 }
 
 /// Test-only access to the exact production-called orchestration seam. This
@@ -1627,6 +1748,9 @@ pub(crate) async fn run_d063_cleanup_orchestration_harness<
     Retention,
     Validate,
     Effects,
+    Prepare,
+    PrepareFuture,
+    Prepared,
     Confirm,
     ConfirmFuture,
     Mutate,
@@ -1635,22 +1759,27 @@ pub(crate) async fn run_d063_cleanup_orchestration_harness<
     retention_days: i64,
     validate: Validate,
     require_effects_allowed: Effects,
+    prepare: Prepare,
     require_native_confirmation: Confirm,
     mutate: Mutate,
 ) -> Result<usize, AppError>
 where
     Retention: Clone,
+    Prepared: Clone,
     Validate: FnOnce(i64) -> Result<Retention, AppError>,
-    Effects: FnOnce() -> Result<(), AppError>,
-    Confirm: FnOnce(Retention) -> ConfirmFuture,
+    Effects: Fn() -> Result<(), AppError>,
+    Prepare: FnOnce(Retention) -> PrepareFuture,
+    PrepareFuture: std::future::Future<Output = Result<Prepared, AppError>>,
+    Confirm: FnOnce(Retention, Prepared) -> ConfirmFuture,
     ConfirmFuture: std::future::Future<Output = Result<(), AppError>>,
-    Mutate: FnOnce(Retention) -> MutateFuture,
+    Mutate: FnOnce(Retention, Prepared) -> MutateFuture,
     MutateFuture: std::future::Future<Output = Result<usize, AppError>>,
 {
     orchestrate_mcp_audit_cleanup(
         retention_days,
         validate,
         require_effects_allowed,
+        prepare,
         require_native_confirmation,
         mutate,
     )
@@ -1674,6 +1803,7 @@ pub async fn rotate_mcp_audit_key(
             requested_target: None,
             affected_count: None,
             reference: confirmation_evidence.as_ref(),
+            preflight_scope_arguments: None,
             arguments: &serde_json::json!({ "operation": "rotate_mcp_audit_key_epoch" }),
             arguments_summary: "轮换 MCP 审计加密 epoch，并保留历史 epoch 供旧记录解密。",
         },
@@ -1744,6 +1874,52 @@ mod tests {
     const W84_IMPORT_PAYLOAD_MESSAGE_SECRET: &str = "W84_IMPORT_PAYLOAD_MESSAGE_SECRET";
     const W84_IMPORT_CURRENT_VECTOR_SECRET: &str = "W84_IMPORT_CURRENT_VECTOR_SECRET";
     const W84_IMPORT_PAYLOAD_VECTOR_SECRET: &str = "W84_IMPORT_PAYLOAD_VECTOR_SECRET";
+
+    #[test]
+    fn d063_invalid_cleanup_retention_is_a_stable_config_error() {
+        for invalid in [i64::MIN, -1, 0, MCP_AUDIT_RETENTION_MAX_DAYS + 1, i64::MAX] {
+            let error = validate_mcp_audit_retention_days(invalid).unwrap_err();
+            let AppError::Config { message, hint } = error else {
+                panic!("invalid cleanup retention must not be reported as an internal error");
+            };
+            assert_eq!(message, "invalid_mcp_audit_retention_days");
+            assert_eq!(
+                hint.as_deref(),
+                Some("retention_days_must_be_1_through_3650")
+            );
+        }
+    }
+
+    #[test]
+    fn d063_cleanup_preflight_digest_binds_retention_predicate_and_server_count() {
+        let scoped_view = |retention_days, candidate_count| {
+            let arguments =
+                mcp_audit_cleanup_preflight_scope_arguments(retention_days, candidate_count);
+            danger_action_preflight_for_action_scoped(
+                "mcp_audit_cleanup",
+                false,
+                DangerActionPreflightScope {
+                    target_ids: vec![],
+                    affected_count: Some(candidate_count),
+                    preflight_scope_arguments: Some(arguments),
+                },
+            )
+            .unwrap()
+        };
+        let expected = scoped_view(90, 2);
+        let changed_retention = scoped_view(30, 2);
+        let changed_count = scoped_view(90, 3);
+
+        assert_eq!(expected.affected_item_count, 2);
+        assert_ne!(
+            expected.confirmation_scope_digest,
+            changed_retention.confirmation_scope_digest
+        );
+        assert_ne!(
+            expected.confirmation_scope_digest,
+            changed_count.confirmation_scope_digest
+        );
+    }
 
     #[test]
     fn resolve_masked_api_key_uses_current_key_for_mask_or_empty() {
@@ -2297,6 +2473,7 @@ mod tests {
             DangerActionPreflightScope {
                 target_ids: vec!["run-private-1".into(), "run-private-2".into()],
                 affected_count: Some(2),
+                preflight_scope_arguments: None,
             },
         )
         .unwrap();
@@ -2322,6 +2499,7 @@ mod tests {
             DangerActionPreflightScope {
                 target_ids: vec![],
                 affected_count: Some(12),
+                preflight_scope_arguments: None,
             },
         )
         .unwrap();
@@ -2344,6 +2522,7 @@ mod tests {
             DangerActionPreflightScope {
                 target_ids: vec!["run-confirm-1".to_string()],
                 affected_count: Some(1),
+                preflight_scope_arguments: None,
             },
         )
         .unwrap();

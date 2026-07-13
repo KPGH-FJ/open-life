@@ -166,6 +166,7 @@ pub async fn rebuild_memory_index(
             requested_target: None,
             affected_count: Some(affected_count),
             reference: confirmation_evidence.as_ref(),
+            preflight_scope_arguments: None,
             arguments: &serde_json::json!({
                 "canonical_memory_row_count": affected_count,
                 "owner_scope": ["knowledge_note", "memory_lifecycle", "legacy_memory_record"],

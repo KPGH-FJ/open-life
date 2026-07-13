@@ -19,6 +19,10 @@ pub(crate) struct NativeDangerActionRequest<'a> {
     pub target_ids_for_new_challenge: &'a [String],
     pub requested_target: Option<&'a str>,
     pub affected_count: usize,
+    /// Stable, non-sensitive action scope captured by the server preflight.
+    /// When present, the final action must reproduce this exact scope before a
+    /// native prompt can start.
+    pub preflight_scope_arguments: Option<&'a serde_json::Value>,
     pub arguments: &'a serde_json::Value,
     pub arguments_summary: &'a str,
     pub scope_summary: &'a str,
@@ -30,6 +34,7 @@ struct GrantConsumptionRequest<'a> {
     action_type: &'a str,
     requested_target: Option<&'a str>,
     expected_affected_count: usize,
+    preflight_scope_arguments_digest: Option<&'a str>,
     arguments_digest: &'a str,
     local_session_binding: &'a str,
     now_millis: i64,
@@ -40,6 +45,7 @@ struct ChallengeScope {
     action_type: String,
     target_ids: Vec<String>,
     affected_count: usize,
+    preflight_scope_arguments_digest: Option<String>,
     local_session_binding: String,
     policy_version: String,
 }
@@ -94,6 +100,7 @@ struct NativePromptTicket {
     action_type: String,
     affected_count: usize,
     target_count: usize,
+    preflight_scope_arguments_digest: Option<String>,
     arguments_digest: String,
 }
 
@@ -140,6 +147,7 @@ impl DangerActionGrantAuthority {
         action_type: &str,
         target_ids: &[String],
         affected_count: usize,
+        preflight_scope_arguments_digest: Option<&str>,
         local_session_binding: &str,
         now_millis: i64,
     ) -> Result<String, AppError> {
@@ -150,6 +158,8 @@ impl DangerActionGrantAuthority {
                 action_type: action_type.to_string(),
                 target_ids,
                 affected_count,
+                preflight_scope_arguments_digest: preflight_scope_arguments_digest
+                    .map(str::to_string),
                 local_session_binding: local_session_binding.to_string(),
                 policy_version: DANGER_ACTION_POLICY_VERSION.to_string(),
             },
@@ -189,6 +199,7 @@ impl DangerActionGrantAuthority {
             request.action_type,
             request.requested_target,
             request.expected_affected_count,
+            request.preflight_scope_arguments_digest,
             request.local_session_binding,
             request.now_millis,
         )?;
@@ -206,6 +217,10 @@ impl DangerActionGrantAuthority {
                     action_type: record.scope.action_type.clone(),
                     affected_count: record.scope.affected_count,
                     target_count: record.scope.target_ids.len(),
+                    preflight_scope_arguments_digest: record
+                        .scope
+                        .preflight_scope_arguments_digest
+                        .clone(),
                     arguments_digest: request.arguments_digest.to_string(),
                 };
                 record.status = ChallengeStatus::Confirming {
@@ -262,6 +277,7 @@ impl DangerActionGrantAuthority {
                 Some(ticket.requested_target.as_str())
             },
             ticket.affected_count,
+            ticket.preflight_scope_arguments_digest.as_deref(),
             local_session_binding,
             now_millis,
         )?;
@@ -340,6 +356,7 @@ fn ensure_challenge_scope(
     action_type: &str,
     requested_target: Option<&str>,
     expected_affected_count: usize,
+    preflight_scope_arguments_digest: Option<&str>,
     local_session_binding: &str,
     now_millis: i64,
 ) -> Result<(), AppError> {
@@ -350,6 +367,8 @@ fn ensure_challenge_scope(
     }
     if record.scope.action_type != action_type
         || record.scope.affected_count != expected_affected_count
+        || record.scope.preflight_scope_arguments_digest.as_deref()
+            != preflight_scope_arguments_digest
         || record.scope.local_session_binding != local_session_binding
         || record.scope.policy_version != DANGER_ACTION_POLICY_VERSION
     {
@@ -506,13 +525,16 @@ pub(crate) fn issue_danger_action_challenge(
     action_type: &str,
     target_ids: &[String],
     affected_count: usize,
+    preflight_scope_arguments: Option<&serde_json::Value>,
 ) -> Result<String, AppError> {
     let authority = authority();
     let local_session_binding = authority.local_session_binding(window_label)?;
+    let preflight_scope_arguments_digest = preflight_scope_arguments.map(arguments_digest);
     authority.create_challenge(
         action_type,
         target_ids,
         affected_count,
+        preflight_scope_arguments_digest.as_deref(),
         &local_session_binding,
         monotonic_now_millis(),
     )
@@ -525,12 +547,14 @@ pub(crate) async fn require_native_danger_action_confirmation<R: Runtime>(
     let authority = authority();
     let local_session_binding = authority.local_session_binding(window.label())?;
     let now_millis = monotonic_now_millis();
+    let preflight_scope_arguments_digest = request.preflight_scope_arguments.map(arguments_digest);
     let owned_challenge_id = match request.challenge_id {
         Some(challenge_id) if !challenge_id.trim().is_empty() => challenge_id.to_string(),
         _ => authority.create_challenge(
             request.action_type,
             request.target_ids_for_new_challenge,
             request.affected_count,
+            preflight_scope_arguments_digest.as_deref(),
             &local_session_binding,
             now_millis,
         )?,
@@ -541,6 +565,7 @@ pub(crate) async fn require_native_danger_action_confirmation<R: Runtime>(
         action_type: request.action_type,
         requested_target: request.requested_target,
         expected_affected_count: request.affected_count,
+        preflight_scope_arguments_digest: preflight_scope_arguments_digest.as_deref(),
         arguments_digest: &arguments_digest,
         local_session_binding: &local_session_binding,
         now_millis,
@@ -601,6 +626,7 @@ mod tests {
                 "agent_run_bulk_delete",
                 &target_ids,
                 affected_count,
+                None,
                 &session,
                 now_millis,
             )
@@ -621,6 +647,7 @@ mod tests {
             action_type: "agent_run_bulk_delete",
             requested_target,
             expected_affected_count,
+            preflight_scope_arguments_digest: None,
             arguments_digest,
             local_session_binding,
             now_millis,
@@ -658,10 +685,27 @@ mod tests {
     fn d063_cleanup_native_grant_is_exact_scope_and_single_use() {
         let authority = test_authority();
         let session = authority.local_session_binding("main").unwrap();
+        let preflight_scope = arguments_digest(&serde_json::json!({
+            "retention_days": 30,
+            "predicate_version": "mcp-audit-created-before-request-cutoff-v1",
+            "candidate_count": 0,
+        }));
         let challenge = authority
-            .create_challenge("mcp_audit_cleanup", &[], 0, &session, 900)
+            .create_challenge(
+                "mcp_audit_cleanup",
+                &[],
+                0,
+                Some(&preflight_scope),
+                &session,
+                900,
+            )
             .unwrap();
-        let arguments = arguments_digest(&serde_json::json!({"retention_days": 30}));
+        let arguments = arguments_digest(&serde_json::json!({
+            "retention_days": 30,
+            "predicate_version": "mcp-audit-created-before-request-cutoff-v1",
+            "candidate_count": 0,
+            "cutoff_utc": "2026-07-13T00:00:00Z",
+        }));
 
         let missing = authority
             .begin_or_consume(GrantConsumptionRequest {
@@ -669,6 +713,7 @@ mod tests {
                 action_type: "mcp_audit_cleanup",
                 requested_target: None,
                 expected_affected_count: 0,
+                preflight_scope_arguments_digest: Some(&preflight_scope),
                 arguments_digest: &arguments,
                 local_session_binding: &session,
                 now_millis: 901,
@@ -682,6 +727,7 @@ mod tests {
                 action_type: "mcp_audit_key_rotation",
                 requested_target: None,
                 expected_affected_count: 0,
+                preflight_scope_arguments_digest: Some(&preflight_scope),
                 arguments_digest: &arguments,
                 local_session_binding: &session,
                 now_millis: 901,
@@ -689,12 +735,32 @@ mod tests {
             .unwrap_err();
         assert!(wrong_scope.message().contains("scope does not match"));
 
+        let changed_preflight_scope = arguments_digest(&serde_json::json!({
+            "retention_days": 7,
+            "predicate_version": "mcp-audit-created-before-request-cutoff-v1",
+            "candidate_count": 0,
+        }));
+        let wrong_retention = authority
+            .begin_or_consume(GrantConsumptionRequest {
+                challenge_id: &challenge,
+                action_type: "mcp_audit_cleanup",
+                requested_target: None,
+                expected_affected_count: 0,
+                preflight_scope_arguments_digest: Some(&changed_preflight_scope),
+                arguments_digest: &arguments,
+                local_session_binding: &session,
+                now_millis: 901,
+            })
+            .unwrap_err();
+        assert!(wrong_retention.message().contains("scope does not match"));
+
         let step = authority
             .begin_or_consume(GrantConsumptionRequest {
                 challenge_id: &challenge,
                 action_type: "mcp_audit_cleanup",
                 requested_target: None,
                 expected_affected_count: 0,
+                preflight_scope_arguments_digest: Some(&preflight_scope),
                 arguments_digest: &arguments,
                 local_session_binding: &session,
                 now_millis: 902,
@@ -713,6 +779,7 @@ mod tests {
                 action_type: "mcp_audit_cleanup",
                 requested_target: None,
                 expected_affected_count: 0,
+                preflight_scope_arguments_digest: Some(&preflight_scope),
                 arguments_digest: &arguments,
                 local_session_binding: &session,
                 now_millis: 904,

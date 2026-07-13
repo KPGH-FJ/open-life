@@ -1,7 +1,9 @@
 use crate::commands::settings::run_d063_cleanup_orchestration_harness;
 use crate::errors::AppError;
 use chrono::{Duration, Utc};
-use openlife_core::mcp_audit::{McpAuditStore, MCP_AUDIT_RETENTION_MAX_DAYS};
+use openlife_core::mcp_audit::{
+    McpAuditCleanupScopeChanged, McpAuditRetentionDays, McpAuditStore, MCP_AUDIT_RETENTION_MAX_DAYS,
+};
 use rusqlite::params;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -14,7 +16,7 @@ use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
 use syn::{Attribute, Expr, Item, ItemFn, Token, UseTree, Visibility};
 
-const D063_CLEANUP_CONTRACT_ADAPTER_VERSION: &str = "d063-cleanup-contract-adapter-v1";
+const D063_CLEANUP_CONTRACT_ADAPTER_VERSION: &str = "d063-cleanup-contract-adapter-v2";
 
 fn parse_rust(source: &str, label: &str) -> syn::File {
     syn::parse_file(source).unwrap_or_else(|error| panic!("parse Rust source {label}: {error}"))
@@ -312,6 +314,25 @@ fn named_calls_in_expr<'ast>(
     visitor.calls
 }
 
+#[derive(Default)]
+struct OrderedCallVisitor {
+    calls: Vec<String>,
+}
+
+impl<'ast> Visit<'ast> for OrderedCallVisitor {
+    fn visit_expr_method_call(&mut self, expression: &'ast syn::ExprMethodCall) {
+        self.calls.push(format!("method:{}", expression.method));
+        visit::visit_expr_method_call(self, expression);
+    }
+
+    fn visit_expr_call(&mut self, expression: &'ast syn::ExprCall) {
+        if let Expr::Path(path) = expression.func.as_ref() {
+            self.calls.push(format!("path:{}", path_name(&path.path)));
+        }
+        visit::visit_expr_call(self, expression);
+    }
+}
+
 fn module_name(relative: &str) -> String {
     relative
         .strip_prefix("src/")
@@ -388,18 +409,20 @@ fn row_truth(store: &McpAuditStore) -> Vec<(String, String)> {
     rows
 }
 
-/// Frozen adapter across the current `cleanup(i64)` and the target
-/// `cleanup(McpAuditRetentionDays)` signature. Type inference selects the
-/// method argument: identity conversion today, `TryFrom<i64>` after D063 GREEN.
-fn d063_cleanup_contract_adapter_v1(
+/// Versioned adapter for the typed cutoff plus confirmed candidate snapshot.
+/// The v1 inputs and boundary assertions remain unchanged; v2 obtains the
+/// server-side count required by the transactional cleanup signature.
+fn d063_cleanup_contract_adapter_v2(
     store: &McpAuditStore,
     retention_days: i64,
 ) -> anyhow::Result<usize> {
-    store.cleanup(retention_days.try_into().map_err(|_| {
+    let retention: McpAuditRetentionDays = retention_days.try_into().map_err(|_| {
         anyhow::anyhow!(
             "{D063_CLEANUP_CONTRACT_ADAPTER_VERSION}: invalid retention {retention_days}"
         )
-    })?)
+    })?;
+    let expected_candidate_count = store.count_cleanup_candidates(&retention)?;
+    store.cleanup(retention, expected_candidate_count)
 }
 
 fn assert_invalid_retention_is_non_mutating(retention_days: i64) {
@@ -418,7 +441,7 @@ fn assert_invalid_retention_is_non_mutating(retention_days: i64) {
     let before = row_truth(&store);
 
     let result = catch_unwind(AssertUnwindSafe(|| {
-        d063_cleanup_contract_adapter_v1(&store, retention_days)
+        d063_cleanup_contract_adapter_v2(&store, retention_days)
     }));
     let after = row_truth(&store);
 
@@ -474,9 +497,10 @@ async fn assert_valid_retention_boundary(retention_days: i64) {
         Ok::<i64, AppError>,
         || Ok(()),
         |_| std::future::ready(Ok(())),
-        |raw| {
+        |_, _| std::future::ready(Ok(())),
+        |raw, _| {
             std::future::ready(
-                d063_cleanup_contract_adapter_v1(&store, raw).map_err(AppError::from),
+                d063_cleanup_contract_adapter_v2(&store, raw).map_err(AppError::from),
             )
         },
     )
@@ -501,12 +525,14 @@ async fn assert_valid_retention_boundary(retention_days: i64) {
 enum OrchestrationRejection {
     Validation,
     Effects,
+    EffectsAfterConfirmation,
     Confirmation(&'static str),
 }
 
 #[derive(Default)]
 struct OrchestrationCounts {
     effects: AtomicUsize,
+    preparations: AtomicUsize,
     confirmations: AtomicUsize,
     mutations: AtomicUsize,
 }
@@ -522,9 +548,12 @@ async fn assert_orchestration_rejection(rejection: OrchestrationRejection) {
         {
             let counts = Arc::clone(&counts);
             move || {
-                counts.effects.fetch_add(1, Ordering::SeqCst);
+                let previous_checks = counts.effects.fetch_add(1, Ordering::SeqCst);
                 match rejection {
                     OrchestrationRejection::Effects => {
+                        Err(AppError::db_with_hint("degraded", "read_only_degraded"))
+                    }
+                    OrchestrationRejection::EffectsAfterConfirmation if previous_checks >= 1 => {
                         Err(AppError::db_with_hint("degraded", "read_only_degraded"))
                     }
                     _ => Ok(()),
@@ -534,6 +563,14 @@ async fn assert_orchestration_rejection(rejection: OrchestrationRejection) {
         {
             let counts = Arc::clone(&counts);
             move |_| async move {
+                counts.preparations.fetch_add(1, Ordering::SeqCst);
+                Ok(7usize)
+            }
+        },
+        {
+            let counts = Arc::clone(&counts);
+            move |_, prepared_count| async move {
+                assert_eq!(prepared_count, 7);
                 counts.confirmations.fetch_add(1, Ordering::SeqCst);
                 match rejection {
                     OrchestrationRejection::Confirmation(reason) => {
@@ -545,7 +582,8 @@ async fn assert_orchestration_rejection(rejection: OrchestrationRejection) {
         },
         {
             let counts = Arc::clone(&counts);
-            move |_| async move {
+            move |_, prepared_count| async move {
+                assert_eq!(prepared_count, 7);
                 counts.mutations.fetch_add(1, Ordering::SeqCst);
                 Ok(0)
             }
@@ -554,12 +592,14 @@ async fn assert_orchestration_rejection(rejection: OrchestrationRejection) {
     .await;
     assert!(result.is_err());
     let expected = match rejection {
-        OrchestrationRejection::Validation => (0, 0),
-        OrchestrationRejection::Effects => (1, 0),
-        OrchestrationRejection::Confirmation(_) => (1, 1),
+        OrchestrationRejection::Validation => (0, 0, 0),
+        OrchestrationRejection::Effects => (1, 0, 0),
+        OrchestrationRejection::EffectsAfterConfirmation => (2, 1, 1),
+        OrchestrationRejection::Confirmation(_) => (1, 1, 1),
     };
     assert_eq!(counts.effects.load(Ordering::SeqCst), expected.0);
-    assert_eq!(counts.confirmations.load(Ordering::SeqCst), expected.1);
+    assert_eq!(counts.preparations.load(Ordering::SeqCst), expected.1);
+    assert_eq!(counts.confirmations.load(Ordering::SeqCst), expected.2);
     assert_eq!(counts.mutations.load(Ordering::SeqCst), 0);
 }
 
@@ -820,6 +860,40 @@ fn d063_shipped_command_binds_the_typed_retention_domain() {
 }
 
 #[test]
+fn d063_shipped_mutation_rechecks_effects_after_store_guard_before_delete() {
+    let file = parse_rust(include_str!("commands/settings.rs"), "commands/settings.rs");
+    let command = function(&file, "cleanup_mcp_audit_logs");
+    let orchestration = named_calls(command, "orchestrate_mcp_audit_cleanup");
+    assert_eq!(orchestration.len(), 1);
+    let mutation = orchestration[0]
+        .args
+        .iter()
+        .nth(5)
+        .expect("cleanup mutation closure");
+    let Expr::Closure(mutation) = mutation else {
+        panic!("cleanup mutation must remain an inline, mechanically reviewable closure");
+    };
+    let mut visitor = OrderedCallVisitor::default();
+    visitor.visit_expr(&mutation.body);
+    let position = |needle: &str| {
+        visitor
+            .calls
+            .iter()
+            .position(|call| call == needle)
+            .unwrap_or_else(|| panic!("missing {needle} in mutation calls: {:?}", visitor.calls))
+    };
+
+    let lock = position("method:lock");
+    let effects = position("path:require_mcp_audit_cleanup_effects_allowed");
+    let cleanup = position("method:cleanup");
+    assert!(
+        lock < effects && effects < cleanup,
+        "store guard, effects recheck, and delete must stay ordered: {:?}",
+        visitor.calls
+    );
+}
+
+#[test]
 fn d063_release_orchestrator_is_private_and_has_one_product_caller() {
     let syntax_probe = parse_rust(
         r#"
@@ -884,6 +958,11 @@ async fn d063_orchestration_degraded_effects_stop_confirmation_and_mutation() {
 }
 
 #[tokio::test]
+async fn d063_effects_revoked_during_confirmation_stop_mutation() {
+    assert_orchestration_rejection(OrchestrationRejection::EffectsAfterConfirmation).await;
+}
+
+#[tokio::test]
 async fn d063_orchestration_missing_or_invalid_confirmation_is_non_mutating() {
     for denial in ["missing native authority", "invalid native authority"] {
         assert_orchestration_rejection(OrchestrationRejection::Confirmation(denial)).await;
@@ -908,6 +987,36 @@ fn d063_above_maximum_retention_is_rejected_without_mutation() {
 #[test]
 fn d063_overflow_retention_is_rejected_without_panic_or_mutation() {
     assert_invalid_retention_is_non_mutating(i64::MAX);
+}
+
+#[test]
+fn d063_candidate_drift_fails_closed_inside_the_delete_transaction() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("mcp-audit.sqlite");
+    let store = McpAuditStore::new(&path);
+    let old = Utc::now()
+        .checked_sub_signed(Duration::days(3))
+        .expect("D063 old fixture timestamp")
+        .to_rfc3339();
+    insert_at(&store, &path, "d063-prepared-row", &old);
+    let retention = McpAuditRetentionDays::try_from(1).expect("one day retention");
+    let prepared_count = store
+        .count_cleanup_candidates(&retention)
+        .expect("prepare candidate count");
+    assert_eq!(prepared_count, 1);
+
+    insert_at(&store, &path, "d063-late-old-row", &old);
+    let before = row_truth(&store);
+    let error = store
+        .cleanup(retention, prepared_count)
+        .expect_err("candidate drift must invalidate cleanup");
+    let changed = error
+        .downcast_ref::<McpAuditCleanupScopeChanged>()
+        .expect("candidate drift must retain a typed cause");
+
+    assert_eq!(changed.expected_candidate_count(), 1);
+    assert_eq!(changed.observed_candidate_count(), 2);
+    assert_eq!(row_truth(&store), before, "stale confirmation deleted rows");
 }
 
 #[tokio::test]
