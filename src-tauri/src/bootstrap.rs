@@ -2904,6 +2904,7 @@ mod tests {
         values: std::collections::HashMap<String, String>,
         set_refs: Vec<String>,
         deleted_refs: Vec<String>,
+        fail_mcp_set: bool,
     }
 
     #[derive(Default)]
@@ -2919,6 +2920,10 @@ mod tests {
                 secret_ref.to_string(),
                 base64::engine::general_purpose::STANDARD.encode(key),
             );
+        }
+
+        fn fail_mcp_key_creation(&self) {
+            self.state.lock().unwrap().fail_mcp_set = true;
         }
 
         fn mcp_set_refs(&self) -> Vec<String> {
@@ -2972,6 +2977,11 @@ mod tests {
         fn set(&self, secret_ref: &str, value: &str) -> anyhow::Result<()> {
             let mut state = self.state.lock().unwrap();
             state.set_refs.push(secret_ref.to_string());
+            if state.fail_mcp_set
+                && secret_ref.starts_with(crate::secret_store::MCP_AUDIT_KEY_REF_PREFIX)
+            {
+                anyhow::bail!("injected D057 MCP keychain creation failure");
+            }
             state
                 .values
                 .insert(secret_ref.to_string(), value.to_string());
@@ -3952,6 +3962,256 @@ mod tests {
             ),
             "a key is not authoritative until its reference is durably saved; persistence failure must roll it back before audit-store construction"
         );
+    }
+
+    #[test]
+    fn d057_lookalike_empty_schema_is_not_first_boot_and_remains_byte_exact() {
+        use crate::persistence_coordinator::PersistenceStoreMode;
+
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("mcp_audit.db");
+        let connection = rusqlite::Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE mcp_log (
+                    id TEXT,
+                    tool_name BLOB,
+                    arguments_encrypted INTEGER,
+                    result_encrypted REAL,
+                    success TEXT,
+                    pii_found TEXT,
+                    created_at BLOB
+                );",
+            )
+            .unwrap();
+        drop(connection);
+        let before = d057_audit_artifact_snapshot(directory.path());
+        let secrets = D057RecordingSecretStore::default();
+
+        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+
+        assert!(secrets.mcp_set_refs().is_empty());
+        assert!(!directory.path().join("mcp_audit_keys.json").exists());
+        assert_eq!(
+            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
+            PersistenceStoreMode::Unavailable
+        );
+        assert_eq!(
+            d057_store_mode(&result, "McpAuditStore"),
+            PersistenceStoreMode::Unavailable
+        );
+        assert!(d057_audit_reads_fail_closed(&result));
+        assert_eq!(
+            d057_audit_artifact_snapshot(directory.path()),
+            before,
+            "lookalike schemas must fail before migration or secret creation"
+        );
+    }
+
+    #[test]
+    fn d057_unknown_audit_trigger_is_not_first_boot_and_cannot_survive_activation() {
+        use crate::persistence_coordinator::PersistenceStoreMode;
+
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("mcp_audit.db");
+        let connection = rusqlite::Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE mcp_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tool_name TEXT NOT NULL,
+                    arguments_encrypted TEXT NOT NULL,
+                    result_encrypted TEXT NOT NULL,
+                    success INTEGER NOT NULL,
+                    pii_found INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TRIGGER hostile_audit_insert
+                BEFORE INSERT ON mcp_log
+                BEGIN
+                    SELECT RAISE(ABORT, 'hostile trigger retained');
+                END;",
+            )
+            .unwrap();
+        drop(connection);
+        let before = d057_audit_artifact_snapshot(directory.path());
+        let secrets = D057RecordingSecretStore::default();
+
+        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+
+        assert!(secrets.mcp_set_refs().is_empty());
+        assert_eq!(
+            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
+            PersistenceStoreMode::Unavailable
+        );
+        assert_eq!(
+            d057_store_mode(&result, "McpAuditStore"),
+            PersistenceStoreMode::Unavailable
+        );
+        assert_eq!(d057_audit_artifact_snapshot(directory.path()), before);
+    }
+
+    #[test]
+    fn d057_legacy_only_keyring_keeps_verified_reads_when_new_key_creation_fails() {
+        use crate::persistence_coordinator::PersistenceStoreMode;
+
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("mcp_audit.db");
+        let legacy_store = McpAuditStore::new(&database_path);
+        legacy_store
+            .insert_log(
+                "legacy_read_only_fixture",
+                &serde_json::json!({"legacy": true}),
+                "legacy-result",
+                true,
+                false,
+            )
+            .unwrap();
+        let legacy_config = legacy_store.key_config().clone();
+        drop(legacy_store);
+        let keyring_path = directory.path().join("mcp_audit_keys.json");
+        let keyring_before = d057_write_keyring(&keyring_path, &[legacy_config]);
+        let secrets = D057RecordingSecretStore::default();
+        secrets.fail_mcp_key_creation();
+
+        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+
+        assert_eq!(std::fs::read(&keyring_path).unwrap(), keyring_before);
+        assert!(secrets.live_mcp_refs().is_empty());
+        assert_eq!(
+            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
+            PersistenceStoreMode::ReadOnlyCanonical
+        );
+        assert_eq!(
+            d057_store_mode(&result, "McpAuditStore"),
+            PersistenceStoreMode::ReadOnlyCanonical
+        );
+        let logs = result
+            .state
+            .mcp_audit_store
+            .try_lock()
+            .unwrap()
+            .list_logs(10)
+            .expect("verified legacy material remains a canonical read authority");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].tool_name, "legacy_read_only_fixture");
+        assert!(
+            !result
+                .state
+                .persistence_coordinator
+                .snapshot()
+                .tool_dispatch_allowed
+        );
+    }
+
+    #[test]
+    fn d057_legacy_only_keyring_keeps_verified_reads_when_reference_save_fails() {
+        use crate::persistence_coordinator::PersistenceStoreMode;
+
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("mcp_audit.db");
+        let legacy_store = McpAuditStore::new(&database_path);
+        legacy_store
+            .insert_log(
+                "legacy_save_failure_fixture",
+                &serde_json::json!({"legacy": true}),
+                "legacy-result",
+                true,
+                false,
+            )
+            .unwrap();
+        let legacy_config = legacy_store.key_config().clone();
+        drop(legacy_store);
+        let keyring_path = directory.path().join("mcp_audit_keys.json");
+        let keyring_before = d057_write_keyring(&keyring_path, &[legacy_config]);
+        crate::storage::fail_next_mcp_audit_keyring_save_for_test(keyring_path.clone());
+        let secrets = D057RecordingSecretStore::default();
+
+        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+
+        assert_eq!(std::fs::read(&keyring_path).unwrap(), keyring_before);
+        assert_eq!(secrets.mcp_set_refs(), secrets.mcp_deleted_refs());
+        assert!(secrets.live_mcp_refs().is_empty());
+        assert_eq!(
+            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
+            PersistenceStoreMode::ReadOnlyCanonical
+        );
+        assert_eq!(
+            d057_store_mode(&result, "McpAuditStore"),
+            PersistenceStoreMode::ReadOnlyCanonical
+        );
+        assert_eq!(
+            result
+                .state
+                .mcp_audit_store
+                .try_lock()
+                .unwrap()
+                .list_logs(10)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn d057_preflight_rejects_live_wal_family_without_writing_any_artifact() {
+        use crate::persistence_coordinator::PersistenceStoreMode;
+
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("mcp_audit.db");
+        let legacy_store = McpAuditStore::new(&database_path);
+        let legacy_config = legacy_store.key_config().clone();
+        drop(legacy_store);
+        let keyring_path = directory.path().join("mcp_audit_keys.json");
+        let keyring_before = d057_write_keyring(&keyring_path, &[legacy_config]);
+        let connection = rusqlite::Connection::open(&database_path).unwrap();
+        let journal_mode: String = connection
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        connection
+            .execute_batch(
+                "PRAGMA wal_autocheckpoint = 0;
+             CREATE TABLE d057_wal_marker(value TEXT NOT NULL);
+             INSERT INTO d057_wal_marker(value) VALUES ('uncheckpointed');",
+            )
+            .unwrap();
+        let before = d057_audit_artifact_snapshot(directory.path());
+        assert!(before
+            .iter()
+            .any(|(name, bytes)| name == "mcp_audit.db-wal" && bytes.is_some()));
+        let secrets = D057RecordingSecretStore::default();
+
+        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+
+        assert!(secrets.mcp_set_refs().is_empty());
+        assert_eq!(std::fs::read(&keyring_path).unwrap(), keyring_before);
+        assert_eq!(
+            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
+            PersistenceStoreMode::Unavailable
+        );
+        assert_eq!(
+            d057_store_mode(&result, "McpAuditStore"),
+            PersistenceStoreMode::Unavailable
+        );
+        assert_eq!(d057_audit_artifact_snapshot(directory.path()), before);
+        drop(connection);
+    }
+
+    #[test]
+    fn d057_normal_startup_source_has_no_unbounded_audit_log_scan_or_duplicate_preflight() {
+        let core_source = include_str!("../../openlife-core/src/mcp_audit.rs");
+
+        for forbidden in [
+            "SELECT COUNT(*) FROM mcp_log",
+            "SELECT DISTINCT key_epoch FROM mcp_log",
+            "Self::preflight_existing_database_key_materials(&db_path, &materials)?",
+        ] {
+            assert!(
+                !core_source.contains(forbidden),
+                "normal startup still carries an unbounded or duplicate preflight route: {forbidden}"
+            );
+        }
     }
 
     async fn seed_failed_main_chat_owner_fixture(
