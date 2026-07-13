@@ -516,6 +516,138 @@
       "acceptance": ["Each canonical audit store owns a durable random store identity and each new key uses a collision-resistant store-bound reference; numeric epoch is ordering metadata only", "Creating a new secret is create-only: a collision preserves existing keychain bytes, reference-file bytes and database state", "Exactly one OS-backed writable owner exists per canonical audit database across clones and processes, and connection identity is revalidated before use", "The versioned mcp_audit_keys.json remains the sole canonical key-reference owner; database and lease metadata may retain only version, digest and verifier data and cannot reconstruct or guess references", "A missing keyring beside a non-empty audit database enters exactly Unavailable, creates no secret and performs no reference guessing, keychain enumeration or claimed read-only recovery", "Read-only recovery is allowed only when the keyring is present and structurally valid, every referenced secret hydrates, and ciphertext verification succeeds; BR4-D057 strict loader-state validation is a prerequisite for the BR4-D064 migration", "Legacy epoch-only references are read-only recovery inputs and are never overwritten or automatically deleted; new writes use unique references and restart reads both generations"],
       "deletion_targets": ["Global prefix-plus-epoch identity for newly created MCP audit keys", "Unconditional secret replacement for newly generated audit key material", "Writable McpAuditStore without SqliteSlotOwnerLease or equivalent no-create cross-process authority lease", "Per-operation writable Connection::open path detached from the held owner identity", "Missing-keyring reference guessing, keychain scanning or duplicate database key-reference authority", "Legacy global epoch references as active-write or automatic-delete targets", "Unleased key-reference, keychain and database activation sequence"],
       "immutable_fingerprint": "0ff3398ef9c35c9616c09fd20f2fe6d1809cdcfe6ccf797ee70e42096a313296"
+    },
+    {
+      "id": "BR4-D065",
+      "discovered_at": "2026-07-13T19:00:00+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P1-16",
+        "P1-17",
+        "P2-02"
+      ],
+      "why_not_fully_subsumed": "BR4-D057 covers bootstrap key-authority corruption, but neither it nor the frozen persistence and projection findings require every shipped audit read to depend on both key-reference and audit-store health or preserve list and decrypt failures as unknown.",
+      "title": "MCP audit reads bypass or erase trusted-read failure as healthy product truth",
+      "observed_symptom": "System diagnostics converts an unavailable audit store or list error into zero recent logs and zero PII hits, while the shipped audit-list command reads McpAuditStore without a trusted-read gate and per-row decrypt errors are returned as successful decrypt-failed placeholders.",
+      "root_cause_hypothesis": "There is no single typed MCP audit read gateway that owns composite key-reference and database trust, read completeness and product projection; raw consumers independently turn an error into empty truth, direct data or a successful placeholder.",
+      "affected_surfaces": [
+        "src-tauri/src/commands/diagnostics.rs::get_system_diagnostics_with_state",
+        "src-tauri/src/commands/mcp.rs::list_mcp_audit_logs",
+        "src-tauri/src/persistence_coordinator.rs",
+        "openlife-core/src/mcp_audit.rs::McpAuditStore::list_logs",
+        "frontend/src/pages/settings/tabs/PrivacyTab.tsx",
+        "frontend/src/pages/McpPage.tsx"
+      ],
+      "broken_invariants": [
+        "I08",
+        "I09",
+        "I12",
+        "I17"
+      ],
+      "target_phase": "Phase 1, Phase 5 and Phase 6",
+      "owner_module": "MCP audit trusted-read gateway and product projection",
+      "acceptance": [
+        "Every shipped audit read enters one gateway that requires trusted McpAuditKeyReferenceStore and McpAuditStore state before interpreting rows",
+        "Diagnostics and product read models represent available, unavailable, degraded and unknown explicitly and never convert a gate, list or decrypt error into count zero",
+        "The audit-list command fails closed or returns a typed unavailable result, and a row decrypt failure cannot be returned as a successful log entry",
+        "A trusted empty audit database returns available with count zero, while a trusted non-empty database returns exact bounded counts and entries",
+        "BR4-D057 cannot enter GREEN until its unavailable bootstrap states project unknown through diagnostics, audit list and UI with zero provider, tool or canonical effect dispatch"
+      ],
+      "deletion_targets": [
+        "Diagnostics audit read error or untrusted state fallback to (0, 0)",
+        "Shipped list_mcp_audit_logs direct McpAuditStore read",
+        "Bare audit count fields that cannot distinguish trusted zero from unknown",
+        "Per-row decrypt failure rendered as a successful decrypt-failed log entry"
+      ],
+      "immutable_fingerprint": "81df31ee962ac04b902490a219457a135091e5fbd455bc9147f28f7e92f3f574"
+    },
+    {
+      "id": "BR4-D066",
+      "discovered_at": "2026-07-13T19:01:00+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P1-16",
+        "P1-17",
+        "P2-02"
+      ],
+      "why_not_fully_subsumed": "The frozen audit-key finding and BR4-D057 cover one store's encryption, restart and bootstrap authority, but not by-value ToolGateway resource snapshots that retain an independently mutable active write epoch across a successful runtime rotation.",
+      "title": "ToolGateway resource snapshots clone mutable MCP audit write-key authority",
+      "observed_symptom": "A Main Chat, AgentLoop or Scheduler resource snapshot captured at epoch A can keep writing new audit rows with A after the AppState store successfully rotates and durably records epoch B; historical-key retention keeps those rows readable and hides the failed cutover.",
+      "root_cause_hypothesis": "McpAuditStore derives Clone over its active key, key configuration and keyring, and capture_shared_after_config copies that mutable authority by value to long-lived product execution contexts while rotation mutates only the AppState instance.",
+      "affected_surfaces": [
+        "src-tauri/src/state.rs",
+        "src-tauri/src/tool_gateway_resources.rs::capture_shared_after_config",
+        "src-tauri/src/commands/settings.rs::rotate_mcp_audit_key",
+        "openlife-core/src/mcp_audit.rs::McpAuditStore",
+        "openlife-core/src/agent/action_executor/mod.rs::ActionExecutionContext",
+        "openlife-core/src/agent/action_executor/tool_executor.rs::call_tool_internal"
+      ],
+      "broken_invariants": [
+        "I08",
+        "I12"
+      ],
+      "target_phase": "Phase 4 and Phase 5",
+      "owner_module": "MCP audit key authority and ToolGateway shared handle",
+      "acceptance": [
+        "Product ToolGateway resources carry a cloneable handle to one active audit-key authority and never copy mutable key material or epoch state by value",
+        "After epoch B is durably activated, a real tool completion through a resource captured at epoch A writes B; Main Chat, AgentLoop and Scheduler satisfy the same barrier",
+        "The rotation and audit-insert linearization boundary is explicit so an insert committed before cutover may use A and every insert after cutover uses B",
+        "A key-reference save failure leaves every writer on A, creates no B row and exposes no successful rotation",
+        "Historical A rows remain readable after B rotation and no audit-key or store guard is held across external provider, tool or network await"
+      ],
+      "deletion_targets": [
+        "By-value McpAuditStore in product ToolGateway resource snapshots",
+        "state.mcp_audit_store lock then clone active-authority capture",
+        "Multiple independently mutable active audit-key views",
+        "Rotation rollback based on cloning and replacing mutable key authority"
+      ],
+      "immutable_fingerprint": "6f67d6d3aeb1f2f45297f28e12f41eff91f95e2b858f684471e42af701cfff30"
+    },
+    {
+      "id": "BR4-D067",
+      "discovered_at": "2026-07-13T19:02:00+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "frozen_finding_scope_expansion",
+      "related_frozen_findings": [
+        "P1-08",
+        "P1-17",
+        "P2-02"
+      ],
+      "why_not_fully_subsumed": "The frozen ToolGateway, persistence and runtime-truth findings cover dispatch and effect receipts, but not the post-adapter MCP audit insert whose failure is erased after the tool outcome is already known.",
+      "title": "ToolGateway swallows MCP audit persistence failure after tool execution",
+      "observed_symptom": "After a manifest-backed tool succeeds or fails, call_tool_internal attempts to insert its audit row, prints a warning on error and returns the original ToolCallInternalResult; the execution receipt and PersistenceCoordinator therefore expose no fact that the durable audit trail is missing.",
+      "root_cause_hypothesis": "MCP audit is modeled as best-effort side logging outside the typed ToolGateway terminal and persistence-health contract, so audit commit failure has no canonical disposition, cannot degrade future effect admission and is indistinguishable from a successfully audited execution.",
+      "affected_surfaces": [
+        "openlife-core/src/agent/action_executor/tool_executor.rs::call_tool_internal",
+        "openlife-core/src/agent/action_executor/helpers.rs::ToolCallInternalResult",
+        "openlife-core/src/tool_execution_receipt.rs::ToolExecutionReceipt",
+        "openlife-core/src/agent/action_executor/mod.rs::ActionExecutionContext",
+        "src-tauri/src/persistence_coordinator.rs",
+        "src-tauri/src/main_chat_react_execution.rs"
+      ],
+      "broken_invariants": [
+        "I08",
+        "I12",
+        "I13"
+      ],
+      "target_phase": "Phase 4, Phase 5 and Phase 6",
+      "owner_module": "ToolGateway terminal receipt and audit persistence disposition",
+      "acceptance": [
+        "The existing ToolGateway terminal fact carries a minimal audit persistence disposition bound to the same receipt without copying tool arguments, output or sensitive payload",
+        "If a tool succeeds and audit commit fails, the observed tool effect remains succeeded or confirmed while audit state is failed or unknown, PersistenceCoordinator degrades and later effects are blocked",
+        "If both tool execution and audit persistence fail, the two outcomes remain separately observable and the original tool failure is not overwritten",
+        "Audit failure never automatically retries a non-idempotent tool or rewrites a confirmed external effect as not attempted",
+        "Normal execution writes exactly one minimized audit row, a pre-dispatch blocker writes no false success row, and recovery deepens existing receipt and event owners rather than adding a parallel ledger"
+      ],
+      "deletion_targets": [
+        "Audit insert failure eprintln then continue success path",
+        "Audit insert failure eprintln then return only the original tool error",
+        "Tool terminal result with no audit persistence disposition",
+        "Continued healthy effect admission after a runtime MCP audit store failure"
+      ],
+      "immutable_fingerprint": "3ec8fd15d7d75461478bfbffac9b94334434a9b4abb26930e409a71a52551d13"
     }
   ]
 }
