@@ -15350,6 +15350,292 @@ mod session_content_minimization_tests {
             }
         }
     }
+
+    fn canonical_test_owner_digest(owner_kind: &str, owner: &impl serde::Serialize) -> String {
+        crate::agent::metadata_safe::metadata_safe_value_digest(&serde_json::json!({
+            "ownerKind": owner_kind,
+            "owner": serde_json::to_value(owner).expect("serialize canonical test owner"),
+        }))
+        .1
+    }
+
+    #[test]
+    fn unknown_task_strategy_fails_closed_instead_of_becoming_direct_answer() {
+        let store = AgentTaskSessionStore::new_in_memory().expect("task session store");
+        let session = store
+            .create_session(AgentTaskSessionDraft {
+                chat_session_id: "unknown-strategy-chat".into(),
+                user_goal: "verify strict persisted strategy decoding".into(),
+                selected_strategy: MainChatAgentStrategy::DirectAnswer,
+                current_plan_summary: None,
+                context_snapshot_refs: Vec::new(),
+            })
+            .expect("create task session");
+        store
+            .conn
+            .lock()
+            .expect("lock task store")
+            .execute(
+                "UPDATE agent_task_sessions SET selected_strategy = 'future_strategy' WHERE id = ?1",
+                [&session.id],
+            )
+            .expect("inject unknown persisted strategy");
+
+        assert!(
+            store.load_session(&session.id).is_err(),
+            "unknown persisted strategy must not hydrate as DirectAnswer"
+        );
+        assert!(
+            store.canonical_owner_receipt(&session.id).is_err(),
+            "unknown persisted strategy must not receive a valid canonical owner receipt"
+        );
+    }
+
+    #[test]
+    fn unknown_task_status_fails_closed_instead_of_becoming_running() {
+        let store = AgentTaskSessionStore::new_in_memory().expect("task session store");
+        let session = store
+            .create_session(AgentTaskSessionDraft {
+                chat_session_id: "unknown-status-chat".into(),
+                user_goal: "verify strict persisted status decoding".into(),
+                selected_strategy: MainChatAgentStrategy::DirectAnswer,
+                current_plan_summary: None,
+                context_snapshot_refs: Vec::new(),
+            })
+            .expect("create task session");
+        store
+            .conn
+            .lock()
+            .expect("lock task store")
+            .execute(
+                "UPDATE agent_task_sessions SET status = 'future_status' WHERE id = ?1",
+                [&session.id],
+            )
+            .expect("inject unknown persisted status");
+
+        assert!(
+            store.load_session(&session.id).is_err(),
+            "unknown persisted status must not hydrate as Running"
+        );
+        assert!(
+            store.canonical_owner_receipt(&session.id).is_err(),
+            "unknown persisted status must not receive a valid canonical owner receipt"
+        );
+    }
+
+    #[test]
+    fn unknown_transcript_kind_cannot_alias_legal_error_owner_digest() {
+        let store = AgentTaskSessionStore::new_in_memory().expect("task session store");
+        let session = store
+            .create_session(AgentTaskSessionDraft {
+                chat_session_id: "unknown-transcript-kind-chat".into(),
+                user_goal: "verify strict transcript kind decoding".into(),
+                selected_strategy: MainChatAgentStrategy::DirectAnswer,
+                current_plan_summary: None,
+                context_snapshot_refs: Vec::new(),
+            })
+            .expect("create task session");
+        let legal_error = store
+            .append_transcript_entry(ExecutionTranscriptEntryDraft {
+                session_id: session.id.clone(),
+                kind: ExecutionTranscriptEntryKind::Error,
+                summary: "legal error fixture".into(),
+                metadata: Value::Null,
+            })
+            .expect("append legal Error transcript");
+        let legal_digest = canonical_test_owner_digest("task_transcript", &legal_error);
+        store
+            .conn
+            .lock()
+            .expect("lock task store")
+            .execute(
+                "UPDATE execution_transcript_entries SET kind = 'future_error' WHERE id = ?1",
+                [&legal_error.id],
+            )
+            .expect("inject unknown transcript kind");
+
+        match store.list_transcript_entries(&session.id) {
+            Err(_) => {}
+            Ok(entries) => {
+                let aliased = entries
+                    .into_iter()
+                    .find(|entry| entry.id == legal_error.id)
+                    .expect("same transcript owner remains present");
+                assert_eq!(
+                    aliased, legal_error,
+                    "current fallback maps the unknown raw kind to the same typed Error owner"
+                );
+                assert_eq!(
+                    canonical_test_owner_digest("task_transcript", &aliased),
+                    legal_digest,
+                    "current fallback preserves the same typed owner digest"
+                );
+                panic!("unknown transcript kind aliased a legal Error owner and digest");
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_unknown_transcript_kind_is_not_migrated_to_error() {
+        let directory = tempfile::tempdir().expect("legacy transcript directory");
+        let path = directory.path().join("legacy-unknown-transcript-kind.db");
+        let key = AgentRunReceiptKey::from_bytes([0x6a; 32]).expect("test receipt key");
+        let store =
+            AgentTaskSessionStore::new_with_receipt_key(&path, key.clone()).expect("task store");
+        let session = store
+            .create_session(AgentTaskSessionDraft {
+                chat_session_id: "legacy-unknown-transcript-chat".into(),
+                user_goal: "verify fail-closed legacy transcript migration".into(),
+                selected_strategy: MainChatAgentStrategy::DirectAnswer,
+                current_plan_summary: None,
+                context_snapshot_refs: Vec::new(),
+            })
+            .expect("create task session");
+        let entry = store
+            .append_transcript_entry(ExecutionTranscriptEntryDraft {
+                session_id: session.id,
+                kind: ExecutionTranscriptEntryKind::Error,
+                summary: "legacy error fixture".into(),
+                metadata: Value::Null,
+            })
+            .expect("append transcript");
+        store
+            .conn
+            .lock()
+            .expect("lock task store")
+            .execute(
+                "UPDATE execution_transcript_entries
+                 SET kind = 'future_error', payload_minimized_version = 1
+                 WHERE id = ?1",
+                [&entry.id],
+            )
+            .expect("inject legacy unknown transcript kind");
+        drop(store);
+
+        let reopen = AgentTaskSessionStore::new_with_receipt_key(&path, key);
+        assert!(
+            reopen.is_err(),
+            "legacy migration must reject an unknown kind instead of rewriting it as Error"
+        );
+        let raw = Connection::open(&path).expect("inspect rejected legacy row");
+        let (kind, version): (String, i64) = raw
+            .query_row(
+                "SELECT kind, payload_minimized_version
+                 FROM execution_transcript_entries WHERE id = ?1",
+                [&entry.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("load rejected legacy row");
+        assert_eq!(kind, "future_error");
+        assert_eq!(
+            version, 1,
+            "failed migration must roll back without rewrite"
+        );
+    }
+
+    #[test]
+    fn legal_historical_task_and_transcript_enum_values_remain_compatible() {
+        let store = AgentTaskSessionStore::new_in_memory().expect("task session store");
+        let strategies = [
+            MainChatAgentStrategy::DirectAnswer,
+            MainChatAgentStrategy::ReActToolExecution,
+            MainChatAgentStrategy::PlanExecute,
+            MainChatAgentStrategy::ReversibleMemoryCommit,
+            MainChatAgentStrategy::MemoryProposal,
+            MainChatAgentStrategy::LifeModelProposal,
+            MainChatAgentStrategy::FileWriteProposal,
+            MainChatAgentStrategy::ReviewMaturation,
+            MainChatAgentStrategy::BlockedConfirmation,
+        ];
+        let statuses = [
+            AgentTaskSessionStatus::Running,
+            AgentTaskSessionStatus::WaitingPermission,
+            AgentTaskSessionStatus::Blocked,
+            AgentTaskSessionStatus::Completed,
+            AgentTaskSessionStatus::Failed,
+            AgentTaskSessionStatus::Cancelled,
+        ];
+        let transcript_kinds = [
+            ExecutionTranscriptEntryKind::UserInput,
+            ExecutionTranscriptEntryKind::RouteDecision,
+            ExecutionTranscriptEntryKind::Plan,
+            ExecutionTranscriptEntryKind::Action,
+            ExecutionTranscriptEntryKind::Observation,
+            ExecutionTranscriptEntryKind::FollowUp,
+            ExecutionTranscriptEntryKind::PermissionRequest,
+            ExecutionTranscriptEntryKind::ProposalRequest,
+            ExecutionTranscriptEntryKind::Error,
+            ExecutionTranscriptEntryKind::Retry,
+            ExecutionTranscriptEntryKind::FinalResult,
+            ExecutionTranscriptEntryKind::Fallback,
+        ];
+
+        for strategy in strategies {
+            let session = store
+                .create_session(AgentTaskSessionDraft {
+                    chat_session_id: format!("historical-strategy-{}", strategy.as_str()),
+                    user_goal: "legal persisted strategy fixture".into(),
+                    selected_strategy: strategy,
+                    current_plan_summary: None,
+                    context_snapshot_refs: Vec::new(),
+                })
+                .expect("create strategy fixture");
+            assert_eq!(
+                store
+                    .load_session(&session.id)
+                    .expect("load legal strategy")
+                    .expect("strategy fixture exists")
+                    .selected_strategy,
+                strategy
+            );
+        }
+
+        let matrix_session = store
+            .create_session(AgentTaskSessionDraft {
+                chat_session_id: "historical-status-transcript-matrix".into(),
+                user_goal: "legal status and transcript fixtures".into(),
+                selected_strategy: MainChatAgentStrategy::DirectAnswer,
+                current_plan_summary: None,
+                context_snapshot_refs: Vec::new(),
+            })
+            .expect("create compatibility matrix session");
+        for status in statuses {
+            store
+                .conn
+                .lock()
+                .expect("lock task store")
+                .execute(
+                    "UPDATE agent_task_sessions SET status = ?2 WHERE id = ?1",
+                    params![matrix_session.id, status.as_str()],
+                )
+                .expect("set legal historical status");
+            assert_eq!(
+                store
+                    .load_session(&matrix_session.id)
+                    .expect("load legal status")
+                    .expect("status fixture exists")
+                    .status,
+                status
+            );
+        }
+        for kind in transcript_kinds {
+            let entry = store
+                .append_transcript_entry(ExecutionTranscriptEntryDraft {
+                    session_id: matrix_session.id.clone(),
+                    kind,
+                    summary: format!("legal {} transcript fixture", kind.as_str()),
+                    metadata: Value::Null,
+                })
+                .expect("append legal historical transcript kind");
+            let loaded = store
+                .list_transcript_entries(&matrix_session.id)
+                .expect("load legal transcript kinds")
+                .into_iter()
+                .find(|candidate| candidate.id == entry.id)
+                .expect("transcript fixture exists");
+            assert_eq!(loaded.kind, kind);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -15496,6 +15782,157 @@ mod action_queue_replay_claim_tests {
         serde_json::json!({
             "toolExecutionReceipt": receipt,
         })
+    }
+
+    fn canonical_action_owner_digest(action: &QueuedExecutionAction) -> String {
+        crate::agent::metadata_safe::metadata_safe_value_digest(&serde_json::json!({
+            "ownerKind": "action_queue",
+            "owner": serde_json::to_value(action).expect("serialize canonical action owner"),
+        }))
+        .1
+    }
+
+    #[test]
+    fn unknown_replay_effect_certainty_cannot_alias_dispatched_unknown_digest() {
+        let store = ActionQueueStore::new_in_memory().expect("action queue");
+        let action = ExecutionAction::new("file.read", "Read one governed file reference.");
+        let queued = store
+            .enqueue(
+                "unknown-action-certainty-session",
+                action.clone(),
+                ExecutionPolicy::default().classify(&action),
+            )
+            .expect("enqueue action");
+        store
+            .conn
+            .lock()
+            .expect("lock action queue")
+            .execute(
+                "UPDATE action_queue SET replay_effect_certainty = 'dispatched_unknown'
+                 WHERE id = ?1",
+                [&queued.id],
+            )
+            .expect("install legal dispatched_unknown fixture");
+        let legal = store
+            .load(&queued.id)
+            .expect("load legal certainty")
+            .expect("action exists");
+        let legal_digest = canonical_action_owner_digest(&legal);
+        store
+            .conn
+            .lock()
+            .expect("lock action queue")
+            .execute(
+                "UPDATE action_queue SET replay_effect_certainty = 'future_certainty'
+                 WHERE id = ?1",
+                [&queued.id],
+            )
+            .expect("inject unknown replay certainty");
+
+        match store.load(&queued.id) {
+            Err(_) => {}
+            Ok(Some(aliased)) => {
+                assert_eq!(
+                    aliased, legal,
+                    "current fallback maps the unknown raw certainty to the same typed owner"
+                );
+                assert_eq!(
+                    canonical_action_owner_digest(&aliased),
+                    legal_digest,
+                    "current fallback preserves the same typed action owner digest"
+                );
+                panic!("unknown replay certainty aliased dispatched_unknown and its owner digest");
+            }
+            Ok(None) => panic!("same action owner unexpectedly disappeared"),
+        }
+    }
+
+    #[test]
+    fn current_schema_reopen_does_not_rewrite_unknown_replay_certainty() {
+        let directory = tempfile::tempdir().expect("action queue directory");
+        let path = directory.path().join("current-unknown-action-certainty.db");
+        let store = ActionQueueStore::new(&path).expect("action queue");
+        let action = ExecutionAction::new("file.read", "Read one governed file reference.");
+        let queued = store
+            .enqueue(
+                "current-unknown-action-certainty-session",
+                action.clone(),
+                ExecutionPolicy::default().classify(&action),
+            )
+            .expect("enqueue action");
+        store
+            .conn
+            .lock()
+            .expect("lock action queue")
+            .execute(
+                "UPDATE action_queue SET replay_effect_certainty = 'future_certainty'
+                 WHERE id = ?1",
+                [&queued.id],
+            )
+            .expect("inject current-schema unknown certainty");
+        drop(store);
+
+        let reopened = ActionQueueStore::new(&path);
+        let raw = Connection::open(&path).expect("inspect current-schema row");
+        let certainty: String = raw
+            .query_row(
+                "SELECT replay_effect_certainty FROM action_queue WHERE id = ?1",
+                [&queued.id],
+                |row| row.get(0),
+            )
+            .expect("load raw replay certainty");
+        assert_eq!(
+            certainty, "future_certainty",
+            "current-schema reopen must preserve corrupt evidence for reconciliation"
+        );
+        if let Ok(store) = reopened {
+            assert!(
+                store.load(&queued.id).is_err(),
+                "preserved unknown certainty must fail typed decoding"
+            );
+        }
+    }
+
+    #[test]
+    fn legal_action_replay_certainty_values_remain_compatible() {
+        let store = ActionQueueStore::new_in_memory().expect("action queue");
+        let legal_values = [
+            ActionReplayEffectCertainty::NotDispatched,
+            ActionReplayEffectCertainty::EffectNotAttempted,
+            ActionReplayEffectCertainty::FailedBeforeDispatch,
+            ActionReplayEffectCertainty::DispatchedUnknown,
+            ActionReplayEffectCertainty::Confirmed,
+        ];
+        for (index, certainty) in legal_values.into_iter().enumerate() {
+            let action = ExecutionAction::new(
+                "file.read",
+                format!("Legal replay certainty fixture {index}."),
+            );
+            let queued = store
+                .enqueue(
+                    &format!("legal-action-certainty-{index}"),
+                    action.clone(),
+                    ExecutionPolicy::default().classify(&action),
+                )
+                .expect("enqueue legal certainty fixture");
+            store
+                .conn
+                .lock()
+                .expect("lock action queue")
+                .execute(
+                    "UPDATE action_queue SET replay_effect_certainty = ?2 WHERE id = ?1",
+                    params![queued.id, certainty.as_str()],
+                )
+                .expect("set legal replay certainty");
+            assert_eq!(
+                store
+                    .load(&queued.id)
+                    .expect("load legal replay certainty")
+                    .expect("action exists")
+                    .replay_effect_certainty,
+                certainty
+            );
+        }
     }
 
     fn replay_prepared_attempt_for_test(
