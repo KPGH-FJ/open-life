@@ -15534,6 +15534,119 @@ mod session_content_minimization_tests {
     }
 
     #[test]
+    fn mixed_legacy_transcript_enum_migration_rolls_back_prior_legal_row() {
+        const LEGAL_SENTINEL: &str = "D054_MIXED_LEGAL_LEGACY_SUMMARY";
+        const CORRUPT_SENTINEL: &str = "D054_MIXED_CORRUPT_LEGACY_SUMMARY";
+        let directory = tempfile::tempdir().expect("mixed legacy transcript directory");
+        let path = directory.path().join("mixed-legacy-transcript-enums.db");
+        let key = AgentRunReceiptKey::from_bytes([0x6b; 32]).expect("test receipt key");
+        let store =
+            AgentTaskSessionStore::new_with_receipt_key(&path, key.clone()).expect("task store");
+        let session = store
+            .create_session(AgentTaskSessionDraft {
+                chat_session_id: "mixed-legacy-transcript-chat".into(),
+                user_goal: "verify atomic fail-closed transcript migration".into(),
+                selected_strategy: MainChatAgentStrategy::DirectAnswer,
+                current_plan_summary: None,
+                context_snapshot_refs: Vec::new(),
+            })
+            .expect("create task session");
+        let legal = store
+            .append_transcript_entry(ExecutionTranscriptEntryDraft {
+                session_id: session.id.clone(),
+                kind: ExecutionTranscriptEntryKind::Plan,
+                summary: "legal legacy plan".into(),
+                metadata: Value::Null,
+            })
+            .expect("append legal transcript first");
+        let corrupt = store
+            .append_transcript_entry(ExecutionTranscriptEntryDraft {
+                session_id: session.id,
+                kind: ExecutionTranscriptEntryKind::Error,
+                summary: "corrupt legacy error".into(),
+                metadata: Value::Null,
+            })
+            .expect("append corrupt transcript second");
+        {
+            let conn = store.conn.lock().expect("lock task store");
+            let legal_rowid: i64 = conn
+                .query_row(
+                    "SELECT rowid FROM execution_transcript_entries WHERE id = ?1",
+                    [&legal.id],
+                    |row| row.get(0),
+                )
+                .expect("load legal rowid");
+            let corrupt_rowid: i64 = conn
+                .query_row(
+                    "SELECT rowid FROM execution_transcript_entries WHERE id = ?1",
+                    [&corrupt.id],
+                    |row| row.get(0),
+                )
+                .expect("load corrupt rowid");
+            assert!(
+                legal_rowid < corrupt_rowid,
+                "fixture must place the legal row before the corrupt row"
+            );
+            conn.execute(
+                "UPDATE execution_transcript_entries
+                 SET summary = ?2, metadata_json = ?3, payload_minimized_version = 1
+                 WHERE id = ?1",
+                params![
+                    legal.id,
+                    LEGAL_SENTINEL,
+                    serde_json::json!({"legacy": LEGAL_SENTINEL}).to_string(),
+                ],
+            )
+            .expect("install prior legal legacy row");
+            conn.execute(
+                "UPDATE execution_transcript_entries
+                 SET kind = 'future_error', summary = ?2, metadata_json = ?3,
+                     payload_minimized_version = 1
+                 WHERE id = ?1",
+                params![
+                    corrupt.id,
+                    CORRUPT_SENTINEL,
+                    serde_json::json!({"legacy": CORRUPT_SENTINEL}).to_string(),
+                ],
+            )
+            .expect("install following corrupt legacy row");
+        }
+        drop(store);
+
+        assert!(
+            AgentTaskSessionStore::new_with_receipt_key(&path, key).is_err(),
+            "one unknown kind must reject the whole ordered migration batch"
+        );
+        let raw = Connection::open(&path).expect("inspect rejected mixed migration");
+        let legal_after: (String, String, i64) = raw
+            .query_row(
+                "SELECT kind, summary, payload_minimized_version
+                 FROM execution_transcript_entries WHERE id = ?1",
+                [&legal.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("load prior legal row after rejected migration");
+        let corrupt_after: (String, String, i64) = raw
+            .query_row(
+                "SELECT kind, summary, payload_minimized_version
+                 FROM execution_transcript_entries WHERE id = ?1",
+                [&corrupt.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("load corrupt row after rejected migration");
+        assert_eq!(
+            legal_after,
+            ("plan".into(), LEGAL_SENTINEL.into(), 1),
+            "the earlier legal row update must roll back with the corrupt row"
+        );
+        assert_eq!(
+            corrupt_after,
+            ("future_error".into(), CORRUPT_SENTINEL.into(), 1),
+            "the corrupt row must remain untouched for reconciliation"
+        );
+    }
+
+    #[test]
     fn legal_historical_task_and_transcript_enum_values_remain_compatible() {
         let store = AgentTaskSessionStore::new_in_memory().expect("task session store");
         let strategies = [
