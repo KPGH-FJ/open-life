@@ -46,6 +46,7 @@ The shipped product must have:
 - `plans/openlife_backend_remediation_v4_scenarios.json`
 - `plans/openlife_backend_remediation_v4_scenario_waivers.json`
 - `plans/openlife_backend_remediation_v4_phase0_evidence.md`
+- `plans/openlife_backend_d068_authenticated_payload_red_matrix.md`
 - `plans/adr/0014-explicit-user-memory-write-lane.md`
 - `plans/adr/0015-transient-state-command-lane.md`
 
