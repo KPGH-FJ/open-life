@@ -2436,16 +2436,20 @@ async fn d058_d051_missing_file_has_one_real_failed_tool_owner_and_final_recover
         "one failed receipt, one terminal owner"
     );
     assert_eq!(terminal_events[0].event_type, "tool.failed");
+    let dispatch_events = before_retry_events
+        .iter()
+        .filter(|event| {
+            event.object_id == receipt.receipt_id && event.event_type == "tool.dispatch_prepared"
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
-        before_retry_events
-            .iter()
-            .filter(|event| {
-                event.object_id == receipt.receipt_id
-                    && event.event_type == "tool.dispatch_prepared"
-            })
-            .count(),
+        dispatch_events.len(),
         1,
         "the real ToolGateway request is durably prepared exactly once"
+    );
+    assert!(
+        dispatch_events[0].sequence < terminal_events[0].sequence,
+        "a missing-path terminal proves an OS observation occurred only after the ToolGateway dispatch was durably prepared"
     );
     assert_one_durable_final_is_last(&before_retry_events);
     assert_tool_execution_final_owner_binding(
@@ -2587,15 +2591,108 @@ fn d058_kernel_does_not_mint_failed_before_dispatch_receipt_owners() {
     );
 }
 
+fn d058_collect_production_rust_files(
+    directory: &std::path::Path,
+    files: &mut Vec<std::path::PathBuf>,
+) {
+    for entry in std::fs::read_dir(directory).expect("walk production Rust source") {
+        let path = entry.expect("read production source entry").path();
+        if path.is_dir() {
+            d058_collect_production_rust_files(&path, files);
+        } else if path.extension().and_then(std::ffi::OsStr::to_str) == Some("rs")
+            && !path
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .is_some_and(|name| name.ends_with("_tests.rs"))
+        {
+            files.push(path);
+        }
+    }
+}
+
+#[test]
+fn d058_d062_workspace_file_os_observation_has_only_gateway_owned_adapters() {
+    let repository_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repository root");
+    let mut files = Vec::new();
+    for relative_root in ["src-tauri/src", "openlife-core/src"] {
+        d058_collect_production_rust_files(&repository_root.join(relative_root), &mut files);
+    }
+
+    let observation_markers = [
+        ".canonicalize(",
+        ".is_file(",
+        ".is_dir(",
+        ".symlink_metadata(",
+        "std::env::current_dir(",
+        "std::fs::metadata(",
+        "tokio::fs::metadata(",
+        "std::fs::File::open(",
+        "tokio::fs::File::open(",
+        "std::fs::read(",
+        "tokio::fs::read(",
+        "std::fs::read_to_string(",
+        "tokio::fs::read_to_string(",
+        "tokio::fs::canonicalize(",
+        "tokio::fs::symlink_metadata(",
+    ];
+    let allowed_observation_owners = [
+        "openlife-core/src/agent/action_executor/execution_tools.rs",
+        "openlife-core/src/agent/action_executor/helpers.rs",
+    ];
+    let mut violations = Vec::new();
+
+    for path in files {
+        let relative = path
+            .strip_prefix(repository_root)
+            .expect("repository-relative source path")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let source = std::fs::read_to_string(&path).expect("read production Rust source");
+        let production_source = source
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap_or(&source);
+        let observed_markers = observation_markers
+            .iter()
+            .filter(|marker| production_source.contains(*marker))
+            .copied()
+            .collect::<Vec<_>>();
+        if observed_markers.is_empty() {
+            continue;
+        }
+
+        let allowed = allowed_observation_owners.contains(&relative.as_str());
+        let is_workspace_route_owner = relative == "src-tauri/src/workspace_file_resolver.rs"
+            || production_source
+                .contains("workspace_file_resolver::resolve_main_chat_workspace_file_target")
+            || (production_source.contains("workspace_file_resolver::resolve_workspace_root")
+                && production_source.contains("\"file.read\""));
+        let is_tool_gateway_adapter_area =
+            relative.starts_with("openlife-core/src/agent/action_executor/");
+        if (is_workspace_route_owner || is_tool_gateway_adapter_area) && !allowed {
+            violations.push(format!("{relative}: {}", observed_markers.join(", ")));
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "D062 deletion target: lexical workspace routing is pure syntax, while canonicalize/metadata/open/read observations live only in ToolGateway or a bounded filesystem adapter:\n{}",
+        violations.join("\n")
+    );
+}
+
 #[tokio::test]
 async fn d058_path_traversal_send_returns_structured_blocker_without_fake_tool_owner() {
     let user_text = "Please read file `../AGENTS.md`.";
     let operation_id = uuid::Uuid::new_v4().to_string();
+    let session_id = "d058-k3-send-traversal";
     let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let send_response = invoke_send_message_for_kernel_goal_3_with_operation(
         send_state.clone(),
         &operation_id,
-        "d058-k3-send-traversal",
+        session_id,
         user_text,
     )
     .await;
@@ -2606,6 +2703,34 @@ async fn d058_path_traversal_send_returns_structured_blocker_without_fake_tool_o
         "filesystem_path_traversal_blocked",
     )
     .await;
+
+    let actions_before = list_command_surface_actions(&send_state, &operation_id).await;
+    let events_before = list_command_surface_events(&send_state, &operation_id).await;
+    assert_eq!(actions_before.len(), 1);
+    let recovered = invoke_send_message_for_kernel_goal_3_with_operation(
+        send_state.clone(),
+        &operation_id,
+        session_id,
+        user_text,
+    )
+    .await;
+    assert_d058_pre_gateway_file_blocker_turn(
+        &send_state,
+        &recovered,
+        &operation_id,
+        "filesystem_path_traversal_blocked",
+    )
+    .await;
+    assert_eq!(
+        list_command_surface_actions(&send_state, &operation_id).await,
+        actions_before,
+        "same-operation pre-gateway recovery cannot enqueue, mutate, or dispatch the action"
+    );
+    assert_eq!(
+        list_command_surface_events(&send_state, &operation_id).await,
+        events_before,
+        "same-operation recovery must reuse the immutable blocker final"
+    );
 }
 
 #[tokio::test]

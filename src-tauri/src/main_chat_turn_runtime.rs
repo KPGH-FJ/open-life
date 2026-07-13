@@ -6581,20 +6581,48 @@ mod turn_admission_tests {
         final_event: crate::main_chat_event_stream::MainChatAgentDurableEvent,
     }
 
-    async fn d058_send_real_tool_turn(
+    struct D058ToolOwnerFact {
+        action_id: String,
+        receipt_id: String,
+        terminal_event: crate::main_chat_event_stream::MainChatAgentDurableEvent,
+    }
+
+    struct D058DurableMultiToolFixture {
+        owners: Vec<D058ToolOwnerFact>,
+        final_event: crate::main_chat_event_stream::MainChatAgentDurableEvent,
+        actions_before: Vec<openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction>,
+        events_before: Vec<crate::main_chat_event_stream::MainChatAgentDurableEvent>,
+    }
+
+    async fn d058_send_turn(
         state: &std::sync::Arc<crate::AppState>,
         operation_id: &str,
         session_id: &str,
+        body: &str,
     ) -> Result<crate::SendMessageResult, String> {
         crate::main_chat_send::send_message_with_operation_state(
             operation_id.to_string(),
             session_id.into(),
             vec![openlife_core::llm::ChatMessage {
                 role: "user".into(),
-                content: "Please read file `Cargo.toml`.".into(),
+                content: body.into(),
             }],
             None,
             state,
+        )
+        .await
+    }
+
+    async fn d058_send_real_tool_turn(
+        state: &std::sync::Arc<crate::AppState>,
+        operation_id: &str,
+        session_id: &str,
+    ) -> Result<crate::SendMessageResult, String> {
+        d058_send_turn(
+            state,
+            operation_id,
+            session_id,
+            "Please read file `Cargo.toml`.",
         )
         .await
     }
@@ -6656,21 +6684,22 @@ mod turn_admission_tests {
     }
 
     fn d058_v2_tool_execution_binding(
-        fixture: &D058DurableRealToolFixture,
         action_id: &str,
+        receipt_id: &str,
+        terminal_event: &crate::main_chat_event_stream::MainChatAgentDurableEvent,
     ) -> serde_json::Value {
         serde_json::json!({
             "actionId": action_id,
             "kind": "tool_execution",
-            "receiptId": fixture.receipt_id,
-            "terminalEventId": fixture.terminal_event.event_id,
-            "terminalEventDigest": fixture.terminal_event.payload_digest,
+            "receiptId": receipt_id,
+            "terminalEventId": terminal_event.event_id,
+            "terminalEventDigest": terminal_event.payload_digest,
         })
     }
 
     async fn d058_override_final_payload(
         state: &std::sync::Arc<crate::AppState>,
-        fixture: &D058DurableRealToolFixture,
+        final_event_id: &str,
         payload: serde_json::Value,
     ) {
         state
@@ -6679,8 +6708,174 @@ mod turn_admission_tests {
             .expect("event store")
             .lock()
             .await
-            .override_final_payload_for_recovery_test(&fixture.final_event.event_id, payload)
+            .override_final_payload_for_recovery_test(final_event_id, payload)
             .expect("install parser-boundary durable-final fixture");
+    }
+
+    fn d058_multi_read_body() -> &'static str {
+        crate::main_chat_command_surface_eval::main_chat_command_surface_eval_user_text(
+            crate::main_chat_command_surface_eval::MainChatCommandSurfaceEvalScenario::MultiReadAgentLoopSuccess,
+        )
+    }
+
+    async fn d058_override_v2_multi_tool_bindings(
+        state: &std::sync::Arc<crate::AppState>,
+        fixture: &D058DurableMultiToolFixture,
+        bindings: Vec<serde_json::Value>,
+    ) {
+        let mut payload = fixture.final_event.payload.clone();
+        let object = payload.as_object_mut().expect("final payload object");
+        object.insert("toolOwnerBindingsVersion".into(), serde_json::json!(2));
+        object.insert(
+            "toolOwnerBindings".into(),
+            serde_json::Value::Array(bindings),
+        );
+        d058_override_final_payload(state, &fixture.final_event.event_id, payload).await;
+    }
+
+    async fn d058_assert_multi_tool_state_unchanged(
+        state: &std::sync::Arc<crate::AppState>,
+        operation_id: &str,
+        fixture: &D058DurableMultiToolFixture,
+    ) {
+        let actions_after = state
+            .main_chat_action_queue_store
+            .as_ref()
+            .expect("action queue")
+            .lock()
+            .await
+            .list_for_session(operation_id)
+            .expect("list actions after v2 recovery decision");
+        assert_eq!(actions_after, fixture.actions_before);
+        let events_after = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("event store")
+            .lock()
+            .await
+            .list(operation_id, 0, 250)
+            .expect("list events after v2 recovery decision");
+        assert_eq!(events_after, fixture.events_before);
+    }
+
+    async fn d058_seed_durable_two_real_tool_final(
+        state: &std::sync::Arc<crate::AppState>,
+        operation_id: &str,
+        session_id: &str,
+    ) -> D058DurableMultiToolFixture {
+        let scenario = crate::main_chat_command_surface_eval::MainChatCommandSurfaceEvalScenario::MultiReadAgentLoopSuccess;
+        crate::main_chat_command_surface_eval::configure_main_chat_command_surface_eval_state(
+            state, scenario,
+        )
+        .await
+        .expect("configure two-real-tool command-surface fixture");
+        let body = d058_multi_read_body();
+        fail_main_chat_once_after_durable_final_for_test(operation_id);
+        let first_error = d058_send_turn(state, operation_id, session_id, body)
+            .await
+            .expect_err("lose only the live response after the two-tool final is durable");
+        assert_eq!(
+            first_error,
+            "injected_turn_failure_after_durable_final_before_live_delivery"
+        );
+
+        let actions_before = state
+            .main_chat_action_queue_store
+            .as_ref()
+            .expect("action queue")
+            .lock()
+            .await
+            .list_for_session(operation_id)
+            .expect("list two runtime-owned tool actions");
+        assert_eq!(
+            actions_before.len(),
+            2,
+            "the fixture must cross ToolGateway twice; JSON-only bindings are not evidence"
+        );
+        assert!(actions_before.iter().all(|action| {
+            action.action.action_type == "memory.search"
+                && action.status
+                    == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Completed
+                && action
+                    .observation_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("toolExecutionReceipt"))
+                    .is_some()
+        }));
+
+        let event_store = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("event store")
+            .lock()
+            .await;
+        let events_before = event_store
+            .list(operation_id, 0, 250)
+            .expect("list durable two-tool lifecycle");
+        let final_event = events_before
+            .iter()
+            .find(|event| event.event_type == "final_delivery.created")
+            .cloned()
+            .expect("durable two-tool final");
+        assert_eq!(
+            events_before.last().map(|event| event.event_id.as_str()),
+            Some(final_event.event_id.as_str()),
+            "final remains the last durable event"
+        );
+
+        let mut owners = Vec::with_capacity(actions_before.len());
+        for action in &actions_before {
+            let receipt_value = action
+                .observation_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("toolExecutionReceipt"))
+                .cloned()
+                .expect("runtime-issued receipt for each real action");
+            let receipt: openlife_core::tool_execution_receipt::ToolExecutionReceipt =
+                serde_json::from_value(receipt_value).expect("valid ToolGateway receipt");
+            assert_eq!(receipt.source_run_id.as_deref(), Some(operation_id));
+            assert!(receipt.manifest_id.is_some());
+            assert!(receipt.dispatch_observed);
+            assert_eq!(receipt.dispatch_attempt_count, 1);
+            receipt
+                .mechanically_valid_terminal()
+                .expect("real ToolGateway receipt has a mechanically valid terminal");
+            let receipt_id = receipt.receipt_id;
+            let terminal_event = event_store
+                .get_unique_tool_terminal_event(operation_id, operation_id, &receipt_id)
+                .expect("query exact terminal")
+                .expect("each real ToolGateway receipt has one terminal");
+            assert_eq!(terminal_event.event_type, "tool.completed");
+            assert_eq!(
+                events_before
+                    .iter()
+                    .filter(|event| {
+                        event.object_id == receipt_id
+                            && event.event_type == "tool.dispatch_prepared"
+                    })
+                    .count(),
+                1,
+                "each real action has exactly one durable dispatch"
+            );
+            owners.push(D058ToolOwnerFact {
+                action_id: action.id.clone(),
+                receipt_id,
+                terminal_event,
+            });
+        }
+        assert_ne!(owners[0].action_id, owners[1].action_id);
+        assert_ne!(owners[0].receipt_id, owners[1].receipt_id);
+        assert_ne!(
+            owners[0].terminal_event.event_id,
+            owners[1].terminal_event.event_id
+        );
+
+        D058DurableMultiToolFixture {
+            owners,
+            final_event,
+            actions_before,
+            events_before,
+        }
     }
 
     #[tokio::test]
@@ -6766,7 +6961,11 @@ mod turn_admission_tests {
         let operation_id = uuid::Uuid::new_v4().to_string();
         let session_id = "d058-duplicate-action-owner-binding";
         let fixture = d058_seed_durable_real_tool_final(&state, &operation_id, session_id).await;
-        let binding = d058_v2_tool_execution_binding(&fixture, &fixture.action_id);
+        let binding = d058_v2_tool_execution_binding(
+            &fixture.action_id,
+            &fixture.receipt_id,
+            &fixture.terminal_event,
+        );
         let mut payload = fixture.final_event.payload.clone();
         let object = payload.as_object_mut().expect("final payload object");
         object.insert("toolOwnerBindingsVersion".into(), serde_json::json!(2));
@@ -6774,7 +6973,7 @@ mod turn_admission_tests {
             "toolOwnerBindings".into(),
             serde_json::json!([binding.clone(), binding]),
         );
-        d058_override_final_payload(&state, &fixture, payload).await;
+        d058_override_final_payload(&state, &fixture.final_event.event_id, payload).await;
 
         let recovery_error = d058_send_real_tool_turn(&state, &operation_id, session_id)
             .await
@@ -6810,11 +7009,12 @@ mod turn_admission_tests {
         object.insert(
             "toolOwnerBindings".into(),
             serde_json::json!([d058_v2_tool_execution_binding(
-                &fixture,
-                "unknown-action-owner"
+                "unknown-action-owner",
+                &fixture.receipt_id,
+                &fixture.terminal_event,
             )]),
         );
-        d058_override_final_payload(&state, &fixture, payload).await;
+        d058_override_final_payload(&state, &fixture.final_event.event_id, payload).await;
 
         let recovery_error = d058_send_real_tool_turn(&state, &operation_id, session_id)
             .await
@@ -6836,6 +7036,120 @@ mod turn_admission_tests {
             1,
             "unknown binding rejection cannot redispatch"
         );
+    }
+
+    #[tokio::test]
+    async fn d058_v2_reversed_two_real_tool_bindings_recover_by_identity_without_redispatch() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let session_id = "d058-reversed-two-real-tool-bindings";
+        let fixture =
+            d058_seed_durable_two_real_tool_final(&state, &operation_id, session_id).await;
+        let first = &fixture.owners[0];
+        let second = &fixture.owners[1];
+        d058_override_v2_multi_tool_bindings(
+            &state,
+            &fixture,
+            vec![
+                d058_v2_tool_execution_binding(
+                    &second.action_id,
+                    &second.receipt_id,
+                    &second.terminal_event,
+                ),
+                d058_v2_tool_execution_binding(
+                    &first.action_id,
+                    &first.receipt_id,
+                    &first.terminal_event,
+                ),
+            ],
+        )
+        .await;
+
+        let recovered = d058_send_turn(&state, &operation_id, session_id, d058_multi_read_body())
+            .await
+            .expect("v2 recovery binds by action identity, not array position");
+        assert_eq!(recovered.status, "completed");
+        d058_assert_multi_tool_state_unchanged(&state, &operation_id, &fixture).await;
+    }
+
+    #[tokio::test]
+    async fn d058_v2_cross_bound_real_tool_owner_fails_closed_without_redispatch() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let session_id = "d058-cross-bound-real-tool-owner";
+        let fixture =
+            d058_seed_durable_two_real_tool_final(&state, &operation_id, session_id).await;
+        let first = &fixture.owners[0];
+        let second = &fixture.owners[1];
+        d058_override_v2_multi_tool_bindings(
+            &state,
+            &fixture,
+            vec![
+                d058_v2_tool_execution_binding(
+                    &first.action_id,
+                    &second.receipt_id,
+                    &second.terminal_event,
+                ),
+                d058_v2_tool_execution_binding(
+                    &second.action_id,
+                    &first.receipt_id,
+                    &first.terminal_event,
+                ),
+            ],
+        )
+        .await;
+
+        let recovery_error =
+            d058_send_turn(&state, &operation_id, session_id, d058_multi_read_body())
+                .await
+                .expect_err("a receipt and terminal cannot impersonate another valid action owner");
+        assert_eq!(
+            recovery_error,
+            "turn_operation_final_reconciliation_required:tool_owner_binding_receipt_action_conflict"
+        );
+        d058_assert_multi_tool_state_unchanged(&state, &operation_id, &fixture).await;
+    }
+
+    #[tokio::test]
+    async fn d058_v2_shared_receipt_for_two_valid_actions_fails_closed_without_redispatch() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let session_id = "d058-shared-receipt-two-valid-actions";
+        let fixture =
+            d058_seed_durable_two_real_tool_final(&state, &operation_id, session_id).await;
+        let first = &fixture.owners[0];
+        let second = &fixture.owners[1];
+        d058_override_v2_multi_tool_bindings(
+            &state,
+            &fixture,
+            vec![
+                d058_v2_tool_execution_binding(
+                    &first.action_id,
+                    &first.receipt_id,
+                    &first.terminal_event,
+                ),
+                d058_v2_tool_execution_binding(
+                    &second.action_id,
+                    &first.receipt_id,
+                    &first.terminal_event,
+                ),
+            ],
+        )
+        .await;
+
+        let recovery_error =
+            d058_send_turn(&state, &operation_id, session_id, d058_multi_read_body())
+                .await
+                .expect_err("one receipt and terminal cannot own two valid actions");
+        assert!(
+            matches!(
+                recovery_error.as_str(),
+                "turn_operation_final_reconciliation_required:tool_owner_binding_duplicate_receipt"
+                    | "turn_operation_final_reconciliation_required:tool_owner_binding_receipt_action_conflict"
+            ),
+            "shared owner must fail for a typed v2 identity reason: {recovery_error}"
+        );
+        d058_assert_multi_tool_state_unchanged(&state, &operation_id, &fixture).await;
     }
 
     #[tokio::test]
@@ -6863,7 +7177,7 @@ mod turn_admission_tests {
             serde_json::json!([fixture.terminal_event.payload_digest.clone()]),
         );
         object.insert("toolCallCount".into(), serde_json::json!(1));
-        d058_override_final_payload(&state, &fixture, legacy_payload).await;
+        d058_override_final_payload(&state, &fixture.final_event.event_id, legacy_payload).await;
 
         let recovered = d058_send_real_tool_turn(&state, &operation_id, session_id)
             .await
