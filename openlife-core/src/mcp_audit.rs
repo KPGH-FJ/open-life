@@ -499,6 +499,31 @@ impl McpAuditStore {
         Ok(general_purpose::STANDARD.encode(&combined))
     }
 
+    /// D068 RED-fixture seam for the exact historical, pre-envelope wire
+    /// format. Keep this test-only helper bound to the production legacy
+    /// decoder when the authenticated current envelope is introduced.
+    #[cfg(test)]
+    fn d068_encrypt_legacy_payload_fixture_for_test(&self, plaintext: &str) -> Result<String> {
+        self.encrypt(plaintext)
+    }
+
+    /// D068 RED-fixture seam for a current-format encrypted payload. The RED
+    /// implementation cannot yet bind the role or format version; the target
+    /// implementation must route this through the same authenticated envelope
+    /// encoder used by `insert_log`. A valid-control test prevents this helper
+    /// from being left on the legacy encoder while invalid-envelope tests are
+    /// made green by rejecting every fixture.
+    #[cfg(test)]
+    fn d068_encrypt_current_payload_fixture_for_test(
+        &self,
+        role: &str,
+        format_version: i64,
+        receipt_json: &str,
+    ) -> Result<String> {
+        let _ = (role, format_version);
+        self.encrypt(receipt_json)
+    }
+
     fn decrypt(&self, combined_b64: &str) -> Result<String> {
         self.decrypt_with_key(combined_b64, &self.key)
     }
@@ -866,6 +891,10 @@ mod tests {
         assert_eq!(version, MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION);
     }
 }
+
+#[cfg(test)]
+#[path = "mcp_audit/d068_authenticated_payload_tests.rs"]
+mod d068_authenticated_payload_tests;
 
 /// Shareable handle.
 pub type SharedMcpAuditStore = Arc<Mutex<McpAuditStore>>;
