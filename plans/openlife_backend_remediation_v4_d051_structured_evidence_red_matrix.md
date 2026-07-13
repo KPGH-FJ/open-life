@@ -1,13 +1,14 @@
-# BR4-D051 Structured Memory Evidence RED Matrix — Review Revision 2
+# BR4-D051 Structured Memory Evidence RED Matrix — Review Revision 3
 
 > Status: frozen RED contract, tests only; production seam intentionally absent
 > Source baseline: `3c6f4d7f9fe8c6617f213c8b70cf900b6454e780`
 > Supersedes the synthetic test design in tests-only commit `94d2b4b`
 
-This revision closes the independent review finding that the first RED matrix
-could be made green by implementing a test-only interpreter or runtime helper.
-There is no outcome fixture and no expected status, reason, mutation or credit
-value enters the system under test. Expected values exist only in assertions.
+This revision addresses both independent review requests: the first RED matrix
+could be made green by implementing a test-only interpreter or runtime helper,
+and the second did not prove exact persisted owner binding. There is no outcome
+fixture and no expected status, reason, mutation or credit value enters the
+system under test. Expected values exist only in assertions.
 
 The suite now constructs production types, executes the real Main Chat runtime
 and reads product truth from real durable stores. It remains a RED contract: it
@@ -75,19 +76,36 @@ then extracts the exact
 `agent-run://.../observation/...` reference from the actual final request and
 uses it in the final response; OpenLife never receives a placeholder.
 
-Assertions read:
+Behavior assertions reconstruct one owner graph and require exact equality,
+rather than treating non-empty identifiers as evidence:
 
 - final truth from `MainChatAgentEventStore`;
 - proposal truth from `ProposalStore`;
 - minimized runtime truth from `AgentRunStore`;
-- execution traces from `ActionQueueStore` and `TaskSessionStore`;
-- audit truth from `McpAuditStore`;
+- the canonical AgentRun action, observation and `BoundContentReceipt`;
+- the exact persisted `ToolExecutionReceipt` projection from `ActionQueueStore`;
+- the same queue action and transcript observation from `TaskSessionStore`;
 - canonical before/after truth from `MemoryLifecycleStore`, LifeModel and the
   HS asset-authority registry.
+
+The positive Proposal must copy exact values from that graph for
+`sourceRunId`, `sourceActionId`, `sourceObservationId`,
+`sourceOutputReceiptDigest` and `sourceToolReceiptId`. Its `candidateDigest`
+must be the digest of the exact structured slice plus those canonical owner
+identities; an arbitrary non-empty digest is not sufficient. The durable tool
+events and ActionQueue projection must all identify `manifestId=file.read` and
+the same exact ToolExecutionReceipt `receiptId`. Separately, AgentRun's
+minimized `output.receiptId` must equal its own `BoundContentReceipt.receiptId`;
+the two receipt types are deliberately not conflated.
 
 The full observation sentinel must be absent from every serialized durable
 artifact above. Its presence in the transient captured HTTP request is
 intentional and is not persistence credit.
+
+`file.read` is a built-in ToolGateway execution and does not produce an MCP
+audit record. `McpAuditStore` is therefore scanned only as a global
+sensitive-body-leak counterexample. An empty audit result is valid and is never
+credited as evidence that this `file.read` execution occurred.
 
 ## Frozen limits
 
@@ -122,15 +140,20 @@ the unfulfilled part of the request.
 
 ## Frozen tests
 
-### Behavior and single-authority deletion RED
+### Behavior, owner binding and absence-guard RED
 
 - `d051_product_behavior_not_symbol_names_removes_legacy_implicit_authority`
   proves that plain untrusted observation prose has no Memory Proposal route;
   it does not rely on a function-name scan.
-- `d051_authority_inventory_requires_one_production_admission_seam_and_no_raw_preview_router`
-  requires one definition and one product caller, and inspects the product
-  conditional-review stage for absence of raw-body, preview and heuristic
-  routing.
+- `d051_admission_seam_absence_guard_requires_one_definition_and_one_product_caller`
+  is only a source-level absence guard: it requires one definition and one
+  product caller, and inspects the product conditional-review stage for absence
+  of raw-body, preview and heuristic routing. It is not proof of one behavioral
+  authority.
+- The runtime positive cases are the behavioral authority proof: they rebuild
+  the exact AgentRun/action/observation/BoundContentReceipt,
+  ToolExecutionReceipt/event, ActionQueue and transcript owner graph, then
+  require the Proposal fields and candidate digest to match that graph exactly.
 - The existing
   `d051_legacy_implicit_stable_fact_authority_is_deleted` remains the direct
   regression contract for removal of handwritten stable-fact authority.
@@ -208,6 +231,10 @@ The current result independently records `provider_invocation_status =
 not_attempted` for the target. This is the intended RED: the old product route
 short-circuits before the same-final provider evidence seam. It is not an API
 key, permission, network, test parser, fixture-outcome or mock-store failure.
+Before reaching that network-edge RED assertion, the focused runtime test now
+passes the exact existing `file.read` owner-graph preconditions described
+above. This separates a valid real read graph from the missing final-provider
+and structured-admission capability.
 
 ## Credit and remaining verification boundary
 

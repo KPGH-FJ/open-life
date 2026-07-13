@@ -1,6 +1,9 @@
-use openlife_core::agent::main_chat_agent_v1::{ExecutionTranscriptEntry, QueuedExecutionAction};
-use openlife_core::agent::{AgentProposal, AgentRun};
+use openlife_core::agent::main_chat_agent_v1::{
+    ExecutionTranscriptEntry, ExecutionTranscriptEntryKind, QueuedExecutionAction,
+};
+use openlife_core::agent::{AgentAction, AgentObservation, AgentProposal, AgentRun};
 use openlife_core::llm::ChatMessage;
+use openlife_core::tool_execution_receipt::ToolExecutionReceipt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -370,7 +373,10 @@ struct RuntimeArtifacts {
     run: AgentRun,
     actions: Vec<QueuedExecutionAction>,
     transcript: Vec<ExecutionTranscriptEntry>,
-    audit: Vec<openlife_core::mcp_audit::McpLogEntry>,
+    // `file.read` is a built-in ToolGateway execution and is not expected to
+    // emit MCP audit rows. This global store is loaded only as an additional
+    // sensitive-body leak counterexample, never as proof of this execution.
+    mcp_audit_leak_scan: Vec<openlife_core::mcp_audit::McpLogEntry>,
 }
 
 impl RuntimeArtifacts {
@@ -388,7 +394,7 @@ impl RuntimeArtifacts {
             "run": self.run,
             "actions": self.actions,
             "transcript": self.transcript,
-            "audit": self.audit,
+            "globalMcpAuditLeakScan": self.mcp_audit_leak_scan,
         })
         .to_string()
     }
@@ -436,7 +442,7 @@ async fn load_artifacts(state: &Arc<crate::AppState>, operation_id: &str) -> Run
         .await
         .list_transcript_entries(operation_id)
         .expect("list D051 transcript");
-    let audit = state
+    let mcp_audit_leak_scan = state
         .mcp_audit_store
         .lock()
         .await
@@ -448,7 +454,7 @@ async fn load_artifacts(state: &Arc<crate::AppState>, operation_id: &str) -> Run
         run,
         actions,
         transcript,
-        audit,
+        mcp_audit_leak_scan,
     }
 }
 
@@ -505,15 +511,194 @@ fn assert_one_post_observation_provider_call(capture: &CapturedProvider) {
     );
 }
 
-fn assert_real_durable_file_read_receipt(artifacts: &RuntimeArtifacts, operation_id: &str) {
+struct RuntimeReadOwnerGraph<'a> {
+    action: &'a AgentAction,
+    observation: &'a AgentObservation,
+    output_receipt: &'a openlife_core::agent::BoundContentReceipt,
+    tool_receipt: ToolExecutionReceipt,
+    queue_action: &'a QueuedExecutionAction,
+    transcript_observation: &'a ExecutionTranscriptEntry,
+}
+
+fn assert_real_durable_file_read_owner_graph<'a>(
+    artifacts: &'a RuntimeArtifacts,
+    operation_id: &str,
+) -> RuntimeReadOwnerGraph<'a> {
+    let matching_actions = artifacts
+        .run
+        .actions
+        .iter()
+        .filter(|action| {
+            action.status == "succeeded"
+                && action
+                    .react_trace
+                    .as_ref()
+                    .is_some_and(|trace| trace.tool_id == "file.read")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matching_actions.len(),
+        1,
+        "the canonical AgentRun must own exactly one succeeded file.read action"
+    );
+    let action = matching_actions[0];
+    let action_trace = action
+        .react_trace
+        .as_ref()
+        .expect("D051 file.read action trace");
+    assert_eq!(action_trace.run_id.as_deref(), Some(operation_id));
+    assert_eq!(action_trace.action_id, action.id);
+    assert_eq!(action_trace.tool_id, "file.read");
+    assert_eq!(action_trace.tool_name, "file.read");
+
+    let observation_id = action_trace
+        .observation_id
+        .as_deref()
+        .expect("D051 file.read observation identity");
+    let matching_observations = artifacts
+        .run
+        .observations
+        .iter()
+        .filter(|observation| observation.id == observation_id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matching_observations.len(),
+        1,
+        "the AgentRun action must bind exactly one canonical observation"
+    );
+    let observation = matching_observations[0];
+    assert_eq!(observation.action_id.as_deref(), Some(action.id.as_str()));
+
+    let output_receipt = action_trace
+        .output_receipt
+        .as_ref()
+        .expect("D051 runtime persisted the bound observation-body receipt");
+    let output_receipt_value =
+        serde_json::to_value(output_receipt).expect("serialize D051 BoundContentReceipt");
+    assert_eq!(output_receipt.version(), 2);
+    assert_eq!(
+        output_receipt.provenance(),
+        openlife_core::agent::ContentReceiptProvenance::ObservedToolAdapterBody
+    );
+    assert_eq!(output_receipt.byte_count(), OBSERVATION_BODY.len());
+    assert_eq!(output_receipt_value["runId"], operation_id);
+    assert_eq!(output_receipt_value["actionId"], action.id);
+    assert_eq!(output_receipt_value["observationId"], observation.id);
+    assert_eq!(
+        action
+            .output
+            .as_ref()
+            .and_then(|output| output.get("receiptId")),
+        output_receipt_value.get("receiptId"),
+        "AgentRun's minimized output ref must identify its exact BoundContentReceipt"
+    );
+
+    let matching_queue_actions = artifacts
+        .actions
+        .iter()
+        .filter(|queued| {
+            queued.session_id == operation_id
+                && queued.action.action_type == "file.read"
+                && queued
+                    .observation_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("executorActionId"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some(action.id.as_str())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matching_queue_actions.len(),
+        1,
+        "ActionQueue must project exactly one row for the canonical AgentRun action"
+    );
+    let queue_action = matching_queue_actions[0];
+    assert_eq!(
+        queue_action.status,
+        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Completed
+    );
+    let queue_metadata = queue_action
+        .observation_metadata
+        .as_ref()
+        .expect("D051 completed queue observation metadata");
+    assert_eq!(queue_metadata["actionId"], queue_action.id);
+    assert_eq!(queue_metadata["executorActionId"], action.id);
+    assert_eq!(queue_metadata["observationId"], observation.id);
+    assert_eq!(
+        queue_metadata["replayExecutionEnvelope"]["queueActionId"],
+        queue_action.id
+    );
+    assert_eq!(
+        queue_metadata["replayExecutionEnvelope"]["executorActionId"],
+        action.id
+    );
+    assert_eq!(
+        queue_metadata["replayExecutionEnvelope"]["runId"],
+        operation_id
+    );
+    assert_eq!(
+        queue_metadata["replayExecutionEnvelope"]["taskSessionId"],
+        operation_id
+    );
+    assert_eq!(
+        queue_metadata["replayExecutionEnvelope"]["manifestId"],
+        "file.read"
+    );
+    let tool_receipt_value = queue_metadata
+        .get("toolExecutionReceipt")
+        .cloned()
+        .expect("ActionQueue must persist the exact ToolExecutionReceipt projection");
+    let tool_receipt: ToolExecutionReceipt = serde_json::from_value(tool_receipt_value.clone())
+        .expect("decode the persisted D051 ToolExecutionReceipt projection");
+    assert_eq!(tool_receipt.source_run_id.as_deref(), Some(operation_id));
+    assert_eq!(tool_receipt.manifest_id.as_deref(), Some("file.read"));
+    assert_eq!(tool_receipt_value["manifestId"], "file.read");
+
+    let matching_tool_events = artifacts
+        .events
+        .iter()
+        .filter(|event| {
+            event.object_type == "tool_execution_receipt"
+                && event.object_id == tool_receipt.receipt_id
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        matching_tool_events.len() >= 3,
+        "the same ToolExecutionReceipt must own prepared, started and terminal durable events"
+    );
+    for required_event_type in ["tool.dispatch_prepared", "tool.started", "tool.completed"] {
+        assert_eq!(
+            matching_tool_events
+                .iter()
+                .filter(|event| event.event_type == required_event_type)
+                .count(),
+            1,
+            "the exact receipt must own one {required_event_type} event"
+        );
+    }
+    for event in &matching_tool_events {
+        assert_eq!(event.task_session_id, operation_id);
+        assert_eq!(event.run_id, operation_id);
+        assert_eq!(event.payload["receiptId"], tool_receipt.receipt_id);
+        assert_eq!(event.payload["sourceRunId"], operation_id);
+        assert_eq!(
+            event.payload["manifestId"], "file.read",
+            "D051 credit is only for the exact file.read manifest"
+        );
+    }
     let receipt_event = artifacts
         .events
         .iter()
         .find(|event| {
-            event.object_type == "tool_execution_receipt" && event.event_type == "tool.completed"
+            event.object_type == "tool_execution_receipt"
+                && event.event_type == "tool.completed"
+                && event.object_id == tool_receipt.receipt_id
         })
         .expect("D051 durable event store contains the completed ToolGateway receipt");
+    assert_eq!(receipt_event.object_id, tool_receipt.receipt_id);
+    assert_eq!(receipt_event.payload["receiptId"], tool_receipt.receipt_id);
     assert_eq!(receipt_event.payload["sourceRunId"], operation_id);
+    assert_eq!(receipt_event.payload["manifestId"], "file.read");
     assert_eq!(receipt_event.payload["dispatchKind"], "local");
     assert_eq!(
         receipt_event.payload["transportStatus"],
@@ -522,26 +707,122 @@ fn assert_real_durable_file_read_receipt(artifacts: &RuntimeArtifacts, operation
     assert_eq!(receipt_event.payload["executionOutcome"], "succeeded");
     assert_eq!(receipt_event.payload["dispatchObserved"], true);
 
-    let body_receipt = artifacts
-        .run
-        .actions
+    for field in [
+        "receiptId",
+        "sourceRunId",
+        "manifestId",
+        "requestDigest",
+        "actionEffect",
+        "idempotencyContract",
+        "dispatchKind",
+        "dispatchAttemptCount",
+        "dispatchObserved",
+        "transportStatus",
+        "effectStatus",
+        "executionOutcome",
+        "startedAt",
+        "dispatchedAt",
+        "responseObservedAt",
+        "finishedAt",
+    ] {
+        assert_eq!(
+            receipt_event.payload[field], tool_receipt_value[field],
+            "durable terminal event drifted from the exact persisted ToolExecutionReceipt field {field}"
+        );
+    }
+
+    let matching_transcript = artifacts
+        .transcript
         .iter()
-        .find_map(|action| {
-            action
-                .react_trace
-                .as_ref()
-                .and_then(|trace| trace.output_receipt.as_ref())
+        .filter(|entry| {
+            entry.kind == ExecutionTranscriptEntryKind::Observation
+                && entry.session_id == operation_id
+                && entry.metadata["actionId"] == queue_action.id
+                && entry.metadata["executorActionId"] == action.id
+                && entry.metadata["runId"] == operation_id
         })
-        .expect("D051 runtime persisted the bound observation-body receipt");
-    assert_eq!(body_receipt.version(), 2);
+        .collect::<Vec<_>>();
     assert_eq!(
-        body_receipt.provenance(),
-        openlife_core::agent::ContentReceiptProvenance::ObservedToolAdapterBody
+        matching_transcript.len(),
+        1,
+        "Task transcript must project the same queue and AgentRun owners"
     );
-    assert_eq!(body_receipt.byte_count(), OBSERVATION_BODY.len());
+    let transcript_observation = matching_transcript[0];
+    assert_eq!(transcript_observation.metadata["status"], "completed");
+    let action_completed = artifacts
+        .events
+        .iter()
+        .find(|event| event.event_type == "action.completed" && event.object_id == queue_action.id)
+        .expect("D051 action completion projection");
+    assert!(action_completed.payload["observationIds"]
+        .as_array()
+        .is_some_and(|ids| ids == &[serde_json::json!(transcript_observation.id)]));
+    let observation_created = artifacts
+        .events
+        .iter()
+        .find(|event| {
+            event.event_type == "observation.created"
+                && event.object_id == transcript_observation.id
+        })
+        .expect("D051 transcript observation projection");
+    assert_eq!(observation_created.payload["actionId"], queue_action.id);
+    assert_eq!(
+        observation_created.payload["observationId"],
+        transcript_observation.id
+    );
+
+    RuntimeReadOwnerGraph {
+        action,
+        observation,
+        output_receipt,
+        tool_receipt,
+        queue_action,
+        transcript_observation,
+    }
 }
 
-fn assert_positive_durable_truth(artifacts: &RuntimeArtifacts) {
+fn expected_structured_candidate_digest(graph: &RuntimeReadOwnerGraph<'_>) -> String {
+    let start = OBSERVATION_BODY
+        .find(CANDIDATE_TEXT)
+        .expect("D051 exact candidate slice");
+    let end = start + CANDIDATE_TEXT.len();
+    let observation_ref = format!(
+        "agent-run://{}/action/{}/observation/{}",
+        graph
+            .action
+            .react_trace
+            .as_ref()
+            .and_then(|trace| trace.run_id.as_deref())
+            .expect("D051 graph run id"),
+        graph.action.id,
+        graph.observation.id,
+    );
+    openlife_core::agent::metadata_safe::metadata_safe_value_digest(&serde_json::json!({
+        "schema": "openlife.memory_evidence.candidate.v1",
+        "candidateText": CANDIDATE_TEXT,
+        "evidence": {
+            "observationRef": observation_ref,
+            "startByte": start,
+            "endByte": end,
+            "sha256": sha256(&OBSERVATION_BODY.as_bytes()[start..end]),
+        },
+        "owner": {
+            "runId": graph
+                .action
+                .react_trace
+                .as_ref()
+                .and_then(|trace| trace.run_id.as_deref())
+                .expect("D051 graph run id"),
+            "actionId": graph.action.id.as_str(),
+            "observationId": graph.observation.id.as_str(),
+            "outputReceiptDigest": graph.output_receipt.public_digest(),
+            "toolReceiptId": graph.tool_receipt.receipt_id.as_str(),
+        }
+    }))
+    .1
+}
+
+fn assert_positive_durable_truth(artifacts: &RuntimeArtifacts, graph: &RuntimeReadOwnerGraph<'_>) {
     let final_event = artifacts.final_event();
     assert_eq!(
         final_event.payload["status"],
@@ -577,14 +858,52 @@ fn assert_positive_durable_truth(artifacts: &RuntimeArtifacts) {
         vec![artifacts.proposals[0].id.clone()]
     );
     assert_eq!(artifacts.proposals[0].after["content"], CANDIDATE_TEXT);
+    assert_eq!(
+        artifacts.proposals[0].after["sourceRunId"],
+        artifacts.run.id
+    );
+    assert_eq!(
+        artifacts.proposals[0].after["sourceActionId"],
+        graph.action.id
+    );
+    assert_eq!(
+        artifacts.proposals[0].after["sourceObservationId"],
+        graph.observation.id
+    );
+    assert_eq!(
+        artifacts.proposals[0].after["sourceOutputReceiptDigest"],
+        graph.output_receipt.public_digest()
+    );
+    assert_eq!(
+        artifacts.proposals[0].after["sourceToolReceiptId"],
+        graph.tool_receipt.receipt_id
+    );
+    assert_eq!(
+        artifacts.proposals[0].after["candidateDigest"],
+        expected_structured_candidate_digest(graph),
+        "candidateDigest must bind the exact structured slice and canonical owner graph"
+    );
+    assert_eq!(
+        graph
+            .queue_action
+            .observation_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("toolExecutionReceipt"))
+            .and_then(|receipt| receipt.get("receiptId")),
+        Some(&artifacts.proposals[0].after["sourceToolReceiptId"]),
+    );
+    assert_eq!(
+        graph.transcript_observation.metadata["executorActionId"],
+        artifacts.proposals[0].after["sourceActionId"]
+    );
     assert!(
         !artifacts.serialized_persistence().contains(RAW_SENTINEL),
-        "raw observation body leaked into AgentRun/event/final receipt/audit/proposal persistence"
+        "raw observation body leaked into AgentRun/event/final receipt/proposal persistence or the global MCP-audit counterexample scan"
     );
 }
 
 #[test]
-fn d051_authority_inventory_requires_one_production_admission_seam_and_no_raw_preview_router() {
+fn d051_admission_seam_absence_guard_requires_one_definition_and_one_product_caller() {
     let core_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../openlife-core/src/agent/structured_memory_evidence.rs");
     let core = std::fs::read_to_string(&core_path).unwrap_or_else(|error| {
@@ -606,7 +925,7 @@ fn d051_authority_inventory_requires_one_production_admission_seam_and_no_raw_pr
             .map(|source| source.matches("admit_structured_memory_evidence(").count())
             .sum::<usize>(),
         2,
-        "one definition and one product caller are the complete D051 authority graph"
+        "source counting is an absence guard only; runtime owner binding proves behavioral authority"
     );
     assert!(!stage.contains("extract_main_chat_memory_candidates"));
     assert!(!stage.contains(".get(\"preview\")"));
@@ -623,11 +942,11 @@ async fn d051_buffered_runtime_uses_real_http_event_proposal_and_canonical_store
         .await
         .expect("D051 buffered runtime");
     let artifacts = load_artifacts(&state, &operation_id).await;
-    assert_real_durable_file_read_receipt(&artifacts, &operation_id);
+    let owner_graph = assert_real_durable_file_read_owner_graph(&artifacts, &operation_id);
     assert_one_post_observation_provider_call(&capture);
     assert_eq!(result["status"], "completed_with_pending_items");
 
-    assert_positive_durable_truth(&artifacts);
+    assert_positive_durable_truth(&artifacts, &owner_graph);
     assert_eq!(canonical_state_digest(&state).await, before);
 
     let retry = run_buffered(&state, &operation_id, "d051-buffered-positive")
@@ -678,6 +997,9 @@ async fn d051_buffered_and_streaming_project_identical_durable_evidence_truth() 
     assert_one_post_observation_provider_call(&streaming_capture);
     let buffered = load_artifacts(&buffered_state, &buffered_operation).await;
     let streaming = load_artifacts(&streaming_state, &streaming_operation).await;
+    let buffered_graph = assert_real_durable_file_read_owner_graph(&buffered, &buffered_operation);
+    let streaming_graph =
+        assert_real_durable_file_read_owner_graph(&streaming, &streaming_operation);
     for field in [
         "status",
         "memoryEvidenceStatus",
@@ -692,8 +1014,8 @@ async fn d051_buffered_and_streaming_project_identical_durable_evidence_truth() 
             "buffered/streaming field drift: {field}"
         );
     }
-    assert_positive_durable_truth(&buffered);
-    assert_positive_durable_truth(&streaming);
+    assert_positive_durable_truth(&buffered, &buffered_graph);
+    assert_positive_durable_truth(&streaming, &streaming_graph);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
