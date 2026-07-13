@@ -83,7 +83,10 @@ rather than treating non-empty identifiers as evidence:
 - proposal truth from `ProposalStore`;
 - minimized runtime truth from `AgentRunStore`;
 - the canonical AgentRun action, observation and `BoundContentReceipt`;
-- the exact persisted `ToolExecutionReceipt` projection from `ActionQueueStore`;
+- the authenticated canonical replay authority reloaded by `ActionQueueStore`;
+- the persisted `ToolExecutionReceipt` JSON as a descriptive terminal fact,
+  never as execution authority because serde intentionally drops its
+  process-local action authenticity;
 - the same queue action and transcript observation from `TaskSessionStore`;
 - canonical before/after truth from `MemoryLifecycleStore`, LifeModel and the
   HS asset-authority registry.
@@ -94,13 +97,26 @@ The positive Proposal must copy exact values from that graph for
 must be the digest of the exact structured slice plus those canonical owner
 identities; an arbitrary non-empty digest is not sufficient. The durable tool
 events and ActionQueue projection must all identify `manifestId=file.read` and
-the same exact ToolExecutionReceipt `receiptId`. Separately, AgentRun's
-minimized `output.receiptId` must equal its own `BoundContentReceipt.receiptId`;
-the two receipt types are deliberately not conflated.
+the same exact canonical replay-authority `receiptId`. The replay authority is
+also required to bind the queue/executor action, run/session, manifest,
+recomputed governed-input digest and length, request digest, effect,
+idempotency and complete terminal state. Separately, AgentRun's minimized
+`output.receiptId` must equal its own `BoundContentReceipt.receiptId`, and that
+ID must differ from the ToolExecutionReceipt/replay-authority ID; the two
+receipt types are deliberately not conflated.
+
+All terminal owner lookups are exact-one checks. A missing or duplicate
+`final_delivery.created`, `action.completed`, `observation.created`, prepared,
+started or terminal tool event fails the contract before any field is credited.
 
 The full observation sentinel must be absent from every serialized durable
 artifact above. Its presence in the transient captured HTTP request is
 intentional and is not persistence credit.
+
+The sentinel lives only in
+`src-tauri/test-fixtures/d051_structured_evidence_private.md`. The shared
+`d051_useful_memory.md` fixture retains its pre-D051 RED contents so the new
+leak counterexample cannot reshape existing command-surface behavior.
 
 `file.read` is a built-in ToolGateway execution and does not produce an MCP
 audit record. `McpAuditStore` is therefore scanned only as a global
@@ -152,8 +168,9 @@ the unfulfilled part of the request.
   authority.
 - The runtime positive cases are the behavioral authority proof: they rebuild
   the exact AgentRun/action/observation/BoundContentReceipt,
-  ToolExecutionReceipt/event, ActionQueue and transcript owner graph, then
-  require the Proposal fields and candidate digest to match that graph exactly.
+  canonical replay authority/ToolExecutionReceipt facts/durable events,
+  ActionQueue and transcript owner graph, then require the Proposal fields and
+  candidate digest to match that graph exactly.
 - The existing
   `d051_legacy_implicit_stable_fact_authority_is_deleted` remains the direct
   regression contract for removal of handwritten stable-fact authority.
@@ -200,7 +217,8 @@ Retry uses the same operation UUID and must reuse one durable final receipt and
 one Proposal without another provider request. Concurrent calls use the same
 operation UUID and require one execution owner; the competing caller may
 safely reuse the durable final or receive a typed owner/in-progress
-disposition. Cancellation blocks the real final provider response at a
+disposition. The concurrent join itself is bounded so a deadlock is a test
+failure rather than an indefinitely hung gate. Cancellation blocks the real final provider response at a
 barrier, invokes the real cancellation registry, then releases late response
 bytes and proves no late proposal or canonical commit.
 

@@ -1,4 +1,2 @@
-D051_RAW_OBSERVATION_SENTINEL_START
 The user works in UTC.
 Going forward, schedule reminders in UTC.
-D051_RAW_OBSERVATION_SENTINEL_END
