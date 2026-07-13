@@ -114,30 +114,29 @@ async fn pause_main_chat_before_cancellation_registration_for_test(_chat_session
 
 #[cfg(test)]
 #[derive(Clone)]
-struct MainChatFinalOwnerSnapshotBarrier {
+struct MainChatTerminalSealingBarrier {
     reached: Arc<tokio::sync::Barrier>,
     release: Arc<tokio::sync::Barrier>,
 }
 
 #[cfg(test)]
-fn main_chat_final_owner_snapshot_barrier_slot(
-) -> &'static std::sync::Mutex<std::collections::HashMap<String, MainChatFinalOwnerSnapshotBarrier>>
-{
+fn main_chat_terminal_sealing_barrier_slot(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, MainChatTerminalSealingBarrier>> {
     static SLOT: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, MainChatFinalOwnerSnapshotBarrier>>,
+        std::sync::Mutex<std::collections::HashMap<String, MainChatTerminalSealingBarrier>>,
     > = std::sync::OnceLock::new();
     SLOT.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
 #[cfg(test)]
-pub(crate) struct MainChatFinalOwnerSnapshotBarrierGuard {
+pub(crate) struct MainChatTerminalSealingBarrierGuard {
     operation_id: String,
 }
 
 #[cfg(test)]
-impl Drop for MainChatFinalOwnerSnapshotBarrierGuard {
+impl Drop for MainChatTerminalSealingBarrierGuard {
     fn drop(&mut self) {
-        main_chat_final_owner_snapshot_barrier_slot()
+        main_chat_terminal_sealing_barrier_slot()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&self.operation_id);
@@ -145,27 +144,27 @@ impl Drop for MainChatFinalOwnerSnapshotBarrierGuard {
 }
 
 #[cfg(test)]
-pub(crate) fn install_main_chat_final_owner_snapshot_barrier_for_test(
+pub(crate) fn install_main_chat_terminal_sealing_barrier_for_test(
     operation_id: &str,
 ) -> (
-    MainChatFinalOwnerSnapshotBarrierGuard,
+    MainChatTerminalSealingBarrierGuard,
     Arc<tokio::sync::Barrier>,
     Arc<tokio::sync::Barrier>,
 ) {
     let reached = Arc::new(tokio::sync::Barrier::new(2));
     let release = Arc::new(tokio::sync::Barrier::new(2));
-    main_chat_final_owner_snapshot_barrier_slot()
+    main_chat_terminal_sealing_barrier_slot()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(
             operation_id.to_string(),
-            MainChatFinalOwnerSnapshotBarrier {
+            MainChatTerminalSealingBarrier {
                 reached: Arc::clone(&reached),
                 release: Arc::clone(&release),
             },
         );
     (
-        MainChatFinalOwnerSnapshotBarrierGuard {
+        MainChatTerminalSealingBarrierGuard {
             operation_id: operation_id.to_string(),
         },
         reached,
@@ -174,8 +173,8 @@ pub(crate) fn install_main_chat_final_owner_snapshot_barrier_for_test(
 }
 
 #[cfg(test)]
-async fn pause_main_chat_after_final_owner_snapshot_for_test(operation_id: &str) {
-    let barrier = main_chat_final_owner_snapshot_barrier_slot()
+async fn pause_main_chat_at_terminal_sealing_for_test(operation_id: &str) {
+    let barrier = main_chat_terminal_sealing_barrier_slot()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(operation_id)
@@ -4203,6 +4202,10 @@ async fn persist_openlife_turn_final_delivery_receipt(
     kernel_event_count: usize,
     durable_event_count: usize,
 ) -> Result<MainChatAgentDurableEvent, String> {
+    // The D055 linearization boundary begins before any mutable owner head is
+    // read. A future durable epoch must already be SEALING at this point.
+    #[cfg(test)]
+    pause_main_chat_at_terminal_sealing_for_test(task_session_id).await;
     let assistant_message = ChatMessage {
         role: "assistant".into(),
         content: result.reply.clone(),
@@ -4463,9 +4466,6 @@ async fn persist_openlife_turn_final_delivery_receipt(
     for (field, value) in owner_graph_fields {
         payload_object.insert(field.into(), value);
     }
-
-    #[cfg(test)]
-    pause_main_chat_after_final_owner_snapshot_for_test(task_session_id).await;
 
     crate::main_chat_event_stream::append_main_chat_agent_runtime_event(
         state,

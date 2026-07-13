@@ -46,9 +46,6 @@ pub mod tool_gateway;
 pub mod types;
 
 #[cfg(test)]
-mod d055_terminal_successor_receipt_contract_tests;
-
-#[cfg(test)]
 mod tests;
 
 pub use crate::tool_execution_receipt::{

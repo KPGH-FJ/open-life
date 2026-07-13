@@ -46,6 +46,8 @@ The shipped product must have:
 - `plans/openlife_backend_remediation_v4_scenarios.json`
 - `plans/openlife_backend_remediation_v4_scenario_waivers.json`
 - `plans/openlife_backend_remediation_v4_phase0_evidence.md`
+- `plans/openlife_backend_d055_terminal_owner_red_matrix.md` (D055 executable
+  RED-oracle evidence only; not a production implementation claim)
 - `plans/adr/0014-explicit-user-memory-write-lane.md`
 - `plans/adr/0015-transient-state-command-lane.md`
 
