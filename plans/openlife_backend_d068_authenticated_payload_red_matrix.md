@@ -25,10 +25,10 @@ the sole format authority. Strict decoding happens before `McpLogEntry` or
 | Valid current fixture | GREEN | The test fixture is forced through the same current envelope encoder; a blanket reject cannot green the negative tests. |
 | Source-backed version-zero legacy payload | GREEN | Real historical raw ciphertext in the existing migration format migrates transactionally and remains readable after restart. |
 | Legacy 0 -> current 1 column flip | RED for arguments and export/result | Changing only plaintext metadata cannot make legacy ciphertext current or expose raw plaintext. |
-| Strict receipt schema table | RED | Wrong role/kind, `payloadStored`, value type, byte type/range, digest, missing and unknown fields all fail. |
-| Corrupt current ciphertext table | RED for arguments and result | Authentication failure in either current-format column fails both list and export without a placeholder success. |
-| Envelope role/version/column table | RED | Wrong authenticated format version, swapped columns, and column/envelope mismatch fail. |
-| Corrupt second legacy row | RED | Authentication failure aborts the whole migration; the first row is not partially rewritten. |
+| Strict receipt schema table | RED | Both roles reject every missing required field, every required-field type mismatch, wrong role/kind, `payloadStored`, value type, byte range, digest, and unknown fields. |
+| Corrupt current ciphertext table | RED for arguments and result | A same-length, valid-Base64 bit flip in either current-format AEAD ciphertext fails both list and export without a placeholder success. |
+| Envelope role/version/column table | RED | Independently wrong authenticated roles, wrong envelope or column versions, a matching unsupported envelope/column version, and swapped columns all fail. |
+| Corrupt second legacy row | RED | A same-length, valid-Base64 authenticated-ciphertext bit flip aborts the whole migration; the first row is not partially rewritten. |
 | SQLite family snapshot | RED on every invalid path | Main, WAL, SHM and rollback-journal presence, bytes and stable metadata remain exact. |
 | Real product bootstrap legal current payload | GREEN | The shipped bootstrap keeps both key-reference and audit stores canonical, preserves minimized reads, and performs no credential mutation. |
 | Real product bootstrap | RED | A version-flipped row leaves the valid key-reference store healthy and byte-exact, creates/deletes no secret, marks the audit store unavailable, and blocks provider/tool effects. |

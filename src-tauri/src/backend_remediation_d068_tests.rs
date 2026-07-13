@@ -76,6 +76,19 @@ struct ArtifactReceipt {
     sha256: String,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct D068BootstrapAttackObservation {
+    key_reference_mode: Option<PersistenceStoreMode>,
+    audit_mode: Option<PersistenceStoreMode>,
+    audit_read_failed: bool,
+    raw_payload_absent: bool,
+    effects_blocked: bool,
+    keyring_unchanged: bool,
+    keyring_read_failed: bool,
+    secret_mutations: (Vec<String>, Vec<String>),
+    database_family_unchanged: bool,
+}
+
 fn artifact_family(path: &Path) -> Vec<ArtifactReceipt> {
     let parent = path.parent().unwrap();
     let base = path.file_name().and_then(|name| name.to_str()).unwrap();
@@ -239,8 +252,8 @@ fn d068_bootstrap_version_flip_preserves_key_authority_and_fails_closed() {
         .state
         .mcp_audit_store
         .try_lock()
-        .expect("D068 audit store lock is not held")
-        .list_logs(10);
+        .map_err(|error| error.to_string())
+        .and_then(|store| store.list_logs(10).map_err(|error| error.to_string()));
     let audit_json = audit_read
         .as_ref()
         .ok()
@@ -249,29 +262,45 @@ fn d068_bootstrap_version_flip_preserves_key_authority_and_fails_closed() {
         .unwrap_or_default()
         .unwrap_or_default();
     let persistence = result.state.persistence_coordinator.snapshot();
-    let observation = (
-        store_mode(&result, "McpAuditKeyReferenceStore"),
-        store_mode(&result, "McpAuditStore"),
-        audit_read.is_err(),
-        !audit_json.contains(RAW_ARGUMENT_SENTINEL) && !audit_json.contains(RAW_RESULT_SENTINEL),
-        !persistence.provider_dispatch_allowed && !persistence.tool_dispatch_allowed,
-        std::fs::read(&keyring_path).unwrap() == keyring_bytes,
-        secrets.mcp_mutations(),
-        artifact_family(&database_path) == artifacts_before,
-    );
+    let observed_mode = |name: &str| {
+        persistence
+            .stores
+            .iter()
+            .find(|health| health.store == name)
+            .map(|health| health.mode)
+    };
+    let keyring_after = std::fs::read(&keyring_path);
+    let secret_mutations = secrets.mcp_mutations();
+    let artifacts_after = artifact_family(&database_path);
+    let observation = D068BootstrapAttackObservation {
+        key_reference_mode: observed_mode("McpAuditKeyReferenceStore"),
+        audit_mode: observed_mode("McpAuditStore"),
+        audit_read_failed: audit_read.is_err(),
+        raw_payload_absent: !audit_json.contains(RAW_ARGUMENT_SENTINEL)
+            && !audit_json.contains(RAW_RESULT_SENTINEL),
+        effects_blocked: !persistence.provider_dispatch_allowed
+            && !persistence.tool_dispatch_allowed,
+        keyring_unchanged: keyring_after
+            .as_ref()
+            .is_ok_and(|bytes| bytes == &keyring_bytes),
+        keyring_read_failed: keyring_after.is_err(),
+        secret_mutations,
+        database_family_unchanged: artifacts_after == artifacts_before,
+    };
 
     assert_eq!(
         observation,
-        (
-            PersistenceStoreMode::ReadWriteCanonical,
-            PersistenceStoreMode::Unavailable,
-            true,
-            true,
-            true,
-            true,
-            (Vec::new(), Vec::new()),
-            true,
-        ),
+        D068BootstrapAttackObservation {
+            key_reference_mode: Some(PersistenceStoreMode::ReadWriteCanonical),
+            audit_mode: Some(PersistenceStoreMode::Unavailable),
+            audit_read_failed: true,
+            raw_payload_absent: true,
+            effects_blocked: true,
+            keyring_unchanged: true,
+            keyring_read_failed: false,
+            secret_mutations: (Vec::new(), Vec::new()),
+            database_family_unchanged: true,
+        },
         "D068 RED: a version-flipped legacy ciphertext must not activate product audit truth or mutate the valid key-reference owner, secret, or SQLite family"
     );
 }
