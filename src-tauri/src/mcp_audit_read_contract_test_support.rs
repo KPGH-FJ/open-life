@@ -1,6 +1,55 @@
+use crate::persistence_coordinator::{PersistenceCoordinator, PersistenceStoreMode};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+
+pub(crate) const D065_AUDIT_KEY_REFERENCE_STORE: &str = "McpAuditKeyReferenceStore";
+pub(crate) const D065_AUDIT_STORE: &str = "McpAuditStore";
+pub(crate) const D065_UNRELATED_STORE: &str = "MemoryStore";
+
+pub(crate) fn assert_d065_store_mode(
+    coordinator: &PersistenceCoordinator,
+    store: &str,
+    expected: PersistenceStoreMode,
+) {
+    let snapshot = coordinator.snapshot();
+    let actual = snapshot
+        .stores
+        .iter()
+        .find(|health| health.store == store)
+        .unwrap_or_else(|| panic!("D065 fixture did not register exact store owner {store}"))
+        .mode;
+    assert_eq!(
+        actual, expected,
+        "D065 fixture must prove the exact owner mode for {store}"
+    );
+}
+
+pub(crate) fn assert_d065_composite_read_owners(
+    coordinator: &PersistenceCoordinator,
+    key_reference_mode: PersistenceStoreMode,
+    audit_store_mode: PersistenceStoreMode,
+) {
+    assert_d065_store_mode(
+        coordinator,
+        D065_AUDIT_KEY_REFERENCE_STORE,
+        key_reference_mode,
+    );
+    assert_d065_store_mode(coordinator, D065_AUDIT_STORE, audit_store_mode);
+    for owner in [D065_AUDIT_KEY_REFERENCE_STORE, D065_AUDIT_STORE] {
+        assert!(
+            coordinator.require_trusted_read(owner).is_ok(),
+            "D065 composite audit-read owner {owner} must remain independently readable"
+        );
+    }
+}
+
+pub(crate) fn assert_d065_effects_blocked_independently(coordinator: &PersistenceCoordinator) {
+    assert!(
+        coordinator.require_effects_allowed().is_err(),
+        "the fixture must independently prove that global effects are blocked"
+    );
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SqliteFileSnapshot {
