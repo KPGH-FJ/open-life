@@ -462,6 +462,24 @@
       "acceptance": ["Every persisted enum has an explicit one-to-one database parser and unknown values fail before typed materialization or owner digest", "Present-invalid timestamps fail instead of becoming None or the current time", "All legal historical enum and timestamp values retain deterministic round-trip", "Current schema constraints, legacy schemas and read-only recovery paths are audited separately", "No D054 or D059 evidence is reused as closure credit for this owner set"],
       "deletion_targets": ["Patch unknown operation, source, risk and status defaults", "Proposal unknown type and risk defaults", "Malformed Patch and Proposal optional timestamps to absence", "MemoryLifecycle unknown status to Candidate and materialization status to NotRequired on persisted reads", "MemoryLifecycle malformed timestamp to Utc::now"],
       "immutable_fingerprint": "42d9a7c8534f0c2ec7463e2853dc246f8c680736a099dfeb9eff9a623a521ed1"
+    },
+    {
+      "id": "BR4-D062",
+      "discovered_at": "2026-07-13T17:10:00+08:00",
+      "severity_at_discovery": "P1",
+      "classification": "evidence_gap_and_scope_correction",
+      "related_frozen_findings": ["P1-02", "P1-05", "P1-17", "P2-03"],
+      "why_not_fully_subsumed": "BR4-D058 correctly identified a missing terminal owner, but its initial acceptance grouped a missing file with lexical traversal as pre-ToolGateway admission failures. A missing file is known only after canonicalize, metadata or read touches the operating system, so keeping that observation outside ToolGateway would preserve a second product tool executor while making the new tests green.",
+      "title": "D058 conflated lexical admission blockers with filesystem execution failures",
+      "observed_symptom": "Workspace path traversal and a missing workspace file currently fail before ToolGateway and share a synthetic failed-before-dispatch path even though the first is a pure policy decision and the second is a real filesystem execution result.",
+      "root_cause_hypothesis": "Workspace tool admission, path-policy validation and actual filesystem I/O were collapsed in Kernel and WorkspaceFileResolver, and the first D058 evidence contract copied that implementation boundary instead of enforcing ToolGateway as the only product execution authority.",
+      "affected_surfaces": ["src-tauri/src/main_chat_kernel.rs", "src-tauri/src/workspace_file_resolver.rs", "openlife-core/src/agent/action_executor/tool_executor.rs", "openlife-core/src/agent/action_executor/execution_tools.rs", "openlife-core/src/agent/tool_gateway.rs", "src-tauri/src/main_chat_turn_runtime.rs", "plans/openlife_backend_remediation_v4_discovered_findings.json", "plans/openlife_backend_remediation_v4_discovered_traceability.json"],
+      "broken_invariants": ["I01", "I05", "I08", "I12", "I13"],
+      "target_phase": "Phase 2, Phase 4 and Phase 5",
+      "owner_module": "ToolGateway filesystem adapter and identity-keyed final owner binding",
+      "acceptance": ["Pure lexical traversal, absolute-path and outside-workspace policy violations may fail before ToolGateway with a typed ActionQueue blocker and no ToolExecutionReceipt or ToolEvent", "Canonicalize, metadata, open and read operations occur only inside ToolGateway or its bounded filesystem adapter", "A missing file produces one runtime-bound failed ToolExecutionReceipt, exactly one matching tool.failed terminal event and a versioned identity-keyed final owner binding", "Final persistence and recovery match each action to its owner by stable identity; missing, duplicate, conflicting and unknown bindings fail closed without positional zip or count inference", "Quoted and successful workspace reads retain real ToolGateway lifecycle, and legacy version-one finals containing real tool owners remain recoverable"],
+      "deletion_targets": ["Filesystem canonicalize, metadata, open or read outside ToolGateway", "Missing-file pre-gateway no-receipt hypothesis", "Synthetic failed_before_dispatch ToolExecutionReceipt for lexical policy blockers", "Positional tool owner zip or count recovery model"],
+      "immutable_fingerprint": "971e183ba25d91505eae948debdf3deecfad4c338ff7281ec0c9d858bd250c29"
     }
   ]
 }

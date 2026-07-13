@@ -321,12 +321,12 @@
       "closure_state": "open",
       "evidence": {
         "reproduction": ["test_run:d051_failed_or_quoted_read_creates_zero_memory_proposals-1-executed-RED-turn_final_tool_terminal_owner_missing-at-08a7b52", "test_run:main_chat_kernel_goal_3_path_traversal_send_stream_blocks_filesystem_read-1-executed-same-RED-at-08a7b52", "source_trace:pre-gateway-blocker-to-non-runtime-receipt-to-excluded-regular-projection-to-final-missing-owner"],
-        "failing_test": ["existing:d051_failed_or_quoted_read_creates_zero_memory_proposals", "existing:main_chat_kernel_goal_3_path_traversal_send_stream_blocks_filesystem_read", "test_defined:missing-file-pre-gateway-blocker-has-no-forged-tool-receipt-and-final-recovers", "test_defined:quoted-file-real-gateway-receipt-has-one-terminal-and-zero-proposals", "test_defined:runtime-issued-receipt-without-unique-terminal-fails-closed"],
+        "failing_test": ["existing:d051_failed_or_quoted_read_creates_zero_memory_proposals", "existing:main_chat_kernel_goal_3_path_traversal_send_stream_blocks_filesystem_read", "superseded_by_D062:missing-file-pre-gateway-blocker-has-no-forged-tool-receipt-and-final-recovers", "test_defined:quoted-file-real-gateway-receipt-has-one-terminal-and-zero-proposals", "test_defined:runtime-issued-receipt-without-unique-terminal-fails-closed"],
         "positive": ["test_run:d051_not_useful_read_observation_never_creates_memory_proposal-PASS", "test_run:d051_useful_proposal_body_and_evidence_are_bound_to_canonical_observation_receipt-PASS"],
         "counterfactual": ["caller-created-or-serde-receipt-cannot-gain-ToolEvent-admission", "live-runtime-receipt-without-one-matching-terminal-cannot-recover", "duplicate-or-conflicting-terminal-remains-rejected", "pre-gateway-blocker-remains-visible-in-ActionQueue-and-final-blocker-truth"],
-        "deletion_or_absence": ["deletion_required:failed_before_dispatch-in-blocked_kernel_read_tool_execution", "deletion_required:missing-receipt-fake-tool-owner-fallback", "deletion_required:positional-owner-count-recovery-assumption", "absence_required:pre-gateway-blocker-has-no-synthetic-toolExecutionReceipt"],
-        "capability_non_regression": ["missing-file-and-traversal-send-stream-return-structured-blocker", "quoted-and-successful-reads-keep-ToolGateway-lifecycle", "failed-and-quoted-reads-produce-zero-Proposal", "durable-final-recovery-remains-idempotent"],
-        "live_boundary": ["quoted-case-not-directly-executed-because-combined-test-stops-at-missing-file-RED", "no-production-fix-or-new-D058-RED-contract-implemented", "D055-terminal-seal-does-not-create-a-missing-tool-owner", "external-live-provider-credit-not-applicable"]
+        "deletion_or_absence": ["deletion_required:failed_before_dispatch-in-blocked_kernel-read-tool-execution-scope-corrected-by-D062", "deletion_required:missing-receipt-fake-tool-owner-fallback", "deletion_required:positional-owner-count-recovery-assumption", "absence_required:pure-lexical-pre-gateway-blocker-has-no-synthetic-toolExecutionReceipt"],
+        "capability_non_regression": ["missing-file-and-traversal-send-stream-return-structured-blocker-with-distinct-owner-contracts-per-D062", "quoted-and-successful-reads-keep-ToolGateway-lifecycle", "failed-and-quoted-reads-produce-zero-Proposal", "durable-final-recovery-remains-idempotent"],
+        "live_boundary": ["D062-supersedes-only-the-D058-missing-file-pre-gateway-hypothesis", "quoted-case-not-directly-executed-because-combined-test-stops-at-missing-file-RED", "no-production-fix-or-approved-D058-D062-RED-contract-implemented", "D055-terminal-seal-does-not-create-a-missing-tool-owner", "external-live-provider-credit-not-applicable"]
       },
       "independent_review": {"reviewer":"d058_terminal_tool_owner_baseline","decision":"root-cause-confirmed-independent-finding","evidence_refs":["baseline-08a7b52-exact-RED", "path-traversal-corroborating-RED", "two-successful-read-controls-GREEN", "source-map:resolver-kernel-action-queue-runtime-event-final-recovery"]}
     },
@@ -383,6 +383,24 @@
         "live_boundary": ["partial-source-map-only-full-non-JSON-persistence-audit-not-complete", "MemoryLifecycle-enum-injection-is-constrained-on-current-schema-but-legacy-and-read-only-reachability-open", "timestamp-corruption-is-directly-reachable", "D054-and-D059-provide-zero-closure-credit", "severity-remains-P1-suspected"]
       },
       "independent_review": {"reviewer":"d057_json_fallback_inventory","decision":"suspected-adjacent-persisted-defaults-full-audit-required","evidence_refs":["source-map:Patch-Proposal-MemoryLifecycle", "boundary:D054-owner-set-excluded", "boundary:current-schema-CHECK-versus-legacy"]}
+    },
+    {
+      "id": "BR4-D062",
+      "current_severity": "P1",
+      "triage_state": "root_cause_confirmed",
+      "implementation_state": "not_started",
+      "verification_state": "none",
+      "closure_state": "open",
+      "evidence": {
+        "reproduction": ["source_trace:Kernel-canonicalizes-workspace-file-before-ToolGateway", "source_trace:missing-file-and-traversal-share-failed-before-dispatch-construction", "source_trace:ToolGateway-execution-tools-own-metadata-and-read-after-admission", "evidence_correction:D058-initial-test-contract-preserved-second-filesystem-executor"],
+        "failing_test": ["test_defined:lexical-traversal-blocks-before-gateway-without-receipt-or-terminal", "test_defined:missing-file-enters-gateway-and-owns-one-failed-receipt-and-tool-failed-terminal", "test_defined:final-owner-bindings-match-actions-by-identity-not-position-or-count", "test_defined:unknown-duplicate-or-conflicting-action-owner-binding-fails-closed"],
+        "positive": ["source_proof:ToolGateway-already-owns-typed-tool-lifecycle-for-admitted-execution", "capability_control:quoted-and-successful-workspace-read-have-real-tool-owner"],
+        "counterfactual": ["lexical-policy-rejection-never-gains-a-synthetic-runtime-receipt", "operating-system-file-not-found-can-never-be-reported-as-not-attempted", "legacy-version-one-real-tool-final-remains-recoverable"],
+        "deletion_or_absence": ["deletion_required:filesystem-canonicalize-metadata-open-read-outside-ToolGateway", "deletion_required:missing-file-pre-gateway-no-receipt-hypothesis", "deletion_required:positional-tool-owner-zip-or-count-recovery"],
+        "capability_non_regression": ["missing-file-and-traversal-both-return-truthful-structured-failures-with-distinct-authority", "quoted-and-successful-file-read-remain-available", "failed-and-quoted-reads-produce-zero-Proposal", "durable-final-recovery-remains-idempotent"],
+        "live_boundary": ["scope-correction-registered-before-production-change", "D058-RED-tests-being-rewritten-to-D062-boundary", "no-production-fix-implemented", "external-live-provider-credit-not-applicable"]
+      },
+      "independent_review": {"reviewer":"root-architecture-audit","decision":"root-cause-confirmed-scope-correction-required","evidence_refs":["invariant:I05-all-product-tool-calls-through-ToolGateway", "counterfactual:missing-file-requires-operating-system-observation", "anti-hallucination:do-not-green-current-boundary"]}
     }
   ],
   "supplemental_scenarios": [
@@ -440,6 +458,7 @@
     {"id":"DISC-058","finding_ids":["BR4-D058"],"kind":"pre_gateway_blocker_and_tool_terminal_owner","scenario":"Missing workspace files and traversal are pre-ToolGateway admission failures that return a structured blocker, failed ActionQueue state, zero Proposal and no synthetic ToolExecutionReceipt or ToolEvent owner; an existing quoted file enters real ToolGateway and owns exactly one terminal, while any runtime-issued receipt with an absent, duplicate or conflicting terminal fails closed.","frozen_denominator_credit":false},
     {"id":"DISC-059","finding_ids":["BR4-D059"],"kind":"canonical_json_corruption_and_projection_truth","scenario":"Malformed required or present-optional JSON in Transcript, Patch, Proposal, Memory or MemoryLifecycle fails before typed materialization, digest, effect or version advance; the original bytes and whole migration batch remain unchanged, while derived views expose degraded and rebuild rather than healthy empty truth.","frozen_denominator_credit":false},
     {"id":"DISC-060","finding_ids":["BR4-D060"],"kind":"plugin_enable_authority_corruption","scenario":"After a user disables a manifest-default-enabled plugin, malformed or unreadable enabled_overrides.json cannot alias a missing file or restore enabled state; the registry exposes unavailable, preserves the bytes, and registers no executable plugin tool or skill, while valid overrides still survive restart.","frozen_denominator_credit":false},
-    {"id":"DISC-061","finding_ids":["BR4-D061"],"kind":"non_json_persisted_enum_and_timestamp_corruption","scenario":"Unknown persisted Patch, Proposal and MemoryLifecycle enums and present-invalid timestamps fail before typed materialization or owner digest across current, legacy and read-only paths; every legal historical value round-trips and neither D054 nor D059 evidence counts as closure.","frozen_denominator_credit":false}
+    {"id":"DISC-061","finding_ids":["BR4-D061"],"kind":"non_json_persisted_enum_and_timestamp_corruption","scenario":"Unknown persisted Patch, Proposal and MemoryLifecycle enums and present-invalid timestamps fail before typed materialization or owner digest across current, legacy and read-only paths; every legal historical value round-trips and neither D054 nor D059 evidence counts as closure.","frozen_denominator_credit":false},
+    {"id":"DISC-062","finding_ids":["BR4-D062"],"kind":"filesystem_tool_admission_execution_and_owner_identity","scenario":"A lexical traversal is rejected before ToolGateway with a typed ActionQueue blocker and no receipt or terminal; a missing file reaches ToolGateway and owns one failed receipt plus one tool.failed terminal; quoted and successful reads keep real tool lifecycle, and final recovery matches every action-owner binding by stable identity while unknown, duplicate and conflicting bindings fail closed.","frozen_denominator_credit":false}
   ]
 }
