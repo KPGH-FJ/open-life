@@ -315,6 +315,7 @@ pub fn extract_main_chat_memory_candidates(user_text: &str) -> Vec<MainChatMemor
             && !future_rule
             && !identity_or_preference
             && !is_life_event_expression(&lower)
+            && !hypothetical_only
             && !is_quoted_or_structured_content(&compact)
             && is_supported_stable_user_fact_expression(&lower)
         {
@@ -1274,6 +1275,8 @@ mod tests {
             "Cargo.toml often changes. Going forward, confirm that file format.",
             "The user worked in UTC yesterday.",
             "If the user works in UTC, then schedule reminders in UTC.",
+            "If the user uses UTC, then plan reminders in UTC.",
+            "如果用户使用 UTC，就按 UTC 安排提醒。",
             "> The user usually works in UTC.",
             "\"The user works in UTC\"",
             "{\"content\":\"The user usually works in UTC\"}",
