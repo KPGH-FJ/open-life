@@ -77,6 +77,23 @@ pub struct MainChatMemoryRoutingResult {
     pub blockers: Vec<String>,
 }
 
+/// Private syntax signal for inferred stable-fact admission only. Explicit
+/// memory requests continue through the existing proposal path below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClauseAssertionMode {
+    Asserted,
+    Conditional,
+    Uncertain,
+    Question,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemoryClause {
+    text: String,
+    assertion_mode: ClauseAssertionMode,
+    source_span_id: String,
+}
+
 /// Opaque proof that the deterministic candidate router selected one exact,
 /// internal, low-risk LifeEvent candidate from the canonical user message.
 /// It is neither cloneable nor serializable and cannot be constructed by an
@@ -226,6 +243,23 @@ pub fn extract_main_chat_memory_candidates(user_text: &str) -> Vec<MainChatMemor
     let mut candidates = Vec::new();
     let mut previous_memory_spans: Vec<String> = Vec::new();
 
+    for clause in asserted_stable_user_fact_clauses(user_text) {
+        push_candidate(
+            &mut candidates,
+            &clause.source_span_id,
+            MemoryCandidateKind::SemanticUserFact,
+            MemoryDestination::MemoryProposal,
+            &clause.text,
+            &normalized_claim(&clause.text),
+            sensitivity_for_text(&clause.text),
+            "stable",
+            "implicit",
+            "retrieval_fact",
+            0.86,
+            vec!["stable_fact_supports_future_rule".into()],
+        );
+    }
+
     for (index, span) in spans.iter().enumerate() {
         let compact = compact_text(span);
         if compact.is_empty() {
@@ -308,30 +342,6 @@ pub fn extract_main_chat_memory_candidates(user_text: &str) -> Vec<MainChatMemor
                 "future_actionable",
                 0.9,
                 vec!["stable_identity_or_preference".into()],
-            );
-        }
-
-        if !explicit_memory
-            && !future_rule
-            && !identity_or_preference
-            && !is_life_event_expression(&lower)
-            && !hypothetical_only
-            && !is_quoted_or_structured_content(&compact)
-            && is_supported_stable_user_fact_expression(&lower)
-        {
-            push_candidate(
-                &mut candidates,
-                &span_id,
-                MemoryCandidateKind::SemanticUserFact,
-                MemoryDestination::MemoryProposal,
-                &compact,
-                &normalized_claim(&compact),
-                sensitivity_for_text(&compact),
-                "stable",
-                "implicit",
-                "retrieval_fact",
-                0.86,
-                vec!["stable_fact_supports_future_rule".into()],
             );
         }
 
@@ -505,6 +515,207 @@ fn push_candidate(
         confidence,
         reason_codes,
     });
+}
+
+fn asserted_stable_user_fact_clauses(user_text: &str) -> Vec<MemoryClause> {
+    let normalized = compact_text(user_text);
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+
+    parse_memory_clauses(user_text)
+        .into_iter()
+        .filter(|clause| clause.assertion_mode == ClauseAssertionMode::Asserted)
+        .filter(|clause| {
+            let lower = clause.text.to_ascii_lowercase();
+            !has_explicit_memory_marker(&lower)
+                && !is_future_rule(&lower)
+                && !is_identity_or_long_term_preference(&lower)
+                && !is_life_event_expression(&lower)
+                && !is_quoted_or_structured_content(&clause.text)
+                && is_supported_stable_user_fact_expression(&lower)
+        })
+        .collect()
+}
+
+fn parse_memory_clauses(user_text: &str) -> Vec<MemoryClause> {
+    let mut clauses = Vec::new();
+
+    for (sentence_index, (sentence, terminal_question)) in
+        split_memory_sentences(user_text).into_iter().enumerate()
+    {
+        let sentence_lower = sentence.to_ascii_lowercase();
+        let sentence_source_span_id = source_span_id(sentence_index, &sentence);
+        if terminal_question || starts_with_question_opener(&sentence_lower) {
+            push_memory_clause(
+                &mut clauses,
+                &sentence,
+                ClauseAssertionMode::Question,
+                &sentence_source_span_id,
+            );
+            continue;
+        }
+
+        let has_conditional_scope = find_conditional_opener(&sentence_lower).is_some();
+        let has_uncertain_scope = contains_uncertainty_marker(&sentence_lower);
+        let split_commas = has_conditional_scope || has_uncertain_scope;
+        let segments = sentence
+            .split(|ch| matches!(ch, ';' | '；') || (split_commas && matches!(ch, ',' | '，')))
+            .map(compact_text)
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+        let mut conditional_scope = false;
+
+        for segment in segments {
+            if conditional_scope {
+                push_memory_clause(
+                    &mut clauses,
+                    &segment,
+                    ClauseAssertionMode::Conditional,
+                    &sentence_source_span_id,
+                );
+                continue;
+            }
+
+            let lower = segment.to_ascii_lowercase();
+            if find_conditional_opener(&lower).is_some() {
+                push_memory_clause(
+                    &mut clauses,
+                    &segment,
+                    ClauseAssertionMode::Conditional,
+                    &sentence_source_span_id,
+                );
+                conditional_scope = true;
+                continue;
+            }
+
+            let assertion_mode = if contains_uncertainty_marker(&lower) {
+                ClauseAssertionMode::Uncertain
+            } else {
+                ClauseAssertionMode::Asserted
+            };
+            push_memory_clause(
+                &mut clauses,
+                &segment,
+                assertion_mode,
+                &sentence_source_span_id,
+            );
+        }
+    }
+
+    clauses
+}
+
+fn push_memory_clause(
+    clauses: &mut Vec<MemoryClause>,
+    text: &str,
+    assertion_mode: ClauseAssertionMode,
+    source_span_id: &str,
+) {
+    let text = compact_claim(text);
+    if !text.is_empty() {
+        clauses.push(MemoryClause {
+            text,
+            assertion_mode,
+            source_span_id: source_span_id.to_string(),
+        });
+    }
+}
+
+fn split_memory_sentences(user_text: &str) -> Vec<(String, bool)> {
+    let mut sentences = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+
+    for ch in user_text.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote == Some('"') {
+            current.push(ch);
+            escaped = true;
+            continue;
+        }
+
+        match (quote, ch) {
+            (None, '"' | '“') => {
+                quote = Some(ch);
+                current.push(ch);
+                continue;
+            }
+            (Some('"'), '"') | (Some('“'), '”') => {
+                quote = None;
+                current.push(ch);
+                continue;
+            }
+            _ => {}
+        }
+
+        if quote.is_none() && matches!(ch, '.' | '。' | '!' | '！' | '?' | '？' | '\n') {
+            let sentence = compact_text(&current);
+            if !sentence.is_empty() {
+                sentences.push((sentence, matches!(ch, '?' | '？')));
+            }
+            current.clear();
+        } else {
+            current.push(ch);
+        }
+    }
+
+    let sentence = compact_text(&current);
+    if !sentence.is_empty() {
+        sentences.push((sentence, false));
+    }
+    sentences
+}
+
+fn find_conditional_opener(lower: &str) -> Option<usize> {
+    let mut earliest = ["if", "whenever"]
+        .into_iter()
+        .filter_map(|word| find_ascii_word(lower, word))
+        .min();
+
+    for marker in ["如果", "假如", "若", "倘若"] {
+        if let Some(index) = lower.find(marker) {
+            earliest = Some(earliest.map_or(index, |current| current.min(index)));
+        }
+    }
+    earliest
+}
+
+fn find_ascii_word(value: &str, needle: &str) -> Option<usize> {
+    value.match_indices(needle).find_map(|(start, _)| {
+        let end = start + needle.len();
+        let before = value[..start].chars().next_back();
+        let after = value[end..].chars().next();
+        (!before.is_some_and(is_ascii_word_char) && !after.is_some_and(is_ascii_word_char))
+            .then_some(start)
+    })
+}
+
+fn is_ascii_word_char(value: char) -> bool {
+    value.is_ascii_alphanumeric() || value == '_'
+}
+
+fn starts_with_question_opener(lower: &str) -> bool {
+    [
+        "do", "does", "did", "is", "are", "was", "were", "has", "have", "had", "can", "could",
+        "would", "should", "will",
+    ]
+    .into_iter()
+    .any(|word| find_ascii_word(lower, word) == Some(0))
+}
+
+fn contains_uncertainty_marker(lower: &str) -> bool {
+    [
+        "may", "might", "could", "possible", "possibly", "perhaps", "maybe", "whether",
+    ]
+    .into_iter()
+    .any(|word| find_ascii_word(lower, word).is_some())
+        || contains_any(lower, &["是否", "可能", "也许", "或许", "大概"])
 }
 
 fn split_spans(user_text: &str) -> Vec<String> {
@@ -1288,6 +1499,70 @@ mod tests {
                 "non-durable or non-user observation became Memory: {text}"
             );
         }
+    }
+
+    #[test]
+    fn implicit_memory_admission_respects_clause_assertion_scope() {
+        for text in [
+            "If the user uses UTC, schedule reminders in UTC.",
+            "若用户使用 UTC，则按 UTC 安排提醒。",
+            "Whenever the user uses UTC, schedule reminders in UTC.",
+            "If the user uses UTC; schedule reminders in UTC.",
+            "如果用户使用 UTC；则按 UTC 安排提醒。",
+            "Does the user work in UTC?",
+            "The user may work in UTC.",
+            "The user might work in UTC.",
+            "用户是否使用 UTC？",
+            "用户可能使用 UTC。",
+            "Does the user work in UTC",
+            "Whether the user works in UTC is unclear.",
+            "The user could work in UTC.",
+            "It is possible the user works in UTC.",
+            "I work in UTC if I travel.",
+            "The user works in UTC whenever traveling.",
+        ] {
+            let result = routed(text);
+            assert!(
+                result.memory_proposal_candidate_ids.is_empty(),
+                "non-assertive clause became Memory: {text}"
+            );
+        }
+
+        let mixed = routed("I work in UTC, so if you plan reminders, use UTC.");
+        let memory_claims = mixed
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.destination == MemoryDestination::MemoryProposal)
+            .map(|candidate| {
+                assert_eq!(candidate.evidence_text, "I work in UTC");
+                assert_eq!(candidate.source_preview, "I work in UTC");
+                candidate.normalized_claim.as_str()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(memory_claims, vec!["I work in UTC"]);
+        assert!(mixed.no_op_candidate_ids.is_empty());
+
+        let explicit_other_clause = routed("I work in UTC. Remember that coffee makes me anxious.");
+        let memory_claims = explicit_other_clause
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.destination == MemoryDestination::MemoryProposal)
+            .map(|candidate| candidate.normalized_claim.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            memory_claims,
+            vec!["I work in UTC", "coffee makes me anxious"]
+        );
+
+        let structured_other_clause =
+            routed("I work in UTC. {\"content\":\"The user works in CET\"}");
+        let memory_claims = structured_other_clause
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.destination == MemoryDestination::MemoryProposal)
+            .map(|candidate| candidate.normalized_claim.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(memory_claims, vec!["I work in UTC"]);
     }
 
     #[test]
