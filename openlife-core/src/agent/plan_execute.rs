@@ -1341,6 +1341,18 @@ impl PlanExecuteSessionStore {
         Ok(store)
     }
 
+    pub fn open_read_only_existing(db_path: impl Into<PathBuf>) -> Result<Self> {
+        let db_path = db_path.into();
+        let conn = crate::sqlite_migration::open_existing_read_only(
+            &db_path,
+            "plan_execute_session_store",
+            &["plan_execute_sessions"],
+        )?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
+    }
+
     fn init_tables(&self) -> Result<()> {
         let conn = self
             .conn

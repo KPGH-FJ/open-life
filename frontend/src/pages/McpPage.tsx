@@ -31,11 +31,13 @@ import {
   listMcpAuditLogs,
   clearMcpAuditLogs,
   getPrivacyPolicy,
+  getRuntimeBuildInfo,
   type McpServerInfo,
   type McpTemplate,
   type ToolManifest,
   type McpAuditLogEntry,
   type PrivacyRule,
+  type RuntimeBuildInfo,
 } from "../tauri";
 import EmptyState from "../components/EmptyState";
 import ErrorBanner from "../components/ErrorBanner";
@@ -59,7 +61,46 @@ function resolveEnv(
   return out;
 }
 
+function parseTypedMcpManifests(value: string, serverName: string): ToolManifest[] {
+  const parsed: unknown = JSON.parse(value);
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new Error("至少需要一个 typed manifest contract");
+  }
+  for (const manifest of parsed) {
+    if (typeof manifest !== "object" || manifest === null) {
+      throw new Error("typed manifest 必须是对象");
+    }
+    const candidate = manifest as ToolManifest;
+    const source = candidate.source;
+    if (
+      typeof candidate.id !== "string" ||
+      !candidate.id.trim() ||
+      typeof candidate.name !== "string" ||
+      !candidate.name.trim() ||
+      typeof candidate.parameters !== "object" ||
+      !Array.isArray(candidate.capabilities) ||
+      candidate.capabilities.length === 0 ||
+      candidate.capabilities.some(capability => !capability.trim()) ||
+      source?.type !== "Mcp" ||
+      source.server_name !== serverName ||
+      !["read", "write", "network", "external_side_effect", "proposal_only_write"].includes(
+        candidate.action_type
+      ) ||
+      !["low", "medium", "high", "critical"].includes(candidate.risk_level) ||
+      !["low", "medium", "high", "critical"].includes(candidate.permission_level) ||
+      candidate.enabled !== true ||
+      candidate.declarative_only !== false ||
+      candidate.idempotency_contract === "unspecified"
+    ) {
+      throw new Error("typed manifest 必须完整并绑定当前 MCP Server 名称");
+    }
+  }
+  return parsed as ToolManifest[];
+}
+
 export default function McpPage() {
+  const [runtimeBuildInfo, setRuntimeBuildInfo] = useState<RuntimeBuildInfo | null>(null);
+  const [runtimeBuildInfoLoaded, setRuntimeBuildInfoLoaded] = useState(false);
   const [servers, setServers] = useState<McpServerInfo[]>([]);
   const [tools, setTools] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
@@ -68,6 +109,7 @@ export default function McpPage() {
   const [name, setName] = useState("");
   const [command, setCommand] = useState("");
   const [argsText, setArgsText] = useState("");
+  const [manifestsText, setManifestsText] = useState("");
   const [registering, setRegistering] = useState(false);
 
   const [templates, setTemplates] = useState<McpTemplate[]>([]);
@@ -81,6 +123,17 @@ export default function McpPage() {
   const [privacyRules, setPrivacyRules] = useState<PrivacyRule[]>([]);
   const [expandedLog, setExpandedLog] = useState<number | null>(null);
   const [confirmAuditCleanup, setConfirmAuditCleanup] = useState(false);
+  const arbitraryRegistrationEnabled =
+    runtimeBuildInfo?.devExtensionsEnabled === true &&
+    runtimeBuildInfo.arbitraryMcpRegistrationEnabled === true;
+  const registrationStatus = !runtimeBuildInfoLoaded
+    ? "checking"
+    : arbitraryRegistrationEnabled
+      ? "dev_only_enabled"
+      : runtimeBuildInfo?.devExtensionsEnabled === false
+        ? "disabled_by_build"
+        : "unavailable";
+  const typedTemplates = templates.filter(template => (template.manifests?.length ?? 0) > 0);
 
   const load = async () => {
     setLoading(true);
@@ -124,16 +177,36 @@ export default function McpPage() {
     load();
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    getRuntimeBuildInfo()
+      .then(info => {
+        if (active) setRuntimeBuildInfo(info);
+      })
+      .catch(() => {
+        if (active) setRuntimeBuildInfo(null);
+      })
+      .finally(() => {
+        if (active) setRuntimeBuildInfoLoaded(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const handleRegister = async () => {
-    if (!name.trim() || !command.trim()) return;
+    if (!arbitraryRegistrationEnabled || !name.trim() || !command.trim() || !manifestsText.trim())
+      return;
     const args = argsText.trim().split(/\s+/).filter(Boolean);
     setRegistering(true);
     setPageError("");
     try {
-      await registerMcpServer(name.trim(), command.trim(), args);
+      const manifests = parseTypedMcpManifests(manifestsText, name.trim());
+      await registerMcpServer(name.trim(), command.trim(), args, manifests);
       setName("");
       setCommand("");
       setArgsText("");
+      setManifestsText("");
       await load();
     } catch (e) {
       setPageError("注册失败: " + String(e));
@@ -143,6 +216,7 @@ export default function McpPage() {
   };
 
   const handleRemove = async (n: string) => {
+    if (!arbitraryRegistrationEnabled) return;
     if (!confirm(`确定要删除 MCP Server "${n}" 吗？`)) return;
     setPageError("");
     try {
@@ -154,6 +228,8 @@ export default function McpPage() {
   };
 
   const openWizard = () => {
+    if (!arbitraryRegistrationEnabled || !templates.some(template => template.manifests?.length))
+      return;
     setWizardOpen(true);
     setWizardStep("select");
     setSelectedTemplate(null);
@@ -178,7 +254,9 @@ export default function McpPage() {
   };
 
   const installRecommended = (manifest: ToolManifest) => {
+    if (!arbitraryRegistrationEnabled) return;
     const matched = templates.find(tpl => {
+      if (!tpl.manifests?.length) return false;
       if (tpl.id === manifest.name) return true;
       const tags = tpl.tags ?? [];
       return manifest.tags.some(tag => tags.includes(tag));
@@ -195,6 +273,13 @@ export default function McpPage() {
     setPageError("当前推荐工具没有对应模板，可先手动注册。");
   };
 
+  const hasTypedTemplateForManifest = (manifest: ToolManifest) =>
+    typedTemplates.some(template => {
+      if (template.id === manifest.name) return true;
+      const tags = template.tags ?? [];
+      return manifest.tags.some(tag => tags.includes(tag));
+    });
+
   const previewArgs = selectedTemplate
     ? resolvePlaceholders(selectedTemplate.args, templateInputs)
     : [];
@@ -204,13 +289,19 @@ export default function McpPage() {
     selectedTemplate.required_args.every(k => templateInputs[k]?.trim() !== "");
 
   const handleRegisterTemplate = async () => {
-    if (!selectedTemplate) return;
+    if (!arbitraryRegistrationEnabled || !selectedTemplate?.manifests?.length) return;
     setWizardRegistering(true);
     setPageError("");
     try {
       const resolvedArgs = resolvePlaceholders(selectedTemplate.args, templateInputs);
       const env = resolveEnv(selectedTemplate.env, templateInputs);
-      await registerMcpServer(selectedTemplate.id, selectedTemplate.command, resolvedArgs, env);
+      await registerMcpServer(
+        selectedTemplate.id,
+        selectedTemplate.command,
+        resolvedArgs,
+        selectedTemplate.manifests,
+        env
+      );
       setWizardStep("done");
       await load();
     } catch (e) {
@@ -246,6 +337,29 @@ export default function McpPage() {
           MCP 管理
         </h2>
 
+        <section
+          className={`rounded-xl border p-4 ${arbitraryRegistrationEnabled ? "border-indigo-100 bg-indigo-50/70" : "border-amber-200 bg-amber-50"}`}
+        >
+          <div className="flex items-start gap-3">
+            <Lock
+              className={`mt-0.5 shrink-0 ${arbitraryRegistrationEnabled ? "text-indigo-700" : "text-amber-700"}`}
+              size={16}
+              aria-hidden="true"
+            />
+            <div>
+              <div className="text-sm font-semibold text-gray-900">任意 MCP 注册能力</div>
+              <div className="mt-1 text-sm text-gray-700">
+                {arbitraryRegistrationEnabled
+                  ? "仅当前开发构建允许注册和移除本地 MCP Server。"
+                  : "当前构建只展示后端可读取的 Server、工具和审计事实，不开放注册或移除入口。"}
+              </div>
+              <div className="mt-2 font-mono text-xs font-semibold text-gray-700">
+                {registrationStatus}
+              </div>
+            </div>
+          </div>
+        </section>
+
         <section className="rounded-xl border border-indigo-100 bg-indigo-50/70 p-5">
           <div className="flex items-start gap-3">
             <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-white text-indigo-700">
@@ -254,9 +368,9 @@ export default function McpPage() {
             <div>
               <h3 className="text-sm font-semibold text-indigo-950">Chat 外部能力如何生效</h3>
               <p className="mt-1 text-sm leading-6 text-indigo-900">
-                天气、网页和第三方数据读取需要这里先接入安全的 read-only 工具。Chat
-                每次调用仍会经过候选
-                allowlist、隐私规则和必要确认；未接入时，助手应解释“工具未启用”，而不是泄露治理错误码。
+                {arbitraryRegistrationEnabled
+                  ? "开发构建可在这里接入 MCP；Chat 每次调用仍会经过 allowlist、隐私规则和必要确认。"
+                  : "这里仅展示后端已报告的 MCP 只读事实。当前构建不能从此页接入新工具，推荐项也不代表能力已经可用。"}
               </p>
               <div className="mt-3 flex flex-wrap gap-2 text-xs">
                 <span className="rounded-md bg-white px-2.5 py-1 font-medium text-indigo-800">
@@ -273,64 +387,87 @@ export default function McpPage() {
           </div>
         </section>
 
-        <section className="space-y-4 border rounded-xl p-5 bg-gray-50">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-2">
-              <Plus size={16} /> 注册新 MCP Server
-            </h3>
-            <button
-              onClick={openWizard}
-              className="inline-flex items-center gap-2 text-sm bg-white border border-gray-200 px-3 py-1.5 rounded-lg hover:bg-gray-100"
-            >
-              <LayoutTemplate size={14} /> 一键安装模板
-            </button>
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        {arbitraryRegistrationEnabled && (
+          <section className="space-y-4 border rounded-xl p-5 bg-gray-50">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-2">
+                <Plus size={16} /> 注册新 MCP Server
+              </h3>
+              <button
+                onClick={openWizard}
+                disabled={typedTemplates.length === 0}
+                className="inline-flex items-center gap-2 text-sm bg-white border border-gray-200 px-3 py-1.5 rounded-lg hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <LayoutTemplate size={14} />
+                {typedTemplates.length > 0 ? "安装 typed 模板" : "暂无 typed 模板"}
+              </button>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <label className="text-xs text-gray-500">名称</label>
+                <input
+                  className="w-full border rounded-md px-3 py-2 text-sm"
+                  placeholder="例如: filesystem"
+                  value={name}
+                  onChange={e => setName(e.target.value)}
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs text-gray-500">启动命令</label>
+                <input
+                  className="w-full border rounded-md px-3 py-2 text-sm"
+                  placeholder="例如: npx"
+                  value={command}
+                  onChange={e => setCommand(e.target.value)}
+                />
+              </div>
+            </div>
             <div className="space-y-1">
-              <label className="text-xs text-gray-500">名称</label>
+              <label className="text-xs text-gray-500">参数（空格分隔）</label>
               <input
                 className="w-full border rounded-md px-3 py-2 text-sm"
-                placeholder="例如: filesystem"
-                value={name}
-                onChange={e => setName(e.target.value)}
+                placeholder="例如: -y @modelcontextprotocol/server-filesystem /tmp"
+                value={argsText}
+                onChange={e => setArgsText(e.target.value)}
               />
             </div>
             <div className="space-y-1">
-              <label className="text-xs text-gray-500">启动命令</label>
-              <input
-                className="w-full border rounded-md px-3 py-2 text-sm"
-                placeholder="例如: npx"
-                value={command}
-                onChange={e => setCommand(e.target.value)}
+              <label className="text-xs text-gray-500">
+                Typed manifests JSON（必须覆盖服务发现的全部工具）
+              </label>
+              <textarea
+                className="min-h-36 w-full rounded-md border px-3 py-2 font-mono text-xs"
+                placeholder='[{"id":"mcp:server:tool","name":"tool",...}]'
+                value={manifestsText}
+                onChange={event => setManifestsText(event.target.value)}
               />
+              <p className="text-xs leading-5 text-gray-500">
+                OpenLife 不会根据工具名称猜测权限、风险、能力或幂等性；后端会把这里的契约与真实
+                tools/list 结果逐项核对。
+              </p>
             </div>
-          </div>
-          <div className="space-y-1">
-            <label className="text-xs text-gray-500">参数（空格分隔）</label>
-            <input
-              className="w-full border rounded-md px-3 py-2 text-sm"
-              placeholder="例如: -y @modelcontextprotocol/server-filesystem /tmp"
-              value={argsText}
-              onChange={e => setArgsText(e.target.value)}
-            />
-          </div>
-          <div className="flex gap-3">
-            <button
-              onClick={handleRegister}
-              disabled={registering || !name.trim() || !command.trim()}
-              className="inline-flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50"
-            >
-              {registering ? "注册中..." : "注册"}
-            </button>
-          </div>
-        </section>
+            <div className="flex gap-3">
+              <button
+                onClick={handleRegister}
+                disabled={registering || !name.trim() || !command.trim() || !manifestsText.trim()}
+                className="inline-flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {registering ? "注册中..." : "注册"}
+              </button>
+            </div>
+          </section>
+        )}
 
         <section className="space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-2">
               <Sparkles size={16} /> 推荐工具
             </h3>
-            <div className="text-xs text-gray-500">根据当前目标与能力缺口自动推荐</div>
+            <div className="text-xs text-gray-500">
+              {arbitraryRegistrationEnabled
+                ? "根据当前目标与能力缺口自动推荐"
+                : "候选清单，仅供查看"}
+            </div>
           </div>
           {recommended.length === 0 ? (
             <EmptyState
@@ -375,13 +512,17 @@ export default function McpPage() {
                     <div className="inline-flex items-center gap-1 text-xs text-emerald-700 bg-emerald-50 px-3 py-2 rounded-lg">
                       <Shield size={14} /> 已内置
                     </div>
-                  ) : (
+                  ) : arbitraryRegistrationEnabled && hasTypedTemplateForManifest(manifest) ? (
                     <button
                       onClick={() => installRecommended(manifest)}
                       className="shrink-0 inline-flex items-center gap-2 bg-indigo-600 text-white px-3 py-2 rounded-lg text-sm hover:bg-indigo-700"
                     >
-                      用模板安装
+                      安装 typed 模板
                     </button>
+                  ) : (
+                    <div className="shrink-0 rounded-lg bg-gray-100 px-3 py-2 text-xs font-medium text-gray-600">
+                      无可执行 typed 契约
+                    </div>
                   )}
                 </div>
               ))}
@@ -604,7 +745,11 @@ export default function McpPage() {
           {servers.length === 0 ? (
             <EmptyState
               title="暂无注册的 MCP Server"
-              description="点击上方按钮注册服务器或使用模板安装。"
+              description={
+                arbitraryRegistrationEnabled
+                  ? "点击上方按钮注册服务器或使用模板安装。"
+                  : "当前构建未报告可读取的 MCP Server。"
+              }
               className="py-4"
             />
           ) : (
@@ -621,13 +766,19 @@ export default function McpPage() {
                     </div>
                     <div className="text-xs text-gray-400 mt-1">工具数量: {s.tool_count}</div>
                   </div>
-                  <button
-                    onClick={() => handleRemove(s.name)}
-                    className="text-red-500 hover:text-red-700 p-2"
-                    title="删除"
-                  >
-                    <Trash2 size={18} />
-                  </button>
+                  {arbitraryRegistrationEnabled ? (
+                    <button
+                      onClick={() => handleRemove(s.name)}
+                      className="text-red-500 hover:text-red-700 p-2"
+                      title="删除"
+                    >
+                      <Trash2 size={18} />
+                    </button>
+                  ) : (
+                    <span className="rounded bg-gray-100 px-2 py-1 text-xs text-gray-500">
+                      只读
+                    </span>
+                  )}
                 </div>
               ))}
             </div>
@@ -657,7 +808,7 @@ export default function McpPage() {
         </section>
       </div>
 
-      {wizardOpen && (
+      {arbitraryRegistrationEnabled && wizardOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
           <div className="w-full max-w-lg bg-white rounded-xl shadow-xl p-6 space-y-5">
             <div className="flex items-center justify-between">
@@ -674,7 +825,7 @@ export default function McpPage() {
 
             {wizardStep === "select" && (
               <div className="space-y-3 max-h-96 overflow-auto pr-1">
-                {templates.map(tpl => (
+                {typedTemplates.map(tpl => (
                   <button
                     key={tpl.id}
                     onClick={() => selectTemplate(tpl)}

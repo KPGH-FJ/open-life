@@ -9,6 +9,10 @@ pub(crate) async fn get_chat_history_with_state(
     session_id: &str,
     state: &Arc<AppState>,
 ) -> Result<Vec<ChatMessage>, AppError> {
+    state
+        .persistence_coordinator
+        .require_trusted_read("MemoryStore")
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "canonical_state_unknown"))?;
     let store = state.memory_store.lock().await;
     store
         .load_recent_messages(session_id, 200)
@@ -26,20 +30,37 @@ pub async fn get_chat_history(
 pub(crate) async fn save_chat_message_with_state(
     session_id: &str,
     message: &ChatMessage,
+    operation_id: &str,
     state: &Arc<AppState>,
 ) -> Result<(), AppError> {
-    memory_gateway::save_turn_message_with_state(session_id, message, state)
-        .await
-        .map(|_| ())
+    let parsed = uuid::Uuid::parse_str(operation_id)
+        .map_err(|_| AppError::permission("conversation operation id must be a UUIDv4"))?;
+    if parsed.get_version() != Some(uuid::Version::Random)
+        || parsed.hyphenated().to_string() != operation_id
+    {
+        return Err(AppError::permission(
+            "conversation operation id must be a canonical lowercase UUIDv4",
+        ));
+    }
+    memory_gateway::save_conversation_message_idempotent_with_state(
+        session_id,
+        message,
+        operation_id,
+        state,
+    )
+    .await
+    .map(|_| ())
+    .map_err(AppError::internal)
 }
 
 #[tauri::command]
 pub async fn save_chat_message(
     session_id: String,
     message: ChatMessage,
+    operation_id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), AppError> {
-    save_chat_message_with_state(&session_id, &message, &state.inner().clone()).await
+    save_chat_message_with_state(&session_id, &message, &operation_id, &state.inner().clone()).await
 }
 
 pub(crate) async fn create_chat_session_with_state(
@@ -79,6 +100,10 @@ pub async fn delete_chat_session(
 pub(crate) async fn list_chat_sessions_with_state(
     state: &Arc<AppState>,
 ) -> Result<Vec<openlife_core::memory::ChatSession>, AppError> {
+    state
+        .persistence_coordinator
+        .require_trusted_read("MemoryStore")
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "canonical_state_unknown"))?;
     let store = state.memory_store.lock().await;
     store.list_chat_sessions(200).map_err(AppError::from)
 }
@@ -93,7 +118,6 @@ pub async fn list_chat_sessions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     fn test_app_state(temp_dir: &tempfile::TempDir) -> Arc<AppState> {
         let config = openlife_core::config::AppConfig::default();
@@ -101,12 +125,16 @@ mod tests {
             tokio::sync::RwLock::new(openlife_core::memory_cache::HotMemoryCache::default()),
         );
         Arc::new(AppState {
+            persistence_coordinator: Arc::new(
+                crate::persistence_coordinator::PersistenceCoordinator::isolated_evaluation(),
+            ),
             config: Arc::new(tokio::sync::Mutex::new(config.clone())),
             life_model_manager: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::life_model::LifeModelManager::new(
                     temp_dir.path().join("life-model").join("current"),
                 ),
             )),
+            life_model_write_coordinator: Arc::new(tokio::sync::Mutex::new(())),
             memory_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::memory::MemoryStore::new_in_memory().unwrap(),
             )),
@@ -140,7 +168,6 @@ mod tests {
                 openlife_core::vectors::VectorStore::new_in_memory().unwrap(),
             )),
             vector_persistence_mode: crate::state::VectorPersistenceMode::Enabled,
-            builder_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             builder_session_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::builder::BuilderSessionStore::new(
                     temp_dir.path().join("builder_sessions.json"),
@@ -202,12 +229,11 @@ mod tests {
                 openlife_core::plugins::PluginRegistry::new(temp_dir.path().join("plugins")),
             )),
             hot_cache,
-            proposal_engine: Arc::new(tokio::sync::Mutex::new(
-                openlife_core::agent::ProposalEngine::new(),
-            )),
             startup_warnings: vec![],
             provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
-            scheduled_task_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            scheduled_task_store: Arc::new(
+                openlife_core::tasks::TaskStore::new_in_memory().unwrap(),
+            ),
             runtime_clock_source: Arc::new(tokio::sync::Mutex::new(
                 crate::main_chat_runtime_facts::MainChatRuntimeClockSource::default(),
             )),
@@ -247,7 +273,13 @@ mod tests {
             role: "user".to_string(),
             content: "Hello world".to_string(),
         };
-        let result = save_chat_message_with_state("session-2", &msg, &state).await;
+        let result = save_chat_message_with_state(
+            "session-2",
+            &msg,
+            "a8af0116-1571-4918-93ac-79880ef1f783",
+            &state,
+        )
+        .await;
         assert!(result.is_ok());
 
         // Get history

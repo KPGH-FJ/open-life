@@ -1,16 +1,14 @@
-use crate::agent::action_executor::helpers::is_private_url;
 use crate::agent::action_executor::helpers::{
-    call_a2a_agent_blocking, canonical_tool_source, ensure_external_write_content_size,
-    external_write_content_preview, extract_host_from_url, fetch_url_on_worker_thread,
+    call_a2a_agent, canonical_tool_source, ensure_external_write_content_size,
+    external_write_content_preview, extract_host_from_url, fetch_url_async,
     filesystem_access_error, hs_requires_external_write_proposal, is_direct_external_write_tool,
-    is_path_in_safe_paths, search_web_on_worker_thread, summarize_content_blocking,
-    ToolCallInternalResult,
+    is_path_in_safe_paths_async, prepare_web_content_observation, reserve_web_search_rate_limit,
+    search_web_async, ToolCallInternalResult,
 };
-use crate::agent::review_workflow::{
-    DurableWriteRequest, DurableWriteSource, DurableWriteSubject, ReviewWorkflow,
-};
+use crate::agent::review_workflow::{DurableWriteRequest, DurableWriteSource, DurableWriteSubject};
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
-use crate::tool_manifest::ToolSource;
+use crate::tool_execution_receipt::ToolExecutionReceiptTracker;
+use crate::tool_manifest::{ToolManifest, ToolSource};
 use anyhow::Result;
 use ring::digest::{digest, SHA256};
 use serde_json::Value;
@@ -20,16 +18,20 @@ use super::AgentActionRequest;
 
 impl super::ActionExecutor {
     /// Execute an Execution tool (file.read, web.fetch, etc.).
-    pub fn execute_execution_tool(
+    pub(crate) async fn execute_execution_tool(
         &self,
         tool_name: &str,
         args: &Value,
         ctx: &ActionExecutionContext<'_>,
         request: &AgentActionRequest,
+        manifest: &ToolManifest,
+        receipt_tracker: ToolExecutionReceiptTracker,
+        authorized_network_policy: Option<&crate::config::NetworkPolicy>,
     ) -> Result<ToolCallInternalResult> {
+        let network_policy = authorized_network_policy.or(ctx.network_policy);
         // Check network policy for web tools
         if matches!(tool_name, "web.fetch" | "web.search") {
-            if let Some(policy) = ctx.network_policy {
+            if let Some(policy) = network_policy {
                 if !policy.enabled {
                     return Ok(ToolCallInternalResult {
                         success: false,
@@ -59,7 +61,11 @@ impl super::ActionExecutor {
                     if let Some(url) = args.get("url").and_then(|v| v.as_str()) {
                         if let Some(host) = extract_host_from_url(url) {
                             // Check denylist first
-                            if policy.domain_denylist.iter().any(|d| host.ends_with(d)) {
+                            if policy
+                                .domain_denylist
+                                .iter()
+                                .any(|rule| crate::network_client::domain_matches(&host, rule))
+                            {
                                 return Ok(ToolCallInternalResult {
                                     success: false,
                                     output: None,
@@ -71,7 +77,10 @@ impl super::ActionExecutor {
                             }
                             // If allowlist is not empty, only allow listed domains
                             if !policy.domain_allowlist.is_empty()
-                                && !policy.domain_allowlist.iter().any(|d| host.ends_with(d))
+                                && !policy
+                                    .domain_allowlist
+                                    .iter()
+                                    .any(|rule| crate::network_client::domain_matches(&host, rule))
                             {
                                 return Ok(ToolCallInternalResult {
                                     success: false,
@@ -88,7 +97,7 @@ impl super::ActionExecutor {
             }
         }
 
-        match tool_name {
+        let mut result = match tool_name {
             "file.read" => {
                 let path = args
                     .get("path")
@@ -96,7 +105,7 @@ impl super::ActionExecutor {
                     .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument for file.read"))?;
 
                 // Validate path is within safe_paths
-                if !is_path_in_safe_paths(path, ctx.safe_paths) {
+                if !is_path_in_safe_paths_async(path, ctx.safe_paths).await {
                     return Ok(ToolCallInternalResult {
                         success: false,
                         output: None,
@@ -105,7 +114,8 @@ impl super::ActionExecutor {
                 }
 
                 // Check file size before reading
-                let metadata = std::fs::metadata(path)
+                let metadata = tokio::fs::metadata(path)
+                    .await
                     .map_err(|e| anyhow::anyhow!("Failed to read file metadata: {}", e))?;
                 let max_size = 100 * 1024; // 100KB limit
                 if metadata.len() > max_size {
@@ -120,7 +130,11 @@ impl super::ActionExecutor {
                     });
                 }
 
-                match std::fs::read_to_string(path) {
+                ctx.authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
+                    .await?;
+                receipt_tracker.mark_local_dispatched();
+                ctx.observe_tool_started(&receipt_tracker).await?;
+                match tokio::fs::read_to_string(path).await {
                     Ok(content) => Ok(ToolCallInternalResult {
                         success: true,
                         output: Some(content),
@@ -144,14 +158,14 @@ impl super::ActionExecutor {
                     // Validate source path is within calendar_ics_paths or safe_paths
                     let mut all_calendar_paths: Vec<String> = ctx.calendar_ics_paths.to_vec();
                     all_calendar_paths.extend(ctx.safe_paths.iter().cloned());
-                    if !is_path_in_safe_paths(path, &all_calendar_paths) {
+                    if !is_path_in_safe_paths_async(path, &all_calendar_paths).await {
                         return Ok(ToolCallInternalResult {
                             success: false,
                             output: None,
                             error: Some(filesystem_access_error(path, &all_calendar_paths)),
                         });
                     }
-                    let metadata = match std::fs::metadata(path) {
+                    let metadata = match tokio::fs::metadata(path).await {
                         Ok(m) => m,
                         Err(e) => {
                             return Ok(ToolCallInternalResult {
@@ -173,14 +187,24 @@ impl super::ActionExecutor {
                             )),
                         });
                     }
-                    match std::fs::read_to_string(path) {
+                    ctx.authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
+                        .await?;
+                    receipt_tracker.mark_local_dispatched();
+                    ctx.observe_tool_started(&receipt_tracker).await?;
+                    match tokio::fs::read_to_string(path).await {
                         Ok(content) => crate::calendar::parse_ics(&content, range_start, range_end),
                         Err(e) => {
-                            return Ok(ToolCallInternalResult {
-                                success: false,
-                                output: None,
-                                error: Some(format!("Failed to read ICS file '{}': {}", path, e)),
-                            });
+                            return Ok(complete_local_early_result(
+                                &receipt_tracker,
+                                ToolCallInternalResult {
+                                    success: false,
+                                    output: None,
+                                    error: Some(format!(
+                                        "Failed to read ICS file '{}': {}",
+                                        path, e
+                                    )),
+                                },
+                            ));
                         }
                     }
                 } else {
@@ -190,13 +214,17 @@ impl super::ActionExecutor {
                     } else {
                         ctx.calendar_ics_paths.iter().collect()
                     };
+                    ctx.authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
+                        .await?;
+                    receipt_tracker.mark_local_dispatched();
+                    ctx.observe_tool_started(&receipt_tracker).await?;
                     let mut all_events = Vec::new();
                     for search_path in &ics_search_paths {
-                        if let Ok(entries) = std::fs::read_dir(search_path) {
-                            for entry in entries.flatten() {
-                                let p = entry.path();
-                                if p.extension() == Some(std::ffi::OsStr::new("ics")) {
-                                    if let Ok(content) = std::fs::read_to_string(&p) {
+                        if let Ok(mut entries) = tokio::fs::read_dir(search_path).await {
+                            while let Ok(Some(entry)) = entries.next_entry().await {
+                                let path = entry.path();
+                                if path.extension() == Some(std::ffi::OsStr::new("ics")) {
+                                    if let Ok(content) = tokio::fs::read_to_string(&path).await {
                                         all_events.extend(crate::calendar::parse_ics(
                                             &content,
                                             range_start,
@@ -208,13 +236,16 @@ impl super::ActionExecutor {
                         }
                     }
                     if all_events.is_empty() {
-                        return Ok(ToolCallInternalResult {
-                            success: false,
-                            output: None,
-                            error: Some(
-                                "No .ics files found in safe_paths. Configure calendar_ics_paths in Settings or provide 'source' argument.".to_string(),
-                            ),
-                        });
+                        return Ok(complete_local_early_result(
+                            &receipt_tracker,
+                            ToolCallInternalResult {
+                                success: false,
+                                output: None,
+                                error: Some(
+                                    "No .ics files found in safe_paths. Configure calendar_ics_paths in Settings or provide 'source' argument.".to_string(),
+                                ),
+                            },
+                        ));
                     }
                     all_events
                 };
@@ -249,43 +280,29 @@ impl super::ActionExecutor {
                     });
                 }
 
-                // Block private IP ranges and localhost
-                if is_private_url(url) {
-                    return Ok(ToolCallInternalResult {
-                        success: false,
-                        output: None,
-                        error: Some(format!(
-                            "URL '{}' points to a private/internal address and is blocked for security",
-                            url
-                        )),
-                    });
-                }
-
-                let result = fetch_url_on_worker_thread(url)?;
-                // Optional summarization via Ollama
+                ctx.authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
+                    .await?;
+                let result = fetch_url_async(
+                    url,
+                    network_policy,
+                    receipt_tracker.clone(),
+                    ctx.tool_started_transition_observer,
+                )
+                .await?;
+                // Keep model synthesis inside the active TurnRuntime. The tool returns an
+                // explicitly untrusted, bounded observation instead of starting a hidden
+                // provider request of its own.
                 let summarize = args
                     .get("summarize")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 if summarize && result.success && result.output.is_some() {
                     let content = result.output.clone().unwrap_or_default();
-                    match summarize_content_blocking(&content, url) {
-                        Ok(summary) => Ok(ToolCallInternalResult {
-                            success: true,
-                            output: Some(summary),
-                            error: None,
-                        }),
-                        Err(_) => {
-                            // Summarization failed, return original content
-                            Ok(ToolCallInternalResult {
-                                success: true,
-                                output: Some(content),
-                                error: Some(
-                                    "Content summarization failed, showing raw content".to_string(),
-                                ),
-                            })
-                        }
-                    }
+                    Ok(ToolCallInternalResult {
+                        success: true,
+                        output: Some(prepare_web_content_observation(&content, url)),
+                        error: None,
+                    })
                 } else {
                     Ok(result)
                 }
@@ -311,6 +328,12 @@ impl super::ActionExecutor {
                 }
 
                 if let Some(fixture_output) = ctx.web_search_fixture_output {
+                    ctx.authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
+                        .await?;
+                    receipt_tracker.mark_simulated_dispatched();
+                    ctx.observe_tool_started(&receipt_tracker).await?;
+                    receipt_tracker.mark_response_observed();
+                    super::tool_executor::record_effect_outcome(&receipt_tracker, true);
                     return Ok(ToolCallInternalResult {
                         success: true,
                         output: Some(fixture_output.to_string()),
@@ -318,7 +341,24 @@ impl super::ActionExecutor {
                     });
                 }
 
-                search_web_on_worker_thread(query, max_results)
+                if let Some(error) = reserve_web_search_rate_limit() {
+                    return Ok(ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some(error),
+                    });
+                }
+
+                ctx.authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
+                    .await?;
+                search_web_async(
+                    query,
+                    max_results,
+                    network_policy,
+                    receipt_tracker.clone(),
+                    ctx.tool_started_transition_observer,
+                )
+                .await
             }
             "mcp.call_tool" => {
                 let target_tool_name =
@@ -371,7 +411,16 @@ impl super::ActionExecutor {
                 if hs_requires_external_write_proposal(ctx)
                     && is_direct_external_write_tool(&target_manifest)
                 {
-                    return match self.create_external_write_action_proposal_record(
+                    ctx.authorize_tool_dispatch(
+                        &target_manifest,
+                        request,
+                        &tool_args,
+                        &receipt_tracker,
+                    )
+                    .await?;
+                    receipt_tracker.mark_local_dispatched();
+                    ctx.observe_tool_started(&receipt_tracker).await?;
+                    let proposal_result = match self.create_external_write_action_proposal_record(
                         request,
                         ctx,
                         &target_manifest.name,
@@ -400,6 +449,14 @@ impl super::ActionExecutor {
                                     .to_string(),
                             ),
                         }),
+                    };
+                    return match proposal_result {
+                        Ok(result) => Ok(complete_local_early_result(&receipt_tracker, result)),
+                        Err(error) => {
+                            receipt_tracker.mark_response_observed();
+                            super::tool_executor::record_effect_outcome(&receipt_tracker, false);
+                            Err(error)
+                        }
                     };
                 }
 
@@ -449,20 +506,37 @@ impl super::ActionExecutor {
                 }
 
                 // 4. Execute target tool
-                Ok(self.call_tool_internal(
+                ctx.authorize_tool_dispatch(
                     &target_manifest,
-                    tool_args,
-                    ctx.registry,
-                    ctx.audit_store,
-                    inspection.pii_found,
-                ))
+                    request,
+                    &tool_args,
+                    &receipt_tracker,
+                )
+                .await?;
+                Ok(self
+                    .call_tool_internal(
+                        &target_manifest,
+                        tool_args,
+                        ctx,
+                        inspection.pii_found,
+                        receipt_tracker.clone(),
+                    )
+                    .await)
             }
             "file.write_proposal" => {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
                 let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
+                if path.is_empty() {
+                    return Ok(ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some("file.write_proposal requires a non-empty path".into()),
+                    });
+                }
+
                 // Validate path is within safe_paths
-                if !path.is_empty() && !is_path_in_safe_paths(path, ctx.safe_paths) {
+                if !is_path_in_safe_paths_async(path, ctx.safe_paths).await {
                     return Ok(ToolCallInternalResult {
                         success: false,
                         output: None,
@@ -483,56 +557,58 @@ impl super::ActionExecutor {
                 let content_hash: String =
                     hash.as_ref().iter().map(|b| format!("{:02x}", b)).collect();
                 let size_bytes = content.len();
-                let operation = if std::path::Path::new(path).exists() {
+                let operation = if tokio::fs::try_exists(path).await.unwrap_or(false) {
                     "overwrite"
                 } else {
                     "create"
                 };
                 let content_preview = external_write_content_preview(content);
 
-                // Auto-create ExternalWriteAction Proposal if path is non-empty
-                let mut proposal_id: Option<String> = None;
-                if !path.is_empty() {
-                    if let Some(proposal_store) = ctx.proposal_store {
-                        let mut proposal = AgentProposal::new(
-                            ProposalType::ExternalWriteAction,
-                            &format!("filesystem.{}", path),
-                            serde_json::json!({
-                                "path": path,
-                                "content": content,
-                                "content_preview": content_preview,
-                                "content_hash": content_hash,
-                                "size_bytes": size_bytes,
-                                "encoding": "utf-8",
-                                "operation": operation,
-                            }),
-                            &format!("Agent proposed file write to '{}' ({})", path, operation),
-                            0.9,
-                            RiskLevel::High,
-                            ProposalSource::Manual,
-                        );
-                        // Link to source run if available
-                        if let Some(ref run_id) = request.source_run_id {
-                            proposal.run_id = Some(run_id.clone());
-                        }
-                        match ReviewWorkflow::new(proposal_store).submit(
-                            DurableWriteRequest::from_agent_proposal(
-                                DurableWriteSource::ToolPermission,
-                                DurableWriteSubject::FileWrite,
-                                proposal,
-                                "File write proposal is pending Review Center approval.",
-                            ),
-                        ) {
-                            Ok(outcome) => proposal_id = Some(outcome.proposal_id().to_string()),
-                            Err(e) => {
-                                eprintln!(
-                                    "[warn] Failed to create ExternalWriteAction Proposal: {}",
-                                    e
-                                );
-                            }
-                        }
-                    }
+                let mut proposal = AgentProposal::new(
+                    ProposalType::ExternalWriteAction,
+                    &format!("filesystem.{}", path),
+                    serde_json::json!({
+                        "path": path,
+                        "content": content,
+                        "content_preview": content_preview,
+                        "content_hash": content_hash,
+                        "size_bytes": size_bytes,
+                        "encoding": "utf-8",
+                        "operation": operation,
+                    }),
+                    &format!("Agent proposed file write to '{}' ({})", path, operation),
+                    0.9,
+                    RiskLevel::High,
+                    ProposalSource::Manual,
+                );
+                if let Some(ref run_id) = request.source_run_id {
+                    proposal.run_id = Some(run_id.clone());
                 }
+                ctx.authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
+                    .await?;
+                receipt_tracker.mark_local_dispatched();
+                ctx.observe_tool_started(&receipt_tracker).await?;
+                let proposal_id =
+                    match ctx.submit_review_proposal(DurableWriteRequest::from_agent_proposal(
+                        DurableWriteSource::ToolPermission,
+                        DurableWriteSubject::FileWrite,
+                        proposal,
+                        "File write proposal is pending Review Center approval.",
+                    )) {
+                        Ok(outcome) => outcome.proposal_id().to_string(),
+                        Err(error) => {
+                            return Ok(complete_local_early_result(
+                                &receipt_tracker,
+                                ToolCallInternalResult {
+                                    success: false,
+                                    output: None,
+                                    error: Some(format!(
+                                        "Failed to create ExternalWriteAction Proposal: {error}"
+                                    )),
+                                },
+                            ));
+                        }
+                    };
 
                 // Return structured result with unified payload, including proposal_id
                 let mut result_payload = serde_json::json!({
@@ -554,10 +630,8 @@ impl super::ActionExecutor {
                     "requires_confirmation": true,
                     "reason": format!("Proposed file write to '{}' ({})", path, operation),
                 });
-                if let Some(id) = proposal_id {
-                    if let Some(obj) = result_payload.as_object_mut() {
-                        obj.insert("proposal_id".to_string(), serde_json::json!(id));
-                    }
+                if let Some(obj) = result_payload.as_object_mut() {
+                    obj.insert("proposal_id".to_string(), serde_json::json!(proposal_id));
                 }
 
                 Ok(ToolCallInternalResult {
@@ -595,7 +669,7 @@ impl super::ActionExecutor {
                     "proposal_kind": "calendar_event",
                 });
 
-                if let Some(proposal_store) = ctx.proposal_store {
+                if ctx.proposal_store.is_some() {
                     let mut proposal = AgentProposal::new(
                         ProposalType::ScheduledTask,
                         "calendar.events",
@@ -608,14 +682,16 @@ impl super::ActionExecutor {
                     if let Some(ref run_id) = request.source_run_id {
                         proposal.run_id = Some(run_id.clone());
                     }
-                    match ReviewWorkflow::new(proposal_store).submit(
-                        DurableWriteRequest::from_agent_proposal(
-                            DurableWriteSource::ToolPermission,
-                            DurableWriteSubject::Calendar,
-                            proposal,
-                            "Calendar event proposal is pending Review Center approval.",
-                        ),
-                    ) {
+                    ctx.authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
+                        .await?;
+                    receipt_tracker.mark_local_dispatched();
+                    ctx.observe_tool_started(&receipt_tracker).await?;
+                    match ctx.submit_review_proposal(DurableWriteRequest::from_agent_proposal(
+                        DurableWriteSource::ToolPermission,
+                        DurableWriteSubject::Calendar,
+                        proposal,
+                        "Calendar event proposal is pending Review Center approval.",
+                    )) {
                         Ok(outcome) => Ok(ToolCallInternalResult {
                             success: true,
                             output: Some(
@@ -662,7 +738,7 @@ impl super::ActionExecutor {
                     "proposal_kind": "email_draft",
                 });
 
-                if let Some(proposal_store) = ctx.proposal_store {
+                if ctx.proposal_store.is_some() {
                     let mut proposal = AgentProposal::new(
                         ProposalType::DataExport,
                         "email.drafts",
@@ -675,14 +751,16 @@ impl super::ActionExecutor {
                     if let Some(ref run_id) = request.source_run_id {
                         proposal.run_id = Some(run_id.clone());
                     }
-                    match ReviewWorkflow::new(proposal_store).submit(
-                        DurableWriteRequest::from_agent_proposal(
-                            DurableWriteSource::ToolPermission,
-                            DurableWriteSubject::Email,
-                            proposal,
-                            "Email draft proposal is pending Review Center approval.",
-                        ),
-                    ) {
+                    ctx.authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
+                        .await?;
+                    receipt_tracker.mark_local_dispatched();
+                    ctx.observe_tool_started(&receipt_tracker).await?;
+                    match ctx.submit_review_proposal(DurableWriteRequest::from_agent_proposal(
+                        DurableWriteSource::ToolPermission,
+                        DurableWriteSubject::Email,
+                        proposal,
+                        "Email draft proposal is pending Review Center approval.",
+                    )) {
                         Ok(outcome) => Ok(ToolCallInternalResult {
                             success: true,
                             output: Some(
@@ -731,7 +809,7 @@ impl super::ActionExecutor {
                     .unwrap_or("medium");
 
                 // Check if we have a proposal store (create proposal first for user confirmation)
-                let task_args = serde_json::json!({
+                let mut task_args = serde_json::json!({
                     "title": title,
                     "description": description,
                     "due_date": due_date,
@@ -739,8 +817,13 @@ impl super::ActionExecutor {
                     "priority": priority,
                     "tool": "task.create_proposal",
                 });
+                if let Some(provider_route) = args.get("provider_route") {
+                    if let Some(task_args) = task_args.as_object_mut() {
+                        task_args.insert("provider_route".into(), provider_route.clone());
+                    }
+                }
 
-                if let Some(proposal_store) = ctx.proposal_store {
+                if ctx.proposal_store.is_some() {
                     let mut proposal = AgentProposal::new(
                         ProposalType::ScheduledTask,
                         "tasks",
@@ -753,14 +836,16 @@ impl super::ActionExecutor {
                     if let Some(ref run_id) = request.source_run_id {
                         proposal.run_id = Some(run_id.clone());
                     }
-                    match ReviewWorkflow::new(proposal_store).submit(
-                        DurableWriteRequest::from_agent_proposal(
-                            DurableWriteSource::ToolPermission,
-                            DurableWriteSubject::Calendar,
-                            proposal,
-                            "Task proposal is pending Review Center approval.",
-                        ),
-                    ) {
+                    ctx.authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
+                        .await?;
+                    receipt_tracker.mark_local_dispatched();
+                    ctx.observe_tool_started(&receipt_tracker).await?;
+                    match ctx.submit_review_proposal(DurableWriteRequest::from_agent_proposal(
+                        DurableWriteSource::ToolPermission,
+                        DurableWriteSubject::Calendar,
+                        proposal,
+                        "Task proposal is pending Review Center approval.",
+                    )) {
                         Ok(outcome) => {
                             let output = serde_json::json!({
                                 "status": "proposal_created",
@@ -802,6 +887,7 @@ impl super::ActionExecutor {
                     .get("session_id")
                     .and_then(|v| v.as_str())
                     .or(request.source_run_id.as_deref());
+                let request_id = args.get("request_id").and_then(|v| v.as_str());
 
                 // Validate URL scheme and block private IPs
                 if !agent_url.starts_with("http://") && !agent_url.starts_with("https://") {
@@ -811,25 +897,74 @@ impl super::ActionExecutor {
                         error: Some(format!("Invalid A2A URL scheme: {}", agent_url)),
                     });
                 }
-                if is_private_url(agent_url) {
-                    return Ok(ToolCallInternalResult {
-                        success: false,
-                        output: None,
-                        error: Some(format!(
-                            "A2A agent URL '{}' points to a private address and is blocked",
-                            agent_url
-                        )),
-                    });
-                }
-
-                // Run A2A call on blocking thread
-                call_a2a_agent_blocking(agent_url, task_text, session_id)
+                ctx.authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
+                    .await?;
+                call_a2a_agent(
+                    agent_url,
+                    task_text,
+                    session_id,
+                    request_id,
+                    receipt_tracker.clone(),
+                    ctx.tool_started_transition_observer,
+                    ctx.a2a_outbound_authorization,
+                )
+                .await
             }
             _ => Ok(ToolCallInternalResult {
                 success: false,
                 output: None,
                 error: Some(format!("Unknown execution tool: {}", tool_name)),
             }),
-        }
+        }?;
+
+        finalize_adapter_result(&receipt_tracker, &mut result);
+        Ok(result)
     }
+}
+
+fn finalize_adapter_result(
+    receipt_tracker: &ToolExecutionReceiptTracker,
+    result: &mut ToolCallInternalResult,
+) {
+    use crate::tool_execution_receipt::{ToolDispatchKind, ToolTransportStatus};
+
+    let snapshot = receipt_tracker.snapshot();
+    match snapshot.transport_status {
+        ToolTransportStatus::Dispatched
+            if matches!(
+                snapshot.dispatch_kind,
+                ToolDispatchKind::Local | ToolDispatchKind::Simulated
+            ) =>
+        {
+            receipt_tracker.mark_response_observed();
+            super::tool_executor::record_effect_outcome(receipt_tracker, result.success);
+        }
+        ToolTransportStatus::ResponseObserved => {
+            super::tool_executor::record_effect_outcome(receipt_tracker, result.success);
+        }
+        ToolTransportStatus::Dispatched => {
+            receipt_tracker.mark_remote_unknown();
+            if result.success {
+                result.success = false;
+                result.output = None;
+                result.error = Some("tool_adapter_success_without_observed_response".into());
+            }
+        }
+        ToolTransportStatus::NotAttempted if result.success => {
+            result.success = false;
+            result.output = None;
+            result.error = Some("tool_adapter_success_without_dispatch_receipt".into());
+        }
+        ToolTransportStatus::NotAttempted
+        | ToolTransportStatus::LocalAborted
+        | ToolTransportStatus::RemoteUnknown => {}
+    }
+}
+
+fn complete_local_early_result(
+    receipt_tracker: &ToolExecutionReceiptTracker,
+    mut result: ToolCallInternalResult,
+) -> ToolCallInternalResult {
+    finalize_adapter_result(receipt_tracker, &mut result);
+    result
 }

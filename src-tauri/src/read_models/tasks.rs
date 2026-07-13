@@ -152,22 +152,7 @@ async fn load_task_inputs(
             .and_then(|delivery| delivery.get("status"))
             .and_then(|status| status.as_str())
             .map(str::to_string);
-        let retry_action_id = if detail
-            .allowed_controls
-            .iter()
-            .any(|control| control == "retry")
-        {
-            detail
-                .actions
-                .iter()
-                .find(|action| {
-                    action.status
-                        == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed
-                })
-                .map(|action| action.id.clone())
-        } else {
-            None
-        };
+        let retry_action_id = detail.retry_target_action_id.clone();
         let mut pending_blockers = detail.blockers.clone();
         pending_blockers.extend(detail.task_session.pending_blockers.clone());
         pending_blockers.extend(detail.continuity_diagnostics.reason_codes.clone());

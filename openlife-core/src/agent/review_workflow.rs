@@ -1,5 +1,6 @@
 use crate::agent::proposal_store::ProposalStore;
 use crate::agent::types::{AgentProposal, ProposalStatus, ProposalType, RiskLevel};
+use crate::agent::{CanonicalWriteAdmission, CanonicalWriteAdmissionRequest};
 use anyhow::{anyhow, Result};
 use ring::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,7 @@ pub enum DurableWriteSource {
     Proactive,
     ManualOverride,
     SkillRuntime,
+    NetworkConsent,
     TestFixture,
 }
 
@@ -183,6 +185,103 @@ impl ReviewWorkflowOutcome {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewAcceptanceAuthorityProof {
+    ClaimedByReviewWorkflow,
+}
+
+/// Non-serializable proof that the exact Proposal snapshot currently owns the
+/// Review Center acceptance dispatch claim.
+///
+/// The Proposal remains pending until its effect receipt is durable; this
+/// object proves the user's accepted action and exact snapshot without
+/// misreporting the effect as completed. Deserialized Proposal/claim strings
+/// cannot construct this type because the authority proof is private.
+#[derive(Debug, Clone)]
+pub struct ClaimedReviewAcceptanceSnapshot {
+    proposal: AgentProposal,
+    proposal_snapshot_digest: String,
+    dispatch_claim_digest: String,
+    authority_proof: ReviewAcceptanceAuthorityProof,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaterializedReviewAcceptanceAuthorityProof {
+    ReloadedFromCanonicalReviewWorkflow,
+}
+
+/// Non-serializable restart proof that ProposalStore durably confirmed the
+/// effect for the exact pre-dispatch Proposal snapshot and claim.
+#[derive(Debug, Clone)]
+pub struct MaterializedReviewAcceptanceSnapshot {
+    proposal: AgentProposal,
+    proposal_snapshot_digest: String,
+    dispatch_claim_digest: String,
+    authority_proof: MaterializedReviewAcceptanceAuthorityProof,
+}
+
+impl MaterializedReviewAcceptanceSnapshot {
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self.authority_proof
+            != MaterializedReviewAcceptanceAuthorityProof::ReloadedFromCanonicalReviewWorkflow
+        {
+            anyhow::bail!("materialized review acceptance authority proof is unavailable");
+        }
+        if self.proposal_snapshot_digest.trim().is_empty()
+            || self.dispatch_claim_digest.trim().is_empty()
+        {
+            anyhow::bail!("materialized review acceptance provenance is incomplete");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn proposal(&self) -> &AgentProposal {
+        &self.proposal
+    }
+
+    pub(crate) fn proposal_snapshot_digest(&self) -> &str {
+        &self.proposal_snapshot_digest
+    }
+
+    pub(crate) fn dispatch_claim_digest(&self) -> &str {
+        &self.dispatch_claim_digest
+    }
+}
+
+impl ClaimedReviewAcceptanceSnapshot {
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self.authority_proof != ReviewAcceptanceAuthorityProof::ClaimedByReviewWorkflow {
+            anyhow::bail!("review acceptance authority proof is unavailable");
+        }
+        if !matches!(
+            self.proposal.status,
+            ProposalStatus::Pending | ProposalStatus::Postponed | ProposalStatus::Edited
+        ) || self.proposal.is_expired()
+        {
+            anyhow::bail!("review acceptance snapshot is not active");
+        }
+        if review_proposal_snapshot_digest(&self.proposal)? != self.proposal_snapshot_digest {
+            anyhow::bail!("review acceptance snapshot changed after claim");
+        }
+        if self.dispatch_claim_digest.trim().is_empty() {
+            anyhow::bail!("review acceptance dispatch claim digest is missing");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn proposal(&self) -> &AgentProposal {
+        &self.proposal
+    }
+
+    pub(crate) fn proposal_snapshot_digest(&self) -> &str {
+        &self.proposal_snapshot_digest
+    }
+
+    pub(crate) fn dispatch_claim_digest(&self) -> &str {
+        &self.dispatch_claim_digest
+    }
+}
+
 pub struct ReviewWorkflow<'a> {
     proposal_store: &'a ProposalStore,
 }
@@ -190,6 +289,75 @@ pub struct ReviewWorkflow<'a> {
 impl<'a> ReviewWorkflow<'a> {
     pub fn new(proposal_store: &'a ProposalStore) -> Self {
         Self { proposal_store }
+    }
+
+    /// Consume one exact PolicyRouter grant after a successful canonical read
+    /// observation. ReviewWorkflow constructs the Proposal itself so a caller
+    /// cannot substitute request prose, a different candidate, or different
+    /// evidence-shaped strings after policy admission.
+    pub fn submit_conditional_observation_memory_review(
+        &self,
+        grant: crate::agent::main_chat_agent_v1::PolicyConditionalObservationReviewGrant,
+        admission: &dyn CanonicalWriteAdmission,
+    ) -> Result<ReviewWorkflowOutcome> {
+        let evidence_refs = vec![
+            format!("main_chat_operation:{}", grant.operation_id()),
+            format!(
+                "canonical_user_message:{}:{}",
+                grant.source_user_message_id(),
+                grant.source_user_message_digest()
+            ),
+            format!("agent_run:{}", grant.run_id()),
+            format!("agent_action:{}", grant.action_id()),
+            format!("agent_observation:{}", grant.observation_id()),
+            format!("bound_output_receipt:{}", grant.output_receipt_digest()),
+            format!("tool_execution_receipt:{}", grant.tool_receipt_id()),
+            format!("policy_conditional_grant:{}", grant.policy_grant_id()),
+        ];
+        let mut proposal = AgentProposal::new(
+            ProposalType::MemoryWrite,
+            "memory.pending.observation_review",
+            serde_json::json!({
+                "content": grant.candidate_body(),
+                "scope": "global",
+                "category": "fact",
+                "riskLevel": "medium",
+                "sensitivity": "internal",
+                "candidateKind": "semantic_user_fact",
+                "source": "main_chat_observation",
+                "operationId": grant.operation_id(),
+                "sourceUserMessageId": grant.source_user_message_id(),
+                "sourceUserMessageDigest": grant.source_user_message_digest(),
+                "sourceRunId": grant.run_id(),
+                "sourceActionId": grant.action_id(),
+                "sourceObservationId": grant.observation_id(),
+                "sourceOutputReceiptDigest": grant.output_receipt_digest(),
+                "sourceToolReceiptId": grant.tool_receipt_id(),
+                "candidateDigest": grant.candidate_digest(),
+                "policyGrantId": grant.policy_grant_id(),
+                "policyContractDigest": grant.policy_contract_digest(),
+                "reviewPath": "mailbox",
+                "acceptedDurableTruthWritten": false,
+                "directWritesExecuted": false,
+            }),
+            "A useful supported Memory candidate was derived from an admitted current-turn observation and requires review.",
+            0.86,
+            RiskLevel::Medium,
+            crate::agent::ProposalSource::ChatConversation,
+        );
+        proposal.run_id = Some(grant.run_id().to_string());
+        proposal.source_detail = Some(grant.operation_id().to_string());
+        // ReviewWorkflow's canonical idempotency key covers the full
+        // observation-bound `after` payload above. Do not introduce a second
+        // key namespace that ProposalStore cannot reconstruct.
+        let request = DurableWriteRequest::from_agent_proposal(
+            DurableWriteSource::MainChat,
+            DurableWriteSubject::Memory,
+            proposal,
+            "Observation-derived Memory proposal is pending Review Center approval.",
+        )
+        .with_evidence_refs(evidence_refs);
+        self.submit_with_admission(request, admission)
     }
 
     pub fn submit(&self, mut request: DurableWriteRequest) -> Result<ReviewWorkflowOutcome> {
@@ -238,6 +406,111 @@ impl<'a> ReviewWorkflow<'a> {
         ))
     }
 
+    /// Issue an ephemeral acceptance proof only after ProposalStore confirms
+    /// the exact id + dispatch claim is the sole claimed Review Center action.
+    pub fn claimed_acceptance_snapshot(
+        &self,
+        proposal_id: &str,
+        dispatch_claim_id: &str,
+    ) -> Result<ClaimedReviewAcceptanceSnapshot> {
+        if proposal_id.trim().is_empty() || dispatch_claim_id.trim().is_empty() {
+            anyhow::bail!("review acceptance claim is incomplete");
+        }
+        let (proposal, persisted_snapshot_digest) = self
+            .proposal_store
+            .claimed_dispatch_proposal(proposal_id, dispatch_claim_id)?
+            .ok_or_else(|| anyhow!("review acceptance dispatch claim is not canonical"))?;
+        let computed_snapshot_digest = review_proposal_snapshot_digest(&proposal)?;
+        if persisted_snapshot_digest != computed_snapshot_digest {
+            anyhow::bail!("review acceptance snapshot digest is not canonical");
+        }
+        let snapshot = ClaimedReviewAcceptanceSnapshot {
+            proposal_snapshot_digest: persisted_snapshot_digest,
+            dispatch_claim_digest: format!("sha256:{}", sha256_hex(dispatch_claim_id.as_bytes())),
+            proposal,
+            authority_proof: ReviewAcceptanceAuthorityProof::ClaimedByReviewWorkflow,
+        };
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
+
+    /// Re-establish runtime authority after restart from canonical
+    /// ProposalStore evidence. The returned proof cannot be serialized or
+    /// constructed from a TaskStore row.
+    pub fn materialized_acceptance_snapshot(
+        &self,
+        proposal_id: &str,
+    ) -> Result<MaterializedReviewAcceptanceSnapshot> {
+        let (proposal, dispatch_claim_id, proposal_snapshot_digest, dispatch_state) = self
+            .proposal_store
+            .materialized_dispatch_proposal(proposal_id)?
+            .ok_or_else(|| anyhow!("materialized review acceptance is not canonical"))?;
+        match dispatch_state.as_str() {
+            "confirmed_projection_pending" => {
+                if !matches!(
+                    proposal.status,
+                    ProposalStatus::Pending | ProposalStatus::Postponed | ProposalStatus::Edited
+                ) || review_proposal_snapshot_digest(&proposal)? != proposal_snapshot_digest
+                {
+                    anyhow::bail!("projection-pending review snapshot changed after dispatch");
+                }
+            }
+            "confirmed" => {
+                if proposal.status != ProposalStatus::Accepted || proposal.resolved_at.is_none() {
+                    anyhow::bail!("confirmed review effect lacks its accepted projection");
+                }
+            }
+            _ => anyhow::bail!("review effect is not durably materialized"),
+        }
+        let snapshot = MaterializedReviewAcceptanceSnapshot {
+            proposal,
+            proposal_snapshot_digest,
+            dispatch_claim_digest: format!("sha256:{}", sha256_hex(dispatch_claim_id.as_bytes())),
+            authority_proof:
+                MaterializedReviewAcceptanceAuthorityProof::ReloadedFromCanonicalReviewWorkflow,
+        };
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
+
+    /// Canonical proposal admission plus ReviewWorkflow submission as one
+    /// authority. Product callers must use this entrypoint when cancellation
+    /// can race a durable Proposal create/reuse/update.
+    pub fn submit_with_admission(
+        &self,
+        request: DurableWriteRequest,
+        admission: &dyn CanonicalWriteAdmission,
+    ) -> Result<ReviewWorkflowOutcome> {
+        let canonical_proposal_id = request
+            .existing_proposal_id
+            .as_deref()
+            .unwrap_or(&request.proposal.id);
+        let permit = admission
+            .acquire(CanonicalWriteAdmissionRequest::new(
+                "proposal",
+                format!("proposal:{canonical_proposal_id}"),
+            ))
+            .map_err(anyhow::Error::from)?;
+        match self.submit(request) {
+            Ok(outcome) => {
+                match outcome.decision.kind {
+                    DurableWriteDecisionKind::CreatePendingProposal
+                    | DurableWriteDecisionKind::UpdatePendingProposal => {
+                        permit.finish_committed();
+                    }
+                    DurableWriteDecisionKind::ReusePendingProposal => {
+                        permit.finish_noop();
+                    }
+                }
+                Ok(outcome)
+            }
+            Err(error) => {
+                permit.finish_failed();
+                Err(error)
+            }
+        }
+    }
+
     fn find_existing_pending(
         &self,
         request: &DurableWriteRequest,
@@ -258,6 +531,7 @@ pub fn proposal_status_semantics(status: ProposalStatus) -> &'static str {
         ProposalStatus::Rejected => "rejected_no_durable_write_applied",
         ProposalStatus::Edited => "edited_pending_or_applied_only_after_explicit_acceptance",
         ProposalStatus::Postponed => "postponed_no_durable_write_applied",
+        ProposalStatus::Expired => "expired_no_durable_write_applied",
     }
 }
 
@@ -330,6 +604,16 @@ fn default_idempotency_key(
     });
     let serialized = serde_json::to_vec(&payload).unwrap_or_default();
     format!("review_workflow:{}", sha256_hex(&serialized))
+}
+
+pub(crate) fn review_proposal_snapshot_digest(proposal: &AgentProposal) -> Result<String> {
+    let payload = json!({
+        "schema": "openlife.reviewWorkflow.acceptanceSnapshot.v1",
+        "proposal": proposal,
+    });
+    let serialized = serde_json::to_vec(&payload)
+        .map_err(|error| anyhow!("review acceptance snapshot is not canonical JSON: {error}"))?;
+    Ok(format!("sha256:{}", sha256_hex(&serialized)))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -419,5 +703,27 @@ mod tests {
             .to_string()
             .contains("pending proposal wording must not claim durable completion"));
         assert_eq!(store.pending_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn acceptance_snapshot_requires_the_exact_canonical_dispatch_claim() {
+        let store = ProposalStore::new_in_memory().unwrap();
+        let proposal = proposal("memory.acceptance.snapshot");
+        let proposal_id = proposal.id.clone();
+        store.create_proposal(&proposal).unwrap();
+        assert!(ReviewWorkflow::new(&store)
+            .claimed_acceptance_snapshot(&proposal_id, "forged-claim")
+            .is_err());
+
+        let claim_id = store.claim_dispatch(&proposal_id).unwrap().unwrap();
+        let snapshot = ReviewWorkflow::new(&store)
+            .claimed_acceptance_snapshot(&proposal_id, &claim_id)
+            .unwrap();
+
+        snapshot.validate().unwrap();
+        assert_eq!(snapshot.proposal().id, proposal_id);
+        assert!(snapshot.proposal_snapshot_digest().starts_with("sha256:"));
+        assert!(snapshot.dispatch_claim_digest().starts_with("sha256:"));
+        assert!(!snapshot.dispatch_claim_digest().contains(&claim_id));
     }
 }

@@ -1151,7 +1151,7 @@ fn collect_source_refs(input: &LifeModelViewModelBuildInput) -> Vec<EvidenceRef>
             .proposals
             .iter()
             .filter(|proposal| is_life_model_proposal(proposal))
-            .map(|proposal| evidence_ref_from_proposal(proposal)),
+            .map(evidence_ref_from_proposal),
     );
     dedupe_evidence_refs(refs)
 }
@@ -1187,8 +1187,7 @@ fn is_life_model_proposal(proposal: &AgentProposal) -> bool {
 fn affected_dimension_ids(proposal: &AgentProposal) -> Vec<String> {
     let path = proposal
         .affected_path
-        .replace('/', ".")
-        .replace('[', ".")
+        .replace(['/', '['], ".")
         .to_ascii_lowercase();
     let mut ids = Vec::new();
     for (prefix, id) in [
@@ -1289,7 +1288,9 @@ fn decision_status_from_proposal(status: ProposalStatus) -> LifeModelCandidateDe
         ProposalStatus::Accepted => LifeModelCandidateDecisionStatus::Accepted,
         ProposalStatus::Edited => LifeModelCandidateDecisionStatus::Edited,
         ProposalStatus::Postponed => LifeModelCandidateDecisionStatus::Postponed,
-        ProposalStatus::Rejected => LifeModelCandidateDecisionStatus::Unknown,
+        ProposalStatus::Rejected | ProposalStatus::Expired => {
+            LifeModelCandidateDecisionStatus::Unknown
+        }
     }
 }
 

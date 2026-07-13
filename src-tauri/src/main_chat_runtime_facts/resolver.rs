@@ -1,4 +1,5 @@
 use openlife_core::agent::ModelRouteTrace;
+use openlife_core::config::AppConfig;
 use openlife_core::scheduler::InferenceScheduler;
 use std::sync::Arc;
 
@@ -15,6 +16,7 @@ use crate::AppState;
 pub(crate) struct MainChatRuntimeFactPreModelRequest<'a> {
     pub(crate) user_text: &'a str,
     pub(crate) state: &'a Arc<AppState>,
+    pub(crate) provider_config: &'a AppConfig,
     pub(crate) scheduler: &'a InferenceScheduler,
     pub(crate) session_id: &'a str,
     pub(crate) current_task_session_id: Option<&'a str>,
@@ -40,6 +42,7 @@ pub(crate) async fn resolve_pre_model_runtime_fact_answer(
             return resolve_provider_route_fact_answer(
                 request.user_text,
                 request.state,
+                request.provider_config,
                 request.scheduler,
                 request.session_id,
                 None,
@@ -50,12 +53,15 @@ pub(crate) async fn resolve_pre_model_runtime_fact_answer(
             .await;
         }
         Some(MainChatProviderRouteIntent::AskCurrentModelRoute)
-            if provider_route_fact_should_block_before_model(request.state, request.scheduler)
-                .await =>
+            if provider_route_fact_should_block_before_model(
+                request.provider_config,
+                request.scheduler,
+            ) =>
         {
             return resolve_provider_route_fact_answer(
                 request.user_text,
                 request.state,
+                request.provider_config,
                 request.scheduler,
                 request.session_id,
                 None,
@@ -86,6 +92,7 @@ pub(crate) async fn resolve_pre_model_runtime_fact_answer(
 pub(crate) struct MainChatRuntimeFactPostModelRequest<'a> {
     pub(crate) user_text: &'a str,
     pub(crate) state: &'a Arc<AppState>,
+    pub(crate) provider_config: &'a AppConfig,
     pub(crate) scheduler: &'a InferenceScheduler,
     pub(crate) session_id: &'a str,
     pub(crate) current_route: ModelRouteTrace,
@@ -106,6 +113,7 @@ pub(crate) async fn resolve_post_model_runtime_fact_answer(
     resolve_provider_route_fact_answer(
         request.user_text,
         request.state,
+        request.provider_config,
         request.scheduler,
         request.session_id,
         Some(request.current_route),

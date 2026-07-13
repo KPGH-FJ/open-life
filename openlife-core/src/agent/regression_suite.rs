@@ -167,9 +167,9 @@ impl RegressionSuite {
                         requested_route: Some(ModelRoutePolicy::CloudAllowed),
                     }),
                 });
-                let passed = decision.route == ModelRoutePolicy::LocalOnly
+                let passed = decision.route() == ModelRoutePolicy::LocalOnly
                     && decision
-                        .conflicts
+                        .conflicts()
                         .iter()
                         .any(|conflict| conflict.policy_won);
                 Ok(result(
@@ -184,7 +184,7 @@ impl RegressionSuite {
                     } else {
                         "relaxing heuristic was not blocked"
                     },
-                    serde_json::json!({ "conflictCount": decision.conflicts.len() }),
+                    serde_json::json!({ "conflictCount": decision.conflicts().len() }),
                 ))
             }
             RegressionScenarioKind::ExternalWriteProposalFirst => {

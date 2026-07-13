@@ -113,13 +113,12 @@ struct ProviderPreflightFactSnapshot {
     blockers: Vec<String>,
 }
 
-pub(crate) async fn provider_route_fact_should_block_before_model(
-    state: &Arc<AppState>,
+pub(crate) fn provider_route_fact_should_block_before_model(
+    config: &AppConfig,
     scheduler: &InferenceScheduler,
 ) -> bool {
-    let config = state.config.lock().await.clone();
     let planned = planned_route_without_probe(scheduler);
-    let preflight = provider_preflight_snapshot(&config, scheduler, &planned);
+    let preflight = provider_preflight_snapshot(config, scheduler, &planned);
     preflight.status == "blocked"
 }
 
@@ -127,6 +126,7 @@ pub(crate) async fn provider_route_fact_should_block_before_model(
 pub(crate) async fn resolve_provider_route_fact_answer(
     user_text: &str,
     state: &Arc<AppState>,
+    config: &AppConfig,
     scheduler: &InferenceScheduler,
     session_id: &str,
     current_route: Option<ModelRouteTrace>,
@@ -135,9 +135,8 @@ pub(crate) async fn resolve_provider_route_fact_answer(
     provider_generation_path: &str,
 ) -> Option<MainChatRuntimeFactAnswer> {
     let intent = classify_provider_route_query(user_text)?;
-    let config = state.config.lock().await.clone();
     let planned_route = planned_route_without_probe(scheduler);
-    let preflight = provider_preflight_snapshot(&config, scheduler, &planned_route);
+    let preflight = provider_preflight_snapshot(config, scheduler, &planned_route);
     let configured = ProviderRouteFactSnapshot {
         provider: Some(bounded_runtime_fact_label(&config.llm.provider)),
         model: Some(bounded_runtime_fact_label(&config.llm.chat_model)),
@@ -161,7 +160,7 @@ pub(crate) async fn resolve_provider_route_fact_answer(
     let last_turn = last_turn_snapshot(state, session_id).await;
     let runtime_route_evidence = build_runtime_route_evidence_from_snapshots(
         state,
-        &config,
+        config,
         scheduler,
         Some(session_id),
         None,
@@ -375,14 +374,14 @@ pub(crate) fn provider_route_query_has_followup_task(user_text: &str) -> bool {
 
 pub(crate) async fn build_settings_runtime_route_evidence(
     state: &Arc<AppState>,
+    config: &AppConfig,
     scheduler: &InferenceScheduler,
 ) -> RuntimeRouteEvidence {
-    let config = state.config.lock().await.clone();
     let planned = route_snapshot_from_trace(&planned_route_without_probe(scheduler), None);
     let last_completed = last_completed_generation_snapshot_any_session(state).await;
     build_runtime_route_evidence_from_snapshots(
         state,
-        &config,
+        config,
         scheduler,
         None,
         None,
@@ -404,6 +403,86 @@ pub(crate) fn provider_transmission_history_from_runs(
         .collect()
 }
 
+pub(crate) async fn provider_transmission_history_from_runs_with_state(
+    state: &Arc<AppState>,
+    runs: &[AgentRun],
+) -> Result<Vec<ProviderTransmissionHistoryItem>, String> {
+    let mut items = provider_transmission_history_from_runs(runs);
+    let Some(event_store_arc) = state.main_chat_agent_event_store.as_ref() else {
+        for item in &mut items {
+            item.status = "unknown".into();
+            item.truth_confidence = "unknown".into();
+            item.reason = "durable_provider_lifecycle_store_unavailable".into();
+        }
+        return Ok(items);
+    };
+    let event_store = event_store_arc.lock().await;
+    for (run, item) in runs.iter().zip(items.iter_mut()) {
+        let event = event_store
+            .latest_provider_event_for_run(&run.id)
+            .map_err(|error| format!("provider lifecycle read failed for {}: {error}", run.id))?;
+        let Some(event) = event else {
+            if item.route_type == "cloud" {
+                item.status = "unknown".into();
+                item.truth_confidence = "unknown".into();
+                item.reason = "durable_exact_request_lifecycle_missing".into();
+            }
+            continue;
+        };
+        apply_durable_provider_event_to_history_item(item, &event);
+    }
+    Ok(items)
+}
+
+fn apply_durable_provider_event_to_history_item(
+    item: &mut ProviderTransmissionHistoryItem,
+    event: &crate::main_chat_event_stream::MainChatAgentDurableEvent,
+) {
+    let provider = event
+        .payload
+        .get("provider")
+        .and_then(Value::as_str)
+        .map(metadata_safe_transmission_label)
+        .unwrap_or_else(|| "unknown".into());
+    let model = event
+        .payload
+        .get("model")
+        .and_then(Value::as_str)
+        .map(metadata_safe_transmission_label)
+        .unwrap_or_else(|| "unknown".into());
+    let route_type = if provider.eq_ignore_ascii_case("ollama") {
+        "local"
+    } else if provider == "unknown" {
+        "unknown"
+    } else {
+        "cloud"
+    };
+    item.provider = provider;
+    item.model = model;
+    item.route_type = route_type.into();
+    item.status = match (event.event_type.as_str(), route_type) {
+        ("provider.completed", "cloud") => "sent",
+        ("provider.completed" | "provider.failed" | "provider.remote_unknown", "local") => {
+            "not_sent"
+        }
+        ("provider.started" | "provider.failed" | "provider.remote_unknown", "cloud") => "unknown",
+        _ => "unknown",
+    }
+    .into();
+    item.reason = format!(
+        "durable_exact_request_{}",
+        event.event_type.replace('.', "_")
+    );
+    item.evidence_id = metadata_safe_transmission_label(&event.event_id);
+    item.truth_confidence = "verified".into();
+    item.source_refs.push(ProviderTransmissionSourceRef {
+        source: "turn_event_store".into(),
+        ref_id: Some(metadata_safe_transmission_label(&event.event_id)),
+        status: Some(metadata_safe_transmission_label(&event.event_type)),
+        route_type: Some(route_type.into()),
+    });
+}
+
 pub(crate) fn provider_transmission_history_item_from_run(
     run: &AgentRun,
 ) -> ProviderTransmissionHistoryItem {
@@ -419,16 +498,7 @@ pub(crate) fn provider_transmission_history_item_from_run(
         });
     let status_route = runtime_evidence
         .as_ref()
-        .and_then(transmission_invocation_route_from_evidence)
-        .or_else(|| {
-            if runtime_evidence.is_none() {
-                run.model_route
-                    .as_ref()
-                    .map(route_identity_from_model_route)
-            } else {
-                None
-            }
-        });
+        .and_then(transmission_invocation_route_from_evidence);
     let route_type = route
         .as_ref()
         .map(|route| normalized_evidence_route_type(Some(route.route_type.as_str())))
@@ -563,9 +633,6 @@ fn provider_transmission_status(
     route: Option<&RouteIdentity>,
     route_type: &str,
 ) -> String {
-    if metadata_bool(metadata, &["liveProviderInvoked", "live_provider_invoked"]) {
-        return "sent".into();
-    }
     let invocation_route = evidence
         .and_then(|evidence| {
             evidence
@@ -578,13 +645,6 @@ fn provider_transmission_status(
         && no_model_invocation_for_blocked_status(metadata, invocation_route)
     {
         return "blocked".into();
-    }
-    if route_type == "cloud"
-        || positive_evidence_transmission(evidence, "sent", &["cloud"])
-        || metadata_string(metadata, &["externalTransmission", "external_transmission"])
-            == Some("sent")
-    {
-        return "sent".into();
     }
     if positive_not_sent_route_type(route_type)
         || positive_evidence_transmission(
@@ -1124,12 +1184,12 @@ async fn build_runtime_route_evidence_from_snapshots(
     current_turn_model_generated: bool,
 ) -> RuntimeRouteEvidence {
     let generated_at = chrono::Utc::now().to_rfc3339();
-    let validation_record = crate::provider_validation::load_provider_validation_record_from_path(
+    let validation_load = crate::provider_validation::load_provider_validation_record_from_path(
         &crate::provider_validation::provider_validation_path(),
     );
-    let validation = crate::provider_validation::summarize_provider_validation(
+    let validation = crate::provider_validation::summarize_loaded_provider_validation(
         config,
-        validation_record.as_ref(),
+        &validation_load,
         chrono::Utc::now(),
     );
     let local_test_provider_ready = false;
@@ -1149,15 +1209,30 @@ async fn build_runtime_route_evidence_from_snapshots(
         Some(runtime_fact_route_identity())
     };
     let last_completed_route = last_completed.and_then(route_identity_from_snapshot);
-    let observed_fallback_reason = actual
-        .or(last_completed)
-        .and_then(|snapshot| snapshot.fallback_reason.as_deref());
-    let fallback = fallback_evidence(
+    let current_fallback = fallback_evidence(
         planned_route.as_ref(),
-        actual_route.as_ref().or(last_completed_route.as_ref()),
-        observed_fallback_reason,
+        actual_route.as_ref(),
+        actual.and_then(|snapshot| snapshot.fallback_reason.as_deref()),
         &preflight,
     );
+    // Historical provider truth is a separate observation. It must never be
+    // joined to today's planned route or preflight blockers to fabricate a
+    // cross-request fallback. A historical fallback is exposed only when the
+    // exact completed request matched the AgentRun provider/model metadata;
+    // `route_snapshot_from_provider_event` clears fallback_reason otherwise.
+    let historical_fallback = (answer_scope == "settings_readiness")
+        .then(|| {
+            let route = last_completed_route.as_ref()?;
+            let reason = last_completed?.fallback_reason.as_deref()?;
+            Some(FallbackEvidence {
+                from_route: None,
+                to_route: Some(route.clone()),
+                reason: bounded_runtime_fact_label(reason),
+                blocker_codes: Vec::new(),
+            })
+        })
+        .flatten();
+    let fallback = current_fallback.or(historical_fallback);
     let provider_readiness = provider_readiness(
         config,
         &validation,
@@ -1309,32 +1384,26 @@ fn fallback_evidence(
     fallback_reason: Option<&str>,
     preflight: &ProviderPreflightFactSnapshot,
 ) -> Option<FallbackEvidence> {
+    let actual = actual?;
     let planned_cloud = planned.is_some_and(|route| route.route_type == "cloud");
-    let actual_local = actual.is_some_and(|route| route.route_type == "local");
-    let preflight_blocked = preflight.status == "blocked";
+    let actual_local = actual.route_type == "local";
     let planned_cloud_actual_local = planned_cloud && actual_local;
-    if !planned_cloud_actual_local && fallback_reason.is_none() && !preflight_blocked {
+    if !planned_cloud_actual_local && fallback_reason.is_none() {
         return None;
     }
-    if planned_cloud_actual_local || fallback_reason.is_some() || preflight_blocked {
-        let reason = fallback_reason
-            .map(bounded_runtime_fact_label)
-            .or_else(|| {
-                if planned_cloud_actual_local {
-                    Some("planned_cloud_actual_local".into())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| "provider_preflight_blocked".into());
-        return Some(FallbackEvidence {
-            from_route: planned.cloned(),
-            to_route: actual.cloned(),
-            reason,
-            blocker_codes: preflight.blockers.clone(),
-        });
-    }
-    None
+    let reason = fallback_reason
+        .map(bounded_runtime_fact_label)
+        .unwrap_or_else(|| "planned_cloud_actual_local".into());
+    Some(FallbackEvidence {
+        from_route: planned.cloned(),
+        to_route: Some(actual.clone()),
+        reason,
+        blocker_codes: if preflight.status == "blocked" {
+            preflight.blockers.clone()
+        } else {
+            Vec::new()
+        },
+    })
 }
 
 fn route_identity_from_snapshot(snapshot: &ProviderRouteFactSnapshot) -> Option<RouteIdentity> {
@@ -1575,13 +1644,17 @@ async fn last_turn_snapshot(
     let store_arc = state.agent_run_store.as_ref()?;
     let store = store_arc.lock().await;
     let runs = store.list_runs_for_session(session_id, 5).ok()?;
-    runs.into_iter()
-        .find(|run| run.status == AgentRunStatus::Completed)
-        .and_then(|run| {
-            run.model_route
-                .as_ref()
-                .map(|route| route_snapshot_from_trace(route, Some(run.id.as_str())))
-        })
+    let run = runs
+        .into_iter()
+        .find(|run| run.status == AgentRunStatus::Completed)?;
+    drop(store);
+    if let Some(event_store_arc) = state.main_chat_agent_event_store.as_ref() {
+        let event_store = event_store_arc.lock().await;
+        if let Ok(Some(event)) = event_store.latest_completed_provider_event_for_run(&run.id) {
+            return route_snapshot_from_provider_event(&event, &run);
+        }
+    }
+    Some(deterministic_run_snapshot(&run))
 }
 
 async fn last_completed_generation_snapshot(
@@ -1591,12 +1664,17 @@ async fn last_completed_generation_snapshot(
     let store_arc = state.agent_run_store.as_ref()?;
     let store = store_arc.lock().await;
     let runs = store.list_runs_for_session(session_id, 20).ok()?;
+    drop(store);
+    let event_store_arc = state.main_chat_agent_event_store.as_ref()?;
+    let event_store = event_store_arc.lock().await;
     runs.into_iter()
         .filter(|run| run.status == AgentRunStatus::Completed)
         .find_map(|run| {
-            let route = run.model_route.as_ref()?;
-            let snapshot = route_snapshot_from_trace(route, Some(run.id.as_str()));
-            route_snapshot_is_model_generation(&snapshot).then_some(snapshot)
+            event_store
+                .latest_completed_provider_event_for_run(&run.id)
+                .ok()
+                .flatten()
+                .and_then(|event| route_snapshot_from_provider_event(&event, &run))
         })
 }
 
@@ -1606,15 +1684,76 @@ async fn last_completed_generation_snapshot_any_session(
     let store_arc = state.agent_run_store.as_ref()?;
     let store = store_arc.lock().await;
     let runs = store.list_runs(50, 0).ok()?;
+    drop(store);
+    let event_store_arc = state.main_chat_agent_event_store.as_ref()?;
+    let event_store = event_store_arc.lock().await;
     runs.into_iter()
         .filter(|run| run.status == AgentRunStatus::Completed)
-        .find_map(|run| route_snapshot_from_run(&run))
+        .find_map(|run| {
+            event_store
+                .latest_completed_provider_event_for_run(&run.id)
+                .ok()
+                .flatten()
+                .and_then(|event| route_snapshot_from_provider_event(&event, &run))
+        })
 }
 
-fn route_snapshot_from_run(run: &AgentRun) -> Option<ProviderRouteFactSnapshot> {
-    let route = run.model_route.as_ref()?;
-    let snapshot = route_snapshot_from_trace(route, Some(run.id.as_str()));
-    route_snapshot_is_model_generation(&snapshot).then_some(snapshot)
+fn route_snapshot_from_provider_event(
+    event: &crate::main_chat_event_stream::MainChatAgentDurableEvent,
+    run: &AgentRun,
+) -> Option<ProviderRouteFactSnapshot> {
+    if event.event_type != "provider.completed" {
+        return None;
+    }
+    let provider = event.payload.get("provider")?.as_str()?;
+    let model = event.payload.get("model")?.as_str()?;
+    // Provider/model execution truth comes only from the exact-request durable
+    // receipt. Route rationale remains AgentRun-owned metadata and is joined
+    // only when it names the same provider/model, preventing cross-attempt
+    // aggregation from inventing fallback or privacy facts.
+    let matching_route = run
+        .model_route
+        .as_ref()
+        .filter(|route| route.provider.eq_ignore_ascii_case(provider) && route.model == model);
+    Some(ProviderRouteFactSnapshot {
+        provider: Some(bounded_runtime_fact_label(provider)),
+        model: Some(bounded_runtime_fact_label(model)),
+        route_type: Some(if provider.eq_ignore_ascii_case("ollama") {
+            "local".into()
+        } else {
+            "cloud".into()
+        }),
+        run_id: Some(bounded_runtime_fact_label(&run.id)),
+        reason: Some(
+            matching_route
+                .map(|route| bounded_runtime_fact_label(&route.reason))
+                .unwrap_or_else(|| "durable_exact_request_provider_completed".into()),
+        ),
+        privacy_level: Some(
+            matching_route
+                .map(|route| route.privacy_level.to_string())
+                .unwrap_or_else(|| "unknown".into()),
+        ),
+        provider_health_is_estimated: matching_route
+            .and_then(|route| route.provider_health_is_estimated)
+            .or(Some(false)),
+        fallback_reason: matching_route
+            .and_then(|route| route.fallback_reason.as_deref())
+            .map(bounded_runtime_fact_label),
+    })
+}
+
+fn deterministic_run_snapshot(run: &AgentRun) -> ProviderRouteFactSnapshot {
+    ProviderRouteFactSnapshot {
+        provider: None,
+        model: None,
+        route_type: Some("agent_runtime".into()),
+        run_id: Some(bounded_runtime_fact_label(&run.id)),
+        reason: Some("no_durable_provider_completion_for_run".into()),
+        privacy_level: Some("unknown".into()),
+        provider_health_is_estimated: Some(false),
+        fallback_reason: None,
+    }
 }
 
 fn route_snapshot_from_trace(
@@ -1708,44 +1847,20 @@ fn is_cloud_route_provider(provider: &str) -> bool {
 }
 
 fn planned_route_without_probe(scheduler: &InferenceScheduler) -> ModelRouteTrace {
-    if let Some(router) = scheduler.model_router.as_ref() {
-        if let Ok(decision) = router.route_chat(None, scheduler.prefer_local) {
-            return decision.to_trace();
-        }
+    if let Ok(decision) = scheduler
+        .model_router
+        .route_chat(None, scheduler.prefer_local)
+    {
+        return decision.to_trace();
     }
 
-    let has_remote_key = !scheduler.effective_api_key().trim().is_empty();
-    let use_configured_local = scheduler.prefer_local && !has_remote_key;
-    let (provider, model, route_type, reason) = if use_configured_local {
-        (
-            "ollama".to_string(),
-            scheduler.local_model.clone(),
-            "local".to_string(),
-            "configured_local_preference_without_probe".to_string(),
-        )
-    } else if scheduler.provider.trim().is_empty() || scheduler.provider == "none" {
-        (
-            "none".to_string(),
-            scheduler.chat_model.clone(),
-            "unknown".to_string(),
-            "configured_provider_missing_without_probe".to_string(),
-        )
-    } else {
-        (
-            scheduler.provider.clone(),
-            scheduler.chat_model.clone(),
-            "cloud".to_string(),
-            "configured_cloud_route_without_probe".to_string(),
-        )
-    };
-
     ModelRouteTrace {
-        provider,
-        model,
-        route_type,
+        provider: "none".into(),
+        model: String::new(),
+        route_type: "unknown".into(),
         prefer_local: scheduler.prefer_local,
         local_model: scheduler.local_model.clone(),
-        reason,
+        reason: "provider_route_unobserved_without_health_snapshot".into(),
         privacy_level: openlife_core::agent::RedactionLevel::None,
         latency_ms: None,
         retry_count: 0,

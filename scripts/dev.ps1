@@ -42,7 +42,12 @@ if (Test-Path $EnvFile) {
     }
 }
 
-$OpenLifeProfile = if ($env:OPENLIFE_PROFILE) { $env:OPENLIFE_PROFILE } else { "dev" }
+$OpenLifeProfile = "dev"
+if ($env:OPENLIFE_DATA_DIR -and $env:OPENLIFE_ALLOW_DEV_EXTENSIONS_WITH_CUSTOM_DATA_DIR -ne "1") {
+    Write-Host "[WARN] dev-extensions 拒绝使用 OPENLIFE_DATA_DIR；请使用隔离 dev profile" -ForegroundColor Yellow
+    Write-Host "       如确需隔离的自定义目录，请显式设置 OPENLIFE_ALLOW_DEV_EXTENSIONS_WITH_CUSTOM_DATA_DIR=1"
+    exit 1
+}
 $env:OPENLIFE_PROFILE = $OpenLifeProfile
 if (-not $env:A2A_PORT) {
     if ($OpenLifeProfile -eq "dev") {
@@ -73,6 +78,11 @@ $TauriConfigOverride = @{
         beforeDevCommand = "cd `"$FrontendDir`" && corepack pnpm dev --host 127.0.0.1 --port $VitePort"
         devUrl = $env:OPENLIFE_DEV_URL
         frontendDist = $env:OPENLIFE_FRONTEND_DIST
+    }
+    app = @{
+        security = @{
+            capabilities = @("default", "dev-extensions")
+        }
     }
 } | ConvertTo-Json -Compress -Depth 4
 
@@ -134,8 +144,14 @@ if (-not (Get-Command "cargo" -ErrorAction SilentlyContinue)) {
     Write-Host "[ERROR] cargo 不可用" -ForegroundColor Red
     exit 1
 }
-Write-Host "[INFO] 构建 A2A sidecar..." -ForegroundColor Blue
-cargo build --manifest-path (Join-Path $RepoRoot "Cargo.toml") --bin openlife-a2a-server
+if ($env:OPENLIFE_DEV_AUTOSTART_A2A -eq "1") {
+    if ($env:OPENLIFE_ENABLE_DEV_A2A -ne "1" -or -not $env:OPENLIFE_A2A_PAIRED_TOKEN -or $env:OPENLIFE_A2A_PAIRED_TOKEN.Length -lt 32) {
+        Write-Host "[ERROR] A2A autostart requires OPENLIFE_ENABLE_DEV_A2A=1 and a 32+ character OPENLIFE_A2A_PAIRED_TOKEN" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "[INFO] 构建显式启用的开发 A2A sidecar..." -ForegroundColor Blue
+    cargo build --manifest-path (Join-Path $RepoRoot "Cargo.toml") --bin openlife-a2a-server --features dev-extensions
+}
 
 Push-Location $RepoRoot
 $localTauri = Join-Path $FrontendDir "node_modules\.bin\tauri.cmd"
@@ -144,10 +160,10 @@ $globalTauri = Get-Command "tauri" -ErrorAction SilentlyContinue
 try {
     if (Test-Path $localTauri) {
         Write-Host "[INFO] 使用本地 Tauri CLI 启动..." -ForegroundColor Blue
-        & $localTauri dev --config $TauriConfigOverride
+        & $localTauri dev --features dev-extensions --config (Join-Path $RepoRoot "src-tauri/tauri.dev.conf.json") --config $TauriConfigOverride
     } elseif ($globalTauri) {
         Write-Host "[INFO] 使用全局 Tauri CLI 启动..." -ForegroundColor Blue
-        tauri dev --config $TauriConfigOverride
+        tauri dev --features dev-extensions --config (Join-Path $RepoRoot "src-tauri/tauri.dev.conf.json") --config $TauriConfigOverride
     } else {
         Write-Host "[ERROR] Tauri CLI 不可用" -ForegroundColor Red
         Write-Host "       请先运行: corepack pnpm --dir `"$FrontendDir`" install"

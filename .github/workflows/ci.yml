@@ -61,6 +61,9 @@ jobs:
       - name: Run tests
         run: cargo test --all --locked
 
+      - name: Verify dev A2A sidecar parent lifecycle
+        run: cargo test -p openlife-tauri --features dev-extensions --test a2a_parent_guard --locked
+
   frontend-check:
     name: Frontend Check
     runs-on: ubuntu-latest
@@ -152,6 +155,9 @@ jobs:
       - name: Run tests
         run: cargo test --all --locked
 
+      - name: Verify dev A2A sidecar parent lifecycle
+        run: cargo test -p openlife-tauri --features dev-extensions --test a2a_parent_guard --locked
+
   rust-check-windows:
     name: Rust Check (Windows)
     runs-on: windows-latest
@@ -175,6 +181,9 @@ jobs:
 
       - name: Run Tauri binary tests
         run: cargo test -p openlife-tauri --bins --locked
+
+      - name: Verify dev A2A sidecar parent lifecycle
+        run: cargo test -p openlife-tauri --features dev-extensions --test a2a_parent_guard --locked
 
   # ============================================
   # Rust 覆盖率（可选，仅在 dev → main 时运行）
@@ -218,7 +227,10 @@ jobs:
         run: cargo install cargo-audit
 
       - name: Run cargo audit
-        run: cargo audit
+        run: |
+          cargo audit --json > cargo-audit.json
+          python3 scripts/check-rust-advisory-ownership.py \
+            cargo-audit.json plans/openlife_rust_advisory_ownership.json
 
   # ============================================
   # 端到端验证

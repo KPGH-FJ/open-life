@@ -63,21 +63,18 @@ pub(crate) fn load_mcp_audit_keyring_from_path(path: &std::path::Path) -> Vec<Au
     std::fs::read_to_string(path)
         .ok()
         .and_then(|text| serde_json::from_str::<Vec<AuditKeyConfig>>(&text).ok())
-        .filter(|configs| !configs.is_empty())
-        .unwrap_or_else(|| vec![AuditKeyConfig::default()])
+        .unwrap_or_default()
 }
 
 pub(crate) fn save_mcp_audit_keyring_to_path(
     path: &std::path::Path,
     configs: &[AuditKeyConfig],
 ) -> Result<(), AppError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(AppError::from)?;
-    }
     let text = serde_json::to_string_pretty(configs).map_err(AppError::from)?;
-    std::fs::write(path, text).map_err(AppError::from)
+    openlife_core::atomic_file::write_atomic(path, text.as_bytes()).map_err(AppError::from)
 }
 
+#[cfg(test)]
 pub(crate) fn load_privacy_policy_from_path(path: &std::path::Path) -> PrivacyPolicy {
     std::fs::read_to_string(path)
         .ok()
@@ -89,11 +86,8 @@ pub(crate) fn save_privacy_policy_to_path(
     path: &std::path::Path,
     policy: &PrivacyPolicy,
 ) -> Result<(), AppError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(AppError::from)?;
-    }
     let text = policy.to_yaml().map_err(AppError::from)?;
-    std::fs::write(path, text).map_err(AppError::from)
+    openlife_core::atomic_file::write_atomic(path, text.as_bytes()).map_err(AppError::from)
 }
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 use crate::main_chat_generation_support::{main_chat_provider_endpoint_kind, preview_text};
-use crate::main_chat_send::send_message_with_state;
+use crate::main_chat_send::send_message_with_operation_state;
 use crate::{main_chat_command_surface_eval, main_chat_eval_state, main_chat_final_gate, AppState};
 use openlife_core::llm::ChatMessage;
 use std::sync::Arc;
@@ -213,7 +213,8 @@ pub(crate) async fn run_main_chat_live_provider_eval_harness(
         main_chat_command_surface_eval::grant_builtin_echo_read_once(&state).await?;
     }
 
-    let result = send_message_with_state(
+    let result = send_message_with_operation_state(
+        uuid::Uuid::new_v4().to_string(),
         input.session_id.clone(),
         vec![ChatMessage {
             role: "user".into(),

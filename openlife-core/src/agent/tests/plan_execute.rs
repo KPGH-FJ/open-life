@@ -51,6 +51,9 @@ fn test_hs_packet(source_run_id: &str) -> RuntimeHSPacket {
             estimated_tokens: 8,
             token_budget: 128,
         },
+        provider_authorization: crate::llm::ProviderPolicyAuthorization::local_only_fail_closed(
+            crate::llm::ProviderLocalOnlyReason::TestFixture,
+        ),
     }
 }
 

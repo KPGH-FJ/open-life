@@ -20,7 +20,7 @@ import {
   selectMainChatSkill,
   listMainChatAgentEvents,
   getMainChatAgentStateSnapshot,
-  restoreArchivedChunks,
+  restoreArchivedMemory,
   restoreSnapshot,
   saveChatMessage,
   startStreamMessage,
@@ -98,9 +98,11 @@ describe("tauri command argument aliases", () => {
       run_id: "run-1",
     });
 
-    await sendMessageV2("session-secret", [
-      { role: "user", content: "我的邮箱 test@example.com 和身份证 11010519491231002X" },
-    ]);
+    await sendMessageV2(
+      "session-secret",
+      [{ role: "user", content: "我的邮箱 test@example.com 和身份证 11010519491231002X" }],
+      { operationId: "c7414f1e-35dc-4aec-b2f0-f704313003a0" }
+    );
 
     const redacted = redactedLogForLastInvoke();
     expect(redacted).toContain("session-secret");
@@ -198,7 +200,7 @@ describe("tauri command argument aliases", () => {
 
   it("adds camelCase aliases for snake_case command arguments", async () => {
     await getStateHistory("专注度", 7);
-    await restoreArchivedChunks([1, 2]);
+    await restoreArchivedMemory({ ownerKind: "knowledge_note", ownerId: "note-1" });
 
     expect(invoke).toHaveBeenCalledWith(
       "get_state_history",
@@ -211,23 +213,32 @@ describe("tauri command argument aliases", () => {
     expect(invoke).toHaveBeenCalledWith(
       "restore_archived_chunks",
       expect.objectContaining({
-        chunkIds: [1, 2],
-        chunk_ids: [1, 2],
+        owner: { ownerKind: "knowledge_note", ownerId: "note-1" },
       })
     );
   });
 
   it("keeps existing explicit aliases for high-traffic chat and builder commands", async () => {
-    await startStreamMessage("session-1", [{ role: "user", content: "你好" }]);
-    await saveChatMessage("session-1", { role: "assistant", content: "你好" });
+    await startStreamMessage("session-1", [{ role: "user", content: "你好" }], {
+      operationId: "c7414f1e-35dc-4aec-b2f0-f704313003a1",
+    });
+    await saveChatMessage(
+      "session-1",
+      { role: "assistant", content: "你好" },
+      "c7414f1e-35dc-4aec-b2f0-f704313003aa"
+    );
     await builderStart("incremental", "builder-1", "goals");
 
     expect(invoke).toHaveBeenCalledWith(
       "start_stream_message",
       expect.objectContaining({
+        operationId: "c7414f1e-35dc-4aec-b2f0-f704313003a1",
+        operation_id: "c7414f1e-35dc-4aec-b2f0-f704313003a1",
         sessionId: "session-1",
         session_id: "session-1",
         args: expect.objectContaining({
+          operationId: "c7414f1e-35dc-4aec-b2f0-f704313003a1",
+          operation_id: "c7414f1e-35dc-4aec-b2f0-f704313003a1",
           sessionId: "session-1",
           session_id: "session-1",
         }),
@@ -239,6 +250,8 @@ describe("tauri command argument aliases", () => {
         sessionId: "session-1",
         session_id: "session-1",
         message: { role: "assistant", content: "你好" },
+        operationId: "c7414f1e-35dc-4aec-b2f0-f704313003aa",
+        operation_id: "c7414f1e-35dc-4aec-b2f0-f704313003aa",
       })
     );
     expect(invoke).toHaveBeenCalledWith(
@@ -260,15 +273,19 @@ describe("tauri command argument aliases", () => {
     });
 
     await sendMessageV2("session-skill", [{ role: "user", content: "Summarize this" }], {
+      operationId: "c7414f1e-35dc-4aec-b2f0-f704313003a2",
       selectedSkillId: "summarize",
     });
     await startStreamMessage("session-skill", [{ role: "user", content: "Summarize this" }], {
+      operationId: "c7414f1e-35dc-4aec-b2f0-f704313003a3",
       selectedSkillId: "summarize",
     });
 
     expect(invoke).toHaveBeenCalledWith(
       "send_message",
       expect.objectContaining({
+        operationId: "c7414f1e-35dc-4aec-b2f0-f704313003a2",
+        operation_id: "c7414f1e-35dc-4aec-b2f0-f704313003a2",
         selectedSkillId: "summarize",
         selected_skill_id: "summarize",
       })
@@ -276,9 +293,13 @@ describe("tauri command argument aliases", () => {
     expect(invoke).toHaveBeenCalledWith(
       "start_stream_message",
       expect.objectContaining({
+        operationId: "c7414f1e-35dc-4aec-b2f0-f704313003a3",
+        operation_id: "c7414f1e-35dc-4aec-b2f0-f704313003a3",
         selectedSkillId: "summarize",
         selected_skill_id: "summarize",
         args: expect.objectContaining({
+          operationId: "c7414f1e-35dc-4aec-b2f0-f704313003a3",
+          operation_id: "c7414f1e-35dc-4aec-b2f0-f704313003a3",
           selectedSkillId: "summarize",
           selected_skill_id: "summarize",
         }),
@@ -314,12 +335,16 @@ describe("tauri command argument aliases", () => {
   });
 
   it("normalizes optional state and daily-goal arguments before invoke", async () => {
-    await recordState("睡眠", 7.5, "小时", "昨晚", 6, 9, 2);
-    await addDailyGoal("阅读30分钟");
+    const stateOperationId = crypto.randomUUID();
+    const goalOperationId = crypto.randomUUID();
+    await recordState(stateOperationId, "睡眠", 7.5, "小时", "昨晚", 6, 9, 2);
+    await addDailyGoal(goalOperationId, "阅读30分钟");
 
     expect(invoke).toHaveBeenCalledWith(
       "record_state",
       expect.objectContaining({
+        operationId: stateOperationId,
+        operation_id: stateOperationId,
         dimensionName: "睡眠",
         dimension_name: "睡眠",
         minThreshold: 6,
@@ -330,7 +355,11 @@ describe("tauri command argument aliases", () => {
         alert_days: 2,
       })
     );
-    expect(invoke).toHaveBeenCalledWith("add_daily_goal", { name: "阅读30分钟" });
+    expect(invoke).toHaveBeenCalledWith("add_daily_goal", {
+      operationId: goalOperationId,
+      operation_id: goalOperationId,
+      name: "阅读30分钟",
+    });
   });
 
   it("sends governed restore and import request envelopes", async () => {

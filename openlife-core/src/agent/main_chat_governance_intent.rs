@@ -52,16 +52,18 @@ impl MainChatBlockerRequirement {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct MainChatGovernanceIntent {
+pub struct MainChatIntentSignals {
     pub durable_write_requirement: Option<MainChatDurableWriteRequirement>,
     pub external_read_requirement: Option<MainChatExternalReadRequirement>,
     pub blocker_requirement: Option<MainChatBlockerRequirement>,
     pub reason_codes: Vec<String>,
     pub matched_terms: Vec<String>,
     pub confidence: f32,
+    #[serde(skip)]
+    pub memory_routing: MainChatMemoryRoutingResult,
 }
 
-impl MainChatGovernanceIntent {
+impl MainChatIntentSignals {
     fn empty() -> Self {
         Self {
             durable_write_requirement: None,
@@ -70,27 +72,32 @@ impl MainChatGovernanceIntent {
             reason_codes: Vec::new(),
             matched_terms: Vec::new(),
             confidence: 0.0,
+            memory_routing: MainChatMemoryRoutingResult::default(),
         }
     }
 
-    pub fn requires_governance(&self) -> bool {
+    pub fn has_policy_relevant_signal(&self) -> bool {
         self.durable_write_requirement.is_some()
             || self.external_read_requirement.is_some()
             || self.blocker_requirement.is_some()
     }
 }
 
-pub fn classify_main_chat_governance_intent(user_text: &str) -> MainChatGovernanceIntent {
+/// Extracts semantic request signals from the current authenticated user text.
+/// This function does not authorize execution; only `PolicyRouter` may turn
+/// these signals into a typed `PolicyDecision`.
+pub fn extract_main_chat_intent_signals(user_text: &str) -> MainChatIntentSignals {
     let normalized = normalize_for_matching(user_text);
     if normalized.is_empty() {
-        return MainChatGovernanceIntent::empty();
+        return MainChatIntentSignals::empty();
     }
 
-    let mut intent = MainChatGovernanceIntent::empty();
+    let mut intent = MainChatIntentSignals::empty();
     collect_blocker_requirement(&normalized, &mut intent);
     let candidates = extract_main_chat_memory_candidates(user_text);
     let memory_routing = route_memory_candidates(&candidates);
     collect_durable_write_requirement_from_memory_routing(&memory_routing, &mut intent);
+    intent.memory_routing = memory_routing;
     collect_durable_write_requirement_from_knowledge_asset_operation(&normalized, &mut intent);
     collect_external_read_requirement(&normalized, &mut intent);
 
@@ -102,7 +109,7 @@ pub fn classify_main_chat_governance_intent(user_text: &str) -> MainChatGovernan
     intent
 }
 
-fn collect_blocker_requirement(normalized: &str, intent: &mut MainChatGovernanceIntent) {
+fn collect_blocker_requirement(normalized: &str, intent: &mut MainChatIntentSignals) {
     if contains_any(
         normalized,
         &[
@@ -140,7 +147,7 @@ fn collect_blocker_requirement(normalized: &str, intent: &mut MainChatGovernance
 
 fn collect_durable_write_requirement_from_memory_routing(
     memory_routing: &MainChatMemoryRoutingResult,
-    intent: &mut MainChatGovernanceIntent,
+    intent: &mut MainChatIntentSignals,
 ) {
     if !memory_routing.lifemodel_proposal_candidate_ids.is_empty() {
         set_durable_write_requirement(
@@ -166,7 +173,7 @@ fn collect_durable_write_requirement_from_memory_routing(
 
 fn collect_durable_write_requirement_from_knowledge_asset_operation(
     normalized: &str,
-    intent: &mut MainChatGovernanceIntent,
+    intent: &mut MainChatIntentSignals,
 ) {
     if intent.durable_write_requirement.is_some() || !is_knowledge_asset_edit_proposal(normalized) {
         return;
@@ -209,7 +216,7 @@ fn is_knowledge_asset_edit_proposal(normalized: &str) -> bool {
     )
 }
 
-fn collect_external_read_requirement(normalized: &str, intent: &mut MainChatGovernanceIntent) {
+fn collect_external_read_requirement(normalized: &str, intent: &mut MainChatIntentSignals) {
     if is_pure_hypothetical_plan(normalized) {
         return;
     }
@@ -362,7 +369,7 @@ fn collect_external_read_requirement(normalized: &str, intent: &mut MainChatGove
 }
 
 fn set_durable_write_requirement(
-    intent: &mut MainChatGovernanceIntent,
+    intent: &mut MainChatIntentSignals,
     requirement: MainChatDurableWriteRequirement,
     reason_code: &str,
     matched_term: &str,
@@ -373,7 +380,7 @@ fn set_durable_write_requirement(
 }
 
 fn set_external_read_requirement(
-    intent: &mut MainChatGovernanceIntent,
+    intent: &mut MainChatIntentSignals,
     requirement: MainChatExternalReadRequirement,
     reason_code: &str,
     matched_term: &str,
@@ -384,7 +391,7 @@ fn set_external_read_requirement(
 }
 
 fn set_blocker_requirement(
-    intent: &mut MainChatGovernanceIntent,
+    intent: &mut MainChatIntentSignals,
     requirement: MainChatBlockerRequirement,
     reason_code: &str,
     matched_term: &str,
@@ -395,7 +402,7 @@ fn set_blocker_requirement(
 }
 
 fn push_reason(
-    intent: &mut MainChatGovernanceIntent,
+    intent: &mut MainChatIntentSignals,
     reason_code: &str,
     matched_term: &str,
     confidence: f32,
@@ -645,7 +652,7 @@ mod tests {
 
     #[test]
     fn main_chat_governance_intent_classifies_chinese_memory_request() {
-        let intent = classify_main_chat_governance_intent(
+        let intent = extract_main_chat_intent_signals(
             "这条对我挺重要：空腹喝咖啡会让我心慌，尤其是在赶路的时候。帮我记下来，下次提醒我先吃点东西。",
         );
 
@@ -666,9 +673,8 @@ mod tests {
 
     #[test]
     fn main_chat_governance_intent_classifies_future_preference_request() {
-        let intent = classify_main_chat_governance_intent(
-            "以后如果我说空腹喝了咖啡，你优先提醒我先吃点东西。",
-        );
+        let intent =
+            extract_main_chat_intent_signals("以后如果我说空腹喝了咖啡，你优先提醒我先吃点东西。");
 
         assert_eq!(
             intent.durable_write_requirement,
@@ -682,8 +688,7 @@ mod tests {
 
     #[test]
     fn main_chat_governance_intent_classifies_chinese_current_weather_read() {
-        let intent =
-            classify_main_chat_governance_intent("帮我看一下今天上海会不会下雨，我要不要带伞");
+        let intent = extract_main_chat_intent_signals("帮我看一下今天上海会不会下雨，我要不要带伞");
 
         assert_eq!(
             intent.external_read_requirement,
@@ -697,7 +702,7 @@ mod tests {
 
     #[test]
     fn main_chat_governance_intent_classifies_stage6c_native_weather_prompt() {
-        let intent = classify_main_chat_governance_intent(
+        let intent = extract_main_chat_intent_signals(
             "请告诉我今天旧金山的天气。必须使用可审计的 web/weather 读取证据；如果当前没有可用外部读取工具，请明确 fail closed，不要猜。",
         );
 
@@ -714,7 +719,7 @@ mod tests {
     #[test]
     fn main_chat_governance_intent_classifies_english_live_weather_read() {
         let intent =
-            classify_main_chat_governance_intent("What is the live weather in Shanghai right now?");
+            extract_main_chat_intent_signals("What is the live weather in Shanghai right now?");
 
         assert_eq!(
             intent.external_read_requirement,
@@ -728,18 +733,17 @@ mod tests {
 
     #[test]
     fn main_chat_governance_intent_keeps_weather_statement_and_hypothetical_plan_direct() {
-        let statement = classify_main_chat_governance_intent("今天天气不错");
-        assert!(!statement.requires_governance());
+        let statement = extract_main_chat_intent_signals("今天天气不错");
+        assert!(!statement.has_policy_relevant_signal());
 
-        let hypothetical = classify_main_chat_governance_intent("如果明天下雨就改室内安排");
-        assert!(!hypothetical.requires_governance());
+        let hypothetical = extract_main_chat_intent_signals("如果明天下雨就改室内安排");
+        assert!(!hypothetical.has_policy_relevant_signal());
     }
 
     #[test]
     fn main_chat_governance_intent_routes_knowledge_asset_edit_without_intercepting_inspection() {
-        let edit = classify_main_chat_governance_intent(
-            "Propose an edit to SOUL.md knowledge asset wording.",
-        );
+        let edit =
+            extract_main_chat_intent_signals("Propose an edit to SOUL.md knowledge asset wording.");
         assert_eq!(
             edit.durable_write_requirement,
             Some(MainChatDurableWriteRequirement::LifeModelProposal)
@@ -748,13 +752,13 @@ mod tests {
             .reason_codes
             .contains(&"knowledge_asset_edit_proposal_required".to_string()));
 
-        let inspect = classify_main_chat_governance_intent("Inspect loaded knowledge assets.");
+        let inspect = extract_main_chat_intent_signals("Inspect loaded knowledge assets.");
         assert!(inspect.durable_write_requirement.is_none());
     }
 
     #[test]
     fn main_chat_governance_intent_blocks_external_destination_publish() {
-        let intent = classify_main_chat_governance_intent(
+        let intent = extract_main_chat_intent_signals(
             "Publish the seeded `dogfood/policy_note.md` to a sensitive external destination named in the write-like action seed.",
         );
 
@@ -770,9 +774,8 @@ mod tests {
 
     #[test]
     fn main_chat_governance_intent_blocks_sensitive_external_write_without_exact_phrase() {
-        let intent = classify_main_chat_governance_intent(
-            "Send this private medical update to my coworker.",
-        );
+        let intent =
+            extract_main_chat_intent_signals("Send this private medical update to my coworker.");
 
         assert_eq!(
             intent.blocker_requirement,
@@ -789,7 +792,7 @@ mod tests {
             "summarize this email",
             "plan a calendar for my week",
         ] {
-            let intent = classify_main_chat_governance_intent(prompt);
+            let intent = extract_main_chat_intent_signals(prompt);
             assert!(
                 intent.blocker_requirement.is_none(),
                 "{prompt} should not be treated as an external side-effect write"
@@ -804,7 +807,7 @@ mod tests {
             "publish my medical update to Slack",
             "add my therapy appointment to calendar",
         ] {
-            let intent = classify_main_chat_governance_intent(prompt);
+            let intent = extract_main_chat_intent_signals(prompt);
             assert_eq!(
                 intent.blocker_requirement,
                 Some(MainChatBlockerRequirement::ExternalWriteConfirmation),
@@ -816,7 +819,7 @@ mod tests {
     #[test]
     fn main_chat_governance_intent_does_not_block_calendar_read() {
         for prompt in ["calendar.read", "read calendar", "查询日程"] {
-            let intent = classify_main_chat_governance_intent(prompt);
+            let intent = extract_main_chat_intent_signals(prompt);
             assert!(
                 intent.blocker_requirement.is_none(),
                 "{prompt} should stay read-only"
@@ -826,7 +829,7 @@ mod tests {
 
     #[test]
     fn main_chat_governance_intent_does_not_treat_arrange_today_work_as_lifemodel() {
-        let intent = classify_main_chat_governance_intent("帮我安排今天下午工作");
+        let intent = extract_main_chat_intent_signals("帮我安排今天下午工作");
 
         assert_ne!(
             intent.durable_write_requirement,

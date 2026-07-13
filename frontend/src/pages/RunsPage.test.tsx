@@ -43,8 +43,14 @@ describe("RunsPage contract", () => {
                   riskLevel: "low",
                   status: "succeeded",
                   outputPreview: "40 bytes redacted",
-                  outputHash: "sha256:run1",
-                  outputByteCount: 40,
+                  outputReceipt: {
+                    version: 2,
+                    kind: "tool_output",
+                    provenance: "observed_tool_adapter_body",
+                    byteCount: 40,
+                    digest: `sha256:${"a".repeat(64)}`,
+                    verified: true,
+                  },
                   metadataSafe: true,
                 },
               },
@@ -432,6 +438,91 @@ describe("RunsPage contract", () => {
     vi.clearAllMocks();
   });
 
+  it("labels remote unknown runs as uncertainty and never as failed", async () => {
+    const now = new Date().toISOString();
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "list_agent_runs") {
+        return Promise.resolve([
+          {
+            id: "run-remote-unknown",
+            taskId: "task-remote-unknown",
+            status: "remote_unknown",
+            kind: "tool_execution",
+            userInput: "A2A outbound task",
+            generatedProposals: [],
+            actions: [],
+            observations: [],
+            error: {
+              message: "remote_state_unknown",
+              phase: "startup_projection_recovery",
+              recoverable: false,
+            },
+            startedAt: now,
+            finishedAt: now,
+          },
+        ]);
+      }
+      if (cmd === "get_tasks_view_model") {
+        return Promise.resolve({
+          data: {
+            items: [
+              {
+                canonicalTaskId: "task-remote-unknown",
+                taskSessionId: null,
+                relatedRunIds: ["run-remote-unknown"],
+                conversationId: null,
+                title: "A2A outbound task",
+                strategy: "tool_execution",
+                lifecycleStatus: "remote_unknown",
+                terminalDeliveryStatus: "unknown",
+                finalDeliveryEvidencePresent: false,
+                pendingBlockers: [],
+                pendingReviewItemRefs: [],
+                allowedControls: [],
+                nextRecommendedControl: "open_trace",
+                latestResultPreview: null,
+                evidenceRefs: [],
+                updatedAt: now,
+              },
+            ],
+            summary: {
+              total: 1,
+              activeCount: 0,
+              waitingPermissionCount: 0,
+              blockedCount: 0,
+              pendingReviewCount: 0,
+              completedCount: 0,
+              completedNeedsEvidenceCount: 0,
+              failedCount: 0,
+              cancelledCount: 0,
+              byLifecycleStatus: { remote_unknown: 1 },
+            },
+            sourceRefs: [],
+            contractLimitations: [],
+          },
+          status: "ready",
+          lastUpdatedAt: now,
+          source: "backend-readmodel",
+          evidenceRefs: [],
+          warnings: [],
+          actions: { primary: [] },
+        });
+      }
+      return mockInvoke(cmd);
+    });
+
+    render(
+      <MemoryRouter>
+        <RunsPage />
+      </MemoryRouter>
+    );
+
+    expect((await screen.findAllByText("任务远端状态未知")).length).toBeGreaterThan(0);
+    expect(screen.getByText("远端状态未知，未自动重试")).toBeInTheDocument();
+    expect(screen.queryByText("任务失败")).not.toBeInTheDocument();
+    expect(screen.queryByText("run_failed")).not.toBeInTheDocument();
+  });
+
   it("uses metadata-safe AgentRun fields for search, preview, proposals, and trash filtering", async () => {
     render(
       <MemoryRouter>
@@ -479,6 +570,151 @@ describe("RunsPage contract", () => {
     await waitFor(() => {
       expect(screen.getByText("deleted run")).toBeInTheDocument();
     });
+  });
+
+  it("does not present legacy route, output, or tool metadata as observed truth", async () => {
+    const updatedAt = new Date().toISOString();
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "list_agent_runs") {
+        return Promise.resolve([
+          {
+            id: "legacy-run-1",
+            taskId: "legacy-task-1",
+            status: "failed",
+            kind: "conversation",
+            legacyPayloadUnverified: true,
+            outputPreview: `run_output:bytes=1:sha256:${"a".repeat(64)}`,
+            modelRoute: {
+              provider: "forged-provider",
+              model: "forged-model",
+              routeType: "cloud",
+              preferLocal: false,
+              localModel: "forged-local",
+              reason: "forged actual route",
+              privacyLevel: "none",
+              retryCount: 4,
+            },
+            generatedProposals: ["legacy-proposal-ref"],
+            error: {
+              message: "LEGACY_RUN_ERROR_MUST_NOT_RENDER",
+              phase: "provider",
+              recoverable: true,
+            },
+            actions: [
+              {
+                id: "legacy-action",
+                actionType: "tool",
+                input: {},
+                status: "succeeded",
+                timestamp: updatedAt,
+              },
+            ],
+            observations: [],
+            startedAt: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+          },
+        ]);
+      }
+      if (cmd === "get_tasks_view_model") {
+        return Promise.resolve({
+          data: {
+            items: [
+              {
+                canonicalTaskId: "legacy-task-1",
+                relatedRunIds: ["legacy-run-1"],
+                title: "Legacy migrated task",
+                strategy: "conversation",
+                lifecycleStatus: "completed_needs_evidence",
+                terminalDeliveryStatus: "missing_final_delivery_evidence",
+                finalDeliveryEvidencePresent: false,
+                pendingBlockers: ["LEGACY_BLOCKER_MUST_NOT_RENDER"],
+                pendingReviewItemRefs: [
+                  { id: "legacy-review", kind: "proposal", label: "legacy proposal" },
+                ],
+                allowedControls: [
+                  {
+                    id: "legacy-retry",
+                    label: "重试此任务",
+                    kind: "retry",
+                    effect: "task_retry_request",
+                    enabled: true,
+                    targetTaskId: "legacy-task-1",
+                    targetActionId: "legacy-action",
+                    completionProofAfterDispatch: false,
+                  },
+                  {
+                    id: "legacy-cancel",
+                    label: "取消此任务",
+                    kind: "cancel",
+                    effect: "task_cancel_request",
+                    enabled: true,
+                    targetTaskId: "legacy-task-1",
+                    completionProofAfterDispatch: false,
+                  },
+                ],
+                nextRecommendedControl: "retry",
+                latestResultPreview: {
+                  status: "completed",
+                  label: "completed",
+                  preview: "LEGACY_RESULT_MUST_NOT_RENDER",
+                  evidenceRefs: [],
+                },
+                evidenceRefs: [],
+                updatedAt,
+              },
+            ],
+            summary: {
+              total: 1,
+              activeCount: 0,
+              waitingPermissionCount: 0,
+              blockedCount: 0,
+              pendingReviewCount: 0,
+              completedCount: 0,
+              completedNeedsEvidenceCount: 1,
+              failedCount: 0,
+              cancelledCount: 0,
+              byLifecycleStatus: { completed_needs_evidence: 1 },
+            },
+            sourceRefs: [],
+            contractLimitations: [],
+          },
+          status: "ready",
+          lastUpdatedAt: updatedAt,
+          source: "backend-readmodel",
+          evidenceRefs: [],
+          warnings: [],
+          actions: { primary: [] },
+        });
+      }
+      return mockInvoke(cmd);
+    });
+
+    render(
+      <MemoryRouter>
+        <RunsPage />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText("旧版执行元数据未验证")).toBeInTheDocument();
+    expect(screen.getByText(/receipt、route 与 digest 均不可作为已观察事实/)).toBeInTheDocument();
+    expect(screen.getAllByText("路线未验证").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("工具调用未验证").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/forged-provider/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/forged actual route/)).not.toBeInTheDocument();
+    expect(screen.queryByText(new RegExp(`sha256:${"a".repeat(64)}`))).not.toBeInTheDocument();
+    expect(screen.getByText("任务未知")).toBeInTheDocument();
+    expect(screen.getByText("下一步：查看记录")).toBeInTheDocument();
+    expect(screen.getByText("交付：未知")).toBeInTheDocument();
+    expect(screen.getAllByText("状态未记录").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("阻断状态未验证").length).toBeGreaterThan(0);
+    expect(screen.queryByText("任务缺少完成证据")).not.toBeInTheDocument();
+    expect(screen.queryByText(/LEGACY_RESULT_MUST_NOT_RENDER/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/LEGACY_RUN_ERROR_MUST_NOT_RENDER/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/LEGACY_BLOCKER_MUST_NOT_RENDER/)).not.toBeInTheDocument();
+    expect(screen.queryByText("待审核：1")).not.toBeInTheDocument();
+    expect(screen.queryByText("待确认 1")).not.toBeInTheDocument();
+    expect(screen.queryByText("连续性需复核")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重试此任务" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "取消此任务" })).not.toBeInTheDocument();
   });
 
   it("preflights selected run deletion before calling the final delete command", async () => {

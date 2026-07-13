@@ -2,19 +2,11 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capabilities",
-  "remote": {
-    "urls": ["http://127.0.0.1:*", "http://localhost:*"]
-  },
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "shell:allow-open",
-    "fs:allow-app-read",
-    "fs:allow-app-write",
-    "fs:allow-app-read-recursive",
-    "fs:allow-app-write-recursive",
     "dialog:default",
-    "store:default",
-    "http:default"
+    "fs:allow-read-text-file",
+    "fs:allow-write-text-file"
   ]
 }

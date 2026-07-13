@@ -348,15 +348,11 @@ fn life_model_linkage(records: &[MemoryLifecycleRecord]) -> MemoryLifeModelLinka
         materialized_memory_count,
         conflict_count,
         boundary_memory_count: boundary_records.len(),
-        linkage_status: if boundary_records.is_empty() {
-            MemoryLifeModelLinkageStatus::Partial
-        } else {
-            MemoryLifeModelLinkageStatus::Partial
-        },
+        linkage_status: MemoryLifeModelLinkageStatus::Partial,
         memory_refs: boundary_records
             .into_iter()
             .take(8)
-            .map(|record| memory_ref(record))
+            .map(memory_ref)
             .collect(),
         evidence_refs: records
             .iter()
@@ -466,6 +462,7 @@ fn all_memory_lanes() -> Vec<MemoryLane> {
 fn lane_label(lane: MemoryLane) -> &'static str {
     match lane {
         MemoryLane::TurnContext => "Turn context",
+        MemoryLane::KnowledgeNote => "Knowledge notes",
         MemoryLane::EpisodicLifeEvent => "Episodic life events",
         MemoryLane::SemanticFactPreference => "Semantic facts and preferences",
         MemoryLane::ProceduralRule => "Procedural rules",
@@ -515,6 +512,8 @@ mod tests {
             scope: crate::agent::memory_lifecycle::MemoryLifecycleScope::Global,
             category,
             risk_level: crate::agent::memory_lifecycle::MemoryLifecycleRiskLevel::Low,
+            sensitivity: crate::agent::memory_lifecycle::MemoryLifecycleSensitivity::Internal,
+            audit_digest: "sha256:test-memory-view-model".into(),
             status,
             materialization_status,
             materialization_error_code: None,

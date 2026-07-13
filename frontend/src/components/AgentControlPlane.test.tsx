@@ -772,6 +772,8 @@ describe("AgentControlPlane", () => {
                   scope: "global",
                   category: "preference",
                   riskLevel: "low",
+                  sensitivity: "internal",
+                  auditDigest: `sha256:${"a".repeat(64)}`,
                   status: "materialized",
                   materializationStatus: "materialized",
                   createdBy: "agent",

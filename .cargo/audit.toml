@@ -1,8 +1,0 @@
-[advisories]
-ignore = [
-  # RUSTSEC-2026-0194: quick-xml 0.39.x is pulled transitively by plist 1.9.0
-  # through Tauri 2.x. plist 1.9.0 is the latest published plist release and
-  # still requires quick-xml ^0.39. Remove this ignore when plist/Tauri publishes
-  # a compatible release that depends on quick-xml >= 0.41.0.
-  "RUSTSEC-2026-0194",
-]

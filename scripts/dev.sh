@@ -52,7 +52,12 @@ if [ -f "$ENV_FILE" ]; then
     set +a
 fi
 
-OPENLIFE_PROFILE="${OPENLIFE_PROFILE:-dev}"
+if [ -n "${OPENLIFE_DATA_DIR:-}" ] && [ "${OPENLIFE_ALLOW_DEV_EXTENSIONS_WITH_CUSTOM_DATA_DIR:-0}" != "1" ]; then
+    echo -e "${YELLOW}[WARN]${NC} dev-extensions 拒绝使用 OPENLIFE_DATA_DIR；请使用隔离 dev profile"
+    echo "       如确需隔离的自定义目录，请显式设置 OPENLIFE_ALLOW_DEV_EXTENSIONS_WITH_CUSTOM_DATA_DIR=1"
+    exit 1
+fi
+OPENLIFE_PROFILE="dev"
 export OPENLIFE_PROFILE
 if [ -z "${A2A_PORT:-}" ]; then
     if [ "$OPENLIFE_PROFILE" = "dev" ]; then
@@ -94,6 +99,11 @@ TAURI_CONFIG_OVERRIDE=$(cat <<JSON
     "beforeDevCommand": "cd \"$FRONTEND_DIR_JSON\" && corepack pnpm dev --host 127.0.0.1 --port $VITE_PORT",
     "devUrl": "$DEV_URL_JSON",
     "frontendDist": "$FRONTEND_DIST_JSON"
+  },
+  "app": {
+    "security": {
+      "capabilities": ["default", "dev-extensions"]
+    }
   }
 }
 JSON
@@ -150,16 +160,22 @@ if ! command -v cargo &>/dev/null; then
     exit 1
 fi
 
-echo -e "${BLUE}[INFO]${NC} 构建 A2A sidecar..."
-cargo build --bin openlife-a2a-server
+if [ "${OPENLIFE_DEV_AUTOSTART_A2A:-0}" = "1" ]; then
+    if [ "${OPENLIFE_ENABLE_DEV_A2A:-0}" != "1" ] || [ "${#OPENLIFE_A2A_PAIRED_TOKEN}" -lt 32 ]; then
+        echo -e "${YELLOW}[ERROR]${NC} A2A autostart requires OPENLIFE_ENABLE_DEV_A2A=1 and a 32+ character OPENLIFE_A2A_PAIRED_TOKEN"
+        exit 1
+    fi
+    echo -e "${BLUE}[INFO]${NC} 构建显式启用的开发 A2A sidecar..."
+    cargo build --bin openlife-a2a-server --features dev-extensions
+fi
 
 # 自动检测 Tauri CLI 启动方式
 if [ -f "$FRONTEND_DIR/node_modules/.bin/tauri" ]; then
     echo -e "${BLUE}[INFO]${NC} 使用本地 Tauri CLI 启动..."
-    "$FRONTEND_DIR/node_modules/.bin/tauri" dev --config "$TAURI_CONFIG_OVERRIDE"
+    "$FRONTEND_DIR/node_modules/.bin/tauri" dev --features dev-extensions --config "$REPO_ROOT/src-tauri/tauri.dev.conf.json" --config "$TAURI_CONFIG_OVERRIDE"
 elif command -v tauri &>/dev/null; then
     echo -e "${BLUE}[INFO]${NC} 使用全局 Tauri CLI 启动..."
-    tauri dev --config "$TAURI_CONFIG_OVERRIDE"
+    tauri dev --features dev-extensions --config "$REPO_ROOT/src-tauri/tauri.dev.conf.json" --config "$TAURI_CONFIG_OVERRIDE"
 else
     echo -e "${YELLOW}[ERROR]${NC} Tauri CLI 不可用"
     echo "       请先运行: corepack pnpm --dir \"$FRONTEND_DIR\" install"

@@ -70,12 +70,6 @@ function defaultConfig(): AppConfig {
     runtime_mode: "local_first_default",
     prefer_local_model: false,
     local_model: "llama2",
-    chat_proposal: {
-      enabled: true,
-      confidence_threshold: 0.6,
-      min_message_length: 10,
-      cooldown_seconds: 300,
-    },
   };
 }
 
@@ -240,7 +234,6 @@ export default function SettingsPage() {
           runtime_mode: config.runtime_mode,
           prefer_local: config.prefer_local_model,
           local_model: config.local_model,
-          chat_proposal_enabled: config.chat_proposal?.enabled,
           use_agent_loop: config.use_agent_loop,
         },
         screen_size: `${window.screen.width}x${window.screen.height}`,
@@ -684,12 +677,7 @@ export default function SettingsPage() {
         )}
 
         {activeTab === "review_memory" && (
-          <ReviewMemoryTab
-            config={config}
-            setConfig={setConfig}
-            projection={lifeStateProjection}
-            memoryViewModel={memoryViewModel}
-          />
+          <ReviewMemoryTab projection={lifeStateProjection} memoryViewModel={memoryViewModel} />
         )}
 
         {activeTab === "advanced" && (

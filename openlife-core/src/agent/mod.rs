@@ -2,12 +2,14 @@ pub mod accepted_guidance;
 pub mod action_executor;
 pub mod agent_loop;
 pub mod backend_contract_freeze;
+pub mod canonical_write_admission;
 pub mod context_assembler;
 pub mod evidence_graph;
 pub mod evidence_store;
 pub mod golden_paths;
 pub mod governor;
 pub mod heuristic_store;
+pub mod hs_asset_authority;
 pub mod hs_selector;
 pub mod life_model_view_model;
 pub mod lifemodel_backend_completion;
@@ -26,8 +28,6 @@ pub mod model_router;
 pub mod plan_execute;
 pub mod policy_store;
 pub mod product_read_model;
-pub mod proposal_engine;
-pub mod proposal_generators;
 pub mod proposal_outcome;
 pub mod proposal_store;
 pub mod provider_privacy_boundary;
@@ -41,12 +41,17 @@ mod runtime_strategy_contract;
 pub mod store;
 pub mod strategy_runtime;
 pub mod tasks_view_model;
+pub mod tool_execution_owner;
 pub mod tool_gateway;
 pub mod types;
 
 #[cfg(test)]
 mod tests;
 
+pub use crate::tool_execution_receipt::{
+    ToolActionEffect, ToolDispatchKind, ToolEffectStatus, ToolExecutionOutcome,
+    ToolExecutionReceipt, ToolExecutionReceiptRegistration, ToolTransportStatus,
+};
 pub use accepted_guidance::{
     build_lifemodel_version_read_model, create_accepted_guidance_from_maturation_candidate,
     deactivate_accepted_guidance, AcceptedGuidanceLifecycleInput, AcceptedGuidanceLifecycleReport,
@@ -54,12 +59,14 @@ pub use accepted_guidance::{
     LifeModelVersionAssetDiffRef, LifeModelVersionReadModel,
 };
 pub use action_executor::{
-    ActionExecutionContext, ActionExecutionResult, ActionExecutionStatus, ActionExecutor,
-    ActionExecutorConfig, AgentActionRequest,
+    A2AOutboundAuthorization, ActionExecutionContext, ActionExecutionResult, ActionExecutionStatus,
+    ActionExecutorConfig, AgentActionRequest, DurableToolExecutionOwner, ToolDispatchAttempt,
+    ToolDispatchObserver, ToolStartedTransitionObserver,
 };
 pub use agent_loop::apply_react_guidance_to_config;
 pub use agent_loop::{
-    AgentLoop, AgentLoopAllowedToolAction, AgentLoopConfig, AgentLoopResult, StreamingCallback,
+    AgentLoop, AgentLoopAllowedToolAction, AgentLoopConfig, AgentLoopResult, AgentLoopRunRequest,
+    AgentLoopTerminalDisposition, StreamingCallback,
 };
 pub use backend_contract_freeze::{
     evaluate_final_backend_completion_gate, freeze_pre_ui_backend_read_model_contracts,
@@ -71,6 +78,10 @@ pub use backend_contract_freeze::{
     ProposalReviewItem, ProposalReviewReadModel, RawContentExclusionProof, RuntimeTraceHsInfluence,
     RuntimeTraceReadModel, RuntimeTraceRunItem, ToolGovernanceProof, UiReadModelGateProof,
     UiReadModelSurfaceContract,
+};
+pub use canonical_write_admission::{
+    CanonicalWriteAdmission, CanonicalWriteAdmissionRejection, CanonicalWriteAdmissionRequest,
+    CanonicalWritePermit,
 };
 pub use context_assembler::{
     AssembleInput, AssembleOutput, CompositeAssembler, ContextAssembler, LifeModelAssembler,
@@ -103,6 +114,13 @@ pub use heuristic_store::{
     HeuristicLifecycleStatus, HeuristicLineage, HeuristicQuery, HeuristicRecord, HeuristicStore,
     HeuristicUsageMetadata, HeuristicValidationState,
 };
+pub use hs_asset_authority::{
+    build_collaboration_guidance_projection, complete_collaboration_guidance_cutover,
+    digest_string, reconcile_collaboration_guidance_authority, CollaborationGuidanceCutoverReport,
+    CollaborationGuidanceCutoverStatus, CollaborationGuidanceProjection, HSAssetAuthorityRecord,
+    HSAssetAuthorityRegistry, HSAssetCategory, HSAssetOwner, HSAssetWriteKind, HSAssetWriteRequest,
+    ProductScenarioReceipt, RollbackRehearsalReceipt, ShadowParityReceipt,
+};
 pub use hs_selector::{
     behavior_checks_for_packet, build_guidance_impact_read_model, build_runtime_hs_packet,
     GuidanceAffectedSurface, GuidanceImpactReadModel, GuidanceImpactRef,
@@ -123,16 +141,17 @@ pub use life_model_view_model::{
 };
 pub use lifemodel_backend_completion::{
     bridge_life_signal_to_evidence, evaluate_lifemodel_backend_completion_readiness,
-    extract_life_signals, DroppedLifeSignal, LifeDomain, LifeEvent, LifeEventPrivacyLevel,
-    LifeEventSourceRef, LifeEventSourceType, LifeEventStore,
+    extract_life_signals, CanonicalLifeEventOwnerKind, CanonicalLifeEventOwnerRef,
+    CanonicalLifeEventSourceProof, DroppedLifeSignal, LifeDomain, LifeEvent, LifeEventPrivacyLevel,
+    LifeEventSourceRef, LifeEventSourceType, LifeEventSourceVerification, LifeEventStore,
     LifeModelBackendCompletionReadinessReport, LifeModelBackendGateBlocker,
     LifeModelBackendGovernanceReadiness, LifeModelBackendPrerequisites, LifeSignal,
     LifeSignalBridgeInput, LifeSignalEvidenceBridgeReport, LifeSignalExtractorInput,
     LifeSignalExtractorReport, LifeSignalPolarity, LifeSignalType,
 };
 pub use main_chat_governance_intent::{
-    classify_main_chat_governance_intent, MainChatBlockerRequirement,
-    MainChatDurableWriteRequirement, MainChatExternalReadRequirement, MainChatGovernanceIntent,
+    extract_main_chat_intent_signals, MainChatBlockerRequirement, MainChatDurableWriteRequirement,
+    MainChatExternalReadRequirement, MainChatIntentSignals,
 };
 pub use main_chat_memory_candidate::{
     extract_main_chat_memory_candidates, plan_main_chat_memory_routing, route_memory_candidates,
@@ -159,8 +178,11 @@ pub use maturation::{
     MaturationProposalCandidate, MaturationReport, MaturationService,
 };
 pub use memory_lifecycle::{
+    memory_lifecycle_category_for_candidate_kind, CanonicalMemoryFactDescriptor,
+    ExplicitMemoryWriteInput, ExplicitMemoryWriteReceipt, MemoryAdmissionOutcome,
     MemoryLifecycleAcceptanceInput, MemoryLifecycleAcceptanceReport, MemoryLifecycleCategory,
-    MemoryLifecycleEvent, MemoryLifecycleRecord, MemoryLifecycleRiskLevel, MemoryLifecycleScope,
+    MemoryLifecycleEvent, MemoryLifecycleRecord, MemoryLifecycleRetrievalReader,
+    MemoryLifecycleRiskLevel, MemoryLifecycleScope, MemoryLifecycleSensitivity,
     MemoryLifecycleStatus, MemoryLifecycleStore, MemoryMaterializationStatus,
     MemoryMaterializedView, MemoryRollbackEvent, MemoryRollbackReport,
 };
@@ -177,7 +199,7 @@ pub use metadata_safe::{
 pub use metrics::{RolloutMetric, RolloutMetricsStore, RolloutSummary};
 pub use model_router::{
     ModelRouteDecision, ModelRouteScore, ModelRouter, PrivacyRequirement, ProviderAvailability,
-    ProviderHealth, TaskType,
+    TaskType,
 };
 pub use plan_execute::{
     PlanDraft, PlanExecuteCancelResult, PlanExecuteInput, PlanExecuteProductAuthorityReport,
@@ -201,12 +223,6 @@ pub use product_read_model::{
     ReviewActionKind, ReviewItemMaterializationStatus, ViewModelActions, ViewModelEnvelope,
     ViewModelSource, ViewModelStatus, ViewModelWarning, ViewModelWarningSeverity,
 };
-pub use proposal_engine::{
-    BuilderProposalGenerator, CalibrationProposalGenerator, ChatProposalGeneratorAdapter,
-    FeedbackProposalGenerator, MemoryProposalGenerator, ProposalEngine, ProposalGenerator,
-    ToolProposalGenerator,
-};
-pub use proposal_generators::ChatProposalGenerator;
 pub use proposal_outcome::{
     evaluate_maturation_proposal_outcome_evidence, record_maturation_proposal_outcome_evidence,
     MaturationProposalOutcome, MaturationProposalOutcomeEvidenceReport,
@@ -230,8 +246,8 @@ pub use review_item::{
 };
 pub use review_workflow::{
     proposal_status_semantics, DurableWriteDecision, DurableWriteDecisionKind, DurableWriteRequest,
-    DurableWriteSource, DurableWriteSubject, FinalDeliveryWordingContract, ReviewWorkflow,
-    ReviewWorkflowOutcome,
+    DurableWriteSource, DurableWriteSubject, FinalDeliveryWordingContract,
+    MaterializedReviewAcceptanceSnapshot, ReviewWorkflow, ReviewWorkflowOutcome,
 };
 pub use runtime::{AgentRuntime, AgentRuntimeConfig, AgentRuntimeError, AgentRuntimeOutput};
 pub use runtime_contract::{
@@ -255,6 +271,11 @@ pub use tasks_view_model::{
     TaskViewModelContractError, TaskViewModelItem, TaskViewModelRunInput, TaskViewModelTaskInput,
     TasksViewModel, TasksViewModelBuildInput, TasksViewModelSummary, WorkspaceTimelineItem,
     WorkspaceViewModel,
+};
+#[cfg(any(test, feature = "test-utils"))]
+pub use tool_execution_owner::AgentRunToolExecutionFaultPoint;
+pub use tool_execution_owner::{
+    AgentRunA2AToolExecutionOwner, AgentRunToolExecutionRecord, AgentRunToolExecutionState,
 };
 pub use tool_gateway::{
     validate_manifest_execution_contract, ToolGateway, ToolGatewayContractEvidence,

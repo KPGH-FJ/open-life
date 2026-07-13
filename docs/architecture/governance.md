@@ -20,7 +20,7 @@ document rule set.
 
 ## Last verified
 
-2026-07-07 during Stage3-A source-map reading.
+2026-07-11 during Phase7 Proposal-authority deletion review.
 
 ## Source map
 
@@ -33,7 +33,9 @@ document rule set.
 - `openlife-core/src/mcp_audit.rs`
 - `openlife-core/src/agent/tool_gateway.rs`
 - `openlife-core/src/agent/model_router.rs`
-- `src-tauri/src/main_chat_proposal_support.rs`
+- `openlife-core/src/agent/review_workflow.rs`
+- `src-tauri/src/main_chat_kernel.rs`
+- `src-tauri/src/provider_network_consent.rs`
 - `src-tauri/src/main_chat_task_controls.rs`
 - `src-tauri/src/main_chat_task_control_tests.rs`
 - `src-tauri/src/commands/mcp.rs`
@@ -108,10 +110,13 @@ does not by itself mean a Main Chat AgentLoop scenario has live provider credit.
 
 ## Proposal Governance
 
-`src-tauri/src/main_chat_proposal_support.rs` creates Main Chat proposals
-through `ReviewWorkflow`. Memory, LifeModel, knowledge-asset, and ToolPermission
-paths create pending Review Center proposals and mark `directWritesExecuted` as
-false.
+The dormant `src-tauri/src/main_chat_proposal_support.rs` parallel route is
+deleted. Active Main Chat proposal orchestration lives in
+`src-tauri/src/main_chat_kernel.rs`; tool-governance proposals enter the typed
+ReviewWorkflow gateway owned by ActionExecutor. Provider network-consent
+staging is an active separate callsite and remains under execution-epoch
+admission remediation; it must not be cited as cancellation-safe until that
+gate is complete.
 
 `src-tauri/src/commands/proposal.rs` validates proposal payloads before
 application. Accepting ToolPermission proposals records a permission policy.

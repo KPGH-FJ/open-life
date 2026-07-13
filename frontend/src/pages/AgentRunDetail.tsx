@@ -5,7 +5,6 @@ import {
   deleteAgentRun,
   getDangerActionPreflight,
   buildDangerActionConfirmationEvidence,
-  replayAgentAction,
   listMainChatAgentTasks,
   getMainChatAgentTaskDetail,
   resumeMainChatAgentTask,
@@ -16,7 +15,7 @@ import {
   type DangerActionPreflightView,
   type MainChatTaskSummary,
   type MainChatTaskDetail,
-  type RunEvidenceView,
+  type ProductRunEvidenceView,
 } from "../tauri";
 import RunTracePanel from "../components/RunTracePanel";
 import RuntimeDisclosureStrip from "../components/RuntimeDisclosureStrip";
@@ -45,12 +44,19 @@ import {
 } from "lucide-react";
 
 const STALE_RUN_THRESHOLD_MS = 10 * 60 * 1000;
+const CONTENT_ABSENT_RECEIPT = /^[a-z0-9_]+:bytes=\d+:sha256:[0-9a-f]{64}$/;
+
+function executionText(value: string | null | undefined, fallback = "内容未保存在执行记录中") {
+  if (!value || CONTENT_ABSENT_RECEIPT.test(value)) return fallback;
+  return value;
+}
 
 function statusIcon(status: string) {
   switch (status) {
     case "running":
       return <Activity size={20} className="text-blue-500 animate-pulse" />;
     case "blocked":
+    case "remote_unknown":
       return <AlertTriangle size={20} className="text-amber-500" />;
     case "timed_out":
       return <Clock size={20} className="text-red-500" />;
@@ -115,6 +121,7 @@ function lifecycleLabel(status: string): string {
     blocked: "blocked",
     timed_out: "timed_out",
     failed: "failed",
+    remote_unknown: "远端状态未知",
     cancelled: "cancelled",
     completed: "completed",
     waiting_permission: "blocked",
@@ -138,7 +145,7 @@ function failureTitle(failureKind?: string | null, fallbackKind?: string): strin
 
 function toneForLifecycle(status?: string): ActivityTimelineItem["tone"] {
   if (status === "timed_out" || status === "failed") return "danger";
-  if (status === "blocked") return "warning";
+  if (status === "blocked" || status === "remote_unknown") return "warning";
   if (status === "completed") return "ready";
   if (status === "cancelled") return "neutral";
   return "info";
@@ -161,7 +168,7 @@ function timelineTone(kind: string, status?: string): ActivityTimelineItem["tone
 function buildActivityTimeline(
   run: AgentRun,
   taskDetail: MainChatTaskDetail | null,
-  evidenceView: RunEvidenceView | null
+  evidenceView: ProductRunEvidenceView | null
 ): ActivityTimelineItem[] {
   if (evidenceView) {
     return evidenceView.eventTimeline.map((entry, index) => ({
@@ -173,6 +180,18 @@ function buildActivityTimeline(
         ? toneForLifecycle(entry.normalizedLifecycleState)
         : timelineTone(entry.kind),
     }));
+  }
+
+  if (run.legacyPayloadUnverified) {
+    return [
+      {
+        id: "legacy-payload-unverified",
+        title: "旧版 trace 未验证",
+        body: "旧版 action、observation、receipt 与路线字段未具备当前运行时证据，不能作为实际执行事实。",
+        timestamp: run.startedAt,
+        tone: "warning",
+      },
+    ];
   }
 
   const transcriptItems =
@@ -190,7 +209,7 @@ function buildActivityTimeline(
     run.statusUpdates?.map((update, index) => ({
       id: `status-${index}`,
       title: transcriptTitle(update.phase),
-      body: safePreviewText(update.message, 220),
+      body: safePreviewText(executionText(update.message), 220),
       timestamp: update.timestamp,
       tone: timelineTone(update.phase),
     })) ?? [];
@@ -204,7 +223,12 @@ function buildActivityTimeline(
           ? "工具动作"
           : "执行动作",
     body: safePreviewText(
-      [action.actionType, action.target, action.error, action.reactTrace?.outputPreview]
+      [
+        executionText(action.actionType, "动作类型未验证"),
+        action.target ? executionText(action.target) : null,
+        action.error ? executionText(action.error) : null,
+        action.reactTrace?.outputPreview ? executionText(action.reactTrace.outputPreview) : null,
+      ]
         .filter(Boolean)
         .join(" · "),
       220
@@ -216,7 +240,10 @@ function buildActivityTimeline(
   const observationItems = run.observations.map(observation => ({
     id: `observation-${observation.id}`,
     title: "观察结果",
-    body: safePreviewText(observation.reactTrace?.outputPreview ?? observation.content, 220),
+    body: safePreviewText(
+      executionText(observation.reactTrace?.outputPreview ?? observation.content),
+      220
+    ),
     timestamp: observation.timestamp,
     tone: "ready" as const,
   }));
@@ -234,7 +261,7 @@ function buildActivityTimeline(
         {
           id: "final-result",
           title: "最终结果",
-          body: safePreviewText(run.outputPreview, 220),
+          body: safePreviewText(executionText(run.outputPreview), 220),
           timestamp: run.finishedAt,
           tone: "ready" as const,
         },
@@ -313,11 +340,11 @@ export default function AgentRunDetail() {
         await refreshMainChatAgentTaskContext(taskSummary.taskSessionId);
       } else {
         const detail = taskDetail ?? (await getMainChatAgentTaskDetail(taskSummary.taskSessionId));
-        const failedAction = detail.actions.find(action => action.status === "failed");
-        if (!failedAction) {
-          throw new Error("没有可重试的失败 action");
+        const retryTargetActionId = detail.retryTargetActionId;
+        if (!retryTargetActionId) {
+          throw new Error("后端 read model 未提供可重试 action");
         }
-        await retryMainChatAgentAction(taskSummary.taskSessionId, failedAction.id);
+        await retryMainChatAgentAction(taskSummary.taskSessionId, retryTargetActionId);
       }
       await loadRun(runId);
     } catch (e) {
@@ -402,19 +429,27 @@ export default function AgentRunDetail() {
     );
   }
 
+  const evidenceView = taskDetail?.evidenceView ?? taskSummary?.evidenceView ?? null;
+  const legacyUnknown = run.legacyPayloadUnverified === true && !evidenceView;
   const startedAt = new Date(run.startedAt).getTime();
   const stale =
-    (taskSummary?.staleState && !["fresh", "none", "ok"].includes(taskSummary.staleState)) ||
-    (run.status === "running" &&
-      Number.isFinite(startedAt) &&
-      Date.now() - startedAt > STALE_RUN_THRESHOLD_MS);
-  const evidenceView = taskDetail?.evidenceView ?? taskSummary?.evidenceView ?? null;
-  const lifecycleState = evidenceView?.lifecycleState ?? taskSummary?.lifecycleState ?? run.status;
+    !legacyUnknown &&
+    ((taskSummary?.staleState && !["fresh", "none", "ok"].includes(taskSummary.staleState)) ||
+      (run.status === "running" &&
+        Number.isFinite(startedAt) &&
+        Date.now() - startedAt > STALE_RUN_THRESHOLD_MS));
+  const lifecycleState =
+    evidenceView?.lifecycleState ??
+    (legacyUnknown ? "unknown" : (taskSummary?.lifecycleState ?? run.status));
   const activityTimeline = buildActivityTimeline(run, taskDetail, evidenceView);
   const allowedControls = evidenceView?.allowedControls ?? taskDetail?.allowedControls ?? [];
-  const actionControls = allowedControls.filter(control =>
-    ["resume", "retry", "cancel", "refresh_context"].includes(control)
-  );
+  const actionControls = legacyUnknown
+    ? []
+    : allowedControls.filter(
+        control =>
+          ["resume", "retry", "cancel", "refresh_context"].includes(control) &&
+          (control !== "retry" || Boolean(taskDetail?.retryTargetActionId))
+      );
 
   return (
     <div className="h-full overflow-auto p-6">
@@ -479,12 +514,20 @@ export default function AgentRunDetail() {
                 taskSummary: taskSummary ?? undefined,
                 evidenceView,
                 runtimeRouteEvidence:
-                  evidenceView?.routeEvidence ?? taskSummary?.routeEvidence ?? null,
-                strictRuntimeRouteEvidence: Boolean(evidenceView),
+                  evidenceView?.routeEvidence ??
+                  (legacyUnknown ? null : taskSummary?.routeEvidence),
+                strictRuntimeRouteEvidence: Boolean(evidenceView) || legacyUnknown,
               })}
               runId={run.id}
             />
           </div>
+
+          {run.legacyPayloadUnverified && (
+            <div className="mb-6 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              这是从旧版 payload 迁移的未验证执行记录。其 receipt、digest
+              与模型路线只可用于恢复定位， 不代表 provider、工具或输出已被实际观察。
+            </div>
+          )}
 
           {/* Stats Summary */}
           {evidenceView ? (
@@ -524,10 +567,11 @@ export default function AgentRunDetail() {
                 </div>
               </div>
             </div>
-          ) : run.stepCount ||
-            run.toolCallCount ||
-            run.actions.length ||
-            run.observations.length ? (
+          ) : !run.legacyPayloadUnverified &&
+            (run.stepCount ||
+              run.toolCallCount ||
+              run.actions.length ||
+              run.observations.length) ? (
             <div className="mb-6 grid grid-cols-2 md:grid-cols-4 gap-3">
               <div className="bg-stone-50 rounded-lg p-3 text-center">
                 <div className="flex items-center justify-center gap-1 text-stone-500 text-xs mb-1">
@@ -578,7 +622,7 @@ export default function AgentRunDetail() {
             </div>
           )}
 
-          {run.userInput && (
+          {run.userInput && !run.legacyPayloadUnverified && (
             <div className="mb-6">
               <h3 className="text-sm font-semibold text-stone-700 mb-2">用户输入摘要</h3>
               <div className="bg-stone-50 rounded-lg p-3 text-sm text-stone-800">
@@ -587,11 +631,11 @@ export default function AgentRunDetail() {
             </div>
           )}
 
-          {run.outputPreview && (
+          {run.outputPreview && !run.legacyPayloadUnverified && (
             <div className="mb-6">
               <h3 className="text-sm font-semibold text-stone-700 mb-2">输出摘要</h3>
               <div className="bg-stone-50 rounded-lg p-3 text-sm text-stone-800">
-                {safePreviewText(run.outputPreview, 160)}
+                {safePreviewText(executionText(run.outputPreview), 160)}
               </div>
             </div>
           )}
@@ -630,7 +674,7 @@ export default function AgentRunDetail() {
 
           <div className="mb-6">
             <h3 className="text-sm font-semibold text-stone-700 mb-2">任务控制</h3>
-            {taskSummary ? (
+            {taskSummary && !legacyUnknown ? (
               <div className="rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm text-stone-700">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="rounded-md bg-stone-900 px-2 py-1 text-xs font-semibold text-white">
@@ -713,6 +757,10 @@ export default function AgentRunDetail() {
                   <div className="mt-3 text-xs text-stone-500">当前只允许查看 trace。</div>
                 )}
               </div>
+            ) : legacyUnknown ? (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                旧版 task 状态、推荐动作、阻断与连续性均未验证；当前只允许查看 trace。
+              </div>
             ) : (
               <div className="rounded-lg border border-stone-200 bg-stone-50 p-3 text-sm text-stone-500">
                 旧 run 或缺少 task session，当前无法直接控制。
@@ -720,19 +768,40 @@ export default function AgentRunDetail() {
             )}
           </div>
 
-          {run.error && (
+          {run.error && !run.legacyPayloadUnverified && (
             <div className="mb-6">
-              <h3 className="text-sm font-semibold text-red-700 mb-2">错误</h3>
-              <div className="bg-red-50 rounded-lg p-3 text-sm text-red-800">
-                <div className="font-medium">{run.error.message}</div>
-                <div className="text-xs text-red-600 mt-1">
-                  阶段: {run.error.phase} · 可恢复: {run.error.recoverable ? "是" : "否"}
+              <h3
+                className={`mb-2 text-sm font-semibold ${
+                  run.status === "remote_unknown" ? "text-amber-700" : "text-red-700"
+                }`}
+              >
+                {run.status === "remote_unknown" ? "远端状态未知" : "错误"}
+              </h3>
+              <div
+                className={`rounded-lg p-3 text-sm ${
+                  run.status === "remote_unknown"
+                    ? "bg-amber-50 text-amber-900"
+                    : "bg-red-50 text-red-800"
+                }`}
+              >
+                <div className="font-medium">
+                  {run.status === "remote_unknown"
+                    ? "请求已离开本地，但尚未观察到可信的远端终态；系统不会自动重试。"
+                    : executionText(run.error.message)}
+                </div>
+                <div
+                  className={`mt-1 text-xs ${
+                    run.status === "remote_unknown" ? "text-amber-700" : "text-red-600"
+                  }`}
+                >
+                  阶段: {executionText(run.error.phase, "phase 未验证")} · 可恢复:{" "}
+                  {run.error.recoverable ? "是" : "否"}
                 </div>
               </div>
             </div>
           )}
 
-          {run.warnings && run.warnings.length > 0 && (
+          {run.warnings && run.warnings.length > 0 && !run.legacyPayloadUnverified && (
             <div className="mb-6">
               <h3 className="text-sm font-semibold text-amber-700 mb-2">警告</h3>
               <div className="bg-amber-50 rounded-lg p-3 text-sm text-amber-800 space-y-1">
@@ -746,7 +815,7 @@ export default function AgentRunDetail() {
             </div>
           )}
 
-          {run.contextSummary && (
+          {run.contextSummary && !run.legacyPayloadUnverified && (
             <div className="mb-6">
               <h3 className="text-sm font-semibold text-stone-700 mb-2">上下文摘要</h3>
               <div className="bg-stone-50 rounded-lg p-3 text-sm text-stone-800 space-y-1">
@@ -770,9 +839,9 @@ export default function AgentRunDetail() {
                     "provider 未验证"}
                 </div>
                 <div>
-                  Model:{" "}
-                  {evidenceView.routeEvidence.actual_route?.model ??
-                    evidenceView.routeEvidence.planned_route?.model ??
+                  Model ref:{" "}
+                  {evidenceView.routeEvidence.actual_route?.model_ref ??
+                    evidenceView.routeEvidence.planned_route?.model_ref ??
                     "model 未验证"}
                 </div>
                 <div>
@@ -787,22 +856,32 @@ export default function AgentRunDetail() {
             </div>
           ) : !evidenceView && run.modelRoute ? (
             <div className="mb-6">
-              <h3 className="text-sm font-semibold text-stone-700 mb-2">路线详情</h3>
+              <h3 className="text-sm font-semibold text-stone-700 mb-2">计划路线（非调用证据）</h3>
               <div className="bg-stone-50 rounded-lg p-3 text-sm text-stone-800 space-y-1">
-                <div>Provider: {run.modelRoute.provider}</div>
-                <div>Model: {run.modelRoute.model}</div>
-                <div>Route: {run.modelRoute.routeType}</div>
-                <div>Reason: {run.modelRoute.reason}</div>
-                <div>Privacy: {run.modelRoute.privacyLevel}</div>
-                <div>Retry: {run.modelRoute.retryCount}</div>
-                {run.modelRoute.fallbackReason && (
-                  <div>Fallback: {run.modelRoute.fallbackReason}</div>
-                )}
-                {run.modelRoute.providerHealthIsEstimated !== undefined && (
+                {run.legacyPayloadUnverified ? (
                   <div>
-                    Health:{" "}
-                    {run.modelRoute.providerHealthIsEstimated ? "estimated / gray" : "probed"}
+                    Provider、model、route、privacy、retry 与 health 均未获得当前运行时证据。
                   </div>
+                ) : (
+                  <>
+                    <div>Provider: {executionText(run.modelRoute.provider, "provider 未验证")}</div>
+                    <div>Model: {executionText(run.modelRoute.model, "model 未验证")}</div>
+                    <div>Route: {executionText(run.modelRoute.routeType, "route 未验证")}</div>
+                    <div>Reason: {executionText(run.modelRoute.reason, "reason 未保存")}</div>
+                    <div>Privacy: {run.modelRoute.privacyLevel}</div>
+                    <div>Retry: {run.modelRoute.retryCount}</div>
+                    {run.modelRoute.fallbackReason && (
+                      <div>
+                        Fallback: {executionText(run.modelRoute.fallbackReason, "reason 未保存")}
+                      </div>
+                    )}
+                    {run.modelRoute.providerHealthIsEstimated !== undefined && (
+                      <div>
+                        Health:{" "}
+                        {run.modelRoute.providerHealthIsEstimated ? "estimated / gray" : "probed"}
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             </div>
@@ -810,11 +889,17 @@ export default function AgentRunDetail() {
 
           <div className="mb-6">
             <h3 className="text-sm font-semibold text-stone-700 mb-2">协作行为</h3>
-            <RunTracePanel run={run} />
+            {run.legacyPayloadUnverified && !evidenceView ? (
+              <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                旧版协作规则、工具与行为检查未验证，已停止按实际运行事实展示。
+              </div>
+            ) : (
+              <RunTracePanel run={run} />
+            )}
           </div>
 
           {/* Status Timeline */}
-          {run.statusUpdates && run.statusUpdates.length > 0 && (
+          {run.statusUpdates && run.statusUpdates.length > 0 && !run.legacyPayloadUnverified && (
             <div className="mb-6">
               <h3 className="text-sm font-semibold text-stone-700 mb-2">
                 状态时间线 ({run.statusUpdates.length})
@@ -868,7 +953,7 @@ export default function AgentRunDetail() {
             </div>
           )}
 
-          {run.generatedProposals.length > 0 && (
+          {run.generatedProposals.length > 0 && !run.legacyPayloadUnverified && (
             <div className="mb-6">
               <h3 className="text-sm font-semibold text-stone-700 mb-2">生成的提案</h3>
               <div className="space-y-2">
@@ -881,171 +966,163 @@ export default function AgentRunDetail() {
             </div>
           )}
 
-          {(run.actions.length > 0 || run.observations.length > 0) && (
-            <div className="mb-6">
-              <h3 className="text-sm font-semibold text-stone-700 mb-2">
-                执行时间线 ({run.actions.length + run.observations.length})
-              </h3>
-              <div className="space-y-2">
-                {(() => {
-                  const timeline = [
-                    ...run.actions.map(a => ({ type: "action" as const, item: a })),
-                    ...run.observations.map(o => ({ type: "observation" as const, item: o })),
-                  ];
-                  timeline.sort((a, b) => {
-                    const timeA = a.item.timestamp ? new Date(a.item.timestamp).getTime() : 0;
-                    const timeB = b.item.timestamp ? new Date(b.item.timestamp).getTime() : 0;
-                    if (Number.isNaN(timeA) || timeA === 0) return 1;
-                    if (Number.isNaN(timeB) || timeB === 0) return -1;
-                    return timeA - timeB;
-                  });
-                  return timeline.map(entry => {
-                    if (entry.type === "action") {
-                      const action = entry.item;
-                      const trace = action.reactTrace;
-                      return (
-                        <div
-                          key={action.id}
-                          className="bg-stone-50 rounded-lg p-3 text-sm border-l-4 border-blue-400"
-                        >
-                          <div className="font-medium text-stone-800 flex items-center gap-2">
-                            <span className="text-blue-600 text-xs font-bold">ACTION</span>
-                            {action.actionType}
-                            {action.target ? ` · ${action.target}` : ""}
-                            {action.status === "needs_confirmation" && (
-                              <span className="inline-flex items-center gap-1 text-orange-600 text-xs">
-                                <AlertTriangle size={12} /> 待确认
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-xs text-stone-500 mt-1">
-                            Status: {action.status} · Permission:{" "}
-                            {action.permissionDecision ?? "n/a"} ·{" "}
-                            {new Date(action.startedAt ?? action.timestamp).toLocaleString()}
-                          </div>
-                          {trace && (
-                            <div className="mt-2 text-xs text-stone-600 bg-white rounded p-2">
-                              <div className="font-medium mb-1">ReAct Trace:</div>
-                              <div>Tool: {trace.toolName}</div>
-                              <div>Source: {trace.toolSource}</div>
-                              <div>Risk: {trace.riskLevel}</div>
-                              <div>Status: {trace.status}</div>
-                              <div>Category: {trace.actionCategory}</div>
-                              {trace.outputPreview && <div>Output: {trace.outputPreview}</div>}
-                              {trace.outputHash && <div>Hash: {trace.outputHash}</div>}
+          {(run.actions.length > 0 || run.observations.length > 0) &&
+            !run.legacyPayloadUnverified && (
+              <div className="mb-6">
+                <h3 className="text-sm font-semibold text-stone-700 mb-2">
+                  执行时间线 ({run.actions.length + run.observations.length})
+                </h3>
+                <div className="space-y-2">
+                  {(() => {
+                    const timeline = [
+                      ...run.actions.map(a => ({ type: "action" as const, item: a })),
+                      ...run.observations.map(o => ({ type: "observation" as const, item: o })),
+                    ];
+                    timeline.sort((a, b) => {
+                      const timeA = a.item.timestamp ? new Date(a.item.timestamp).getTime() : 0;
+                      const timeB = b.item.timestamp ? new Date(b.item.timestamp).getTime() : 0;
+                      if (Number.isNaN(timeA) || timeA === 0) return 1;
+                      if (Number.isNaN(timeB) || timeB === 0) return -1;
+                      return timeA - timeB;
+                    });
+                    return timeline.map(entry => {
+                      if (entry.type === "action") {
+                        const action = entry.item;
+                        const trace = action.reactTrace;
+                        return (
+                          <div
+                            key={action.id}
+                            className="bg-stone-50 rounded-lg p-3 text-sm border-l-4 border-blue-400"
+                          >
+                            <div className="font-medium text-stone-800 flex items-center gap-2">
+                              <span className="text-blue-600 text-xs font-bold">ACTION</span>
+                              {executionText(action.actionType, "动作类型未验证")}
+                              {action.target ? ` · ${executionText(action.target)}` : ""}
+                              {action.status === "needs_confirmation" && (
+                                <span className="inline-flex items-center gap-1 text-orange-600 text-xs">
+                                  <AlertTriangle size={12} /> 待确认
+                                </span>
+                              )}
                             </div>
-                          )}
-                          {action.toolScope && (
-                            <div className="mt-2 text-xs text-stone-600 bg-white rounded p-2">
-                              <div className="font-medium mb-1">Tool Scope:</div>
-                              <div>Tool: {action.toolScope.toolName}</div>
-                              <div>Source: {action.toolScope.source}</div>
-                              <div>Risk: {action.toolScope.riskLevel}</div>
-                              <div>
-                                Capabilities: {action.toolScope.capabilities.join(", ") || "none"}
+                            <div className="text-xs text-stone-500 mt-1">
+                              Status: {action.status} · Permission:{" "}
+                              {action.permissionDecision ?? "n/a"} ·{" "}
+                              {new Date(action.startedAt ?? action.timestamp).toLocaleString()}
+                            </div>
+                            {trace && (
+                              <div className="mt-2 text-xs text-stone-600 bg-white rounded p-2">
+                                <div className="font-medium mb-1">ReAct Trace:</div>
+                                <div>Tool: {trace.toolName}</div>
+                                <div>Source: {trace.toolSource}</div>
+                                <div>Risk: {trace.riskLevel}</div>
+                                <div>Status: {trace.status}</div>
+                                <div>Category: {trace.actionCategory}</div>
+                                {trace.outputPreview && <div>Output: {trace.outputPreview}</div>}
+                                {trace.outputReceipt && !run.legacyPayloadUnverified && (
+                                  <div>
+                                    Receipt: {trace.outputReceipt.kind} ·{" "}
+                                    {trace.outputReceipt.byteCount} bytes ·{" "}
+                                    {trace.outputReceipt.digest}
+                                  </div>
+                                )}
                               </div>
-                            </div>
-                          )}
-                          {/* Linked proposal extraction */}
-                          {(() => {
-                            let proposalId: string | null = null;
-                            if (trace?.proposalId) {
-                              proposalId = trace.proposalId;
-                            } else if (action.output) {
-                              // Try direct proposal_id
-                              if (typeof action.output === "object" && action.output !== null) {
-                                const direct = (action.output as any).proposal_id;
-                                if (direct) proposalId = direct;
-                                // Try wrapped in text field
-                                const text = (action.output as any).text;
-                                if (text && typeof text === "string") {
-                                  try {
-                                    const parsed = JSON.parse(text);
-                                    if (parsed.proposal_id) proposalId = parsed.proposal_id;
-                                  } catch {
-                                    /* ignore parse error */
+                            )}
+                            {action.toolScope && (
+                              <div className="mt-2 text-xs text-stone-600 bg-white rounded p-2">
+                                <div className="font-medium mb-1">Tool Scope:</div>
+                                <div>Tool: {action.toolScope.toolName}</div>
+                                <div>Source: {action.toolScope.source}</div>
+                                <div>Risk: {action.toolScope.riskLevel}</div>
+                                <div>
+                                  Capabilities: {action.toolScope.capabilities.join(", ") || "none"}
+                                </div>
+                              </div>
+                            )}
+                            {/* Linked proposal extraction */}
+                            {(() => {
+                              let proposalId: string | null = null;
+                              if (trace?.proposalId) {
+                                proposalId = trace.proposalId;
+                              } else if (action.output) {
+                                // Try direct proposal_id
+                                if (typeof action.output === "object" && action.output !== null) {
+                                  const direct = (action.output as any).proposal_id;
+                                  if (direct) proposalId = direct;
+                                  // Try wrapped in text field
+                                  const text = (action.output as any).text;
+                                  if (text && typeof text === "string") {
+                                    try {
+                                      const parsed = JSON.parse(text);
+                                      if (parsed.proposal_id) proposalId = parsed.proposal_id;
+                                    } catch {
+                                      /* ignore parse error */
+                                    }
                                   }
                                 }
                               }
-                            }
-                            if (!proposalId && run.generatedProposals.length > 0) {
-                              // Fallback: link to the first generated proposal if action is recent
-                              proposalId = run.generatedProposals[0];
-                            }
-                            return proposalId ? (
-                              <div className="mt-2 text-xs bg-blue-50 rounded p-2">
-                                <div className="font-medium text-blue-800 mb-1">
-                                  Linked Proposal:
+                              if (!proposalId && run.generatedProposals.length > 0) {
+                                // Fallback: link to the first generated proposal if action is recent
+                                proposalId = run.generatedProposals[0];
+                              }
+                              return proposalId ? (
+                                <div className="mt-2 text-xs bg-blue-50 rounded p-2">
+                                  <div className="font-medium text-blue-800 mb-1">
+                                    Linked Proposal:
+                                  </div>
+                                  <div className="text-blue-700">{proposalId}</div>
+                                  <button
+                                    onClick={() => navigate(mailboxRoute({ proposalId }))}
+                                    className="mt-1 text-blue-600 hover:text-blue-800 underline"
+                                  >
+                                    查看 Proposal
+                                  </button>
                                 </div>
-                                <div className="text-blue-700">{proposalId}</div>
-                                <button
-                                  onClick={() => navigate(mailboxRoute({ proposalId }))}
-                                  className="mt-1 text-blue-600 hover:text-blue-800 underline"
-                                >
-                                  查看 Proposal
-                                </button>
+                              ) : null;
+                            })()}
+                            {action.error && (
+                              <div className="mt-2 rounded bg-red-50 px-2 py-1 text-xs text-red-700">
+                                {safePreviewText(executionText(action.error), 140)}
                               </div>
-                            ) : null;
-                          })()}
-                          {action.status === "needs_confirmation" && (
-                            <div className="mt-2">
-                              <button
-                                onClick={async () => {
-                                  try {
-                                    await replayAgentAction(run.id, action.id);
-                                    await loadRun(run.id);
-                                  } catch (e) {
-                                    alert(`Replay failed: ${e}`);
-                                  }
-                                }}
-                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-orange-600 text-white text-xs hover:bg-orange-700"
-                              >
-                                <Play size={12} />
-                                重新执行
-                              </button>
-                            </div>
-                          )}
-                          {action.error && (
-                            <div className="mt-2 rounded bg-red-50 px-2 py-1 text-xs text-red-700">
-                              {safePreviewText(action.error, 140)}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    } else {
-                      const obs = entry.item;
-                      const trace = obs.reactTrace;
-                      return (
-                        <div
-                          key={obs.id}
-                          className="bg-stone-50 rounded-lg p-3 text-sm border-l-4 border-green-400"
-                        >
-                          <div className="flex items-center gap-2 mb-1">
-                            <span className="text-green-600 text-xs font-bold">OBSERVATION</span>
-                            <span className="text-xs text-stone-500">
-                              {new Date(obs.timestamp).toLocaleString()}
-                            </span>
+                            )}
                           </div>
-                          <div className="text-stone-800">
-                            {trace?.outputPreview ?? safePreviewText(obs.content, 140)}
-                          </div>
-                          <div className="text-xs text-stone-500 mt-1">
-                            Source: {obs.source}
-                            {obs.actionId ? ` · Action: ${obs.actionId.slice(0, 8)}` : ""}
-                          </div>
-                          {trace?.outputHash && (
-                            <div className="mt-2 rounded bg-white px-2 py-1 text-xs text-stone-600">
-                              {trace.outputHash}
+                        );
+                      } else {
+                        const obs = entry.item;
+                        const trace = obs.reactTrace;
+                        return (
+                          <div
+                            key={obs.id}
+                            className="bg-stone-50 rounded-lg p-3 text-sm border-l-4 border-green-400"
+                          >
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="text-green-600 text-xs font-bold">OBSERVATION</span>
+                              <span className="text-xs text-stone-500">
+                                {new Date(obs.timestamp).toLocaleString()}
+                              </span>
                             </div>
-                          )}
-                        </div>
-                      );
-                    }
-                  });
-                })()}
+                            <div className="text-stone-800">
+                              {trace?.outputPreview
+                                ? executionText(trace.outputPreview)
+                                : safePreviewText(executionText(obs.content), 140)}
+                            </div>
+                            <div className="text-xs text-stone-500 mt-1">
+                              Source: {obs.source}
+                              {obs.actionId ? ` · Action: ${obs.actionId.slice(0, 8)}` : ""}
+                            </div>
+                            {trace?.outputReceipt && !run.legacyPayloadUnverified && (
+                              <div className="mt-2 rounded bg-white px-2 py-1 text-xs text-stone-600">
+                                {trace.outputReceipt.kind} · {trace.outputReceipt.byteCount} bytes ·{" "}
+                                {trace.outputReceipt.digest}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      }
+                    });
+                  })()}
+                </div>
               </div>
-            </div>
-          )}
+            )}
 
           <DangerZone
             title="危险操作"

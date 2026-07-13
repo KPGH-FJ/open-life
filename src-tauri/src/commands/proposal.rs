@@ -1,4 +1,11 @@
-use crate::{life_model_write_gateway, memory_gateway, storage::app_data_dir, AppState};
+use crate::{
+    danger_action_confirmation::{
+        require_native_danger_action_confirmation, NativeDangerActionRequest,
+    },
+    life_model_write_gateway, memory_gateway,
+    storage::app_data_dir,
+    AppState,
+};
 use openlife_core::agent::{
     AgentProposal, MaturationProposalOutcome, MemoryLifecycleRecord, MemoryLifecycleScope,
     MemoryLifecycleStatus, MemoryRollbackReport, ProposalSource, ProposalStatus, ProposalType,
@@ -6,6 +13,7 @@ use openlife_core::agent::{
 };
 use openlife_core::life_model::patch::PatchSource;
 use openlife_core::life_model::LifeModel;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::Write;
 use std::sync::Arc;
@@ -14,6 +22,77 @@ use tauri::State;
 /// Maximum content size for ExternalWriteAction (100 KB)
 const EXTERNAL_WRITE_MAX_SIZE: usize = 100 * 1024;
 pub(crate) const COMMUNICATION_STYLE_CANONICAL_PATH: &str = "preferences.communication_style";
+
+fn require_persistence_write(state: &Arc<AppState>) -> Result<(), String> {
+    state
+        .persistence_coordinator
+        .require_effects_allowed()
+        .map_err(|error| error.to_string())
+}
+
+fn runtime_proposal_store_error(state: &Arc<AppState>, error: impl ToString) -> String {
+    let error = error.to_string();
+    state
+        .persistence_coordinator
+        .register_runtime_durable_failure("ProposalStore", &error);
+    format!("proposal_store_runtime_degraded:{error}")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AcceptProposalResponse {
+    pub success: bool,
+    #[serde(alias = "patch_result")]
+    pub patch_result: openlife_core::life_model::patch::PatchApplyResult,
+    #[serde(alias = "effect_status")]
+    pub effect_status: String,
+    #[serde(alias = "proposal_projection_status")]
+    pub proposal_projection_status: String,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub main_chat_task_sync: Vec<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_gateway: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_lifecycle: Option<Value>,
+    /// Canonical Memory commit and its derived projection are separate facts.
+    /// Keeping this field in the typed IPC contract prevents serde from
+    /// silently dropping a degraded/pending projection while reporting the
+    /// already-confirmed effect to the product as fully applied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_persistence: Option<MemoryPersistenceResponse>,
+    #[serde(alias = "blocked_action")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_action: Option<Value>,
+    #[serde(alias = "can_continue")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_continue: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MemoryPersistenceResponse {
+    pub canonical_committed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outbox_event_id: Option<String>,
+    pub projection_state: openlife_core::persistence_outbox::ProjectionDeliveryState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub degraded: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_digest: Option<String>,
+}
+
+fn typed_accept_proposal_response(value: Value) -> Result<AcceptProposalResponse, String> {
+    serde_json::from_value(value)
+        .map_err(|error| format!("accept Proposal response contract mismatch: {error}"))
+}
 
 pub(crate) fn canonical_lifemodel_path(path: &str) -> String {
     let trimmed = path.trim();
@@ -69,7 +148,358 @@ fn ensure_pending_or_postponed(proposal: &AgentProposal) -> Result<(), String> {
         ProposalStatus::Pending | ProposalStatus::Postponed | ProposalStatus::Edited => Ok(()),
         ProposalStatus::Accepted => Err("该 Proposal 已经被接受，不能重复处理。".to_string()),
         ProposalStatus::Rejected => Err("该 Proposal 已经被拒绝，不能再次处理。".to_string()),
+        ProposalStatus::Expired => Err("该 Proposal 已经过期，不能再执行。".to_string()),
     }
+}
+
+async fn ensure_review_change_precedes_effect_dispatch(
+    state: &Arc<AppState>,
+    proposal_id: &str,
+) -> Result<(), String> {
+    let dispatch_state = state
+        .proposal_store
+        .as_ref()
+        .ok_or_else(proposal_store_missing)?
+        .lock()
+        .await
+        .dispatch_state(proposal_id)
+        .map_err(|error| error.to_string())?;
+    match dispatch_state.as_deref() {
+        Some("unclaimed" | "failed_before_effect") => Ok(()),
+        Some("confirmed_projection_pending" | "confirmed") => Err(
+            "Proposal effect is already confirmed; review mutation is blocked and projection reconciliation is required."
+                .into(),
+        ),
+        Some("claimed" | "unknown") => Err(
+            "Proposal effect state is not safely reversible; review mutation is blocked pending reconciliation."
+                .into(),
+        ),
+        Some(other) => Err(format!(
+            "unsupported Proposal dispatch state '{other}'; review mutation failed closed"
+        )),
+        None => Err("Proposal dispatch receipt is unavailable; review mutation failed closed".into()),
+    }
+}
+
+fn is_builder_lifemodel_patch_batch(proposal: &AgentProposal) -> bool {
+    proposal.proposal_type == ProposalType::LifeModelUpdate
+        && proposal.source == ProposalSource::BuilderReview
+        && proposal.affected_path == openlife_core::life_model::patch::LIFEMODEL_PATCH_BATCH_PATH
+}
+
+fn dispatch_failure_was_definitely_before_effect(operation: &str) -> bool {
+    matches!(
+        operation,
+        "validation_failed"
+            | "lifemodel_gateway_stale_conflict"
+            | "lifemodel_patch_conflict"
+            | "lifemodel_gateway_blocked"
+            | "lifemodel_patch_batch_validation_failed"
+            | "lifemodel_gateway_batch_stale_conflict"
+            | "lifemodel_patch_batch_conflict"
+            | "lifemodel_gateway_batch_blocked"
+            | "lifemodel_compare_and_swap_conflict"
+            | "memory_write_not_committed"
+            | "memory_write_duplicate_no_effect"
+            | "scheduled_task_review_snapshot_missing"
+            | "scheduled_cloud_due_time_missing"
+            | "scheduled_cloud_due_time_invalid"
+            | "scheduled_cloud_provider_preflight_failed"
+            | "scheduled_cloud_network_policy_invalid"
+            | "scheduled_cloud_network_policy_not_allowed"
+            | "scheduled_cloud_policy_rejected"
+            | "scheduled_cloud_grant_seal_rejected"
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LinkedAgentRunReviewOutcome {
+    Materialized,
+    Rejected,
+    WaitingReview,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProposalReconciliationReport {
+    pub proposal_projections_repaired: usize,
+    pub agent_runs_reconciled: usize,
+    pub projection_backlog_may_remain: bool,
+    pub agent_run_backlog_may_remain: bool,
+}
+
+async fn reconcile_agent_runs_for_proposal(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+    outcome: LinkedAgentRunReviewOutcome,
+) -> Result<usize, String> {
+    let Some(store) = state.agent_run_store.as_ref() else {
+        return Err("AgentRun store is unavailable for Proposal reconciliation.".into());
+    };
+    let linked_runs = store
+        .lock()
+        .await
+        .list_runs_linked_to_proposal(&proposal.id)
+        .map_err(|error| error.to_string())?;
+    if linked_runs.is_empty() {
+        return Ok(0);
+    }
+
+    let mut linked_outcomes = std::collections::HashMap::new();
+    {
+        let proposal_store = state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(proposal_store_missing)?
+            .lock()
+            .await;
+        for linked_proposal_id in linked_runs
+            .iter()
+            .flat_map(|run| run.generated_proposals.iter())
+        {
+            if linked_outcomes.contains_key(linked_proposal_id) {
+                continue;
+            }
+            let linked_outcome = if linked_proposal_id == &proposal.id {
+                outcome
+            } else {
+                match proposal_store
+                    .get_proposal(linked_proposal_id)
+                    .map_err(|error| error.to_string())?
+                {
+                    Some(linked) => match linked.status {
+                        ProposalStatus::Accepted
+                            if proposal_store
+                                .dispatch_state(linked_proposal_id)
+                                .map_err(|error| error.to_string())?
+                                .as_deref()
+                                == Some("confirmed") =>
+                        {
+                            LinkedAgentRunReviewOutcome::Materialized
+                        }
+                        ProposalStatus::Rejected | ProposalStatus::Expired => {
+                            LinkedAgentRunReviewOutcome::Rejected
+                        }
+                        _ => LinkedAgentRunReviewOutcome::WaitingReview,
+                    },
+                    None => LinkedAgentRunReviewOutcome::WaitingReview,
+                }
+            };
+            linked_outcomes.insert(linked_proposal_id.clone(), linked_outcome);
+        }
+    }
+
+    let store = store.lock().await;
+    let mut reconciled = 0_usize;
+    for linked_run in linked_runs {
+        let Some(mut run) = store
+            .get_run(&linked_run.id)
+            .map_err(|error| error.to_string())?
+        else {
+            continue;
+        };
+        if run.status != openlife_core::agent::AgentRunStatus::WaitingPermission {
+            continue;
+        }
+        if run.deleted_at.is_some() {
+            continue;
+        }
+        let run_outcomes = run
+            .generated_proposals
+            .iter()
+            .map(|proposal_id| {
+                linked_outcomes
+                    .get(proposal_id)
+                    .copied()
+                    .unwrap_or(LinkedAgentRunReviewOutcome::WaitingReview)
+            })
+            .collect::<Vec<_>>();
+        let run_outcome = if run_outcomes
+            .iter()
+            .any(|item| matches!(item, LinkedAgentRunReviewOutcome::WaitingReview))
+        {
+            LinkedAgentRunReviewOutcome::WaitingReview
+        } else if run_outcomes
+            .iter()
+            .any(|item| matches!(item, LinkedAgentRunReviewOutcome::Rejected))
+        {
+            LinkedAgentRunReviewOutcome::Rejected
+        } else {
+            LinkedAgentRunReviewOutcome::Materialized
+        };
+        match run_outcome {
+            LinkedAgentRunReviewOutcome::Materialized => {
+                run.status = openlife_core::agent::AgentRunStatus::Completed;
+                run.finished_at = Some(chrono::Utc::now());
+                run.output_preview =
+                    Some("All linked Proposal effects materialized through ReviewWorkflow.".into());
+                run.error = None;
+            }
+            LinkedAgentRunReviewOutcome::Rejected => {
+                run.cancel();
+                run.output_preview = Some(
+                    "Linked Proposal review completed without materializing every effect.".into(),
+                );
+            }
+            LinkedAgentRunReviewOutcome::WaitingReview => {
+                run.status = openlife_core::agent::AgentRunStatus::WaitingPermission;
+                run.finished_at = None;
+                run.output_preview =
+                    Some("One or more linked Proposals remain in Review Center.".into());
+            }
+        }
+        store.update_run(&run).map_err(|error| error.to_string())?;
+        reconciled += 1;
+    }
+    Ok(reconciled)
+}
+
+async fn project_confirmed_effect_projection_only(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+    claim_id: &str,
+) -> Result<AgentProposal, String> {
+    let mut accepted = proposal.clone();
+    accepted.accept();
+    canonicalize_proposal_affected_path(&mut accepted);
+    let store = state
+        .proposal_store
+        .as_ref()
+        .ok_or_else(proposal_store_missing)?
+        .lock()
+        .await;
+    if store
+        .project_confirmed_effect(&accepted, claim_id)
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(accepted);
+    }
+
+    // A concurrent reconciler may have won the exact same projection. Treat that as
+    // idempotent success only when both the read model and dispatch receipt agree.
+    let stored = store
+        .get_proposal(&proposal.id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "confirmed Proposal projection target disappeared".to_string())?;
+    let dispatch_state = store
+        .dispatch_state(&proposal.id)
+        .map_err(|error| error.to_string())?;
+    if stored.status == ProposalStatus::Accepted && dispatch_state.as_deref() == Some("confirmed") {
+        Ok(stored)
+    } else {
+        Err("confirmed effect remains projection_pending; no effect was replayed".into())
+    }
+}
+
+pub(crate) async fn reconcile_durable_proposal_projections_with_state(
+    state: &Arc<AppState>,
+    limit: i64,
+) -> Result<ProposalReconciliationReport, String> {
+    require_persistence_write(state)?;
+    let bounded_limit = limit.clamp(1, 200);
+    let confirmed_projection_pending = {
+        let store = state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(proposal_store_missing)?
+            .lock()
+            .await;
+        store
+            .list_confirmed_projection_pending(bounded_limit)
+            .map_err(|error| runtime_proposal_store_error(state, error))?
+    };
+
+    let mut report = ProposalReconciliationReport {
+        projection_backlog_may_remain: confirmed_projection_pending.len() == bounded_limit as usize,
+        ..ProposalReconciliationReport::default()
+    };
+    for (proposal, claim_id) in confirmed_projection_pending {
+        let accepted =
+            project_confirmed_effect_projection_only(state, &proposal, &claim_id).await?;
+        report.agent_runs_reconciled += reconcile_agent_runs_for_proposal(
+            state,
+            &accepted,
+            LinkedAgentRunReviewOutcome::Materialized,
+        )
+        .await?;
+        report.proposal_projections_repaired += 1;
+    }
+
+    // A process may stop after the Proposal projection commits but before every linked
+    // AgentRun projection is updated. Reconcile only the bounded indexed waiting queue;
+    // never scan all historical runs and never invoke the proposal effect applicator.
+    let waiting_proposal_ids = {
+        let Some(store) = state.agent_run_store.as_ref() else {
+            return Err("AgentRun store is unavailable for Proposal reconciliation.".into());
+        };
+        store
+            .lock()
+            .await
+            .list_waiting_permission_linked_proposal_ids(bounded_limit)
+            .map_err(|error| error.to_string())?
+    };
+    report.agent_run_backlog_may_remain = waiting_proposal_ids.len() == bounded_limit as usize;
+    for proposal_id in waiting_proposal_ids {
+        let (proposal, dispatch_state) = {
+            let store = state
+                .proposal_store
+                .as_ref()
+                .ok_or_else(proposal_store_missing)?
+                .lock()
+                .await;
+            let proposal = store
+                .get_proposal(&proposal_id)
+                .map_err(|error| error.to_string())?;
+            let dispatch_state = store
+                .dispatch_state(&proposal_id)
+                .map_err(|error| error.to_string())?;
+            (proposal, dispatch_state)
+        };
+        let Some(proposal) = proposal else {
+            continue;
+        };
+        let outcome = match proposal.status {
+            ProposalStatus::Accepted if dispatch_state.as_deref() == Some("confirmed") => {
+                Some(LinkedAgentRunReviewOutcome::Materialized)
+            }
+            ProposalStatus::Rejected | ProposalStatus::Expired => {
+                Some(LinkedAgentRunReviewOutcome::Rejected)
+            }
+            _ => None,
+        };
+        if let Some(outcome) = outcome {
+            report.agent_runs_reconciled +=
+                reconcile_agent_runs_for_proposal(state, &proposal, outcome).await?;
+        }
+    }
+    Ok(report)
+}
+
+fn confirmed_effect_reconciliation_response(
+    proposal: &AgentProposal,
+    projection_confirmed: bool,
+    warnings: Vec<String>,
+) -> Value {
+    serde_json::json!({
+        "success": true,
+        "patch_result": patch_result_for_proposal(
+            proposal,
+            true,
+            if projection_confirmed {
+                "confirmed_effect_projection_reconciled"
+            } else {
+                "confirmed_effect_projection_pending"
+            },
+            None,
+        ),
+        "effect_status": "confirmed",
+        "proposal_projection_status": if projection_confirmed {
+            "confirmed"
+        } else {
+            "reconciliation_required"
+        },
+        "warnings": warnings,
+    })
 }
 
 fn patch_result_for_proposal(
@@ -120,6 +550,11 @@ fn lifemodel_patch_source_mapping_for_proposal_source(
         ProposalSource::ProactiveAgent => (PatchSource::ProactiveAgent, true, None),
         ProposalSource::SkillRuntime => (PatchSource::SkillRuntime, true, None),
         ProposalSource::Plugin => (PatchSource::Plugin, true, None),
+        ProposalSource::NetworkConsent => (
+            PatchSource::Manual,
+            false,
+            Some("network_consent_is_not_a_lifemodel_patch_source"),
+        ),
         ProposalSource::MemoryGovernance => (PatchSource::MemoryGovernance, true, None),
         ProposalSource::PlanningSession => (PatchSource::PlanningSession, true, None),
     }
@@ -630,6 +1065,14 @@ fn safe_write_utf8(path: &str, content: &str, safe_paths: &[String]) -> Result<(
     // 3. Atomic rename (Unix: atomic; Windows: best-effort)
     match std::fs::rename(&temp_path, &canonical_target_path) {
         Ok(_) => {
+            if let Err(error) =
+                std::fs::File::open(&canonical_parent).and_then(|directory| directory.sync_all())
+            {
+                return Err(format!(
+                    "File was renamed but parent directory durability could not be confirmed: {}",
+                    error
+                ));
+            }
             let canonical_target = canonical_target_path
                 .canonicalize()
                 .map_err(|e| format!("Failed to canonicalize written file: {}", e))?;
@@ -727,50 +1170,87 @@ fn urlencoding(s: &str) -> String {
         .collect()
 }
 
+fn parse_scheduled_at(value: &str) -> Result<Option<chrono::DateTime<chrono::Utc>>, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(value) {
+        return Ok(Some(parsed.with_timezone(&chrono::Utc)));
+    }
+    if let Ok(parsed) = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S") {
+        return Ok(Some(parsed.and_utc()));
+    }
+    if let Ok(parsed) = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+        return Ok(Some(
+            parsed
+                .and_hms_opt(0, 0, 0)
+                .ok_or_else(|| "ScheduledTask 日期超出有效范围。".to_string())?
+                .and_utc(),
+        ));
+    }
+    Err(
+        "ScheduledTask scheduled_at/date 必须是 RFC3339、YYYY-MM-DDTHH:MM:SS 或 YYYY-MM-DD。"
+            .to_string(),
+    )
+}
+
+fn ics_escape(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace(';', "\\;")
+        .replace(',', "\\,")
+        .replace("\r\n", "\\n")
+        .replace(['\r', '\n'], "\\n")
+}
+
 /// Build a minimal ICS (iCalendar) VEVENT string from proposal after data.
-fn build_ics_event(after: &Value) -> String {
+fn build_ics_event(after: &Value) -> Result<String, String> {
     let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
     let uid = uuid::Uuid::new_v4().to_string();
-    let title = after
-        .get("title")
-        .and_then(Value::as_str)
-        .unwrap_or("Untitled Event");
-    let description = after
-        .get("description")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let title = ics_escape(
+        after
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("Untitled Event"),
+    );
+    let description = ics_escape(
+        after
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    );
     let scheduled_at = after
         .get("scheduled_at")
         .or_else(|| after.get("date"))
         .and_then(Value::as_str)
         .unwrap_or("");
-    // Use scheduled_at as DTSTART; default end to +1h
-    let dtend = if !scheduled_at.is_empty() {
-        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(scheduled_at, "%Y-%m-%dT%H:%M:%S") {
-            (dt + chrono::Duration::hours(1))
+    let scheduled = parse_scheduled_at(scheduled_at)?;
+    let dtstart = scheduled
+        .map(|value| value.format("%Y%m%dT%H%M%SZ").to_string())
+        .unwrap_or_default();
+    let dtend = scheduled
+        .map(|value| {
+            (value + chrono::Duration::hours(1))
                 .format("%Y%m%dT%H%M%SZ")
                 .to_string()
-        } else {
-            String::new()
-        }
-    } else {
-        String::new()
-    };
+        })
+        .unwrap_or_default();
 
-    format!(
+    Ok(format!(
         "BEGIN:VCALENDAR\r\n\
          VERSION:2.0\r\n\
          PRODID:-//OpenLife//Calendar//EN\r\n\
          BEGIN:VEVENT\r\n\
          DTSTAMP:{now}\r\n\
          UID:{uid}\r\n\
-         DTSTART:{scheduled_at}\r\n\
+         DTSTART:{dtstart}\r\n\
          DTEND:{dtend}\r\n\
          SUMMARY:{title}\r\n\
          DESCRIPTION:{description}\r\n\
          END:VEVENT\r\n\
          END:VCALENDAR\r\n"
-    )
+    ))
 }
 
 /// Replace path-unsafe characters in a filename.
@@ -802,25 +1282,67 @@ pub(crate) fn memory_content(after: &Value) -> Result<String, String> {
     Err("MemoryWrite Proposal 缺少 after.content。".to_string())
 }
 
-pub(crate) fn memory_archive_ids(after: &Value) -> Result<Vec<i64>, String> {
-    let value = after
-        .get("chunk_ids")
-        .or_else(|| after.get("chunkIds"))
-        .or_else(|| after.get("ids"))
-        .unwrap_or(after);
-
-    if let Some(id) = value.as_i64() {
-        return Ok(vec![id]);
+pub(crate) fn memory_archive_owners(
+    after: &Value,
+) -> Result<Vec<memory_gateway::CanonicalMemoryOwnerInput>, String> {
+    if after.get("chunk_ids").is_some()
+        || after.get("chunkIds").is_some()
+        || after.get("ids").is_some()
+        || after.as_i64().is_some()
+        || after.as_array().is_some()
+    {
+        return Err(
+            "MemoryArchive Proposal 不再接受 derived vector row id；必须提供 after.owner 的 stable canonical owner。"
+                .to_string(),
+        );
     }
-
-    if let Some(ids) = value.as_array() {
-        let parsed: Vec<i64> = ids.iter().filter_map(Value::as_i64).collect();
-        if !parsed.is_empty() {
-            return Ok(parsed);
-        }
+    let owner = after.get("owner");
+    let owners = after.get("owners");
+    if owner.is_some() == owners.is_some() {
+        return Err(
+            "MemoryArchive Proposal 必须且只能提供 after.owner 或 after.owners。".to_string(),
+        );
     }
-
-    Err("MemoryArchive Proposal 缺少 after.chunk_ids。".to_string())
+    let values = if let Some(owner) = owner {
+        vec![owner.clone()]
+    } else {
+        owners
+            .and_then(Value::as_array)
+            .filter(|owners| !owners.is_empty() && owners.len() <= 200)
+            .cloned()
+            .ok_or_else(|| {
+                "MemoryArchive Proposal after.owners 必须包含 1..=200 个 owner。".to_string()
+            })?
+    };
+    let parsed = values
+        .into_iter()
+        .map(|value| {
+            let owner: memory_gateway::CanonicalMemoryOwnerInput = serde_json::from_value(value)
+                .map_err(|_| {
+                    "MemoryArchive Proposal owner 必须只包含 ownerKind 和 ownerId。".to_string()
+                })?;
+            owner.owner().map_err(|error| error.to_string())?;
+            Ok(owner)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let unique = parsed
+        .iter()
+        .map(|owner| format!("{}:{}", owner.owner_kind, owner.owner_id))
+        .collect::<std::collections::HashSet<_>>();
+    if unique.len() != parsed.len() {
+        return Err("MemoryArchive Proposal after.owners 包含重复 owner。".to_string());
+    }
+    let lifecycle_owned = parsed
+        .iter()
+        .filter(|owner| owner.owner_kind == "memory_lifecycle")
+        .count();
+    if lifecycle_owned != 0 && lifecycle_owned != parsed.len() {
+        return Err(
+            "MemoryArchive Proposal 不能在一个原子批次中混合 lifecycle 与 MemoryStore owner。"
+                .to_string(),
+        );
+    }
+    Ok(parsed)
 }
 
 #[allow(dead_code)]
@@ -844,6 +1366,14 @@ fn set_path_value(root: &mut Value, path: &str, value: Value) -> Result<(), Stri
             .ok_or_else(|| format!("人生模型不包含字段路径 `{}`。", path))?;
     }
     Err("Proposal affected_path 不能为空。".to_string())
+}
+
+fn json_value_at_dot_path(root: &Value, path: &str) -> Option<Value> {
+    let mut current = root;
+    for segment in path.split('.') {
+        current = current.get(segment)?;
+    }
+    Some(current.clone())
 }
 
 #[allow(dead_code)]
@@ -883,34 +1413,88 @@ pub(crate) fn validate_proposal_payload(
                 _ => Err("MemoryWrite Proposal 缺少 after.content（非空字符串）。".to_string()),
             }
         }
-        ProposalType::MemoryArchive => {
-            let has_ids = after.get("chunk_ids").is_some()
-                || after.get("chunkIds").is_some()
-                || after.get("ids").is_some()
-                || after.as_i64().is_some()
-                || after.as_array().map(|a| !a.is_empty()).unwrap_or(false);
-            if !has_ids {
-                return Err(
-                    "MemoryArchive Proposal 缺少 after.chunk_ids（整数或整数数组）。".to_string(),
-                );
+        ProposalType::MemoryArchive => memory_archive_owners(after).map(|_| ()),
+        ProposalType::ToolPermission => {
+            let scope_kind = tool_permission_scope_kind(after)?;
+            for (field, aliases) in [
+                ("tool_name", &["tool_name", "toolName", "name"][..]),
+                ("source", &["source"][..]),
+                ("risk_level", &["risk_level", "riskLevel"][..]),
+                ("action_type", &["action_type", "actionType"][..]),
+            ] {
+                let value = aliases
+                    .iter()
+                    .find_map(|alias| tool_permission_scope_field(after, alias));
+                if value.is_none_or(|value| value.trim().is_empty()) {
+                    return Err(format!(
+                        "ToolPermission Proposal 缺少精确 after.{field}（非空字符串）。"
+                    ));
+                }
+            }
+            let (policy, _) = resolve_tool_permission_policy(after)?;
+            let manifest_action_type = tool_permission_scope_field(after, "action_type")
+                .or_else(|| tool_permission_scope_field(after, "actionType"))
+                .expect("validated action_type");
+            match scope_kind {
+                ToolPermissionScopeKind::ActionBound => {
+                    if manifest_action_type == "network" {
+                        return Err(
+                            "action_bound ToolPermission 不能声明 network manifest action。"
+                                .to_string(),
+                        );
+                    }
+                    if policy != openlife_core::tool_permissions::ToolPermissionPolicy::AllowOnce {
+                        return Err("Action-bound ToolPermission 必须使用 allow_once。".to_string());
+                    }
+                    action_bound_tool_permission_scope(after)?;
+                }
+                ToolPermissionScopeKind::ManifestPolicy => {
+                    if manifest_action_type == "network" {
+                        return Err(
+                            "network ToolPermission 必须使用 network_policy scope。".to_string()
+                        );
+                    }
+                    if policy == openlife_core::tool_permissions::ToolPermissionPolicy::AllowOnce {
+                        return Err(
+                            "manifest_policy ToolPermission 不能使用一次性隐式作用域。".to_string()
+                        );
+                    }
+                    if after
+                        .get("permission")
+                        .or_else(|| after.get("policy"))
+                        .is_none()
+                    {
+                        return Err(
+                            "manifest_policy ToolPermission 必须显式声明 permission/policy。"
+                                .to_string(),
+                        );
+                    }
+                }
+                ToolPermissionScopeKind::NetworkPolicy => {
+                    let decision_id = after
+                        .get("canonical_scope")
+                        .or_else(|| after.get("canonicalScope"))
+                        .and_then(|scope| {
+                            scope
+                                .get("network_policy_decision_id")
+                                .or_else(|| scope.get("networkPolicyDecisionId"))
+                        })
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.trim().is_empty());
+                    if manifest_action_type != "network" || decision_id.is_none() {
+                        return Err(
+                            "network_policy ToolPermission 必须绑定 network action 与精确 decision id。"
+                                .to_string(),
+                        );
+                    }
+                    if policy != openlife_core::tool_permissions::ToolPermissionPolicy::AllowOnce {
+                        return Err(
+                            "network_policy ToolPermission 必须使用 allow_once。".to_string()
+                        );
+                    }
+                }
             }
             Ok(())
-        }
-        ProposalType::ToolPermission => {
-            let tool_name = after
-                .get("tool_name")
-                .or_else(|| after.get("toolName"))
-                .or_else(|| after.get("name"))
-                .and_then(Value::as_str);
-            match tool_name {
-                Some(name) if !name.is_empty() => {
-                    resolve_tool_permission_policy(after)?;
-                    Ok(())
-                }
-                _ => {
-                    Err("ToolPermission Proposal 缺少 after.tool_name（非空字符串）。".to_string())
-                }
-            }
         }
         ProposalType::ExternalWriteAction => {
             let path = after
@@ -932,6 +1516,15 @@ pub(crate) fn validate_proposal_payload(
             if title.is_none() {
                 return Err("ScheduledTask Proposal 缺少 after.title（非空字符串）。".to_string());
             }
+            if let Some(scheduled_at) = after
+                .get("scheduled_at")
+                .or_else(|| after.get("due_date"))
+                .or_else(|| after.get("date"))
+                .and_then(Value::as_str)
+            {
+                parse_scheduled_at(scheduled_at)?;
+            }
+            parse_reviewed_scheduled_provider_route(after)?;
             Ok(())
         }
         ProposalType::DataExport => {
@@ -948,6 +1541,101 @@ pub(crate) fn validate_proposal_payload(
             // These types are not yet implemented; validation passes but apply will fail
             Ok(())
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ReviewedScheduledProviderRoute {
+    provider: String,
+    model: String,
+    expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn parse_reviewed_scheduled_provider_route(
+    after: &Value,
+) -> Result<Option<ReviewedScheduledProviderRoute>, String> {
+    let Some(route) = after.get("provider_route") else {
+        return Ok(None);
+    };
+    let route = route
+        .as_object()
+        .ok_or_else(|| "ScheduledTask provider_route 必须是对象。".to_string())?;
+    if route.get("data_route").and_then(Value::as_str) != Some("policy_allowed")
+        || route.get("grant_scope").and_then(Value::as_str) != Some("single_execution")
+        || route.get("consent_scope").and_then(Value::as_str) != Some("scheduled_provider_once")
+    {
+        return Err(
+            "ScheduledTask 云路由必须显式声明 policy_allowed、single_execution 和 scheduled_provider_once。"
+                .into(),
+        );
+    }
+    let bounded_target = |name: &str| -> Result<String, String> {
+        let value = route
+            .get(name)
+            .and_then(Value::as_str)
+            .filter(|value| {
+                !value.trim().is_empty()
+                    && value.chars().count() <= 256
+                    && !value
+                        .chars()
+                        .any(|character| character.is_control() || character.is_whitespace())
+            })
+            .ok_or_else(|| format!("ScheduledTask provider_route.{name} 无效。"))?;
+        Ok(value.to_string())
+    };
+    let expires_at = route
+        .get("expires_at")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "ScheduledTask provider_route.expires_at 缺失。".to_string())?;
+    let expires_at = chrono::DateTime::parse_from_rfc3339(expires_at)
+        .map_err(|_| "ScheduledTask provider_route.expires_at 必须是 RFC3339。".to_string())?
+        .with_timezone(&chrono::Utc);
+    if after
+        .get("description")
+        .and_then(Value::as_str)
+        .map_or(true, |value| value.trim().is_empty())
+    {
+        return Err("ScheduledTask 云路由必须绑定非空 description。".into());
+    }
+    if after
+        .get("scheduled_at")
+        .or_else(|| after.get("due_date"))
+        .or_else(|| after.get("date"))
+        .and_then(Value::as_str)
+        .is_none()
+    {
+        return Err("ScheduledTask 云路由必须绑定 scheduled_at。".into());
+    }
+    Ok(Some(ReviewedScheduledProviderRoute {
+        provider: bounded_target("provider")?,
+        model: bounded_target("model")?,
+        expires_at,
+    }))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolPermissionScopeKind {
+    ActionBound,
+    ManifestPolicy,
+    NetworkPolicy,
+}
+
+fn tool_permission_scope_kind(after: &Value) -> Result<ToolPermissionScopeKind, String> {
+    let label = after
+        .get("permission_scope_kind")
+        .or_else(|| after.get("permissionScopeKind"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            "ToolPermission Proposal 必须显式声明 permission_scope_kind。".to_string()
+        })?;
+    match label {
+        "action_bound" => Ok(ToolPermissionScopeKind::ActionBound),
+        "manifest_policy" => Ok(ToolPermissionScopeKind::ManifestPolicy),
+        "network_policy" => Ok(ToolPermissionScopeKind::NetworkPolicy),
+        _ => Err(format!(
+            "ToolPermission Proposal 的 permission_scope_kind '{}' 无效。",
+            label
+        )),
     }
 }
 
@@ -1014,10 +1702,20 @@ fn tool_permission_scope_field<'a>(after: &'a Value, field: &str) -> Option<&'a 
         .and_then(Value::as_str)
 }
 
+fn action_bound_tool_permission_scope(
+    after: &Value,
+) -> Result<openlife_core::tool_permissions::ActionBoundToolPermissionScope, String> {
+    openlife_core::tool_permissions::ActionBoundToolPermissionScope::from_proposal_after(after)
+        .map_err(|error| error.to_string())
+}
+
 async fn apply_proposal_to_state(
     state: &Arc<AppState>,
     proposal: &AgentProposal,
     after: Value,
+    review_acceptance: Option<
+        &openlife_core::agent::review_workflow::ClaimedReviewAcceptanceSnapshot,
+    >,
 ) -> Result<openlife_core::life_model::patch::PatchApplyResult, String> {
     // Validate payload schema before applying
     if let Err(e) = validate_proposal_payload(proposal.proposal_type, &after) {
@@ -1041,10 +1739,6 @@ async fn apply_proposal_to_state(
                 let manager = state.life_model_manager.lock().await;
                 manager.load().map_err(|e| e.to_string())?
             };
-            let path_pointer =
-                openlife_core::life_model::patch::dot_to_pointer(&canonical_affected_path);
-            let path_display =
-                openlife_core::life_model::patch::pointer_to_display(&path_pointer, &model);
             let source_mapping = ensure_lifemodel_proposal_patch_source_mapping(proposal)?;
             if source_mapping.metadata_safe_fallback {
                 log::warn!(
@@ -1056,6 +1750,113 @@ async fn apply_proposal_to_state(
                 );
             }
             let patch_source = resolve_lifemodel_patch_source_for_proposal(proposal);
+
+            if proposal.proposal_type == ProposalType::LifeModelUpdate
+                && canonical_affected_path
+                    == openlife_core::life_model::patch::LIFEMODEL_PATCH_BATCH_PATH
+            {
+                if proposal.source != ProposalSource::BuilderReview {
+                    return Err(
+                        "lifemodel_patch_batch_is_restricted_to_builder_review_source".into(),
+                    );
+                }
+                let batch = serde_json::from_value::<
+                    openlife_core::life_model::patch::LifeModelPatchBatchV1,
+                >(after)
+                .map_err(|_| "invalid_lifemodel_patch_batch_payload".to_string())?;
+                batch.validate()?;
+                let builder_risk = match proposal.risk_level {
+                    openlife_core::agent::RiskLevel::Low => openlife_core::builder::RiskLevel::Low,
+                    openlife_core::agent::RiskLevel::Medium => {
+                        openlife_core::builder::RiskLevel::Medium
+                    }
+                    openlife_core::agent::RiskLevel::High => {
+                        openlife_core::builder::RiskLevel::High
+                    }
+                    openlife_core::agent::RiskLevel::Critical => {
+                        openlife_core::builder::RiskLevel::High
+                    }
+                };
+                let signals = batch
+                    .operations
+                    .iter()
+                    .map(|operation| {
+                        let dimension = match operation.path.split('.').next() {
+                            Some("identity") => openlife_core::builder::BuilderDimension::Identity,
+                            Some("goals") => openlife_core::builder::BuilderDimension::Goals,
+                            Some("capabilities") => {
+                                openlife_core::builder::BuilderDimension::Capabilities
+                            }
+                            Some("state") | Some("preferences") => {
+                                openlife_core::builder::BuilderDimension::State
+                            }
+                            _ => return Err("invalid_builder_candidate_path".to_string()),
+                        };
+                        Ok(openlife_core::builder::BuilderSignal {
+                            id: operation.candidate_id.clone(),
+                            source_step: 0,
+                            source_question_id: "builder_review_batch".into(),
+                            dimension,
+                            affected_path: operation.path.clone(),
+                            proposed_value: operation.candidate.clone(),
+                            confidence: proposal.confidence,
+                            reason: "accepted_builder_review_candidate".into(),
+                            risk_level: builder_risk,
+                            user_status: openlife_core::builder::SignalUserStatus::Accepted,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                let mut preview_model = model.clone();
+                let (applied, skipped) =
+                    openlife_core::builder::BuilderEngine::apply_signals_to_model(
+                        &mut preview_model,
+                        &signals,
+                    );
+                if !skipped.is_empty() || applied.len() != signals.len() {
+                    return Err("invalid_builder_candidate_batch".into());
+                }
+                let before_value = serde_json::to_value(&model)
+                    .map_err(|_| "lifemodel_batch_before_serialization_failed".to_string())?;
+                let after_value = serde_json::to_value(&preview_model)
+                    .map_err(|_| "lifemodel_batch_after_serialization_failed".to_string())?;
+                let mut patches = Vec::with_capacity(batch.operations.len());
+                for operation in batch.operations {
+                    let path = canonical_lifemodel_path(&operation.path);
+                    if path != operation.path {
+                        return Err("lifemodel_patch_batch_path_must_be_canonical".into());
+                    }
+                    let path_pointer = openlife_core::life_model::patch::dot_to_pointer(&path);
+                    let path_display =
+                        openlife_core::life_model::patch::pointer_to_display(&path_pointer, &model);
+                    let before = json_value_at_dot_path(&before_value, &path)
+                        .ok_or_else(|| "builder_candidate_before_path_missing".to_string())?;
+                    let after = json_value_at_dot_path(&after_value, &path)
+                        .ok_or_else(|| "builder_candidate_after_path_missing".to_string())?;
+                    patches.push(
+                        openlife_core::life_model::patch::LifeModelPatch::from_proposal(
+                            &proposal.id,
+                            &path_pointer,
+                            &path_display,
+                            openlife_core::life_model::patch::PatchOp::Replace,
+                            Some(before),
+                            after,
+                            &proposal.reason,
+                            proposal.confidence,
+                            proposal.risk_level,
+                            patch_source,
+                        ),
+                    );
+                }
+                return life_model_write_gateway::materialize_accepted_lifemodel_patch_batch_with_state(
+                    state, proposal, patches,
+                )
+                .await;
+            }
+
+            let path_pointer =
+                openlife_core::life_model::patch::dot_to_pointer(&canonical_affected_path);
+            let path_display =
+                openlife_core::life_model::patch::pointer_to_display(&path_pointer, &model);
 
             let patch = openlife_core::life_model::patch::LifeModelPatch::from_proposal(
                 &proposal.id,
@@ -1090,36 +1891,83 @@ async fn apply_proposal_to_state(
                 .await
             }
             ProposalType::MemoryArchive => {
-                let ids = memory_archive_ids(&after)?;
-                memory_gateway::archive_memory_for_proposal_with_state(state, proposal, &ids).await
+                let owners = memory_archive_owners(&after)?;
+                memory_gateway::archive_memory_for_proposal_with_state(state, proposal, &owners)
+                    .await
             }
             _ => unreachable!(),
         },
         ProposalType::ToolPermission => {
+            let scope_kind = tool_permission_scope_kind(&after)?;
             let tool_name = tool_permission_scope_field(&after, "tool_name")
                 .or_else(|| tool_permission_scope_field(&after, "toolName"))
                 .or_else(|| tool_permission_scope_field(&after, "name"))
                 .ok_or_else(|| "ToolPermission Proposal 缺少 after.tool_name。".to_string())?;
             let (policy, permission) = resolve_tool_permission_policy(&after)?;
-            let source = tool_permission_scope_field(&after, "source").unwrap_or("*");
+            let source = tool_permission_scope_field(&after, "source")
+                .ok_or_else(|| "ToolPermission Proposal 缺少精确 after.source。".to_string())?;
             let risk_level = tool_permission_scope_field(&after, "risk_level")
                 .or_else(|| tool_permission_scope_field(&after, "riskLevel"))
-                .unwrap_or("*");
+                .ok_or_else(|| "ToolPermission Proposal 缺少精确 after.risk_level。".to_string())?;
             let action_type = tool_permission_scope_field(&after, "action_type")
                 .or_else(|| tool_permission_scope_field(&after, "actionType"))
-                .unwrap_or("*");
+                .ok_or_else(|| {
+                    "ToolPermission Proposal 缺少精确 after.action_type。".to_string()
+                })?;
+            if scope_kind == ToolPermissionScopeKind::ManifestPolicy
+                && proposal.source != openlife_core::agent::ProposalSource::Manual
             {
-                let permission_store = state.tool_permission_store.lock().await;
-                permission_store
-                    .grant(tool_name, source, risk_level, action_type, policy, None)
-                    .map_err(|e| e.to_string())?;
+                return Err(
+                    "manifest_policy ToolPermission 只能由显式 Manual review source 创建。"
+                        .to_string(),
+                );
             }
+            let action_bound_scope = if scope_kind == ToolPermissionScopeKind::ActionBound {
+                Some(action_bound_tool_permission_scope(&after)?)
+            } else {
+                None
+            };
+            let permission_id = {
+                let permission_store = state.tool_permission_store.lock().await;
+                if let Some(scope) = action_bound_scope.as_ref() {
+                    permission_store
+                        .grant_action_bound(&proposal.id, scope)
+                        .map(|authorization| authorization.permission_id)
+                        .map_err(|e| e.to_string())?
+                } else if scope_kind == ToolPermissionScopeKind::NetworkPolicy {
+                    let review_acceptance = review_acceptance.ok_or_else(|| {
+                        "network_policy ToolPermission 缺少不可序列化的 ReviewWorkflow acceptance proof。"
+                            .to_string()
+                    })?;
+                    permission_store
+                        .grant_reviewed_network_once(
+                            review_acceptance,
+                            tool_name,
+                            source,
+                            risk_level,
+                            action_type,
+                        )
+                        .map(|record| record.id)
+                        .map_err(|e| e.to_string())?
+                } else {
+                    permission_store
+                        .grant(tool_name, source, risk_level, action_type, policy, None)
+                        .map(|record| record.id)
+                        .map_err(|e| e.to_string())?
+                }
+            };
             {
                 let feedback = state.feedback_store.lock().await;
                 let detail = serde_json::json!({
                     "proposal_id": proposal.id,
                     "tool_name": tool_name,
                     "permission": permission,
+                    "permission_id": permission_id,
+                    "permission_scope_kind": match scope_kind {
+                        ToolPermissionScopeKind::ActionBound => "action_bound",
+                        ToolPermissionScopeKind::ManifestPolicy => "manifest_policy",
+                        ToolPermissionScopeKind::NetworkPolicy => "network_policy",
+                    },
                     "source_detail": proposal.source_detail,
                 });
                 let detail_text = detail.to_string();
@@ -1240,91 +2088,186 @@ async fn apply_proposal_to_state(
             }
         }
         ProposalType::ScheduledTask => {
+            let Some(review_acceptance) = review_acceptance else {
+                return Ok(patch_result_for_proposal(
+                    proposal,
+                    false,
+                    "scheduled_task_review_snapshot_missing",
+                    Some("Scheduled task has no exact ReviewWorkflow acceptance snapshot.".into()),
+                ));
+            };
             let title = after
                 .get("title")
                 .and_then(Value::as_str)
                 .unwrap_or("Untitled Task");
             let scheduled_at = after
                 .get("scheduled_at")
+                .or_else(|| after.get("due_date"))
                 .or_else(|| after.get("date"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
+            let normalized_scheduled_at =
+                parse_scheduled_at(scheduled_at)?.map(|value| value.to_rfc3339());
 
-            let task = serde_json::json!({
-                "id": proposal.id,
-                "title": title,
-                "prompt": after.get("description").and_then(Value::as_str).unwrap_or(""),
-                "action_type": after.get("tool").and_then(Value::as_str).unwrap_or("scheduled_task"),
-                "scheduled_at": scheduled_at,
-                "status": "pending",
-                "created_at": chrono::Utc::now().to_rfc3339(),
-                "source_run_id": proposal.run_id,
-                "source_proposal_id": proposal.id,
-            });
-
-            // Atomic append to scheduled_tasks.json under mutex guard
-            let tasks_path = app_data_dir().join("scheduled_tasks.json");
-            let _guard = state.scheduled_task_mutex.lock().await;
-
-            let mut tasks = if tasks_path.exists() {
-                std::fs::read_to_string(&tasks_path)
-                    .ok()
-                    .and_then(|text| serde_json::from_str::<Vec<Value>>(&text).ok())
-                    .unwrap_or_default()
-            } else {
-                vec![]
-            };
-            tasks.push(task.clone());
-
-            let temp_path = tasks_path.with_extension("tmp");
-            if let Some(parent) = tasks_path.parent() {
-                if let Err(e) = std::fs::create_dir_all(parent) {
+            let mut task = openlife_core::tasks::ScheduledTask::new(
+                title,
+                after
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+                normalized_scheduled_at.clone(),
+                after
+                    .get("priority")
+                    .and_then(Value::as_str)
+                    .unwrap_or("medium"),
+            );
+            task.id = proposal.id.clone();
+            task.source_run_id = proposal.run_id.clone();
+            task.source_proposal_id = Some(proposal.id.clone());
+            task.action_type = after
+                .get("tool")
+                .and_then(Value::as_str)
+                .unwrap_or("scheduled_task")
+                .to_string();
+            if let Some(route) = parse_reviewed_scheduled_provider_route(&after)? {
+                let Some(due_at) = normalized_scheduled_at.as_deref() else {
                     return Ok(patch_result_for_proposal(
                         proposal,
                         false,
-                        "scheduled_task",
-                        Some(format!("Failed to create scheduled task directory: {}", e)),
+                        "scheduled_cloud_due_time_missing",
+                        Some("Scheduled cloud route requires a due time.".into()),
+                    ));
+                };
+                let due_at = match chrono::DateTime::parse_from_rfc3339(due_at) {
+                    Ok(value) => value.with_timezone(&chrono::Utc),
+                    Err(_) => {
+                        return Ok(patch_result_for_proposal(
+                            proposal,
+                            false,
+                            "scheduled_cloud_due_time_invalid",
+                            Some("Scheduled cloud route due time is invalid.".into()),
+                        ))
+                    }
+                };
+                let config = state.config.lock().await.clone();
+                if route.provider != config.llm.provider
+                    || route.model != config.llm.chat_model
+                    || config.effective_cloud_api_key().trim().is_empty()
+                {
+                    return Ok(patch_result_for_proposal(
+                        proposal,
+                        false,
+                        "scheduled_cloud_provider_preflight_failed",
+                        Some(
+                            "Reviewed scheduled provider/model is not the configured credentialed cloud target."
+                                .into(),
+                        ),
                     ));
                 }
+                let endpoint = openlife_core::llm::chat_completions_url(
+                    &route.provider,
+                    &config.effective_openai_base(),
+                );
+                let capability = format!("provider.{}", route.provider);
+                let network_decision =
+                    match openlife_core::network_client::resolve_network_policy_decision(
+                        &config.system.network_policy,
+                        &endpoint,
+                        &capability,
+                    ) {
+                        Ok(decision) => decision,
+                        Err(error) => {
+                            return Ok(patch_result_for_proposal(
+                                proposal,
+                                false,
+                                "scheduled_cloud_network_policy_invalid",
+                                Some(error.to_string()),
+                            ))
+                        }
+                    };
+                if network_decision.disposition
+                    != openlife_core::network_client::NetworkPolicyDisposition::Allow
+                {
+                    return Ok(patch_result_for_proposal(
+                        proposal,
+                        false,
+                        "scheduled_cloud_network_policy_not_allowed",
+                        Some(
+                            "Scheduled cloud execution requires an already-allowed exact network policy; Ask or Deny cannot run unattended."
+                                .into(),
+                        ),
+                    ));
+                }
+                let decision = match openlife_core::agent::main_chat_agent_v1::PolicyRouter
+                    .authorize_scheduled_provider_route(
+                        review_acceptance,
+                        openlife_core::agent::main_chat_agent_v1::ScheduledProviderRouteRequest {
+                            task_id: task.id.clone(),
+                            description: task.description.clone(),
+                            action_type: task.action_type.clone(),
+                            due_at,
+                            provider: route.provider,
+                            model: route.model,
+                            requested_data_route:
+                                openlife_core::llm::ProviderDataRoute::PolicyAllowed,
+                            grant_expires_at: route.expires_at,
+                        },
+                    ) {
+                    Ok(decision) => decision,
+                    Err(error) => {
+                        return Ok(patch_result_for_proposal(
+                            proposal,
+                            false,
+                            "scheduled_cloud_policy_rejected",
+                            Some(error.to_string()),
+                        ))
+                    }
+                };
+                if let Err(error) = task.seal_reviewed_cloud_provider_grant(&decision) {
+                    return Ok(patch_result_for_proposal(
+                        proposal,
+                        false,
+                        "scheduled_cloud_grant_seal_rejected",
+                        Some(error.to_string()),
+                    ));
+                }
+            } else {
+                task.seal_deterministic_local_provider_grant();
             }
-            if let Err(e) = std::fs::write(
-                &temp_path,
-                serde_json::to_string_pretty(&tasks).map_err(|e| e.to_string())?,
-            ) {
+
+            if let Err(e) = state.scheduled_task_store.create_task_idempotent(&task) {
                 return Ok(patch_result_for_proposal(
                     proposal,
                     false,
                     "scheduled_task",
-                    Some(format!("Failed to write scheduled task temp file: {}", e)),
-                ));
-            }
-            if let Err(e) = std::fs::rename(&temp_path, &tasks_path) {
-                let _ = std::fs::remove_file(&temp_path);
-                return Ok(patch_result_for_proposal(
-                    proposal,
-                    false,
-                    "scheduled_task",
-                    Some(format!("Failed to atomically save scheduled tasks: {}", e)),
+                    Some(format!("Failed to commit scheduled task: {}", e)),
                 ));
             }
 
             // For calendar.propose_event, also write an .ics file if safe_paths allow
             let tool = after.get("tool").and_then(Value::as_str).unwrap_or("");
+            let mut projection_warning = None;
             if tool == "calendar.propose_event" {
                 let safe_paths = {
                     let cfg = state.config.lock().await;
                     cfg.system.safe_paths.clone()
                 };
                 if !safe_paths.is_empty() {
-                    let ics_content = build_ics_event(&after);
+                    let ics_content = build_ics_event(&after)?;
                     let ics_filename = format!("{}.ics", sanitize_filename(title));
                     let ics_path = std::path::PathBuf::from(&safe_paths[0]).join(&ics_filename);
-                    if let Err(e) = std::fs::write(&ics_path, &ics_content) {
+                    if let Err(e) =
+                        openlife_core::atomic_file::write_atomic(&ics_path, ics_content.as_bytes())
+                    {
                         log::warn!(
                             "[proposal] Failed to write ICS file '{}': {}",
                             ics_path.display(),
                             e
                         );
+                        projection_warning = Some(format!(
+                            "projection_degraded: failed to materialize ICS view: {}",
+                            e
+                        ));
                     }
                 }
             }
@@ -1332,8 +2275,12 @@ async fn apply_proposal_to_state(
             Ok(patch_result_for_proposal(
                 proposal,
                 true,
-                "scheduled_task",
-                None,
+                if projection_warning.is_some() {
+                    "scheduled_task_projection_degraded"
+                } else {
+                    "scheduled_task"
+                },
+                projection_warning,
             ))
         }
         ProposalType::DataExport => {
@@ -1399,7 +2346,7 @@ async fn apply_proposal_to_state(
                 }
 
                 let export_path = export_dir.join(filename);
-                match std::fs::write(&export_path, content) {
+                match openlife_core::atomic_file::write_atomic(&export_path, content.as_bytes()) {
                     Ok(_) => Ok(patch_result_for_proposal(
                         proposal,
                         true,
@@ -1444,22 +2391,42 @@ async fn get_proposal_with_state(
         .ok_or_else(|| format!("Proposal 不存在：{}", proposal_id))
 }
 
-async fn update_proposal_with_state(
+async fn update_review_proposal_before_dispatch_with_state(
     state: &Arc<AppState>,
     proposal: &AgentProposal,
+    expected_status: ProposalStatus,
 ) -> Result<(), String> {
     let store = state
         .proposal_store
         .as_ref()
         .ok_or_else(proposal_store_missing)?;
     let store = store.lock().await;
-    store.update_proposal(proposal).map_err(|e| e.to_string())
+    if store
+        .update_review_before_dispatch(proposal, expected_status)
+        .map_err(|error| runtime_proposal_store_error(state, error))?
+    {
+        Ok(())
+    } else {
+        let current_status = store
+            .get_proposal(&proposal.id)
+            .map_err(|error| error.to_string())?
+            .map(|current| current.status.to_string())
+            .unwrap_or_else(|| "missing".into());
+        let dispatch_state = store
+            .dispatch_state(&proposal.id)
+            .map_err(|error| error.to_string())?
+            .unwrap_or_else(|| "missing".into());
+        Err(format!(
+            "Proposal review compare-and-swap conflict: current_status={current_status}, dispatch_state={dispatch_state}"
+        ))
+    }
 }
 
 pub(crate) async fn get_pending_proposals_with_state(
     limit: i64,
     state: &Arc<AppState>,
 ) -> Result<Vec<AgentProposal>, String> {
+    reconcile_durable_proposal_projections_with_state(state, limit.clamp(1, 200)).await?;
     let store = state
         .proposal_store
         .as_ref()
@@ -1470,31 +2437,295 @@ pub(crate) async fn get_pending_proposals_with_state(
         .map_err(|e| e.to_string())
 }
 
+#[cfg(test)]
 pub(crate) async fn accept_proposal_with_state(
     proposal_id: String,
     state: &Arc<AppState>,
 ) -> Result<serde_json::Value, String> {
+    accept_proposal_with_state_and_confirmation(proposal_id, state, None).await
+}
+
+async fn accept_proposal_with_state_and_confirmation(
+    proposal_id: String,
+    state: &Arc<AppState>,
+    expected_native_confirmation_digest: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    require_persistence_write(state)?;
     check_safe_mode(state)?;
     let mut proposal = get_proposal_with_state(state, &proposal_id).await?;
-    ensure_pending_or_postponed(&proposal)?;
-    let result = apply_proposal_to_state(state, &proposal, proposal.after.clone()).await?;
-    if !result.success {
-        return Err(format!(
-            "Patch 应用失败: {}",
-            result.error.unwrap_or_default()
+
+    let (confirmed_projection_claim, dispatch_state) = {
+        let store = state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(proposal_store_missing)?
+            .lock()
+            .await;
+        (
+            store
+                .confirmed_projection_claim_id(&proposal_id)
+                .map_err(|error| error.to_string())?,
+            store
+                .dispatch_state(&proposal_id)
+                .map_err(|error| error.to_string())?,
+        )
+    };
+    if let Some(claim_id) = confirmed_projection_claim {
+        return match project_confirmed_effect_projection_only(state, &proposal, &claim_id).await {
+            Ok(accepted) => {
+                let mut warnings = vec![
+                    "Recovered the durable confirmed effect projection without redispatching the effect."
+                        .to_string(),
+                ];
+                if let Err(error) = reconcile_agent_runs_for_proposal(
+                    state,
+                    &accepted,
+                    LinkedAgentRunReviewOutcome::Materialized,
+                )
+                .await
+                {
+                    warnings.push(format!("AgentRun 投影仍等待 reconciliation: {}", error));
+                }
+                Ok(confirmed_effect_reconciliation_response(
+                    &accepted, true, warnings,
+                ))
+            }
+            Err(error) => Ok(confirmed_effect_reconciliation_response(
+                &proposal,
+                false,
+                vec![format!(
+                    "Effect 已确认，Proposal 投影仍等待 reconciliation；未重放副作用: {}",
+                    error
+                )],
+            )),
+        };
+    }
+    if proposal.status == ProposalStatus::Accepted && dispatch_state.as_deref() == Some("confirmed")
+    {
+        let mut warnings = vec![
+            "Proposal effect was already confirmed; the idempotent retry did not redispatch it."
+                .to_string(),
+        ];
+        if let Err(error) = reconcile_agent_runs_for_proposal(
+            state,
+            &proposal,
+            LinkedAgentRunReviewOutcome::Materialized,
+        )
+        .await
+        {
+            warnings.push(format!("AgentRun 投影仍等待 reconciliation: {}", error));
+        }
+        return Ok(confirmed_effect_reconciliation_response(
+            &proposal, true, warnings,
         ));
     }
-    proposal.accept();
-    canonicalize_proposal_affected_path(&mut proposal);
-    update_proposal_with_state(state, &proposal).await?;
-    record_maturation_proposal_outcome_evidence_with_state(
+    ensure_pending_or_postponed(&proposal)?;
+    validate_proposal_payload(proposal.proposal_type, &proposal.after)?;
+    if is_builder_lifemodel_patch_batch(&proposal) {
+        let batch =
+            serde_json::from_value::<openlife_core::life_model::patch::LifeModelPatchBatchV1>(
+                proposal.after.clone(),
+            )
+            .map_err(|_| "invalid_lifemodel_patch_batch_payload".to_string())?;
+        batch.validate()?;
+    }
+    if matches!(
+        proposal.proposal_type,
+        ProposalType::PluginPermission
+            | ProposalType::ModelPolicyChange
+            | ProposalType::ScheduleCheckin
+            | ProposalType::Unsupported
+    ) {
+        return Err(format!(
+            "{} Proposal 尚未接入应用器，已保持 pending。",
+            proposal.proposal_type
+        ));
+    }
+    let dispatch_claim_id = {
+        let store = state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(proposal_store_missing)?
+            .lock()
+            .await;
+        store
+            .claim_dispatch(&proposal_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                "该 Proposal 已由另一个请求领取执行；请先检查执行结果，禁止重复副作用。".to_string()
+            })?
+    };
+    if let Some(expected_digest) = expected_native_confirmation_digest {
+        // The native grant is bound to the exact Proposal snapshot. Reload only
+        // after winning the dispatch claim: edits that raced before the claim are
+        // now visible, while edits racing after the claim fail their own CAS.
+        let claimed_proposal = get_proposal_with_state(state, &proposal_id).await?;
+        let current_digest = proposal_native_confirmation_digest(&claimed_proposal);
+        if current_digest != expected_digest {
+            if let Some(store) = state.proposal_store.as_ref() {
+                let store = store.lock().await;
+                let _ = store.mark_dispatch_failed_before_effect(
+                    &proposal_id,
+                    &dispatch_claim_id,
+                    "native_confirmation_snapshot_changed",
+                );
+            }
+            return Err(
+                "Proposal changed after native confirmation; no effect was dispatched. Review and confirm the new snapshot."
+                    .to_string(),
+            );
+        }
+        proposal = claimed_proposal;
+        validate_proposal_payload(proposal.proposal_type, &proposal.after)?;
+    }
+    let review_acceptance_result = {
+        let store = state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(proposal_store_missing)?
+            .lock()
+            .await;
+        openlife_core::agent::ReviewWorkflow::new(&store)
+            .claimed_acceptance_snapshot(&proposal_id, &dispatch_claim_id)
+            .map_err(|error| error.to_string())
+    };
+    let review_acceptance = match review_acceptance_result {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            if let Some(store) = state.proposal_store.as_ref() {
+                let store = store.lock().await;
+                let _ = store.mark_dispatch_failed_before_effect(
+                    &proposal_id,
+                    &dispatch_claim_id,
+                    "review_acceptance_snapshot_unavailable",
+                );
+            }
+            return Err(format!(
+                "Review acceptance snapshot could not be proven before effect: {error}"
+            ));
+        }
+    };
+    let result = match apply_proposal_to_state(
         state,
         &proposal,
-        MaturationProposalOutcome::Accepted,
+        proposal.after.clone(),
+        Some(&review_acceptance),
     )
-    .await;
-    let main_chat_task_sync =
-        sync_main_chat_task_blockers_after_review_proposal_accept(state, &proposal).await;
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            if let Some(store) = state.proposal_store.as_ref() {
+                let store = store.lock().await;
+                let _ = store.mark_dispatch_unknown(
+                    &proposal_id,
+                    &dispatch_claim_id,
+                    "proposal_apply_effect_unknown",
+                );
+            }
+            return Err(format!(
+                "Proposal 执行状态无法确认，已禁止自动重试并等待 reconciliation：{}",
+                error
+            ));
+        }
+    };
+    if !result.success {
+        if let Some(store) = state.proposal_store.as_ref() {
+            let store = store.lock().await;
+            if dispatch_failure_was_definitely_before_effect(&result.operation) {
+                let _ = store.mark_dispatch_failed_before_effect(
+                    &proposal_id,
+                    &dispatch_claim_id,
+                    &result.operation,
+                );
+            } else {
+                let _ = store.mark_dispatch_unknown(
+                    &proposal_id,
+                    &dispatch_claim_id,
+                    "proposal_apply_effect_unknown",
+                );
+            }
+        }
+        let detail = result.error.clone().unwrap_or_default();
+        return if dispatch_failure_was_definitely_before_effect(&result.operation) {
+            Err(format!("Patch 应用前校验失败: {}", detail))
+        } else {
+            Err(format!(
+                "Patch 未确认完成，实际副作用状态为 unknown，已禁止自动重试: {}",
+                detail
+            ))
+        };
+    }
+    let mut warnings = Vec::new();
+    let effect_receipt_persisted = {
+        let store = state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(proposal_store_missing)?
+            .lock()
+            .await;
+        match store.mark_effect_confirmed_projection_pending(&proposal_id, &dispatch_claim_id) {
+            Ok(true) => true,
+            Ok(false) => {
+                warnings.push(
+                    "Effect 已确认，但 dispatch receipt claim 已变化；禁止重复执行并等待 reconciliation。"
+                        .to_string(),
+                );
+                false
+            }
+            Err(error) => {
+                warnings.push(format!(
+                    "Effect 已确认，但 dispatch receipt 持久化失败并等待 reconciliation: {}",
+                    error
+                ));
+                false
+            }
+        }
+    };
+    proposal.accept();
+    canonicalize_proposal_affected_path(&mut proposal);
+    let proposal_projected = if effect_receipt_persisted {
+        match project_confirmed_effect_projection_only(state, &proposal, &dispatch_claim_id).await {
+            Ok(projected) => {
+                proposal = projected;
+                true
+            }
+            Err(error) => {
+                warnings.push(format!(
+                    "Effect 已确认，但 Proposal status 投影失败并等待 reconciliation: {}",
+                    error
+                ));
+                false
+            }
+        }
+    } else {
+        false
+    };
+    let dispatch_projection_confirmed = proposal_projected;
+    if let Err(error) = reconcile_agent_runs_for_proposal(
+        state,
+        &proposal,
+        if effect_receipt_persisted {
+            LinkedAgentRunReviewOutcome::Materialized
+        } else {
+            LinkedAgentRunReviewOutcome::WaitingReview
+        },
+    )
+    .await
+    {
+        warnings.push(format!("AgentRun 投影仍等待 reconciliation: {}", error));
+    }
+    let main_chat_task_sync = if proposal_projected {
+        record_maturation_proposal_outcome_evidence_with_state(
+            state,
+            &proposal,
+            MaturationProposalOutcome::Accepted,
+        )
+        .await;
+        sync_main_chat_task_blockers_after_review_proposal_accept(state, &proposal).await
+    } else {
+        Vec::new()
+    };
     // Check for blocked_action in the patch result error field
     let blocked_action_info = if let Some(ref err) = result.error {
         if err.starts_with("__blocked_action__:") {
@@ -1509,6 +2740,13 @@ pub(crate) async fn accept_proposal_with_state(
     let mut response = serde_json::json!({
         "success": true,
         "patch_result": result,
+        "effect_status": "confirmed",
+        "proposal_projection_status": if proposal_projected && dispatch_projection_confirmed {
+            "confirmed"
+        } else {
+            "reconciliation_required"
+        },
+        "warnings": warnings,
     });
     if !main_chat_task_sync.is_empty() {
         response["mainChatTaskSync"] = serde_json::Value::Array(main_chat_task_sync);
@@ -1526,6 +2764,32 @@ pub(crate) async fn accept_proposal_with_state(
             if let Ok(Some(record)) = store.get_record_by_proposal_id(&proposal.id) {
                 response["memoryLifecycle"] =
                     serde_json::to_value(&record).unwrap_or(serde_json::Value::Null);
+                response["memoryPersistence"] =
+                    match store.latest_projection_event_id(&record.memory_id) {
+                        Ok(Some(event_id)) => match store.projection_summary(&event_id) {
+                            Ok(summary) => serde_json::json!({
+                                "canonicalCommitted": true,
+                                "outboxEventId": event_id,
+                                "projectionState": summary.state(),
+                                "pending": summary.pending,
+                                "degraded": summary.degraded,
+                                "applied": summary.applied,
+                            }),
+                            Err(error) => serde_json::json!({
+                                "canonicalCommitted": true,
+                                "projectionState": "degraded",
+                                "reasonCode": "projection_summary_unavailable",
+                                "errorDigest": openlife_core::persistence_outbox::metadata_digest(
+                                    &error.to_string()
+                                ),
+                            }),
+                        },
+                        _ => serde_json::json!({
+                            "canonicalCommitted": true,
+                            "projectionState": "degraded",
+                            "reasonCode": "canonical_outbox_reference_missing",
+                        }),
+                    };
             }
         }
     }
@@ -1579,11 +2843,13 @@ fn collect_main_chat_task_session_ids_from_proposal(proposal: &AgentProposal) ->
 
 fn push_main_chat_task_session_id(ids: &mut Vec<String>, value: &str) {
     let trimmed = value.trim();
-    if trimmed.starts_with("mainchat_task_")
+    let historical_id = trimmed.starts_with("mainchat_task_")
         && !trimmed
             .chars()
-            .any(|ch| ch.is_control() || ch.is_whitespace())
-    {
+            .any(|ch| ch.is_control() || ch.is_whitespace());
+    let current_uuid =
+        uuid::Uuid::parse_str(trimmed).is_ok_and(|parsed| parsed.get_version_num() == 4);
+    if historical_id || current_uuid {
         ids.push(trimmed.to_string());
     }
 }
@@ -1730,10 +2996,23 @@ pub(crate) async fn reject_proposal_with_state(
     proposal_id: String,
     state: &Arc<AppState>,
 ) -> Result<(), String> {
+    require_persistence_write(state)?;
     let mut proposal = get_proposal_with_state(state, &proposal_id).await?;
     ensure_pending_or_postponed(&proposal)?;
+    ensure_review_change_precedes_effect_dispatch(state, &proposal_id).await?;
+    let expected_status = proposal.status;
     proposal.reject();
-    update_proposal_with_state(state, &proposal).await?;
+    update_review_proposal_before_dispatch_with_state(state, &proposal, expected_status).await?;
+    if let Err(error) =
+        reconcile_agent_runs_for_proposal(state, &proposal, LinkedAgentRunReviewOutcome::Rejected)
+            .await
+    {
+        log::warn!(
+            "[proposal] AgentRun rejection reconciliation pending for {}: {}",
+            proposal.id,
+            error
+        );
+    }
     record_maturation_proposal_outcome_evidence_with_state(
         state,
         &proposal,
@@ -1784,12 +3063,34 @@ pub(crate) async fn edit_proposal_with_state(
     new_after: Value,
     state: &Arc<AppState>,
 ) -> Result<serde_json::Value, String> {
+    require_persistence_write(state)?;
     check_safe_mode(state)?;
     let mut proposal = get_proposal_with_state(state, &proposal_id).await?;
     ensure_pending_or_postponed(&proposal)?;
+    ensure_review_change_precedes_effect_dispatch(state, &proposal_id).await?;
+    if is_builder_lifemodel_patch_batch(&proposal) {
+        return Err(
+            "Builder batch Proposal requires a typed Builder editor; generic JSON edit is disabled."
+                .into(),
+        );
+    }
     canonicalize_proposal_affected_path(&mut proposal);
+    let expected_status = proposal.status;
     proposal.edit(new_after);
-    update_proposal_with_state(state, &proposal).await?;
+    update_review_proposal_before_dispatch_with_state(state, &proposal, expected_status).await?;
+    if let Err(error) = reconcile_agent_runs_for_proposal(
+        state,
+        &proposal,
+        LinkedAgentRunReviewOutcome::WaitingReview,
+    )
+    .await
+    {
+        log::warn!(
+            "[proposal] AgentRun edit reconciliation pending for {}: {}",
+            proposal.id,
+            error
+        );
+    }
     record_maturation_proposal_outcome_evidence_with_state(
         state,
         &proposal,
@@ -1807,10 +3108,27 @@ pub(crate) async fn postpone_proposal_with_state(
     proposal_id: String,
     state: &Arc<AppState>,
 ) -> Result<(), String> {
+    require_persistence_write(state)?;
     let mut proposal = get_proposal_with_state(state, &proposal_id).await?;
     ensure_pending_or_postponed(&proposal)?;
+    ensure_review_change_precedes_effect_dispatch(state, &proposal_id).await?;
+    let expected_status = proposal.status;
     proposal.postpone();
-    update_proposal_with_state(state, &proposal).await
+    update_review_proposal_before_dispatch_with_state(state, &proposal, expected_status).await?;
+    if let Err(error) = reconcile_agent_runs_for_proposal(
+        state,
+        &proposal,
+        LinkedAgentRunReviewOutcome::WaitingReview,
+    )
+    .await
+    {
+        log::warn!(
+            "[proposal] AgentRun postpone reconciliation pending for {}: {}",
+            proposal.id,
+            error
+        );
+    }
+    Ok(())
 }
 
 fn ensure_exact_memory_id(memory_id: &str) -> Result<(), String> {
@@ -1952,12 +3270,14 @@ pub async fn list_proposals(
     limit: i64,
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<AgentProposal>, String> {
+    reconcile_durable_proposal_projections_with_state(state.inner(), limit.clamp(1, 200)).await?;
     let status_filter = status.and_then(|s| match s.as_str() {
         "pending" => Some(ProposalStatus::Pending),
         "accepted" => Some(ProposalStatus::Accepted),
         "rejected" => Some(ProposalStatus::Rejected),
         "edited" => Some(ProposalStatus::Edited),
         "postponed" => Some(ProposalStatus::Postponed),
+        "expired" => Some(ProposalStatus::Expired),
         _ => None,
     });
 
@@ -2003,6 +3323,7 @@ pub async fn batch_accept_low_risk_proposals(
     proposal_ids: Option<Vec<String>>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<i64, String> {
+    require_persistence_write(state.inner())?;
     check_safe_mode(state.inner())?;
     let store = state
         .proposal_store
@@ -2015,7 +3336,10 @@ pub async fn batch_accept_low_risk_proposals(
         let mut proposals = Vec::new();
         for id in ids {
             if let Ok(Some(p)) = store.get_proposal(&id) {
-                if p.status == ProposalStatus::Pending && p.risk_level == RiskLevel::Low {
+                if p.status == ProposalStatus::Pending
+                    && p.risk_level == RiskLevel::Low
+                    && !proposal_requires_native_confirmation(&p)
+                {
                     proposals.push(p);
                 }
             }
@@ -2030,11 +3354,17 @@ pub async fn batch_accept_low_risk_proposals(
                 200,
             )
             .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|proposal| !proposal_requires_native_confirmation(proposal))
+            .collect()
     };
+    drop(store);
 
     let mut accepted_count = 0i64;
     for proposal in proposals {
-        match accept_proposal_with_state(proposal.id.clone(), state.inner()).await {
+        match accept_proposal_with_state_and_confirmation(proposal.id.clone(), state.inner(), None)
+            .await
+        {
             Ok(_) => accepted_count += 1,
             Err(e) => eprintln!("Batch accept failed for proposal {}: {}", proposal.id, e),
         }
@@ -2043,12 +3373,116 @@ pub async fn batch_accept_low_risk_proposals(
     Ok(accepted_count)
 }
 
+fn proposal_native_confirmation_digest(proposal: &AgentProposal) -> String {
+    let (_, digest) =
+        openlife_core::agent::metadata_safe::metadata_safe_value_digest(&serde_json::json!({
+            "proposal_id": proposal.id,
+            "run_id": proposal.run_id,
+            "proposal_type": proposal.proposal_type,
+            "source": proposal.source,
+            "source_detail": proposal.source_detail,
+            "risk_level": proposal.risk_level,
+            "affected_path": proposal.affected_path,
+            "base_hash": proposal.base_hash,
+            "before": proposal.before,
+            "after": proposal.after,
+            "reason": proposal.reason,
+            "confidence_bits": proposal.confidence.to_bits(),
+            "status": proposal.status,
+            "created_at": proposal.created_at,
+            "resolved_at": proposal.resolved_at,
+            "expires_at": proposal.expires_at,
+        }));
+    digest
+}
+
+fn proposal_requires_native_confirmation(proposal: &AgentProposal) -> bool {
+    matches!(proposal.risk_level, RiskLevel::High | RiskLevel::Critical)
+        || matches!(
+            proposal.proposal_type,
+            ProposalType::ToolPermission
+                | ProposalType::PluginPermission
+                | ProposalType::ExternalWriteAction
+                | ProposalType::ModelPolicyChange
+                | ProposalType::DataExport
+        )
+}
+
+async fn proposal_may_dispatch_effect(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+) -> Result<bool, String> {
+    if !matches!(
+        proposal.status,
+        ProposalStatus::Pending | ProposalStatus::Postponed | ProposalStatus::Edited
+    ) {
+        return Ok(false);
+    }
+    let dispatch_state = state
+        .proposal_store
+        .as_ref()
+        .ok_or_else(proposal_store_missing)?
+        .lock()
+        .await
+        .dispatch_state(&proposal.id)
+        .map_err(|error| error.to_string())?;
+    Ok(matches!(
+        dispatch_state.as_deref(),
+        None | Some("unclaimed" | "failed_before_effect")
+    ))
+}
+
 #[tauri::command]
 pub async fn accept_proposal(
     proposal_id: String,
+    window: tauri::WebviewWindow,
     state: State<'_, Arc<AppState>>,
-) -> Result<serde_json::Value, String> {
-    accept_proposal_with_state(proposal_id, state.inner()).await
+) -> Result<AcceptProposalResponse, String> {
+    check_safe_mode(state.inner())?;
+    let proposal = get_proposal_with_state(state.inner(), &proposal_id).await?;
+    let mut expected_native_confirmation_digest = None;
+    if proposal_requires_native_confirmation(&proposal)
+        && proposal_may_dispatch_effect(state.inner(), &proposal).await?
+    {
+        ensure_pending_or_postponed(&proposal)?;
+        validate_proposal_payload(proposal.proposal_type, &proposal.after)?;
+        let snapshot_digest = proposal_native_confirmation_digest(&proposal);
+        let affected_path_digest = openlife_core::agent::metadata_safe::metadata_safe_value_digest(
+            &serde_json::json!({ "affected_path": proposal.affected_path }),
+        )
+        .1;
+        require_native_danger_action_confirmation(
+            &window,
+            NativeDangerActionRequest {
+                action_type: "proposal_accept",
+                target_ids_for_new_challenge: std::slice::from_ref(&proposal_id),
+                requested_target: Some(proposal_id.as_str()),
+                affected_count: 1,
+                arguments: &serde_json::json!({
+                    "proposal_snapshot_digest": snapshot_digest.clone(),
+                    "proposal_type": proposal.proposal_type,
+                    "risk_level": proposal.risk_level,
+                    "affected_path_digest": affected_path_digest.clone(),
+                }),
+                arguments_summary: &format!(
+                    "接受 {} / {} Proposal；affected path 仅以 digest 展示：{}",
+                    proposal.proposal_type, proposal.risk_level, affected_path_digest
+                ),
+                scope_summary: "执行高风险 Proposal 的已审核 canonical 或 external effect。",
+                challenge_id: None,
+            },
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        expected_native_confirmation_digest = Some(snapshot_digest);
+    }
+    let response = accept_proposal_with_state_and_confirmation(
+        proposal_id,
+        state.inner(),
+        expected_native_confirmation_digest.as_deref(),
+    )
+    .await?;
+    typed_accept_proposal_response(response)
 }
 
 #[tauri::command]
@@ -2126,9 +3560,10 @@ mod tests {
     use crate::{a2a_sidecar::A2ASidecar, HotMemoryCache, PrivacyEngine, SharedHotCache};
     use openlife_core::{
         agent::{
-            AgentProposal, EvidenceDraft, EvidencePrivacyLevel, EvidenceQuery, EvidenceRecord,
-            EvidenceSourceRef, EvidenceSourceType, EvidenceType, ProposalEngine, ProposalSource,
-            ProposalStore, ProposalType, RiskLevel,
+            AgentProposal, AgentRun, AgentRunStatus, AgentRunStore, EvidenceDraft,
+            EvidencePrivacyLevel, EvidenceQuery, EvidenceRecord, EvidenceSourceRef,
+            EvidenceSourceType, EvidenceType, ProposalSource, ProposalStore, ProposalType,
+            RiskLevel,
         },
         builder::BuilderSessionStore,
         config::AppConfig,
@@ -2141,7 +3576,6 @@ mod tests {
         vectors::VectorStore,
         versioning::VersionManager,
     };
-    use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Mutex;
 
@@ -2150,10 +3584,14 @@ mod tests {
         let hot_cache: SharedHotCache =
             Arc::new(tokio::sync::RwLock::new(HotMemoryCache::default()));
         Arc::new(AppState {
+            persistence_coordinator: Arc::new(
+                crate::persistence_coordinator::PersistenceCoordinator::isolated_evaluation(),
+            ),
             config: Arc::new(Mutex::new(config.clone())),
             life_model_manager: Arc::new(Mutex::new(LifeModelManager::new(
                 temp_dir.path().join("life-model").join("current"),
             ))),
+            life_model_write_coordinator: Arc::new(Mutex::new(())),
             memory_store: Arc::new(Mutex::new(MemoryStore::new_in_memory().unwrap())),
             mcp_registry: Arc::new(Mutex::new(McpRegistry::new())),
             scheduler: Arc::new(Mutex::new(InferenceScheduler::new(
@@ -2173,7 +3611,6 @@ mod tests {
             feedback_store: Arc::new(Mutex::new(FeedbackStore::new_in_memory().unwrap())),
             vector_store: Arc::new(Mutex::new(VectorStore::new_in_memory().unwrap())),
             vector_persistence_mode: crate::state::VectorPersistenceMode::Enabled,
-            builder_sessions: Arc::new(Mutex::new(HashMap::new())),
             builder_session_store: Arc::new(Mutex::new(BuilderSessionStore::new(
                 temp_dir.path().join("builder_sessions.json"),
             ))),
@@ -2184,7 +3621,9 @@ mod tests {
             mcp_audit_store: Arc::new(Mutex::new(McpAuditStore::new(
                 temp_dir.path().join("mcp_audit.db"),
             ))),
-            agent_run_store: None,
+            agent_run_store: Some(Arc::new(Mutex::new(
+                AgentRunStore::new_in_memory().unwrap(),
+            ))),
             evidence_store: Arc::new(Mutex::new(
                 openlife_core::agent::EvidenceStore::new_in_memory().unwrap(),
             )),
@@ -2229,10 +3668,11 @@ mod tests {
                 temp_dir.path().join("plugins"),
             ))),
             hot_cache,
-            proposal_engine: Arc::new(tokio::sync::Mutex::new(ProposalEngine::new())),
             startup_warnings: vec![],
             provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
-            scheduled_task_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            scheduled_task_store: Arc::new(
+                openlife_core::tasks::TaskStore::new_in_memory().unwrap(),
+            ),
             runtime_clock_source: Arc::new(tokio::sync::Mutex::new(
                 crate::main_chat_runtime_facts::MainChatRuntimeClockSource::default(),
             )),
@@ -2425,6 +3865,172 @@ mod tests {
             .unwrap();
         assert_eq!(patches.len(), 1);
         (patches[0].source, result)
+    }
+
+    #[test]
+    fn privileged_or_high_risk_proposals_require_native_confirmation() {
+        let high_risk = AgentProposal::new(
+            ProposalType::GoalUpdate,
+            "goals.long_term",
+            serde_json::json!([{"description": "bounded test"}]),
+            "test",
+            0.9,
+            RiskLevel::High,
+            ProposalSource::Manual,
+        );
+        assert!(proposal_requires_native_confirmation(&high_risk));
+
+        let privileged_low = AgentProposal::new(
+            ProposalType::ToolPermission,
+            "tool_permission.test",
+            serde_json::json!({
+                "permission": "allow_once",
+                "tool_name": "test",
+                "source": "test",
+                "risk_level": "low",
+                "action_type": "network"
+            }),
+            "test",
+            0.9,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        assert!(proposal_requires_native_confirmation(&privileged_low));
+
+        let ordinary_medium = AgentProposal::new(
+            ProposalType::MemoryWrite,
+            "memory.candidates",
+            serde_json::json!({"content": "bounded test"}),
+            "test",
+            0.9,
+            RiskLevel::Medium,
+            ProposalSource::Manual,
+        );
+        assert!(!proposal_requires_native_confirmation(&ordinary_medium));
+    }
+
+    #[test]
+    fn native_proposal_confirmation_digest_changes_with_effect_snapshot() {
+        let mut proposal = AgentProposal::new(
+            ProposalType::ExternalWriteAction,
+            "external.write",
+            serde_json::json!({"target": "first"}),
+            "test",
+            0.9,
+            RiskLevel::High,
+            ProposalSource::Manual,
+        );
+        let before = proposal_native_confirmation_digest(&proposal);
+        proposal.after = serde_json::json!({"target": "second"});
+        let after = proposal_native_confirmation_digest(&proposal);
+        assert_ne!(before, after);
+    }
+
+    #[tokio::test]
+    async fn changed_snapshot_after_native_confirmation_fails_before_effect_dispatch() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let proposal = AgentProposal::new(
+            ProposalType::ScheduledTask,
+            "tasks.scheduled",
+            serde_json::json!({"title": "must not be scheduled"}),
+            "test",
+            0.9,
+            RiskLevel::High,
+            ProposalSource::Manual,
+        );
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        let error = accept_proposal_with_state_and_confirmation(
+            proposal_id.clone(),
+            &state,
+            Some("sha256:stale-native-confirmation-snapshot"),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("changed after native confirmation"));
+        let store = state.proposal_store.as_ref().unwrap().lock().await;
+        assert_eq!(
+            store.dispatch_state(&proposal_id).unwrap().as_deref(),
+            Some("failed_before_effect")
+        );
+        assert_eq!(
+            store.get_proposal(&proposal_id).unwrap().unwrap().status,
+            ProposalStatus::Pending
+        );
+    }
+
+    #[test]
+    fn accept_proposal_typed_ipc_response_serializes_the_frontend_contract() {
+        let typed = typed_accept_proposal_response(serde_json::json!({
+            "success": true,
+            "patch_result": {
+                "patchId": "patch-1",
+                "success": true,
+                "path": "identity.name",
+                "operation": "replace",
+                "error": null
+            },
+            "effect_status": "confirmed",
+            "proposal_projection_status": "reconciliation_required",
+            "warnings": ["projection pending"],
+            "memoryPersistence": {
+                "canonicalCommitted": true,
+                "outboxEventId": "event-1",
+                "projectionState": "degraded",
+                "pending": 0,
+                "degraded": 1,
+                "applied": 0,
+                "reasonCode": "projection_delivery_failed",
+                "errorDigest": "sha256:deadbeef"
+            }
+        }))
+        .unwrap();
+        let serialized = serde_json::to_value(typed).unwrap();
+        assert!(serialized.get("patchResult").is_some());
+        assert!(serialized.get("patch_result").is_none());
+        assert_eq!(serialized["effectStatus"], "confirmed");
+        assert_eq!(
+            serialized["proposalProjectionStatus"],
+            "reconciliation_required"
+        );
+        assert_eq!(serialized["memoryPersistence"]["canonicalCommitted"], true);
+        assert_eq!(
+            serialized["memoryPersistence"]["projectionState"],
+            "degraded"
+        );
+        assert_eq!(
+            serialized["memoryPersistence"]["reasonCode"],
+            "projection_delivery_failed"
+        );
+    }
+
+    #[test]
+    fn accept_proposal_ipc_contract_rejects_unmodeled_truth_fields() {
+        let error = typed_accept_proposal_response(serde_json::json!({
+            "success": true,
+            "patchResult": {
+                "patchId": "patch-unknown",
+                "success": true,
+                "path": "memory.preference",
+                "operation": "memory_write_projection_degraded",
+                "error": null
+            },
+            "effectStatus": "confirmed",
+            "proposalProjectionStatus": "confirmed",
+            "warnings": [],
+            "unmodeledProjectionTruth": "must_not_be_silently_dropped"
+        }))
+        .expect_err("typed IPC must fail closed instead of deleting a new fact");
+        assert!(error.contains("unknown field"));
     }
 
     #[test]
@@ -3644,7 +5250,7 @@ mod tests {
 
     #[tokio::test]
     async fn accept_sensitive_memory_write_proposal_does_not_call_cloud_embedding() {
-        openlife_core::vectors::clear_embedding_cache();
+        openlife_core::embedding::clear_embedding_cache();
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
         let (openai_base, cloud_call_count) = fake_cloud_embedding_endpoint().await;
@@ -3680,19 +5286,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accept_memory_archive_proposal_archives_specific_chunk() {
+    async fn accept_memory_archive_proposal_uses_stable_canonical_owner() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
-        let chunk_id = state
+        let profile = openlife_core::embedding::EmbeddingProfile::new(
+            openlife_core::embedding::EmbeddingRouteKind::DeterministicHash,
+            "openlife-test",
+            "proposal-archive-test-v1",
+            "builtin:test",
+            "proposal-archive-test-artifact-v1",
+            4,
+        )
+        .unwrap();
+        let canonical = state
+            .memory_store
+            .lock()
+            .await
+            .save_knowledge_note_idempotent_with_outbox(
+                &uuid::Uuid::new_v4().to_string(),
+                "s1",
+                "temporary canonical memory",
+                "knowledge_note",
+                "manual",
+                &[],
+                "private",
+            )
+            .unwrap();
+        let owner = openlife_core::vectors::CanonicalVectorOwnerRef::new(
+            "knowledge_note",
+            &canonical.knowledge_note_id.to_string(),
+        )
+        .unwrap();
+        state
             .vector_store
             .lock()
             .await
-            .insert("s1", "temporary memory", &[0.1, 0.2, 0.3, 0.4], "test")
+            .project_memory_embedding(
+                &canonical.canonical_mutation.event_id,
+                &owner,
+                "s1",
+                "temporary canonical memory",
+                &[0.1, 0.2, 0.3, 0.4],
+                &profile,
+            )
             .unwrap();
         let proposal = AgentProposal::new(
             ProposalType::MemoryArchive,
-            "memory.chunks",
-            serde_json::json!({ "chunk_ids": [chunk_id] }),
+            "memory.retrieval",
+            serde_json::json!({
+                "owner": {
+                    "ownerKind": owner.kind(),
+                    "ownerId": owner.id(),
+                }
+            }),
             "用户确认归档低价值记忆",
             0.8,
             RiskLevel::Low,
@@ -3712,13 +5358,19 @@ mod tests {
             .await
             .unwrap();
 
-        let archived = state.vector_store.lock().await.list_archived(10).unwrap();
+        assert!(!state
+            .memory_store
+            .lock()
+            .await
+            .is_memory_retrieval_active(&owner)
+            .unwrap());
+        let archived = state.vector_store.lock().await.export_all_chunks().unwrap();
         assert_eq!(archived.len(), 1);
-        assert_eq!(archived[0].id, chunk_id);
+        assert!(archived[0].archived);
     }
 
     #[tokio::test]
-    async fn accept_memory_archive_without_chunk_ids_keeps_pending() {
+    async fn accept_memory_archive_without_stable_owner_keeps_pending() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
         let proposal = AgentProposal::new(
@@ -3743,7 +5395,7 @@ mod tests {
         let err = accept_proposal_with_state(id.clone(), &state)
             .await
             .unwrap_err();
-        assert!(err.contains("chunk_ids"));
+        assert!(err.contains("after.owner") || err.contains("after.owners"));
         let stored = state
             .proposal_store
             .as_ref()
@@ -3756,6 +5408,16 @@ mod tests {
         assert_eq!(stored.status, ProposalStatus::Pending);
     }
 
+    #[test]
+    fn memory_archive_payload_rejects_derived_vector_row_ids() {
+        let error = validate_proposal_payload(
+            ProposalType::MemoryArchive,
+            &serde_json::json!({ "chunk_ids": [7] }),
+        )
+        .expect_err("derived vector ids cannot authorize canonical archive");
+        assert!(error.contains("derived vector row id"));
+    }
+
     #[tokio::test]
     async fn accept_tool_permission_proposal_records_permission_event() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -3764,7 +5426,11 @@ mod tests {
             ProposalType::ToolPermission,
             "tools.filesystem.write",
             serde_json::json!({
+                "permission_scope_kind": "manifest_policy",
                 "tool_name": "filesystem.write",
+                "source": "builtin",
+                "risk_level": "medium",
+                "action_type": "write",
                 "permission": "allowed"
             }),
             "用户确认工具权限",
@@ -3799,6 +5465,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn main_chat_action_bound_tool_permission_without_exact_scope_stays_pending() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let proposal = AgentProposal::new(
+            ProposalType::ToolPermission,
+            "tool_permission.builtin.builtin_echo",
+            serde_json::json!({
+                "permission_scope_kind": "action_bound",
+                "tool_name": "builtin_echo",
+                "source": "builtin",
+                "risk_level": "low",
+                "action_type": "read",
+                "permission": "allow_once",
+                "mainChatAgentV1": true
+            }),
+            "Missing action-bound scope must fail closed.",
+            0.7,
+            RiskLevel::Medium,
+            ProposalSource::ChatConversation,
+        );
+        let id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        let error = accept_proposal_with_state(id.clone(), &state)
+            .await
+            .expect_err("missing exact blocked_action must not materialize permission");
+        assert!(error.contains("blocked_action"));
+        let stored = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ProposalStatus::Pending);
+        let permissions = state.tool_permission_store.lock().await;
+        assert!(permissions.list().unwrap().is_empty());
+        assert_eq!(permissions.action_bound_permission_count().unwrap(), 0);
+    }
+
+    #[tokio::test]
     async fn accept_auto_tool_permission_proposal_uses_policy_and_canonical_scope() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
@@ -3806,11 +5522,12 @@ mod tests {
             ProposalType::ToolPermission,
             "tool_permission.builtin.web.search",
             serde_json::json!({
+                "permission_scope_kind": "action_bound",
                 "tool_name": "web.search",
                 "source": "builtin",
                 "risk_level": "medium",
                 "permission_action": "grant",
-                "policy": "allow_until_revoked",
+                "policy": "allow_once",
                 "canonical_scope": {
                     "tool_name": "web.search",
                     "source": "builtin",
@@ -3819,9 +5536,13 @@ mod tests {
                 },
                 "blocked_action": {
                     "action_type": "mcp_tool",
-                    "target": "web.search"
+                    "target": "web.search",
+                    "resolved_target": "web.search",
+                    "input_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                    "input_length_bytes": 42
                 },
                 "auto_generated": true,
+                "mainChatAgentV1": true,
                 "directWritesExecuted": false
             }),
             "用户确认自动生成的工具权限",
@@ -3854,17 +5575,18 @@ mod tests {
             .unwrap();
         assert_eq!(stored.status, ProposalStatus::Accepted);
 
-        let permissions = state.tool_permission_store.lock().await.list().unwrap();
-        assert_eq!(permissions.len(), 1);
-        let permission = &permissions[0];
-        assert_eq!(permission.tool_name, "web.search");
-        assert_eq!(permission.source, "builtin");
-        assert_eq!(permission.risk_level, "medium");
-        assert_eq!(permission.action_type, "read");
-        assert_eq!(
-            permission.policy,
-            openlife_core::tool_permissions::ToolPermissionPolicy::AllowUntilRevoked
+        let scope = action_bound_tool_permission_scope(&proposal.after).unwrap();
+        let permission_store = state.tool_permission_store.lock().await;
+        assert!(
+            permission_store.list().unwrap().is_empty(),
+            "action-bound permission must not become a globally reusable manifest grant"
         );
+        let authorization = permission_store
+            .peek_action_bound(&id, &scope)
+            .unwrap()
+            .expect("exact action-bound permission exists");
+        assert_eq!(authorization.proposal_id, id);
+        assert_eq!(authorization.scope, scope);
     }
 
     #[tokio::test]
@@ -4221,6 +5943,217 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.status, ProposalStatus::Accepted);
+        let tasks = state
+            .scheduled_task_store
+            .list_tasks(Some("pending"))
+            .unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, id);
+        assert_eq!(tasks[0].source_proposal_id.as_deref(), Some(id.as_str()));
+        assert!(!temp_dir.path().join("scheduled_tasks.json").exists());
+    }
+
+    #[tokio::test]
+    async fn accepted_exact_scheduled_cloud_route_seals_scoped_single_use_grant() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        {
+            let mut config = state.config.lock().await;
+            config.llm.openai_key = "test-key-not-persisted".into();
+            config.system.network_policy.default_decision = "allow".into();
+        }
+        let due_at = chrono::Utc::now() + chrono::Duration::hours(1);
+        let expires_at = due_at + chrono::Duration::hours(1);
+        let proposal = AgentProposal::new(
+            ProposalType::ScheduledTask,
+            "tasks.reviewed_cloud",
+            serde_json::json!({
+                "title": "Reviewed cloud task",
+                "scheduled_at": due_at.to_rfc3339(),
+                "description": "Prepare a short review",
+                "tool": "scheduled_task",
+                "provider_route": {
+                    "data_route": "policy_allowed",
+                    "provider": "openai",
+                    "model": "gpt-4o-mini",
+                    "grant_scope": "single_execution",
+                    "consent_scope": "scheduled_provider_once",
+                    "expires_at": expires_at.to_rfc3339(),
+                }
+            }),
+            "User reviews one exact scheduled cloud execution.",
+            1.0,
+            RiskLevel::Medium,
+            ProposalSource::Manual,
+        );
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap();
+
+        let task = state
+            .scheduled_task_store
+            .list_tasks(Some("pending"))
+            .unwrap()
+            .remove(0);
+        assert_eq!(task.id, proposal_id);
+        assert_eq!(
+            task.provider_grant.data_route,
+            openlife_core::llm::ProviderDataRoute::PolicyAllowed
+        );
+        assert_eq!(
+            task.provider_grant.grant_scope,
+            openlife_core::tasks::ScheduledProviderGrantScope::SingleExecution
+        );
+        assert!(task.provider_grant.grant_expires_at.is_some());
+        assert!(task.provider_grant.review_snapshot_digest.is_some());
+        assert!(task.provider_grant.review_dispatch_claim_digest.is_some());
+        assert!(!task
+            .provider_grant
+            .provider_digest
+            .as_deref()
+            .unwrap()
+            .contains("openai"));
+    }
+
+    #[tokio::test]
+    async fn sensitive_scheduled_cloud_route_fails_before_task_effect() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        {
+            let mut config = state.config.lock().await;
+            config.llm.openai_key = "test-key-not-persisted".into();
+            config.system.network_policy.default_decision = "allow".into();
+        }
+        let due_at = chrono::Utc::now() + chrono::Duration::hours(1);
+        let proposal = AgentProposal::new(
+            ProposalType::ScheduledTask,
+            "tasks.sensitive_cloud",
+            serde_json::json!({
+                "title": "Sensitive cloud task",
+                "scheduled_at": due_at.to_rfc3339(),
+                "description": "Summarize my medical diagnosis and health record",
+                "tool": "scheduled_task",
+                "provider_route": {
+                    "data_route": "policy_allowed",
+                    "provider": "openai",
+                    "model": "gpt-4o-mini",
+                    "grant_scope": "single_execution",
+                    "consent_scope": "scheduled_provider_once",
+                    "expires_at": (due_at + chrono::Duration::hours(1)).to_rfc3339(),
+                }
+            }),
+            "Cloud route must still pass deterministic sensitivity and expiry policy.",
+            1.0,
+            RiskLevel::Medium,
+            ProposalSource::Manual,
+        );
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        let error = accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("Patch 应用前校验失败"));
+        assert!(state
+            .scheduled_task_store
+            .list_tasks(None)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .dispatch_state(&proposal_id)
+                .unwrap()
+                .as_deref(),
+            Some("failed_before_effect")
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_scheduled_cloud_route_fails_before_task_effect() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        {
+            let mut config = state.config.lock().await;
+            config.llm.openai_key = "test-key-not-persisted".into();
+            config.system.network_policy.default_decision = "allow".into();
+        }
+        let due_at = chrono::Utc::now() + chrono::Duration::hours(1);
+        let proposal = AgentProposal::new(
+            ProposalType::ScheduledTask,
+            "tasks.expired_cloud",
+            serde_json::json!({
+                "title": "Expired cloud grant",
+                "scheduled_at": due_at.to_rfc3339(),
+                "description": "Prepare a short review",
+                "tool": "scheduled_task",
+                "provider_route": {
+                    "data_route": "policy_allowed",
+                    "provider": "openai",
+                    "model": "gpt-4o-mini",
+                    "grant_scope": "single_execution",
+                    "consent_scope": "scheduled_provider_once",
+                    "expires_at": (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339(),
+                }
+            }),
+            "Expired cloud authority must fail before task creation.",
+            1.0,
+            RiskLevel::Medium,
+            ProposalSource::Manual,
+        );
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        assert!(accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap_err()
+            .contains("Patch 应用前校验失败"));
+        assert!(state
+            .scheduled_task_store
+            .list_tasks(None)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .dispatch_state(&proposal_id)
+                .unwrap()
+                .as_deref(),
+            Some("failed_before_effect")
+        );
     }
 
     #[tokio::test]
@@ -4271,6 +6204,638 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.status, ProposalStatus::Accepted);
+    }
+
+    fn scheduled_builder_proposal(title: &str) -> AgentProposal {
+        AgentProposal::new(
+            ProposalType::ScheduledTask,
+            "tasks.scheduled",
+            serde_json::json!({
+                "title": title,
+                "description": "metadata-safe builder proposal reconciliation test",
+            }),
+            "Builder candidate awaiting review",
+            0.9,
+            RiskLevel::Medium,
+            ProposalSource::BuilderReview,
+        )
+    }
+
+    async fn create_waiting_builder_run(
+        state: &Arc<AppState>,
+        proposal_id: &str,
+        session_id: &str,
+    ) -> String {
+        let mut run = AgentRun::new_builder_run(session_id);
+        run.status = AgentRunStatus::WaitingPermission;
+        run.add_generated_proposal(proposal_id);
+        let run_id = run.id.clone();
+        state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_run(&run)
+            .unwrap();
+        run_id
+    }
+
+    async fn create_waiting_conversation_run(
+        state: &Arc<AppState>,
+        proposal_id: &str,
+        session_id: &str,
+    ) -> String {
+        let mut run = AgentRun::new_chat_run(session_id, "conversation awaiting proposal review");
+        run.status = AgentRunStatus::WaitingPermission;
+        run.add_generated_proposal(proposal_id);
+        let run_id = run.id.clone();
+        state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_run(&run)
+            .unwrap();
+        run_id
+    }
+
+    #[tokio::test]
+    async fn generic_proposal_edit_rejects_builder_typed_batch_without_typed_editor() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let batch = openlife_core::life_model::patch::LifeModelPatchBatchV1::new(vec![
+            openlife_core::life_model::patch::LifeModelPatchBatchOperationV1 {
+                candidate_id: "candidate-1".into(),
+                path: "goals.short_term".into(),
+                candidate: serde_json::json!([{"title": "typed candidate"}]),
+            },
+        ])
+        .unwrap();
+        let proposal = AgentProposal::new(
+            ProposalType::LifeModelUpdate,
+            openlife_core::life_model::patch::LIFEMODEL_PATCH_BATCH_PATH,
+            serde_json::to_value(&batch).unwrap(),
+            "Builder typed batch awaiting review",
+            0.9,
+            RiskLevel::Medium,
+            ProposalSource::BuilderReview,
+        );
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        let error = edit_proposal_with_state(
+            proposal_id.clone(),
+            serde_json::json!({"arbitrary": "generic replacement"}),
+            &state,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("typed Builder editor"), "{error}");
+        let stored = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&proposal_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ProposalStatus::Pending);
+        assert_eq!(stored.after, serde_json::to_value(batch).unwrap());
+    }
+
+    #[tokio::test]
+    async fn confirmed_effect_with_failed_proposal_projection_reports_reconciliation_not_failure() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut state = test_app_state(&temp_dir);
+        let proposals_db = temp_dir.path().join("projection-failure-proposals.db");
+        let proposal_store = ProposalStore::new(&proposals_db).unwrap();
+        Arc::get_mut(&mut state).unwrap().proposal_store =
+            Some(Arc::new(Mutex::new(proposal_store)));
+
+        let proposal = scheduled_builder_proposal("projection failure task");
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+        let run_id = create_waiting_builder_run(&state, &proposal_id, "builder-projection").await;
+
+        rusqlite::Connection::open(&proposals_db)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_accepted_projection
+                 BEFORE UPDATE OF status ON proposals
+                 WHEN NEW.status = 'accepted'
+                 BEGIN
+                   SELECT RAISE(FAIL, 'forced proposal projection failure');
+                 END;",
+            )
+            .unwrap();
+
+        let result = accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .expect("the effect is confirmed, so a projection failure must not be reported as effect failure");
+        assert_eq!(result["success"], true);
+        assert_eq!(result["effect_status"], "confirmed");
+        assert_eq!(
+            result["proposal_projection_status"],
+            "reconciliation_required"
+        );
+        assert_eq!(
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .dispatch_state(&proposal_id)
+                .unwrap()
+                .as_deref(),
+            Some("confirmed_projection_pending")
+        );
+        assert_eq!(
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .dispatch_error_code(&proposal_id)
+                .unwrap()
+                .as_deref(),
+            Some("proposal_status_projection_pending")
+        );
+        assert_eq!(
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .get_proposal(&proposal_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            ProposalStatus::Pending
+        );
+        assert_eq!(
+            state
+                .agent_run_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .get_run(&run_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            AgentRunStatus::Completed
+        );
+        assert_eq!(
+            state
+                .scheduled_task_store
+                .list_tasks(Some("pending"))
+                .unwrap()
+                .len(),
+            1
+        );
+        rusqlite::Connection::open(&proposals_db)
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_accepted_projection;")
+            .unwrap();
+
+        let retry = accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .expect("retry must reconcile the durable confirmed effect without redispatch");
+        assert_eq!(retry["effect_status"], "confirmed");
+        assert_eq!(retry["proposal_projection_status"], "confirmed");
+        assert_eq!(
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .dispatch_state(&proposal_id)
+                .unwrap()
+                .as_deref(),
+            Some("confirmed")
+        );
+        assert_eq!(
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .get_proposal(&proposal_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            ProposalStatus::Accepted
+        );
+        assert_eq!(
+            state
+                .scheduled_task_store
+                .list_tasks(Some("pending"))
+                .unwrap()
+                .len(),
+            1,
+            "projection reconciliation must not replay the already-confirmed effect"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_list_reconciles_durable_confirmed_projection_without_replaying_effect() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let proposal = scheduled_builder_proposal("recover confirmed projection");
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+        let run_id =
+            create_waiting_builder_run(&state, &proposal_id, "builder-reconcile-on-list").await;
+
+        let claim_id = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .claim_dispatch(&proposal_id)
+            .unwrap()
+            .unwrap();
+        let review_acceptance = {
+            let store = state.proposal_store.as_ref().unwrap().lock().await;
+            openlife_core::agent::ReviewWorkflow::new(&store)
+                .claimed_acceptance_snapshot(&proposal_id, &claim_id)
+                .unwrap()
+        };
+        let effect = apply_proposal_to_state(
+            &state,
+            &proposal,
+            proposal.after.clone(),
+            Some(&review_acceptance),
+        )
+        .await
+        .unwrap();
+        assert!(effect.success);
+        assert!(state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .mark_effect_confirmed_projection_pending(&proposal_id, &claim_id)
+            .unwrap());
+
+        let report = reconcile_durable_proposal_projections_with_state(&state, 200)
+            .await
+            .unwrap();
+        assert_eq!(report.proposal_projections_repaired, 1);
+        assert_eq!(report.agent_runs_reconciled, 1);
+        assert!(!report.projection_backlog_may_remain);
+        assert!(!report.agent_run_backlog_may_remain);
+        let pending = get_pending_proposals_with_state(200, &state).await.unwrap();
+        assert!(pending.iter().all(|item| item.id != proposal_id));
+        assert_eq!(
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .get_proposal(&proposal_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            ProposalStatus::Accepted
+        );
+        assert_eq!(
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .dispatch_state(&proposal_id)
+                .unwrap()
+                .as_deref(),
+            Some("confirmed")
+        );
+        assert_eq!(
+            state
+                .agent_run_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .get_run(&run_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            AgentRunStatus::Completed
+        );
+        assert_eq!(
+            state
+                .scheduled_task_store
+                .list_tasks(Some("pending"))
+                .unwrap()
+                .len(),
+            1,
+            "recovery must project state only and never replay the materialized task"
+        );
+    }
+
+    #[tokio::test]
+    async fn confirmed_projection_pending_cannot_be_rejected_edited_or_postponed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let proposal = scheduled_builder_proposal("confirmed review mutation guard");
+        let proposal_id = proposal.id.clone();
+        let claim_id = {
+            let store = state.proposal_store.as_ref().unwrap().lock().await;
+            store.create_proposal(&proposal).unwrap();
+            store.claim_dispatch(&proposal_id).unwrap().unwrap()
+        };
+        assert!(state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .mark_effect_confirmed_projection_pending(&proposal_id, &claim_id)
+            .unwrap());
+
+        assert!(reject_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap_err()
+            .contains("already confirmed"));
+        assert!(edit_proposal_with_state(
+            proposal_id.clone(),
+            serde_json::json!({"title": "must not overwrite"}),
+            &state,
+        )
+        .await
+        .unwrap_err()
+        .contains("already confirmed"));
+        assert!(postpone_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap_err()
+            .contains("already confirmed"));
+        assert_eq!(
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .get_proposal(&proposal_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            ProposalStatus::Pending
+        );
+        assert_eq!(
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .dispatch_state(&proposal_id)
+                .unwrap()
+                .as_deref(),
+            Some("confirmed_projection_pending")
+        );
+    }
+
+    #[tokio::test]
+    async fn builder_proposal_decisions_reconcile_every_linked_waiting_agent_run() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+
+        let accepted = scheduled_builder_proposal("accepted builder task");
+        let accepted_id = accepted.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&accepted)
+            .unwrap();
+        let accepted_run_a =
+            create_waiting_builder_run(&state, &accepted_id, "builder-accepted-a").await;
+        let accepted_run_b =
+            create_waiting_builder_run(&state, &accepted_id, "builder-accepted-b").await;
+        accept_proposal_with_state(accepted_id, &state)
+            .await
+            .unwrap();
+
+        let rejected = scheduled_builder_proposal("rejected builder task");
+        let rejected_id = rejected.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&rejected)
+            .unwrap();
+        let rejected_run =
+            create_waiting_builder_run(&state, &rejected_id, "builder-rejected").await;
+        reject_proposal_with_state(rejected_id, &state)
+            .await
+            .unwrap();
+
+        let postponed = scheduled_builder_proposal("postponed builder task");
+        let postponed_id = postponed.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&postponed)
+            .unwrap();
+        let postponed_run =
+            create_waiting_builder_run(&state, &postponed_id, "builder-postponed").await;
+        postpone_proposal_with_state(postponed_id, &state)
+            .await
+            .unwrap();
+
+        let store = state.agent_run_store.as_ref().unwrap().lock().await;
+        assert_eq!(
+            store.get_run(&accepted_run_a).unwrap().unwrap().status,
+            AgentRunStatus::Completed
+        );
+        assert_eq!(
+            store.get_run(&accepted_run_b).unwrap().unwrap().status,
+            AgentRunStatus::Completed
+        );
+        assert_eq!(
+            store.get_run(&rejected_run).unwrap().unwrap().status,
+            AgentRunStatus::Cancelled
+        );
+        assert_eq!(
+            store.get_run(&postponed_run).unwrap().unwrap().status,
+            AgentRunStatus::WaitingPermission
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_proposal_run_waits_until_every_linked_review_is_terminal() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let first = scheduled_builder_proposal("first linked decision");
+        let second = scheduled_builder_proposal("second linked decision");
+        let first_id = first.id.clone();
+        let second_id = second.id.clone();
+        {
+            let store = state.proposal_store.as_ref().unwrap().lock().await;
+            store.create_proposal(&first).unwrap();
+            store.create_proposal(&second).unwrap();
+        }
+        let mut run = AgentRun::new_builder_run("builder-multi-proposal");
+        run.status = AgentRunStatus::WaitingPermission;
+        run.add_generated_proposal(&first_id);
+        run.add_generated_proposal(&second_id);
+        let run_id = run.id.clone();
+        state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_run(&run)
+            .unwrap();
+
+        accept_proposal_with_state(first_id, &state).await.unwrap();
+        assert_eq!(
+            state
+                .agent_run_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .get_run(&run_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            AgentRunStatus::WaitingPermission,
+            "one accepted Proposal must not complete a Run that still has pending reviews"
+        );
+
+        accept_proposal_with_state(second_id, &state).await.unwrap();
+        assert_eq!(
+            state
+                .agent_run_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .get_run(&run_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            AgentRunStatus::Completed
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_proposal_reconciles_linked_non_builder_agent_runs() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut proposal = scheduled_builder_proposal("conversation-origin scheduled task");
+        proposal.source = ProposalSource::ChatConversation;
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+        let run_id =
+            create_waiting_conversation_run(&state, &proposal_id, "conversation-linked-run").await;
+
+        accept_proposal_with_state(proposal_id, &state)
+            .await
+            .unwrap();
+
+        let run = state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_run(&run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.kind, openlife_core::agent::AgentTaskKind::Conversation);
+        assert_eq!(run.status, AgentRunStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn expired_proposal_is_truthful_and_cannot_dispatch() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut proposal = scheduled_builder_proposal("expired builder task");
+        proposal.expires_at = Some(chrono::Utc::now() - chrono::Duration::minutes(1));
+        let proposal_id = proposal.id.clone();
+        {
+            let store = state.proposal_store.as_ref().unwrap().lock().await;
+            store.create_proposal(&proposal).unwrap();
+            assert_eq!(store.cleanup_expired_proposals().unwrap(), 1);
+            assert_eq!(
+                store.get_proposal(&proposal_id).unwrap().unwrap().status,
+                ProposalStatus::Expired
+            );
+        }
+
+        let error = accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap_err();
+        assert!(error.contains("已经过期"), "{error}");
+        assert_eq!(
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .dispatch_state(&proposal_id)
+                .unwrap()
+                .as_deref(),
+            Some("unclaimed")
+        );
+        assert!(state
+            .scheduled_task_store
+            .list_tasks(Some("pending"))
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

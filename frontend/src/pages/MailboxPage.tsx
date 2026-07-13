@@ -123,7 +123,7 @@ function statusLabel(status: ProposalStatus): string {
     rejected: "不同意",
     edited: "已修改",
     postponed: "稍后再说",
-    expired: "已处理",
+    expired: "已过期",
   };
   return labels[status];
 }
@@ -334,8 +334,9 @@ export default function MailboxPage() {
     }
 
     try {
+      let acceptance: Awaited<ReturnType<typeof acceptProposal>> | null = null;
       if (action === "accept") {
-        await acceptProposal(proposal.id);
+        acceptance = await acceptProposal(proposal.id);
       } else if (action === "reject") {
         await rejectProposal(proposal.id);
       } else {
@@ -347,6 +348,17 @@ export default function MailboxPage() {
       if (action === "accept") {
         const relation = refreshedItem?.taskResumeRelation;
         if (
+          acceptance?.memoryPersistence?.canonicalCommitted &&
+          acceptance.memoryPersistence.projectionState !== "applied"
+        ) {
+          setNotice(
+            `Memory 已写入 canonical store，但派生视图仍为 ${acceptance.memoryPersistence.projectionState}；Mailbox 保持等待状态。`
+          );
+        } else if (acceptance?.proposalProjectionStatus !== "confirmed") {
+          setNotice(
+            "副作用已确认，但审阅状态仍在后端对账；系统不会重复执行，Mailbox 保持等待状态。"
+          );
+        } else if (
           linkedMainChatTaskId &&
           relation?.taskSessionId === linkedMainChatTaskId &&
           relation.canRequestResume

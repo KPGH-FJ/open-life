@@ -22,7 +22,7 @@ not permit ordinary Main Chat to write durable LifeModel truth directly.
 
 ## Last verified
 
-2026-07-07 during Stage3-A source-map reading.
+2026-07-12 during the Phase7 single-system deletion review.
 
 ## Source map
 
@@ -31,7 +31,6 @@ not permit ordinary Main Chat to write durable LifeModel truth directly.
 - `openlife-core/src/life_model/patch.rs`
 - `openlife-core/src/life_model/patch_store.rs`
 - `openlife-core/src/life_model_write_gateway.rs`
-- `openlife-core/src/agent/proposal_engine.rs`
 - `openlife-core/src/agent/proposal_store.rs`
 - `openlife-core/src/agent/proposal_outcome.rs`
 - `openlife-core/src/agent/memory_lifecycle.rs`
@@ -71,9 +70,18 @@ patch source, conflict handling, and conversion from proposals to patch inputs.
 `openlife-core/src/life_model/patch_store.rs` persists patches and conflicts in
 SQLite.
 
-`openlife-core/src/agent/proposal_engine.rs` generates proposal objects for
-memory writes, memory archives, tool permissions, and chat-derived LifeModel
-updates. It creates proposal records, not direct durable writes.
+The former `openlife-core/src/agent/proposal_engine.rs` module is deleted. It
+was a shipped second proposal authority: `AppState` and bootstrap owned it,
+ordinary Main Chat finalization and AgentRun replay invoked it, and it could
+construct proposals from raw run output without PolicyRouter authorization.
+Those caller-shaped proposals were subsequently submitted to ReviewWorkflow,
+but ReviewWorkflow had no observation-bound policy proof to validate. The
+engine, its product consumers, and its public exports were therefore deleted
+together. Main Chat proposals must now carry current PolicyRouter admission
+into ReviewWorkflow. Builder, Calibration, ToolPermission, PlanExecute,
+Maturation, and other remaining proposal writers are still tracked as separate
+convergence work; their existence is not evidence that the single proposal
+authority is complete.
 
 `openlife-core/src/agent/proposal_store.rs` persists proposal lifecycle state,
 including pending, accepted, rejected, edited, and postponed records.

@@ -122,6 +122,9 @@ fn local_only_packet(run_id: &str) -> RuntimeHSPacket {
             estimated_tokens: 0,
             token_budget: 128,
         },
+        provider_authorization: crate::llm::ProviderPolicyAuthorization::local_only_fail_closed(
+            crate::llm::ProviderLocalOnlyReason::TestFixture,
+        ),
     }
 }
 

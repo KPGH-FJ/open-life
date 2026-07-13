@@ -131,6 +131,13 @@ pub struct DailyGoal {
     #[serde(alias = "completed")]
     pub done: bool,
     pub time_block: Option<TimeBlock>,
+    /// Canonical UUIDv4 of the product effect that created this goal. Older
+    /// goals legitimately have no operation identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    /// UUID-salted digest binding `operation_id` to the original payload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -466,13 +473,29 @@ impl LifeModelCompatibilityAssetRef {
         source_ids.sort();
         source_ids.dedup();
 
-        let affected_path = format!("heuristics.{}.{}", record.domain, record.trigger);
+        // YAML is a compact compatibility projection, not a second heuristic
+        // store. Keep only a bounded domain path and digest the rule content.
+        let affected_path = format!(
+            "heuristics.{}",
+            compatibility_safe_heuristic_domain(&record.domain)
+        );
         let content_digest = sha256_hex(
             serde_json::json!({
                 "asset_kind": "heuristic",
                 "asset_id": record.id,
-                "domain": record.domain,
-                "trigger": record.trigger,
+                "domain": compatibility_safe_heuristic_domain(&record.domain),
+                "trigger_digest": sha256_hex(record.trigger.as_bytes()),
+                "guidance_digest": sha256_hex(record.guidance.as_bytes()),
+                "conditions_digest": sha256_hex(
+                    serde_json::to_string(&record.conditions)
+                        .unwrap_or_default()
+                        .as_bytes()
+                ),
+                "constraints_digest": sha256_hex(
+                    serde_json::to_string(&record.constraints)
+                        .unwrap_or_default()
+                        .as_bytes()
+                ),
                 "priority": record.priority,
                 "status": record.status.to_string(),
                 "validation_state": record.validation_state,
@@ -659,6 +682,96 @@ pub struct LifeModelHSCompatibilityView {
     pub asset_refs: Vec<LifeModelCompatibilityAssetRef>,
     pub provenance: LifeModelMaterializedViewProvenance,
     pub source_digest: String,
+}
+
+/// Digest the metadata-safe collaboration-guidance projection produced from
+/// the accepted HS store. The full rule text participates through a digest but
+/// is never copied into the YAML compatibility view.
+pub fn collaboration_guidance_digest_from_records(
+    records: &[crate::agent::heuristic_store::HeuristicRecord],
+) -> String {
+    let mut refs = records
+        .iter()
+        .map(LifeModelCompatibilityAssetRef::from_heuristic)
+        .collect::<Vec<_>>();
+    refs.sort_by(|left, right| left.asset_id.cmp(&right.asset_id));
+    collaboration_guidance_digest_from_refs(&refs)
+}
+
+/// Recompute the same category digest exclusively from the YAML projection.
+/// This is the LM-B shadow-read boundary: only refs and digests are compared.
+pub fn collaboration_guidance_digest_from_view(view: &LifeModelHSCompatibilityView) -> String {
+    let mut refs = view
+        .asset_refs
+        .iter()
+        .filter(|asset| asset.asset_kind == "heuristic")
+        .cloned()
+        .collect::<Vec<_>>();
+    refs.sort_by(|left, right| left.asset_id.cmp(&right.asset_id));
+    collaboration_guidance_digest_from_refs(&refs)
+}
+
+/// Produce a bounded compatibility summary without copying guidance, trigger,
+/// evidence, or source text into YAML.
+pub fn collaboration_guidance_summaries(
+    records: &[crate::agent::heuristic_store::HeuristicRecord],
+) -> Vec<LifeModelCompatibilitySummary> {
+    if records.is_empty() {
+        return Vec::new();
+    }
+    let mut asset_ids = records
+        .iter()
+        .map(|record| record.id.clone())
+        .collect::<Vec<_>>();
+    asset_ids.sort();
+    asset_ids.dedup();
+    let mut domains = records
+        .iter()
+        .map(|record| compatibility_safe_heuristic_domain(&record.domain).to_string())
+        .collect::<Vec<_>>();
+    domains.sort();
+    domains.dedup();
+    vec![LifeModelCompatibilitySummary::new(
+        format!(
+            "{} accepted collaboration guidance assets across {} bounded domains.",
+            asset_ids.len(),
+            domains.len()
+        ),
+        asset_ids,
+    )]
+}
+
+fn collaboration_guidance_digest_from_refs(refs: &[LifeModelCompatibilityAssetRef]) -> String {
+    let digest = sha256_hex(
+        serde_json::json!({
+            "schema": "lifemodel_hs_collaboration_guidance_projection_v1",
+            "category": "collaboration_guidance",
+            "assets": refs
+                .iter()
+                .map(|asset| serde_json::json!({
+                    "asset_id": asset.asset_id,
+                    "content_digest": asset.content_digest,
+                }))
+                .collect::<Vec<_>>(),
+        })
+        .to_string()
+        .as_bytes(),
+    );
+    format!("sha256:{digest}")
+}
+
+fn compatibility_safe_heuristic_domain(domain: &str) -> &'static str {
+    match domain {
+        "conversation" => "conversation",
+        "planning" => "planning",
+        "privacy" => "privacy",
+        "tool_use" => "tool_use",
+        "proactive" => "proactive",
+        "memory" => "memory",
+        "goals" => "goals",
+        "state" => "state",
+        _ => "other",
+    }
 }
 
 #[derive(Serialize)]
@@ -1650,6 +1763,20 @@ impl Default for LifeModelManager {
 }
 
 impl LifeModelManager {
+    /// Metadata journal colocated with the current YAML compatibility view.
+    /// The journal is a recovery aid for the file owner; it does not turn file
+    /// and SQLite projections into one transaction.
+    pub fn mutation_journal_path(&self) -> PathBuf {
+        self.data_dir.join("life_model_mutation_journal.db")
+    }
+
+    /// Durable per-asset authority registry. It is colocated with the YAML
+    /// compatibility view so profile moves and isolated test profiles retain
+    /// the same authority decisions across restart.
+    pub fn hs_asset_authority_registry_path(&self) -> PathBuf {
+        self.data_dir.join("hs_asset_authority.db")
+    }
+
     pub fn load_existing(&self) -> Result<Option<LifeModel>> {
         let path = self.data_dir.join("life_model.yaml");
         if !path.exists() {
@@ -1680,7 +1807,24 @@ impl LifeModelManager {
     pub fn save(&self, model: &LifeModel) -> Result<()> {
         let path = self.data_dir.join("life_model.yaml");
         let content = serde_yaml::to_string(model).with_context(|| "序列化人生模型失败")?;
-        fs::write(&path, content).with_context(|| format!("写入人生模型失败: {:?}", path))?;
+        crate::atomic_file::write_atomic(&path, content.as_bytes())
+            .with_context(|| format!("写入人生模型失败: {:?}", path))?;
+        Ok(())
+    }
+
+    /// Persist a validated derived HS compatibility projection. Product
+    /// callers must first pass `HSAssetAuthorityRegistry::authorize_write`;
+    /// this bottom file primitive intentionally does not decide authority.
+    pub fn save_hs_compatibility_view(&self, yaml: &str) -> Result<()> {
+        let _: LifeModel = serde_yaml::from_str(yaml)
+            .with_context(|| "验证 LifeModel HS 兼容视图中的 LifeModel 失败")?;
+        let view = extract_hs_compatibility_view_from_yaml(yaml)?;
+        if view.source_digest.trim().is_empty() {
+            return Err(anyhow::anyhow!("LifeModel HS 兼容视图缺少 source_digest"));
+        }
+        let path = self.data_dir.join("life_model.yaml");
+        crate::atomic_file::write_atomic(&path, yaml.as_bytes())
+            .with_context(|| format!("写入 LifeModel HS 兼容视图失败: {path:?}"))?;
         Ok(())
     }
 }

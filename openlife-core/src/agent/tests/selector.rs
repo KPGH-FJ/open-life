@@ -1,7 +1,10 @@
 use crate::agent::heuristic_store::{
     HeuristicActivationAuthority, HeuristicDraft, HeuristicLifecycleStatus, HeuristicStore,
 };
-use crate::agent::hs_selector::{HSExclusionReason, HSSelector, HSSelectorInput};
+use crate::agent::hs_selector::{
+    build_runtime_hs_packet, HSExclusionReason, HSSelector, HSSelectorInput,
+    RuntimeHSPacketBuildInput,
+};
 use crate::agent::policy_store::{
     ModelRoutePolicy, PolicyStore, PolicyTopic, BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING,
     BUILTIN_HEURISTIC_REJECTED_REMINDER_DELAY,
@@ -124,6 +127,82 @@ fn selector_selects_mvp_policy_and_task_heuristics() {
         .selected_policies
         .iter()
         .any(|policy| policy.policy_id == "policy.external_writes.proposal_first"));
+}
+
+#[test]
+fn serialized_hs_packet_cannot_rehydrate_cloud_authorization() {
+    let packet = HSSelector::default()
+        .select(
+            &PolicyStore::mvp_builtin(),
+            &HeuristicStore::new_in_memory().unwrap(),
+            &HSSelectorInput {
+                task_kind: AgentTaskKind::Conversation,
+                intent_summary: "metadata-safe general conversation".into(),
+                privacy_topic: PolicyTopic::General,
+                risk_level: RiskLevel::Low,
+                tool_requirements: vec![],
+                current_state_hints: serde_json::json!({}),
+                token_budget: 128,
+                agent_task_id: Some("task-serialized-hs".into()),
+                agent_run_id: Some("run-serialized-hs".into()),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        packet.provider_authorization().data_route(),
+        crate::llm::ProviderDataRoute::PolicyAllowed
+    );
+
+    let serialized = serde_json::to_value(&packet).unwrap();
+    assert!(serialized.get("providerAuthorization").is_none());
+    let rehydrated: crate::agent::RuntimeHSPacket = serde_json::from_value(serialized).unwrap();
+
+    assert_eq!(
+        rehydrated.provider_authorization().data_route(),
+        crate::llm::ProviderDataRoute::LocalOnly
+    );
+    assert_eq!(
+        rehydrated.provider_authorization().authority(),
+        crate::llm::ProviderPolicyAuthority::LocalOnlyFailClosed
+    );
+}
+
+#[test]
+fn empty_asset_selection_keeps_canonical_hs_provider_policy_capability() {
+    let task = crate::agent::AgentTask {
+        kind: AgentTaskKind::Conversation,
+        session_id: "empty-hs-policy-session".into(),
+        messages: vec![],
+        user_text: "ordinary general request".into(),
+        layer: crate::layer::Layer::L2,
+    };
+    let packet = build_runtime_hs_packet(
+        &PolicyStore::mvp_builtin(),
+        &HeuristicStore::new_in_memory().unwrap(),
+        RuntimeHSPacketBuildInput {
+            task: &task,
+            sanitized_intent_summary: "ordinary general request".into(),
+            privacy_topic: PolicyTopic::General,
+            risk_level: RiskLevel::Low,
+            tool_requirements: vec![],
+            current_state_hints: serde_json::json!({}),
+            token_budget: 128,
+            agent_run_id: Some("empty-hs-policy-run".into()),
+        },
+    )
+    .unwrap()
+    .expect("provider policy is an HS runtime fact even without optional assets");
+
+    assert!(packet.selected_policies.is_empty());
+    assert!(packet.selected_heuristics.is_empty());
+    assert_eq!(
+        packet.provider_authorization().data_route(),
+        crate::llm::ProviderDataRoute::PolicyAllowed
+    );
+    assert_eq!(
+        packet.provider_authorization().authority(),
+        crate::llm::ProviderPolicyAuthority::HsPolicyStore
+    );
 }
 
 #[test]

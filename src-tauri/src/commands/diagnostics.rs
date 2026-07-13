@@ -1,7 +1,7 @@
 use crate::errors::AppError;
 use crate::storage::app_data_dir;
 use crate::{AppState, BuilderCompletion, OllamaModelInfo, SystemDiagnostics};
-use openlife_core::ollama::inspect_ollama_status;
+use openlife_core::ollama::inspect_ollama_status_for_generation;
 use std::sync::Arc;
 use tauri::State;
 
@@ -63,7 +63,9 @@ pub async fn get_system_diagnostics(
 pub(crate) async fn get_system_diagnostics_with_state(
     state: &Arc<AppState>,
 ) -> Result<SystemDiagnostics, AppError> {
+    let persistence_health = state.persistence_coordinator.snapshot();
     let policy_router = current_policy_router_status();
+    let provider_runtime = state.provider_runtime_snapshot().await;
     let (mcp_server_count, mcp_tool_count) = {
         let registry = state.mcp_registry.lock().await;
         (
@@ -72,27 +74,64 @@ pub(crate) async fn get_system_diagnostics_with_state(
         )
     };
     let (mcp_recent_audit_count, mcp_recent_pii_count) = {
-        let audit = state.mcp_audit_store.lock().await;
-        let logs = audit.list_logs(50).map_err(AppError::from)?;
-        let pii_count = logs.iter().filter(|log| log.pii_found).count();
-        (logs.len(), pii_count)
+        if state
+            .persistence_coordinator
+            .require_trusted_read("McpAuditStore")
+            .is_ok()
+        {
+            let audit = state.mcp_audit_store.lock().await;
+            match audit.list_logs(50) {
+                Ok(logs) => {
+                    let pii_count = logs.iter().filter(|log| log.pii_found).count();
+                    (logs.len(), pii_count)
+                }
+                Err(_) => (0, 0),
+            }
+        } else {
+            (0, 0)
+        }
     };
-    let (memory_chunk_count, vector_corrupt_embedding_count) = {
-        let store = state.vector_store.lock().await;
-        let report = store.integrity_report().map_err(AppError::from)?;
-        (
-            report.total_chunks as usize,
-            report.corrupt_embedding_count as usize,
-        )
+    let (
+        memory_chunk_count,
+        vector_corrupt_embedding_count,
+        vector_unknown_profile_count,
+        vector_profile_dimension_mismatch_count,
+    ) = {
+        if state
+            .persistence_coordinator
+            .require_trusted_read("VectorStore")
+            .is_ok()
+        {
+            let store = state.vector_store.lock().await;
+            match store.integrity_report() {
+                Ok(report) => (
+                    report.total_chunks as usize,
+                    report.corrupt_embedding_count as usize,
+                    report.unknown_profile_count as usize,
+                    report.profile_dimension_mismatch_count as usize,
+                ),
+                Err(_) => (0, 0, 0, 0),
+            }
+        } else {
+            (0, 0, 0, 0)
+        }
     };
     let (unfinished_builder_sessions, pending_builder_review_sessions) = {
-        let store = state.builder_session_store.lock().await;
-        let sessions = store.list_unfinished_sessions().map_err(AppError::from)?;
-        let pending_review = sessions
-            .iter()
-            .filter(|session| session.finished && !session.pending_signals.is_empty())
-            .count();
-        (sessions.len(), pending_review)
+        if state
+            .persistence_coordinator
+            .require_trusted_read("BuilderSessionStore")
+            .is_ok()
+        {
+            let store = state.builder_session_store.lock().await;
+            let sessions = store.list_unfinished_sessions().unwrap_or_default();
+            let pending_review = sessions
+                .iter()
+                .filter(|session| session.finished && !session.pending_signals.is_empty())
+                .count();
+            (sessions.len(), pending_review)
+        } else {
+            (0, 0)
+        }
     };
     let (
         local_model,
@@ -107,17 +146,21 @@ pub(crate) async fn get_system_diagnostics_with_state(
         cloud_api_validation_source,
         embedding_enabled,
     ) = {
-        let cfg = state.config.lock().await;
+        let cfg = &provider_runtime.config;
         let provider = cfg.effective_provider_label();
-        let validation_record =
-            crate::provider_validation::load_provider_validation_record_from_path(
-                &crate::provider_validation::provider_validation_path(),
-            );
-        let validation = crate::provider_validation::summarize_provider_validation(
-            &cfg,
-            validation_record.as_ref(),
+        let validation_load = crate::provider_validation::load_provider_validation_record_from_path(
+            &crate::provider_validation::provider_validation_path(),
+        );
+        let mut validation = crate::provider_validation::summarize_loaded_provider_validation(
+            cfg,
+            &validation_load,
             chrono::Utc::now(),
         );
+        if !provider_runtime.coherent {
+            validation.validated = false;
+            validation.status = "runtime_generation_incoherent";
+            validation.last_error = Some("provider_runtime_generation_incoherent".into());
+        }
         (
             cfg.local_model.clone(),
             cfg.prefer_local_model,
@@ -132,7 +175,11 @@ pub(crate) async fn get_system_diagnostics_with_state(
             cfg.llm.embedding_enabled,
         )
     };
-    let ollama_status = inspect_ollama_status(&local_model).await;
+    let ollama_status = inspect_ollama_status_for_generation(
+        &local_model,
+        provider_runtime.scheduler.provider_config_generation(),
+    )
+    .await;
     let ollama_service_online = ollama_status.server_online;
     let ollama_models = ollama_status
         .models
@@ -145,15 +192,31 @@ pub(crate) async fn get_system_diagnostics_with_state(
     let resolved_local_model = ollama_status.resolved_model;
     let ollama_online = resolved_local_model.is_some();
     let snapshot_count = {
-        let vm = state.version_manager.lock().await;
-        vm.list_versions()
-            .map(|versions| versions.len())
-            .unwrap_or_default()
+        if state
+            .persistence_coordinator
+            .require_trusted_read("LifeModelFileStore")
+            .is_ok()
+        {
+            let vm = state.version_manager.lock().await;
+            vm.list_versions()
+                .map(|versions| versions.len())
+                .unwrap_or_default()
+        } else {
+            0
+        }
     };
     let (life_model_ready, model_empty, builder_completion) = {
-        let manager = state.life_model_manager.lock().await;
-        match manager.load() {
-            Ok(model) => {
+        let model = if state
+            .persistence_coordinator
+            .require_trusted_read("LifeModelFileStore")
+            .is_ok()
+        {
+            state.life_model_manager.lock().await.load().ok()
+        } else {
+            None
+        };
+        match model {
+            Some(model) => {
                 let empty = model.is_effectively_empty();
 
                 let completion = model.calculate_4d_completion();
@@ -181,7 +244,7 @@ pub(crate) async fn get_system_diagnostics_with_state(
                 };
                 (true, empty, builder_comp)
             }
-            Err(_) => (
+            None => (
                 false,
                 true,
                 BuilderCompletion {
@@ -196,21 +259,35 @@ pub(crate) async fn get_system_diagnostics_with_state(
         }
     };
     let chat_session_count = {
-        let store = state.memory_store.lock().await;
-        match store.list_chat_sessions(1000) {
-            Ok(sessions) => sessions.len(),
-            Err(_) => 0,
+        if state
+            .persistence_coordinator
+            .require_trusted_read("MemoryStore")
+            .is_ok()
+        {
+            let store = state.memory_store.lock().await;
+            store
+                .list_chat_sessions(1000)
+                .map(|sessions| sessions.len())
+                .unwrap_or_default()
+        } else {
+            0
         }
     };
     let (agent_run_count, agent_run_store_status) = {
-        if let Some(ref agent_run_store_arc) = state.agent_run_store {
+        if state
+            .persistence_coordinator
+            .require_trusted_read("AgentRunStore")
+            .is_err()
+        {
+            (0, "unavailable".to_string())
+        } else if let Some(ref agent_run_store_arc) = state.agent_run_store {
             let store = agent_run_store_arc.lock().await;
             match store.run_count() {
                 Ok(count) => (count as usize, "ok".to_string()),
                 Err(_) => (0, "error".to_string()),
             }
         } else {
-            (0, "disabled".to_string())
+            (0, "unavailable".to_string())
         }
     };
     let mut readiness_issues = Vec::new();
@@ -251,18 +328,15 @@ pub(crate) async fn get_system_diagnostics_with_state(
         ));
     }
     if cloud_provider == "DeepSeek" && local_model.is_empty() {
-        let current_model = {
-            let cfg = state.config.lock().await;
-            cfg.llm.chat_model.clone()
-        };
+        let current_model = provider_runtime.config.llm.chat_model.clone();
         if current_model.to_lowercase().contains("reasoner") {
             readiness_issues.push(
-                "当前云端聊天模型是 DeepSeek 推理模型 deepseek-reasoner。为保证桌面端实时对话体验，主聊天流会自动切到 deepseek-chat；如果你想要更稳定的试用体验，也建议直接在设置页把模型改成 deepseek-chat。".to_string(),
+                "当前云端聊天模型是 DeepSeek 推理模型 deepseek-reasoner；缓冲和流式请求都会使用这个已配置模型，不会在适配器中静默改写。首次可见输出可能更慢，如需更轻量的实时对话请在设置页显式选择 deepseek-chat。".to_string(),
             );
         }
         if embedding_enabled {
             readiness_issues.push(
-                "当前是 DeepSeek 云端配置，远端 embedding 会自动关闭并回退到本地/Ollama 或哈希向量；如果历史聊天很多但记忆索引仍为空，请去设置页恢复控制台重建向量索引。".to_string(),
+                "当前聊天 Provider 是 DeepSeek，它不被声明为 embedding Provider；路由会在派发前显式选择本地确定性哈希，而不会拼接不存在的 /embeddings 端点。只有显式配置 Ollama 才会调用 Ollama。".to_string(),
             );
         }
     }
@@ -270,6 +344,18 @@ pub(crate) async fn get_system_diagnostics_with_state(
         readiness_issues.push(format!(
             "检测到 {} 条向量记忆索引损坏，记忆检索可能不完整；请在设置页导出备份后重建记忆索引。",
             vector_corrupt_embedding_count
+        ));
+    }
+    if vector_unknown_profile_count > 0 {
+        readiness_issues.push(format!(
+            "检测到 {} 条旧版向量缺少 embedding profile；其向量内容未必损坏，但必须重建后才能参与语义检索。",
+            vector_unknown_profile_count
+        ));
+    }
+    if vector_profile_dimension_mismatch_count > 0 {
+        readiness_issues.push(format!(
+            "检测到 {} 条向量的 profile 维度与实际数据不一致；已禁止静默过滤，请重建记忆索引。",
+            vector_profile_dimension_mismatch_count
         ));
     }
     if chat_session_count > 0 && memory_chunk_count == 0 {
@@ -283,8 +369,16 @@ pub(crate) async fn get_system_diagnostics_with_state(
             state.startup_warnings.join("；")
         ));
     }
+    if !persistence_health.canonical_writes_allowed {
+        readiness_issues.push(format!(
+            "持久化系统处于 {:?}：读取未观察到的事实必须视为 unknown，Provider、Tool 与所有 canonical write 已禁用。",
+            persistence_health.mode
+        ));
+    }
     let cloud_chat_backend_available = cloud_api_validated;
-    let chat_ready = life_model_ready && (ollama_online || cloud_chat_backend_available);
+    let chat_ready = persistence_health.provider_dispatch_allowed
+        && life_model_ready
+        && (ollama_online || cloud_chat_backend_available);
 
     let mut usage_readiness_issues = Vec::new();
     if !chat_ready {
@@ -326,6 +420,12 @@ pub(crate) async fn get_system_diagnostics_with_state(
         usage_readiness_issues
             .push("向量记忆索引存在损坏记录：建议重建索引后再验证长期记忆体验。".to_string());
     }
+    if vector_unknown_profile_count > 0 || vector_profile_dimension_mismatch_count > 0 {
+        usage_readiness_issues.push(
+            "向量索引存在未知或不兼容 embedding profile：关键词记忆仍可用，但语义检索需先重建。"
+                .to_string(),
+        );
+    }
     if chat_session_count > 0 && memory_chunk_count == 0 {
         usage_readiness_issues.push(
             "已有聊天记录，但语义记忆索引仍为空：建议先重建记忆索引，再验证长期记忆与校准体验。"
@@ -333,7 +433,13 @@ pub(crate) async fn get_system_diagnostics_with_state(
         );
     }
     let (pending_proposal_count, high_risk_pending_proposal_count, proposal_store_status) = {
-        if let Some(ref store_arc) = state.proposal_store {
+        if state
+            .persistence_coordinator
+            .require_trusted_read("ProposalStore")
+            .is_err()
+        {
+            (0, 0, "unavailable".to_string())
+        } else if let Some(ref store_arc) = state.proposal_store {
             let store = store_arc.lock().await;
             let pending = store.pending_count().unwrap_or(0) as usize;
             let high_risk = store
@@ -344,7 +450,7 @@ pub(crate) async fn get_system_diagnostics_with_state(
                 .unwrap_or(0) as usize;
             (pending, high_risk, "ok".to_string())
         } else {
-            (0, 0, "disabled".to_string())
+            (0, 0, "unavailable".to_string())
         }
     };
 
@@ -352,18 +458,23 @@ pub(crate) async fn get_system_diagnostics_with_state(
         && !model_empty
         && chat_session_count > 0
         && state.startup_warnings.is_empty()
+        && persistence_health.live_or_canonical_credit_eligible
         && vector_corrupt_embedding_count == 0
+        && vector_unknown_profile_count == 0
+        && vector_profile_dimension_mismatch_count == 0
         && memory_chunk_count != 0;
     let runtime_build_info = crate::runtime_build_info::collect_runtime_build_info().await;
-    let scheduler_for_route_evidence = { state.scheduler.lock().await.clone() };
+    let scheduler_for_route_evidence = provider_runtime.scheduler.clone();
     let runtime_route_evidence =
         crate::main_chat_runtime_facts::build_settings_runtime_route_evidence(
             state,
+            &provider_runtime.config,
             &scheduler_for_route_evidence,
         )
         .await;
 
     Ok(SystemDiagnostics {
+        persistence_health: persistence_health.clone(),
         policy_router,
         mcp_server_count,
         mcp_tool_count,
@@ -371,6 +482,8 @@ pub(crate) async fn get_system_diagnostics_with_state(
         mcp_recent_pii_count,
         memory_chunk_count,
         vector_corrupt_embedding_count,
+        vector_unknown_profile_count,
+        vector_profile_dimension_mismatch_count,
         unfinished_builder_sessions,
         pending_builder_review_sessions,
         ollama_service_online,
@@ -390,7 +503,9 @@ pub(crate) async fn get_system_diagnostics_with_state(
         readiness_issues,
         data_dir: app_data_dir().display().to_string(),
         active_data_dir: app_data_dir().display().to_string(),
-        database_status: if state.startup_warnings.is_empty() {
+        database_status: if persistence_health.canonical_writes_allowed
+            && state.startup_warnings.is_empty()
+        {
             "ok".to_string()
         } else {
             "degraded".to_string()
@@ -429,7 +544,7 @@ pub async fn get_policy_router_status() -> Result<PolicyRouterStatus, AppError> 
 pub async fn get_scheduler_config(
     state: State<'_, Arc<AppState>>,
 ) -> Result<SchedulerConfigResponse, AppError> {
-    let cfg = state.config.lock().await;
+    let cfg = state.provider_runtime_snapshot().await.config;
     Ok(SchedulerConfigResponse {
         local_model: cfg.local_model.clone(),
         prefer_local: cfg.prefer_local_model,
@@ -442,16 +557,15 @@ pub async fn set_scheduler_config(
     prefer_local: bool,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), AppError> {
-    let mut scheduler = state.scheduler.lock().await;
-    scheduler.local_model = local_model.clone();
-    scheduler.prefer_local = prefer_local;
-
+    let _config_write_guard = crate::commands::settings::CONFIG_WRITE_COORDINATOR
+        .lock()
+        .await;
     let data_dir = app_data_dir();
     let config_path = data_dir.join("config.yaml");
-
-    let mut cfg = state.config.lock().await;
+    let mut cfg = state.provider_runtime_snapshot().await.config;
     cfg.local_model = local_model;
     cfg.prefer_local_model = prefer_local;
     cfg.save(&config_path).map_err(AppError::from)?;
+    state.replace_provider_runtime_config(cfg).await;
     Ok(())
 }

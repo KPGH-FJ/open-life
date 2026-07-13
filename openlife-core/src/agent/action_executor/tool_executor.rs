@@ -1,42 +1,168 @@
 use crate::mcp::McpArgumentInspection;
-use crate::mcp::McpRegistry;
-use crate::mcp_audit::McpAuditStore;
 use crate::tool_manifest::{ToolManifest, ToolSource};
 use crate::tool_permissions::ToolPermissionDecision;
 use anyhow::Result;
 use serde_json::Value;
 
 use super::helpers::{
-    canonical_tool_source, ensure_external_write_content_size, external_write_content_preview,
-    filesystem_access_error, hs_requires_external_write_proposal, is_direct_external_write_tool,
-    is_path_in_safe_paths, is_proposal_generation_tool, minimized_external_write_arguments,
-    normalize_tool_name, should_mark_needs_confirmation, ToolCallInternalResult,
+    canonical_tool_source, configured_web_search_endpoint, ensure_external_write_content_size,
+    external_write_content_preview, filesystem_access_error, hs_requires_external_write_proposal,
+    is_direct_external_write_tool, is_path_in_safe_paths_async, is_proposal_generation_tool,
+    minimized_external_write_arguments, normalize_tool_name, should_mark_needs_confirmation,
+    ToolCallInternalResult,
 };
 use super::ActionExecutionContext;
 use super::ActionExecutionResult;
 use super::ActionExecutionStatus;
 use super::AgentActionRequest;
-use crate::agent::metadata_safe::{
-    metadata_safe_text_digest, metadata_safe_text_preview, metadata_safe_value_digest,
-    metadata_safe_value_preview,
-};
+use crate::agent::metadata_safe::{metadata_safe_text_preview, metadata_safe_value_digest};
 use crate::agent::policy_store::BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST;
-use crate::agent::review_workflow::{
-    DurableWriteRequest, DurableWriteSource, DurableWriteSubject, ReviewWorkflow,
-};
+use crate::agent::review_workflow::{DurableWriteRequest, DurableWriteSource, DurableWriteSubject};
+use crate::agent::tool_gateway::ToolGatewayContractEvidence;
 use crate::agent::types::{
-    AgentAction, AgentObservation, AgentProposal, ProposalSource, ProposalType,
-    ReactActionTraceEnvelope, RiskLevel, ToolActionScope,
+    AgentAction, AgentObservation, AgentProposal, BoundContentField, ContentReceiptBinding,
+    ContentReceiptKind, ProposalSource, ProposalType, ReactActionTraceEnvelope, RiskLevel,
+    ToolActionScope,
 };
 use crate::agent::{ExternalWriteGovernanceInput, LifeModelGovernor, MemoryWriteGovernanceInput};
+use crate::network_client::{
+    resolve_network_policy_decision, NetworkPolicyDecision, NetworkPolicyDisposition,
+};
+use crate::tool_execution_receipt::{ToolActionEffect, ToolExecutionReceiptTracker};
 use ring::digest::{digest, SHA256};
+
+struct NetworkPolicyBlockedInput<'a> {
+    request: &'a AgentActionRequest,
+    tool_name: &'a str,
+    args: &'a Value,
+    manifest: Option<&'a ToolManifest>,
+    inspection: &'a McpArgumentInspection,
+    decision: &'a NetworkPolicyDecision,
+    execution_receipt: crate::tool_execution_receipt::ToolExecutionReceipt,
+}
+
+struct PendingNetworkAuthorization {
+    permission_scope: String,
+    decision: NetworkPolicyDecision,
+}
+
+/// One adapter observation that may be consumed exactly once by the narrow
+/// receipt issuer. Construction is private to this module, the value is not
+/// Clone/serde, and consuming it moves the raw body out of ToolExecutor.
+pub(crate) struct ObservedToolBodyAdmission {
+    issuance_id: String,
+    kind: ContentReceiptKind,
+    body: String,
+    owner_anchor_digest: String,
+}
+
+impl std::fmt::Debug for ObservedToolBodyAdmission {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ObservedToolBodyAdmission")
+            .field("kind", &self.kind)
+            .field("byte_count", &self.body.len())
+            .field("body", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl ObservedToolBodyAdmission {
+    fn from_adapter_observation(
+        kind: ContentReceiptKind,
+        body: &str,
+        binding: &ContentReceiptBinding,
+    ) -> Result<Self> {
+        if body.len() > crate::agent::types::MAX_OBSERVED_CONTENT_RECEIPT_BYTES {
+            return Err(
+                crate::agent::types::ContentReceiptIssuanceError::ObservedBodyTooLarge {
+                    observed_bytes: body.len(),
+                    max_bytes: crate::agent::types::MAX_OBSERVED_CONTENT_RECEIPT_BYTES,
+                }
+                .into(),
+            );
+        }
+        if binding.field() != BoundContentField::for_kind(kind) {
+            return Err(crate::agent::types::ContentReceiptIssuanceError::FieldKindMismatch.into());
+        }
+        Ok(Self {
+            issuance_id: uuid::Uuid::new_v4().to_string(),
+            kind,
+            body: body.to_string(),
+            owner_anchor_digest: binding.owner_anchor_digest(),
+        })
+    }
+
+    pub(crate) fn into_issue_evidence(self) -> ObservedToolBodyIssueEvidence {
+        ObservedToolBodyIssueEvidence {
+            issuance_id: self.issuance_id,
+            kind: self.kind,
+            body: self.body,
+            owner_anchor_digest: self.owner_anchor_digest,
+        }
+    }
+}
+
+/// Store-facing evidence obtainable only by consuming an admission minted by
+/// the ToolExecutor adapter boundary.
+pub(crate) struct ObservedToolBodyIssueEvidence {
+    issuance_id: String,
+    kind: ContentReceiptKind,
+    body: String,
+    owner_anchor_digest: String,
+}
+
+impl ObservedToolBodyIssueEvidence {
+    pub(crate) fn issuance_id(&self) -> &str {
+        &self.issuance_id
+    }
+
+    pub(crate) fn kind(&self) -> ContentReceiptKind {
+        self.kind
+    }
+
+    pub(crate) fn body(&self) -> &str {
+        &self.body
+    }
+
+    pub(crate) fn owner_anchor_digest(&self) -> &str {
+        &self.owner_anchor_digest
+    }
+}
+
+fn mint_observed_body_admission(
+    observed_body: Option<(&str, ContentReceiptKind)>,
+    request: &AgentActionRequest,
+    action: &AgentAction,
+    observation: &AgentObservation,
+    require_run_identity: bool,
+) -> Result<Option<ObservedToolBodyAdmission>> {
+    let Some((body, kind)) = observed_body else {
+        return Ok(None);
+    };
+    let Some(run_id) = request.source_run_id.as_deref() else {
+        if require_run_identity {
+            anyhow::bail!("internal_read_canonical_run_identity_missing");
+        }
+        return Ok(None);
+    };
+    let field = match kind {
+        ContentReceiptKind::ToolOutput => BoundContentField::ActionOutputObservationContent,
+        ContentReceiptKind::ToolError => BoundContentField::ActionErrorObservationContent,
+    };
+    let binding = ContentReceiptBinding::from_action_graph(run_id, action, observation, field)?;
+    Ok(Some(ObservedToolBodyAdmission::from_adapter_observation(
+        kind, body, &binding,
+    )?))
+}
 
 impl super::ActionExecutor {
     /// Execute a tool action (MCP, builtin, or plugin).
-    pub fn execute_tool(
+    pub(crate) async fn execute_tool(
         &self,
         request: AgentActionRequest,
         ctx: &ActionExecutionContext<'_>,
+        receipt_tracker: ToolExecutionReceiptTracker,
     ) -> Result<ActionExecutionResult> {
         let normalized_target = normalize_tool_name(&request.target, ctx.registry);
         let tool_name = &normalized_target;
@@ -78,6 +204,43 @@ impl super::ActionExecutor {
                 status: ActionExecutionStatus::Blocked,
                 stop_reason: Some("tool_manifest_not_found".into()),
                 governance_report: None,
+                execution_receipt: receipt_tracker.snapshot(),
+                observed_body_admission: None,
+            });
+        }
+
+        if !self.config.allow_cloud
+            && manifest.as_ref().is_some_and(|manifest| {
+                manifest.action_type == "network"
+                    || manifest
+                        .capabilities
+                        .iter()
+                        .any(|capability| capability == "network")
+            })
+        {
+            let forced_decision = ToolPermissionDecision {
+                allowed: false,
+                requires_confirmation: false,
+                decision: "blocked".into(),
+                reason: "network-capable tool blocked because allow_cloud=false".into(),
+                policy_id: None,
+            };
+            let (action, observation) = self.build_blocked_action_observation(
+                tool_name,
+                &args,
+                &inspection,
+                &forced_decision,
+                manifest.as_ref(),
+                &request,
+            );
+            return Ok(ActionExecutionResult {
+                action,
+                observation,
+                status: ActionExecutionStatus::Blocked,
+                stop_reason: Some("allow_cloud_false".into()),
+                governance_report: None,
+                execution_receipt: receipt_tracker.snapshot(),
+                observed_body_admission: None,
             });
         }
 
@@ -116,7 +279,134 @@ impl super::ActionExecutor {
                 status: ActionExecutionStatus::Blocked,
                 stop_reason: Some("unsupported_tool_source".into()),
                 governance_report: Some(report),
+                execution_receipt: receipt_tracker.snapshot(),
+                observed_body_admission: None,
             });
+        }
+
+        // Network policy is an execution authorization, not a post-dispatch
+        // transport error. Resolve it before generic tool permission handling,
+        // dispatch observers, and receipt mutation. An `ask` decision must
+        // materialize a durable ReviewWorkflow item or remain fail-closed.
+        let mut authorized_network_policy = None;
+        let mut pending_network_authorization = None;
+        if matches!(tool_name.as_str(), "web.fetch" | "web.search") {
+            let endpoint = if tool_name == "web.fetch" {
+                args.get("url")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .ok_or_else(|| anyhow::anyhow!("Missing 'url' argument for web.fetch"))?
+            } else {
+                configured_web_search_endpoint()
+            };
+            if let Some(policy) = ctx.network_policy {
+                let network_decision = resolve_network_policy_decision(
+                    policy, &endpoint, tool_name,
+                )
+                .map_err(|error| anyhow::anyhow!("network_policy_evaluation_failed: {error:#}"))?;
+                match network_decision.disposition {
+                    NetworkPolicyDisposition::Allow => {}
+                    NetworkPolicyDisposition::Deny => {
+                        return Ok(self.build_network_policy_blocked_result(
+                            NetworkPolicyBlockedInput {
+                                request: &request,
+                                tool_name,
+                                args: &args,
+                                manifest: manifest.as_ref(),
+                                inspection: &inspection,
+                                decision: &network_decision,
+                                execution_receipt: receipt_tracker.snapshot(),
+                            },
+                        ));
+                    }
+                    NetworkPolicyDisposition::Ask => {
+                        let permission_scope =
+                            network_permission_scope(&network_decision, &request, &args);
+                        // Peek here so a one-shot grant is not consumed by a
+                        // later generic permission/argument/path blocker. The
+                        // CAS consumption happens immediately before dispatch.
+                        let permission = ctx
+                            .permission_store
+                            .peek(
+                                &permission_scope,
+                                "network_policy",
+                                "medium",
+                                "network",
+                                &["network".into(), "external_side_effect".into()],
+                            )
+                            .unwrap_or(ToolPermissionDecision {
+                                allowed: false,
+                                requires_confirmation: true,
+                                decision: "ask_every_time".into(),
+                                reason: "network consent lookup failed closed".into(),
+                                policy_id: None,
+                            });
+
+                        if !permission.allowed {
+                            if permission.decision == "deny" {
+                                let mut denied = network_decision.clone();
+                                denied.reason_code = "network_policy_permission_denied".into();
+                                return Ok(self.build_network_policy_blocked_result(
+                                    NetworkPolicyBlockedInput {
+                                        request: &request,
+                                        tool_name,
+                                        args: &args,
+                                        manifest: manifest.as_ref(),
+                                        inspection: &inspection,
+                                        decision: &denied,
+                                        execution_receipt: receipt_tracker.snapshot(),
+                                    },
+                                ));
+                            }
+                            if let Some(result) = self.create_network_policy_consent_proposal(
+                                &request,
+                                ctx,
+                                tool_name,
+                                &args,
+                                &network_decision,
+                                &receipt_tracker,
+                            ) {
+                                return result;
+                            }
+                            let forced_decision = ToolPermissionDecision {
+                                allowed: false,
+                                requires_confirmation: true,
+                                decision: "network_policy_consent_required".into(),
+                                reason: format!(
+                                    "{}; durable consent store unavailable",
+                                    network_decision.reason_code
+                                ),
+                                policy_id: None,
+                            };
+                            let (action, observation) = self.build_blocked_action_observation(
+                                tool_name,
+                                &args,
+                                &inspection,
+                                &forced_decision,
+                                manifest.as_ref(),
+                                &request,
+                            );
+                            return Ok(ActionExecutionResult {
+                                action,
+                                observation,
+                                status: ActionExecutionStatus::NeedsConfirmation,
+                                stop_reason: Some("network_policy_consent_required".into()),
+                                governance_report: None,
+                                execution_receipt: receipt_tracker.snapshot(),
+                                observed_body_admission: None,
+                            });
+                        }
+                        authorized_network_policy = Some(network_policy_after_exact_consent(
+                            policy,
+                            &network_decision,
+                        ));
+                        pending_network_authorization = Some(PendingNetworkAuthorization {
+                            permission_scope,
+                            decision: network_decision,
+                        });
+                    }
+                }
+            }
         }
 
         // 3. Check permission with canonical decision order:
@@ -144,7 +434,51 @@ impl super::ActionExecutor {
             } else {
                 let source = canonical_tool_source(manifest);
 
-                let perm_check = if self.config.consume_allow_once {
+                let perm_check = if let Some(authorization) = ctx.action_bound_tool_permission {
+                    let derived_execution_binding =
+                        crate::tool_permissions::ActionBoundToolExecutionBinding {
+                            queue_action_type: request.action_type.clone(),
+                            requested_target: request.target.clone(),
+                        };
+                    let execution_binding = authorization
+                        .execution_binding
+                        .as_ref()
+                        .unwrap_or(&derived_execution_binding);
+                    if self.config.consume_allow_once {
+                        ctx.permission_store.consume_action_bound(
+                            authorization,
+                            execution_binding,
+                            &manifest.name,
+                            &source,
+                            &manifest.risk_level,
+                            &manifest.action_type,
+                            &args,
+                        )
+                    } else if authorization.scope.matches_execution(
+                        execution_binding,
+                        &manifest.name,
+                        &source,
+                        &manifest.risk_level,
+                        &manifest.action_type,
+                        &args,
+                    ) {
+                        Ok(ToolPermissionDecision {
+                            allowed: true,
+                            requires_confirmation: false,
+                            decision: "action_bound_allow_once_peek".into(),
+                            reason: "exact action-bound ToolPermission is available".into(),
+                            policy_id: Some(authorization.permission_id.clone()),
+                        })
+                    } else {
+                        Ok(ToolPermissionDecision {
+                            allowed: false,
+                            requires_confirmation: true,
+                            decision: "action_bound_scope_mismatch".into(),
+                            reason: "action-bound ToolPermission does not match execution".into(),
+                            policy_id: Some(authorization.permission_id.clone()),
+                        })
+                    }
+                } else if self.config.consume_allow_once {
                     ctx.permission_store.check(
                         &manifest.name,
                         &source,
@@ -207,6 +541,8 @@ impl super::ActionExecutor {
                     status: ActionExecutionStatus::Blocked,
                     stop_reason: Some("allow_writes_false".into()),
                     governance_report: None,
+                    execution_receipt: receipt_tracker.snapshot(),
+                    observed_body_admission: None,
                 });
             }
         }
@@ -259,6 +595,8 @@ impl super::ActionExecutor {
                         })
                         .to_report(),
                 ),
+                execution_receipt: receipt_tracker.snapshot(),
+                observed_body_admission: None,
             });
         }
 
@@ -363,6 +701,8 @@ impl super::ActionExecutor {
                 status,
                 stop_reason: Some("blocked_by_policy".into()),
                 governance_report: None,
+                execution_receipt: receipt_tracker.snapshot(),
+                observed_body_admission: None,
             });
         }
 
@@ -373,7 +713,7 @@ impl super::ActionExecutor {
                     .get("path")
                     .and_then(|v: &Value| v.as_str())
                     .unwrap_or("");
-                if !is_path_in_safe_paths(path, ctx.safe_paths) {
+                if !is_path_in_safe_paths_async(path, ctx.safe_paths).await {
                     let (action, observation) = self.build_blocked_action_observation(
                         tool_name,
                         &args,
@@ -394,6 +734,65 @@ impl super::ActionExecutor {
                         status: ActionExecutionStatus::Blocked,
                         stop_reason: Some("path_not_in_safe_paths".into()),
                         governance_report: None,
+                        execution_receipt: receipt_tracker.snapshot(),
+                        observed_body_admission: None,
+                    });
+                }
+            }
+        }
+
+        if self.config.consume_allow_once {
+            if let Some(pending) = pending_network_authorization.as_ref() {
+                let permission = ctx
+                    .permission_store
+                    .check(
+                        &pending.permission_scope,
+                        "network_policy",
+                        "medium",
+                        "network",
+                        &["network".into(), "external_side_effect".into()],
+                    )
+                    .unwrap_or(ToolPermissionDecision {
+                        allowed: false,
+                        requires_confirmation: true,
+                        decision: "ask_every_time".into(),
+                        reason: "network consent consumption failed closed".into(),
+                        policy_id: None,
+                    });
+                if !permission.allowed {
+                    if let Some(result) = self.create_network_policy_consent_proposal(
+                        &request,
+                        ctx,
+                        tool_name,
+                        &args,
+                        &pending.decision,
+                        &receipt_tracker,
+                    ) {
+                        return result;
+                    }
+                    let forced_decision = ToolPermissionDecision {
+                        allowed: false,
+                        requires_confirmation: true,
+                        decision: "network_policy_consent_required".into(),
+                        reason: "single-use network consent was unavailable at dispatch".into(),
+                        policy_id: permission.policy_id,
+                    };
+                    let (action, observation) = self.build_blocked_action_observation(
+                        tool_name,
+                        &args,
+                        &inspection,
+                        &forced_decision,
+                        manifest.as_ref(),
+                        &request,
+                    );
+                    return Ok(ActionExecutionResult {
+                        action,
+                        observation,
+                        status: ActionExecutionStatus::NeedsConfirmation,
+                        stop_reason: Some("network_policy_consent_required".into()),
+                        governance_report: None,
+                        execution_receipt: receipt_tracker.snapshot(),
+                        observed_body_admission: None,
                     });
                 }
             }
@@ -404,36 +803,61 @@ impl super::ActionExecutor {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Tool manifest not found for '{}'", tool_name))?;
         let result = if manifest_ref.tags.contains(&"core_os".to_string()) {
-            self.execute_core_os_tool(tool_name, &args, ctx)
+            let result = self
+                .execute_core_os_tool(
+                    tool_name,
+                    &args,
+                    &request,
+                    ctx,
+                    manifest_ref,
+                    receipt_tracker.clone(),
+                )
+                .await
                 .unwrap_or_else(|e| ToolCallInternalResult {
                     success: false,
                     output: None,
                     error: Some(e.to_string()),
-                })
+                });
+            result
         } else if manifest_ref.tags.contains(&"execution".to_string()) {
-            self.execute_execution_tool(tool_name, &args, ctx, &request)
+            let result = self
+                .execute_execution_tool(
+                    tool_name,
+                    &args,
+                    ctx,
+                    &request,
+                    manifest_ref,
+                    receipt_tracker.clone(),
+                    authorized_network_policy.as_ref(),
+                )
+                .await
                 .unwrap_or_else(|e| ToolCallInternalResult {
                     success: false,
                     output: None,
                     error: Some(e.to_string()),
-                })
+                });
+            result
         } else {
+            ctx.authorize_tool_dispatch(manifest_ref, &request, &args, &receipt_tracker)
+                .await?;
             self.call_tool_internal(
                 manifest_ref,
                 args.clone(),
-                ctx.registry,
-                ctx.audit_store,
+                ctx,
                 inspection.pii_found,
+                receipt_tracker.clone(),
             )
+            .await
         };
 
-        let (mut action, mut observation) = self.build_success_action_observation(
-            tool_name,
-            &args,
-            &result,
-            manifest.as_ref(),
-            &request,
-        );
+        let (mut action, mut observation, observed_body_admission) = self
+            .build_success_action_observation(
+                tool_name,
+                &args,
+                &result,
+                manifest.as_ref(),
+                &request,
+            )?;
         if is_web_network_policy_blocker(tool_name, result.error.as_deref()) {
             action.status = "blocked".into();
             action.permission_decision = Some("network_policy_blocked".into());
@@ -454,6 +878,8 @@ impl super::ActionExecutor {
                 status: ActionExecutionStatus::Blocked,
                 stop_reason: Some("network_policy_blocked".into()),
                 governance_report: None,
+                execution_receipt: receipt_tracker.snapshot(),
+                observed_body_admission,
             });
         }
 
@@ -503,6 +929,8 @@ impl super::ActionExecutor {
                         status: ActionExecutionStatus::Blocked,
                         stop_reason: Some("mcp_read_tool_not_registered".into()),
                         governance_report: None,
+                        execution_receipt: receipt_tracker.snapshot(),
+                        observed_body_admission,
                     });
                 }
             }
@@ -535,6 +963,8 @@ impl super::ActionExecutor {
                             status: ActionExecutionStatus::NeedsConfirmation,
                             stop_reason: Some("hs_external_write_proposal_first".into()),
                             governance_report: None,
+                            execution_receipt: receipt_tracker.snapshot(),
+                            observed_body_admission,
                         });
                     }
                     if error.contains("blocked") || error.contains("ask_every_time") {
@@ -568,6 +998,8 @@ impl super::ActionExecutor {
                             status: ActionExecutionStatus::NeedsConfirmation,
                             stop_reason: Some("target_tool_needs_confirmation".into()),
                             governance_report: None,
+                            execution_receipt: receipt_tracker.snapshot(),
+                            observed_body_admission,
                         });
                     }
                 }
@@ -586,20 +1018,34 @@ impl super::ActionExecutor {
             status,
             stop_reason: None,
             governance_report: None,
+            execution_receipt: receipt_tracker.snapshot(),
+            observed_body_admission,
         })
     }
 
-    pub fn call_tool_internal(
+    pub(crate) async fn call_tool_internal(
         &self,
         manifest: &ToolManifest,
         args: Value,
-        registry: &McpRegistry,
-        audit: &McpAuditStore,
+        ctx: &ActionExecutionContext<'_>,
         pii_found: bool,
+        receipt_tracker: ToolExecutionReceiptTracker,
     ) -> ToolCallInternalResult {
-        match registry.execute_manifest(manifest, args.clone()) {
+        match ctx
+            .registry
+            .execute_manifest_async_with_receipt_tracker(
+                manifest,
+                args.clone(),
+                receipt_tracker,
+                ctx.tool_started_transition_observer,
+            )
+            .await
+        {
             Ok(r) => {
-                if let Err(e) = audit.insert_log(&manifest.name, &args, &r, true, pii_found) {
+                if let Err(e) =
+                    ctx.audit_store
+                        .insert_log(&manifest.name, &args, &r, true, pii_found)
+                {
                     eprintln!("[warn] audit log write failed: {}", e);
                 }
                 ToolCallInternalResult {
@@ -609,9 +1055,13 @@ impl super::ActionExecutor {
                 }
             }
             Err(e) => {
-                if let Err(log_err) =
-                    audit.insert_log(&manifest.name, &args, &e.to_string(), false, pii_found)
-                {
+                if let Err(log_err) = ctx.audit_store.insert_log(
+                    &manifest.name,
+                    &args,
+                    &e.to_string(),
+                    false,
+                    pii_found,
+                ) {
                     eprintln!("[warn] audit log write failed: {}", log_err);
                 }
                 ToolCallInternalResult {
@@ -665,7 +1115,6 @@ impl super::ActionExecutor {
             &action_id,
             Some(&observation_id),
             tool_name,
-            args,
             None,
             manifest,
             request,
@@ -693,6 +1142,7 @@ impl super::ActionExecutor {
             },
             timestamp: now,
             react_trace: Some(trace.clone()),
+            runtime_execution_receipt: None,
         };
 
         let observation = AgentObservation {
@@ -720,14 +1170,18 @@ impl super::ActionExecutor {
         (action, observation)
     }
 
-    pub fn build_success_action_observation(
+    fn build_success_action_observation(
         &self,
         tool_name: &str,
         args: &Value,
         result: &ToolCallInternalResult,
         manifest: Option<&ToolManifest>,
         request: &AgentActionRequest,
-    ) -> (AgentAction, AgentObservation) {
+    ) -> Result<(
+        AgentAction,
+        AgentObservation,
+        Option<ObservedToolBodyAdmission>,
+    )> {
         let now = chrono::Utc::now();
         let action_id = format!(
             "action-{}-{}",
@@ -760,8 +1214,16 @@ impl super::ActionExecutor {
             &action_id,
             Some(&observation_id),
             tool_name,
-            args,
-            result.output.as_deref().or(result.error.as_deref()),
+            result
+                .output
+                .as_deref()
+                .map(|body| (body, ContentReceiptKind::ToolOutput))
+                .or_else(|| {
+                    result
+                        .error
+                        .as_deref()
+                        .map(|body| (body, ContentReceiptKind::ToolError))
+                }),
             manifest,
             request,
             status,
@@ -787,6 +1249,7 @@ impl super::ActionExecutor {
             error: result.error.clone(),
             timestamp: now,
             react_trace: Some(trace.clone()),
+            runtime_execution_receipt: None,
         };
 
         let observation = AgentObservation {
@@ -811,7 +1274,133 @@ impl super::ActionExecutor {
             react_trace: Some(trace),
         };
 
-        (action, observation)
+        let observed_body_admission = mint_observed_body_admission(
+            manifest.and_then(|_| {
+                result
+                    .output
+                    .as_deref()
+                    .map(|body| (body, ContentReceiptKind::ToolOutput))
+                    .or_else(|| {
+                        result
+                            .error
+                            .as_deref()
+                            .map(|body| (body, ContentReceiptKind::ToolError))
+                    })
+            }),
+            request,
+            &action,
+            &observation,
+            false,
+        )?;
+
+        Ok((action, observation, observed_body_admission))
+    }
+
+    pub(super) fn build_internal_read_action_observation(
+        &self,
+        request: &AgentActionRequest,
+        contract: &ToolGatewayContractEvidence,
+        succeeded: bool,
+        observation_content: String,
+        structured_result: Value,
+        failure_code: Option<String>,
+    ) -> Result<(
+        AgentAction,
+        AgentObservation,
+        Option<ObservedToolBodyAdmission>,
+    )> {
+        if contract.source != "tool_gateway_internal"
+            || contract.action_effect != ToolActionEffect::ReadOnly
+            || contract.idempotency_contract
+                != crate::tool_manifest::ToolIdempotencyContract::Idempotent
+            || contract.action_type != "read"
+            || contract.capabilities != ["read"]
+            || contract.manifest_id != request.action_type
+            || contract.tool_name != request.target
+        {
+            anyhow::bail!("tool_gateway_internal_read_contract_binding_mismatch");
+        }
+        if succeeded && failure_code.is_some() {
+            anyhow::bail!("tool_gateway_internal_read_success_error_conflict");
+        }
+        if !succeeded && failure_code.is_none() {
+            anyhow::bail!("tool_gateway_internal_read_failure_code_missing");
+        }
+
+        let now = chrono::Utc::now();
+        let action_id = uuid::Uuid::new_v4().to_string();
+        let observation_id = uuid::Uuid::new_v4().to_string();
+        let status = if succeeded { "succeeded" } else { "failed" };
+        let permission_decision = "read_only_memory_search".to_string();
+        let observed_body =
+            succeeded.then_some((observation_content.as_str(), ContentReceiptKind::ToolOutput));
+        let trace = ReactActionTraceEnvelope {
+            run_id: request.source_run_id.clone(),
+            action_id: action_id.clone(),
+            step_index: request.step_index,
+            tool_call_index: request.step_index,
+            action_type: contract.tool_name.clone(),
+            tool_id: contract.manifest_id.clone(),
+            tool_name: contract.tool_name.clone(),
+            tool_source: contract.source.clone(),
+            action_category: contract.action_type.clone(),
+            risk_level: contract.risk_level.clone(),
+            permission_decision: Some(permission_decision.clone()),
+            status: status.into(),
+            proposal_id: None,
+            observation_id: Some(observation_id.clone()),
+            observation_status: Some(status.into()),
+            output_preview: observed_body.map(|(body, _)| metadata_safe_text_preview(body)),
+            output_receipt: None,
+            output_item_count: structured_result
+                .get("hitCount")
+                .and_then(Value::as_u64)
+                .and_then(|count| usize::try_from(count).ok()),
+            started_at: Some(now),
+            finished_at: Some(now),
+            metadata_safe: true,
+        };
+        let action = AgentAction {
+            id: action_id.clone(),
+            action_type: contract.tool_name.clone(),
+            target: Some(contract.tool_name.clone()),
+            input: request.input.clone(),
+            output: succeeded.then(|| serde_json::json!({"text": observation_content.clone()})),
+            status: status.into(),
+            error: failure_code,
+            permission_decision: Some(permission_decision),
+            started_at: Some(now),
+            finished_at: Some(now),
+            timestamp: now,
+            tool_scope: Some(ToolActionScope {
+                tool_id: contract.manifest_id.clone(),
+                tool_name: contract.tool_name.clone(),
+                source: contract.source.clone(),
+                risk_level: contract.risk_level.clone(),
+                capabilities: contract.capabilities.clone(),
+                action_type: contract.action_type.clone(),
+                requires_confirmation: false,
+                // The gateway authorized this read capability before
+                // execution. A failed adapter/result does not retroactively
+                // turn an allowed read into a policy denial; terminal status
+                // and stop_reason retain the execution failure.
+                allowed: true,
+            }),
+            react_trace: Some(trace.clone()),
+            runtime_execution_receipt: None,
+        };
+        let observation = AgentObservation {
+            id: observation_id,
+            action_id: Some(action_id),
+            content: observation_content.clone(),
+            source: request.action_type.clone(),
+            structured_result: Some(structured_result),
+            timestamp: now,
+            react_trace: Some(trace),
+        };
+        let admission =
+            mint_observed_body_admission(observed_body, request, &action, &observation, true)?;
+        Ok((action, observation, admission))
     }
 
     pub fn build_proposal_required_action(
@@ -819,6 +1408,13 @@ impl super::ActionExecutor {
         request: AgentActionRequest,
         reason: &str,
     ) -> ActionExecutionResult {
+        let execution_receipt = super::receipt_tracker_for_request(
+            &request,
+            None,
+            ToolActionEffect::ProposalOnly,
+            crate::tool_manifest::ToolIdempotencyContract::NonIdempotent,
+        )
+        .snapshot();
         let now = chrono::Utc::now();
         let action_id = format!(
             "action-{}-{}",
@@ -839,8 +1435,7 @@ impl super::ActionExecutor {
             &action_id,
             Some(&observation_id),
             &request.target,
-            &request.input,
-            Some(reason),
+            None,
             None,
             &request,
             status,
@@ -862,6 +1457,7 @@ impl super::ActionExecutor {
             error: Some(reason.to_string()),
             timestamp: now,
             react_trace: Some(trace.clone()),
+            runtime_execution_receipt: None,
         };
         let observation = AgentObservation {
             id: observation_id,
@@ -901,6 +1497,8 @@ impl super::ActionExecutor {
             },
             stop_reason: Some("proposal_required".into()),
             governance_report,
+            execution_receipt,
+            observed_body_admission: None,
         }
     }
 
@@ -910,8 +1508,7 @@ impl super::ActionExecutor {
         action_id: &str,
         observation_id: Option<&str>,
         tool_name: &str,
-        args: &Value,
-        output_or_error: Option<&str>,
+        observed_body: Option<(&str, ContentReceiptKind)>,
         manifest: Option<&ToolManifest>,
         request: &AgentActionRequest,
         status: &str,
@@ -919,30 +1516,16 @@ impl super::ActionExecutor {
         started_at: Option<chrono::DateTime<chrono::Utc>>,
         finished_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> ReactActionTraceEnvelope {
-        let (output_byte_count, output_hash, output_preview) = if let Some(text) = output_or_error {
-            let (byte_count, hash) = metadata_safe_text_digest(text);
-            (
-                Some(byte_count),
-                Some(hash),
-                Some(metadata_safe_text_preview(text)),
-            )
-        } else {
-            let (byte_count, hash) = metadata_safe_value_digest(args);
-            (
-                Some(byte_count),
-                Some(hash),
-                Some(metadata_safe_value_preview(args)),
-            )
-        };
-        let output_item_count = output_or_error
-            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+        let output_preview = observed_body.map(|(text, _)| metadata_safe_text_preview(text));
+        let output_item_count = observed_body
+            .and_then(|(text, _)| serde_json::from_str::<Value>(text).ok())
             .map(|value| match value {
                 Value::Array(items) => items.len(),
                 Value::Object(map) => map.len(),
                 Value::Null => 0,
                 _ => 1,
             });
-        let proposal_id = output_or_error.and_then(extract_proposal_id_from_text);
+        let proposal_id = observed_body.and_then(|(text, _)| extract_proposal_id_from_text(text));
         let tool_source = manifest
             .map(canonical_tool_source)
             .unwrap_or_else(|| "unregistered".into());
@@ -987,8 +1570,7 @@ impl super::ActionExecutor {
             observation_id: observation_id.map(str::to_string),
             observation_status: Some(status.to_string()),
             output_preview,
-            output_hash,
-            output_byte_count,
+            output_receipt: None,
             output_item_count,
             started_at,
             finished_at,
@@ -1008,7 +1590,7 @@ impl super::ActionExecutor {
         manifest: Option<&ToolManifest>,
         decision: &ToolPermissionDecision,
     ) -> Option<anyhow::Result<ActionExecutionResult>> {
-        let proposal_store = ctx.proposal_store?;
+        ctx.proposal_store?;
         let source = manifest
             .map(canonical_tool_source)
             .unwrap_or_else(|| "builtin".to_string());
@@ -1020,14 +1602,14 @@ impl super::ActionExecutor {
             .unwrap_or_else(|| request.action_type.clone());
         let capabilities = manifest.map(|m| m.capabilities.clone()).unwrap_or_default();
         let (input_length_bytes, input_hash) = metadata_safe_value_digest(args);
-        let input_preview = metadata_safe_value_preview(args);
-
         let after = serde_json::json!({
             "permission_action": "grant",
+            "permission_scope_kind": "action_bound",
+            "permission": "allow_once",
             "tool_name": tool_name,
             "source": source.clone(),
             "risk_level": risk_level.clone(),
-            "policy": "allow_until_revoked",
+            "policy": "allow_once",
             "canonical_scope": {
                 "tool_name": tool_name,
                 "source": source.clone(),
@@ -1038,13 +1620,15 @@ impl super::ActionExecutor {
                 "blocked_step_index": request.step_index,
                 "input_hash": input_hash,
                 "input_length_bytes": input_length_bytes,
-                "input_preview": input_preview,
             },
             "blocked_action": {
                 "action_type": request.action_type,
                 "target": request.target,
+                "resolved_target": tool_name,
                 "source_run_id": request.source_run_id,
                 "step_index": request.step_index,
+                "input_hash": input_hash,
+                "input_length_bytes": input_length_bytes,
             },
             "reason": decision.reason,
             "auto_generated": true,
@@ -1069,21 +1653,19 @@ impl super::ActionExecutor {
             proposal.run_id = Some(run_id.clone());
         }
 
-        let outcome = match ReviewWorkflow::new(proposal_store).submit(
-            DurableWriteRequest::from_agent_proposal(
-                DurableWriteSource::ToolPermission,
-                DurableWriteSubject::ToolPermission,
-                proposal,
-                "Tool permission proposal is pending Review Center approval.",
-            ),
-        ) {
+        let outcome = match ctx.submit_review_proposal(DurableWriteRequest::from_agent_proposal(
+            DurableWriteSource::ToolPermission,
+            DurableWriteSubject::ToolPermission,
+            proposal,
+            "Tool permission proposal is pending Review Center approval.",
+        )) {
             Ok(outcome) => outcome,
             Err(e) => {
                 eprintln!(
                     "[warn] Failed to create ToolPermission Proposal for {}: {}",
                     tool_name, e
                 );
-                return None;
+                return Some(Err(e));
             }
         };
 
@@ -1129,6 +1711,195 @@ impl super::ActionExecutor {
         }
 
         Some(Ok(result))
+    }
+
+    fn create_network_policy_consent_proposal(
+        &self,
+        request: &AgentActionRequest,
+        ctx: &ActionExecutionContext<'_>,
+        tool_name: &str,
+        args: &Value,
+        decision: &NetworkPolicyDecision,
+        receipt_tracker: &ToolExecutionReceiptTracker,
+    ) -> Option<anyhow::Result<ActionExecutionResult>> {
+        ctx.proposal_store?;
+        let permission_scope = network_permission_scope(decision, request, args);
+        let (input_length_bytes, input_digest) = metadata_safe_value_digest(args);
+        let after = serde_json::json!({
+            "permission_action": "grant",
+            "permission_scope_kind": "network_policy",
+            "permission": "allow_once",
+            "tool_name": permission_scope,
+            "source": "network_policy",
+            "risk_level": "medium",
+            "action_type": "network",
+            "canonical_scope": {
+                "tool_name": permission_scope,
+                "source": "network_policy",
+                "risk_level": "medium",
+                "action_type": "network",
+                "capabilities": ["network", "external_side_effect"],
+                "network_policy_decision_id": decision.decision_id,
+                "network_capability": decision.capability,
+                "host": decision.host,
+                "blocked_run_id": request.source_run_id,
+                "blocked_step_index": request.step_index,
+                "input_digest": input_digest,
+                "input_length_bytes": input_length_bytes,
+            },
+            "blocked_action": {
+                "action_type": request.action_type,
+                "target": request.target,
+                "source_run_id": request.source_run_id,
+                "step_index": request.step_index,
+                "network_policy_decision_id": decision.decision_id,
+            },
+            "reason": decision.reason_code,
+            "auto_generated": true,
+            "directWritesExecuted": false,
+        });
+        let mut proposal = AgentProposal::new(
+            ProposalType::ToolPermission,
+            &format!("tool_permission.network_policy.{}", decision.decision_id),
+            after,
+            &format!(
+                "Allow one '{}' network request to '{}' after explicit review.",
+                tool_name, decision.host
+            ),
+            1.0,
+            RiskLevel::Medium,
+            ProposalSource::Manual,
+        );
+        proposal.source_detail = Some(format!("network_policy_consent:{}", decision.decision_id));
+        proposal.run_id.clone_from(&request.source_run_id);
+
+        let workflow_request = DurableWriteRequest::from_agent_proposal(
+            DurableWriteSource::ToolPermission,
+            DurableWriteSubject::ToolPermission,
+            proposal,
+            "Network consent is pending Review Center approval.",
+        )
+        .with_idempotency_key(format!("network_policy_consent:{permission_scope}"))
+        .with_evidence_refs(vec![format!(
+            "network_policy_decision:{}",
+            decision.decision_id
+        )]);
+        let outcome = match ctx.submit_review_proposal(workflow_request) {
+            Ok(outcome) => outcome,
+            Err(error) => return Some(Err(error)),
+        };
+
+        let mut result = self.build_proposal_required_action(
+            request.clone(),
+            &format!(
+                "{}: network consent is pending Review Center approval (proposal id: {})",
+                tool_name,
+                outcome.proposal_id()
+            ),
+        );
+        result.execution_receipt = receipt_tracker.snapshot();
+        result.status = ActionExecutionStatus::NeedsConfirmation;
+        result.stop_reason = Some("network_policy_consent_required".into());
+        result.action.status = "needs_confirmation".into();
+        result.action.permission_decision = Some("network_policy_consent_required".into());
+        if let Some(structured) = result.observation.structured_result.as_mut() {
+            if let Some(object) = structured.as_object_mut() {
+                object.insert("status".into(), serde_json::json!("needs_confirmation"));
+                object.insert("requires_confirmation".into(), serde_json::json!(true));
+                object.insert(
+                    "permission_decision".into(),
+                    serde_json::json!("network_policy_consent_required"),
+                );
+                object.insert(
+                    "networkPolicyDecisionId".into(),
+                    serde_json::json!(decision.decision_id),
+                );
+                object.insert("networkHost".into(), serde_json::json!(decision.host));
+                object.insert(
+                    "proposalId".into(),
+                    serde_json::json!(outcome.proposal_id()),
+                );
+                object.insert("directWritesExecuted".into(), serde_json::json!(false));
+            }
+        }
+        for trace in [
+            result.action.react_trace.as_mut(),
+            result.observation.react_trace.as_mut(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            trace.proposal_id = Some(outcome.proposal_id().to_string());
+            trace.status = "needs_confirmation".into();
+            trace.permission_decision = Some("network_policy_consent_required".into());
+            trace.action_category = "proposal".into();
+        }
+        if let Some(trace) = result.observation.react_trace.as_mut() {
+            trace.observation_status = Some("needs_confirmation".into());
+        }
+
+        Some(Ok(result))
+    }
+
+    fn build_network_policy_blocked_result(
+        &self,
+        input: NetworkPolicyBlockedInput<'_>,
+    ) -> ActionExecutionResult {
+        let NetworkPolicyBlockedInput {
+            request,
+            tool_name,
+            args,
+            manifest,
+            inspection,
+            decision,
+            execution_receipt,
+        } = input;
+        let forced_decision = ToolPermissionDecision {
+            allowed: false,
+            requires_confirmation: false,
+            decision: decision.reason_code.clone(),
+            reason: format!(
+                "network policy denied '{}' for host '{}' (decision_id={})",
+                decision.capability, decision.host, decision.decision_id
+            ),
+            policy_id: None,
+        };
+        let (mut action, mut observation) = self.build_blocked_action_observation(
+            tool_name,
+            args,
+            inspection,
+            &forced_decision,
+            manifest,
+            request,
+        );
+        action.permission_decision = Some(decision.reason_code.clone());
+        if let Some(object) = observation
+            .structured_result
+            .as_mut()
+            .and_then(Value::as_object_mut)
+        {
+            object.insert(
+                "networkPolicyDecisionId".into(),
+                serde_json::json!(decision.decision_id),
+            );
+            object.insert("networkHost".into(), serde_json::json!(decision.host));
+            object.insert("networkPolicyBlocked".into(), serde_json::json!(true));
+            object.insert("network_policy_blocked".into(), serde_json::json!(true));
+            object.insert(
+                "networkPolicyReasonCode".into(),
+                serde_json::json!(decision.reason_code),
+            );
+            object.insert("directWritesExecuted".into(), serde_json::json!(false));
+        }
+        ActionExecutionResult {
+            action,
+            observation,
+            status: ActionExecutionStatus::Blocked,
+            stop_reason: Some(decision.reason_code.clone()),
+            governance_report: None,
+            execution_receipt,
+            observed_body_admission: None,
+        }
     }
 
     pub(crate) fn create_external_write_action_proposal(
@@ -1185,7 +1956,7 @@ impl super::ActionExecutor {
         args: &Value,
         manifest: &ToolManifest,
     ) -> Option<anyhow::Result<String>> {
-        let proposal_store = ctx.proposal_store?;
+        ctx.proposal_store?;
         let source = canonical_tool_source(manifest);
         let server = match &manifest.source {
             ToolSource::Mcp { server_name } => Some(server_name.clone()),
@@ -1258,26 +2029,67 @@ impl super::ActionExecutor {
         if let Some(ref run_id) = request.source_run_id {
             proposal.run_id = Some(run_id.clone());
         }
-        let outcome = match ReviewWorkflow::new(proposal_store).submit(
-            DurableWriteRequest::from_agent_proposal(
-                DurableWriteSource::ToolPermission,
-                DurableWriteSubject::ExternalWrite,
-                proposal,
-                "External write proposal is pending Review Center approval.",
-            ),
-        ) {
+        let outcome = match ctx.submit_review_proposal(DurableWriteRequest::from_agent_proposal(
+            DurableWriteSource::ToolPermission,
+            DurableWriteSubject::ExternalWrite,
+            proposal,
+            "External write proposal is pending Review Center approval.",
+        )) {
             Ok(outcome) => outcome,
             Err(e) => {
                 eprintln!(
                     "[warn] Failed to create ExternalWriteAction Proposal for {}: {}",
                     tool_name, e
                 );
-                return None;
+                return Some(Err(e));
             }
         };
 
         Some(Ok(outcome.proposal_id().to_string()))
     }
+}
+
+pub(super) fn record_effect_outcome(receipt_tracker: &ToolExecutionReceiptTracker, success: bool) {
+    if success {
+        receipt_tracker.mark_execution_succeeded();
+        receipt_tracker.mark_effect_confirmed();
+    } else {
+        receipt_tracker.mark_execution_failed();
+        receipt_tracker.mark_effect_unknown_if_dispatched();
+    }
+}
+
+fn network_permission_scope(
+    decision: &NetworkPolicyDecision,
+    request: &AgentActionRequest,
+    args: &Value,
+) -> String {
+    let (_, action_digest) = metadata_safe_value_digest(&serde_json::json!({
+        "networkPolicyDecisionId": decision.decision_id,
+        "sourceRunId": request.source_run_id,
+        "stepIndex": request.step_index,
+        "arguments": args,
+    }));
+    format!(
+        "network-consent@{}#action:{}",
+        decision.decision_id, action_digest
+    )
+}
+
+fn network_policy_after_exact_consent(
+    policy: &crate::config::NetworkPolicy,
+    decision: &NetworkPolicyDecision,
+) -> crate::config::NetworkPolicy {
+    let mut authorized = policy.clone();
+    // The grant is bound to this exact policy decision and host. Constrain the
+    // transport policy so a redirect cannot inherit consent for a different
+    // destination.
+    authorized.default_decision = "deny".into();
+    authorized.domain_allowlist = vec![decision.host.clone()];
+    authorized
+        .tool_overrides
+        .insert(decision.capability.clone(), "allow".into());
+    authorized
 }
 
 fn is_web_network_policy_blocker(tool_name: &str, error: Option<&str>) -> bool {
@@ -1294,6 +2106,13 @@ fn is_web_network_policy_blocker(tool_name: &str, error: Option<&str>) -> bool {
         "not in the network allowlist",
         "private/internal address",
         "Invalid URL scheme",
+        "network_policy_blocked",
+        "network_domain_denied",
+        "network_domain_not_allowlisted",
+        "network_private_or_reserved_address_blocked",
+        "network_url_scheme_blocked",
+        "network_redirect_limit_exceeded",
+        "network_response_body_too_large",
     ]
     .iter()
     .any(|needle| error.contains(needle))
@@ -1315,5 +2134,180 @@ fn manifest_risk_level(manifest: &ToolManifest) -> RiskLevel {
         "high" => RiskLevel::High,
         "medium" => RiskLevel::Medium,
         _ => RiskLevel::Low,
+    }
+}
+
+#[cfg(test)]
+mod bound_content_receipt_tests {
+    use super::*;
+    use crate::agent::action_executor::{ActionExecutor, ActionExecutorConfig};
+    use crate::tool_manifest::{ToolIdempotencyContract, ToolSource};
+
+    fn manifest() -> ToolManifest {
+        let mut manifest = ToolManifest::new(
+            "memory.search",
+            "Search canonical memory",
+            serde_json::json!({"type": "object"}),
+            "low",
+            "1",
+            ToolSource::BuiltIn,
+        );
+        manifest.id = "builtin.memory.search".into();
+        manifest.risk_level = "low".into();
+        manifest.capabilities = vec!["read".into(), "memory".into()];
+        manifest.action_type = "read".into();
+        manifest.idempotency_contract = ToolIdempotencyContract::Idempotent;
+        manifest
+    }
+
+    fn request(run_id: &str) -> AgentActionRequest {
+        AgentActionRequest {
+            action_type: "read".into(),
+            target: "memory.search".into(),
+            input: serde_json::json!({"arguments": {"query": "private transient input"}}),
+            source_run_id: Some(run_id.into()),
+            step_index: 1,
+        }
+    }
+
+    #[test]
+    fn bound_content_receipt_admission_has_one_private_mint_surface() {
+        let executor_source = include_str!("tool_executor.rs");
+        let production_source = executor_source
+            .split("#[cfg(test)]\nmod bound_content_receipt_tests")
+            .next()
+            .expect("production ToolExecutor source");
+        let admission_declaration = executor_source
+            .split("pub(crate) struct ObservedToolBodyAdmission")
+            .nth(1)
+            .and_then(|tail| tail.split("impl ObservedToolBodyAdmission").next())
+            .expect("admission declaration");
+        assert!(!admission_declaration.contains("derive"));
+        assert_eq!(
+            production_source
+                .matches("ObservedToolBodyAdmission::from_adapter_observation")
+                .count(),
+            1,
+            "only the real adapter observation builder may mint an admission"
+        );
+        assert_eq!(
+            production_source
+                .matches("fn from_adapter_observation(")
+                .count(),
+            1,
+            "the admission has exactly one module-private constructor definition"
+        );
+        assert!(!production_source.contains("pub fn build_success_action_observation"));
+        for non_issuer_source in [
+            include_str!("../types.rs"),
+            include_str!("../store.rs"),
+            include_str!("mod.rs"),
+        ] {
+            assert!(
+                !non_issuer_source.contains("ObservedToolBodyAdmission::from_adapter_observation")
+            );
+        }
+    }
+
+    #[test]
+    fn tool_executor_success_and_error_issue_runtime_bound_receipts() {
+        let executor = ActionExecutor::new(ActionExecutorConfig::default());
+        let manifest = manifest();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let request = request(&run_id);
+
+        for (result, expected_kind) in [
+            (
+                ToolCallInternalResult {
+                    success: true,
+                    output: Some("real adapter success body".into()),
+                    error: None,
+                },
+                ContentReceiptKind::ToolOutput,
+            ),
+            (
+                ToolCallInternalResult {
+                    success: false,
+                    output: None,
+                    error: Some("real adapter error body".into()),
+                },
+                ContentReceiptKind::ToolError,
+            ),
+        ] {
+            let store = crate::agent::AgentRunStore::new_in_memory().unwrap();
+            let mut run = crate::agent::AgentRun::new_chat_run("tool-receipt-test", "");
+            run.id = run_id.clone();
+            store.create_run(&run).unwrap();
+            let (mut action, mut observation, admission) = executor
+                .build_success_action_observation(
+                    &manifest.name,
+                    &serde_json::json!({"query": "transient"}),
+                    &result,
+                    Some(&manifest),
+                    &request,
+                )
+                .unwrap();
+            let receipt = crate::agent::action_executor::BoundContentReceiptIssuer::issue_bound_content_receipt(
+                &store,
+                admission.expect("adapter body admission"),
+                &action,
+                &observation,
+            )
+            .unwrap();
+            action.react_trace.as_mut().unwrap().output_receipt = Some(receipt);
+            observation.react_trace = None;
+            let action_receipt = action
+                .react_trace
+                .as_ref()
+                .and_then(|trace| trace.output_receipt.as_ref())
+                .expect("ToolExecutor action receipt");
+            assert_eq!(action_receipt.kind(), expected_kind);
+
+            run.actions.push(action);
+            run.observations.push(observation);
+            store.update_run(&run).unwrap();
+            let reloaded = store.get_run(&run.id).unwrap().unwrap();
+            let durable = reloaded.actions[0]
+                .react_trace
+                .as_ref()
+                .and_then(|trace| trace.output_receipt.as_ref())
+                .expect("durable ToolExecutor receipt");
+            assert_eq!(durable.kind(), expected_kind);
+            assert_eq!(durable.version(), 2);
+            assert!(durable.binding_receipt().starts_with("hmac-sha256:"));
+            assert!(reloaded.observations[0].react_trace.is_none());
+            let product_json = serde_json::to_string(&reloaded).unwrap();
+            assert!(!product_json.contains("real adapter success body"));
+            assert!(!product_json.contains("real adapter error body"));
+            assert!(!product_json.contains("bound-content-receipt://"));
+        }
+    }
+
+    #[test]
+    fn oversized_adapter_body_returns_a_typed_failure() {
+        let executor = ActionExecutor::new(ActionExecutorConfig::default());
+        let manifest = manifest();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let request = request(&run_id);
+        let result = ToolCallInternalResult {
+            success: true,
+            output: Some("x".repeat(16 * 1024 * 1024 + 1)),
+            error: None,
+        };
+
+        let error = match executor.build_success_action_observation(
+            &manifest.name,
+            &serde_json::json!({}),
+            &result,
+            Some(&manifest),
+            &request,
+        ) {
+            Ok(_) => panic!("oversized observed bodies must not silently omit receipt authority"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error.downcast_ref::<crate::agent::types::ContentReceiptIssuanceError>(),
+            Some(crate::agent::types::ContentReceiptIssuanceError::ObservedBodyTooLarge { .. })
+        ));
     }
 }

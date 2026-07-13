@@ -68,6 +68,9 @@ fn sensitive_packet() -> RuntimeHSPacket {
             estimated_tokens: 12,
             token_budget: 128,
         },
+        provider_authorization: crate::llm::ProviderPolicyAuthorization::local_only_fail_closed(
+            crate::llm::ProviderLocalOnlyReason::TestFixture,
+        ),
     }
 }
 

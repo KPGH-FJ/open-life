@@ -1,7 +1,6 @@
 use openlife_core::agent::main_chat_agent_v1::{
-    main_chat_action_type_supports_automatic_retry, AgentTaskSession, AgentTaskSessionStatus,
-    ExecutionQueueStatus, ExecutionTranscriptEntry, ExecutionTranscriptEntryKind,
-    QueuedExecutionAction,
+    AgentTaskSession, AgentTaskSessionStatus, ExecutionQueueStatus, ExecutionTranscriptEntry,
+    ExecutionTranscriptEntryKind, QueuedExecutionAction,
 };
 use openlife_core::agent::{AgentProposal, AgentRun, AgentRunStatus, ProposalStatus};
 use serde_json::Value;
@@ -337,7 +336,15 @@ fn agent_self_state_snapshot_from_evidence(
         .filter(|proposal| proposal.status == ProposalStatus::Pending)
         .count();
     let run_status = run.as_ref().map(|run| run.status.to_string());
+    let final_delivery_override = transcript.iter().rev().find_map(|entry| {
+        entry
+            .metadata
+            .get("finalDeliveryStatus")
+            .or_else(|| entry.metadata.get("final_delivery_status"))
+            .and_then(Value::as_str)
+    });
     let final_delivery_evidence = final_result_count > 0
+        && final_delivery_override != Some("failed")
         && run.as_ref().is_some_and(|run| {
             run.status == AgentRunStatus::Completed && run.output_preview.is_some()
         });
@@ -346,7 +353,9 @@ fn agent_self_state_snapshot_from_evidence(
             session.status,
             AgentTaskSessionStatus::Completed | AgentTaskSessionStatus::WaitingPermission
         );
-    let delivery_status = if final_delivery_evidence && pending_proposal_count > 0 {
+    let delivery_status = if let Some(status) = final_delivery_override {
+        status
+    } else if final_delivery_evidence && pending_proposal_count > 0 {
         "response_delivered_pending_review"
     } else if final_delivery_evidence {
         "delivered"
@@ -432,6 +441,9 @@ fn agent_self_state_snapshot_from_evidence(
     if !proposals.is_empty() {
         evidence_labels.push("proposal_store".to_string());
     }
+    if final_delivery_override.is_some() {
+        evidence_labels.push("terminal_delivery_receipt".to_string());
+    }
     evidence_labels.sort();
     evidence_labels.dedup();
 
@@ -493,8 +505,11 @@ fn agent_self_state_safe_next_controls(
         controls.push("review_proposal".to_string());
     }
     if actions.iter().any(|action| {
-        action.status == ExecutionQueueStatus::Failed
-            && main_chat_action_type_supports_automatic_retry(&action.action.action_type)
+        let decision = openlife_core::agent::main_chat_agent_v1::evaluate_main_chat_action_retry(
+            Some(session),
+            Some(action),
+        );
+        decision.allowed && !decision.manual_blocker_required
     }) {
         controls.push("retry_failed_action".to_string());
     }
@@ -893,4 +908,170 @@ pub(crate) fn classify_agent_self_state_query(
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openlife_core::agent::main_chat_agent_v1::{
+        ActionQueueStore, ActionReplayEffectCertainty, AgentTaskSessionDraft,
+        AgentTaskSessionStore, ExecutionAction, ExecutionPolicy, ExecutionQueueStatus,
+        InitialToolExecutionProjection, MainChatAgentStrategy,
+    };
+    use openlife_core::agent::{ActionExecutionStatus, ToolActionEffect};
+    use openlife_core::tool_execution_receipt::ToolExecutionReceipt;
+    use openlife_core::tool_manifest::ToolIdempotencyContract;
+
+    #[test]
+    fn dispatched_unknown_failure_never_becomes_a_safe_retry_control() {
+        let sessions = AgentTaskSessionStore::new_in_memory().expect("task sessions");
+        let session = sessions
+            .create_session(AgentTaskSessionDraft {
+                chat_session_id: "agent-self-unknown-effect".into(),
+                user_goal: "Read without duplicating an uncertain effect.".into(),
+                selected_strategy: MainChatAgentStrategy::ReActToolExecution,
+                current_plan_summary: None,
+                context_snapshot_refs: vec![],
+            })
+            .expect("create task session");
+        let actions = ActionQueueStore::new_in_memory().expect("action queue");
+        let action = ExecutionAction::new("file.read", "Read one governed resource.");
+        let queued = actions
+            .enqueue(
+                &session.id,
+                action.clone(),
+                ExecutionPolicy.classify(&action),
+            )
+            .expect("enqueue action");
+        let initially_failed = actions
+            .fail(&queued.id, "pre-dispatch setup failure", None)
+            .expect("enter failed");
+        let replay_execution_id = uuid::Uuid::new_v4().to_string();
+        let claim = actions
+            .claim_replay_for_test_fixture(
+                &queued.id,
+                initially_failed.status,
+                initially_failed.revision,
+                &replay_execution_id,
+            )
+            .expect("claim replay");
+        let retrying = actions
+            .transition_claimed_replay(
+                &queued.id,
+                &claim.claim_id,
+                initially_failed.status,
+                claim.revision,
+                ExecutionQueueStatus::Retrying,
+                None,
+            )
+            .expect("enter retrying");
+        let executing = actions
+            .transition_claimed_replay(
+                &queued.id,
+                &claim.claim_id,
+                retrying.status,
+                retrying.revision,
+                ExecutionQueueStatus::Executing,
+                None,
+            )
+            .expect("enter executing");
+        let fenced = actions
+            .fence_replay_dispatch_commit(
+                &queued.id,
+                &claim.claim_id,
+                claim.owner_generation,
+                executing.revision,
+            )
+            .expect("persist replay pre-edge dispatch fence");
+        let dispatched = actions
+            .record_replay_dispatch_started(&queued.id, &claim.claim_id, fenced.revision)
+            .expect("record physical dispatch boundary");
+        let failed = actions
+            .fail_claimed_replay(
+                &queued.id,
+                &claim.claim_id,
+                dispatched.status,
+                dispatched.revision,
+                "remote effect unknown",
+                Some(serde_json::json!({"retryReplayable": true})),
+            )
+            .expect("persist unknown effect");
+        assert_eq!(
+            failed.replay_effect_certainty,
+            ActionReplayEffectCertainty::DispatchedUnknown
+        );
+
+        let controls = agent_self_state_safe_next_controls(&session, &[failed], 0);
+        assert!(!controls
+            .iter()
+            .any(|control| control == "retry_failed_action"));
+    }
+
+    #[test]
+    fn non_idempotent_pre_dispatch_failure_is_manual_only_not_an_automatic_control() {
+        let sessions = AgentTaskSessionStore::new_in_memory().expect("task sessions");
+        let session = sessions
+            .create_session(AgentTaskSessionDraft {
+                chat_session_id: "agent-self-non-idempotent-pre-dispatch".into(),
+                user_goal: "Do not replay a non-idempotent tool automatically.".into(),
+                selected_strategy: MainChatAgentStrategy::ReActToolExecution,
+                current_plan_summary: None,
+                context_snapshot_refs: vec![],
+            })
+            .expect("create task session");
+        let actions = ActionQueueStore::new_in_memory().expect("action queue");
+        let action = ExecutionAction::new("mcp.read_only", "Opaque tool name is not authority.");
+        let queued = actions
+            .enqueue(
+                &session.id,
+                action.clone(),
+                ExecutionPolicy.classify(&action),
+            )
+            .expect("enqueue action");
+        let receipt = ToolExecutionReceipt::test_gateway_failed_before_dispatch(
+            Some("run-agent-self-non-idempotent".into()),
+            Some("manifest-agent-self-non-idempotent".into()),
+            "agent-self-non-idempotent-pre-dispatch".into(),
+            ToolActionEffect::ReadOnly,
+            ToolIdempotencyContract::NonIdempotent,
+        );
+        let failed = actions
+            .project_initial_tool_execution_receipt(
+                &queued.id,
+                queued.status,
+                queued.revision,
+                InitialToolExecutionProjection {
+                    execution_status: ActionExecutionStatus::Failed,
+                    receipt: &receipt,
+                    observation_metadata: None,
+                    error: Some("failed before dispatch".into()),
+                },
+            )
+            .expect("project typed pre-dispatch receipt");
+        assert_eq!(
+            failed.replay_effect_certainty,
+            ActionReplayEffectCertainty::EffectNotAttempted
+        );
+        let decision = openlife_core::agent::main_chat_agent_v1::evaluate_main_chat_action_retry(
+            Some(&session),
+            Some(&failed),
+        );
+        assert!(decision.allowed);
+        assert!(decision.manual_blocker_required);
+
+        let chat_session_id = session.chat_session_id.clone();
+        let snapshot = agent_self_state_snapshot_from_evidence(
+            &chat_session_id,
+            session,
+            Vec::new(),
+            vec![failed],
+            None,
+            Vec::new(),
+        );
+        assert!(!snapshot
+            .safe_next_controls
+            .iter()
+            .any(|control| control == "retry_failed_action"));
+        assert!(!snapshot.safe_automatic_control_available);
+    }
 }

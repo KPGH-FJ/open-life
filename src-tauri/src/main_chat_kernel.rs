@@ -5,27 +5,40 @@ use crate::main_chat_runtime_facts::{
     RUNTIME_FACT_PROVIDER_GENERATION_PATH, RUNTIME_FACT_PROVIDER_ROUTE_GENERATION_PATH,
 };
 use async_trait::async_trait;
+use futures::StreamExt;
 use openlife_core::agent::main_chat_agent_v1::{
-    AgentIngressDecision, AgentTaskSessionStatus, CompiledContext, ContextCompiler,
+    AgentIngressDecision, AllowedCapability, CompiledContext, ContextCompiler,
     ContextCompilerInput, ContextSourceCandidate, ContextSourceKind, ExecutionQueueStatus,
-    ExecutionTranscriptEntry, ExecutionTranscriptEntryKind, MainChatAgentStrategy,
-    MainChatPrivacyRiskSummary, PolicyRouteKind,
+    ExecutionTranscriptEntry, ExecutionTranscriptEntryKind, InitialToolExecutionProjection,
+    IntentSourceKind, MainChatAgentStrategy, MainChatPrivacyRiskSummary, PolicyDecision,
+    PolicyRouteKind,
+};
+#[cfg(test)]
+use openlife_core::agent::main_chat_agent_v1::{
+    IntentExecutionDisposition, IntentFrame, IntentRiskLevel, PolicyConsentDisposition,
+    PolicyMemoryAdmissionProof, PolicyRouter,
 };
 use openlife_core::agent::main_chat_runtime_contract::MainChatAgentStateSnapshot;
 use openlife_core::agent::{
-    classify_main_chat_governance_intent, plan_main_chat_memory_routing, ActionExecutionContext,
-    ActionExecutionResult, ActionExecutionStatus, ActionExecutorConfig, AgentActionRequest,
-    AgentRun, AgentRunError, AgentTask, ContextSummary, LifeDomain, LifeEventDraft,
-    LifeEventPrivacyLevel, LifeEventSourceRef, LifeEventSourceType, MainChatBlockerRequirement,
-    MainChatDurableWriteRequirement, MainChatMemoryCandidate, MainChatMemoryRoutingResult,
-    MemoryCandidateKind, MemoryDestination, ModelRoutePolicy, ModelRouteTrace, ReasoningTrace,
-    RedactionLevel, RiskLevel, RuntimeHSPacket,
+    ActionExecutionContext, ActionExecutionResult, ActionExecutionStatus, ActionExecutorConfig,
+    AgentActionRequest, AgentRun, AgentRunStatus, AgentTask, CanonicalMemoryFactDescriptor,
+    ContextSummary, MainChatMemoryCandidate, MainChatMemoryRoutingResult, MemoryCandidateKind,
+    MemoryDestination, MemoryLifecycleRiskLevel, MemoryLifecycleScope, MemoryLifecycleSensitivity,
+    ModelRoutePolicy, ModelRouteTrace, ReasoningTrace, RedactionLevel, RiskLevel, RuntimeHSPacket,
 };
+use openlife_core::config::{AppConfig, NetworkPolicy};
 use openlife_core::layer::Layer;
 use openlife_core::life_model::LifeModel;
-use openlife_core::llm::ChatMessage;
+use openlife_core::llm::{
+    BoundedContextBlock, ChatMessage, ContextManifest, ProviderDataRoute,
+    ProviderInvocationReceipt, ProviderInvocationStatus, ProviderPayloadPurpose,
+    ProviderPolicyAuthorization, ProviderPolicyReceiptEvidence,
+};
 use openlife_core::mcp::McpRegistry;
-use openlife_core::scheduler::InferenceScheduler;
+use openlife_core::privacy::PrivacyEngine;
+use openlife_core::scheduler::{
+    InferenceScheduler, PreparedProviderStreamEvent, PreparedProviderStreamTerminal,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -34,16 +47,19 @@ use std::sync::Arc;
 use crate::main_chat_agent_state_payload::assemble_main_chat_agent_state_for_turn;
 use crate::main_chat_context_loader::{
     compile_main_chat_context, load_configured_knowledge_context_candidates,
-    load_current_workspace_knowledge_context_candidates, sanitize_main_chat_selected_skill_id,
+    load_current_workspace_knowledge_context_candidates, retrievable_lifecycle_context_candidates,
+    sanitize_main_chat_selected_skill_id,
 };
 use crate::main_chat_event_stream::{
-    materialize_optional_main_chat_agent_events, MainChatAgentDurableEvent,
+    append_main_chat_provider_receipt_events, materialize_optional_main_chat_agent_events,
+    MainChatAgentDurableEvent,
 };
 use crate::main_chat_generation_support::{
-    finalize_chat_agent_run, main_chat_provider_endpoint_kind, persist_chat_message_if_needed,
-    persist_vector_memory_for_message, preview_text,
+    finalize_chat_agent_run, main_chat_provider_endpoint_kind, preview_text,
 };
 use crate::main_chat_hs_runtime::{build_chat_runtime_hs_packet, included_life_model_sections};
+#[cfg(test)]
+use crate::main_chat_react_runtime::MainChatReactCanonicalToolDelta;
 use crate::main_chat_react_runtime::{
     attach_main_chat_read_observation_metadata,
     bind_main_chat_observation_metadata_to_queue_action, try_run_main_chat_react_agent_loop,
@@ -54,11 +70,18 @@ use crate::main_chat_react_tool_selection::{
     main_chat_manifest_is_governed_read_candidate, MainChatReactActionPlan,
     MainChatReactToolCandidate,
 };
+use crate::main_chat_replay_contract::{
+    DurableMainChatReplayExecutionEnvelope, DurableMainChatReplayExecutionInput,
+};
 use crate::main_chat_runtime_support::{
     append_main_chat_agent_transcript, append_main_chat_direct_answer_contract_transcript,
     complete_main_chat_agent_turn_session, enqueue_main_chat_agent_action, fail_main_chat_action,
     finalize_main_chat_task_failure, transition_main_chat_action, MainChatAgentTurn,
     MainChatTaskFailureKind,
+};
+use crate::provider_network_consent::{
+    authorize_provider_network_dispatch, NetworkConsentSubmissionScope,
+    ProviderNetworkAuthorization,
 };
 use crate::{AppState, SendMessageResult, ToolCallResult, ToolCallStatus};
 
@@ -77,14 +100,75 @@ const KERNEL_MCP_CANDIDATE_LIMIT: usize = 8;
 pub struct MainChatTurnInput {
     pub session_id: String,
     pub messages: Vec<ChatMessage>,
+    pub provider_authorization: MainChatProviderAuthorization,
     #[serde(default)]
     pub selected_skill_id: Option<String>,
-    #[serde(default)]
-    pub selected_strategy: Option<MainChatAgentStrategy>,
+    pub policy_decision: PolicyDecision,
     #[serde(default)]
     pub model_supplied_tool_arguments: Option<Value>,
     #[serde(default)]
     pub runtime_fact_direct_answer: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MainChatProviderAuthorization {
+    pub data_route: ProviderDataRoute,
+    pub privacy_decision_id: String,
+    #[serde(default)]
+    pub task_session_id: Option<String>,
+    #[serde(skip)]
+    pub(crate) policy_authorization: ProviderPolicyAuthorization,
+}
+
+impl MainChatProviderAuthorization {
+    fn from_ingress_decision(decision: &AgentIngressDecision) -> Result<Self, String> {
+        let policy_authorization = ProviderPolicyAuthorization::from_main_chat_ingress(decision)
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            data_route: decision.policy_decision.data_route,
+            privacy_decision_id: decision.request_id.clone(),
+            task_session_id: decision.agent_task_session_id.clone(),
+            policy_authorization,
+        })
+    }
+
+    fn validate_projection(&self) -> bool {
+        self.data_route == self.policy_authorization.data_route()
+            && self.privacy_decision_id == self.policy_authorization.decision_id()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_fixture(label: &str, allow_cloud: bool) -> Self {
+        Self::test_fixture_for_user_text(label, allow_cloud, "Explain focused work.")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_fixture_for_user_text(
+        label: &str,
+        allow_cloud: bool,
+        current_user_text: &str,
+    ) -> Self {
+        let ingress = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
+            &format!("test-provider-policy:{label}"),
+            current_user_text,
+            None,
+            openlife_core::agent::AgentTaskKind::Conversation,
+        );
+        let authorization = ProviderPolicyAuthorization::from_main_chat_ingress(&ingress).unwrap();
+        let authorization = if allow_cloud {
+            authorization
+        } else {
+            authorization
+                .restrict_to_local(openlife_core::llm::ProviderLocalOnlyReason::TestFixture)
+        };
+        Self {
+            data_route: authorization.data_route(),
+            privacy_decision_id: authorization.decision_id().to_string(),
+            task_session_id: None,
+            policy_authorization: authorization,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +186,13 @@ pub struct MainChatTurnResult {
     pub context_metadata: Option<MainChatKernelContextMetadata>,
     pub direct_writes_executed: bool,
     pub legacy_fallback_used: bool,
+    /// Live adapter graphs remain in-process only. The canonical AgentRun
+    /// update consumes them atomically with the pending bound receipt; serde
+    /// and provider/model surfaces can never carry the raw graph.
+    #[serde(skip)]
+    canonical_tool_graphs: Vec<KernelCanonicalToolGraph>,
+    #[serde(skip)]
+    canonical_supplemental_observations: Vec<openlife_core::agent::AgentObservation>,
 }
 
 impl MainChatTurnResult {
@@ -117,8 +208,16 @@ impl MainChatTurnResult {
             context_metadata: None,
             direct_writes_executed: false,
             legacy_fallback_used: false,
+            canonical_tool_graphs: Vec::new(),
+            canonical_supplemental_observations: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct KernelCanonicalToolGraph {
+    action: openlife_core::agent::AgentAction,
+    observations: Vec<openlife_core::agent::AgentObservation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -137,8 +236,22 @@ pub struct MainChatKernelToolCall {
     pub blocker: Option<String>,
     #[serde(default)]
     pub observation_metadata: Option<Value>,
+    /// Typed execution truth projected once from ToolGateway/AgentLoop. JSON
+    /// metadata is only a presentation mirror and is never parsed as authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_receipt: Option<openlife_core::tool_execution_receipt::ToolExecutionReceipt>,
     #[serde(default)]
     pub model_arguments_ignored: bool,
+    /// Product-safe trace projection only. It is deliberately skipped by the
+    /// internal kernel serde contract so no model/provider round-trip can
+    /// fabricate `verified` receipt truth.
+    #[serde(skip)]
+    pub(crate) react_trace: Option<crate::product_agent_dto::ProductReactActionTrace>,
+    /// Runtime-only exact ToolGateway/action projection proof. It is never
+    /// accepted from model/provider/kernel serde payloads.
+    #[serde(skip)]
+    pub(crate) product_projection:
+        Option<crate::product_agent_dto::VerifiedProductToolCallProjection>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,6 +297,7 @@ pub struct MainChatKernelWriteOutcome {
 pub struct MainChatRouteMetadata {
     pub provider: String,
     pub model: String,
+    pub provider_request_id: Option<String>,
     pub route_type: String,
     pub prefer_local: bool,
     pub local_model: String,
@@ -283,6 +397,42 @@ pub enum MainChatKernelEvent {
     RouteSelected {
         route_metadata: MainChatRouteMetadata,
     },
+    ProviderStarted {
+        request_id: String,
+        provider: String,
+        model: String,
+        started_at: chrono::DateTime<chrono::Utc>,
+        policy_evidence: ProviderPolicyReceiptEvidence,
+    },
+    ProviderCompleted {
+        request_id: String,
+        provider: String,
+        model: String,
+        finished_at: chrono::DateTime<chrono::Utc>,
+    },
+    ProviderFailed {
+        request_id: String,
+        provider: String,
+        model: String,
+        finished_at: chrono::DateTime<chrono::Utc>,
+        error_digest: String,
+    },
+    ProviderRemoteUnknown {
+        request_id: String,
+        provider: String,
+        model: String,
+        finished_at: chrono::DateTime<chrono::Utc>,
+        reason_digest: String,
+    },
+    ProviderPolicyEvidence {
+        request_id: String,
+        policy_evidence: ProviderPolicyReceiptEvidence,
+    },
+    ProviderToken {
+        session_id: String,
+        request_id: String,
+        chunk: String,
+    },
     FinalAnswer {
         content_preview: String,
         content_chars: usize,
@@ -313,7 +463,11 @@ pub enum MainChatKernelEvent {
     },
 }
 
-pub trait MainChatEventSink {
+pub trait MainChatEventSink: Send {
+    fn bind_execution_identity(&mut self, _task_session_id: &str, _run_id: &str) {}
+
+    fn emit_stream_start(&mut self, _session_id: &str, _task_session_id: &str, _run_id: &str) {}
+
     fn emit(&mut self, event: MainChatKernelEvent);
 
     fn events(&self) -> &[MainChatKernelEvent] {
@@ -349,6 +503,9 @@ impl MainChatEventSink for BufferedMainChatEventSink {
 pub struct StreamingMainChatEventSink<'a> {
     emit_stream_event: &'a mut (dyn FnMut(&str, serde_json::Value) + Send),
     events: Vec<MainChatKernelEvent>,
+    provider_token_count: usize,
+    task_session_id: Option<String>,
+    run_id: Option<String>,
 }
 
 impl<'a> StreamingMainChatEventSink<'a> {
@@ -359,21 +516,80 @@ impl<'a> StreamingMainChatEventSink<'a> {
         Self {
             emit_stream_event,
             events: Vec::new(),
+            provider_token_count: 0,
+            task_session_id: None,
+            run_id: None,
         }
     }
 
     pub fn events(&self) -> &[MainChatKernelEvent] {
         &self.events
     }
+
+    pub fn provider_token_count(&self) -> usize {
+        self.provider_token_count
+    }
 }
 
 impl MainChatEventSink for StreamingMainChatEventSink<'_> {
+    fn bind_execution_identity(&mut self, task_session_id: &str, run_id: &str) {
+        debug_assert!(!task_session_id.trim().is_empty());
+        debug_assert!(!run_id.trim().is_empty());
+        self.task_session_id = Some(task_session_id.to_string());
+        self.run_id = Some(run_id.to_string());
+    }
+
+    fn emit_stream_start(&mut self, session_id: &str, task_session_id: &str, run_id: &str) {
+        (self.emit_stream_event)(
+            "stream-message-start",
+            serde_json::json!({
+                "session_id": session_id,
+                "task_session_id": task_session_id,
+                "run_id": run_id,
+                "runtime_owner": crate::main_chat_turn_runtime::OPENLIFE_TURN_RUNTIME_OWNER,
+                "status": "running",
+            }),
+        );
+    }
+
     fn emit(&mut self, event: MainChatKernelEvent) {
-        let payload = serde_json::to_value(&event).unwrap_or_else(|_| {
+        let (Some(task_session_id), Some(run_id)) =
+            (self.task_session_id.as_deref(), self.run_id.as_deref())
+        else {
+            debug_assert!(
+                false,
+                "stream event emitted before canonical identity binding"
+            );
+            return;
+        };
+        if let MainChatKernelEvent::ProviderToken {
+            session_id,
+            request_id,
+            chunk,
+        } = &event
+        {
+            (self.emit_stream_event)(
+                "stream-message-chunk",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "request_id": request_id,
+                    "chunk": chunk,
+                    "task_session_id": task_session_id,
+                    "run_id": run_id,
+                }),
+            );
+            self.provider_token_count += 1;
+            return;
+        }
+        let mut payload = serde_json::to_value(&event).unwrap_or_else(|_| {
             serde_json::json!({
                 "type": "kernel_event_serialization_failed",
             })
         });
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("task_session_id".into(), serde_json::json!(task_session_id));
+            object.insert("run_id".into(), serde_json::json!(run_id));
+        }
         (self.emit_stream_event)("main-chat-kernel-event", payload);
         self.events.push(event);
     }
@@ -405,6 +621,10 @@ struct MainChatKernelReadToolExecution {
     observation_metadata: Value,
     output_preview: String,
     blocker_reason: Option<String>,
+    execution_receipt: openlife_core::tool_execution_receipt::ToolExecutionReceipt,
+    canonical_tool_graph: Option<KernelCanonicalToolGraph>,
+    product_react_trace: Option<crate::product_agent_dto::ProductReactActionTrace>,
+    product_tool_projection: Option<crate::product_agent_dto::VerifiedProductToolCallProjection>,
 }
 
 #[async_trait]
@@ -412,17 +632,31 @@ trait MainChatKernelReadToolExecutor: Send + Sync {
     async fn execute_read_tool(
         &self,
         decision: MainChatKernelReadToolDecision,
+        canonical_run_id: &str,
     ) -> MainChatKernelReadToolExecution;
 }
 
 #[derive(Clone)]
 struct AppStateMainChatReadToolExecutor {
     state: Arc<AppState>,
+    execution_epoch: crate::main_chat_cancellation::MainChatExecutionEpoch,
+    task_session_id: String,
+    conversation_session_id: String,
 }
 
 impl AppStateMainChatReadToolExecutor {
-    fn new(state: Arc<AppState>) -> Self {
-        Self { state }
+    fn new(
+        state: Arc<AppState>,
+        execution_epoch: crate::main_chat_cancellation::MainChatExecutionEpoch,
+        task_session_id: impl Into<String>,
+        conversation_session_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            state,
+            execution_epoch,
+            task_session_id: task_session_id.into(),
+            conversation_session_id: conversation_session_id.into(),
+        }
     }
 }
 
@@ -431,7 +665,32 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
     async fn execute_read_tool(
         &self,
         mut decision: MainChatKernelReadToolDecision,
+        canonical_run_id: &str,
     ) -> MainChatKernelReadToolExecution {
+        if canonical_run_id.trim().is_empty() {
+            return blocked_kernel_read_tool_execution(
+                decision,
+                "canonical_run_identity_missing",
+                "ToolGateway dispatch requires a persisted canonical AgentRun id.",
+                None,
+            );
+        }
+        let resources =
+            match crate::tool_gateway_resources::snapshot_tool_gateway_resources_for_main_chat_read(
+                &self.state,
+            )
+            .await
+            {
+                Ok(resources) => resources,
+                Err(error) => {
+                    return blocked_kernel_read_tool_execution(
+                        decision,
+                        "tool_gateway_resources_unavailable",
+                        &error,
+                        None,
+                    );
+                }
+            };
         if decision.tool_name == "file.read" {
             match crate::workspace_file_resolver::resolve_main_chat_workspace_file_target(
                 decision
@@ -469,8 +728,7 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
         }
 
         if decision.tool_name == "mcp.read_only" {
-            let registry = self.state.mcp_registry.lock().await;
-            match resolve_kernel_mcp_read_decision(&registry, decision) {
+            match resolve_kernel_mcp_read_decision(&resources.governed.shared.registry, decision) {
                 Ok(resolved) => {
                     decision = resolved;
                 }
@@ -486,9 +744,23 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
             }
         }
 
+        if decision.executor_action_type == "session_search"
+            && decision.governed_input.get("session_id").is_none()
+        {
+            // The runtime, not the model, owns the current conversation
+            // identity. Prior-session search must not satisfy itself from the
+            // user message that triggered the search.
+            if let Some(input) = decision.governed_input.as_object_mut() {
+                input.insert(
+                    "exclude_session_id".into(),
+                    serde_json::json!(self.conversation_session_id),
+                );
+            }
+        }
+
         let (safe_paths, calendar_ics_paths, network_policy) = {
-            let config = self.state.config.lock().await;
-            let mut safe_paths = config.system.safe_paths.clone();
+            let governed = &resources.governed;
+            let mut safe_paths = governed.shared.safe_paths.clone();
             if let Ok(workspace) = crate::workspace_file_resolver::resolve_workspace_root() {
                 let workspace = workspace.to_string_lossy().to_string();
                 if !safe_paths.iter().any(|path| path == &workspace) {
@@ -497,8 +769,8 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
             }
             (
                 safe_paths,
-                config.system.calendar_ics_paths.clone(),
-                config.system.network_policy.clone(),
+                governed.calendar_ics_paths.clone(),
+                governed.network_policy.clone(),
             )
         };
 
@@ -540,46 +812,39 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
             None
         };
 
-        let permission_store_guard = if local_file_permission_store.is_none() {
-            Some(self.state.tool_permission_store.lock().await)
+        let permission_store = if let Some(store) = local_file_permission_store {
+            store
         } else {
-            None
-        };
-        let permission_store_ref = match (&local_file_permission_store, &permission_store_guard) {
-            (Some(store), _) => store,
-            (None, Some(store)) => &**store,
-            _ => {
-                return blocked_kernel_read_tool_execution(
-                    decision,
-                    "tool_permission_store_unavailable",
-                    "Tool permission store is unavailable.",
-                    None,
-                );
-            }
+            resources.governed.shared.permission_store.clone()
         };
 
-        let registry = self.state.mcp_registry.lock().await;
-        let audit_store = self.state.mcp_audit_store.lock().await;
-        let privacy_engine = self.state.privacy_engine.lock().await;
-        let memory_store = self.state.memory_store.lock().await;
-        let proposal_store_guard = if let Some(ref proposal_store) = self.state.proposal_store {
-            Some(proposal_store.lock().await)
-        } else {
-            None
-        };
         let mut action_ctx = ActionExecutionContext::new(
-            &registry,
-            permission_store_ref,
-            &audit_store,
-            &privacy_engine,
+            &resources.governed.shared.registry,
+            &permission_store,
+            &resources.governed.shared.audit_store,
+            &resources.governed.shared.privacy_engine,
             &safe_paths,
         )
-        .with_memory_store(&memory_store)
+        .with_memory_store(&resources.governed.memory_store)
+        .with_agent_run_store(&resources.agent_run_store)
         .with_network_policy(&network_policy)
+        .with_canonical_write_admission(&self.execution_epoch)
         .with_calendar_ics_paths(&calendar_ics_paths);
-        if let Some(ref proposal_store) = proposal_store_guard {
-            action_ctx = action_ctx.with_proposal_store(proposal_store);
+        if let Some(retrieval_reader) = resources
+            .governed
+            .memory_lifecycle_retrieval_reader
+            .as_ref()
+        {
+            action_ctx = action_ctx.with_memory_lifecycle_retrieval_reader(retrieval_reader);
         }
+        let lifecycle_observer = crate::main_chat_event_stream::MainChatToolLifecycleObserver::new(
+            Arc::clone(&self.state),
+            self.task_session_id.clone(),
+            canonical_run_id.to_string(),
+        );
+        action_ctx = action_ctx
+            .with_tool_dispatch_observer(&lifecycle_observer)
+            .with_tool_started_transition_observer(&lifecycle_observer);
         if let Some(ref fixture_output) = web_search_fixture_output {
             action_ctx = action_ctx.with_web_search_fixture_output(fixture_output);
         }
@@ -593,22 +858,24 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
             action_type: decision.executor_action_type.clone(),
             target: decision.target.clone(),
             input: request_input,
-            source_run_id: decision
-                .selection_metadata
-                .as_ref()
-                .and_then(|metadata| metadata.get("sourceRunId"))
-                .and_then(Value::as_str)
-                .map(str::to_string),
+            source_run_id: Some(canonical_run_id.to_string()),
             step_index: 0,
         };
+        let execution_epoch = self.execution_epoch.clone();
         match openlife_core::agent::ToolGateway::from_executor_config(ActionExecutorConfig {
             allow_writes: false,
-            allow_cloud: false,
+            allow_cloud: true,
             ..Default::default()
         })
+        .with_receipt_registration_sink(move |registration| {
+            execution_epoch.observe_tool_execution(registration);
+        })
         .execute(request, &action_ctx)
+        .await
         {
-            Ok(result) => kernel_read_tool_execution_from_action_result(decision, result),
+            Ok(result) => {
+                kernel_read_tool_execution_from_action_result(decision, result, canonical_run_id)
+            }
             Err(error) => blocked_kernel_read_tool_execution(
                 decision,
                 "read_tool_gateway_failed",
@@ -1111,29 +1378,193 @@ fn kernel_contract_safe_label(value: &str, allow_colon: bool) -> bool {
         })
 }
 
+fn typed_kernel_read_policy_code(value: Option<&str>) -> Option<&'static str> {
+    match value {
+        Some("allow_cloud_false") => Some("allow_cloud_false"),
+        Some("allow_writes_false") => Some("allow_writes_false"),
+        Some("blocked_by_policy") => Some("blocked_by_policy"),
+        Some("filesystem_outside_workspace_blocked") => {
+            Some("filesystem_outside_workspace_blocked")
+        }
+        Some("filesystem_path_traversal_blocked") => Some("filesystem_path_traversal_blocked"),
+        Some("filesystem_read_blocked") => Some("filesystem_read_blocked"),
+        Some("hs_external_write_proposal_first") => Some("hs_external_write_proposal_first"),
+        Some("mcp_read_tool_not_governed_read_only") => {
+            Some("mcp_read_tool_not_governed_read_only")
+        }
+        Some("mcp_read_tool_not_registered") => Some("mcp_read_tool_not_registered"),
+        // Product blockers expose one stable category while the canonical
+        // action/structured result retains the exact NetworkPolicy reason.
+        Some(
+            "network_policy_disabled"
+            | "network_policy_default_deny"
+            | "network_policy_override_deny"
+            | "network_policy_override_invalid"
+            | "network_domain_denied"
+            | "network_domain_not_allowlisted"
+            | "network_policy_permission_denied"
+            | "network_private_or_reserved_address_blocked"
+            | "network_url_scheme_blocked",
+        ) => Some("network_policy_blocked"),
+        Some("network_policy_blocked") => Some("network_policy_blocked"),
+        Some("network_policy_consent_required") => Some("network_policy_consent_required"),
+        Some("path_not_in_safe_paths") => Some("path_not_in_safe_paths"),
+        Some("policy_capability_not_allowed") => Some("policy_capability_not_allowed"),
+        Some("proposal_required") => Some("proposal_required"),
+        Some("target_tool_needs_confirmation") => Some("target_tool_needs_confirmation"),
+        Some("tool_manifest_not_found") => Some("tool_manifest_not_found"),
+        Some("tool_permission_required") => Some("tool_permission_required"),
+        Some("unsupported_tool_source") => Some("unsupported_tool_source"),
+        _ => None,
+    }
+}
+
+fn typed_kernel_read_failure_code(result: &ActionExecutionResult) -> Option<String> {
+    match result.status {
+        ActionExecutionStatus::Succeeded => None,
+        ActionExecutionStatus::NeedsConfirmation => Some(
+            crate::main_chat_react_runtime::typed_agent_loop_permission_code(
+                result
+                    .observation
+                    .structured_result
+                    .as_ref()
+                    .and_then(|structured| structured.get("permission_decision"))
+                    .and_then(Value::as_str)
+                    .or(result.action.permission_decision.as_deref()),
+            )
+            .or_else(|| typed_kernel_read_policy_code(result.stop_reason.as_deref()))
+            .unwrap_or("tool_permission_required")
+            .to_string(),
+        ),
+        ActionExecutionStatus::Blocked => Some(
+            typed_kernel_read_policy_code(result.stop_reason.as_deref())
+                .or_else(|| {
+                    crate::main_chat_react_runtime::typed_agent_loop_permission_code(
+                        result
+                            .observation
+                            .structured_result
+                            .as_ref()
+                            .and_then(|structured| structured.get("permission_decision"))
+                            .and_then(Value::as_str)
+                            .or(result.action.permission_decision.as_deref()),
+                    )
+                })
+                .unwrap_or("read_tool_blocked")
+                .to_string(),
+        ),
+        ActionExecutionStatus::Failed => {
+            // Preserve an allowlisted policy fact when governance stopped the
+            // action before dispatch. Receipt transport truth alone can only
+            // say `not_dispatched`; it cannot explain *why*. Never copy the
+            // adapter error body or arbitrary stop text into the blocker.
+            if let Some(policy_code) = typed_kernel_read_policy_code(
+                result
+                    .stop_reason
+                    .as_deref()
+                    .or_else(|| {
+                        result
+                            .observation
+                            .structured_result
+                            .as_ref()
+                            .and_then(|structured| structured.get("permission_decision"))
+                            .and_then(Value::as_str)
+                    })
+                    .or(result.action.permission_decision.as_deref()),
+            ) {
+                return Some(policy_code.to_string());
+            }
+            use openlife_core::tool_execution_receipt::{ToolEffectStatus, ToolTransportStatus};
+            let code = match (
+                result.execution_receipt.transport_status,
+                result.execution_receipt.effect_status,
+            ) {
+                (ToolTransportStatus::RemoteUnknown, _) => "tool_remote_state_unknown",
+                (ToolTransportStatus::LocalAborted, _) => "tool_locally_aborted",
+                (_, ToolEffectStatus::Unknown) => "tool_effect_unknown",
+                (ToolTransportStatus::NotAttempted, _) => "tool_not_dispatched",
+                _ => "tool_error",
+            };
+            Some(code.into())
+        }
+    }
+}
+
 fn kernel_read_tool_execution_from_action_result(
     decision: MainChatKernelReadToolDecision,
     result: ActionExecutionResult,
+    canonical_run_id: &str,
 ) -> MainChatKernelReadToolExecution {
-    let status_label = action_execution_status_label(&result.status);
-    let output_preview = preview_text(
-        &result.observation.content,
-        MAX_TOOL_OBSERVATION_PREVIEW_CHARS,
-    );
-    let governed_input = decision.governed_input.clone();
-    let blocker_reason = result
-        .stop_reason
+    let product_tool_projection =
+        crate::product_agent_dto::VerifiedProductToolCallProjection::from_bound_action(
+            &result.action,
+            &result.execution_receipt,
+            canonical_run_id,
+        );
+    let canonical_tool_graph =
+        result
+            .action
+            .react_trace
+            .as_ref()
+            .map(|_| KernelCanonicalToolGraph {
+                action: result.action.clone(),
+                observations: vec![result.observation.clone()],
+            });
+    let product_react_trace = result
+        .action
+        .react_trace
         .clone()
-        .or_else(|| result.action.error.clone())
-        .or_else(|| {
-            result
-                .observation
-                .structured_result
-                .as_ref()
-                .and_then(|structured| structured.get("permission_decision"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
+        .map(crate::product_agent_dto::ProductReactActionTrace::from_transient_trace);
+    let status_label = action_execution_status_label(&result.status);
+    let blocker_reason = typed_kernel_read_failure_code(&result);
+    let output_preview = if result.status == ActionExecutionStatus::Succeeded {
+        preview_text(
+            &result.observation.content,
+            MAX_TOOL_OBSERVATION_PREVIEW_CHARS,
+        )
+    } else {
+        blocker_reason
+            .clone()
+            .unwrap_or_else(|| "tool_error".into())
+    };
+    let observation_content = if result.status == ActionExecutionStatus::Succeeded {
+        result.observation.content.clone()
+    } else {
+        blocker_reason
+            .clone()
+            .unwrap_or_else(|| "tool_error".into())
+    };
+    let structured_result = if result.status == ActionExecutionStatus::Succeeded {
+        result.observation.structured_result.clone()
+    } else {
+        // Never copy arbitrary adapter error bodies into durable/product
+        // metadata. Preserve only the typed blocker category and the exact
+        // allowlisted NetworkPolicy reason already owned by the canonical
+        // action so the projection remains truthful and metadata-safe.
+        let exact_network_policy_reason = result.stop_reason.as_deref().filter(|reason| {
+            matches!(
+                *reason,
+                "network_policy_disabled"
+                    | "network_policy_default_deny"
+                    | "network_policy_override_deny"
+                    | "network_policy_override_invalid"
+                    | "network_domain_denied"
+                    | "network_domain_not_allowlisted"
+                    | "network_policy_permission_denied"
+                    | "network_private_or_reserved_address_blocked"
+                    | "network_url_scheme_blocked"
+            )
         });
+        Some(serde_json::json!({
+            "success": false,
+            "status": status_label,
+            "permission_decision": blocker_reason,
+            "network_policy_blocked": blocker_reason.as_deref() == Some("network_policy_blocked"),
+            "networkPolicyReasonCode": exact_network_policy_reason,
+            "directWritesExecuted": false,
+        }))
+    };
+    let governed_input = decision.governed_input.clone();
+    let tool_execution_receipt = result.execution_receipt.clone();
     let mut metadata = serde_json::json!({
         "kernelBackedReadOnlyToolLoop": true,
         "actionExecutorBacked": true,
@@ -1154,8 +1585,9 @@ fn kernel_read_tool_execution_from_action_result(
         "actionId": result.action.id,
         "observationId": result.observation.id,
         "blockerReason": blocker_reason.clone(),
-        "stopReason": result.stop_reason,
-        "structuredResult": result.observation.structured_result,
+        "stopReason": blocker_reason.clone(),
+        "structuredResult": structured_result.clone(),
+        "toolExecutionReceipt": tool_execution_receipt.clone(),
         "directWritesExecuted": false,
         "legacyFallbackUsed": false,
     });
@@ -1166,7 +1598,7 @@ fn kernel_read_tool_execution_from_action_result(
         &decision.target,
         &governed_input,
         &output_preview,
-        result.observation.structured_result.clone(),
+        structured_result,
         decision.fixture_backed_read,
         result.status == ActionExecutionStatus::Succeeded,
     );
@@ -1174,10 +1606,14 @@ fn kernel_read_tool_execution_from_action_result(
     MainChatKernelReadToolExecution {
         decision,
         status: result.status,
-        observation_content: result.observation.content,
+        observation_content,
         observation_metadata: metadata,
         output_preview,
         blocker_reason,
+        execution_receipt: tool_execution_receipt,
+        canonical_tool_graph,
+        product_react_trace,
+        product_tool_projection,
     }
 }
 
@@ -1199,6 +1635,16 @@ fn blocked_kernel_read_tool_execution(
     if let (Some(object), Some(extra)) = (structured.as_object_mut(), extra_metadata) {
         object.insert("details".into(), extra);
     }
+    let (request_length_bytes, request_hash) =
+        openlife_core::agent::metadata_safe::metadata_safe_value_digest(&governed_input);
+    let tool_execution_receipt =
+        openlife_core::tool_execution_receipt::ToolExecutionReceipt::failed_before_dispatch(
+            None,
+            Some(decision.tool_name.clone()),
+            format!("bytes:{request_length_bytes}:hash:{request_hash}"),
+            openlife_core::tool_execution_receipt::ToolActionEffect::ReadOnly,
+            openlife_core::tool_manifest::ToolIdempotencyContract::Unspecified,
+        );
     let mut metadata = serde_json::json!({
         "kernelBackedReadOnlyToolLoop": true,
         "actionExecutorBacked": false,
@@ -1219,6 +1665,7 @@ fn blocked_kernel_read_tool_execution(
         "blockerReason": blocker,
         "stopReason": blocker,
         "structuredResult": structured,
+        "toolExecutionReceipt": tool_execution_receipt.clone(),
         "directWritesExecuted": false,
         "legacyFallbackUsed": false,
     });
@@ -1241,6 +1688,10 @@ fn blocked_kernel_read_tool_execution(
         observation_metadata: metadata,
         output_preview,
         blocker_reason: Some(blocker.to_string()),
+        execution_receipt: tool_execution_receipt,
+        canonical_tool_graph: None,
+        product_react_trace: None,
+        product_tool_projection: None,
     }
 }
 
@@ -1283,9 +1734,46 @@ pub(crate) struct MainChatKernelCommandSurfaceResult {
 
 impl MainChatKernelCommandSurfaceResult {
     pub(crate) fn into_send_message_result(self) -> SendMessageResult {
+        let canonical_failure_observed = self.agent_state.as_ref().is_some_and(|state| {
+            state.task.status
+                == openlife_core::agent::main_chat_runtime_contract::MainChatAgentProductTaskStatus::Failed
+        });
+        let provider_invocation_status = self
+            .kernel_events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                MainChatKernelEvent::ProviderCompleted { .. } => {
+                    Some(crate::main_chat_turn_runtime::ProviderInvocationState::Completed)
+                }
+                MainChatKernelEvent::ProviderFailed { .. } => {
+                    Some(crate::main_chat_turn_runtime::ProviderInvocationState::Failed)
+                }
+                MainChatKernelEvent::ProviderRemoteUnknown { .. } => {
+                    Some(crate::main_chat_turn_runtime::ProviderInvocationState::RemoteUnknown)
+                }
+                MainChatKernelEvent::ProviderStarted { .. } => {
+                    Some(crate::main_chat_turn_runtime::ProviderInvocationState::Started)
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        let model_invoked = provider_invocation_status.observed_adapter_start();
+        let tool_invoked = self.tool_calls.iter().any(|call| {
+            call.execution_receipt.as_ref().is_some_and(|receipt| {
+                !matches!(
+                    receipt.transport_status,
+                    openlife_core::tool_execution_receipt::ToolTransportStatus::NotAttempted
+                )
+            })
+        });
         SendMessageResult {
             reply: self.reply,
-            status: "completed".into(),
+            status: if canonical_failure_observed {
+                "failed".into()
+            } else {
+                "completed".into()
+            },
             blockers: Vec::new(),
             reasoning_trace: self.reasoning_trace,
             tool_calls: self.tool_calls,
@@ -1295,25 +1783,51 @@ impl MainChatKernelCommandSurfaceResult {
             execution_transcript: self.execution_transcript,
             legacy_fallback_used: self.legacy_fallback_used,
             legacy_runtime_invoked: false,
-            model_invoked: true,
-            tool_invoked: false,
+            provider_invocation_status,
+            model_invoked,
+            tool_invoked,
             turn_terminal: None,
         }
     }
 }
 
+pub(crate) struct MainChatKernelExecutionInput<'a> {
+    pub(crate) session_id: &'a str,
+    pub(crate) messages: Vec<ChatMessage>,
+    pub(crate) selected_skill_id: Option<String>,
+    pub(crate) state: &'a Arc<AppState>,
+    pub(crate) provider_runtime: &'a crate::state::ProviderRuntimeSnapshot,
+    pub(crate) main_chat_agent_turn: &'a MainChatAgentTurn,
+    pub(crate) canonical_run_id: &'a str,
+    pub(crate) provider_durability_scope:
+        &'a crate::main_chat_turn_runtime::MainChatProviderDurabilityScope,
+    pub(crate) execution_epoch: &'a crate::main_chat_cancellation::MainChatExecutionEpoch,
+    pub(crate) event_sink_label: &'static str,
+}
+
 pub(crate) async fn run_main_chat_kernel_direct_answer_with_state<S>(
-    session_id: &str,
-    messages: Vec<ChatMessage>,
-    selected_skill_id: Option<String>,
-    state: &Arc<AppState>,
-    main_chat_agent_turn: &MainChatAgentTurn,
+    input: MainChatKernelExecutionInput<'_>,
     event_sink: &mut S,
-    event_sink_label: &'static str,
 ) -> Result<MainChatKernelCommandSurfaceResult, String>
 where
     S: MainChatEventSink + ?Sized,
 {
+    let MainChatKernelExecutionInput {
+        session_id,
+        messages,
+        selected_skill_id,
+        state,
+        provider_runtime,
+        main_chat_agent_turn,
+        canonical_run_id,
+        provider_durability_scope,
+        execution_epoch,
+        event_sink_label,
+    } = input;
+    main_chat_agent_turn
+        .decision
+        .validate_policy_projection()
+        .map_err(|reason| format!("Main Chat kernel rejected invalid PolicyDecision: {reason}"))?;
     if !main_chat_kernel_supports_turn(&main_chat_agent_turn.decision.selected_strategy, &messages)
     {
         return Err(format!(
@@ -1333,19 +1847,7 @@ where
         session_id,
         main_chat_agent_turn.decision.selected_strategy,
     )
-    .await;
-    let mut effective_main_chat_agent_turn = main_chat_agent_turn.clone();
-    if effective_main_chat_agent_turn
-        .decision
-        .agent_task_session_id
-        .as_deref()
-        != Some(task_session_id.as_str())
-    {
-        effective_main_chat_agent_turn
-            .decision
-            .agent_task_session_id = Some(task_session_id.clone());
-    }
-    let main_chat_agent_turn = &effective_main_chat_agent_turn;
+    .await?;
     let user_msg = messages
         .iter()
         .rev()
@@ -1355,6 +1857,20 @@ where
         .as_ref()
         .map(|message| message.content.clone())
         .unwrap_or_default();
+    let current_user_message_digest = openlife_core::agent::metadata_safe_text_digest(&user_text).1;
+    if current_user_message_digest
+        != main_chat_agent_turn
+            .decision
+            .policy_decision
+            .authorized_user_message_digest
+    {
+        return Err(
+            "Main Chat kernel rejected a user message that did not match its PolicyDecision".into(),
+        );
+    }
+    let provider_authorization =
+        MainChatProviderAuthorization::from_ingress_decision(&main_chat_agent_turn.decision)
+            .map_err(|error| format!("Main Chat provider policy authorization failed: {error}"))?;
     let sanitized_selected_skill_id =
         sanitize_main_chat_selected_skill_id(selected_skill_id.as_deref());
     let mut execution_transcript = main_chat_agent_turn.transcript_entries.clone();
@@ -1390,7 +1906,7 @@ where
                     &user_text,
                     sanitized_selected_skill_id.as_deref(),
                 )
-                .await,
+                .await?,
             );
         }
         MainChatAgentStrategy::ReActToolExecution => {
@@ -1412,11 +1928,22 @@ where
                     &user_text,
                     sanitized_selected_skill_id.as_deref(),
                 )
+                .await?,
+            );
+        }
+        MainChatAgentStrategy::ReversibleMemoryCommit => {
+            execution_transcript.extend(
+                append_main_chat_kernel_write_contract_transcript(
+                    state,
+                    main_chat_agent_turn,
+                    sanitized_selected_skill_id.as_deref(),
+                )
                 .await,
             );
         }
         MainChatAgentStrategy::MemoryProposal
         | MainChatAgentStrategy::LifeModelProposal
+        | MainChatAgentStrategy::FileWriteProposal
         | MainChatAgentStrategy::BlockedConfirmation => {
             execution_transcript.extend(
                 append_main_chat_kernel_write_contract_transcript(
@@ -1439,12 +1966,18 @@ where
         }
     }
 
-    let scheduler = state.scheduler.lock().await.clone();
+    if !provider_runtime.coherent {
+        return Err("provider_runtime_generation_incoherent".into());
+    }
+    let provider_config = provider_runtime.config.clone();
+    let scheduler = provider_runtime.scheduler.clone();
+    let provider_network_policy = provider_config.system.network_policy.clone();
     let clock_source = state.runtime_clock_source.lock().await.clone();
     let runtime_fact_answer =
         resolve_pre_model_runtime_fact_answer(MainChatRuntimeFactPreModelRequest {
             user_text: &user_text,
             state,
+            provider_config: &provider_config,
             scheduler: &scheduler,
             session_id,
             current_task_session_id: Some(task_session_id.as_str()),
@@ -1467,65 +2000,161 @@ where
         main_chat_agent_turn.decision.task_kind,
     )
     .await;
-    let extra_candidates =
-        command_surface_kernel_context_candidates(state, sanitized_selected_skill_id.as_deref())
-            .await;
-    let kernel = MainChatKernel::new(CommandSurfaceDirectAnswerModelClient::new(
-        scheduler.clone(),
-        life_model.clone(),
-        direct_reply.clone(),
-    ))
+    let extra_candidates = command_surface_kernel_context_candidates(
+        state,
+        &provider_config.system.knowledge_roots,
+        sanitized_selected_skill_id.as_deref(),
+    )
+    .await?;
+    let privacy_engine = state.privacy_engine.lock().await.clone();
+    let kernel = MainChatKernel::new(
+        CommandSurfaceDirectAnswerModelClient::new(
+            scheduler.clone(),
+            privacy_engine.clone(),
+            provider_network_policy,
+            direct_reply.clone(),
+        )
+        .with_consent_state(Arc::clone(state))
+        .with_canonical_write_admission(execution_epoch.clone()),
+    )
     .with_context_config(MainChatKernelContextConfig {
         load_workspace_knowledge: true,
         token_budget: 160,
         extra_candidates,
         hs_context,
+        stream_provider_tokens: event_sink_label == "streaming",
+        authorized_memory_routing: Some(
+            main_chat_agent_turn
+                .decision
+                .policy_decision
+                .authorized_memory_routing(
+                    &main_chat_agent_turn.decision.intent_frame.memory_routing,
+                ),
+        ),
     })
-    .with_read_tool_executor(Arc::new(AppStateMainChatReadToolExecutor::new(Arc::clone(
-        state,
-    ))));
+    .with_canonical_run_id(canonical_run_id)
+    .with_read_tool_executor(Arc::new(AppStateMainChatReadToolExecutor::new(
+        Arc::clone(state),
+        execution_epoch.clone(),
+        task_session_id.clone(),
+        session_id,
+    )));
 
     if main_chat_react_turn_requires_governed_agent_loop_candidate_selection(
-        &main_chat_agent_turn.decision.selected_strategy,
+        &main_chat_agent_turn.decision.policy_decision,
         &messages,
-        state,
+        provider_runtime,
     )
     .await
     {
         let plan = build_main_chat_react_action_plan(session_id, &user_text)?;
-        let privacy_engine = openlife_core::privacy::PrivacyEngine::new();
-        let privacy_map: HashMap<String, String> = HashMap::new();
-        let agent_loop_attempt = try_run_main_chat_react_agent_loop(
-            state,
-            &task_session_id,
-            session_id,
-            &user_text,
-            &messages,
-            &life_model,
-            &privacy_engine,
-            &privacy_map,
-            &plan,
-            main_chat_agent_turn
-                .decision
-                .privacy_risk
-                .local_only_required,
-        )
-        .await?;
-        execution_transcript.extend(agent_loop_attempt.transcript_entries.clone());
-        let kernel_result = kernel_turn_result_from_react_agent_loop_attempt(
-            &agent_loop_attempt,
-            &plan,
-            &scheduler,
+        let (_, privacy_map) = privacy_engine.desensitize_batch(
+            &messages
+                .iter()
+                .map(|message| message.content.clone())
+                .collect::<Vec<_>>(),
         );
+        let agent_loop_attempt = {
+            let progress_session_id = session_id.to_string();
+            let mut emit_progress = |progress| match progress {
+                MainChatModelProgress::Started {
+                    request_id,
+                    provider,
+                    model,
+                    started_at,
+                    policy_evidence,
+                } => emit_provider_started_with_policy(
+                    request_id,
+                    provider,
+                    model,
+                    started_at,
+                    policy_evidence,
+                    event_sink,
+                ),
+                MainChatModelProgress::Token { request_id, chunk } => {
+                    event_sink.emit(MainChatKernelEvent::ProviderToken {
+                        session_id: progress_session_id.clone(),
+                        request_id,
+                        chunk,
+                    })
+                }
+                MainChatModelProgress::Completed {
+                    request_id,
+                    provider,
+                    model,
+                    finished_at,
+                } => event_sink.emit(MainChatKernelEvent::ProviderCompleted {
+                    request_id,
+                    provider,
+                    model,
+                    finished_at,
+                }),
+                MainChatModelProgress::Failed {
+                    request_id,
+                    provider,
+                    model,
+                    finished_at,
+                    error_digest,
+                } => event_sink.emit(MainChatKernelEvent::ProviderFailed {
+                    request_id,
+                    provider,
+                    model,
+                    finished_at,
+                    error_digest,
+                }),
+                MainChatModelProgress::RemoteUnknown {
+                    request_id,
+                    provider,
+                    model,
+                    finished_at,
+                    reason_digest,
+                } => event_sink.emit(MainChatKernelEvent::ProviderRemoteUnknown {
+                    request_id,
+                    provider,
+                    model,
+                    finished_at,
+                    reason_digest,
+                }),
+            };
+            try_run_main_chat_react_agent_loop(
+                state,
+                &task_session_id,
+                canonical_run_id,
+                session_id,
+                &user_text,
+                &messages,
+                &life_model,
+                &privacy_engine,
+                &privacy_map,
+                &plan,
+                &provider_authorization,
+                provider_runtime,
+                execution_epoch,
+                &mut emit_progress,
+            )
+            .await?
+        };
+        for receipt in &agent_loop_attempt.provider_receipts {
+            emit_provider_receipt(receipt, false, event_sink);
+        }
+        execution_transcript.extend(agent_loop_attempt.transcript_entries.clone());
+        let provider_durability_proofs = agent_loop_attempt.provider_durability_proofs.clone();
+        let kernel_result =
+            kernel_turn_result_from_react_agent_loop_attempt(agent_loop_attempt, &plan, &scheduler);
         let kernel_events = event_sink.events().to_vec();
         if !kernel_result.blockers.is_empty() {
             return build_blocked_kernel_command_surface_result(
                 session_id,
                 &task_session_id,
+                canonical_run_id,
+                execution_epoch,
                 state,
                 main_chat_agent_turn,
                 execution_transcript,
                 kernel_result,
+                scheduler,
+                provider_durability_scope,
+                provider_durability_proofs,
                 event_sink_label,
                 kernel_events,
             )
@@ -1534,11 +2163,16 @@ where
         return build_successful_kernel_command_surface_result(
             session_id,
             &user_text,
+            canonical_run_id,
+            execution_epoch,
             state,
             main_chat_agent_turn,
             execution_transcript,
             kernel_result,
             scheduler,
+            provider_durability_scope,
+            provider_durability_proofs,
+            provider_config,
             life_model,
             false,
             None,
@@ -1552,6 +2186,8 @@ where
         return build_kernel_plan_execute_command_surface_result(
             session_id,
             &user_text,
+            canonical_run_id,
+            execution_epoch,
             state,
             main_chat_agent_turn,
             execution_transcript,
@@ -1570,8 +2206,9 @@ where
             MainChatTurnInput {
                 session_id: session_id.to_string(),
                 messages,
+                provider_authorization,
                 selected_skill_id: sanitized_selected_skill_id.clone(),
-                selected_strategy: Some(main_chat_agent_turn.decision.selected_strategy),
+                policy_decision: main_chat_agent_turn.decision.policy_decision.clone(),
                 model_supplied_tool_arguments: None,
                 runtime_fact_direct_answer: runtime_fact_answer.is_some(),
             },
@@ -1585,6 +2222,8 @@ where
         return build_kernel_write_outcome_command_surface_result(
             session_id,
             &user_text,
+            canonical_run_id,
+            execution_epoch,
             state,
             main_chat_agent_turn,
             execution_transcript,
@@ -1601,31 +2240,34 @@ where
         return build_blocked_kernel_command_surface_result(
             session_id,
             &task_session_id,
+            canonical_run_id,
+            execution_epoch,
             state,
             main_chat_agent_turn,
             execution_transcript,
             kernel_result,
+            scheduler,
+            provider_durability_scope,
+            Vec::new(),
             event_sink_label,
             kernel_events,
         )
         .await;
     }
 
-    if let Some(user) = user_msg.as_ref() {
-        let inserted = persist_chat_message_if_needed(session_id, user, state).await?;
-        if inserted {
-            persist_vector_memory_for_message(session_id, user, state).await;
-        }
-    }
-
     build_successful_kernel_command_surface_result(
         session_id,
         &user_text,
+        canonical_run_id,
+        execution_epoch,
         state,
         main_chat_agent_turn,
         execution_transcript,
         kernel_result,
         scheduler,
+        provider_durability_scope,
+        Vec::new(),
+        provider_config,
         life_model,
         direct_reply.is_some(),
         runtime_fact_answer,
@@ -1643,11 +2285,11 @@ pub(crate) fn main_chat_kernel_supports_turn(
 }
 
 pub(crate) async fn main_chat_react_turn_requires_governed_agent_loop_candidate_selection(
-    selected_strategy: &MainChatAgentStrategy,
+    policy_decision: &PolicyDecision,
     messages: &[ChatMessage],
-    state: &Arc<AppState>,
+    provider_runtime: &crate::state::ProviderRuntimeSnapshot,
 ) -> bool {
-    if *selected_strategy != MainChatAgentStrategy::ReActToolExecution {
+    if !policy_decision.allows(AllowedCapability::McpReadOnly) {
         return false;
     }
     let Some(user_text) = latest_user_text(messages) else {
@@ -1669,7 +2311,10 @@ pub(crate) async fn main_chat_react_turn_requires_governed_agent_loop_candidate_
         return false;
     }
 
-    let scheduler = state.scheduler.lock().await.clone();
+    if !provider_runtime.coherent {
+        return false;
+    }
+    let scheduler = &provider_runtime.scheduler;
     let chat_model = scheduler.chat_model.to_ascii_lowercase();
     if chat_model.contains("command-surface-eval") {
         return false;
@@ -1687,7 +2332,7 @@ pub(crate) async fn main_chat_react_turn_requires_governed_agent_loop_candidate_
     }
 
     let endpoint_kind = main_chat_provider_endpoint_kind(
-        &scheduler,
+        scheduler,
         scheduler.scripted_generation_response.is_some(),
     );
     matches!(endpoint_kind, "external_provider" | "local_test_http")
@@ -1749,30 +2394,18 @@ fn scripted_react_response_declares_model_selected_tool_boundary(scripted_respon
 
 pub(crate) fn main_chat_kernel_support_disposition(
     selected_strategy: &MainChatAgentStrategy,
-    messages: &[ChatMessage],
+    _messages: &[ChatMessage],
 ) -> MainChatKernelSupportDisposition {
     match selected_strategy {
-        MainChatAgentStrategy::DirectAnswer => MainChatKernelSupportDisposition::KernelSupported,
-        MainChatAgentStrategy::ReActToolExecution => {
-            let input = MainChatTurnInput {
-                session_id: "kernel_support_probe".into(),
-                messages: messages.to_vec(),
-                selected_skill_id: None,
-                selected_strategy: Some(*selected_strategy),
-                model_supplied_tool_arguments: None,
-                runtime_fact_direct_answer: false,
-            };
-            if !plan_kernel_read_tools(&input, false).is_empty()
-                || plan_kernel_write_outcome(&input, false).is_some()
-            {
-                MainChatKernelSupportDisposition::KernelSupported
-            } else {
-                MainChatKernelSupportDisposition::GovernedBlocker
-            }
+        MainChatAgentStrategy::DirectAnswer
+        | MainChatAgentStrategy::ReActToolExecution
+        | MainChatAgentStrategy::PlanExecute
+        | MainChatAgentStrategy::ReversibleMemoryCommit => {
+            MainChatKernelSupportDisposition::KernelSupported
         }
-        MainChatAgentStrategy::PlanExecute => MainChatKernelSupportDisposition::KernelSupported,
         MainChatAgentStrategy::MemoryProposal
         | MainChatAgentStrategy::LifeModelProposal
+        | MainChatAgentStrategy::FileWriteProposal
         | MainChatAgentStrategy::BlockedConfirmation => {
             MainChatKernelSupportDisposition::KernelSupported
         }
@@ -1784,7 +2417,7 @@ pub(crate) fn main_chat_kernel_support_disposition(
 
 pub(crate) async fn main_chat_live_provider_eval_requires_provider_backed_react(
     selected_strategy: &MainChatAgentStrategy,
-    state: &Arc<AppState>,
+    provider_runtime: &crate::state::ProviderRuntimeSnapshot,
 ) -> bool {
     if !matches!(selected_strategy, MainChatAgentStrategy::ReActToolExecution) {
         return false;
@@ -1798,17 +2431,13 @@ pub(crate) async fn main_chat_live_provider_eval_requires_provider_backed_react(
         return false;
     }
 
-    let network_enabled = {
-        let config = state.config.lock().await;
-        config.system.network_policy.enabled
-    };
-    if !network_enabled {
+    if !provider_runtime.coherent || !provider_runtime.config.system.network_policy.enabled {
         return false;
     }
 
-    let scheduler = state.scheduler.lock().await.clone();
+    let scheduler = &provider_runtime.scheduler;
     let scripted_provider_response_present = scheduler.scripted_generation_response.is_some();
-    main_chat_provider_endpoint_kind(&scheduler, scripted_provider_response_present)
+    main_chat_provider_endpoint_kind(scheduler, scripted_provider_response_present)
         == "external_provider"
         && !scheduler.effective_api_key().trim().is_empty()
 }
@@ -1818,37 +2447,28 @@ async fn resolve_kernel_task_session_id(
     requested_task_session_id: &str,
     chat_session_id: &str,
     selected_strategy: MainChatAgentStrategy,
-) -> String {
+) -> Result<String, String> {
     let Some(ref store_arc) = state.main_chat_agent_session_store else {
-        return requested_task_session_id.to_string();
+        return Err("main_chat_agent_session_store_unavailable".into());
     };
     let store = store_arc.lock().await;
-    if matches!(store.load_session(requested_task_session_id), Ok(Some(_))) {
-        return requested_task_session_id.to_string();
+    let session = store
+        .load_session(requested_task_session_id)
+        .map_err(|err| format!("load exact Main Chat task session failed: {err}"))?
+        .ok_or_else(|| {
+            format!("exact_main_chat_task_session_missing:{requested_task_session_id}")
+        })?;
+    if session.chat_session_id != chat_session_id {
+        return Err(format!(
+            "exact_main_chat_task_session_chat_mismatch:{requested_task_session_id}"
+        ));
     }
-    match store.list_sessions(None, 50, 0) {
-        Ok(sessions) => sessions
-            .into_iter()
-            .find(|session| {
-                session.chat_session_id == chat_session_id
-                    && session.selected_strategy == selected_strategy
-                    && matches!(
-                        session.status,
-                        AgentTaskSessionStatus::Running
-                            | AgentTaskSessionStatus::WaitingPermission
-                            | AgentTaskSessionStatus::Blocked
-                    )
-            })
-            .map(|session| session.id)
-            .unwrap_or_else(|| requested_task_session_id.to_string()),
-        Err(err) => {
-            log::warn!(
-                "[MainChatKernel] resolve persisted task session failed: {}",
-                err
-            );
-            requested_task_session_id.to_string()
-        }
+    if session.selected_strategy != selected_strategy {
+        return Err(format!(
+            "exact_main_chat_task_session_strategy_mismatch:{requested_task_session_id}"
+        ));
     }
+    Ok(session.id)
 }
 
 async fn append_main_chat_kernel_read_tool_contract_transcript(
@@ -1864,14 +2484,20 @@ async fn append_main_chat_kernel_read_tool_contract_transcript(
     else {
         return Vec::new();
     };
+    let Ok(provider_authorization) =
+        MainChatProviderAuthorization::from_ingress_decision(&main_chat_agent_turn.decision)
+    else {
+        return Vec::new();
+    };
     let probe = MainChatTurnInput {
         session_id: main_chat_agent_turn.decision.source_session_id.clone(),
         messages: vec![ChatMessage {
             role: "user".into(),
             content: user_text.to_string(),
         }],
+        provider_authorization,
         selected_skill_id: selected_skill_id.map(str::to_string),
-        selected_strategy: Some(main_chat_agent_turn.decision.selected_strategy),
+        policy_decision: main_chat_agent_turn.decision.policy_decision.clone(),
         model_supplied_tool_arguments: None,
         runtime_fact_direct_answer: false,
     };
@@ -1927,13 +2553,13 @@ async fn append_main_chat_kernel_plan_execute_contract_transcript(
     main_chat_agent_turn: &MainChatAgentTurn,
     user_text: &str,
     selected_skill_id: Option<&str>,
-) -> Vec<ExecutionTranscriptEntry> {
+) -> Result<Vec<ExecutionTranscriptEntry>, String> {
     let Some(task_session_id) = main_chat_agent_turn
         .decision
         .agent_task_session_id
         .as_deref()
     else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let mut entries = Vec::new();
     entries.extend(
@@ -1962,7 +2588,16 @@ async fn append_main_chat_kernel_plan_execute_contract_transcript(
         user_text,
         selected_skill_id,
     )
-    .await;
+    .await?;
+    let store = state
+        .main_chat_agent_session_store
+        .as_ref()
+        .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?;
+    store
+        .lock()
+        .await
+        .record_context_snapshot_ref(task_session_id, &compiled_context.context_snapshot_ref)
+        .map_err(|error| format!("persist main chat context snapshot ref failed: {error}"))?;
     entries.extend(
         append_main_chat_agent_transcript(
             state,
@@ -1983,7 +2618,7 @@ async fn append_main_chat_kernel_plan_execute_contract_transcript(
         )
         .await,
     );
-    entries
+    Ok(entries)
 }
 
 async fn append_main_chat_kernel_write_contract_transcript(
@@ -2056,6 +2691,8 @@ pub struct MainChatKernelContextConfig {
     pub token_budget: u32,
     pub extra_candidates: Vec<ContextSourceCandidate>,
     pub hs_context: Option<MainChatKernelHsContext>,
+    pub stream_provider_tokens: bool,
+    pub authorized_memory_routing: Option<MainChatMemoryRoutingResult>,
 }
 
 impl Default for MainChatKernelContextConfig {
@@ -2065,38 +2702,572 @@ impl Default for MainChatKernelContextConfig {
             token_budget: KERNEL_CONTEXT_TOKEN_BUDGET,
             extra_candidates: Vec::new(),
             hs_context: None,
+            stream_provider_tokens: false,
+            authorized_memory_routing: None,
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct MainChatModelRequest {
+    pub session_id: String,
     pub messages: Vec<ChatMessage>,
+    pub provider_authorization: MainChatProviderAuthorization,
     pub system_prompt: String,
     pub context_snapshot_ref: String,
+    pub selected_context_refs: Vec<String>,
+    pub raw_life_model_included: bool,
+    pub raw_unbounded_memory_included: bool,
     pub selected_skill_id: Option<String>,
+    pub stream_provider_tokens: bool,
+}
+
+#[derive(Debug)]
+pub enum MainChatModelProgress {
+    Started {
+        request_id: String,
+        provider: String,
+        model: String,
+        started_at: chrono::DateTime<chrono::Utc>,
+        policy_evidence: ProviderPolicyReceiptEvidence,
+    },
+    Token {
+        request_id: String,
+        chunk: String,
+    },
+    Completed {
+        request_id: String,
+        provider: String,
+        model: String,
+        finished_at: chrono::DateTime<chrono::Utc>,
+    },
+    Failed {
+        request_id: String,
+        provider: String,
+        model: String,
+        finished_at: chrono::DateTime<chrono::Utc>,
+        error_digest: String,
+    },
+    RemoteUnknown {
+        request_id: String,
+        provider: String,
+        model: String,
+        finished_at: chrono::DateTime<chrono::Utc>,
+        reason_digest: String,
+    },
+}
+
+#[derive(Debug)]
+pub struct MainChatModelGeneration {
+    pub content: String,
+    pub provider_receipt: Option<ProviderInvocationReceipt>,
+    pub provider_started_emitted: bool,
+}
+
+#[derive(Debug)]
+pub struct MainChatModelFailure {
+    pub message: String,
+    pub provider_receipt: Option<ProviderInvocationReceipt>,
+    pub provider_started_emitted: bool,
+    pub blocker_code: Option<String>,
+    pub proposal_ids: Vec<String>,
 }
 
 #[async_trait]
 pub trait MainChatModelClient: Send + Sync {
-    async fn generate_direct_answer(&self, request: MainChatModelRequest)
-        -> Result<String, String>;
+    async fn generate_direct_answer(
+        &self,
+        request: MainChatModelRequest,
+        emit_progress: &mut (dyn FnMut(MainChatModelProgress) + Send),
+    ) -> Result<MainChatModelGeneration, MainChatModelFailure>;
 
     fn route_metadata(&self) -> MainChatRouteMetadata;
+}
+
+fn emit_provider_receipt<S>(
+    receipt: &ProviderInvocationReceipt,
+    started_already_emitted: bool,
+    event_sink: &mut S,
+) where
+    S: MainChatEventSink + ?Sized,
+{
+    if receipt.simulated {
+        return;
+    }
+    let start_seen = started_already_emitted
+        || event_sink.events().iter().any(|event| {
+            matches!(
+                event,
+                MainChatKernelEvent::ProviderStarted { request_id, .. }
+                    if request_id == &receipt.request_id
+            )
+        });
+    if !start_seen {
+        if let Some(policy_evidence) = receipt.policy_evidence.clone() {
+            event_sink.emit(MainChatKernelEvent::ProviderStarted {
+                request_id: receipt.request_id.clone(),
+                provider: receipt.provider.clone(),
+                model: receipt.model.clone(),
+                started_at: receipt.started_at,
+                policy_evidence,
+            });
+        }
+    }
+    if let Some(policy_evidence) = receipt.policy_evidence.clone() {
+        let evidence_seen = event_sink.events().iter().any(|event| {
+            matches!(
+                event,
+                MainChatKernelEvent::ProviderPolicyEvidence {
+                    request_id,
+                    policy_evidence: existing,
+                } if request_id == &receipt.request_id && existing == &policy_evidence
+            )
+        });
+        if !evidence_seen {
+            event_sink.emit(MainChatKernelEvent::ProviderPolicyEvidence {
+                request_id: receipt.request_id.clone(),
+                policy_evidence,
+            });
+        }
+    }
+    let terminal_seen = event_sink.events().iter().any(|event| {
+        matches!(
+            event,
+            MainChatKernelEvent::ProviderCompleted { request_id, .. }
+                | MainChatKernelEvent::ProviderFailed { request_id, .. }
+                | MainChatKernelEvent::ProviderRemoteUnknown { request_id, .. }
+                if request_id == &receipt.request_id
+        )
+    });
+    if terminal_seen {
+        return;
+    }
+    match receipt.status {
+        ProviderInvocationStatus::Completed => {
+            event_sink.emit(MainChatKernelEvent::ProviderCompleted {
+                request_id: receipt.request_id.clone(),
+                provider: receipt.provider.clone(),
+                model: receipt.model.clone(),
+                finished_at: receipt.finished_at,
+            });
+        }
+        ProviderInvocationStatus::Failed => {
+            event_sink.emit(MainChatKernelEvent::ProviderFailed {
+                request_id: receipt.request_id.clone(),
+                provider: receipt.provider.clone(),
+                model: receipt.model.clone(),
+                finished_at: receipt.finished_at,
+                error_digest: receipt
+                    .error_digest
+                    .clone()
+                    .unwrap_or_else(|| "provider_error_digest_missing".into()),
+            });
+        }
+        ProviderInvocationStatus::RemoteUnknown => {
+            event_sink.emit(MainChatKernelEvent::ProviderRemoteUnknown {
+                request_id: receipt.request_id.clone(),
+                provider: receipt.provider.clone(),
+                model: receipt.model.clone(),
+                finished_at: receipt.finished_at,
+                reason_digest: receipt
+                    .error_digest
+                    .clone()
+                    .unwrap_or_else(|| "provider_remote_unknown_reason_digest_missing".into()),
+            });
+        }
+    }
+}
+
+fn emit_provider_started_with_policy<S>(
+    request_id: String,
+    provider: String,
+    model: String,
+    started_at: chrono::DateTime<chrono::Utc>,
+    policy_evidence: ProviderPolicyReceiptEvidence,
+    event_sink: &mut S,
+) where
+    S: MainChatEventSink + ?Sized,
+{
+    event_sink.emit(MainChatKernelEvent::ProviderStarted {
+        request_id: request_id.clone(),
+        provider,
+        model,
+        started_at,
+        policy_evidence: policy_evidence.clone(),
+    });
+    event_sink.emit(MainChatKernelEvent::ProviderPolicyEvidence {
+        request_id,
+        policy_evidence,
+    });
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MainChatProviderStartEvidence {
+    pub(crate) request_id: String,
+    pub(crate) provider: String,
+    pub(crate) model: String,
+    pub(crate) started_at: chrono::DateTime<chrono::Utc>,
+    pub(crate) policy_evidence: ProviderPolicyReceiptEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MainChatObservedProviderLifecycle {
+    pub(crate) terminal_receipts: Vec<ProviderInvocationReceipt>,
+    pub(crate) unresolved_starts: Vec<MainChatProviderStartEvidence>,
+}
+
+pub(crate) fn observed_provider_lifecycle_from_kernel_events(
+    events: &[MainChatKernelEvent],
+) -> Result<MainChatObservedProviderLifecycle, String> {
+    #[derive(Clone)]
+    struct Attempt {
+        request_id: String,
+        provider: String,
+        model: String,
+        started_at: chrono::DateTime<chrono::Utc>,
+        policy_evidence: Option<ProviderPolicyReceiptEvidence>,
+        terminal: Option<ProviderInvocationReceipt>,
+    }
+
+    let mut attempts = Vec::<Attempt>::new();
+    let mut attempt_indexes = std::collections::HashMap::<String, usize>::new();
+    for event in events {
+        match event {
+            MainChatKernelEvent::ProviderStarted {
+                request_id,
+                provider,
+                model,
+                started_at,
+                policy_evidence,
+            } => {
+                policy_evidence
+                    .validate_minimal_truth()
+                    .map_err(|_| format!("provider_policy_evidence_invalid:{request_id}"))?;
+                if let Some(index) = attempt_indexes.get(request_id).copied() {
+                    let existing = &attempts[index];
+                    if existing.provider != *provider
+                        || existing.model != *model
+                        || existing.started_at != *started_at
+                        || existing.policy_evidence.as_ref() != Some(policy_evidence)
+                    {
+                        return Err(format!(
+                            "provider_attempt_start_identity_conflict:{request_id}"
+                        ));
+                    }
+                    continue;
+                }
+                attempt_indexes.insert(request_id.clone(), attempts.len());
+                attempts.push(Attempt {
+                    request_id: request_id.clone(),
+                    provider: provider.clone(),
+                    model: model.clone(),
+                    started_at: *started_at,
+                    policy_evidence: Some(policy_evidence.clone()),
+                    terminal: None,
+                });
+            }
+            MainChatKernelEvent::ProviderCompleted {
+                request_id,
+                provider,
+                model,
+                finished_at,
+            } => {
+                let Some(index) = attempt_indexes.get(request_id).copied() else {
+                    return Err(format!(
+                        "provider_attempt_terminal_without_start:{request_id}"
+                    ));
+                };
+                let attempt = &mut attempts[index];
+                if attempt.provider != *provider || attempt.model != *model {
+                    return Err(format!(
+                        "provider_attempt_terminal_identity_conflict:{request_id}"
+                    ));
+                }
+                let receipt = ProviderInvocationReceipt {
+                    request_id: request_id.clone(),
+                    provider: provider.clone(),
+                    model: model.clone(),
+                    status: ProviderInvocationStatus::Completed,
+                    started_at: attempt.started_at,
+                    finished_at: *finished_at,
+                    error_digest: None,
+                    simulated: false,
+                    policy_evidence: attempt.policy_evidence.clone(),
+                };
+                if let Some(existing) = attempt.terminal.as_ref() {
+                    if existing != &receipt {
+                        return Err(format!("provider_attempt_terminal_conflict:{request_id}"));
+                    }
+                } else {
+                    attempt.terminal = Some(receipt);
+                }
+            }
+            MainChatKernelEvent::ProviderFailed {
+                request_id,
+                provider,
+                model,
+                finished_at,
+                error_digest,
+            } => {
+                let Some(index) = attempt_indexes.get(request_id).copied() else {
+                    return Err(format!(
+                        "provider_attempt_terminal_without_start:{request_id}"
+                    ));
+                };
+                let attempt = &mut attempts[index];
+                if attempt.provider != *provider || attempt.model != *model {
+                    return Err(format!(
+                        "provider_attempt_terminal_identity_conflict:{request_id}"
+                    ));
+                }
+                let receipt = ProviderInvocationReceipt {
+                    request_id: request_id.clone(),
+                    provider: provider.clone(),
+                    model: model.clone(),
+                    status: ProviderInvocationStatus::Failed,
+                    started_at: attempt.started_at,
+                    finished_at: *finished_at,
+                    error_digest: Some(error_digest.clone()),
+                    simulated: false,
+                    policy_evidence: attempt.policy_evidence.clone(),
+                };
+                if let Some(existing) = attempt.terminal.as_ref() {
+                    if existing != &receipt {
+                        return Err(format!("provider_attempt_terminal_conflict:{request_id}"));
+                    }
+                } else {
+                    attempt.terminal = Some(receipt);
+                }
+            }
+            MainChatKernelEvent::ProviderRemoteUnknown {
+                request_id,
+                provider,
+                model,
+                finished_at,
+                reason_digest,
+            } => {
+                let Some(index) = attempt_indexes.get(request_id).copied() else {
+                    return Err(format!(
+                        "provider_attempt_terminal_without_start:{request_id}"
+                    ));
+                };
+                let attempt = &mut attempts[index];
+                if attempt.provider != *provider || attempt.model != *model {
+                    return Err(format!(
+                        "provider_attempt_terminal_identity_conflict:{request_id}"
+                    ));
+                }
+                let receipt = ProviderInvocationReceipt {
+                    request_id: request_id.clone(),
+                    provider: provider.clone(),
+                    model: model.clone(),
+                    status: ProviderInvocationStatus::RemoteUnknown,
+                    started_at: attempt.started_at,
+                    finished_at: *finished_at,
+                    error_digest: Some(reason_digest.clone()),
+                    simulated: false,
+                    policy_evidence: attempt.policy_evidence.clone(),
+                };
+                if let Some(existing) = attempt.terminal.as_ref() {
+                    if existing != &receipt {
+                        return Err(format!("provider_attempt_terminal_conflict:{request_id}"));
+                    }
+                } else {
+                    attempt.terminal = Some(receipt);
+                }
+            }
+            MainChatKernelEvent::ProviderPolicyEvidence {
+                request_id,
+                policy_evidence,
+            } => {
+                let Some(index) = attempt_indexes.get(request_id).copied() else {
+                    return Err(format!(
+                        "provider_policy_evidence_without_start:{request_id}"
+                    ));
+                };
+                let attempt = &mut attempts[index];
+                if attempt
+                    .policy_evidence
+                    .as_ref()
+                    .is_some_and(|existing| existing != policy_evidence)
+                {
+                    return Err(format!("provider_policy_evidence_conflict:{request_id}"));
+                }
+                attempt.policy_evidence = Some(policy_evidence.clone());
+                if let Some(terminal) = attempt.terminal.as_mut() {
+                    terminal.policy_evidence = Some(policy_evidence.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut terminal_receipts = Vec::new();
+    let mut unresolved_starts = Vec::new();
+    for attempt in attempts {
+        let policy_evidence = attempt
+            .policy_evidence
+            .ok_or_else(|| format!("provider_policy_evidence_missing:{}", attempt.request_id))?;
+        if let Some(mut terminal) = attempt.terminal {
+            terminal.policy_evidence = Some(policy_evidence);
+            terminal_receipts.push(terminal);
+        } else {
+            unresolved_starts.push(MainChatProviderStartEvidence {
+                request_id: attempt.request_id,
+                provider: attempt.provider,
+                model: attempt.model,
+                started_at: attempt.started_at,
+                policy_evidence,
+            });
+        }
+    }
+    Ok(MainChatObservedProviderLifecycle {
+        terminal_receipts,
+        unresolved_starts,
+    })
+}
+
+fn provider_receipts_from_kernel_events(
+    events: &[MainChatKernelEvent],
+) -> Result<Vec<ProviderInvocationReceipt>, String> {
+    let lifecycle = observed_provider_lifecycle_from_kernel_events(events)?;
+    if let Some(unresolved) = lifecycle.unresolved_starts.first() {
+        return Err(format!(
+            "provider_attempt_terminal_unknown:{}",
+            unresolved.request_id
+        ));
+    }
+    Ok(lifecycle.terminal_receipts)
+}
+
+fn validate_provider_receipts_for_runtime_generation(
+    receipts: &[ProviderInvocationReceipt],
+    expected_generation: &str,
+) -> Result<(), String> {
+    if expected_generation.trim().is_empty() {
+        return Err("turn_provider_runtime_generation_missing".into());
+    }
+    for receipt in receipts {
+        let evidence = receipt.policy_evidence.as_ref().ok_or_else(|| {
+            format!(
+                "provider_receipt_runtime_generation_missing:{}",
+                receipt.request_id
+            )
+        })?;
+        if evidence.provider_config_generation != expected_generation {
+            return Err(format!(
+                "provider_receipt_runtime_generation_mismatch:{}",
+                receipt.request_id
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn resolve_provider_durability_proofs(
+    scheduler: &InferenceScheduler,
+    receipts: &[ProviderInvocationReceipt],
+    supplied: Vec<openlife_core::scheduler::ProviderInvocationDurabilityProof>,
+) -> Result<Vec<openlife_core::scheduler::ProviderInvocationDurabilityProof>, String> {
+    let mut supplied = supplied
+        .into_iter()
+        .map(|proof| (proof.request_id().to_string(), proof))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut resolved = Vec::with_capacity(receipts.len());
+    for receipt in receipts {
+        let proof = match supplied.remove(&receipt.request_id) {
+            Some(proof) => {
+                proof
+                    .validate_runtime_adapter_terminal(receipt)
+                    .map_err(|error| {
+                        format!(
+                            "provider durability supplied proof mismatch:{}:{error}",
+                            receipt.request_id
+                        )
+                    })?;
+                proof
+            }
+            None => scheduler
+                .provider_durability_proof_for_receipt(receipt)
+                .map_err(|error| {
+                    format!(
+                        "provider durability proof load failed:{}:{error}",
+                        receipt.request_id
+                    )
+                })?,
+        };
+        resolved.push(proof);
+    }
+    if !supplied.is_empty() {
+        return Err("provider durability proof scope contained an unobserved request".into());
+    }
+    Ok(resolved)
+}
+
+fn provider_receipt_projection_metadata(
+    receipts: &[ProviderInvocationReceipt],
+) -> Vec<serde_json::Value> {
+    receipts
+        .iter()
+        .map(|receipt| {
+            let status = match receipt.status {
+                ProviderInvocationStatus::Completed => "completed",
+                ProviderInvocationStatus::Failed => "failed",
+                ProviderInvocationStatus::RemoteUnknown => "remote_unknown",
+            };
+            let provider_config_generation = receipt
+                .policy_evidence
+                .as_ref()
+                .map(|evidence| evidence.provider_config_generation.as_str());
+            serde_json::json!({
+                "requestId": receipt.request_id,
+                "provider": receipt.provider,
+                "model": receipt.model,
+                "providerConfigGeneration": provider_config_generation,
+                "status": status,
+                "startedAt": receipt.started_at,
+                "finishedAt": receipt.finished_at,
+                "errorDigest": receipt.error_digest,
+            })
+        })
+        .collect()
 }
 
 #[derive(Clone)]
 pub struct SchedulerMainChatModelClient {
     scheduler: InferenceScheduler,
-    life_model: LifeModel,
+    privacy_engine: PrivacyEngine,
+    network_policy: NetworkPolicy,
+    consent_state: Option<Arc<AppState>>,
+    canonical_write_admission: Option<crate::main_chat_cancellation::MainChatExecutionEpoch>,
 }
 
 impl SchedulerMainChatModelClient {
-    pub fn new(scheduler: InferenceScheduler, life_model: LifeModel) -> Self {
+    pub fn new(
+        scheduler: InferenceScheduler,
+        privacy_engine: PrivacyEngine,
+        network_policy: NetworkPolicy,
+    ) -> Self {
         Self {
             scheduler,
-            life_model,
+            privacy_engine,
+            network_policy,
+            consent_state: None,
+            canonical_write_admission: None,
         }
+    }
+
+    pub fn with_consent_state(mut self, state: Arc<AppState>) -> Self {
+        self.consent_state = Some(state);
+        self
+    }
+
+    pub fn with_canonical_write_admission(
+        mut self,
+        admission: crate::main_chat_cancellation::MainChatExecutionEpoch,
+    ) -> Self {
+        self.canonical_write_admission = Some(admission);
+        self
     }
 }
 
@@ -2105,18 +3276,302 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
     async fn generate_direct_answer(
         &self,
         request: MainChatModelRequest,
-    ) -> Result<String, String> {
-        let mut messages = Vec::with_capacity(request.messages.len() + 1);
-        messages.push(ChatMessage {
-            role: "system".into(),
+        emit_progress: &mut (dyn FnMut(MainChatModelProgress) + Send),
+    ) -> Result<MainChatModelGeneration, MainChatModelFailure> {
+        let stream_provider_tokens = request.stream_provider_tokens;
+        let task_session_id = request.provider_authorization.task_session_id.clone();
+        let context_manifest = ContextManifest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            privacy_decision_id: request
+                .provider_authorization
+                .policy_authorization
+                .decision_id()
+                .to_string(),
+            selected_context_refs: vec![request.context_snapshot_ref.clone()],
+            included_context_categories: vec!["kernel_bounded_context".into()],
+            declared_payload_categories: vec![
+                openlife_core::llm::ProviderPayloadCategory::CurrentUserConversation,
+            ],
+            policy_provenance_refs: Vec::new(),
+            raw_life_model_included: request.raw_life_model_included,
+            raw_unbounded_memory_included: request.raw_unbounded_memory_included,
+        };
+        let context_blocks = vec![BoundedContextBlock {
+            source_ref: request.context_snapshot_ref,
+            category: "kernel_bounded_context".into(),
             content: request.system_prompt,
-        });
-        messages.extend(request.messages);
-
-        self.scheduler
-            .generate(messages, &self.life_model, None)
+        }];
+        let current_user_text = request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role.eq_ignore_ascii_case("user"))
+            .map(|message| message.content.as_str())
+            .ok_or_else(|| MainChatModelFailure {
+                message: "Main Chat provider request is missing its current user subject".into(),
+                provider_receipt: None,
+                provider_started_emitted: false,
+                blocker_code: None,
+                proposal_ids: Vec::new(),
+            })?;
+        let policy_authorization = request
+            .provider_authorization
+            .policy_authorization
+            .authorize_derived_payload(
+                ProviderPayloadPurpose::MainChatDirectAnswer,
+                current_user_text,
+                &request.messages,
+                &context_blocks,
+            )
+            .map_err(|error| MainChatModelFailure {
+                message: error.to_string(),
+                provider_receipt: None,
+                provider_started_emitted: false,
+                blocker_code: None,
+                proposal_ids: Vec::new(),
+            })?;
+        let (mut prepared, privacy_map) = self
+            .scheduler
+            .prepare_chat_request_with_authorized_filter(
+                request.messages,
+                context_blocks,
+                context_manifest,
+                policy_authorization,
+                self.network_policy.clone(),
+                false,
+                |provider_target, messages, context_blocks, context_manifest| {
+                    let mut privacy_map = HashMap::new();
+                    if provider_target != "ollama" {
+                        let message_count = messages.len();
+                        let mut outbound_contents = messages
+                            .iter()
+                            .map(|message| message.content.clone())
+                            .collect::<Vec<_>>();
+                        outbound_contents
+                            .extend(context_blocks.iter().map(|block| block.content.clone()));
+                        let (masked_contents, map) =
+                            self.privacy_engine.desensitize_batch(&outbound_contents);
+                        for (message, masked) in messages
+                            .iter_mut()
+                            .zip(masked_contents.iter().take(message_count))
+                        {
+                            message.content = masked.clone();
+                        }
+                        for (block, masked) in context_blocks
+                            .iter_mut()
+                            .zip(masked_contents.into_iter().skip(message_count))
+                        {
+                            block.content = masked;
+                        }
+                        privacy_map = map;
+                        if !privacy_map.is_empty() {
+                            context_manifest.declared_payload_categories.push(
+                                openlife_core::llm::ProviderPayloadCategory::PrivacyPolicyMasked,
+                            );
+                            context_manifest.declared_payload_categories.sort();
+                            context_manifest.declared_payload_categories.dedup();
+                        }
+                    }
+                    Ok(privacy_map)
+                },
+            )
             .await
-            .map_err(|err| err.to_string())
+            .map_err(|err| MainChatModelFailure {
+                message: err.to_string(),
+                provider_receipt: None,
+                provider_started_emitted: false,
+                blocker_code: None,
+                proposal_ids: Vec::new(),
+            })?;
+
+        // Scripted generation is an in-process eval fixture and has no network
+        // adapter edge. Requiring provider consent here would create a review
+        // item for an effect that cannot occur and would misreport the fixture
+        // as a cloud dispatch. Real cloud adapters always pass this gate.
+        if prepared.provider_target != "ollama"
+            && self.scheduler.scripted_generation_response.is_none()
+        {
+            if let Some(state) = self.consent_state.as_ref() {
+                let admission = self.canonical_write_admission.as_ref().ok_or_else(|| {
+                    MainChatModelFailure {
+                        message: "Main Chat provider network consent has no execution-owned canonical write admission".into(),
+                        provider_receipt: None,
+                        provider_started_emitted: false,
+                        blocker_code: Some(
+                            "provider_network_consent_admission_unavailable".into(),
+                        ),
+                        proposal_ids: Vec::new(),
+                    }
+                })?;
+                let url = openlife_core::llm::chat_completions_url(
+                    &prepared.provider_target,
+                    &self.scheduler.openai_base,
+                );
+                let capability = prepared.network_policy_decision.capability.clone();
+                let authorization = authorize_provider_network_dispatch(
+                    state,
+                    &prepared.network_policy,
+                    &prepared.network_policy_decision,
+                    &url,
+                    &capability,
+                    &prepared.provider_target,
+                    task_session_id.as_deref(),
+                    NetworkConsentSubmissionScope::MainChatTurn(admission),
+                )
+                .await
+                .map_err(|error| MainChatModelFailure {
+                    message: error.to_string(),
+                    provider_receipt: None,
+                    provider_started_emitted: false,
+                    blocker_code: Some("provider_network_consent_error".into()),
+                    proposal_ids: Vec::new(),
+                })?;
+                match authorization {
+                    ProviderNetworkAuthorization::Authorized {
+                        network_policy,
+                        network_policy_decision,
+                        ..
+                    } => {
+                        prepared.network_policy = *network_policy;
+                        prepared.network_policy_decision = network_policy_decision;
+                    }
+                    ProviderNetworkAuthorization::ConsentRequired { proposal_id } => {
+                        return Err(MainChatModelFailure {
+                            message: "provider network consent is pending Review Center approval"
+                                .into(),
+                            provider_receipt: None,
+                            provider_started_emitted: false,
+                            blocker_code: Some("network_policy_consent_required".into()),
+                            proposal_ids: vec![proposal_id],
+                        });
+                    }
+                    ProviderNetworkAuthorization::Denied { reason_code } => {
+                        return Err(MainChatModelFailure {
+                            message: reason_code.clone(),
+                            provider_receipt: None,
+                            provider_started_emitted: false,
+                            blocker_code: Some(reason_code),
+                            proposal_ids: Vec::new(),
+                        });
+                    }
+                }
+            }
+        }
+
+        if stream_provider_tokens && self.scheduler.scripted_generation_response.is_none() {
+            let request_id = prepared.context_manifest.request_id.clone();
+            let mut provider_started_emitted = false;
+            let mut stream = self
+                .scheduler
+                .generate_prepared_stream_with_start_observer(
+                    prepared,
+                    |request_id, provider, model, observed_at, observed_policy_evidence| {
+                        provider_started_emitted = true;
+                        emit_progress(MainChatModelProgress::Started {
+                            request_id: request_id.to_string(),
+                            provider: provider.to_string(),
+                            model: model.to_string(),
+                            started_at: observed_at,
+                            policy_evidence: observed_policy_evidence.clone(),
+                        });
+                        Ok(())
+                    },
+                )
+                .await
+                .map_err(|error| MainChatModelFailure {
+                    message: error.to_string(),
+                    provider_receipt: None,
+                    provider_started_emitted,
+                    blocker_code: None,
+                    proposal_ids: Vec::new(),
+                })?;
+            let mut content = String::new();
+            while let Some(event) = stream.next().await {
+                match event {
+                    PreparedProviderStreamEvent::Token(chunk) => {
+                        emit_progress(MainChatModelProgress::Token {
+                            request_id: request_id.clone(),
+                            chunk: chunk.clone(),
+                        });
+                        content.push_str(&chunk);
+                    }
+                    PreparedProviderStreamEvent::Terminal(
+                        PreparedProviderStreamTerminal::NotAttempted,
+                    ) => {
+                        return Err(MainChatModelFailure {
+                            message: "real provider stream returned not_attempted terminal".into(),
+                            provider_receipt: None,
+                            provider_started_emitted,
+                            blocker_code: Some("provider_stream_not_attempted".into()),
+                            proposal_ids: Vec::new(),
+                        });
+                    }
+                    PreparedProviderStreamEvent::Terminal(
+                        PreparedProviderStreamTerminal::Completed(receipt),
+                    ) => {
+                        return Ok(MainChatModelGeneration {
+                            content: self.privacy_engine.reconstruct(&content, &privacy_map),
+                            provider_receipt: Some(receipt),
+                            provider_started_emitted,
+                        });
+                    }
+                    PreparedProviderStreamEvent::Terminal(
+                        PreparedProviderStreamTerminal::Failed { receipt, error }
+                        | PreparedProviderStreamTerminal::RemoteUnknown { receipt, error },
+                    ) => {
+                        return Err(MainChatModelFailure {
+                            message: error,
+                            provider_receipt: Some(receipt),
+                            provider_started_emitted,
+                            blocker_code: None,
+                            proposal_ids: Vec::new(),
+                        });
+                    }
+                }
+            }
+            return Err(MainChatModelFailure {
+                message: "prepared provider stream ended without its typed terminal event".into(),
+                provider_receipt: None,
+                provider_started_emitted,
+                blocker_code: Some("provider_stream_terminal_missing".into()),
+                proposal_ids: Vec::new(),
+            });
+        }
+
+        let simulated = self.scheduler.scripted_generation_response.is_some();
+        let outcome = self
+            .scheduler
+            .execute_prepared_with_start_observer(
+                prepared,
+                |request_id, provider, model, started_at, policy_evidence| {
+                    if !simulated {
+                        emit_progress(MainChatModelProgress::Started {
+                            request_id: request_id.to_string(),
+                            provider: provider.to_string(),
+                            model: model.to_string(),
+                            started_at,
+                            policy_evidence: policy_evidence.clone(),
+                        });
+                    }
+                    Ok(())
+                },
+            )
+            .await;
+        let provider_started_emitted = outcome.receipt.is_some() && !simulated;
+        match outcome.result {
+            Ok(content) => Ok(MainChatModelGeneration {
+                content: self.privacy_engine.reconstruct(&content, &privacy_map),
+                provider_receipt: outcome.receipt,
+                provider_started_emitted,
+            }),
+            Err(message) => Err(MainChatModelFailure {
+                message,
+                provider_receipt: outcome.receipt,
+                provider_started_emitted,
+                blocker_code: None,
+                proposal_ids: Vec::new(),
+            }),
+        }
     }
 
     fn route_metadata(&self) -> MainChatRouteMetadata {
@@ -2197,21 +3652,41 @@ impl CommandSurfaceDirectReply {
 #[derive(Clone)]
 struct CommandSurfaceDirectAnswerModelClient {
     scheduler: InferenceScheduler,
-    life_model: LifeModel,
+    privacy_engine: PrivacyEngine,
+    network_policy: NetworkPolicy,
     direct_reply: Option<CommandSurfaceDirectReply>,
+    consent_state: Option<Arc<AppState>>,
+    canonical_write_admission: Option<crate::main_chat_cancellation::MainChatExecutionEpoch>,
 }
 
 impl CommandSurfaceDirectAnswerModelClient {
     fn new(
         scheduler: InferenceScheduler,
-        life_model: LifeModel,
+        privacy_engine: PrivacyEngine,
+        network_policy: NetworkPolicy,
         direct_reply: Option<CommandSurfaceDirectReply>,
     ) -> Self {
         Self {
             scheduler,
-            life_model,
+            privacy_engine,
+            network_policy,
             direct_reply,
+            consent_state: None,
+            canonical_write_admission: None,
         }
+    }
+
+    fn with_consent_state(mut self, state: Arc<AppState>) -> Self {
+        self.consent_state = Some(state);
+        self
+    }
+
+    fn with_canonical_write_admission(
+        mut self,
+        admission: crate::main_chat_cancellation::MainChatExecutionEpoch,
+    ) -> Self {
+        self.canonical_write_admission = Some(admission);
+        self
     }
 }
 
@@ -2220,14 +3695,32 @@ impl MainChatModelClient for CommandSurfaceDirectAnswerModelClient {
     async fn generate_direct_answer(
         &self,
         request: MainChatModelRequest,
-    ) -> Result<String, String> {
+        emit_progress: &mut (dyn FnMut(MainChatModelProgress) + Send),
+    ) -> Result<MainChatModelGeneration, MainChatModelFailure> {
         if let Some(reply) = self.direct_reply.as_ref() {
-            return Ok(reply.content.clone());
+            return Ok(MainChatModelGeneration {
+                content: reply.content.clone(),
+                provider_receipt: None,
+                provider_started_emitted: false,
+            });
         }
 
-        SchedulerMainChatModelClient::new(self.scheduler.clone(), self.life_model.clone())
-            .generate_direct_answer(request)
-            .await
+        let mut client = SchedulerMainChatModelClient::new(
+            self.scheduler.clone(),
+            self.privacy_engine.clone(),
+            self.network_policy.clone(),
+        );
+        if let Some(admission) = self.canonical_write_admission.as_ref() {
+            client = client.with_canonical_write_admission(admission.clone());
+        }
+        if let Some(state) = self.consent_state.as_ref() {
+            client
+                .with_consent_state(Arc::clone(state))
+                .generate_direct_answer(request, emit_progress)
+                .await
+        } else {
+            client.generate_direct_answer(request, emit_progress).await
+        }
     }
 
     fn route_metadata(&self) -> MainChatRouteMetadata {
@@ -2235,6 +3728,7 @@ impl MainChatModelClient for CommandSurfaceDirectAnswerModelClient {
             MainChatRouteMetadata {
                 provider: "direct".into(),
                 model: direct_reply.route_model.clone(),
+                provider_request_id: None,
                 route_type: "direct".into(),
                 prefer_local: false,
                 local_model: "".into(),
@@ -2256,11 +3750,20 @@ pub struct MainChatKernel<C = SchedulerMainChatModelClient> {
     model_client: C,
     context_config: MainChatKernelContextConfig,
     read_tool_executor: Option<Arc<dyn MainChatKernelReadToolExecutor>>,
+    canonical_run_id: Option<String>,
 }
 
 impl MainChatKernel<SchedulerMainChatModelClient> {
-    pub fn with_scheduler(scheduler: InferenceScheduler, life_model: LifeModel) -> Self {
-        Self::new(SchedulerMainChatModelClient::new(scheduler, life_model))
+    #[cfg(test)]
+    pub fn with_scheduler(scheduler: InferenceScheduler) -> Self {
+        Self::new(SchedulerMainChatModelClient::new(
+            scheduler,
+            PrivacyEngine::new(),
+            NetworkPolicy {
+                default_decision: "allow".into(),
+                ..NetworkPolicy::default()
+            },
+        ))
     }
 }
 
@@ -2273,6 +3776,7 @@ where
             model_client,
             context_config: MainChatKernelContextConfig::default(),
             read_tool_executor: None,
+            canonical_run_id: None,
         }
     }
 
@@ -2286,6 +3790,12 @@ where
         executor: Arc<dyn MainChatKernelReadToolExecutor>,
     ) -> Self {
         self.read_tool_executor = Some(executor);
+        self
+    }
+
+    fn with_canonical_run_id(mut self, canonical_run_id: impl Into<String>) -> Self {
+        let canonical_run_id = canonical_run_id.into();
+        self.canonical_run_id = (!canonical_run_id.trim().is_empty()).then_some(canonical_run_id);
         self
     }
 
@@ -2314,6 +3824,13 @@ where
             return self.blocked("invalid_user_turn", event_sink);
         }
 
+        if input.policy_decision.policy_version != "main_chat_policy_v2"
+            || !input.provider_authorization.validate_projection()
+            || input.provider_authorization.data_route != input.policy_decision.data_route
+        {
+            return self.blocked("invalid_policy_decision", event_sink);
+        }
+
         let (context_metadata, system_prompt) =
             self.compile_context(session_id, selected_skill_id.clone());
         event_sink.emit(MainChatKernelEvent::ContextLoaded {
@@ -2330,17 +3847,15 @@ where
             });
         }
 
-        let external_read_required = latest_user_text(&input.messages)
-            .map(|user_text| {
-                classify_main_chat_governance_intent(user_text)
-                    .external_read_requirement
-                    .is_some()
-            })
-            .unwrap_or(false);
+        let external_read_required = input.policy_decision.action_effect
+            == openlife_core::agent::main_chat_agent_v1::PolicyActionEffect::ReadOnly;
         let memory_governance = if input.runtime_fact_direct_answer || external_read_required {
             None
         } else {
-            plan_kernel_memory_governance(&input)
+            self.context_config
+                .authorized_memory_routing
+                .clone()
+                .filter(|routing| memory_governance_has_artifacts(Some(routing)))
         };
         let mut write_outcome = if input.runtime_fact_direct_answer {
             None
@@ -2379,7 +3894,10 @@ where
             route_metadata: route_metadata.clone(),
         });
 
-        if input.selected_strategy == Some(MainChatAgentStrategy::ReviewMaturation) {
+        if input
+            .policy_decision
+            .allows(AllowedCapability::ReviewMaturationBlocker)
+        {
             return self.governed_blocker(
                 "review_maturation_kernel_executor_unavailable",
                 context_metadata,
@@ -2428,33 +3946,118 @@ where
                 .await;
         }
 
-        let latest_user_text_for_guard = latest_user_text(&input.messages)
-            .map(str::to_string)
-            .unwrap_or_default();
+        if !input
+            .policy_decision
+            .allows(AllowedCapability::ProviderGeneration)
+        {
+            return self.governed_blocker(
+                "policy_provider_generation_not_allowed",
+                context_metadata,
+                route_metadata,
+                event_sink,
+            );
+        }
+
         let request = MainChatModelRequest {
+            session_id: input.session_id.clone(),
             messages: input.messages,
+            provider_authorization: input.provider_authorization,
             system_prompt,
             context_snapshot_ref: context_metadata.context_snapshot_ref.clone(),
+            selected_context_refs: context_metadata.selected_source_ids.clone(),
+            raw_life_model_included: context_metadata.raw_life_model_yaml_included,
+            raw_unbounded_memory_included: context_metadata
+                .hs_context
+                .as_ref()
+                .is_some_and(|context| context.raw_unbounded_memory_included),
             selected_skill_id,
+            stream_provider_tokens: self.context_config.stream_provider_tokens,
         };
 
-        match self.model_client.generate_direct_answer(request).await {
-            Ok(reply) if !reply.trim().is_empty() => {
-                let (reply, blockers) = match assert_direct_answer_has_required_evidence(
-                    &latest_user_text_for_guard,
-                    &reply,
-                    0,
-                    0,
-                    0,
-                ) {
-                    Ok(()) => (reply, Vec::new()),
-                    Err(blocker) => {
-                        event_sink.emit(MainChatKernelEvent::Blocker {
-                            code: blocker.code.clone(),
-                        });
-                        (blocker.replacement_reply, vec![blocker.code])
-                    }
-                };
+        let progress_session_id = request.session_id.clone();
+        let generation_result = {
+            let mut emit_progress = |progress| match progress {
+                MainChatModelProgress::Started {
+                    request_id,
+                    provider,
+                    model,
+                    started_at,
+                    policy_evidence,
+                } => emit_provider_started_with_policy(
+                    request_id,
+                    provider,
+                    model,
+                    started_at,
+                    policy_evidence,
+                    event_sink,
+                ),
+                MainChatModelProgress::Token { request_id, chunk } => {
+                    event_sink.emit(MainChatKernelEvent::ProviderToken {
+                        session_id: progress_session_id.clone(),
+                        request_id,
+                        chunk,
+                    })
+                }
+                MainChatModelProgress::Completed {
+                    request_id,
+                    provider,
+                    model,
+                    finished_at,
+                } => event_sink.emit(MainChatKernelEvent::ProviderCompleted {
+                    request_id,
+                    provider,
+                    model,
+                    finished_at,
+                }),
+                MainChatModelProgress::Failed {
+                    request_id,
+                    provider,
+                    model,
+                    finished_at,
+                    error_digest,
+                } => event_sink.emit(MainChatKernelEvent::ProviderFailed {
+                    request_id,
+                    provider,
+                    model,
+                    finished_at,
+                    error_digest,
+                }),
+                MainChatModelProgress::RemoteUnknown {
+                    request_id,
+                    provider,
+                    model,
+                    finished_at,
+                    reason_digest,
+                } => event_sink.emit(MainChatKernelEvent::ProviderRemoteUnknown {
+                    request_id,
+                    provider,
+                    model,
+                    finished_at,
+                    reason_digest,
+                }),
+            };
+            self.model_client
+                .generate_direct_answer(request, &mut emit_progress)
+                .await
+        };
+
+        match generation_result {
+            Ok(generation) if !generation.content.trim().is_empty() => {
+                if let Some(receipt) = generation.provider_receipt.as_ref() {
+                    route_metadata = route_metadata_from_provider_receipt(route_metadata, receipt);
+                    emit_provider_receipt(receipt, generation.provider_started_emitted, event_sink);
+                }
+                let reply = generation.content;
+                let (reply, blockers) =
+                    match assert_direct_answer_has_required_evidence(&reply, 0, 0, 0) {
+                        Ok(()) => (reply, Vec::new()),
+                        Err(blocker) => {
+                            event_sink.emit(MainChatKernelEvent::Blocker {
+                                code: blocker.code.clone(),
+                            });
+                            (blocker.replacement_reply, vec![blocker.code])
+                        }
+                    };
                 let assistant_message = ChatMessage {
                     role: "assistant".into(),
                     content: reply,
@@ -2477,10 +4080,41 @@ where
                     context_metadata: Some(context_metadata),
                     direct_writes_executed: false,
                     legacy_fallback_used: false,
+                    canonical_tool_graphs: Vec::new(),
+                    canonical_supplemental_observations: Vec::new(),
                 }
             }
-            Ok(_) => self.blocked("model_generation_empty", event_sink),
-            Err(_) => self.blocked("model_generation_failed", event_sink),
+            Ok(generation) => {
+                if let Some(receipt) = generation.provider_receipt.as_ref() {
+                    emit_provider_receipt(receipt, generation.provider_started_emitted, event_sink);
+                }
+                self.blocked("model_generation_empty", event_sink)
+            }
+            Err(failure) => {
+                if let Some(receipt) = failure.provider_receipt.as_ref() {
+                    emit_provider_receipt(receipt, failure.provider_started_emitted, event_sink);
+                }
+                let blocker = failure
+                    .blocker_code
+                    .unwrap_or_else(|| "model_generation_failed".into());
+                event_sink.emit(MainChatKernelEvent::Blocker {
+                    code: blocker.clone(),
+                });
+                MainChatTurnResult {
+                    assistant_message: None,
+                    blockers: vec![blocker],
+                    proposals: failure.proposal_ids,
+                    tool_calls: Vec::new(),
+                    write_outcome: None,
+                    memory_governance: None,
+                    route_metadata: Some(route_metadata),
+                    context_metadata: Some(context_metadata),
+                    direct_writes_executed: false,
+                    legacy_fallback_used: false,
+                    canonical_tool_graphs: Vec::new(),
+                    canonical_supplemental_observations: Vec::new(),
+                }
+            }
         }
     }
 
@@ -2514,6 +4148,8 @@ where
             context_metadata: Some(context_metadata),
             direct_writes_executed: false,
             legacy_fallback_used: false,
+            canonical_tool_graphs: Vec::new(),
+            canonical_supplemental_observations: Vec::new(),
         }
     }
 
@@ -2545,8 +4181,18 @@ where
                     "Unsupported tool request blocked by MainChatKernel read-only tool policy.",
                     None,
                 )
-            } else if let Some(executor) = self.read_tool_executor.as_ref() {
-                executor.execute_read_tool(decision).await
+            } else if let (Some(executor), Some(canonical_run_id)) = (
+                self.read_tool_executor.as_ref(),
+                self.canonical_run_id.as_deref(),
+            ) {
+                executor.execute_read_tool(decision, canonical_run_id).await
+            } else if self.canonical_run_id.is_none() {
+                blocked_kernel_read_tool_execution(
+                    decision,
+                    "canonical_run_identity_missing",
+                    "Read-only ToolGateway dispatch requires the canonical AgentRun id.",
+                    None,
+                )
             } else {
                 blocked_kernel_read_tool_execution(
                     decision,
@@ -2586,8 +4232,15 @@ where
                 output_preview: Some(execution.output_preview.clone()),
                 blocker: execution.blocker_reason.clone(),
                 observation_metadata: Some(execution.observation_metadata.clone()),
+                execution_receipt: Some(execution.execution_receipt.clone()),
                 model_arguments_ignored: execution.decision.model_arguments_ignored,
+                react_trace: execution.product_react_trace.clone(),
+                product_projection: execution.product_tool_projection.clone(),
             })
+            .collect::<Vec<_>>();
+        let canonical_tool_graphs = executions
+            .iter()
+            .filter_map(|execution| execution.canonical_tool_graph.clone())
             .collect::<Vec<_>>();
         let blockers = executions
             .iter()
@@ -2616,6 +4269,8 @@ where
             context_metadata: Some(context_metadata),
             direct_writes_executed: false,
             legacy_fallback_used: false,
+            canonical_tool_graphs,
+            canonical_supplemental_observations: Vec::new(),
         }
     }
 
@@ -2666,6 +4321,8 @@ where
             context_metadata: Some(context_metadata),
             direct_writes_executed: false,
             legacy_fallback_used: false,
+            canonical_tool_graphs: Vec::new(),
+            canonical_supplemental_observations: Vec::new(),
         }
     }
 
@@ -2707,6 +4364,8 @@ where
             context_metadata: Some(context_metadata),
             direct_writes_executed: false,
             legacy_fallback_used: false,
+            canonical_tool_graphs: Vec::new(),
+            canonical_supplemental_observations: Vec::new(),
         }
     }
 
@@ -2791,22 +4450,23 @@ where
 }
 
 fn kernel_turn_result_from_react_agent_loop_attempt(
-    attempt: &MainChatReactAgentLoopAttempt,
+    attempt: MainChatReactAgentLoopAttempt,
     plan: &MainChatReactActionPlan,
     scheduler: &InferenceScheduler,
 ) -> MainChatTurnResult {
     let mut route_metadata = route_metadata_from_scheduler(scheduler);
+    if let Some(receipt) = attempt
+        .provider_receipts
+        .iter()
+        .rev()
+        .find(|receipt| receipt.status == ProviderInvocationStatus::Completed)
+    {
+        route_metadata = route_metadata_from_provider_receipt(route_metadata, receipt);
+    }
     route_metadata.tools_enabled = true;
     route_metadata.reason = "main_chat_governed_react_agent_loop".into();
     let blocker = attempt.blocker_reason.clone();
-    let status = match attempt.queue_status {
-        Some(ExecutionQueueStatus::Completed) => "succeeded",
-        Some(ExecutionQueueStatus::PendingPermission) => "needs_confirmation",
-        Some(ExecutionQueueStatus::Failed) if blocker.is_some() => "blocked",
-        Some(ExecutionQueueStatus::Failed) => "failed",
-        _ if blocker.is_some() => "blocked",
-        _ => "succeeded",
-    };
+    let metadata = attempt.metadata.clone();
     let reply = attempt.reply.clone().unwrap_or_else(|| {
         format!(
             "That read action is blocked by governance: {}",
@@ -2815,7 +4475,6 @@ fn kernel_turn_result_from_react_agent_loop_attempt(
                 .unwrap_or_else(|| "agent_loop_failed".into())
         )
     });
-    let metadata = attempt.metadata.clone();
     let selected_target = metadata
         .get("toolSelectionCandidateTarget")
         .or_else(|| metadata.get("selectedCandidateTarget"))
@@ -2827,12 +4486,8 @@ fn kernel_turn_result_from_react_agent_loop_attempt(
         .and_then(Value::as_str)
         .unwrap_or(plan.queue_action_type.as_str())
         .to_string();
-    let tool_name = attempt
-        .tool_calls
-        .first()
-        .map(|call| call.name.clone())
-        .unwrap_or_else(|| action_type.clone());
-    let output_preview = metadata
+    let selected_action_id = metadata.get("actionId").and_then(Value::as_str);
+    let terminal_output_preview = metadata
         .get("preview")
         .and_then(Value::as_str)
         .map(str::to_string)
@@ -2843,43 +4498,258 @@ fn kernel_turn_result_from_react_agent_loop_attempt(
                 .map(str::to_string)
         })
         .unwrap_or_else(|| preview_text(&reply, MAX_TOOL_OBSERVATION_PREVIEW_CHARS));
+    let tool_calls = if attempt.tool_calls.is_empty() {
+        let mut missing_metadata = metadata.clone();
+        if let Some(object) = missing_metadata.as_object_mut() {
+            object.insert(
+                "receiptInvariantViolation".into(),
+                serde_json::json!("agent_loop_tool_action_missing"),
+            );
+            object.insert("noAdapterReceipt".into(), serde_json::json!(true));
+            object.insert("agentLoopSucceeded".into(), serde_json::json!(false));
+        }
+        vec![MainChatKernelToolCall {
+            name: action_type.clone(),
+            action_type: action_type.clone(),
+            target: selected_target.clone(),
+            governed_input: plan.arguments.clone(),
+            status: "failed".into(),
+            output_preview: Some(terminal_output_preview.clone()),
+            blocker: Some("agent_loop_tool_action_missing".into()),
+            observation_metadata: Some(missing_metadata),
+            execution_receipt: None,
+            model_arguments_ignored: true,
+            react_trace: None,
+            product_projection: None,
+        }]
+    } else {
+        attempt
+            .tool_calls
+            .iter()
+            .map(|call| {
+                let call_status = match &call.status {
+                    ToolCallStatus::Success => "succeeded",
+                    ToolCallStatus::NeedsConfirmation => "needs_confirmation",
+                    ToolCallStatus::Blocked => "blocked",
+                    ToolCallStatus::Pending | ToolCallStatus::Error => "failed",
+                };
+                let is_selected = selected_action_id.is_some_and(|selected_action_id| {
+                    call.action_id.as_deref() == Some(selected_action_id)
+                });
+                let call_blocker = match &call.status {
+                    ToolCallStatus::Success => None,
+                    ToolCallStatus::NeedsConfirmation => Some(
+                        crate::main_chat_react_runtime::typed_agent_loop_permission_code(
+                            call.permission_decision.as_deref(),
+                        )
+                        .unwrap_or("tool_permission_required")
+                        .to_string(),
+                    ),
+                    ToolCallStatus::Blocked | ToolCallStatus::Pending | ToolCallStatus::Error => {
+                        Some(
+                            is_selected
+                                .then(|| attempt.blocker_reason.clone())
+                                .flatten()
+                                .unwrap_or_else(|| "tool_error".into()),
+                        )
+                    }
+                };
+                let output_preview = if matches!(&call.status, ToolCallStatus::Success) {
+                    call.output
+                        .as_deref()
+                        .map(|output| preview_text(output, MAX_TOOL_OBSERVATION_PREVIEW_CHARS))
+                        .or_else(|| is_selected.then(|| terminal_output_preview.clone()))
+                } else {
+                    call_blocker
+                        .as_deref()
+                        .map(|code| preview_text(code, MAX_TOOL_OBSERVATION_PREVIEW_CHARS))
+                };
+                let mut call_metadata = metadata.clone();
+                if let Some(object) = call_metadata.as_object_mut() {
+                    if !is_selected {
+                        object.remove("structuredResult");
+                        object.remove("sourceKind");
+                        object.remove("sourceLabel");
+                        object.insert(
+                            "observationDetailUnavailableForAction".into(),
+                            serde_json::json!(true),
+                        );
+                    }
+                    object.insert(
+                        "actionId".into(),
+                        call.action_id
+                            .as_ref()
+                            .map(|action_id| Value::String(action_id.clone()))
+                            .unwrap_or(Value::Null),
+                    );
+                    object.insert(
+                        "agentLoopActionStatus".into(),
+                        serde_json::json!(call_status),
+                    );
+                    object.insert("toolName".into(), serde_json::json!(call.name.clone()));
+                    object.insert(
+                        "preview".into(),
+                        output_preview
+                            .as_ref()
+                            .map(|preview| Value::String(preview.clone()))
+                            .unwrap_or(Value::Null),
+                    );
+                    object.insert(
+                        "permissionDecision".into(),
+                        crate::main_chat_react_runtime::typed_agent_loop_permission_code(
+                            call.permission_decision.as_deref(),
+                        )
+                        .map(|decision| Value::String(decision.into()))
+                        .unwrap_or(Value::Null),
+                    );
+                    if call.action_id.is_none() {
+                        object.insert(
+                            "receiptInvariantViolation".into(),
+                            serde_json::json!("agent_loop_action_id_missing"),
+                        );
+                    }
+                }
+                MainChatKernelToolCall {
+                    name: call.name.clone(),
+                    action_type: action_type.clone(),
+                    target: call.name.clone(),
+                    governed_input: call.arguments.clone(),
+                    status: if call.action_id.is_some() {
+                        call_status.into()
+                    } else {
+                        "failed".into()
+                    },
+                    output_preview,
+                    blocker: if call.action_id.is_some() {
+                        call_blocker
+                    } else {
+                        Some("agent_loop_action_id_missing".into())
+                    },
+                    observation_metadata: Some(call_metadata),
+                    execution_receipt: call.execution_receipt.clone(),
+                    model_arguments_ignored: true,
+                    react_trace: call.react_trace.clone(),
+                    product_projection: call.product_projection.clone(),
+                }
+            })
+            .collect()
+    };
+    let blockers = if attempt.tool_calls.is_empty() {
+        vec!["agent_loop_tool_action_missing".into()]
+    } else {
+        blocker.into_iter().collect()
+    };
+
+    let canonical_tool_graphs = attempt
+        .canonical_tool_delta
+        .graphs
+        .into_iter()
+        .map(|graph| KernelCanonicalToolGraph {
+            action: graph.action,
+            observations: graph.observations,
+        })
+        .collect();
+    let canonical_supplemental_observations =
+        attempt.canonical_tool_delta.supplemental_observations;
 
     MainChatTurnResult {
         assistant_message: Some(ChatMessage {
             role: "assistant".into(),
             content: reply,
         }),
-        blockers: blocker.into_iter().collect(),
+        blockers,
         proposals: Vec::new(),
-        tool_calls: vec![MainChatKernelToolCall {
-            name: tool_name,
-            action_type,
-            target: selected_target,
-            governed_input: plan.arguments.clone(),
-            status: status.into(),
-            output_preview: Some(output_preview),
-            blocker: attempt.blocker_reason.clone(),
-            observation_metadata: Some(metadata),
-            model_arguments_ignored: true,
-        }],
+        tool_calls,
         write_outcome: None,
         memory_governance: None,
         route_metadata: Some(route_metadata),
         context_metadata: None,
         direct_writes_executed: false,
         legacy_fallback_used: false,
+        canonical_tool_graphs,
+        canonical_supplemental_observations,
     }
+}
+
+fn main_chat_failure_kind_from_kernel_result(
+    kernel_result: &MainChatTurnResult,
+) -> MainChatTaskFailureKind {
+    let reported_kind = kernel_result.tool_calls.iter().find_map(|tool_call| {
+        tool_call
+            .observation_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("agentLoopFailureKind"))
+            .and_then(Value::as_str)
+    });
+    match reported_kind {
+        Some("tool_error") => MainChatTaskFailureKind::ToolError,
+        Some("provider_error") => MainChatTaskFailureKind::ProviderError,
+        Some("timeout") => MainChatTaskFailureKind::Timeout,
+        Some("cancelled") => MainChatTaskFailureKind::Cancelled,
+        Some("unknown_error") => MainChatTaskFailureKind::UnknownError,
+        _ if kernel_result
+            .tool_calls
+            .iter()
+            .any(|tool_call| tool_call.status == "failed") =>
+        {
+            MainChatTaskFailureKind::ToolError
+        }
+        _ => MainChatTaskFailureKind::PolicyBlocker,
+    }
+}
+
+async fn load_existing_canonical_main_chat_agent_run(
+    state: &Arc<AppState>,
+    run_id: &str,
+    task_session_id: &str,
+    chat_session_id: &str,
+) -> Result<AgentRun, String> {
+    let store_arc = state
+        .agent_run_store
+        .as_ref()
+        .ok_or_else(|| "agent_run_store_unavailable".to_string())?;
+    let store = store_arc.lock().await;
+    let run = store
+        .get_run(run_id)
+        .map_err(|err| format!("load canonical Main Chat AgentRun failed: {err}"))?
+        .ok_or_else(|| format!("canonical_main_chat_agent_run_missing: {run_id}"))?;
+    if run.task_id != task_session_id {
+        return Err(format!(
+            "canonical_main_chat_agent_run_task_mismatch: run {run_id} owns {}, expected {task_session_id}",
+            run.task_id
+        ));
+    }
+    if run.session_id.as_deref() != Some(chat_session_id) {
+        return Err(format!(
+            "canonical_main_chat_agent_run_session_mismatch: run {run_id} owns {:?}, expected {chat_session_id}",
+            run.session_id
+        ));
+    }
+    if run.status != AgentRunStatus::Running {
+        return Err(format!(
+            "canonical_main_chat_agent_run_not_running: run {run_id} is {}",
+            run.status
+        ));
+    }
+    Ok(run)
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn build_successful_kernel_command_surface_result(
     session_id: &str,
     user_text: &str,
+    canonical_run_id: &str,
+    execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
     state: &Arc<AppState>,
     main_chat_agent_turn: &MainChatAgentTurn,
     mut execution_transcript: Vec<ExecutionTranscriptEntry>,
-    kernel_result: MainChatTurnResult,
+    mut kernel_result: MainChatTurnResult,
     scheduler: InferenceScheduler,
+    provider_durability_scope: &crate::main_chat_turn_runtime::MainChatProviderDurabilityScope,
+    supplied_provider_durability_proofs: Vec<
+        openlife_core::scheduler::ProviderInvocationDurabilityProof,
+    >,
+    provider_config: AppConfig,
     life_model: LifeModel,
     direct_reflex_used: bool,
     runtime_fact_answer: Option<MainChatRuntimeFactAnswer>,
@@ -2891,6 +4761,13 @@ async fn build_successful_kernel_command_surface_result(
         .agent_task_session_id
         .as_deref()
         .ok_or_else(|| "Main Chat kernel task session missing".to_string())?;
+    let mut agent_run = load_existing_canonical_main_chat_agent_run(
+        state,
+        canonical_run_id,
+        task_session_id,
+        session_id,
+    )
+    .await?;
     let mut assistant_message = kernel_result
         .assistant_message
         .clone()
@@ -2916,18 +4793,54 @@ async fn build_successful_kernel_command_surface_result(
     } else {
         main_chat_provider_endpoint_kind(&scheduler, scripted_provider_response)
     };
-    let provider_live_invoked = !read_tool_loop_used
-        && !memory_governance_planned
-        && !direct_reflex_used
-        && !scripted_provider_response
-        && route_metadata.provider != "none"
-        && route_metadata.route_type == "cloud";
-    let current_turn_model_generated =
-        !direct_reflex_used && !read_tool_loop_used && !memory_governance_planned;
+    // Validate every provider attempt before any proposal, canonical mutation,
+    // or terminal AgentRun projection. The selected response is bound to the
+    // exact adapter request id carried by route metadata; turn-level booleans
+    // must never join Start A with Complete B.
+    let provider_receipts = provider_receipts_from_kernel_events(&kernel_events)?;
+    validate_provider_receipts_for_runtime_generation(
+        &provider_receipts,
+        scheduler.provider_config_generation(),
+    )?;
+    let provider_durability_proofs = resolve_provider_durability_proofs(
+        &scheduler,
+        &provider_receipts,
+        supplied_provider_durability_proofs,
+    )?;
+    let mut provider_durable_events = append_main_chat_provider_receipt_events(
+        state,
+        task_session_id,
+        &agent_run.id,
+        provider_durability_scope,
+        &provider_receipts,
+        &provider_durability_proofs,
+    )
+    .await?;
+    let selected_provider_receipt = match route_metadata.provider_request_id.as_deref() {
+        Some(request_id) => Some(
+            provider_receipts
+                .iter()
+                .find(|receipt| {
+                    receipt.request_id == request_id
+                        && receipt.status == ProviderInvocationStatus::Completed
+                })
+                .ok_or_else(|| {
+                    format!("provider_response_receipt_missing_or_not_completed:{request_id}")
+                })?,
+        ),
+        None if provider_receipts.is_empty() => None,
+        None => return Err("provider_response_request_identity_missing".into()),
+    };
+    let provider_failed = provider_receipts
+        .iter()
+        .any(|receipt| receipt.status == ProviderInvocationStatus::Failed);
+    let provider_live_invoked = selected_provider_receipt.is_some() && !scripted_provider_response;
+    let current_turn_model_generated = selected_provider_receipt.is_some();
     let provider_route_fact_answer = if runtime_fact_answer.is_none() {
         resolve_post_model_runtime_fact_answer(MainChatRuntimeFactPostModelRequest {
             user_text,
             state,
+            provider_config: &provider_config,
             scheduler: &scheduler,
             session_id,
             current_route: model_route.clone(),
@@ -2968,6 +4881,21 @@ async fn build_successful_kernel_command_surface_result(
         .context_metadata
         .as_ref()
         .and_then(|metadata| metadata.hs_context.clone());
+    if let Some(context_snapshot_ref) = kernel_result
+        .context_metadata
+        .as_ref()
+        .map(|metadata| metadata.context_snapshot_ref.as_str())
+    {
+        let store = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?;
+        store
+            .lock()
+            .await
+            .record_context_snapshot_ref(task_session_id, context_snapshot_ref)
+            .map_err(|error| format!("persist main chat context snapshot ref failed: {error}"))?;
+    }
     let mut generation_metadata = serde_json::json!({
         "hsPacketSelected": hs_metadata
             .as_ref()
@@ -3008,6 +4936,7 @@ async fn build_successful_kernel_command_surface_result(
             .map(|metadata| metadata.context_snapshot_ref.clone()),
         "modelGenerated": current_turn_model_generated,
         "schedulerGenerationCalled": current_turn_model_generated,
+        "turnProviderRuntimeGeneration": scheduler.provider_config_generation(),
         "providerGenerationPath": if read_tool_loop_used {
             "main_chat_kernel_read_tool_synthesis"
         } else if memory_governance_planned {
@@ -3019,13 +4948,37 @@ async fn build_successful_kernel_command_surface_result(
         } else {
             "main_chat_direct_answer_scheduler"
         },
-        "provider": route_metadata.provider,
-        "model": route_metadata.model,
-        "routeType": route_metadata.route_type,
+        "provider": selected_provider_receipt
+            .as_ref()
+            .map(|receipt| receipt.provider.clone())
+            .unwrap_or_else(|| route_metadata.provider.clone()),
+        "model": selected_provider_receipt
+            .as_ref()
+            .map(|receipt| receipt.model.clone())
+            .unwrap_or_else(|| route_metadata.model.clone()),
+        "routeType": selected_provider_receipt
+            .as_ref()
+            .map(|receipt| if receipt.provider == "ollama" { "local" } else { "cloud" })
+            .unwrap_or(route_metadata.route_type.as_str()),
         "routeReason": route_metadata.reason,
         "providerHealthEstimated": false,
         "scriptedProviderResponse": scripted_provider_response,
         "liveProviderInvoked": provider_live_invoked,
+        "providerRequestId": selected_provider_receipt.as_ref().map(|receipt| receipt.request_id.as_str()),
+        "providerReceiptProvider": selected_provider_receipt.as_ref().map(|receipt| receipt.provider.as_str()),
+        "providerReceiptModel": selected_provider_receipt.as_ref().map(|receipt| receipt.model.as_str()),
+        "providerReceiptConfigGeneration": selected_provider_receipt
+            .as_ref()
+            .and_then(|receipt| receipt.policy_evidence.as_ref())
+            .map(|evidence| evidence.provider_config_generation.as_str()),
+        "providerReceiptStatus": if selected_provider_receipt.is_some() {
+            "completed"
+        } else if provider_failed {
+            "failed"
+        } else {
+            "not_attempted"
+        },
+        "providerAttempts": provider_receipt_projection_metadata(&provider_receipts),
         "providerEndpointKind": provider_endpoint_kind,
         "localProviderHttpHarness": provider_live_invoked
             && provider_endpoint_kind == "local_test_http",
@@ -3043,7 +4996,6 @@ async fn build_successful_kernel_command_surface_result(
             answer.generation_metadata(),
         );
     }
-    let mut agent_run = AgentRun::new_chat_run(session_id, user_text);
     agent_run.reasoning_strategy = Some(if memory_governance_planned {
         "main_chat_agent_v1_memory_governance".into()
     } else if read_tool_loop_used {
@@ -3053,84 +5005,8 @@ async fn build_successful_kernel_command_surface_result(
     });
     agent_run.tool_call_count = kernel_result.tool_calls.len() as u32;
     agent_run.step_count = if read_tool_loop_used { 1 } else { 0 };
-    let mut proposal_tool_calls = Vec::new();
     let mut pending_proposal_ids = Vec::new();
-    if read_tool_loop_used
-        && kernel_result
-            .tool_calls
-            .iter()
-            .any(|tool_call| tool_call.status == "succeeded")
-        && user_text_requests_memory_proposal_after_read(user_text)
-    {
-        let outcome = kernel_followup_memory_proposal_outcome(user_text);
-        let queued = enqueue_main_chat_agent_action(
-            state,
-            task_session_id,
-            &outcome.action_type,
-            &kernel_write_action_description(&outcome),
-            &mut execution_transcript,
-        )
-        .await?;
-        transition_main_chat_action(state, &queued.id, ExecutionQueueStatus::Executing, None)
-            .await?;
-        let proposal = create_kernel_write_proposal(
-            state,
-            task_session_id,
-            &agent_run.id,
-            &outcome,
-            user_text,
-        )
-        .await?;
-        agent_run.add_generated_proposal(&proposal.id);
-        pending_proposal_ids.push(proposal.id.clone());
-        let proposal_metadata = serde_json::json!({
-            "kernelBackedProposalOnlyWrite": true,
-            "kernelBackedReadOnlyToolLoop": true,
-            "writeOutcomeKind": outcome.kind.as_str(),
-            "proposalId": proposal.id,
-            "proposalType": proposal.proposal_type,
-            "affectedPath": proposal.affected_path,
-            "sourceRunId": agent_run.id,
-            "sourceTaskSessionId": task_session_id,
-            "payloadSummary": outcome.payload_summary,
-            "reviewStatus": proposal.status,
-            "blockedWriteActionType": kernel_blocked_write_action_type(outcome.kind),
-            "directWritesExecuted": false,
-            "acceptedDurableTruthWritten": false,
-        });
-        transition_main_chat_action(
-            state,
-            &queued.id,
-            ExecutionQueueStatus::Observed,
-            Some(proposal_metadata.clone()),
-        )
-        .await?;
-        transition_main_chat_action(state, &queued.id, ExecutionQueueStatus::Completed, None)
-            .await?;
-        execution_transcript.extend(
-            append_main_chat_agent_transcript(
-                state,
-                Some(task_session_id),
-                ExecutionTranscriptEntryKind::ProposalRequest,
-                "MainChatKernel created a Memory proposal after a governed read.",
-                proposal_metadata.clone(),
-            )
-            .await,
-        );
-        proposal_tool_calls.push(kernel_write_tool_call(
-            "proposal.create",
-            &queued.id,
-            Some(&agent_run.id),
-            proposal_metadata,
-            true,
-            ToolCallStatus::Pending,
-            None,
-            false,
-        ));
-        agent_run.tool_call_count =
-            (kernel_result.tool_calls.len() + proposal_tool_calls.len()) as u32;
-        agent_run.step_count = agent_run.tool_call_count;
-    }
+    let mut deferred_review_proposal_ids = Vec::new();
     let mut memory_governance_tool_calls = Vec::new();
     let mut memory_governance_metadata = empty_memory_governance_metadata();
     if let Some(routing) = kernel_result.memory_governance.as_ref() {
@@ -3139,7 +5015,11 @@ async fn build_successful_kernel_command_surface_result(
             task_session_id,
             &agent_run.id,
             routing,
+            &main_chat_agent_turn.decision.policy_decision,
+            main_chat_agent_turn.decision.intent_frame.source_kind,
+            user_text,
             &mut execution_transcript,
+            execution_epoch,
         )
         .await?;
         memory_governance_metadata = materialized.metadata;
@@ -3163,17 +5043,21 @@ async fn build_successful_kernel_command_surface_result(
         }
     }
     if let Some(object) = generation_metadata.as_object_mut() {
+        let direct_writes_executed = memory_governance_metadata
+            .get("directWritesExecuted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         object.insert(
             "memoryGovernance".into(),
             memory_governance_metadata.clone(),
         );
         object.insert(
+            "directWritesExecuted".into(),
+            serde_json::json!(direct_writes_executed),
+        );
+        object.insert(
             "toolCallCount".into(),
-            serde_json::json!(
-                kernel_result.tool_calls.len()
-                    + proposal_tool_calls.len()
-                    + memory_governance_tool_calls.len()
-            ),
+            serde_json::json!(kernel_result.tool_calls.len() + memory_governance_tool_calls.len()),
         );
     }
     execution_transcript.extend(
@@ -3194,9 +5078,14 @@ async fn build_successful_kernel_command_surface_result(
         )
         .await,
     );
-    agent_run.tool_call_count = (kernel_result.tool_calls.len()
-        + proposal_tool_calls.len()
-        + memory_governance_tool_calls.len()) as u32;
+    append_kernel_canonical_tool_delta(
+        &mut agent_run,
+        std::mem::take(&mut kernel_result.canonical_tool_graphs),
+        std::mem::take(&mut kernel_result.canonical_supplemental_observations),
+    )?;
+    validate_kernel_tool_call_observation_bindings(&agent_run, &kernel_result.tool_calls)?;
+    agent_run.tool_call_count =
+        (kernel_result.tool_calls.len() + memory_governance_tool_calls.len()) as u32;
     agent_run.step_count = agent_run.tool_call_count;
     agent_run.complete(&preview_text(&reply, 200), model_route, context_summary);
     let mut reasoning_trace = ReasoningTrace {
@@ -3226,7 +5115,6 @@ async fn build_successful_kernel_command_surface_result(
         &reply,
         &mut reasoning_trace,
         &mut agent_run,
-        &life_model,
         state,
     )
     .await?;
@@ -3235,11 +5123,60 @@ async fn build_successful_kernel_command_surface_result(
         task_session_id,
         &kernel_result.tool_calls,
         &agent_run.id,
+        execution_epoch,
         &mut execution_transcript,
     )
     .await?;
+    if let Some(proposal) = stage_conditional_observation_memory_review(
+        state,
+        task_session_id,
+        &main_chat_agent_turn.decision.policy_decision,
+        &tool_calls,
+        execution_epoch,
+    )
+    .await?
+    {
+        deferred_review_proposal_ids.push(proposal.id.clone());
+        let proposal_metadata = serde_json::json!({
+            "policyConditionalObservationReview": true,
+            "proposalId": proposal.id,
+            "proposalType": proposal.proposal_type,
+            "affectedPath": proposal.affected_path,
+            "sourceRunId": proposal.run_id,
+            "sourceActionId": proposal.after.get("sourceActionId"),
+            "sourceObservationId": proposal.after.get("sourceObservationId"),
+            "sourceOutputReceiptDigest": proposal.after.get("sourceOutputReceiptDigest"),
+            "candidateDigest": proposal.after.get("candidateDigest"),
+            "reviewStatus": proposal.status,
+            "directWritesExecuted": false,
+            "acceptedDurableTruthWritten": false,
+        });
+        execution_transcript.extend(
+            append_main_chat_agent_transcript(
+                state,
+                Some(task_session_id),
+                ExecutionTranscriptEntryKind::ProposalRequest,
+                "ReviewWorkflow staged one observation-derived Memory proposal.",
+                proposal_metadata,
+            )
+            .await,
+        );
+        let store_arc = state
+            .agent_run_store
+            .as_ref()
+            .ok_or_else(|| "agent_run_store_unavailable".to_string())?;
+        let store = store_arc.lock().await;
+        let mut canonical_run = store
+            .get_run(&agent_run.id)
+            .map_err(|error| format!("reload conditional proposal AgentRun failed: {error}"))?
+            .ok_or_else(|| "conditional proposal AgentRun missing".to_string())?;
+        canonical_run.add_generated_proposal(&proposal.id);
+        store.update_run(&canonical_run).map_err(|error| {
+            format!("persist conditional proposal AgentRun reference failed: {error}")
+        })?;
+        agent_run = canonical_run;
+    }
     let mut tool_calls = tool_calls;
-    tool_calls.extend(proposal_tool_calls);
     tool_calls.extend(memory_governance_tool_calls);
     let pending_permission_blockers = tool_calls
         .iter()
@@ -3307,13 +5244,15 @@ async fn build_successful_kernel_command_surface_result(
         complete_main_chat_agent_turn_session(
             state,
             main_chat_agent_turn,
-            if read_tool_loop_used {
+            if !deferred_review_proposal_ids.is_empty() {
+                "MainChatKernel completed the answer and staged a non-blocking ReviewWorkflow item; no Memory change was applied."
+            } else if read_tool_loop_used {
                 "MainChatKernel read-only tool loop completed without writes."
             } else {
                 "DirectAnswer completed without tool execution."
             },
         )
-        .await;
+        .await?;
     } else if let Some(ref store_arc) = state.main_chat_agent_session_store {
         let store = store_arc.lock().await;
         let blockers = pending_proposal_ids
@@ -3333,6 +5272,8 @@ async fn build_successful_kernel_command_surface_result(
             );
         }
     }
+    let mut visible_proposal_ids = pending_proposal_ids.clone();
+    visible_proposal_ids.extend(deferred_review_proposal_ids.clone());
     execution_transcript.extend(
         append_main_chat_agent_transcript(
             state,
@@ -3342,6 +5283,8 @@ async fn build_successful_kernel_command_surface_result(
                 "MainChatKernel read-only tool loop blocked."
             } else if !pending_proposal_ids.is_empty() {
                 "MainChatKernel read-only tool loop completed with a pending proposal."
+            } else if !deferred_review_proposal_ids.is_empty() {
+                "MainChatKernel answer completed; observation-derived review staged without applying a Memory change."
             } else if read_tool_loop_used {
                 "MainChatKernel read-only tool loop completed."
             } else {
@@ -3353,20 +5296,23 @@ async fn build_successful_kernel_command_surface_result(
                 "legacyFallbackUsed": false,
                 "kernelBackedDirectAnswer": !read_tool_loop_used,
                 "kernelBackedReadOnlyToolLoop": read_tool_loop_used,
-                "kernelBackedProposalOnlyWrite": !pending_proposal_ids.is_empty(),
+                "kernelBackedProposalOnlyWrite": !visible_proposal_ids.is_empty(),
                 "toolCallCount": tool_calls.len(),
                 "agentLoopSucceeded": read_tool_loop_used && read_tool_loop_action_status == "succeeded",
                 "singleStepFallbackUsed": false,
                 "agentLoopActionStatus": read_tool_loop_action_status,
                 "agentLoopActionCount": if read_tool_loop_used { kernel_result.tool_calls.len() } else { 0 },
                 "agentLoopObservationCount": read_tool_loop_observation_count,
-                "proposalIds": pending_proposal_ids.clone(),
+                "proposalIds": visible_proposal_ids,
+                "deferredReviewProposalIds": deferred_review_proposal_ids,
                 "memoryGovernance": memory_governance_metadata.clone(),
-                "directWritesExecuted": false,
+                "directWritesExecuted": memory_governance_metadata
+                    .get("directWritesExecuted")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
                 "pendingBlockers": pending_read_tool_blockers.clone(),
                 "pendingPermissionBlockers": pending_permission_blockers.clone(),
-                "pendingBlockerCount": pending_proposal_ids.len()
-                    + pending_read_tool_blockers.len(),
+                "pendingBlockerCount": pending_proposal_ids.len() + pending_read_tool_blockers.len(),
             }),
         )
         .await,
@@ -3374,8 +5320,9 @@ async fn build_successful_kernel_command_surface_result(
     let agent_state =
         assemble_main_chat_agent_state_for_turn(state, Some(task_session_id), Some(&agent_run.id))
             .await;
-    let durable_events =
-        materialize_optional_main_chat_agent_events(state, agent_state.as_ref()).await?;
+    provider_durable_events
+        .extend(materialize_optional_main_chat_agent_events(state, agent_state.as_ref()).await?);
+    let durable_events = provider_durable_events;
 
     Ok(MainChatKernelCommandSurfaceResult {
         reply,
@@ -3430,34 +5377,248 @@ fn kernel_blocked_write_action_type(kind: MainChatKernelWriteOutcomeKind) -> &'s
     }
 }
 
+fn conservative_memory_proposal_risk(
+    policy_decision: &PolicyDecision,
+) -> (MemoryLifecycleRiskLevel, RiskLevel) {
+    match MemoryLifecycleRiskLevel::from_intent_risk(policy_decision.risk) {
+        MemoryLifecycleRiskLevel::Low | MemoryLifecycleRiskLevel::Medium => {
+            (MemoryLifecycleRiskLevel::Medium, RiskLevel::Medium)
+        }
+        MemoryLifecycleRiskLevel::High => (MemoryLifecycleRiskLevel::High, RiskLevel::High),
+        MemoryLifecycleRiskLevel::IdentityValue => {
+            (MemoryLifecycleRiskLevel::IdentityValue, RiskLevel::Critical)
+        }
+    }
+}
+
+async fn stage_conditional_observation_memory_review(
+    state: &Arc<AppState>,
+    operation_id: &str,
+    policy_decision: &PolicyDecision,
+    recorded_tool_calls: &[ToolCallResult],
+    execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
+) -> Result<Option<openlife_core::agent::AgentProposal>, String> {
+    let conditional_planned = policy_decision
+        .governance_plan()
+        .is_some_and(|plan| !plan.conditional_observation_reviews.is_empty());
+    if !conditional_planned {
+        return Ok(None);
+    }
+    let canonical_run = {
+        let store_arc = state
+            .agent_run_store
+            .as_ref()
+            .ok_or_else(|| "conditional observation AgentRunStore unavailable".to_string())?;
+        let store = store_arc.lock().await;
+        store
+            .get_run(operation_id)
+            .map_err(|error| format!("load canonical observation run failed: {error}"))?
+            .ok_or_else(|| "conditional observation canonical run missing".to_string())?
+    };
+    if canonical_run.id != operation_id || canonical_run.task_id != operation_id {
+        return Err("conditional observation canonical operation owner mismatch".into());
+    }
+    let canonical_queue_actions = {
+        let queue_arc = state
+            .main_chat_action_queue_store
+            .as_ref()
+            .ok_or_else(|| "conditional observation ActionQueue unavailable".to_string())?;
+        let queue = queue_arc.lock().await;
+        queue
+            .list_for_session(operation_id)
+            .map_err(|error| format!("load canonical observation action failed: {error}"))?
+    };
+    let mut recorded_action_ids = std::collections::HashSet::new();
+    for recorded in recorded_tool_calls
+        .iter()
+        .filter(|recorded| matches!(recorded.status, ToolCallStatus::Success))
+    {
+        let action_id = recorded.action_id.as_deref().ok_or_else(|| {
+            "conditional observation canonical action projection missing".to_string()
+        })?;
+        if !recorded_action_ids.insert(action_id) {
+            return Err("conditional observation recorded action binding ambiguous".into());
+        }
+    }
+
+    for recorded in recorded_tool_calls {
+        if !matches!(recorded.status, ToolCallStatus::Success) {
+            continue;
+        }
+        let Some(action_id) = recorded.action_id.as_deref() else {
+            return Err("conditional observation canonical action projection missing".into());
+        };
+        let action = canonical_run
+            .actions
+            .iter()
+            .find(|action| action.id == action_id)
+            .ok_or_else(|| "conditional observation canonical action missing".to_string())?;
+        let tool_receipt = recorded
+            .execution_receipt
+            .as_ref()
+            .ok_or_else(|| "conditional observation tool receipt missing".to_string())?;
+        if !recorded
+            .product_projection
+            .as_ref()
+            .is_some_and(|projection| {
+                projection.authorizes_exact_current_envelope(
+                    recorded,
+                    &canonical_run.id,
+                    &action.id,
+                    tool_receipt,
+                )
+            })
+        {
+            return Err("conditional observation live tool projection mismatch".into());
+        }
+        let matching_queue_actions = canonical_queue_actions
+            .iter()
+            .filter(|queued| {
+                queued.status == ExecutionQueueStatus::Completed
+                    && queued.session_id == operation_id
+                    && queued
+                        .observation_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.get("executorActionId"))
+                        .and_then(Value::as_str)
+                        == Some(action_id)
+            })
+            .collect::<Vec<_>>();
+        if matching_queue_actions.is_empty() {
+            return Err("conditional observation canonical queue action missing".into());
+        }
+        if matching_queue_actions.len() != 1 {
+            return Err("conditional observation canonical queue action ambiguous".into());
+        }
+        let queue_action = matching_queue_actions[0];
+        let queue_metadata = queue_action.observation_metadata.as_ref().ok_or_else(|| {
+            "conditional observation canonical queue metadata missing".to_string()
+        })?;
+        let observed_body = queue_metadata
+            .get("preview")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "conditional observation canonical preview missing".to_string())?;
+        let action_trace = action
+            .react_trace
+            .as_ref()
+            .ok_or_else(|| "conditional observation canonical action trace missing".to_string())?;
+        let observation_id = action_trace.observation_id.as_deref().ok_or_else(|| {
+            "conditional observation canonical observation id missing".to_string()
+        })?;
+        let observation = canonical_run
+            .observations
+            .iter()
+            .find(|observation| observation.id == observation_id)
+            .ok_or_else(|| "conditional observation canonical observation missing".to_string())?;
+        let output_receipt = action_trace.output_receipt.as_ref().ok_or_else(|| {
+            "conditional observation canonical output receipt missing".to_string()
+        })?;
+        if queue_metadata.get("observationId").and_then(Value::as_str) != Some(observation_id)
+            || queue_metadata
+                .get("toolExecutionReceipt")
+                .and_then(|receipt| receipt.get("receiptId"))
+                .and_then(Value::as_str)
+                != Some(tool_receipt.receipt_id.as_str())
+        {
+            return Err("conditional observation canonical queue receipt binding mismatch".into());
+        }
+
+        let Some(grant) = policy_decision
+            .try_authorize_conditional_observation_memory_review(
+                operation_id,
+                &policy_decision.authorized_user_message_id,
+                &policy_decision.authorized_user_message_digest,
+                &canonical_run.id,
+                action,
+                observation,
+                output_receipt,
+                tool_receipt,
+                observed_body,
+            )
+            .map_err(|error| format!("conditional observation policy admission failed: {error}"))?
+        else {
+            continue;
+        };
+        let store_arc = state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(|| "Proposal store not available".to_string())?;
+        let store = store_arc.lock().await;
+        let outcome = openlife_core::agent::ReviewWorkflow::new(&store)
+            .submit_conditional_observation_memory_review(grant, execution_epoch)
+            .map_err(|error| {
+                format!("conditional observation ReviewWorkflow submission failed: {error}")
+            })?;
+        return Ok(Some(outcome.proposal));
+    }
+
+    Ok(None)
+}
+
 async fn create_kernel_write_proposal(
     state: &Arc<AppState>,
     task_session_id: &str,
     run_id: &str,
     outcome: &MainChatKernelWriteOutcome,
     user_text: &str,
+    policy_decision: &PolicyDecision,
+    execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
 ) -> Result<openlife_core::agent::AgentProposal, String> {
     use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 
     let (proposal_type, affected_path, reason, risk_level, after) = match outcome.kind {
-        MainChatKernelWriteOutcomeKind::MemoryProposal => (
-            ProposalType::MemoryWrite,
-            "memory.pending.chat_conversation".to_string(),
-            "User asked OpenLife to remember this local conversation fact after review."
-                .to_string(),
-            RiskLevel::Medium,
-            serde_json::json!({
-                "content": outcome
-                    .governed_input
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .unwrap_or(user_text),
-                "source": "chat_explicit",
-                "session_id": task_session_id,
-                "sourceRunId": run_id,
-                "reviewPath": "mailbox",
-            }),
-        ),
+        MainChatKernelWriteOutcomeKind::MemoryProposal => {
+            let (lifecycle_risk, proposal_risk) =
+                conservative_memory_proposal_risk(policy_decision);
+            let canonical_body = outcome
+                .governed_input
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or(user_text);
+            let candidate_sensitivity = outcome
+                .governed_input
+                .get("sensitivity")
+                .and_then(Value::as_str)
+                .unwrap_or("sensitive");
+            let mut sensitivity = MemoryLifecycleSensitivity::from_policy_and_candidate(
+                policy_decision.sensitivity,
+                candidate_sensitivity,
+            );
+            if matches!(
+                lifecycle_risk,
+                MemoryLifecycleRiskLevel::High | MemoryLifecycleRiskLevel::IdentityValue
+            ) {
+                sensitivity = MemoryLifecycleSensitivity::Sensitive;
+            }
+            let fact = CanonicalMemoryFactDescriptor::from_candidate(
+                canonical_body,
+                MemoryCandidateKind::SemanticUserFact,
+                MemoryLifecycleScope::Global,
+                lifecycle_risk,
+                sensitivity,
+            )
+            .map_err(|error| format!("Memory proposal descriptor rejected: {error}"))?;
+            (
+                ProposalType::MemoryWrite,
+                "memory.pending.chat_conversation".to_string(),
+                "User asked OpenLife to remember this local conversation fact after review."
+                    .to_string(),
+                proposal_risk,
+                serde_json::json!({
+                    "content": fact.canonical_body,
+                    "scope": fact.scope,
+                    "category": fact.category,
+                    "riskLevel": fact.risk_level,
+                    "sensitivity": fact.sensitivity,
+                    "candidateKind": MemoryCandidateKind::SemanticUserFact,
+                    "source": "chat_explicit",
+                    "session_id": task_session_id,
+                    "sourceRunId": run_id,
+                    "reviewPath": "mailbox",
+                }),
+            )
+        }
         MainChatKernelWriteOutcomeKind::LifeModelProposal => {
             let requested_change = outcome
                 .governed_input
@@ -3565,8 +5726,8 @@ async fn create_kernel_write_proposal(
         .as_ref()
         .ok_or_else(|| "Proposal store not available".to_string())?;
     let store = store_arc.lock().await;
-    let outcome = openlife_core::agent::ReviewWorkflow::new(&store)
-        .submit(
+    openlife_core::agent::ReviewWorkflow::new(&store)
+        .submit_with_admission(
             openlife_core::agent::DurableWriteRequest::from_agent_proposal(
                 openlife_core::agent::DurableWriteSource::MainChat,
                 openlife_core::agent::DurableWriteSubject::from_proposal_type(
@@ -3576,9 +5737,10 @@ async fn create_kernel_write_proposal(
                 "Main Chat kernel proposal is pending Review Center approval.",
             )
             .with_evidence_refs(vec![format!("main_chat_task_session:{task_session_id}")]),
+            execution_epoch,
         )
-        .map_err(|err| format!("create kernel write proposal failed: {err}"))?;
-    Ok(outcome.proposal)
+        .map(|outcome| outcome.proposal)
+        .map_err(|err| format!("create kernel write proposal failed: {err}"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3612,6 +5774,8 @@ fn kernel_write_tool_call(
         run_id: run_id.map(str::to_string),
         permission_decision: None,
         react_trace: None,
+        execution_receipt: None,
+        product_projection: None,
     }
 }
 
@@ -3622,88 +5786,96 @@ struct MainChatMemoryGovernanceMaterialization {
     pending_proposal_ids: Vec<String>,
 }
 
+#[cfg(test)]
+pub(crate) fn test_policy_memory_admission_context(
+    source_message_id: &str,
+    source_user_message: &str,
+    fact: &CanonicalMemoryFactDescriptor,
+) -> (
+    PolicyDecision,
+    MainChatMemoryCandidate,
+    PolicyMemoryAdmissionProof,
+) {
+    let candidate = MainChatMemoryCandidate {
+        candidate_id: format!("candidate:test:{source_message_id}"),
+        source_span_id: format!("span:test:{source_message_id}"),
+        kind: MemoryCandidateKind::SemanticUserFact,
+        destination: MemoryDestination::MemoryProposal,
+        evidence_text: source_user_message.to_string(),
+        source_preview: "test current user message".into(),
+        normalized_claim: fact.canonical_body.clone(),
+        sensitivity: fact.sensitivity.as_str().into(),
+        stability: "stable".into(),
+        explicitness: "explicit".into(),
+        future_actionability: "retrieval_fact".into(),
+        confidence: 1.0,
+        reason_codes: vec!["test_explicit_memory_request".into()],
+    };
+    let mut intent = IntentFrame::from_user_message(source_user_message);
+    // Keep this helper deterministic: the exact source message remains bound
+    // by id/digest/candidate, while privacy classification is exercised by its
+    // own production tests instead of incidental words in a unit-test fact.
+    intent.user_goal = "explicit reversible Memory unit-test authorization".into();
+    intent.current_user_message_id = Some(source_message_id.to_string());
+    intent.current_user_message_digest =
+        openlife_core::agent::metadata_safe::metadata_safe_text_digest(source_user_message).1;
+    intent.execution_disposition = IntentExecutionDisposition::ActionRequested;
+    intent.untrusted_instruction_spans.clear();
+    intent.requests_durable_write = true;
+    intent.requests_memory_change = true;
+    intent.requests_lifemodel_change = false;
+    intent.requests_file_change = false;
+    intent.risk_level = match fact.risk_level {
+        MemoryLifecycleRiskLevel::Low => IntentRiskLevel::Low,
+        MemoryLifecycleRiskLevel::Medium => IntentRiskLevel::Medium,
+        MemoryLifecycleRiskLevel::High => IntentRiskLevel::High,
+        MemoryLifecycleRiskLevel::IdentityValue => IntentRiskLevel::Critical,
+    };
+    intent.requires_confirmation = false;
+    intent.requires_hard_block = false;
+    intent.memory_routing = MainChatMemoryRoutingResult {
+        candidates: vec![candidate.clone()],
+        memory_proposal_candidate_ids: vec![candidate.candidate_id.clone()],
+        ..MainChatMemoryRoutingResult::default()
+    };
+    let route = PolicyRouter.route(intent);
+    assert_eq!(route.route_kind, PolicyRouteKind::ReversibleMemoryCommit);
+    let policy = route.policy_decision;
+    let proof = policy
+        .authorize_explicit_memory_admission(
+            IntentSourceKind::CurrentAuthenticatedUserMessage,
+            source_user_message,
+            &candidate,
+            fact,
+        )
+        .expect("test Policy Memory admission proof");
+    (policy, candidate, proof)
+}
+
 async fn materialize_kernel_memory_governance(
     state: &Arc<AppState>,
     task_session_id: &str,
     run_id: &str,
     routing: &MainChatMemoryRoutingResult,
+    policy_decision: &PolicyDecision,
+    source_kind: IntentSourceKind,
+    source_user_message: &str,
     execution_transcript: &mut Vec<ExecutionTranscriptEntry>,
+    execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
 ) -> Result<MainChatMemoryGovernanceMaterialization, String> {
-    let mut life_event_ids = Vec::new();
+    let life_event_ids: Vec<String> = Vec::new();
     let mut memory_proposal_ids = Vec::new();
     let mut lifemodel_proposal_ids = Vec::new();
+    let mut explicit_memory_receipts = Vec::new();
     let mut pending_proposal_ids = Vec::new();
     let mut tool_calls = Vec::new();
     let mut blockers = routing.blockers.clone();
 
-    for candidate_id in &routing.life_event_candidate_ids {
-        let Some(candidate) = find_memory_candidate(routing, candidate_id) else {
-            push_unique_string(&mut blockers, "life_event_candidate_missing");
-            continue;
-        };
-        let queued = enqueue_main_chat_agent_action(
-            state,
-            task_session_id,
-            "life_event.create",
-            "Create a local LifeEvent from Main Chat memory governance.",
-            execution_transcript,
-        )
-        .await?;
-        transition_main_chat_action(state, &queued.id, ExecutionQueueStatus::Executing, None)
-            .await?;
-        let event =
-            create_kernel_life_event_for_candidate(state, task_session_id, run_id, candidate)
-                .await?;
-        life_event_ids.push(event.id.clone());
-        let event_metadata = serde_json::json!({
-            "memoryGovernanceArtifact": true,
-            "artifactType": "life_event",
-            "lifeEventId": event.id,
-            "candidateId": candidate.candidate_id,
-            "sourceTaskSessionId": task_session_id,
-            "sourceRunId": run_id,
-            "rawEvidencePreview": candidate.source_preview,
-            "localOnly": true,
-            "proposalRequired": false,
-            "directLifeModelWrite": false,
-            "acceptedDurableTruthWritten": false,
-            "directWritesExecuted": false,
-            "directMemoryWrite": false,
-        });
-        transition_main_chat_action(
-            state,
-            &queued.id,
-            ExecutionQueueStatus::Observed,
-            Some(event_metadata.clone()),
-        )
-        .await?;
-        transition_main_chat_action(
-            state,
-            &queued.id,
-            ExecutionQueueStatus::Completed,
-            Some(event_metadata.clone()),
-        )
-        .await?;
-        execution_transcript.extend(
-            append_main_chat_agent_transcript(
-                state,
-                Some(task_session_id),
-                ExecutionTranscriptEntryKind::Observation,
-                "MainChatKernel captured a local LifeEvent from deterministic memory governance.",
-                event_metadata.clone(),
-            )
-            .await,
+    if !routing.life_event_candidate_ids.is_empty() {
+        push_unique_string(
+            &mut blockers,
+            "implicit_life_event_write_not_authorized_by_policy",
         );
-        tool_calls.push(kernel_write_tool_call(
-            "life_event.create",
-            &queued.id,
-            Some(run_id),
-            event_metadata,
-            true,
-            ToolCallStatus::Success,
-            None,
-            false,
-        ));
     }
 
     for candidate_id in routing
@@ -3715,6 +5887,159 @@ async fn materialize_kernel_memory_governance(
             push_unique_string(&mut blockers, "proposal_candidate_missing");
             continue;
         };
+        if policy_decision.allows(AllowedCapability::ReversibleMemoryCommit)
+            && policy_decision.allows_memory_candidate(&candidate.candidate_id)
+        {
+            let fact = CanonicalMemoryFactDescriptor::from_candidate(
+                candidate.normalized_claim.clone(),
+                candidate.kind,
+                MemoryLifecycleScope::Global,
+                MemoryLifecycleRiskLevel::from_intent_risk(policy_decision.risk),
+                MemoryLifecycleSensitivity::from_policy_and_candidate(
+                    policy_decision.sensitivity,
+                    &candidate.sensitivity,
+                ),
+            )
+            .map_err(|error| format!("explicit Memory descriptor rejected: {error}"))?;
+            let admission_proof = policy_decision
+                .authorize_explicit_memory_admission(
+                    source_kind,
+                    source_user_message,
+                    candidate,
+                    &fact,
+                )
+                .map_err(|error| error.to_string())?;
+            let queued = enqueue_main_chat_agent_action(
+                state,
+                task_session_id,
+                "memory.explicit_write",
+                "Commit an exact reversible Memory fact explicitly requested by the current user.",
+                execution_transcript,
+            )
+            .await?;
+            transition_main_chat_action(state, &queued.id, ExecutionQueueStatus::Executing, None)
+                .await?;
+            let receipt = crate::memory_gateway::commit_explicit_user_memory_for_turn_with_state(
+                state,
+                task_session_id.to_string(),
+                run_id.to_string(),
+                policy_decision.authorized_user_message_id.clone(),
+                fact,
+                admission_proof,
+                source_user_message,
+                candidate,
+                execution_epoch,
+            )
+            .await
+            .map_err(|error| format!("explicit Memory write failed: {error}"))?;
+            let terminal_historical = receipt.admission_outcome
+                == openlife_core::agent::MemoryAdmissionOutcome::TerminalHistorical;
+            let direct_write_executed = receipt.newly_committed && receipt.canonical_committed;
+            let receipt_metadata = serde_json::json!({
+                "memoryGovernanceArtifact": true,
+                "artifactType": "explicit_memory_write",
+                "receiptId": receipt.receipt_id,
+                "memoryId": receipt.memory_id,
+                "factKey": receipt.fact_key,
+                "sourceMessageId": receipt.source_message_id,
+                "contentDigest": receipt.content_digest,
+                "sensitivity": receipt.sensitivity,
+                "auditDigest": receipt.audit_digest,
+                "admissionOutcome": receipt.admission_outcome,
+                "admissionAt": receipt.admission_at,
+                "ownerAcceptedAt": receipt.owner_accepted_at,
+                "createdAt": receipt.created_at,
+                "newlyCommitted": receipt.newly_committed,
+                "undoAvailable": receipt.undo_available,
+                "authoritySource": "current_authenticated_user_message",
+                "policyVersion": policy_decision.policy_version,
+                "policyReasonCode": policy_decision.reason_code,
+                "policyRoute": policy_decision.route_kind.as_str(),
+                "policyActionEffect": policy_decision.action_effect.as_str(),
+                "policyConsentDisposition": policy_decision.consent_disposition.as_str(),
+                "authorizedCandidateId": candidate.candidate_id,
+                "canonicalHsChanged": false,
+                "canonicalOwnerActive": receipt.canonical_committed && !terminal_historical,
+                "directMemoryWrite": direct_write_executed,
+                "directLifeModelWrite": false,
+                "directWritesExecuted": direct_write_executed,
+                "acceptedDurableTruthWritten": direct_write_executed,
+            });
+            if terminal_historical {
+                push_unique_string(
+                    &mut blockers,
+                    "explicit_memory_admission_terminal_historical",
+                );
+                transition_main_chat_action(
+                    state,
+                    &queued.id,
+                    ExecutionQueueStatus::Failed,
+                    Some(receipt_metadata.clone()),
+                )
+                .await?;
+                tool_calls.push(kernel_write_tool_call(
+                    "memory.explicit_write",
+                    &queued.id,
+                    Some(run_id),
+                    receipt_metadata,
+                    false,
+                    ToolCallStatus::Error,
+                    Some("explicit_memory_admission_terminal_historical"),
+                    false,
+                ));
+                continue;
+            }
+            transition_main_chat_action(
+                state,
+                &queued.id,
+                ExecutionQueueStatus::Observed,
+                Some(receipt_metadata.clone()),
+            )
+            .await?;
+            transition_main_chat_action(
+                state,
+                &queued.id,
+                ExecutionQueueStatus::Completed,
+                Some(receipt_metadata.clone()),
+            )
+            .await?;
+            execution_transcript.extend(
+                append_main_chat_agent_transcript(
+                    state,
+                    Some(task_session_id),
+                    ExecutionTranscriptEntryKind::FinalResult,
+                    "The current user explicitly committed a reversible Memory fact.",
+                    receipt_metadata.clone(),
+                )
+                .await,
+            );
+            tool_calls.push(kernel_write_tool_call(
+                "memory.explicit_write",
+                &queued.id,
+                Some(run_id),
+                receipt_metadata.clone(),
+                true,
+                ToolCallStatus::Success,
+                None,
+                false,
+            ));
+            explicit_memory_receipts.push(receipt_metadata);
+            continue;
+        }
+        let proposal_authorized = match candidate.destination {
+            MemoryDestination::MemoryProposal => {
+                policy_decision.allows(AllowedCapability::MemoryProposal)
+            }
+            MemoryDestination::LifeModelProposal => {
+                policy_decision.allows(AllowedCapability::LifeModelProposal)
+            }
+            _ => false,
+        } && policy_decision
+            .allows_memory_candidate(&candidate.candidate_id);
+        if !proposal_authorized {
+            push_unique_string(&mut blockers, "policy_memory_candidate_not_authorized");
+            continue;
+        }
         let queued = enqueue_main_chat_agent_action(
             state,
             task_session_id,
@@ -3725,9 +6050,15 @@ async fn materialize_kernel_memory_governance(
         .await?;
         transition_main_chat_action(state, &queued.id, ExecutionQueueStatus::Executing, None)
             .await?;
-        let proposal =
-            create_kernel_memory_governance_proposal(state, task_session_id, run_id, candidate)
-                .await?;
+        let proposal = create_kernel_memory_governance_proposal(
+            state,
+            task_session_id,
+            run_id,
+            candidate,
+            policy_decision,
+            execution_epoch,
+        )
+        .await?;
         let is_lifemodel = candidate.destination == MemoryDestination::LifeModelProposal;
         if is_lifemodel {
             lifemodel_proposal_ids.push(proposal.id.clone());
@@ -3795,6 +6126,7 @@ async fn materialize_kernel_memory_governance(
         &life_event_ids,
         &memory_proposal_ids,
         &lifemodel_proposal_ids,
+        &explicit_memory_receipts,
         &blockers,
     );
 
@@ -3805,93 +6137,63 @@ async fn materialize_kernel_memory_governance(
     })
 }
 
-async fn create_kernel_life_event_for_candidate(
-    state: &Arc<AppState>,
-    task_session_id: &str,
-    run_id: &str,
-    candidate: &MainChatMemoryCandidate,
-) -> Result<openlife_core::agent::LifeEvent, String> {
-    let store_arc = state
-        .life_event_store
-        .as_ref()
-        .ok_or_else(|| "LifeEvent store not available".to_string())?;
-    let source_payload = format!(
-        "{}|{}|{}",
-        run_id, candidate.candidate_id, candidate.source_preview
-    );
-    let source_refs = vec![
-        LifeEventSourceRef::from_payload(
-            LifeEventSourceType::ChatMessage,
-            task_session_id,
-            Some(candidate.candidate_id.as_str()),
-            &source_payload,
-        ),
-        LifeEventSourceRef::from_payload(
-            LifeEventSourceType::AgentRun,
-            run_id,
-            Some(candidate.candidate_id.as_str()),
-            &source_payload,
-        ),
-    ];
-    let draft = LifeEventDraft::new(
-        life_event_type_for_candidate(candidate),
-        candidate.normalized_claim.clone(),
-    )
-    .with_source_run_id(run_id)
-    .with_metadata(serde_json::json!({
-        "candidateId": candidate.candidate_id,
-        "sourceTaskSessionId": task_session_id,
-        "sourceRunId": run_id,
-        "rawEvidencePreview": candidate.source_preview,
-        "localOnly": true,
-        "proposalRequired": false,
-        "directLifeModelWrite": false,
-        "acceptedDurableTruthWritten": false,
-        "confidence": candidate.confidence,
-        "domain": life_domain_for_candidate(candidate).to_string(),
-        "sourceDigest": candidate.candidate_id,
-    }));
-    let store = store_arc.lock().await;
-    store
-        .create_event(
-            draft,
-            source_refs,
-            life_domain_for_candidate(candidate),
-            risk_level_for_candidate(candidate),
-            privacy_level_for_candidate(candidate),
-        )
-        .map_err(|err| format!("create LifeEvent failed: {err}"))
-}
-
 async fn create_kernel_memory_governance_proposal(
     state: &Arc<AppState>,
     task_session_id: &str,
     run_id: &str,
     candidate: &MainChatMemoryCandidate,
+    policy_decision: &PolicyDecision,
+    execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
 ) -> Result<openlife_core::agent::AgentProposal, String> {
     use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType};
 
     let (proposal_type, affected_path, reason, risk_level, after) = match candidate.destination {
-        MemoryDestination::MemoryProposal => (
-            ProposalType::MemoryWrite,
-            "memory.pending.chat_conversation".to_string(),
-            "User requested a governed Memory proposal from Main Chat memory governance."
-                .to_string(),
-            RiskLevel::Medium,
-            serde_json::json!({
-                "content": candidate.normalized_claim,
-                "candidateId": candidate.candidate_id,
-                "candidateKind": candidate.kind,
-                "sourceEvidence": candidate.source_preview,
-                "impactPreview": memory_candidate_impact_preview(candidate),
-                "source": "main_chat_memory_governance",
-                "originatingTaskSessionId": task_session_id,
-                "sourceRunId": run_id,
-                "directMemoryWrite": false,
-                "acceptedDurableTruthWritten": false,
-                "directWritesExecuted": false,
-            }),
-        ),
+        MemoryDestination::MemoryProposal => {
+            let (lifecycle_risk, proposal_risk) =
+                conservative_memory_proposal_risk(policy_decision);
+            let mut sensitivity = MemoryLifecycleSensitivity::from_policy_and_candidate(
+                policy_decision.sensitivity,
+                &candidate.sensitivity,
+            );
+            if matches!(
+                lifecycle_risk,
+                MemoryLifecycleRiskLevel::High | MemoryLifecycleRiskLevel::IdentityValue
+            ) {
+                sensitivity = MemoryLifecycleSensitivity::Sensitive;
+            }
+            let fact = CanonicalMemoryFactDescriptor::from_candidate(
+                candidate.normalized_claim.clone(),
+                candidate.kind,
+                MemoryLifecycleScope::Global,
+                lifecycle_risk,
+                sensitivity,
+            )
+            .map_err(|error| format!("Memory proposal descriptor rejected: {error}"))?;
+            (
+                ProposalType::MemoryWrite,
+                "memory.pending.chat_conversation".to_string(),
+                "User requested a governed Memory proposal from Main Chat memory governance."
+                    .to_string(),
+                proposal_risk,
+                serde_json::json!({
+                    "content": fact.canonical_body,
+                    "scope": fact.scope,
+                    "category": fact.category,
+                    "riskLevel": fact.risk_level,
+                    "sensitivity": fact.sensitivity,
+                    "candidateId": candidate.candidate_id,
+                    "candidateKind": candidate.kind,
+                    "sourceEvidence": candidate.source_preview,
+                    "impactPreview": memory_candidate_impact_preview(candidate),
+                    "source": "main_chat_memory_governance",
+                    "originatingTaskSessionId": task_session_id,
+                    "sourceRunId": run_id,
+                    "directMemoryWrite": false,
+                    "acceptedDurableTruthWritten": false,
+                    "directWritesExecuted": false,
+                }),
+            )
+        }
         MemoryDestination::LifeModelProposal => (
             ProposalType::LifeModelUpdate,
             "lifemodel.pending.chat_conversation".to_string(),
@@ -3940,8 +6242,8 @@ async fn create_kernel_memory_governance_proposal(
         .as_ref()
         .ok_or_else(|| "Proposal store not available".to_string())?;
     let store = store_arc.lock().await;
-    let outcome = openlife_core::agent::ReviewWorkflow::new(&store)
-        .submit(
+    openlife_core::agent::ReviewWorkflow::new(&store)
+        .submit_with_admission(
             openlife_core::agent::DurableWriteRequest::from_agent_proposal(
                 openlife_core::agent::DurableWriteSource::MainChat,
                 openlife_core::agent::DurableWriteSubject::from_proposal_type(
@@ -3954,9 +6256,10 @@ async fn create_kernel_memory_governance_proposal(
                 format!("main_chat_task_session:{task_session_id}"),
                 format!("memory_candidate:{}", candidate.candidate_id),
             ]),
+            execution_epoch,
         )
-        .map_err(|err| format!("create memory governance proposal failed: {err}"))?;
-    Ok(outcome.proposal)
+        .map(|outcome| outcome.proposal)
+        .map_err(|err| format!("create memory governance proposal failed: {err}"))
 }
 
 fn memory_governance_metadata(
@@ -3964,21 +6267,29 @@ fn memory_governance_metadata(
     life_event_ids: &[String],
     memory_proposal_ids: &[String],
     lifemodel_proposal_ids: &[String],
+    explicit_memory_receipts: &[serde_json::Value],
     blockers: &[String],
 ) -> serde_json::Value {
+    let direct_memory_write = explicit_memory_receipts.iter().any(|receipt| {
+        receipt
+            .get("directWritesExecuted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    });
     serde_json::json!({
         "candidateCount": routing.candidates.len(),
         "candidateTrace": routing.candidates.iter().map(memory_candidate_trace).collect::<Vec<_>>(),
         "lifeEventIds": life_event_ids,
         "memoryProposalIds": memory_proposal_ids,
         "lifeModelProposalIds": lifemodel_proposal_ids,
+        "explicitMemoryReceipts": explicit_memory_receipts,
         "sessionOnlyCandidateIds": routing.session_only_candidate_ids,
         "noOpCandidateIds": routing.no_op_candidate_ids,
         "blockers": blockers,
-        "directWritesExecuted": false,
+        "directWritesExecuted": direct_memory_write,
         "directLifeModelWrite": false,
-        "directMemoryWrite": false,
-        "acceptedDurableTruthWritten": false,
+        "directMemoryWrite": direct_memory_write,
+        "acceptedDurableTruthWritten": direct_memory_write,
         "localLifeEventCaptureExecuted": !life_event_ids.is_empty(),
     })
 }
@@ -3990,6 +6301,7 @@ fn empty_memory_governance_metadata() -> serde_json::Value {
         "lifeEventIds": [],
         "memoryProposalIds": [],
         "lifeModelProposalIds": [],
+        "explicitMemoryReceipts": [],
         "sessionOnlyCandidateIds": [],
         "noOpCandidateIds": [],
         "blockers": [],
@@ -4038,47 +6350,6 @@ fn memory_candidate_impact_preview(candidate: &MainChatMemoryCandidate) -> &'sta
     }
 }
 
-fn life_event_type_for_candidate(candidate: &MainChatMemoryCandidate) -> &'static str {
-    match candidate.kind {
-        MemoryCandidateKind::EpisodicLifeEvent => "main_chat.episodic_life_event",
-        _ => "main_chat.life_event",
-    }
-}
-
-fn life_domain_for_candidate(candidate: &MainChatMemoryCandidate) -> LifeDomain {
-    let claim = candidate.normalized_claim.to_ascii_lowercase();
-    if contains_any(&claim, &["心慌", "头疼", "身体", "胃", "health", "medical"]) {
-        LifeDomain::Health
-    } else if contains_any(&claim, &["犯困", "sleep", "睡", "tired"]) {
-        LifeDomain::StateEnergy
-    } else if contains_any(&claim, &["工作", "任务", "work", "task"]) {
-        LifeDomain::WorkStyle
-    } else {
-        LifeDomain::Other
-    }
-}
-
-fn risk_level_for_candidate(candidate: &MainChatMemoryCandidate) -> RiskLevel {
-    if candidate.sensitivity == "sensitive" {
-        RiskLevel::Medium
-    } else {
-        RiskLevel::Low
-    }
-}
-
-fn privacy_level_for_candidate(candidate: &MainChatMemoryCandidate) -> LifeEventPrivacyLevel {
-    if candidate.sensitivity == "sensitive"
-        || contains_any(
-            &candidate.normalized_claim,
-            &["心慌", "身体", "空腹", "健康", "医疗"],
-        )
-    {
-        LifeEventPrivacyLevel::StrictlyLocal
-    } else {
-        LifeEventPrivacyLevel::Sensitive
-    }
-}
-
 fn synthesize_memory_governance_reply(memory_governance: &serde_json::Value) -> String {
     let life_event_count = memory_governance
         .get("lifeEventIds")
@@ -4095,6 +6366,32 @@ fn synthesize_memory_governance_reply(memory_governance: &serde_json::Value) -> 
         .and_then(Value::as_array)
         .map(Vec::len)
         .unwrap_or(0);
+    let explicit_memory_receipts = memory_governance
+        .get("explicitMemoryReceipts")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let explicit_memory_write_count = explicit_memory_receipts
+        .iter()
+        .filter(|receipt| {
+            receipt
+                .get("directWritesExecuted")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .count();
+    let exact_replay_count = explicit_memory_receipts
+        .iter()
+        .filter(|receipt| {
+            receipt.get("admissionOutcome").and_then(Value::as_str) == Some("exact_replay")
+        })
+        .count();
+    let alias_link_count = explicit_memory_receipts
+        .iter()
+        .filter(|receipt| {
+            receipt.get("admissionOutcome").and_then(Value::as_str) == Some("alias_linked")
+        })
+        .count();
     let mut lines = Vec::new();
     if life_event_count > 0 {
         lines.push(format!("已记录到本地生活事件：{life_event_count} 条。"));
@@ -4107,10 +6404,29 @@ fn synthesize_memory_governance_reply(memory_governance: &serde_json::Value) -> 
     if lifemodel_proposal_count > 0 {
         lines.push(format!("待确认 LifeModel 更新：{lifemodel_proposal_count} 条，审批前不会写入 accepted LifeModel。"));
     }
+    if explicit_memory_write_count > 0 {
+        lines.push(format!(
+            "已按你当前这条明确指令写入可撤销 Memory：{explicit_memory_write_count} 条（包含必要的保守治理升级）。"
+        ));
+    }
+    if exact_replay_count > 0 {
+        lines.push(format!(
+            "已确认 Memory 事实此前已由同一条授权记录，不重复写入：{exact_replay_count} 条。"
+        ));
+    }
+    if alias_link_count > 0 {
+        lines.push(format!(
+            "当前明确指令已关联到既有 Memory owner，不重复写入事实：{alias_link_count} 条。"
+        ));
+    }
     if lines.is_empty() {
         lines.push("这次没有产生可持久化的记忆治理产物。".into());
     }
-    lines.push("没有执行直接 Memory 写入或 accepted LifeModel 写入。".into());
+    if explicit_memory_write_count == 0 {
+        lines.push("没有执行直接 Memory 写入或 accepted LifeModel 写入。".into());
+    } else {
+        lines.push("没有修改 canonical LifeModel-HS；Memory receipt 可用于撤销。".into());
+    }
     lines.join("\n")
 }
 
@@ -4124,6 +6440,8 @@ fn push_unique_string(values: &mut Vec<String>, value: &str) {
 async fn build_kernel_write_outcome_command_surface_result(
     session_id: &str,
     user_text: &str,
+    canonical_run_id: &str,
+    execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
     state: &Arc<AppState>,
     main_chat_agent_turn: &MainChatAgentTurn,
     mut execution_transcript: Vec<ExecutionTranscriptEntry>,
@@ -4138,6 +6456,13 @@ async fn build_kernel_write_outcome_command_surface_result(
         .agent_task_session_id
         .as_deref()
         .ok_or_else(|| "Main Chat kernel task session missing".to_string())?;
+    let mut agent_run = load_existing_canonical_main_chat_agent_run(
+        state,
+        canonical_run_id,
+        task_session_id,
+        session_id,
+    )
+    .await?;
     let outcome = kernel_result
         .write_outcome
         .clone()
@@ -4153,7 +6478,6 @@ async fn build_kernel_write_outcome_command_surface_result(
         .as_ref()
         .map(|message| message.content.clone())
         .unwrap_or_else(|| synthesize_write_outcome_answer(&outcome));
-    let mut agent_run = AgentRun::new_chat_run(session_id, user_text);
     agent_run.reasoning_strategy = Some(format!(
         "main_chat_agent_v1_kernel_{}",
         outcome.kind.as_str()
@@ -4181,6 +6505,8 @@ async fn build_kernel_write_outcome_command_surface_result(
             &agent_run.id,
             &outcome,
             user_text,
+            &main_chat_agent_turn.decision.policy_decision,
+            execution_epoch,
         )
         .await?;
         generated_proposals.push(proposal.id.clone());
@@ -4372,6 +6698,7 @@ async fn build_kernel_write_outcome_command_surface_result(
         "kernelEventCount": kernel_events.len(),
         "modelGenerated": false,
         "schedulerGenerationCalled": false,
+        "turnProviderRuntimeGeneration": scheduler.provider_config_generation(),
         "providerGenerationPath": "main_chat_kernel_proposal_only_write",
         "provider": route_metadata.provider,
         "model": route_metadata.model,
@@ -4398,7 +6725,6 @@ async fn build_kernel_write_outcome_command_surface_result(
         &reply,
         &mut reasoning_trace,
         &mut agent_run,
-        &life_model,
         state,
     )
     .await?;
@@ -4446,32 +6772,85 @@ async fn build_kernel_write_outcome_command_surface_result(
 async fn build_blocked_kernel_command_surface_result(
     session_id: &str,
     task_session_id: &str,
+    canonical_run_id: &str,
+    execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
     state: &Arc<AppState>,
     main_chat_agent_turn: &MainChatAgentTurn,
     mut execution_transcript: Vec<ExecutionTranscriptEntry>,
-    kernel_result: MainChatTurnResult,
+    mut kernel_result: MainChatTurnResult,
+    scheduler: InferenceScheduler,
+    provider_durability_scope: &crate::main_chat_turn_runtime::MainChatProviderDurabilityScope,
+    supplied_provider_durability_proofs: Vec<
+        openlife_core::scheduler::ProviderInvocationDurabilityProof,
+    >,
     event_sink_label: &'static str,
     kernel_events: Vec<MainChatKernelEvent>,
 ) -> Result<MainChatKernelCommandSurfaceResult, String> {
+    let mut agent_run = load_existing_canonical_main_chat_agent_run(
+        state,
+        canonical_run_id,
+        task_session_id,
+        session_id,
+    )
+    .await?;
     let blockers = kernel_result.blockers.clone();
     let blocker_summary = blockers.join(",");
+    let pending_proposal_ids = kernel_result.proposals.clone();
+    let waiting_for_review = !pending_proposal_ids.is_empty();
+    let waiting_for_permission = kernel_result.tool_calls.iter().any(|tool_call| {
+        tool_call.status == "needs_confirmation"
+            || tool_call
+                .observation_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("agentLoopTerminalDisposition"))
+                .and_then(Value::as_str)
+                == Some("waiting_permission")
+    });
+    let waiting_for_user = waiting_for_review || waiting_for_permission;
+    let provider_receipts = provider_receipts_from_kernel_events(&kernel_events)?;
+    validate_provider_receipts_for_runtime_generation(
+        &provider_receipts,
+        scheduler.provider_config_generation(),
+    )?;
+    let provider_durability_proofs = resolve_provider_durability_proofs(
+        &scheduler,
+        &provider_receipts,
+        supplied_provider_durability_proofs,
+    )?;
+    let provider_durable_events = append_main_chat_provider_receipt_events(
+        state,
+        task_session_id,
+        &agent_run.id,
+        provider_durability_scope,
+        &provider_receipts,
+        &provider_durability_proofs,
+    )
+    .await?;
+    let provider_started = !provider_receipts.is_empty();
+    let provider_failed = provider_receipts
+        .iter()
+        .any(|receipt| receipt.status == ProviderInvocationStatus::Failed);
     let read_tool_loop_used = !kernel_result.tool_calls.is_empty();
     let governed_strategy_blocker =
         main_chat_agent_turn.decision.selected_strategy == MainChatAgentStrategy::ReviewMaturation;
+    let failure_kind = main_chat_failure_kind_from_kernel_result(&kernel_result);
     if let Some(ref store_arc) = state.main_chat_agent_session_store {
         let store = store_arc.lock().await;
-        if let Err(err) = store.set_pending_blockers(task_session_id, blockers.clone()) {
+        let session_blockers = if waiting_for_review {
+            pending_proposal_ids
+                .iter()
+                .map(|proposal_id| format!("proposal:{proposal_id}"))
+                .collect()
+        } else {
+            blockers.clone()
+        };
+        if let Err(err) = store.set_pending_blockers(task_session_id, session_blockers) {
             log::warn!("[MainChatKernel] set blockers failed: {}", err);
         }
-        if let Err(err) = store.block_session(
-            task_session_id,
-            if read_tool_loop_used {
-                "MainChatKernel read-only tool loop blocked."
-            } else {
-                "MainChatKernel direct answer blocked before model completion."
-            },
-        ) {
-            log::warn!("[MainChatKernel] block session failed: {}", err);
+        if waiting_for_user {
+            if let Err(err) = store.mark_waiting_permission(task_session_id) {
+                log::warn!("[MainChatKernel] mark session waiting failed: {}", err);
+            }
         }
     }
     execution_transcript.extend(
@@ -4499,7 +6878,18 @@ async fn build_blocked_kernel_command_surface_result(
                 "kernelEventSink": event_sink_label,
                 "kernelEventCount": kernel_events.len(),
                 "modelGenerated": false,
-                "schedulerGenerationCalled": false,
+                "schedulerGenerationCalled": provider_started,
+                "turnProviderRuntimeGeneration": scheduler.provider_config_generation(),
+                "providerReceiptStatus": if provider_failed {
+                    "failed"
+                } else if provider_started {
+                    "unknown"
+                } else {
+                    "not_attempted"
+                },
+                "proposalIds": pending_proposal_ids.clone(),
+                "waitingForReview": waiting_for_review,
+                "waitingForPermission": waiting_for_permission,
                 "toolCallCount": kernel_result.tool_calls.len(),
             }),
         )
@@ -4510,12 +6900,16 @@ async fn build_blocked_kernel_command_surface_result(
         .as_ref()
         .map(|message| message.content.clone())
         .unwrap_or_else(|| {
-            format!(
-                "I could not run the kernel turn because the request was blocked: {}.",
-                blocker_summary
-            )
+            if waiting_for_user {
+                "The governed action is waiting for your permission or review; no completion has been recorded."
+                    .to_string()
+            } else {
+                format!(
+                    "I could not run the kernel turn because the request was blocked: {}.",
+                    blocker_summary
+                )
+            }
         });
-    let mut agent_run = AgentRun::new_chat_run(session_id, "");
     agent_run.reasoning_strategy = Some(if read_tool_loop_used {
         "main_chat_agent_v1_read_only_tool_loop".into()
     } else {
@@ -4523,11 +6917,19 @@ async fn build_blocked_kernel_command_surface_result(
     });
     agent_run.tool_call_count = kernel_result.tool_calls.len() as u32;
     agent_run.step_count = if read_tool_loop_used { 1 } else { 0 };
-    agent_run.fail(AgentRunError {
-        message: blocker_summary.clone(),
-        phase: "main_chat_kernel".into(),
-        recoverable: true,
-    });
+    for proposal_id in &pending_proposal_ids {
+        agent_run.add_generated_proposal(proposal_id);
+    }
+    append_kernel_canonical_tool_delta(
+        &mut agent_run,
+        std::mem::take(&mut kernel_result.canonical_tool_graphs),
+        std::mem::take(&mut kernel_result.canonical_supplemental_observations),
+    )?;
+    if waiting_for_user {
+        agent_run.status = openlife_core::agent::AgentRunStatus::WaitingPermission;
+        agent_run.error = None;
+        agent_run.finished_at = None;
+    }
     let hs_metadata = kernel_result
         .context_metadata
         .as_ref()
@@ -4567,44 +6969,68 @@ async fn build_blocked_kernel_command_surface_result(
             "kernelEventSink": event_sink_label,
             "kernelEventCount": kernel_events.len(),
             "modelGenerated": false,
-            "schedulerGenerationCalled": false,
+            "schedulerGenerationCalled": provider_started,
+            "turnProviderRuntimeGeneration": scheduler.provider_config_generation(),
+            "providerReceiptStatus": if provider_failed {
+                "failed"
+            } else if provider_started {
+                "unknown"
+            } else {
+                "not_attempted"
+            },
+            "providerAttempts": provider_receipt_projection_metadata(&provider_receipts),
             "toolCallCount": kernel_result.tool_calls.len(),
             "blockers": kernel_result.blockers,
+                "proposalIds": pending_proposal_ids.clone(),
+                "waitingForReview": waiting_for_review,
+                "waitingForPermission": waiting_for_permission,
         })),
         ..Default::default()
     };
     agent_run.reasoning_trace = Some(reasoning_trace.clone());
-    if let Some(ref store_arc) = state.agent_run_store {
-        let store = store_arc.lock().await;
-        if let Err(err) = store.create_run(&agent_run) {
-            log::warn!("[MainChatKernel] create failed AgentRun failed: {}", err);
-        }
-    }
-    if let Err(err) = finalize_main_chat_task_failure(
-        state,
-        Some(&agent_run.id),
-        Some(task_session_id),
-        MainChatTaskFailureKind::PolicyBlocker,
-        &blocker_summary,
-        "main_chat_kernel.blocked_command_surface",
-    )
-    .await
-    {
-        log::warn!("[MainChatKernel] finalize blocker evidence failed: {}", err);
-    }
     let tool_calls = record_kernel_tool_call_evidence(
         state,
         task_session_id,
         &kernel_result.tool_calls,
         &agent_run.id,
+        execution_epoch,
         &mut execution_transcript,
     )
     .await?;
-    let agent_state =
+    {
+        let store_arc = state
+            .agent_run_store
+            .as_ref()
+            .ok_or_else(|| "agent_run_store_unavailable".to_string())?;
+        let store = store_arc.lock().await;
+        store
+            .update_run(&agent_run)
+            .map_err(|err| format!("update blocked canonical AgentRun failed: {err}"))?;
+    }
+    let preterminal_agent_state =
         assemble_main_chat_agent_state_for_turn(state, Some(task_session_id), Some(&agent_run.id))
             .await;
-    let durable_events =
-        materialize_optional_main_chat_agent_events(state, agent_state.as_ref()).await?;
+    let mut durable_events = provider_durable_events;
+    durable_events.extend(
+        materialize_optional_main_chat_agent_events(state, preterminal_agent_state.as_ref())
+            .await?,
+    );
+    let agent_state = if waiting_for_user {
+        preterminal_agent_state
+    } else {
+        let finalization = finalize_main_chat_task_failure(
+            state,
+            Some(&agent_run.id),
+            Some(task_session_id),
+            failure_kind,
+            &blocker_summary,
+            "main_chat_kernel.blocked_command_surface",
+        )
+        .await?;
+        durable_events.push(finalization.durable_event);
+        assemble_main_chat_agent_state_for_turn(state, Some(task_session_id), Some(&agent_run.id))
+            .await
+    };
 
     Ok(MainChatKernelCommandSurfaceResult {
         reply,
@@ -4620,11 +7046,129 @@ async fn build_blocked_kernel_command_surface_result(
     })
 }
 
+fn append_kernel_canonical_tool_delta(
+    run: &mut openlife_core::agent::AgentRun,
+    graphs: Vec<KernelCanonicalToolGraph>,
+    supplemental_observations: Vec<openlife_core::agent::AgentObservation>,
+) -> Result<(), String> {
+    for graph in graphs {
+        let mut graph_observation_ids = std::collections::HashSet::new();
+        if graph.observations.is_empty()
+            || graph.observations.iter().any(|observation| {
+                observation.action_id.as_deref() != Some(graph.action.id.as_str())
+                    || !graph_observation_ids.insert(observation.id.as_str())
+            })
+        {
+            return Err("kernel_canonical_tool_graph_observation_owner_mismatch".into());
+        }
+        if let Some(trace) = graph.action.react_trace.as_ref() {
+            if trace.run_id.as_deref() != Some(run.id.as_str())
+                || trace.action_id != graph.action.id
+                || trace.observation_id.as_ref().is_some_and(|observation_id| {
+                    !graph
+                        .observations
+                        .iter()
+                        .any(|observation| observation.id == *observation_id)
+                })
+            {
+                return Err("kernel_canonical_tool_graph_owner_mismatch".into());
+            }
+        }
+        if run
+            .actions
+            .iter()
+            .any(|action| action.id == graph.action.id)
+            || graph.observations.iter().any(|candidate| {
+                run.observations
+                    .iter()
+                    .any(|observation| observation.id == candidate.id)
+            })
+        {
+            return Err("kernel_canonical_tool_graph_duplicate".into());
+        }
+        run.actions.push(graph.action);
+        run.observations.extend(graph.observations);
+    }
+    for observation in supplemental_observations {
+        if run
+            .observations
+            .iter()
+            .any(|existing| existing.id == observation.id)
+            || observation
+                .action_id
+                .as_ref()
+                .is_some_and(|action_id| !run.actions.iter().any(|action| action.id == *action_id))
+        {
+            return Err("kernel_canonical_supplemental_observation_invalid".into());
+        }
+        run.observations.push(observation);
+    }
+    Ok(())
+}
+
+fn validate_kernel_tool_call_observation_bindings(
+    run: &openlife_core::agent::AgentRun,
+    calls: &[MainChatKernelToolCall],
+) -> Result<(), String> {
+    for call in calls.iter().filter(|call| call.status == "succeeded") {
+        let action_id = call
+            .product_projection
+            .as_ref()
+            .map(|projection| projection.bound_action_id())
+            .ok_or_else(|| "kernel_tool_observation_product_projection_missing".to_string())?;
+        let action = run
+            .actions
+            .iter()
+            .find(|action| action.id == action_id)
+            .ok_or_else(|| "kernel_tool_observation_action_missing".to_string())?;
+        let trace = action
+            .react_trace
+            .as_ref()
+            .ok_or_else(|| "kernel_tool_observation_action_trace_missing".to_string())?;
+        let observation_id = trace
+            .observation_id
+            .as_deref()
+            .ok_or_else(|| "kernel_tool_observation_id_missing".to_string())?;
+        let observation = run
+            .observations
+            .iter()
+            .find(|observation| observation.id == observation_id)
+            .ok_or_else(|| "kernel_tool_observation_missing".to_string())?;
+        let receipt = call
+            .execution_receipt
+            .as_ref()
+            .ok_or_else(|| "kernel_tool_observation_live_receipt_missing".to_string())?;
+        let expected_projection =
+            crate::product_agent_dto::VerifiedProductToolCallProjection::from_bound_action(
+                action, receipt, &run.id,
+            )
+            .ok_or_else(|| "kernel_tool_observation_live_projection_invalid".to_string())?;
+        let expected_preview =
+            preview_text(&observation.content, MAX_TOOL_OBSERVATION_PREVIEW_CHARS);
+        if call.product_projection.as_ref() != Some(&expected_projection)
+            || call.output_preview.as_deref() != Some(expected_preview.as_str())
+            || action.runtime_execution_receipt.as_ref() != Some(receipt)
+            || !receipt.proves_success()
+            || !receipt.is_runtime_bound_to_action(
+                &run.id,
+                &action.id,
+                &action.action_type,
+                action.target.as_deref(),
+                &action.input,
+            )
+        {
+            return Err("kernel_tool_observation_body_receipt_binding_mismatch".into());
+        }
+    }
+    Ok(())
+}
+
 async fn record_kernel_tool_call_evidence(
     state: &Arc<AppState>,
     task_session_id: &str,
     kernel_tool_calls: &[MainChatKernelToolCall],
     run_id: &str,
+    execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
     execution_transcript: &mut Vec<ExecutionTranscriptEntry>,
 ) -> Result<Vec<ToolCallResult>, String> {
     let mut tool_calls = Vec::new();
@@ -4645,64 +7189,111 @@ async fn record_kernel_tool_call_evidence(
             .clone()
             .unwrap_or_else(|| serde_json::json!({}));
         bind_main_chat_observation_metadata_to_queue_action(&mut metadata, &queued.id);
+        if let Err(reason_code) = attach_kernel_replay_execution_envelope(
+            state,
+            task_session_id,
+            run_id,
+            &queued.id,
+            call,
+            &mut metadata,
+        )
+        .await
+        {
+            if let Some(object) = metadata.as_object_mut() {
+                object.insert(
+                    "replayExecutionEnvelopeUnavailable".into(),
+                    serde_json::json!(reason_code),
+                );
+            }
+        }
         metadata = attach_kernel_tool_permission_proposal_identity(
             state,
             task_session_id,
             run_id,
             &queued.id,
             call,
+            execution_epoch,
             metadata,
         )
         .await?;
-
-        let status = tool_call_status_from_kernel_status(&call.status);
+        let declared_execution_status = match call.status.as_str() {
+            "succeeded" => ActionExecutionStatus::Succeeded,
+            "needs_confirmation" => ActionExecutionStatus::NeedsConfirmation,
+            "blocked" => ActionExecutionStatus::Blocked,
+            _ => ActionExecutionStatus::Failed,
+        };
+        let (receipt, execution_status, projection_error) = match call.execution_receipt.clone() {
+            Some(receipt) => {
+                if let Some(object) = metadata.as_object_mut() {
+                    object.insert(
+                        "toolExecutionReceipt".into(),
+                        serde_json::json!(receipt.clone()),
+                    );
+                }
+                let terminal_error = matches!(
+                    declared_execution_status,
+                    ActionExecutionStatus::Failed | ActionExecutionStatus::Blocked
+                )
+                .then(|| call.blocker.clone())
+                .flatten();
+                (receipt, declared_execution_status, terminal_error)
+            }
+            None => {
+                let receipt =
+                    openlife_core::tool_execution_receipt::ToolExecutionReceipt::failed_before_dispatch(
+                        Some(run_id.to_string()),
+                        Some(call.name.clone()),
+                        format!("missing-receipt:action:{}", queued.id),
+                        openlife_core::tool_execution_receipt::ToolActionEffect::Unknown,
+                        openlife_core::tool_manifest::ToolIdempotencyContract::Unspecified,
+                    );
+                if let Some(object) = metadata.as_object_mut() {
+                    object.insert(
+                        "toolExecutionReceipt".into(),
+                        serde_json::json!(receipt.clone()),
+                    );
+                    object.insert(
+                        "receiptInvariantViolation".into(),
+                        serde_json::json!("kernel_tool_execution_receipt_missing_or_invalid"),
+                    );
+                }
+                (
+                    receipt,
+                    ActionExecutionStatus::Failed,
+                    Some("kernel_tool_execution_receipt_missing_or_invalid".into()),
+                )
+            }
+        };
+        let projected = {
+            let queue_arc = state
+                .main_chat_action_queue_store
+                .as_ref()
+                .ok_or_else(|| "Main Chat action queue store not available".to_string())?;
+            let queue = queue_arc.lock().await;
+            queue
+                .project_initial_tool_execution_receipt(
+                    &queued.id,
+                    queued.status,
+                    queued.revision,
+                    InitialToolExecutionProjection {
+                        execution_status,
+                        receipt: &receipt,
+                        observation_metadata: Some(metadata.clone()),
+                        error: projection_error,
+                    },
+                )
+                .map_err(|error| {
+                    format!("project MainChatKernel typed tool receipt failed: {error}")
+                })?
+        };
+        let status = match projected.status {
+            ExecutionQueueStatus::Completed => ToolCallStatus::Success,
+            ExecutionQueueStatus::PendingPermission => ToolCallStatus::NeedsConfirmation,
+            ExecutionQueueStatus::Failed if call.status == "blocked" => ToolCallStatus::Blocked,
+            _ => ToolCallStatus::Error,
+        };
         let succeeded = matches!(&status, ToolCallStatus::Success);
-        if succeeded {
-            transition_main_chat_action(
-                state,
-                &queued.id,
-                ExecutionQueueStatus::Executing,
-                Some(metadata.clone()),
-            )
-            .await?;
-            transition_main_chat_action(
-                state,
-                &queued.id,
-                ExecutionQueueStatus::Observed,
-                Some(metadata.clone()),
-            )
-            .await?;
-            transition_main_chat_action(
-                state,
-                &queued.id,
-                ExecutionQueueStatus::Completed,
-                Some(metadata.clone()),
-            )
-            .await?;
-        } else if matches!(&status, ToolCallStatus::NeedsConfirmation) {
-            transition_main_chat_action(
-                state,
-                &queued.id,
-                ExecutionQueueStatus::Executing,
-                Some(metadata.clone()),
-            )
-            .await?;
-            transition_main_chat_action(
-                state,
-                &queued.id,
-                ExecutionQueueStatus::PendingPermission,
-                Some(metadata.clone()),
-            )
-            .await?;
-        } else {
-            fail_main_chat_action(
-                state,
-                &queued.id,
-                call.blocker.as_deref().unwrap_or("read_tool_failed"),
-                metadata.clone(),
-            )
-            .await?;
-        }
+        let requires_confirmation = matches!(&status, ToolCallStatus::NeedsConfirmation);
 
         let mut transcript_metadata = metadata.clone();
         if let Some(object) = transcript_metadata.as_object_mut() {
@@ -4714,7 +7305,7 @@ async fn record_kernel_tool_call_evidence(
                 serde_json::json!(call.action_type.clone()),
             );
             object.insert("target".into(), serde_json::json!(call.target.clone()));
-            object.insert("status".into(), serde_json::json!(call.status.clone()));
+            object.insert("status".into(), serde_json::json!(projected.status));
             object.insert(
                 "blocker".into(),
                 call.blocker
@@ -4753,33 +7344,117 @@ async fn record_kernel_tool_call_evidence(
             .await,
         );
 
+        let product_action_id = call
+            .product_projection
+            .as_ref()
+            .map(|projection| projection.bound_action_id().to_string())
+            .unwrap_or_else(|| queued.id.clone());
         tool_calls.push(ToolCallResult {
             name: call.name.clone(),
             arguments: call.governed_input.clone(),
             sanitized_arguments: Some(call.governed_input.clone()),
             success: succeeded,
             output: call.output_preview.clone(),
-            error: call.blocker.clone(),
+            error: projected.error.clone().or_else(|| call.blocker.clone()),
             permission_level: "read".into(),
             status,
-            requires_confirmation: matches!(
-                tool_call_status_from_kernel_status(&call.status),
-                ToolCallStatus::NeedsConfirmation
-            ),
+            requires_confirmation,
             pii_found: false,
             privacy_warnings: Vec::new(),
-            action_id: Some(queued.id),
+            action_id: Some(product_action_id),
             run_id: Some(run_id.to_string()),
             permission_decision: metadata
-                .get("structuredResult")
-                .and_then(|value| value.get("permission_decision"))
+                .get("permissionDecision")
                 .and_then(Value::as_str)
+                .or_else(|| {
+                    metadata
+                        .get("structuredResult")
+                        .and_then(|value| value.get("permission_decision"))
+                        .and_then(Value::as_str)
+                })
                 .map(str::to_string)
                 .or_else(|| call.blocker.clone()),
-            react_trace: None,
+            react_trace: call.react_trace.clone(),
+            execution_receipt: Some(receipt),
+            product_projection: call.product_projection.clone(),
         });
     }
     Ok(tool_calls)
+}
+
+async fn attach_kernel_replay_execution_envelope(
+    state: &Arc<AppState>,
+    task_session_id: &str,
+    run_id: &str,
+    queued_action_id: &str,
+    call: &MainChatKernelToolCall,
+    metadata: &mut Value,
+) -> Result<(), String> {
+    let executor_action_id = metadata
+        .get("executorActionId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "retry_replay_executor_action_id_missing".to_string())?;
+    let executor_action_type = metadata
+        .get("executorActionType")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "retry_replay_executor_action_type_missing".to_string())?;
+    let requested_target = metadata
+        .get("requestedTarget")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "retry_replay_requested_target_missing".to_string())?;
+    let declared_manifest_id = metadata
+        .get("manifestId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let declared_manifest_source = metadata
+        .get("manifestSource")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let manifest = {
+        let registry = state.mcp_registry.lock().await;
+        let manifests = registry.list_manifests();
+        let candidates = manifests
+            .into_iter()
+            .filter(|manifest| {
+                declared_manifest_id.map_or_else(
+                    || {
+                        manifest.id == call.target
+                            || manifest.name == call.target
+                            || manifest.id == call.name
+                            || manifest.name == call.name
+                    },
+                    |manifest_id| manifest.id == manifest_id,
+                )
+            })
+            .filter(|manifest| {
+                declared_manifest_source.is_none_or(|source| manifest.source.to_string() == source)
+            })
+            .collect::<Vec<_>>();
+        let [manifest] = candidates.as_slice() else {
+            return Err("retry_replay_manifest_identity_not_unique".into());
+        };
+        manifest.clone()
+    };
+    if manifest.name != call.target && manifest.id != call.target {
+        return Err("retry_replay_manifest_resolved_target_mismatch".into());
+    }
+    let envelope =
+        DurableMainChatReplayExecutionEnvelope::new(DurableMainChatReplayExecutionInput {
+            task_session_id,
+            run_id,
+            queue_action_id: queued_action_id,
+            executor_action_id,
+            queue_action_type: &call.action_type,
+            executor_action_type,
+            requested_target,
+            resolved_target: &call.target,
+            manifest: &manifest,
+            input: &call.governed_input,
+        })?;
+    envelope.attach_to_metadata(metadata)
 }
 
 async fn attach_kernel_tool_permission_proposal_identity(
@@ -4788,90 +7463,178 @@ async fn attach_kernel_tool_permission_proposal_identity(
     run_id: &str,
     queued_action_id: &str,
     call: &MainChatKernelToolCall,
+    execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
     mut metadata: Value,
 ) -> Result<Value, String> {
-    if call.action_type != "mcp.read_only" || call.status != "needs_confirmation" {
+    if call.status != "needs_confirmation" {
         return Ok(metadata);
     }
-    let proposal_id = metadata
+    let envelope = match DurableMainChatReplayExecutionEnvelope::from_action_metadata(&metadata) {
+        Ok(envelope) => envelope,
+        Err(reason_code) => {
+            if let Some(object) = metadata.as_object_mut() {
+                object.insert("resumeReplayable".into(), serde_json::json!(false));
+                object.insert(
+                    "permissionProposalLinkedToPendingAction".into(),
+                    serde_json::json!(false),
+                );
+                object.insert(
+                    "replayExecutionEnvelopeUnavailable".into(),
+                    serde_json::json!(reason_code),
+                );
+            }
+            return Ok(metadata);
+        }
+    };
+    if envelope.task_session_id != task_session_id
+        || envelope.run_id != run_id
+        || envelope.queue_action_id != queued_action_id
+    {
+        return Err("kernel ToolPermission replay envelope provenance mismatch".into());
+    }
+    if metadata
         .get("structuredResult")
         .and_then(|structured| structured.get("proposalId"))
         .or_else(|| metadata.get("proposalId"))
         .and_then(Value::as_str)
-        .map(str::to_string);
-    let Some(proposal_id) = proposal_id else {
-        return Ok(metadata);
+        .is_some()
+    {
+        return Err(
+            "kernel ToolPermission proposal must be exact at first canonical create".into(),
+        );
+    }
+
+    let manifest = {
+        let registry = state.mcp_registry.lock().await;
+        let manifests = registry
+            .list_manifests()
+            .into_iter()
+            .filter(|manifest| manifest.id == envelope.manifest_id)
+            .collect::<Vec<_>>();
+        let [manifest] = manifests.as_slice() else {
+            return Err("kernel ToolPermission manifest identity is not unique".into());
+        };
+        if manifest.name != envelope.manifest_name
+            || manifest.source.to_string() != envelope.manifest_source
+            || manifest.execution_contract_digest() != envelope.manifest_contract_digest
+        {
+            return Err("kernel ToolPermission manifest contract drifted before proposal".into());
+        }
+        manifest.clone()
     };
 
-    let (input_length_bytes, input_hash) =
-        openlife_core::agent::metadata_safe::metadata_safe_value_digest(&call.governed_input);
     let blocked_action = serde_json::json!({
-        "action_type": call.action_type,
-        "target": metadata
-            .get("requestedTarget")
-            .and_then(Value::as_str)
-            .unwrap_or("mcp.call_tool"),
-        "resolved_target": call.target,
-        "queue_action_id": queued_action_id,
-        "executor_action_id": metadata
-            .get("actionId")
-            .and_then(Value::as_str)
-            .unwrap_or(""),
-        "source_run_id": run_id,
-        "source_task_session_id": task_session_id,
+        "action_type": envelope.queue_action_type,
+        "target": envelope.requested_target,
+        "resolved_target": envelope.resolved_target,
+        "queue_action_id": envelope.queue_action_id,
+        "executor_action_id": envelope.executor_action_id,
+        "source_run_id": envelope.run_id,
+        "source_task_session_id": envelope.task_session_id,
         "step_index": 0,
-        "input_hash": input_hash,
-        "input_length_bytes": input_length_bytes,
+        "input_hash": envelope.input_hash,
+        "input_length_bytes": envelope.input_length_bytes,
         "directWritesExecuted": false,
     });
     let pending_action_identity = serde_json::json!({
-        "taskSessionId": task_session_id,
-        "runId": run_id,
-        "queueActionId": queued_action_id,
-        "executorActionId": metadata
-            .get("actionId")
-            .and_then(Value::as_str)
-            .unwrap_or(""),
-        "queueActionType": call.action_type,
-        "requestedTarget": metadata
-            .get("requestedTarget")
-            .and_then(Value::as_str)
-            .unwrap_or("mcp.call_tool"),
-        "resolvedTarget": call.target,
-        "manifestId": metadata.get("manifestId").cloned().unwrap_or(Value::Null),
-        "manifestName": metadata.get("manifestName").cloned().unwrap_or(Value::Null),
-        "manifestSource": metadata.get("manifestSource").cloned().unwrap_or(Value::Null),
-        "governedArgumentsDigest": format!("bytes:{} hash:{}", input_length_bytes, input_hash),
+        "taskSessionId": envelope.task_session_id,
+        "runId": envelope.run_id,
+        "queueActionId": envelope.queue_action_id,
+        "executorActionId": envelope.executor_action_id,
+        "queueActionType": envelope.queue_action_type,
+        "executorActionType": envelope.executor_action_type,
+        "requestedTarget": envelope.requested_target,
+        "resolvedTarget": envelope.resolved_target,
+        "manifestId": envelope.manifest_id,
+        "manifestName": envelope.manifest_name,
+        "manifestSource": envelope.manifest_source,
+        "manifestContractDigest": envelope.manifest_contract_digest,
+        "inputHash": envelope.input_hash,
+        "inputLengthBytes": envelope.input_length_bytes,
         "directWritesExecuted": false,
     });
-
-    if let Some(ref proposal_store_arc) = state.proposal_store {
+    let after = serde_json::json!({
+        "permission_action": "grant",
+        "permission_scope_kind": "action_bound",
+        "permission": "allow_once",
+        "policy": "allow_once",
+        "tool_name": manifest.name,
+        "source": manifest.source.to_string(),
+        "risk_level": manifest.risk_level,
+        "action_type": manifest.action_type,
+        "capabilities": manifest.capabilities,
+        "canonical_scope": {
+            "tool_name": manifest.name,
+            "source": manifest.source.to_string(),
+            "risk_level": manifest.risk_level,
+            "action_type": manifest.action_type,
+            "capabilities": manifest.capabilities,
+            "input_hash": envelope.input_hash,
+            "input_length_bytes": envelope.input_length_bytes,
+        },
+        "blocked_action": blocked_action,
+        "pending_action_identity": pending_action_identity,
+        "originatingTaskSessionId": task_session_id,
+        "auto_generated": true,
+        "mainChatAgentV1": true,
+        "strictManifestIdentity": true,
+        "fuzzyNameMatchingUsed": false,
+        "directWritesExecuted": false,
+    });
+    let mut proposal = openlife_core::agent::AgentProposal::new(
+        openlife_core::agent::ProposalType::ToolPermission,
+        &format!("tool_permission.{}.{}", manifest.source, manifest.name),
+        after.clone(),
+        "Allow exactly this pending Main Chat tool action once.",
+        1.0,
+        match manifest.risk_level.to_ascii_lowercase().as_str() {
+            "high" => openlife_core::agent::RiskLevel::High,
+            "low" => openlife_core::agent::RiskLevel::Low,
+            _ => openlife_core::agent::RiskLevel::Medium,
+        },
+        openlife_core::agent::ProposalSource::ChatConversation,
+    );
+    proposal.run_id = Some(run_id.to_string());
+    proposal.source_detail = Some(format!("main_chat_agent_task_session:{task_session_id}"));
+    let proposal_store_arc = state
+        .proposal_store
+        .as_ref()
+        .ok_or_else(|| "kernel ToolPermission Proposal store unavailable".to_string())?;
+    let outcome = {
         let proposal_store = proposal_store_arc.lock().await;
-        if let Some(mut proposal) = proposal_store
-            .get_proposal(&proposal_id)
-            .map_err(|err| format!("load kernel ToolPermission proposal failed: {err}"))?
-        {
-            if proposal.proposal_type == openlife_core::agent::ProposalType::ToolPermission {
-                proposal.run_id = Some(run_id.to_string());
-                proposal.source = openlife_core::agent::ProposalSource::ChatConversation;
-                proposal.source_detail =
-                    Some(format!("main_chat_agent_task_session:{task_session_id}"));
-                if let Some(after) = proposal.after.as_object_mut() {
-                    after.insert("blocked_action".into(), blocked_action.clone());
-                    after.insert(
-                        "pending_action_identity".into(),
-                        pending_action_identity.clone(),
-                    );
-                    after.insert("directWritesExecuted".into(), serde_json::json!(false));
-                    after.insert("strictManifestIdentity".into(), serde_json::json!(true));
-                    after.insert("fuzzyNameMatchingUsed".into(), serde_json::json!(false));
-                }
-                proposal_store.update_proposal(&proposal).map_err(|err| {
-                    format!("update kernel ToolPermission proposal failed: {err}")
-                })?;
-            }
-        }
+        openlife_core::agent::ReviewWorkflow::new(&proposal_store)
+            .submit_with_admission(
+                openlife_core::agent::DurableWriteRequest::from_agent_proposal(
+                    openlife_core::agent::DurableWriteSource::MainChat,
+                    openlife_core::agent::DurableWriteSubject::ToolPermission,
+                    proposal,
+                    "Main Chat tool permission is pending exact action review.",
+                )
+                .with_idempotency_key(format!(
+                    "main_chat_tool_permission:{}:{}:{}:{}",
+                    task_session_id,
+                    queued_action_id,
+                    envelope.manifest_contract_digest,
+                    envelope.input_hash,
+                ))
+                .with_evidence_refs(vec![
+                    format!("main_chat_task_session:{task_session_id}"),
+                    format!("main_chat_action:{queued_action_id}"),
+                ]),
+                execution_epoch,
+            )
+            .map_err(|error| {
+                format!("create exact kernel ToolPermission proposal failed: {error}")
+            })?
+    };
+    let expected_source_detail = format!("main_chat_agent_task_session:{task_session_id}");
+    if outcome.proposal.after != after
+        || outcome.proposal.run_id.as_deref() != Some(run_id)
+        || outcome.proposal.source_detail.as_deref() != Some(expected_source_detail.as_str())
+    {
+        return Err("reused kernel ToolPermission Proposal provenance mismatch".into());
     }
+    let proposal_id = outcome.proposal.id;
 
     if let Some(object) = metadata.as_object_mut() {
         object.insert("proposalId".into(), serde_json::json!(proposal_id));
@@ -4887,6 +7650,13 @@ async fn attach_kernel_tool_permission_proposal_identity(
             "sourceTaskSessionId".into(),
             serde_json::json!(task_session_id),
         );
+        if let Some(structured) = object
+            .get_mut("structuredResult")
+            .and_then(Value::as_object_mut)
+        {
+            structured.insert("proposalId".into(), serde_json::json!(proposal_id));
+            structured.insert("permissionProposalCreated".into(), serde_json::json!(true));
+        }
     }
 
     Ok(metadata)
@@ -4966,56 +7736,33 @@ async fn command_surface_kernel_hs_context(
 
 async fn command_surface_kernel_context_candidates(
     state: &Arc<AppState>,
+    configured_knowledge_roots: &[String],
     selected_skill_id: Option<&str>,
-) -> Vec<ContextSourceCandidate> {
+) -> Result<Vec<ContextSourceCandidate>, String> {
     let mut candidates = Vec::new();
-    let configured_knowledge_roots = {
-        let config = state.config.lock().await;
-        config.system.knowledge_roots.clone()
-    };
     candidates.extend(load_configured_knowledge_context_candidates(
-        &configured_knowledge_roots,
+        configured_knowledge_roots,
         selected_skill_id,
     ));
-    if let Some(lifecycle_store) = state.memory_lifecycle_store.as_ref() {
-        let store = lifecycle_store.lock().await;
-        if let Ok(records) = store.list_active_records(None, 8) {
-            for record in records {
-                candidates.push(ContextSourceCandidate::new(
-                    ContextSourceKind::SelectedPersonalContext,
-                    &record.memory_id,
-                    format!(
-                        "Accepted memory [{}:{}]: {}",
-                        record.scope, record.category, record.content
-                    ),
-                    format!(
-                        "accepted memory lifecycle; materialized view {} version {}",
-                        record.materialized_view_id.as_deref().unwrap_or("unknown"),
-                        record.materialized_view_version.unwrap_or_default()
-                    ),
-                    "private",
-                    16,
-                ));
-            }
-        }
-    }
-    if let Ok(sessions) = {
+    candidates.extend(retrievable_lifecycle_context_candidates(state).await?);
+    let sessions = {
         let store = state.memory_store.lock().await;
-        store.list_sessions(5)
-    } {
-        candidates.push(ContextSourceCandidate::new(
-            ContextSourceKind::SelectedPersonalContext,
-            "chat_sessions.recent",
-            format!(
-                "Recent session count available for search: {}",
-                sessions.len()
-            ),
-            "bounded session search metadata",
-            "internal",
-            8,
-        ));
-    }
-    candidates
+        store.list_sessions(5).map_err(|error| {
+            format!("memory_retrieval_degraded:memory_store_query_failed:{error}")
+        })?
+    };
+    candidates.push(ContextSourceCandidate::new(
+        ContextSourceKind::SelectedPersonalContext,
+        "chat_sessions.recent",
+        format!(
+            "Recent session count available for search: {}",
+            sessions.len()
+        ),
+        "bounded session search metadata",
+        "internal",
+        8,
+    ));
+    Ok(candidates)
 }
 
 fn build_kernel_hs_context(
@@ -5270,6 +8017,14 @@ fn plan_kernel_read_tools(
     input: &MainChatTurnInput,
     model_arguments_ignored: bool,
 ) -> Vec<MainChatKernelReadToolDecision> {
+    // PolicyRouter alone authorizes the read lane. Text matching below may
+    // select a target inside that lane, but it must never upgrade DirectAnswer
+    // or another policy route into tool execution.
+    if input.policy_decision.action_effect
+        != openlife_core::agent::main_chat_agent_v1::PolicyActionEffect::ReadOnly
+    {
+        return Vec::new();
+    }
     let Some(user_text) = latest_user_text(&input.messages) else {
         return Vec::new();
     };
@@ -5285,7 +8040,7 @@ fn plan_kernel_read_tools(
             "two bounded memory observations",
         ],
     ) {
-        return vec![
+        let decisions = vec![
             kernel_memory_search_read_tool_decision(
                 "multi-read fixture alpha",
                 "kernel_multi_read_memory_query_alpha",
@@ -5299,11 +8054,45 @@ fn plan_kernel_read_tools(
                 model_arguments_ignored,
             ),
         ];
+        return decisions
+            .into_iter()
+            .map(|decision| {
+                enforce_kernel_read_capability(input, AllowedCapability::MemoryRead, decision)
+            })
+            .collect();
     }
 
     plan_kernel_read_tool(input, model_arguments_ignored)
         .into_iter()
         .collect()
+}
+
+fn enforce_kernel_read_capability(
+    input: &MainChatTurnInput,
+    capability: AllowedCapability,
+    decision: MainChatKernelReadToolDecision,
+) -> MainChatKernelReadToolDecision {
+    if input.policy_decision.allows(capability) {
+        return decision;
+    }
+    MainChatKernelReadToolDecision {
+        tool_name: "unsupported.tool".into(),
+        queue_action_type: "unsupported.tool".into(),
+        executor_action_type: "unsupported_tool".into(),
+        requested_target: decision.requested_target.clone(),
+        target: decision.target.clone(),
+        governed_input: serde_json::json!({
+            "requestedTarget": decision.requested_target,
+            "requiredCapability": capability.as_str(),
+            "policyReasonCode": input.policy_decision.reason_code,
+            "policyVersion": input.policy_decision.policy_version,
+            "governedInputSource": "policy_capability_not_allowed",
+        }),
+        reason: "PolicyDecision did not authorize the requested read target".into(),
+        model_arguments_ignored: decision.model_arguments_ignored,
+        fixture_backed_read: false,
+        selection_metadata: None,
+    }
 }
 
 fn kernel_memory_search_read_tool_decision(
@@ -5374,7 +8163,6 @@ fn plan_kernel_read_tool(
 ) -> Option<MainChatKernelReadToolDecision> {
     let user_text = latest_user_text(&input.messages)?;
     let lower = user_text.to_ascii_lowercase();
-    let governance_intent = classify_main_chat_governance_intent(user_text);
 
     if contains_any(
         &lower,
@@ -5385,29 +8173,37 @@ fn plan_kernel_read_tool(
             "nonexistent tool",
         ],
     ) {
-        return Some(MainChatKernelReadToolDecision {
-            tool_name: "unsupported.tool".into(),
-            queue_action_type: "unsupported.tool".into(),
-            executor_action_type: "unsupported_tool".into(),
-            requested_target: "unsupported.tool".into(),
-            target: "unsupported.tool".into(),
-            governed_input: serde_json::json!({
-                "query": bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
-                "governedInputSource": "kernel_unsupported_tool_blocker",
-            }),
-            reason: "unknown tool target must fail closed".into(),
-            model_arguments_ignored,
-            fixture_backed_read: false,
-            selection_metadata: None,
-        });
+        return Some(enforce_kernel_read_capability(
+            input,
+            AllowedCapability::UnsupportedToolBlocker,
+            MainChatKernelReadToolDecision {
+                tool_name: "unsupported.tool".into(),
+                queue_action_type: "unsupported.tool".into(),
+                executor_action_type: "unsupported_tool".into(),
+                requested_target: "unsupported.tool".into(),
+                target: "unsupported.tool".into(),
+                governed_input: serde_json::json!({
+                    "query": bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
+                    "governedInputSource": "kernel_unsupported_tool_blocker",
+                }),
+                reason: "unknown tool target must fail closed".into(),
+                model_arguments_ignored,
+                fixture_backed_read: false,
+                selection_metadata: None,
+            },
+        ));
     }
 
-    if governance_intent.external_read_requirement.is_some() {
-        return Some(kernel_web_search_read_tool_decision(
-            user_text,
-            "kernel_external_fact_query_from_governance_intent",
-            "current external fact read requires governed web search evidence",
-            model_arguments_ignored,
+    if authorized_read_target_is_current_external_fact(&lower) {
+        return Some(enforce_kernel_read_capability(
+            input,
+            AllowedCapability::WebSearch,
+            kernel_web_search_read_tool_decision(
+                user_text,
+                "kernel_external_fact_target_from_policy_authorized_read",
+                "current external fact read requires governed web search evidence",
+                model_arguments_ignored,
+            ),
         ));
     }
 
@@ -5423,11 +8219,15 @@ fn plan_kernel_read_tool(
             "network unavailable",
         ],
     ) {
-        return Some(kernel_web_search_read_tool_decision(
-            user_text,
-            "kernel_web_search_query_from_user_text",
-            "governed web search requested",
-            model_arguments_ignored,
+        return Some(enforce_kernel_read_capability(
+            input,
+            AllowedCapability::WebSearch,
+            kernel_web_search_read_tool_decision(
+                user_text,
+                "kernel_web_search_query_from_user_text",
+                "governed web search requested",
+                model_arguments_ignored,
+            ),
         ));
     }
 
@@ -5437,56 +8237,64 @@ fn plan_kernel_read_tool(
             .map(trim_main_chat_tool_token)
             .find(|token| token.starts_with("http://") || token.starts_with("https://"))
             .unwrap_or("");
-        return Some(MainChatKernelReadToolDecision {
-            tool_name: "web.fetch".into(),
-            queue_action_type: "web.fetch".into(),
-            executor_action_type: "mcp_tool".into(),
-            requested_target: "web.fetch".into(),
-            target: "web.fetch".into(),
-            governed_input: serde_json::json!({
-                "url": url,
-                "summarize": true,
-                "governedInputSource": "kernel_web_fetch_url_from_user_text",
-            }),
-            reason: "governed web fetch requested".into(),
-            model_arguments_ignored,
-            fixture_backed_read: false,
-            selection_metadata: Some(serde_json::json!({
-                "kernelToolSelection": true,
-                "toolSelectionCandidateCount": 1,
-                "boundedCandidateIds": ["web.fetch"],
-                "targetAllowlist": ["web.fetch"],
-                "actionTargetAllowlist": [{ "actionType": "mcp_tool", "target": "web.fetch" }],
-                "toolSelectionModelRanked": false,
-                "toolSelectionRankingSource": "deterministic_local",
-                "toolSelectionDeterministicFallbackReady": true,
-                "toolSelectionProviderRankingRequiredForLocalCompletion": false,
-                "selectedCandidateId": "web.fetch",
-                "selectedCandidateTarget": "web.fetch",
-                "selectedCandidateActionType": "mcp_tool",
-                "selectedCandidateRank": 1,
-            })),
-        });
+        return Some(enforce_kernel_read_capability(
+            input,
+            AllowedCapability::WebFetch,
+            MainChatKernelReadToolDecision {
+                tool_name: "web.fetch".into(),
+                queue_action_type: "web.fetch".into(),
+                executor_action_type: "mcp_tool".into(),
+                requested_target: "web.fetch".into(),
+                target: "web.fetch".into(),
+                governed_input: serde_json::json!({
+                    "url": url,
+                    "summarize": true,
+                    "governedInputSource": "kernel_web_fetch_url_from_user_text",
+                }),
+                reason: "governed web fetch requested".into(),
+                model_arguments_ignored,
+                fixture_backed_read: false,
+                selection_metadata: Some(serde_json::json!({
+                    "kernelToolSelection": true,
+                    "toolSelectionCandidateCount": 1,
+                    "boundedCandidateIds": ["web.fetch"],
+                    "targetAllowlist": ["web.fetch"],
+                    "actionTargetAllowlist": [{ "actionType": "mcp_tool", "target": "web.fetch" }],
+                    "toolSelectionModelRanked": false,
+                    "toolSelectionRankingSource": "deterministic_local",
+                    "toolSelectionDeterministicFallbackReady": true,
+                    "toolSelectionProviderRankingRequiredForLocalCompletion": false,
+                    "selectedCandidateId": "web.fetch",
+                    "selectedCandidateTarget": "web.fetch",
+                    "selectedCandidateActionType": "mcp_tool",
+                    "selectedCandidateRank": 1,
+                })),
+            },
+        ));
     }
 
     if lower.contains("mcp") {
-        return Some(MainChatKernelReadToolDecision {
-            tool_name: "mcp.read_only".into(),
-            queue_action_type: "mcp.read_only".into(),
-            executor_action_type: "mcp_tool".into(),
-            requested_target: "mcp.call_tool".into(),
-            target: "mcp.call_tool".into(),
-            governed_input: serde_json::json!({
-                "tool_name": infer_kernel_mcp_tool_name(user_text).unwrap_or_default(),
-                "arguments": {},
-                "selection_query": bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
-                "governedInputSource": "kernel_mcp_read_manifest_selection",
-            }),
-            reason: "registered MCP read requested".into(),
-            model_arguments_ignored,
-            fixture_backed_read: false,
-            selection_metadata: None,
-        });
+        return Some(enforce_kernel_read_capability(
+            input,
+            AllowedCapability::McpReadOnly,
+            MainChatKernelReadToolDecision {
+                tool_name: "mcp.read_only".into(),
+                queue_action_type: "mcp.read_only".into(),
+                executor_action_type: "mcp_tool".into(),
+                requested_target: "mcp.call_tool".into(),
+                target: "mcp.call_tool".into(),
+                governed_input: serde_json::json!({
+                    "tool_name": infer_kernel_mcp_tool_name(user_text).unwrap_or_default(),
+                    "arguments": {},
+                    "selection_query": bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
+                    "governedInputSource": "kernel_mcp_read_manifest_selection",
+                }),
+                reason: "registered MCP read requested".into(),
+                model_arguments_ignored,
+                fixture_backed_read: false,
+                selection_metadata: None,
+            },
+        ));
     }
 
     if contains_any(
@@ -5501,21 +8309,25 @@ fn plan_kernel_read_tool(
         ],
     ) || looks_like_workspace_file_read_request(&lower)
     {
-        return Some(MainChatKernelReadToolDecision {
-            tool_name: "file.read".into(),
-            queue_action_type: "file.read".into(),
-            executor_action_type: "mcp_tool".into(),
-            requested_target: "file.read".into(),
-            target: "file.read".into(),
-            governed_input: serde_json::json!({
-                "rawUserText": user_text,
-                "governedInputSource": "workspace_scoped_resolver_pending",
-            }),
-            reason: "workspace file read requested".into(),
-            model_arguments_ignored,
-            fixture_backed_read: false,
-            selection_metadata: None,
-        });
+        return Some(enforce_kernel_read_capability(
+            input,
+            AllowedCapability::WorkspaceFileRead,
+            MainChatKernelReadToolDecision {
+                tool_name: "file.read".into(),
+                queue_action_type: "file.read".into(),
+                executor_action_type: "mcp_tool".into(),
+                requested_target: "file.read".into(),
+                target: "file.read".into(),
+                governed_input: serde_json::json!({
+                    "rawUserText": user_text,
+                    "governedInputSource": "workspace_scoped_resolver_pending",
+                }),
+                reason: "workspace file read requested".into(),
+                model_arguments_ignored,
+                fixture_backed_read: false,
+                selection_metadata: None,
+            },
+        ));
     }
 
     if contains_any(
@@ -5529,22 +8341,26 @@ fn plan_kernel_read_tool(
             "what did i ask",
         ],
     ) {
-        return Some(MainChatKernelReadToolDecision {
-            tool_name: "session.search".into(),
-            queue_action_type: "session.search".into(),
-            executor_action_type: "session_search".into(),
-            requested_target: "session.search".into(),
-            target: "session.search".into(),
-            governed_input: serde_json::json!({
-                "query": bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
-                "limit": 5,
-                "governedInputSource": "kernel_session_query_from_user_text",
-            }),
-            reason: "bounded prior session search requested".into(),
-            model_arguments_ignored,
-            fixture_backed_read: false,
-            selection_metadata: None,
-        });
+        return Some(enforce_kernel_read_capability(
+            input,
+            AllowedCapability::SessionRead,
+            MainChatKernelReadToolDecision {
+                tool_name: "session.search".into(),
+                queue_action_type: "session.search".into(),
+                executor_action_type: "session_search".into(),
+                requested_target: "session.search".into(),
+                target: "session.search".into(),
+                governed_input: serde_json::json!({
+                    "query": bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
+                    "limit": 5,
+                    "governedInputSource": "kernel_session_query_from_user_text",
+                }),
+                reason: "bounded prior session search requested".into(),
+                model_arguments_ignored,
+                fixture_backed_read: false,
+                selection_metadata: None,
+            },
+        ));
     }
 
     if contains_any(
@@ -5557,15 +8373,35 @@ fn plan_kernel_read_tool(
             "memory context",
         ],
     ) {
-        return Some(kernel_memory_search_read_tool_decision(
+        return Some(enforce_kernel_read_capability(
+            input,
+            AllowedCapability::MemoryRead,
+            kernel_memory_search_read_tool_decision(
+                user_text,
+                "kernel_memory_query_from_user_text",
+                "bounded memory search requested",
+                model_arguments_ignored,
+            ),
+        ));
+    }
+
+    // PolicyRouter is the authority for which read capability is allowed. If
+    // it authorized exactly one target, select that typed target instead of
+    // requiring the kernel to rediscover the same intent from a second set of
+    // prompt keywords. Ambiguous multi-capability decisions still fail closed
+    // unless one of the explicit target branches above resolves them.
+    if input.policy_decision.allowed_capabilities.len() == 1
+        && input.policy_decision.allows(AllowedCapability::WebSearch)
+    {
+        return Some(kernel_web_search_read_tool_decision(
             user_text,
-            "kernel_memory_query_from_user_text",
-            "bounded memory search requested",
+            "kernel_single_policy_authorized_web_search",
+            "PolicyDecision authorized web.search as the only read target",
             model_arguments_ignored,
         ));
     }
 
-    if input.selected_strategy == Some(MainChatAgentStrategy::ReActToolExecution) {
+    if input.policy_decision.allows(AllowedCapability::MemoryRead) {
         return Some(kernel_memory_search_read_tool_decision(
             user_text,
             "kernel_react_default_memory_query_from_user_text",
@@ -5575,6 +8411,29 @@ fn plan_kernel_read_tool(
     }
 
     None
+}
+
+fn authorized_read_target_is_current_external_fact(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "current weather",
+            "live weather",
+            "weather today",
+            "latest news",
+            "current price",
+            "live score",
+            "今天的天气",
+            "今天天气",
+            "今天上海",
+            "会不会下雨",
+            "实时天气",
+            "最新消息",
+            "当前价格",
+            "最新价格",
+            "实时比分",
+        ],
+    )
 }
 
 fn looks_like_workspace_file_read_request(lower: &str) -> bool {
@@ -5638,16 +8497,9 @@ fn meaningful_memory_candidate(value: &str) -> bool {
     trimmed.chars().count() >= 8 && !looks_like_instruction_fragment(trimmed)
 }
 
-fn plan_kernel_memory_governance(input: &MainChatTurnInput) -> Option<MainChatMemoryRoutingResult> {
-    let user_text = latest_user_text(&input.messages)?;
-    let routing = plan_main_chat_memory_routing(user_text);
-    memory_governance_has_artifacts(Some(&routing)).then_some(routing)
-}
-
 fn memory_governance_has_artifacts(routing: Option<&MainChatMemoryRoutingResult>) -> bool {
     routing.is_some_and(|routing| {
-        !routing.life_event_candidate_ids.is_empty()
-            || !routing.memory_proposal_candidate_ids.is_empty()
+        !routing.memory_proposal_candidate_ids.is_empty()
             || !routing.lifemodel_proposal_candidate_ids.is_empty()
     })
 }
@@ -5752,27 +8604,44 @@ fn extract_memory_proposal_content(user_text: &str) -> String {
     bounded_text(user_text, MAX_TOOL_OBSERVATION_PREVIEW_CHARS)
 }
 
+fn kernel_user_message_ref(input: &MainChatTurnInput) -> String {
+    input
+        .provider_authorization
+        .task_session_id
+        .as_deref()
+        .map(|task_id| format!("task-session://{task_id}/canonical-user-message"))
+        .unwrap_or_else(|| format!("conversation://{}/current-user-message", input.session_id))
+}
+
+fn kernel_user_message_payload_summary(input: &MainChatTurnInput, user_text: &str) -> String {
+    format!(
+        "user_message_ref={};bytes={};digest={}",
+        kernel_user_message_ref(input),
+        user_text.len(),
+        openlife_core::agent::metadata_safe_text_digest(user_text).1,
+    )
+}
+
 fn plan_kernel_write_outcome(
     input: &MainChatTurnInput,
     model_arguments_ignored: bool,
 ) -> Option<MainChatKernelWriteOutcome> {
     let user_text = latest_user_text(&input.messages)?;
+    let payload_summary = kernel_user_message_payload_summary(input, user_text);
     let lower = user_text.to_ascii_lowercase();
-    let selected_strategy = input.selected_strategy;
-    let governance_intent = classify_main_chat_governance_intent(user_text);
-
-    if is_dangerous_shell_write_intent(&lower)
-        || governance_intent.blocker_requirement
-            == Some(MainChatBlockerRequirement::DangerousLocalWrite)
+    if input
+        .policy_decision
+        .allows(AllowedCapability::DangerousActionBlocker)
     {
         return Some(MainChatKernelWriteOutcome {
             kind: MainChatKernelWriteOutcomeKind::DangerousHardBlock,
             action_type: "shell.destructive".into(),
             target: "dangerous_shell".into(),
             reason: "dangerous shell or destructive local action is hard-blocked".into(),
-            payload_summary: bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
+            payload_summary: payload_summary.clone(),
             governed_input: serde_json::json!({
-                "rawUserTextPreview": bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
+                "userMessageRef": kernel_user_message_ref(input),
+                "userMessageDigest": openlife_core::agent::metadata_safe_text_digest(user_text).1,
                 "governedInputSource": "kernel_dangerous_shell_hard_block",
                 "modelArgumentsIgnored": model_arguments_ignored,
                 "directWritesExecuted": false,
@@ -5786,21 +8655,24 @@ fn plan_kernel_write_outcome(
         });
     }
 
-    if (selected_strategy == Some(MainChatAgentStrategy::MemoryProposal)
-        || is_memory_write_intent(&lower)
-        || governance_intent.durable_write_requirement
-            == Some(MainChatDurableWriteRequirement::MemoryProposal))
-        && !user_text_requests_memory_proposal_after_read(user_text)
+    if input
+        .policy_decision
+        .allows(AllowedCapability::MemoryProposal)
     {
         let memory_content = extract_memory_proposal_content(user_text);
+        let sensitivity = MemoryLifecycleSensitivity::from_policy_and_candidate(
+            input.policy_decision.sensitivity,
+            "internal",
+        );
         return Some(MainChatKernelWriteOutcome {
             kind: MainChatKernelWriteOutcomeKind::MemoryProposal,
             action_type: "proposal.create".into(),
             target: "memory.pending.chat_conversation".into(),
             reason: "memory write request must create a governed Memory proposal".into(),
-            payload_summary: bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
+            payload_summary: payload_summary.clone(),
             governed_input: serde_json::json!({
                 "content": memory_content,
+                "sensitivity": sensitivity,
                 "governedInputSource": "kernel_memory_write_proposal",
                 "directMemoryWrite": false,
                 "directWritesExecuted": false,
@@ -5814,10 +8686,9 @@ fn plan_kernel_write_outcome(
         });
     }
 
-    if selected_strategy == Some(MainChatAgentStrategy::LifeModelProposal)
-        || is_lifemodel_write_intent(&lower)
-        || governance_intent.durable_write_requirement
-            == Some(MainChatDurableWriteRequirement::LifeModelProposal)
+    if input
+        .policy_decision
+        .allows(AllowedCapability::LifeModelProposal)
     {
         let target = main_chat_lifemodel_write_target(user_text);
         return Some(MainChatKernelWriteOutcome {
@@ -5825,7 +8696,7 @@ fn plan_kernel_write_outcome(
             action_type: "proposal.create".into(),
             target: target.clone(),
             reason: "LifeModel-affecting request must create a governed LifeModel proposal".into(),
-            payload_summary: bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
+            payload_summary: payload_summary.clone(),
             governed_input: serde_json::json!({
                 "requestedChange": bounded_text(user_text, MAX_TOOL_OBSERVATION_PREVIEW_CHARS),
                 "target": target,
@@ -5842,7 +8713,10 @@ fn plan_kernel_write_outcome(
         });
     }
 
-    if is_file_write_intent(&lower) {
+    if input
+        .policy_decision
+        .allows(AllowedCapability::FileWriteProposal)
+    {
         let path = extract_backtick_value(user_text).unwrap_or("workspace.pending_file_write");
         let content = extract_second_backtick_value(user_text).unwrap_or("");
         return Some(MainChatKernelWriteOutcome {
@@ -5850,11 +8724,10 @@ fn plan_kernel_write_outcome(
             action_type: "proposal.create".into(),
             target: bounded_text(path, MAX_TOOL_QUERY_CHARS),
             reason: "file write request must create a governed ExternalWriteAction proposal".into(),
-            payload_summary: bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
+            payload_summary: payload_summary.clone(),
             governed_input: serde_json::json!({
                 "path": bounded_text(path, MAX_TOOL_QUERY_CHARS),
                 "content": content,
-                "contentPreview": bounded_text(content, MAX_TOOL_QUERY_CHARS),
                 "governedInputSource": "kernel_file_write_proposal",
                 "directFileWrite": false,
                 "directWritesExecuted": false,
@@ -5868,10 +8741,9 @@ fn plan_kernel_write_outcome(
         });
     }
 
-    if selected_strategy == Some(MainChatAgentStrategy::BlockedConfirmation)
-        || is_external_write_intent(&lower)
-        || governance_intent.blocker_requirement
-            == Some(MainChatBlockerRequirement::ExternalWriteConfirmation)
+    if input
+        .policy_decision
+        .allows(AllowedCapability::ExternalWriteConfirmation)
     {
         return Some(MainChatKernelWriteOutcome {
             kind: MainChatKernelWriteOutcomeKind::ExternalConfirmationBlocker,
@@ -5879,9 +8751,10 @@ fn plan_kernel_write_outcome(
             target: "external_side_effect".into(),
             reason: "external side effect requires explicit confirmation and provider support"
                 .into(),
-            payload_summary: bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
+            payload_summary,
             governed_input: serde_json::json!({
-                "rawUserTextPreview": bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
+                "userMessageRef": kernel_user_message_ref(input),
+                "userMessageDigest": openlife_core::agent::metadata_safe_text_digest(user_text).1,
                 "governedInputSource": "kernel_external_write_confirmation_blocker",
                 "externalWritesExecuted": false,
                 "directWritesExecuted": false,
@@ -5896,35 +8769,6 @@ fn plan_kernel_write_outcome(
     }
 
     None
-}
-
-fn kernel_followup_memory_proposal_outcome(user_text: &str) -> MainChatKernelWriteOutcome {
-    let memory_content = extract_memory_proposal_content(user_text);
-    MainChatKernelWriteOutcome {
-        kind: MainChatKernelWriteOutcomeKind::MemoryProposal,
-        action_type: "proposal.create".into(),
-        target: "memory.pending.chat_conversation".into(),
-        reason: "memory proposal requested after a governed read".into(),
-        payload_summary: bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
-        governed_input: serde_json::json!({
-            "content": memory_content,
-            "governedInputSource": "kernel_read_followup_memory_proposal",
-            "directMemoryWrite": false,
-            "directWritesExecuted": false,
-            "modelArgumentsIgnored": false,
-        }),
-        proposal_type: Some("memory_write".into()),
-        blocker_code: Some("proposal_review_required".into()),
-        requires_confirmation: false,
-        hard_blocked: false,
-        replayable: true,
-    }
-}
-
-fn user_text_requests_memory_proposal_after_read(user_text: &str) -> bool {
-    let lower = user_text.to_ascii_lowercase();
-    (lower.contains("memory proposal") || lower.contains("create a memory proposal"))
-        && (lower.contains("read") || lower.contains("file"))
 }
 
 fn is_memory_write_intent(lower: &str) -> bool {
@@ -5972,22 +8816,6 @@ fn is_lifemodel_write_intent(lower: &str) -> bool {
     )
 }
 
-fn is_file_write_intent(lower: &str) -> bool {
-    contains_any(
-        lower,
-        &[
-            "file.write",
-            "file write",
-            "write file",
-            "write to file",
-            "create file",
-            "save file",
-            "patch file",
-            "edit file",
-        ],
-    ) && !contains_any(lower, &["read file", "file.read"])
-}
-
 fn is_external_write_intent(lower: &str) -> bool {
     contains_any(
         lower,
@@ -6003,21 +8831,6 @@ fn is_external_write_intent(lower: &str) -> bool {
             "publish to",
         ],
     )
-}
-
-fn is_dangerous_shell_write_intent(lower: &str) -> bool {
-    contains_any(
-        lower,
-        &[
-            "rm -rf",
-            "shell.destructive",
-            "delete project files",
-            "drop database",
-            "format disk",
-            "dangerous shell",
-            "destructive shell",
-        ],
-    ) || (lower.contains("shell") && contains_any(lower, &["delete", "destroy", "destructive"]))
 }
 
 fn external_write_action_type(lower: &str) -> &'static str {
@@ -6063,9 +8876,8 @@ fn extract_second_backtick_value(value: &str) -> Option<&str> {
 
 fn latest_user_text(messages: &[ChatMessage]) -> Option<&str> {
     messages
-        .iter()
-        .rev()
-        .find(|message| message.role == "user" && !message.content.trim().is_empty())
+        .last()
+        .filter(|message| message.role == "user" && !message.content.trim().is_empty())
         .map(|message| message.content.as_str())
 }
 
@@ -6089,17 +8901,12 @@ struct DirectAnswerEvidenceBlocker {
 }
 
 fn assert_direct_answer_has_required_evidence(
-    user_text: &str,
     reply: &str,
     tool_observation_count: usize,
     proposal_count: usize,
     life_event_count: usize,
 ) -> Result<(), DirectAnswerEvidenceBlocker> {
-    let governance_intent = classify_main_chat_governance_intent(user_text);
-    if (governance_intent.external_read_requirement.is_some()
-        || direct_answer_claims_external_fact_read(reply))
-        && tool_observation_count == 0
-    {
+    if direct_answer_claims_external_fact_read(reply) && tool_observation_count == 0 {
         return Err(DirectAnswerEvidenceBlocker {
             code: "external_fact_read_unavailable".into(),
             replacement_reply: [
@@ -6110,10 +8917,7 @@ fn assert_direct_answer_has_required_evidence(
         });
     }
 
-    if (governance_intent.durable_write_requirement.is_some()
-        || direct_answer_claims_durable_write(reply))
-        && proposal_count == 0
-    {
+    if direct_answer_claims_durable_write(reply) && proposal_count == 0 {
         return Err(DirectAnswerEvidenceBlocker {
             code: "proposal_review_required".into(),
             replacement_reply:
@@ -6405,6 +9209,8 @@ fn context_summary_from_kernel_result(
 async fn build_kernel_plan_execute_command_surface_result<C, S>(
     session_id: &str,
     user_text: &str,
+    canonical_run_id: &str,
+    execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
     state: &Arc<AppState>,
     main_chat_agent_turn: &MainChatAgentTurn,
     mut execution_transcript: Vec<ExecutionTranscriptEntry>,
@@ -6424,6 +9230,13 @@ where
         .agent_task_session_id
         .as_deref()
         .ok_or_else(|| "Main Chat kernel task session missing".to_string())?;
+    let mut agent_run = load_existing_canonical_main_chat_agent_run(
+        state,
+        canonical_run_id,
+        task_session_id,
+        session_id,
+    )
+    .await?;
     let session_label = bounded_label(session_id.trim(), MAX_ROUTE_LABEL_CHARS);
     event_sink.emit(MainChatKernelEvent::TurnStarted {
         session_id: session_label,
@@ -6457,17 +9270,6 @@ where
         model_arguments_ignored: true,
     });
 
-    if let Some(user) = latest_user_text_from_raw(user_text) {
-        let user_message = ChatMessage {
-            role: "user".into(),
-            content: user,
-        };
-        let inserted = persist_chat_message_if_needed(session_id, &user_message, state).await?;
-        if inserted {
-            persist_vector_memory_for_message(session_id, &user_message, state).await;
-        }
-    }
-
     let queued = enqueue_main_chat_agent_action(
         state,
         task_session_id,
@@ -6487,15 +9289,18 @@ where
         })),
     )
     .await?;
-    let plan_session = crate::commands::agent_runtime::create_plan_execute_session_with_state(
-        crate::commands::agent_runtime::CreatePlanExecuteSessionInput {
-            scenario_id: Some("weekly_planning".into()),
-            source_chat_session_id: Some(session_id.to_string()),
-            max_steps: Some(5),
-        },
-        state,
-    )
-    .await?;
+    let plan_session =
+        crate::commands::agent_runtime::create_plan_execute_session_for_main_chat_with_state(
+            crate::commands::agent_runtime::CreatePlanExecuteSessionInput {
+                scenario_id: Some("weekly_planning".into()),
+                source_chat_session_id: Some(session_id.to_string()),
+                max_steps: Some(5),
+            },
+            state,
+            canonical_run_id,
+            execution_epoch,
+        )
+        .await?;
     let observation_metadata = serde_json::json!({
         "kernelBackedPlanExecuteDraft": true,
         "actionId": queued.id,
@@ -6660,6 +9465,7 @@ where
             .is_some_and(|metadata| metadata.raw_life_model_yaml_included),
         "modelGenerated": false,
         "schedulerGenerationCalled": false,
+        "turnProviderRuntimeGeneration": scheduler.provider_config_generation(),
         "providerGenerationPath": "main_chat_kernel_plan_execute_draft",
         "provider": route_metadata.provider,
         "model": route_metadata.model,
@@ -6688,7 +9494,6 @@ where
         redaction_applied: false,
         redaction_level: RedactionLevel::None,
     };
-    let mut agent_run = AgentRun::new_chat_run(session_id, user_text);
     agent_run.reasoning_strategy = Some("main_chat_agent_v1_kernel_plan_execute".into());
     agent_run.tool_call_count = 1 + u32::from(blocked_external_write_action_id.is_some());
     agent_run.step_count = agent_run.tool_call_count;
@@ -6707,7 +9512,6 @@ where
         &reply,
         &mut reasoning_trace,
         &mut agent_run,
-        &life_model,
         state,
     )
     .await?;
@@ -6750,7 +9554,7 @@ where
             main_chat_agent_turn,
             "MainChatKernel PlanExecute draft completed without writes.",
         )
-        .await;
+        .await?;
     } else if let Some(ref store_arc) = state.main_chat_agent_session_store {
         let store = store_arc.lock().await;
         if let Err(err) = store.set_pending_blockers(task_session_id, pending_blockers.clone()) {
@@ -6839,16 +9643,10 @@ fn plan_execute_external_write_blocker_action(
     Some((action_type, target))
 }
 
-fn latest_user_text_from_raw(user_text: &str) -> Option<String> {
-    let trimmed = user_text.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
-}
-
 fn has_valid_user_turn(messages: &[ChatMessage]) -> bool {
     messages
-        .iter()
-        .rev()
-        .any(|message| message.role == "user" && !message.content.trim().is_empty())
+        .last()
+        .is_some_and(|message| message.role == "user" && !message.content.trim().is_empty())
 }
 
 fn kernel_base_context_candidates(session_id: &str) -> Vec<ContextSourceCandidate> {
@@ -6919,56 +9717,59 @@ fn build_system_prompt(
 }
 
 fn route_metadata_from_scheduler(scheduler: &InferenceScheduler) -> MainChatRouteMetadata {
-    if let Some(router) = scheduler.model_router.as_ref() {
-        if let Ok(decision) = router.route_chat(None, scheduler.prefer_local) {
-            return MainChatRouteMetadata {
-                provider: bounded_label(&decision.provider, MAX_ROUTE_LABEL_CHARS),
-                model: bounded_label(&decision.model, MAX_ROUTE_LABEL_CHARS),
-                route_type: bounded_label(&decision.route_type, MAX_ROUTE_LABEL_CHARS),
-                prefer_local: decision.prefer_local,
-                local_model: bounded_label(&scheduler.local_model, MAX_ROUTE_LABEL_CHARS),
-                reason: bounded_label(&decision.reason, MAX_REASON_CHARS),
-                privacy_level: decision.privacy_level,
-                tools_enabled: false,
-                live_eval_required: false,
-                final_acceptance_gate_required: false,
-                readiness_gate_required: false,
-                scripted_response_configured: scheduler.scripted_generation_response.is_some(),
-            };
-        }
+    if let Ok(decision) = scheduler
+        .model_router
+        .route_chat(None, scheduler.prefer_local)
+    {
+        return MainChatRouteMetadata {
+            provider: bounded_label(&decision.provider, MAX_ROUTE_LABEL_CHARS),
+            model: bounded_label(&decision.model, MAX_ROUTE_LABEL_CHARS),
+            provider_request_id: None,
+            route_type: bounded_label(&decision.route_type, MAX_ROUTE_LABEL_CHARS),
+            prefer_local: decision.prefer_local,
+            local_model: bounded_label(&scheduler.local_model, MAX_ROUTE_LABEL_CHARS),
+            reason: bounded_label(&decision.reason, MAX_REASON_CHARS),
+            privacy_level: decision.privacy_level,
+            tools_enabled: false,
+            live_eval_required: false,
+            final_acceptance_gate_required: false,
+            readiness_gate_required: false,
+            scripted_response_configured: scheduler.scripted_generation_response.is_some(),
+        };
     }
 
-    let has_remote_key = !scheduler.effective_api_key().trim().is_empty();
-    let provider = if scheduler.prefer_local && !has_remote_key {
-        "ollama"
-    } else {
-        scheduler.provider.as_str()
-    };
-    let model = if provider == "ollama" {
-        scheduler.local_model.as_str()
-    } else {
-        scheduler.chat_model.as_str()
-    };
-    let route_type = if provider == "ollama" {
-        "local"
-    } else {
-        "cloud"
-    };
-
     MainChatRouteMetadata {
-        provider: bounded_label(provider, MAX_ROUTE_LABEL_CHARS),
-        model: bounded_label(model, MAX_ROUTE_LABEL_CHARS),
-        route_type: route_type.into(),
+        provider: "unknown".into(),
+        model: "unknown".into(),
+        provider_request_id: None,
+        route_type: "unknown".into(),
         prefer_local: scheduler.prefer_local,
         local_model: bounded_label(&scheduler.local_model, MAX_ROUTE_LABEL_CHARS),
-        reason: "scheduler_config_direct_answer_no_tools".into(),
-        privacy_level: RedactionLevel::Light,
+        reason: "provider_route_unobserved".into(),
+        privacy_level: RedactionLevel::None,
         tools_enabled: false,
         live_eval_required: false,
         final_acceptance_gate_required: false,
         readiness_gate_required: false,
         scripted_response_configured: scheduler.scripted_generation_response.is_some(),
     }
+}
+
+fn route_metadata_from_provider_receipt(
+    mut route: MainChatRouteMetadata,
+    receipt: &ProviderInvocationReceipt,
+) -> MainChatRouteMetadata {
+    route.provider = bounded_label(&receipt.provider, MAX_ROUTE_LABEL_CHARS);
+    route.model = bounded_label(&receipt.model, MAX_ROUTE_LABEL_CHARS);
+    route.provider_request_id = Some(receipt.request_id.clone());
+    route.route_type = if receipt.provider == "ollama" {
+        "local".into()
+    } else {
+        "cloud".into()
+    };
+    route.prefer_local = receipt.provider == "ollama";
+    route.reason = "provider_adapter_receipt".into();
+    route
 }
 
 fn bounded_label(value: &str, max_chars: usize) -> String {
@@ -7015,6 +9816,31 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
+    struct TestCanonicalWriteAdmission;
+    struct TestCanonicalWritePermit;
+
+    impl openlife_core::agent::canonical_write_admission::CanonicalWritePermit
+        for TestCanonicalWritePermit
+    {
+        fn finish_committed(self: Box<Self>) {}
+        fn finish_failed(self: Box<Self>) {}
+        fn finish_noop(self: Box<Self>) {}
+    }
+
+    impl openlife_core::agent::canonical_write_admission::CanonicalWriteAdmission
+        for TestCanonicalWriteAdmission
+    {
+        fn acquire(
+            &self,
+            _request: openlife_core::agent::canonical_write_admission::CanonicalWriteAdmissionRequest,
+        ) -> std::result::Result<
+            Box<dyn openlife_core::agent::canonical_write_admission::CanonicalWritePermit>,
+            openlife_core::agent::canonical_write_admission::CanonicalWriteAdmissionRejection,
+        > {
+            Ok(Box::new(TestCanonicalWritePermit))
+        }
+    }
+
     #[derive(Clone)]
     struct ScriptedModelClient {
         response: Result<String, String>,
@@ -7032,6 +9858,7 @@ mod tests {
                 route_metadata: MainChatRouteMetadata {
                     provider: "test_provider".into(),
                     model: "test_model".into(),
+                    provider_request_id: None,
                     route_type: "direct".into(),
                     prefer_local: false,
                     local_model: "test_local".into(),
@@ -7060,13 +9887,27 @@ mod tests {
         async fn generate_direct_answer(
             &self,
             request: MainChatModelRequest,
-        ) -> Result<String, String> {
+            _emit_progress: &mut (dyn FnMut(MainChatModelProgress) + Send),
+        ) -> Result<MainChatModelGeneration, MainChatModelFailure> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.prompts
                 .lock()
                 .expect("prompts lock")
                 .push(request.system_prompt);
-            self.response.clone()
+            match self.response.clone() {
+                Ok(content) => Ok(MainChatModelGeneration {
+                    content,
+                    provider_receipt: None,
+                    provider_started_emitted: false,
+                }),
+                Err(message) => Err(MainChatModelFailure {
+                    message,
+                    provider_receipt: None,
+                    provider_started_emitted: false,
+                    blocker_code: None,
+                    proposal_ids: Vec::new(),
+                }),
+            }
         }
 
         fn route_metadata(&self) -> MainChatRouteMetadata {
@@ -7082,13 +9923,24 @@ mod tests {
     impl MainChatKernelReadToolExecutor for RecordingReadToolExecutor {
         async fn execute_read_tool(
             &self,
-            decision: MainChatKernelReadToolDecision,
+            mut decision: MainChatKernelReadToolDecision,
+            canonical_run_id: &str,
         ) -> MainChatKernelReadToolExecution {
+            decision.selection_metadata = Some(serde_json::json!({
+                "observedCanonicalRunId": canonical_run_id,
+            }));
             self.decisions
                 .lock()
                 .expect("decisions lock")
                 .push(decision.clone());
             let governed_input = decision.governed_input.clone();
+            let tool_execution_receipt =
+                openlife_core::tool_execution_receipt::ToolExecutionReceipt::test_observed_local_read(
+                    Some(canonical_run_id.to_string()),
+                    Some(decision.tool_name.clone()),
+                    "sha256:recording-read-tool-executor".into(),
+                    true,
+                );
             let mut metadata = serde_json::json!({
                 "kernelBackedReadOnlyToolLoop": true,
                 "actionExecutorBacked": false,
@@ -7105,6 +9957,7 @@ mod tests {
                     "directWritesExecuted": false,
                     "promotedToMemory": false
                 },
+                "toolExecutionReceipt": tool_execution_receipt.clone(),
                 "directWritesExecuted": false,
             });
             attach_main_chat_read_observation_metadata(
@@ -7124,6 +9977,10 @@ mod tests {
                 observation_metadata: metadata,
                 output_preview: "fake governed read observation".into(),
                 blocker_reason: None,
+                execution_receipt: tool_execution_receipt,
+                canonical_tool_graph: None,
+                product_react_trace: None,
+                product_tool_projection: None,
             }
         }
     }
@@ -7135,16 +9992,1783 @@ mod tests {
         }
     }
 
+    fn policy_allowed_authorization(label: &str) -> MainChatProviderAuthorization {
+        MainChatProviderAuthorization::test_fixture(label, true)
+    }
+
+    #[test]
+    fn serialized_main_chat_route_metadata_cannot_rehydrate_provider_authorization() {
+        let authorization = policy_allowed_authorization("serde-fail-closed");
+        let serialized = serde_json::to_value(&authorization).unwrap();
+        assert!(serialized.get("policyAuthorization").is_none());
+
+        let rehydrated: MainChatProviderAuthorization = serde_json::from_value(serialized).unwrap();
+        assert_eq!(
+            rehydrated.policy_authorization.data_route(),
+            ProviderDataRoute::LocalOnly
+        );
+        assert!(!rehydrated.validate_projection());
+    }
+
+    fn test_policy_decision(strategy: MainChatAgentStrategy) -> PolicyDecision {
+        let user_text = match strategy {
+            MainChatAgentStrategy::DirectAnswer => "Explain focused work.",
+            MainChatAgentStrategy::ReActToolExecution => {
+                "web.search web.fetch https://example.com mcp file.read session.search memory.search unknown tool"
+            }
+            MainChatAgentStrategy::PlanExecute => "Draft a weekly plan.",
+            MainChatAgentStrategy::ReversibleMemoryCommit => "记住：我不吃香菜。",
+            MainChatAgentStrategy::MemoryProposal => {
+                "Please remember this private health fact: coffee causes heart palpitations."
+            }
+            MainChatAgentStrategy::LifeModelProposal => {
+                "以后我做计划时，先提醒我留出通勤和休息缓冲。"
+            }
+            MainChatAgentStrategy::FileWriteProposal => {
+                "Write this to file notes.txt."
+            }
+            MainChatAgentStrategy::ReviewMaturation => {
+                "Review what changed in my working style this month."
+            }
+            MainChatAgentStrategy::BlockedConfirmation => {
+                "Send an email to alice@example.com."
+            }
+        };
+        let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
+            "kernel-policy-test",
+            user_text,
+            None,
+            openlife_core::agent::AgentTaskKind::Conversation,
+        );
+        assert_eq!(decision.selected_strategy, strategy, "{user_text}");
+        decision.policy_decision
+    }
+
+    fn explicit_memory_proposal_outcome_for_test(
+        user_text: &str,
+    ) -> (PolicyDecision, MainChatKernelWriteOutcome) {
+        let policy = test_policy_decision(MainChatAgentStrategy::MemoryProposal);
+        let input = MainChatTurnInput {
+            session_id: "explicit-memory-proposal-test".into(),
+            messages: vec![user_message(user_text)],
+            provider_authorization: policy_allowed_authorization(
+                "explicit-memory-proposal-outcome",
+            ),
+            selected_skill_id: None,
+            policy_decision: policy.clone(),
+            model_supplied_tool_arguments: None,
+            runtime_fact_direct_answer: false,
+        };
+        let outcome = plan_kernel_write_outcome(&input, false)
+            .expect("explicit governed Memory proposal outcome");
+        (policy, outcome)
+    }
+
+    #[test]
+    fn proposal_and_blocker_payload_summary_uses_typed_user_message_ref_not_body_preview() {
+        for (strategy, user_text) in [
+            (
+                MainChatAgentStrategy::MemoryProposal,
+                "Please remember this private health fact: coffee causes heart palpitations.",
+            ),
+            (
+                MainChatAgentStrategy::LifeModelProposal,
+                "以后我做计划时，先提醒我留出通勤和休息缓冲。",
+            ),
+            (
+                MainChatAgentStrategy::FileWriteProposal,
+                "Write this to file notes.txt.",
+            ),
+            (
+                MainChatAgentStrategy::BlockedConfirmation,
+                "Send an email to alice@example.com.",
+            ),
+        ] {
+            let mut authorization = policy_allowed_authorization("payload-summary-ref");
+            authorization.task_session_id = Some("task-session-payload-summary".into());
+            let input = MainChatTurnInput {
+                session_id: "chat-payload-summary".into(),
+                messages: vec![user_message(user_text)],
+                provider_authorization: authorization,
+                selected_skill_id: None,
+                policy_decision: test_policy_decision(strategy),
+                model_supplied_tool_arguments: None,
+                runtime_fact_direct_answer: false,
+            };
+            let outcome = plan_kernel_write_outcome(&input, false).unwrap();
+            assert!(!outcome.payload_summary.contains(user_text));
+            assert!(!outcome.payload_summary.contains("coffee causes"));
+            assert!(outcome
+                .payload_summary
+                .contains("task-session://task-session-payload-summary/canonical-user-message"));
+            assert!(outcome.payload_summary.contains("digest=sha256:"));
+            assert!(!outcome
+                .governed_input
+                .to_string()
+                .contains("rawUserTextPreview"));
+            assert!(!outcome
+                .governed_input
+                .to_string()
+                .contains("contentPreview"));
+        }
+    }
+
+    #[test]
+    fn d051_successful_but_not_useful_read_has_no_keyword_proposal_authority() {
+        let user_text =
+            "Read file `Cargo.toml` and create a memory proposal only if the observation contains a useful supported personal fact.";
+        let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
+            "d051-policy-plan",
+            user_text,
+            None,
+            openlife_core::agent::AgentTaskKind::Conversation,
+        );
+        let plan = decision
+            .policy_decision
+            .governance_plan()
+            .expect("live conditional observation plan");
+
+        assert_eq!(decision.policy_route, PolicyRouteKind::ReadOnlyTool);
+        assert_eq!(plan.conditional_observation_reviews.len(), 1);
+        assert!(!decision
+            .policy_decision
+            .allows(AllowedCapability::MemoryProposal));
+    }
+
+    #[test]
+    fn d051_useful_proposal_body_must_come_from_observation_not_request() {
+        let user_text = "Read file `src-tauri/test-fixtures/d051_useful_memory.md` and create a memory proposal only if the observation contains a useful supported personal fact.";
+        let observed_body = "The user works in UTC. Going forward, schedule reminders in UTC.";
+
+        let request_candidates =
+            openlife_core::agent::extract_main_chat_memory_candidates(user_text);
+        let observed_candidate =
+            openlife_core::agent::extract_main_chat_memory_candidates(observed_body)
+                .into_iter()
+                .find(|candidate| {
+                    candidate.destination == openlife_core::agent::MemoryDestination::MemoryProposal
+                })
+                .expect("supported inferred Memory candidate from observation");
+
+        assert_eq!(
+            observed_candidate.normalized_claim, "The user works in UTC",
+            "candidate body must be derived from observation"
+        );
+        assert!(request_candidates
+            .iter()
+            .all(|candidate| candidate.normalized_claim != observed_candidate.normalized_claim));
+    }
+
+    fn provider_started_event(
+        request_id: &str,
+        provider: &str,
+        model: &str,
+        at: chrono::DateTime<chrono::Utc>,
+    ) -> MainChatKernelEvent {
+        let policy_evidence = ProviderPolicyReceiptEvidence {
+            decision_id: format!("policy-{request_id}"),
+            policy_version: "main_chat_policy_v2".into(),
+            issuing_authority: openlife_core::llm::ProviderPolicyAuthority::MainChatPolicyRouter,
+            effective_data_route: ProviderDataRoute::PolicyAllowed,
+            effective_local_restriction: None,
+            subject_scope_digest: format!("sha256:{}", "b".repeat(64)),
+            payload_purpose: Some(openlife_core::llm::ProviderPayloadPurpose::MainChatDirectAnswer),
+            unfiltered_payload_digest: Some(format!("sha256:{}", "c".repeat(64))),
+            context_manifest_digest: format!("sha256:{}", "a".repeat(64)),
+            prepared_envelope_digest: Some(format!("sha256:{}", "d".repeat(64))),
+            provider_config_generation: "test-provider-generation".into(),
+            network_policy_decision_digest: format!("sha256:{}", "e".repeat(64)),
+            selected_context_refs: Vec::new(),
+            included_context_categories: Vec::new(),
+            declared_payload_categories: vec![
+                openlife_core::llm::ProviderPayloadCategory::CurrentUserConversation,
+            ],
+            policy_provenance_refs: Vec::new(),
+            raw_life_model_included: false,
+            raw_unbounded_memory_included: false,
+        };
+        MainChatKernelEvent::ProviderStarted {
+            request_id: request_id.into(),
+            provider: provider.into(),
+            model: model.into(),
+            started_at: at,
+            policy_evidence,
+        }
+    }
+
+    #[test]
+    fn streaming_model_client_forwards_scheduler_terminal_receipt_without_synthesis() {
+        let source = include_str!("main_chat_kernel.rs");
+        let stream_branch = source
+            .split(
+                "if stream_provider_tokens && self.scheduler.scripted_generation_response.is_none()",
+            )
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("let simulated = self.scheduler.scripted_generation_response.is_some()")
+                    .next()
+            })
+            .expect("streaming model-client source slice");
+
+        assert!(!stream_branch.contains("ProviderInvocationReceipt {"));
+        assert!(!stream_branch.contains("ProviderInvocationStatus::Failed"));
+        assert!(!stream_branch.contains("chrono::Utc::now"));
+        assert!(stream_branch.contains("PreparedProviderStreamTerminal::Completed"));
+        assert!(stream_branch.contains("PreparedProviderStreamTerminal::RemoteUnknown"));
+    }
+
+    #[test]
+    fn provider_attempt_receipts_are_joined_only_with_the_same_request_identity() {
+        let started_at = chrono::Utc::now();
+        let failed_at = started_at + chrono::Duration::milliseconds(5);
+        let completed_at = started_at + chrono::Duration::milliseconds(10);
+        let events = vec![
+            provider_started_event("request-a", "provider-a", "model-a", started_at),
+            provider_started_event("request-b", "provider-b", "model-b", started_at),
+            MainChatKernelEvent::ProviderCompleted {
+                request_id: "request-b".into(),
+                provider: "provider-b".into(),
+                model: "model-b".into(),
+                finished_at: completed_at,
+            },
+            MainChatKernelEvent::ProviderFailed {
+                request_id: "request-a".into(),
+                provider: "provider-a".into(),
+                model: "model-a".into(),
+                finished_at: failed_at,
+                error_digest: "sha256:request-a-failed".into(),
+            },
+        ];
+
+        let receipts = provider_receipts_from_kernel_events(&events).expect("valid attempts");
+
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(receipts[0].request_id, "request-a");
+        assert_eq!(receipts[0].provider, "provider-a");
+        assert_eq!(receipts[0].status, ProviderInvocationStatus::Failed);
+        assert_eq!(receipts[1].request_id, "request-b");
+        assert_eq!(receipts[1].provider, "provider-b");
+        assert_eq!(receipts[1].status, ProviderInvocationStatus::Completed);
+    }
+
+    #[test]
+    fn provider_receipt_from_another_runtime_generation_fails_closed() {
+        let started_at = chrono::Utc::now();
+        let events = vec![
+            provider_started_event("request-generation", "provider-a", "model-a", started_at),
+            MainChatKernelEvent::ProviderCompleted {
+                request_id: "request-generation".into(),
+                provider: "provider-a".into(),
+                model: "model-a".into(),
+                finished_at: started_at + chrono::Duration::milliseconds(1),
+            },
+        ];
+        let receipts = provider_receipts_from_kernel_events(&events).expect("valid lifecycle");
+
+        validate_provider_receipts_for_runtime_generation(&receipts, "test-provider-generation")
+            .expect("the exact turn generation remains valid");
+        assert_eq!(
+            validate_provider_receipts_for_runtime_generation(
+                &receipts,
+                "replacement-provider-generation",
+            )
+            .unwrap_err(),
+            "provider_receipt_runtime_generation_mismatch:request-generation"
+        );
+    }
+
+    #[test]
+    fn provider_attempt_receipt_retains_start_bound_minimal_policy_evidence() {
+        let started_at = chrono::Utc::now();
+        let evidence = ProviderPolicyReceiptEvidence {
+            decision_id: "policy-decision-1".into(),
+            policy_version: "main_chat_policy_v2".into(),
+            issuing_authority: openlife_core::llm::ProviderPolicyAuthority::MainChatPolicyRouter,
+            effective_data_route: ProviderDataRoute::PolicyAllowed,
+            effective_local_restriction: None,
+            subject_scope_digest: format!("sha256:{}", "b".repeat(64)),
+            payload_purpose: Some(openlife_core::llm::ProviderPayloadPurpose::MainChatDirectAnswer),
+            unfiltered_payload_digest: Some(format!("sha256:{}", "c".repeat(64))),
+            context_manifest_digest: format!("sha256:{}", "a".repeat(64)),
+            prepared_envelope_digest: Some(format!("sha256:{}", "d".repeat(64))),
+            provider_config_generation: "test-provider-generation".into(),
+            network_policy_decision_digest: format!("sha256:{}", "e".repeat(64)),
+            selected_context_refs: vec!["context-snapshot-1".into()],
+            included_context_categories: vec!["kernel_bounded_context".into()],
+            declared_payload_categories: vec![
+                openlife_core::llm::ProviderPayloadCategory::CurrentUserConversation,
+            ],
+            policy_provenance_refs: Vec::new(),
+            raw_life_model_included: false,
+            raw_unbounded_memory_included: false,
+        };
+        let events = vec![
+            MainChatKernelEvent::ProviderStarted {
+                request_id: "request-policy".into(),
+                provider: "openai".into(),
+                model: "model".into(),
+                started_at,
+                policy_evidence: evidence.clone(),
+            },
+            MainChatKernelEvent::ProviderCompleted {
+                request_id: "request-policy".into(),
+                provider: "openai".into(),
+                model: "model".into(),
+                finished_at: started_at + chrono::Duration::milliseconds(5),
+            },
+        ];
+
+        let receipts = provider_receipts_from_kernel_events(&events).expect("valid policy trace");
+
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].policy_evidence.as_ref(), Some(&evidence));
+    }
+
+    #[test]
+    fn provider_attempt_projection_rejects_cross_identity_and_unknown_terminal_state() {
+        let started_at = chrono::Utc::now();
+        let identity_conflict = vec![
+            provider_started_event("request-a", "provider-a", "model-a", started_at),
+            MainChatKernelEvent::ProviderCompleted {
+                request_id: "request-a".into(),
+                provider: "provider-b".into(),
+                model: "model-b".into(),
+                finished_at: started_at,
+            },
+        ];
+        assert!(provider_receipts_from_kernel_events(&identity_conflict)
+            .unwrap_err()
+            .contains("provider_attempt_terminal_identity_conflict:request-a"));
+
+        let unresolved = vec![provider_started_event(
+            "request-unresolved",
+            "provider-a",
+            "model-a",
+            started_at,
+        )];
+        assert!(provider_receipts_from_kernel_events(&unresolved)
+            .unwrap_err()
+            .contains("provider_attempt_terminal_unknown:request-unresolved"));
+
+        let terminal_without_start = vec![MainChatKernelEvent::ProviderFailed {
+            request_id: "request-missing".into(),
+            provider: "provider-a".into(),
+            model: "model-a".into(),
+            finished_at: started_at,
+            error_digest: "sha256:missing".into(),
+        }];
+        assert!(
+            provider_receipts_from_kernel_events(&terminal_without_start)
+                .unwrap_err()
+                .contains("provider_attempt_terminal_without_start:request-missing")
+        );
+
+        let clock_rollback = vec![
+            provider_started_event("request-time", "provider-a", "model-a", started_at),
+            MainChatKernelEvent::ProviderCompleted {
+                request_id: "request-time".into(),
+                provider: "provider-a".into(),
+                model: "model-a".into(),
+                finished_at: started_at - chrono::Duration::milliseconds(1),
+            },
+        ];
+        let receipts = provider_receipts_from_kernel_events(&clock_rollback)
+            .expect("typed event order remains authoritative across wall-clock rollback");
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].status, ProviderInvocationStatus::Completed);
+        assert!(receipts[0].finished_at < receipts[0].started_at);
+    }
+
+    #[test]
+    fn provider_attempt_projection_rejects_conflicting_terminal_facts() {
+        let started_at = chrono::Utc::now();
+        let events = vec![
+            provider_started_event("request-a", "provider-a", "model-a", started_at),
+            MainChatKernelEvent::ProviderCompleted {
+                request_id: "request-a".into(),
+                provider: "provider-a".into(),
+                model: "model-a".into(),
+                finished_at: started_at,
+            },
+            MainChatKernelEvent::ProviderFailed {
+                request_id: "request-a".into(),
+                provider: "provider-a".into(),
+                model: "model-a".into(),
+                finished_at: started_at,
+                error_digest: "sha256:conflict".into(),
+            },
+        ];
+
+        assert!(provider_receipts_from_kernel_events(&events)
+            .unwrap_err()
+            .contains("provider_attempt_terminal_conflict:request-a"));
+    }
+
+    #[tokio::test]
+    async fn main_chat_provider_ask_stages_review_and_dispatches_only_after_allow_once() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let cancellation_registry =
+            crate::main_chat_cancellation::MainChatCancellationRegistry::default();
+        let registration = cancellation_registry.register("provider-consent-task");
+        let execution_epoch = registration.execution_epoch();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let scheduler = InferenceScheduler::new(
+            String::new(),
+            false,
+            "openai".into(),
+            base,
+            "sk-test".into(),
+            "gpt-test".into(),
+            String::new(),
+            false,
+        );
+        let client = SchedulerMainChatModelClient::new(
+            scheduler,
+            PrivacyEngine::new(),
+            NetworkPolicy::default(),
+        )
+        .with_consent_state(Arc::clone(&state))
+        .with_canonical_write_admission(execution_epoch.clone());
+        let mut provider_authorization = MainChatProviderAuthorization::test_fixture_for_user_text(
+            "provider-consent",
+            true,
+            "hello",
+        );
+        provider_authorization.task_session_id = Some("provider-consent-task".into());
+        let request = MainChatModelRequest {
+            session_id: "provider-consent-chat".into(),
+            messages: vec![ChatMessage {
+                role: "user".into(),
+                content: "hello".into(),
+            }],
+            provider_authorization,
+            system_prompt: "respond".into(),
+            context_snapshot_ref: "context:test".into(),
+            selected_context_refs: Vec::new(),
+            raw_life_model_included: false,
+            raw_unbounded_memory_included: false,
+            selected_skill_id: None,
+            stream_provider_tokens: false,
+        };
+        let mut no_progress = |_progress: MainChatModelProgress| {};
+        let pending = client
+            .generate_direct_answer(request.clone(), &mut no_progress)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            pending.blocker_code.as_deref(),
+            Some("network_policy_consent_required")
+        );
+        assert_eq!(pending.proposal_ids.len(), 1);
+        let pending_proposal = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&pending.proposal_ids[0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            pending_proposal.source,
+            openlife_core::agent::ProposalSource::ChatConversation
+        );
+        assert_eq!(execution_epoch.snapshot().committed_fact_count(), 1);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(75), listener.accept())
+                .await
+                .is_err()
+        );
+
+        crate::commands::proposal::accept_proposal_with_state(
+            pending.proposal_ids[0].clone(),
+            &state,
+        )
+        .await
+        .unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut input = [0_u8; 8192];
+            let _ = socket.read(&mut input).await.unwrap();
+            let body = r#"{"choices":[{"message":{"content":"approved response"}}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let mut no_progress = |_progress: MainChatModelProgress| {};
+        let completed = client
+            .generate_direct_answer(request, &mut no_progress)
+            .await
+            .unwrap();
+        assert_eq!(completed.content, "approved response");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn main_chat_provider_ask_cancel_winner_stages_no_review_and_never_dispatches() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let task_id = "provider-consent-cancel-wins-task";
+        let cancellation_registry =
+            crate::main_chat_cancellation::MainChatCancellationRegistry::default();
+        let registration = cancellation_registry.register(task_id);
+        let execution_epoch = registration.execution_epoch();
+        cancellation_registry.request_cancel(task_id);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let scheduler = InferenceScheduler::new(
+            String::new(),
+            false,
+            "openai".into(),
+            base,
+            "sk-test".into(),
+            "gpt-test".into(),
+            String::new(),
+            false,
+        );
+        let client = SchedulerMainChatModelClient::new(
+            scheduler,
+            PrivacyEngine::new(),
+            NetworkPolicy::default(),
+        )
+        .with_consent_state(Arc::clone(&state))
+        .with_canonical_write_admission(execution_epoch.clone());
+        let mut provider_authorization = MainChatProviderAuthorization::test_fixture_for_user_text(
+            "provider-consent-cancel-wins",
+            true,
+            "hello",
+        );
+        provider_authorization.task_session_id = Some(task_id.into());
+        let request = MainChatModelRequest {
+            session_id: "provider-consent-cancel-wins-chat".into(),
+            messages: vec![ChatMessage {
+                role: "user".into(),
+                content: "hello".into(),
+            }],
+            provider_authorization,
+            system_prompt: "respond".into(),
+            context_snapshot_ref: "context:provider-consent-cancel-wins".into(),
+            selected_context_refs: Vec::new(),
+            raw_life_model_included: false,
+            raw_unbounded_memory_included: false,
+            selected_skill_id: None,
+            stream_provider_tokens: false,
+        };
+
+        let mut no_progress = |_progress: MainChatModelProgress| {};
+        let blocked = client
+            .generate_direct_answer(request, &mut no_progress)
+            .await
+            .expect_err("cancel-winning Main Chat epoch must reject provider consent Proposal");
+
+        assert_eq!(
+            blocked.blocker_code.as_deref(),
+            Some("provider_network_consent_error")
+        );
+        assert!(blocked.proposal_ids.is_empty());
+        assert!(blocked.message.contains("cancel_requested"));
+        assert_eq!(
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .pending_count()
+                .unwrap(),
+            0
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(75), listener.accept())
+                .await
+                .is_err(),
+            "provider adapter edge must remain unobserved"
+        );
+        let snapshot = execution_epoch.snapshot();
+        assert_eq!(snapshot.committed_fact_count(), 0);
+        assert_eq!(snapshot.commit_facts.len(), 1);
+        assert_eq!(
+            snapshot.commit_facts[0].domain, "proposal",
+            "the rejected fact must identify the canonical Proposal boundary"
+        );
+        assert_eq!(
+            snapshot.commit_facts[0].outcome,
+            crate::main_chat_cancellation::MainChatCanonicalCommitOutcome::RejectedAfterCancel
+        );
+    }
+
+    #[tokio::test]
+    async fn kernel_mcp_permission_generation_accept_and_resume_uses_real_gateway_contract() {
+        use openlife_core::agent::main_chat_agent_v1::{
+            AgentTaskSessionDraft, ExecutionQueueStatus, MainChatAgentStrategy,
+        };
+        use openlife_core::agent::{AgentRun, AgentRunStatus, ProposalSource, ProposalStatus};
+        use openlife_core::tool_permissions::ActionBoundToolPermissionScope;
+
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let task = {
+            let store = state
+                .main_chat_agent_session_store
+                .as_ref()
+                .expect("task store")
+                .lock()
+                .await;
+            store
+                .create_session(AgentTaskSessionDraft {
+                    chat_session_id: "kernel-real-mcp-permission-chat".into(),
+                    user_goal: "Use mcp builtin_echo read-only now.".into(),
+                    selected_strategy: MainChatAgentStrategy::ReActToolExecution,
+                    current_plan_summary: Some(
+                        "Wait for exact action-bound ToolPermission.".into(),
+                    ),
+                    context_snapshot_refs: Vec::new(),
+                })
+                .expect("create task")
+        };
+        let run_id = {
+            let mut run = AgentRun::new_chat_run(&task.chat_session_id, &task.user_goal);
+            run.task_id = task.id.clone();
+            run.status = AgentRunStatus::Running;
+            let run_id = run.id.clone();
+            let store = state
+                .agent_run_store
+                .as_ref()
+                .expect("agent run store")
+                .lock()
+                .await;
+            store.create_run(&run).expect("create canonical AgentRun");
+            run_id
+        };
+
+        let cancellation_registry =
+            crate::main_chat_cancellation::MainChatCancellationRegistry::default();
+        let registration = cancellation_registry.register(&task.id);
+        let execution_epoch = registration.execution_epoch();
+        state
+            .tool_permission_store
+            .lock()
+            .await
+            .grant(
+                "builtin_echo",
+                "builtin",
+                "low",
+                "read",
+                openlife_core::tool_permissions::ToolPermissionPolicy::AskEveryTime,
+                None,
+            )
+            .expect("force the real low-risk MCP path through explicit review");
+        let executor = AppStateMainChatReadToolExecutor::new(
+            Arc::clone(&state),
+            execution_epoch.clone(),
+            task.id.clone(),
+            task.chat_session_id.clone(),
+        );
+        let execution = executor
+            .execute_read_tool(
+                MainChatKernelReadToolDecision {
+                    tool_name: "mcp.read_only".into(),
+                    queue_action_type: "mcp.read_only".into(),
+                    executor_action_type: "mcp_tool".into(),
+                    requested_target: "mcp.call_tool".into(),
+                    target: "mcp.call_tool".into(),
+                    governed_input: serde_json::json!({
+                        "tool_name": "builtin_echo",
+                        "arguments": {"text": "real kernel permission path"},
+                        "selection_query": "builtin_echo",
+                        "governedInputSource": "real_kernel_permission_test",
+                    }),
+                    reason: "Exercise the real Kernel to ToolGateway permission path.".into(),
+                    model_arguments_ignored: true,
+                    fixture_backed_read: false,
+                    selection_metadata: None,
+                },
+                &run_id,
+            )
+            .await;
+        assert_eq!(execution.decision.tool_name, "mcp.read_only");
+        assert_eq!(execution.decision.target, "builtin_echo");
+        assert_eq!(execution.status, ActionExecutionStatus::NeedsConfirmation);
+        assert_eq!(
+            execution
+                .observation_metadata
+                .get("manifestId")
+                .and_then(Value::as_str),
+            Some("builtin_echo")
+        );
+
+        let call = MainChatKernelToolCall {
+            name: execution.decision.tool_name.clone(),
+            action_type: execution.decision.queue_action_type.clone(),
+            target: execution.decision.target.clone(),
+            governed_input: execution.decision.governed_input.clone(),
+            status: action_execution_status_label(&execution.status).into(),
+            output_preview: Some(execution.output_preview.clone()),
+            blocker: execution.blocker_reason.clone(),
+            observation_metadata: Some(execution.observation_metadata.clone()),
+            execution_receipt: Some(execution.execution_receipt.clone()),
+            model_arguments_ignored: execution.decision.model_arguments_ignored,
+            react_trace: execution.product_react_trace.clone(),
+            product_projection: execution.product_tool_projection.clone(),
+        };
+        let mut transcript = Vec::new();
+        let projected_calls = record_kernel_tool_call_evidence(
+            &state,
+            &task.id,
+            &[call],
+            &run_id,
+            &execution_epoch,
+            &mut transcript,
+        )
+        .await
+        .expect("record real Kernel permission evidence");
+        assert!(matches!(
+            projected_calls[0].status,
+            ToolCallStatus::NeedsConfirmation
+        ));
+        let action_id = projected_calls[0]
+            .action_id
+            .as_deref()
+            .expect("queued action id")
+            .to_string();
+        let queued = {
+            let queue = state
+                .main_chat_action_queue_store
+                .as_ref()
+                .expect("action queue")
+                .lock()
+                .await;
+            queue
+                .load(&action_id)
+                .expect("load queued action")
+                .expect("queued action exists")
+        };
+        assert_eq!(queued.status, ExecutionQueueStatus::PendingPermission);
+        let envelope = DurableMainChatReplayExecutionEnvelope::from_action_metadata(
+            queued
+                .observation_metadata
+                .as_ref()
+                .expect("queued action metadata"),
+        )
+        .expect("real durable replay envelope");
+        assert_eq!(envelope.task_session_id, task.id);
+        assert_eq!(envelope.run_id, run_id);
+        assert_eq!(envelope.queue_action_id, action_id);
+        assert_eq!(envelope.manifest_id, "builtin_echo");
+        assert_eq!(envelope.manifest_name, "builtin_echo");
+
+        let proposal_id = queued
+            .observation_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("proposalId"))
+            .and_then(Value::as_str)
+            .expect("exact ToolPermission proposal id")
+            .to_string();
+        let proposal = {
+            let proposal_store = state
+                .proposal_store
+                .as_ref()
+                .expect("proposal store")
+                .lock()
+                .await;
+            proposal_store
+                .get_proposal(&proposal_id)
+                .expect("load proposal")
+                .expect("proposal exists")
+        };
+        assert_eq!(proposal.status, ProposalStatus::Pending);
+        assert_eq!(proposal.source, ProposalSource::ChatConversation);
+        assert_eq!(proposal.run_id.as_deref(), Some(run_id.as_str()));
+        assert_eq!(
+            proposal
+                .after
+                .get("permission_scope_kind")
+                .and_then(Value::as_str),
+            Some("action_bound")
+        );
+        assert_eq!(
+            proposal.after.get("permission").and_then(Value::as_str),
+            Some("allow_once")
+        );
+        assert_eq!(
+            proposal
+                .after
+                .get("pending_action_identity")
+                .and_then(|identity| identity.get("queueActionId"))
+                .and_then(Value::as_str),
+            Some(action_id.as_str())
+        );
+        let scope = ActionBoundToolPermissionScope::from_proposal_after(&proposal.after)
+            .expect("exact action-bound scope");
+        assert!(state
+            .tool_permission_store
+            .lock()
+            .await
+            .peek_action_bound(&proposal_id, &scope)
+            .expect("peek pending permission")
+            .is_none());
+
+        {
+            let store = state
+                .main_chat_agent_session_store
+                .as_ref()
+                .expect("task store")
+                .lock()
+                .await;
+            store
+                .mark_waiting_permission(&task.id)
+                .expect("mark task waiting permission");
+        }
+        crate::commands::proposal::accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .expect("accept exact ToolPermission proposal");
+        assert!(state
+            .tool_permission_store
+            .lock()
+            .await
+            .peek_action_bound(&proposal_id, &scope)
+            .expect("peek accepted permission")
+            .is_some());
+
+        crate::main_chat_task_controls::resume_main_chat_agent_task_with_state(&task.id, &state)
+            .await
+            .expect("resume exact governed action");
+        let completed = {
+            let queue = state
+                .main_chat_action_queue_store
+                .as_ref()
+                .expect("action queue")
+                .lock()
+                .await;
+            queue
+                .load(&action_id)
+                .expect("load completed action")
+                .expect("completed action exists")
+        };
+        assert_eq!(completed.status, ExecutionQueueStatus::Completed);
+        assert!(state
+            .tool_permission_store
+            .lock()
+            .await
+            .peek_action_bound(&proposal_id, &scope)
+            .expect("peek consumed permission")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn kernel_read_success_and_real_adapter_error_attach_verified_content_receipts() {
+        use openlife_core::agent::main_chat_agent_v1::{
+            AgentTaskSessionDraft, MainChatAgentStrategy,
+        };
+        use openlife_core::agent::{AgentRun, AgentRunStatus, ContentReceiptKind};
+        use openlife_core::tool_manifest::{ToolIdempotencyContract, ToolManifest, ToolSource};
+        use openlife_core::tool_permissions::ToolPermissionPolicy;
+
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        {
+            let mut registry = state.mcp_registry.lock().await;
+            let manifest = |name: &str| {
+                let mut manifest = ToolManifest::new(
+                    name,
+                    "Kernel bound content receipt fixture",
+                    serde_json::json!({"type": "object"}),
+                    "low",
+                    "1",
+                    ToolSource::BuiltIn,
+                );
+                manifest.id = format!("builtin.{name}");
+                manifest.capabilities = vec!["read".into()];
+                manifest.action_type = "read".into();
+                manifest.idempotency_contract = ToolIdempotencyContract::Idempotent;
+                manifest
+            };
+            registry.register_builtin(
+                manifest("kernel_receipt_success"),
+                Box::new(|_| Ok("D010_KERNEL_SUCCESS_ADAPTER_BODY".into())),
+            );
+            registry.register_builtin(
+                manifest("kernel_receipt_error"),
+                Box::new(|_| Err(anyhow::anyhow!("D010_KERNEL_ERROR_ADAPTER_BODY"))),
+            );
+        }
+        for tool_name in ["kernel_receipt_success", "kernel_receipt_error"] {
+            state
+                .tool_permission_store
+                .lock()
+                .await
+                .grant(
+                    tool_name,
+                    "builtin",
+                    "low",
+                    "read",
+                    ToolPermissionPolicy::Allow,
+                    None,
+                )
+                .unwrap();
+        }
+        let task = {
+            let store = state
+                .main_chat_agent_session_store
+                .as_ref()
+                .expect("task store")
+                .lock()
+                .await;
+            store
+                .create_session(AgentTaskSessionDraft {
+                    chat_session_id: "kernel-content-receipt-chat".into(),
+                    user_goal: "Run governed success and error read adapters.".into(),
+                    selected_strategy: MainChatAgentStrategy::ReActToolExecution,
+                    current_plan_summary: None,
+                    context_snapshot_refs: Vec::new(),
+                })
+                .unwrap()
+        };
+        let run_id = {
+            let mut run = AgentRun::new_chat_run(&task.chat_session_id, &task.user_goal);
+            run.task_id = task.id.clone();
+            run.status = AgentRunStatus::Running;
+            let run_id = run.id.clone();
+            state
+                .agent_run_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .create_run(&run)
+                .unwrap();
+            run_id
+        };
+        let cancellation_registry =
+            crate::main_chat_cancellation::MainChatCancellationRegistry::default();
+        let execution_epoch = cancellation_registry.register(&task.id).execution_epoch();
+        let executor = AppStateMainChatReadToolExecutor::new(
+            Arc::clone(&state),
+            execution_epoch,
+            task.id.clone(),
+            task.chat_session_id.clone(),
+        );
+        let decision = |target: &str| MainChatKernelReadToolDecision {
+            tool_name: "mcp.read_only".into(),
+            queue_action_type: "mcp.read_only".into(),
+            executor_action_type: "mcp_tool".into(),
+            requested_target: "mcp.call_tool".into(),
+            target: "mcp.call_tool".into(),
+            governed_input: serde_json::json!({
+                "tool_name": target,
+                "arguments": {},
+                "selection_query": target,
+                "governedInputSource": "kernel_content_receipt_test",
+            }),
+            reason: "Exercise real kernel adapter receipt boundary.".into(),
+            model_arguments_ignored: true,
+            fixture_backed_read: false,
+            selection_metadata: None,
+        };
+        let success = executor
+            .execute_read_tool(decision("kernel_receipt_success"), &run_id)
+            .await;
+        let failure = executor
+            .execute_read_tool(decision("kernel_receipt_error"), &run_id)
+            .await;
+        assert_eq!(success.status, ActionExecutionStatus::Succeeded);
+        assert_eq!(failure.status, ActionExecutionStatus::Failed);
+        let transient_success = serde_json::to_value(
+            success
+                .product_react_trace
+                .clone()
+                .expect("transient success trace"),
+        )
+        .unwrap();
+        let transient_failure = serde_json::to_value(
+            failure
+                .product_react_trace
+                .clone()
+                .expect("transient failure trace"),
+        )
+        .unwrap();
+        assert_eq!(transient_success["outputReceipt"]["verified"], false);
+        assert_eq!(transient_failure["outputReceipt"]["verified"], false);
+
+        let mut run = state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_run(&run_id)
+            .unwrap()
+            .unwrap();
+        append_kernel_canonical_tool_delta(
+            &mut run,
+            vec![
+                success.canonical_tool_graph.clone().unwrap(),
+                failure.canonical_tool_graph.clone().unwrap(),
+            ],
+            Vec::new(),
+        )
+        .unwrap();
+        let success_call = MainChatKernelToolCall {
+            name: success.decision.tool_name.clone(),
+            action_type: success.decision.queue_action_type.clone(),
+            target: success.decision.target.clone(),
+            governed_input: success.decision.governed_input.clone(),
+            status: "succeeded".into(),
+            output_preview: Some(success.output_preview.clone()),
+            blocker: None,
+            observation_metadata: Some(success.observation_metadata.clone()),
+            execution_receipt: Some(success.execution_receipt.clone()),
+            model_arguments_ignored: success.decision.model_arguments_ignored,
+            react_trace: success.product_react_trace.clone(),
+            product_projection: success.product_tool_projection.clone(),
+        };
+        validate_kernel_tool_call_observation_bindings(&run, &[success_call.clone()])
+            .expect("exact adapter body and live receipt binding");
+        let serde_receipt: openlife_core::tool_execution_receipt::ToolExecutionReceipt =
+            serde_json::from_value(serde_json::to_value(&success.execution_receipt).unwrap())
+                .unwrap();
+        assert!(!serde_receipt.proves_success());
+        assert!(
+            crate::product_agent_dto::VerifiedProductToolCallProjection::from_bound_action(
+                &success
+                    .canonical_tool_graph
+                    .as_ref()
+                    .expect("success graph")
+                    .action,
+                &serde_receipt,
+                &run_id,
+            )
+            .is_none(),
+            "serde receipt metadata cannot recreate live product authority"
+        );
+        let mut transplanted_preview = success_call;
+        transplanted_preview.output_preview = Some("D051_TRANSPLANTED_PREVIEW".into());
+        assert_eq!(
+            validate_kernel_tool_call_observation_bindings(&run, &[transplanted_preview])
+                .expect_err("a transient preview cannot be transplanted onto another receipt"),
+            "kernel_tool_observation_body_receipt_binding_mismatch"
+        );
+        state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .update_run(&run)
+            .unwrap();
+        let stored = state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_run(&run_id)
+            .unwrap()
+            .unwrap();
+        let kinds = stored
+            .actions
+            .iter()
+            .map(|action| {
+                action
+                    .react_trace
+                    .as_ref()
+                    .and_then(|trace| trace.output_receipt.as_ref())
+                    .map(|receipt| receipt.kind())
+                    .expect("verified canonical receipt")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                ContentReceiptKind::ToolOutput,
+                ContentReceiptKind::ToolError
+            ]
+        );
+        let encoded = serde_json::to_string(&stored).unwrap();
+        assert!(!encoded.contains("D010_KERNEL_SUCCESS_ADAPTER_BODY"));
+        assert!(!encoded.contains("D010_KERNEL_ERROR_ADAPTER_BODY"));
+    }
+
+    #[tokio::test]
+    async fn kernel_tool_queue_projects_typed_receipt_atomically_and_missing_receipt_fails_closed()
+    {
+        use openlife_core::agent::main_chat_agent_v1::{
+            ActionReplayEffectCertainty, AgentTaskSessionDraft, ExecutionQueueStatus,
+            MainChatAgentStrategy,
+        };
+        use openlife_core::tool_execution_receipt::ToolExecutionReceipt;
+
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let task = {
+            let store = state
+                .main_chat_agent_session_store
+                .as_ref()
+                .expect("task store")
+                .lock()
+                .await;
+            store
+                .create_session(AgentTaskSessionDraft {
+                    chat_session_id: "kernel-receipt-projection-chat".into(),
+                    user_goal: "Read one governed file.".into(),
+                    selected_strategy: MainChatAgentStrategy::ReActToolExecution,
+                    current_plan_summary: None,
+                    context_snapshot_refs: Vec::new(),
+                })
+                .expect("create task")
+        };
+
+        let receipt = ToolExecutionReceipt::test_observed_local_read(
+            Some("kernel-receipt-run".into()),
+            Some("file.read".into()),
+            "sha256:kernel-receipt-success".into(),
+            true,
+        );
+        let cancellation_registry =
+            crate::main_chat_cancellation::MainChatCancellationRegistry::default();
+        let registration = cancellation_registry.register(&task.id);
+        let execution_epoch = registration.execution_epoch();
+        let success_call = MainChatKernelToolCall {
+            name: "file.read".into(),
+            action_type: "file.read".into(),
+            target: "file.read".into(),
+            governed_input: serde_json::json!({"path": "AGENTS.md"}),
+            status: "succeeded".into(),
+            output_preview: Some("bounded file result".into()),
+            blocker: None,
+            observation_metadata: Some(serde_json::json!({
+                "toolExecutionReceipt": receipt.clone(),
+                "directWritesExecuted": false,
+            })),
+            execution_receipt: Some(receipt),
+            model_arguments_ignored: true,
+            react_trace: None,
+            product_projection: None,
+        };
+        let mut transcript = Vec::new();
+        let projected_calls = record_kernel_tool_call_evidence(
+            &state,
+            &task.id,
+            &[success_call],
+            "kernel-receipt-run",
+            &execution_epoch,
+            &mut transcript,
+        )
+        .await
+        .expect("project successful typed receipt");
+        assert!(projected_calls[0].success);
+        assert!(matches!(
+            &projected_calls[0].status,
+            ToolCallStatus::Success
+        ));
+        let success_action = {
+            let queue = state
+                .main_chat_action_queue_store
+                .as_ref()
+                .expect("action queue")
+                .lock()
+                .await;
+            queue
+                .load(projected_calls[0].action_id.as_deref().expect("action id"))
+                .expect("load projected action")
+                .expect("projected action exists")
+        };
+        assert_eq!(success_action.status, ExecutionQueueStatus::Completed);
+        assert_eq!(
+            success_action.replay_effect_certainty,
+            ActionReplayEffectCertainty::EffectNotAttempted
+        );
+
+        let missing_receipt_call = MainChatKernelToolCall {
+            name: "file.read".into(),
+            action_type: "file.read".into(),
+            target: "file.read".into(),
+            governed_input: serde_json::json!({"path": "AGENTS.md"}),
+            status: "succeeded".into(),
+            output_preview: Some("unreceipted result must not count".into()),
+            blocker: None,
+            observation_metadata: Some(serde_json::json!({"directWritesExecuted": false})),
+            execution_receipt: None,
+            model_arguments_ignored: true,
+            react_trace: None,
+            product_projection: None,
+        };
+        let projected_missing = record_kernel_tool_call_evidence(
+            &state,
+            &task.id,
+            &[missing_receipt_call],
+            "kernel-receipt-run",
+            &execution_epoch,
+            &mut transcript,
+        )
+        .await
+        .expect("missing receipt projects a fail-closed queue fact");
+        assert!(!projected_missing[0].success);
+        assert!(matches!(
+            &projected_missing[0].status,
+            ToolCallStatus::Error
+        ));
+        let missing_action = {
+            let queue = state
+                .main_chat_action_queue_store
+                .as_ref()
+                .expect("action queue")
+                .lock()
+                .await;
+            queue
+                .load(
+                    projected_missing[0]
+                        .action_id
+                        .as_deref()
+                        .expect("missing receipt action id"),
+                )
+                .expect("load missing receipt action")
+                .expect("missing receipt action exists")
+        };
+        assert_eq!(missing_action.status, ExecutionQueueStatus::Failed);
+        assert_eq!(
+            missing_action.replay_effect_certainty,
+            ActionReplayEffectCertainty::DispatchedUnknown
+        );
+        assert_eq!(
+            missing_action
+                .observation_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("receiptInvariantViolation"))
+                .and_then(Value::as_str),
+            Some("kernel_tool_execution_receipt_missing_or_invalid")
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_action_gateway_receipts_keep_order_through_tauri_terminalization() {
+        use openlife_core::agent::main_chat_agent_v1::{
+            AgentTaskSessionDraft, ExecutionQueueStatus, MainChatAgentStrategy,
+        };
+        use openlife_core::agent::{
+            ActionExecutionContext, ActionExecutorConfig, AgentActionRequest, AgentRun,
+            AgentRunStatus, ToolGateway,
+        };
+        use openlife_core::tool_execution_receipt::{
+            ToolDispatchKind, ToolExecutionOutcome, ToolTransportStatus,
+        };
+
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let task = {
+            let store = state
+                .main_chat_agent_session_store
+                .as_ref()
+                .expect("task store")
+                .lock()
+                .await;
+            store
+                .create_session(AgentTaskSessionDraft {
+                    chat_session_id: "tauri-receipt-chain-chat".into(),
+                    user_goal: "Search canonical memory.".into(),
+                    selected_strategy: MainChatAgentStrategy::ReActToolExecution,
+                    current_plan_summary: None,
+                    context_snapshot_refs: Vec::new(),
+                })
+                .expect("create task")
+        };
+        let mut run = AgentRun::new_chat_run("tauri-receipt-chain-chat", "Search memory");
+        run.task_id = task.id.clone();
+        let run_id = run.id.clone();
+        state
+            .agent_run_store
+            .as_ref()
+            .expect("agent run store")
+            .lock()
+            .await
+            .create_run(&run)
+            .expect("create run");
+
+        let registry = openlife_core::mcp::McpRegistry::new();
+        let permission_store =
+            openlife_core::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+        let audit_file = tempfile::NamedTempFile::new().unwrap();
+        let audit_store = openlife_core::mcp_audit::McpAuditStore::new(audit_file.path());
+        let privacy_engine = openlife_core::privacy::PrivacyEngine::new();
+        let memory_store = openlife_core::memory::MemoryStore::new_in_memory().unwrap();
+        let lifecycle_store = openlife_core::agent::MemoryLifecycleStore::new_in_memory().unwrap();
+        let lifecycle_reader = lifecycle_store.retrieval_reader();
+        let action_context = ActionExecutionContext::new(
+            &registry,
+            &permission_store,
+            &audit_store,
+            &privacy_engine,
+            &[],
+        )
+        .with_memory_store(&memory_store)
+        .with_memory_lifecycle_retrieval_reader(&lifecycle_reader);
+        let gateway = ToolGateway::from_executor_config(ActionExecutorConfig::default());
+        let succeeded_gateway_result = gateway
+            .execute(
+                AgentActionRequest {
+                    action_type: "memory_search".into(),
+                    target: "memory.search".into(),
+                    input: serde_json::json!({
+                        "query": "known canonical memory",
+                        "session_id": "tauri-receipt-chain-chat",
+                        "limit": 5,
+                    }),
+                    source_run_id: Some(run_id.clone()),
+                    step_index: 0,
+                },
+                &action_context,
+            )
+            .await
+            .expect("first ToolGateway read succeeds");
+        assert_eq!(
+            succeeded_gateway_result.status,
+            ActionExecutionStatus::Succeeded
+        );
+        let succeeded_action_id = succeeded_gateway_result.action.id.clone();
+        let succeeded_receipt = succeeded_gateway_result.execution_receipt.clone();
+        lifecycle_reader
+            .install_query_failure_for_test()
+            .expect("inject lifecycle failure after first adapter response");
+        let failed_gateway_result = gateway
+            .execute(
+                AgentActionRequest {
+                    action_type: "memory_search".into(),
+                    target: "memory.search".into(),
+                    input: serde_json::json!({
+                        "query": "runtime lifecycle fault",
+                        "session_id": "tauri-receipt-chain-chat",
+                        "limit": 5,
+                    }),
+                    source_run_id: Some(run_id.clone()),
+                    step_index: 1,
+                },
+                &action_context,
+            )
+            .await
+            .expect("ToolGateway returns a typed failed read");
+        assert_eq!(failed_gateway_result.status, ActionExecutionStatus::Failed);
+        let failed_action_id = failed_gateway_result.action.id.clone();
+        let failed_receipt = failed_gateway_result.execution_receipt.clone();
+        assert_ne!(succeeded_receipt.receipt_id, failed_receipt.receipt_id);
+        assert_eq!(failed_receipt.dispatch_kind, ToolDispatchKind::Local);
+        assert_eq!(
+            failed_receipt.transport_status,
+            ToolTransportStatus::ResponseObserved
+        );
+        assert_eq!(
+            failed_receipt.execution_outcome,
+            ToolExecutionOutcome::Failed
+        );
+
+        let tool_calls = crate::main_chat_react_runtime::agent_actions_to_tool_call_results(
+            &[
+                succeeded_gateway_result.action,
+                failed_gateway_result.action,
+            ],
+            &run_id,
+        )
+        .expect("AgentLoop action receipt projection");
+        assert_eq!(tool_calls.len(), 2);
+        assert_eq!(
+            tool_calls[0].action_id.as_deref(),
+            Some(succeeded_action_id.as_str())
+        );
+        assert_eq!(
+            tool_calls[1].action_id.as_deref(),
+            Some(failed_action_id.as_str())
+        );
+        assert_eq!(
+            tool_calls[0].execution_receipt.as_ref(),
+            Some(&succeeded_receipt)
+        );
+        assert_eq!(
+            tool_calls[1].execution_receipt.as_ref(),
+            Some(&failed_receipt)
+        );
+        let plan = build_main_chat_react_action_plan(
+            "tauri-receipt-chain-chat",
+            "Search memory for runtime lifecycle fault",
+        )
+        .expect("memory search plan");
+        let attempt = MainChatReactAgentLoopAttempt {
+            reply: Some("Memory retrieval could not be verified.".into()),
+            tool_calls,
+            model_route: None,
+            transcript_entries: Vec::new(),
+            metadata: serde_json::json!({
+                "agentLoopAttempted": true,
+                "agentLoopSucceeded": false,
+                "agentLoopTerminalDisposition": "failed",
+                "agentLoopFailureKind": "tool_error",
+                "actionId": succeeded_action_id.clone(),
+                "plannedActionType": plan.queue_action_type.clone(),
+                "toolSelectionCandidateTarget": "memory.search",
+                "preview": "memory_lifecycle_reader_unavailable",
+                "directWritesExecuted": false,
+            }),
+            queue_status: Some(ExecutionQueueStatus::Failed),
+            blocker_reason: Some("memory_lifecycle_reader_unavailable".into()),
+            provider_receipts: Vec::new(),
+            provider_durability_proofs: Vec::new(),
+            canonical_tool_delta: MainChatReactCanonicalToolDelta::empty(),
+        };
+        let kernel_result = kernel_turn_result_from_react_agent_loop_attempt(
+            attempt,
+            &plan,
+            &InferenceScheduler::default(),
+        );
+        assert_eq!(kernel_result.tool_calls.len(), 2);
+        assert_eq!(kernel_result.tool_calls[0].status, "succeeded");
+        assert_eq!(kernel_result.tool_calls[1].status, "failed");
+        assert_eq!(
+            kernel_result.tool_calls[0]
+                .observation_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("actionId"))
+                .and_then(Value::as_str),
+            Some(succeeded_action_id.as_str())
+        );
+        assert_eq!(
+            kernel_result.tool_calls[1]
+                .observation_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("actionId"))
+                .and_then(Value::as_str),
+            Some(failed_action_id.as_str())
+        );
+        assert_eq!(
+            kernel_result.tool_calls[0].execution_receipt.as_ref(),
+            Some(&succeeded_receipt)
+        );
+        assert_eq!(
+            kernel_result.tool_calls[1].execution_receipt.as_ref(),
+            Some(&failed_receipt)
+        );
+        let failure_kind = main_chat_failure_kind_from_kernel_result(&kernel_result);
+        assert_eq!(failure_kind, MainChatTaskFailureKind::ToolError);
+
+        let cancellation_registry =
+            crate::main_chat_cancellation::MainChatCancellationRegistry::default();
+        let registration = cancellation_registry.register(&task.id);
+        let execution_epoch = registration.execution_epoch();
+        let mut transcript = Vec::new();
+        let projected_calls = record_kernel_tool_call_evidence(
+            &state,
+            &task.id,
+            &kernel_result.tool_calls,
+            &run_id,
+            &execution_epoch,
+            &mut transcript,
+        )
+        .await
+        .expect("project Tauri typed tool failure");
+        assert_eq!(projected_calls.len(), 2);
+        assert!(matches!(projected_calls[0].status, ToolCallStatus::Success));
+        assert!(matches!(projected_calls[1].status, ToolCallStatus::Error));
+        assert_eq!(
+            projected_calls[0].execution_receipt.as_ref(),
+            Some(&succeeded_receipt)
+        );
+        assert_eq!(
+            projected_calls[1].execution_receipt.as_ref(),
+            Some(&failed_receipt)
+        );
+        for (projected, expected_executor_action_id) in projected_calls
+            .iter()
+            .zip([succeeded_action_id.as_str(), failed_action_id.as_str()])
+        {
+            let queued = state
+                .main_chat_action_queue_store
+                .as_ref()
+                .expect("action queue")
+                .lock()
+                .await
+                .load(
+                    projected
+                        .action_id
+                        .as_deref()
+                        .expect("projected queue action id"),
+                )
+                .unwrap()
+                .expect("projected queue action");
+            assert_eq!(
+                queued
+                    .observation_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("executorActionId"))
+                    .and_then(Value::as_str),
+                Some(expected_executor_action_id),
+                "each queue fact must retain the matching AgentLoop action identity"
+            );
+        }
+        assert!(transcript
+            .iter()
+            .any(|entry| entry.kind == ExecutionTranscriptEntryKind::Error));
+
+        finalize_main_chat_task_failure(
+            &state,
+            Some(&run_id),
+            Some(&task.id),
+            failure_kind,
+            "memory_lifecycle_reader_unavailable",
+            "test.typed_receipt_chain",
+        )
+        .await
+        .expect("finalize typed tool error");
+        let finalized = state
+            .agent_run_store
+            .as_ref()
+            .expect("agent run store")
+            .lock()
+            .await
+            .get_run(&run_id)
+            .unwrap()
+            .expect("finalized run");
+        assert_eq!(finalized.status, AgentRunStatus::Failed);
+        assert_eq!(
+            finalized.error.as_ref().map(|error| error.phase.as_str()),
+            Some("tool_error")
+        );
+    }
+
+    #[test]
+    fn react_terminal_without_tool_action_is_a_fail_closed_synthetic_blocker() {
+        let plan = build_main_chat_react_action_plan(
+            "tauri-missing-tool-action-chat",
+            "Search memory for a canonical fact",
+        )
+        .expect("memory search plan");
+        let attempt = MainChatReactAgentLoopAttempt {
+            reply: Some("Unverified model-only answer".into()),
+            tool_calls: Vec::new(),
+            model_route: None,
+            transcript_entries: Vec::new(),
+            metadata: serde_json::json!({
+                "agentLoopAttempted": true,
+                "agentLoopSucceeded": true,
+                "agentLoopTerminalDisposition": "succeeded",
+                "plannedActionType": plan.queue_action_type.clone(),
+            }),
+            queue_status: Some(ExecutionQueueStatus::Completed),
+            blocker_reason: None,
+            provider_receipts: Vec::new(),
+            provider_durability_proofs: Vec::new(),
+            canonical_tool_delta: MainChatReactCanonicalToolDelta::empty(),
+        };
+
+        let kernel_result = kernel_turn_result_from_react_agent_loop_attempt(
+            attempt,
+            &plan,
+            &InferenceScheduler::default(),
+        );
+
+        assert_eq!(kernel_result.tool_calls.len(), 1);
+        assert_eq!(kernel_result.tool_calls[0].status, "failed");
+        assert_eq!(
+            kernel_result.tool_calls[0].blocker.as_deref(),
+            Some("agent_loop_tool_action_missing")
+        );
+        assert!(kernel_result.tool_calls[0].execution_receipt.is_none());
+        assert_eq!(
+            kernel_result.tool_calls[0]
+                .observation_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("noAdapterReceipt"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_loop_permission_receipt_projects_pending_without_blocker_overwrite() {
+        use openlife_core::agent::main_chat_agent_v1::{
+            AgentTaskSessionDraft, ExecutionQueueStatus, MainChatAgentStrategy,
+        };
+        use openlife_core::agent::{
+            ActionExecutionContext, ActionExecutorConfig, AgentActionRequest, AgentRun, ToolGateway,
+        };
+
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let task = {
+            let store = state
+                .main_chat_agent_session_store
+                .as_ref()
+                .expect("task store")
+                .lock()
+                .await;
+            store
+                .create_session(AgentTaskSessionDraft {
+                    chat_session_id: "tauri-permission-receipt-chat".into(),
+                    user_goal: "Search the web.".into(),
+                    selected_strategy: MainChatAgentStrategy::ReActToolExecution,
+                    current_plan_summary: None,
+                    context_snapshot_refs: Vec::new(),
+                })
+                .expect("create task")
+        };
+        let mut run = AgentRun::new_chat_run("tauri-permission-receipt-chat", "Search the web");
+        run.task_id = task.id.clone();
+        let run_id = run.id.clone();
+        state
+            .agent_run_store
+            .as_ref()
+            .expect("agent run store")
+            .lock()
+            .await
+            .create_run(&run)
+            .expect("create run");
+
+        let registry = openlife_core::mcp::McpRegistry::new();
+        let permission_store =
+            openlife_core::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+        let audit_file = tempfile::NamedTempFile::new().unwrap();
+        let audit_store = openlife_core::mcp_audit::McpAuditStore::new(audit_file.path());
+        let privacy_engine = openlife_core::privacy::PrivacyEngine::new();
+        let proposal_store = openlife_core::agent::ProposalStore::new_in_memory().unwrap();
+        let network_policy = openlife_core::config::NetworkPolicy::default();
+        let action_context = ActionExecutionContext::new(
+            &registry,
+            &permission_store,
+            &audit_store,
+            &privacy_engine,
+            &[],
+        )
+        .with_network_policy(&network_policy)
+        .with_proposal_store(&proposal_store)
+        .with_canonical_write_admission(&TestCanonicalWriteAdmission);
+        let gateway_result = ToolGateway::from_executor_config(ActionExecutorConfig::default())
+            .execute(
+                AgentActionRequest {
+                    action_type: "mcp_tool".into(),
+                    target: "web.search".into(),
+                    input: serde_json::json!({"arguments": {"query": "OpenLife"}}),
+                    source_run_id: Some(run_id.clone()),
+                    step_index: 0,
+                },
+                &action_context,
+            )
+            .await
+            .expect("ToolGateway returns governed permission state");
+        assert_eq!(
+            gateway_result.status,
+            ActionExecutionStatus::NeedsConfirmation
+        );
+        let gateway_receipt = gateway_result.execution_receipt.clone();
+        let tool_calls = crate::main_chat_react_runtime::agent_actions_to_tool_call_results(
+            &[gateway_result.action],
+            &run_id,
+        )
+        .expect("project permission receipt from AgentLoop facts");
+        let plan = build_main_chat_react_action_plan(
+            "tauri-permission-receipt-chat",
+            "Search the web for OpenLife",
+        )
+        .expect("web search plan");
+        let attempt = MainChatReactAgentLoopAttempt {
+            reply: Some("Permission is required before the web request.".into()),
+            tool_calls,
+            model_route: None,
+            transcript_entries: Vec::new(),
+            metadata: serde_json::json!({
+                "agentLoopAttempted": true,
+                "agentLoopSucceeded": false,
+                "agentLoopTerminalDisposition": "waiting_permission",
+                "plannedActionType": plan.queue_action_type.clone(),
+                "toolSelectionCandidateTarget": "web.search",
+                "preview": "network_policy_consent_required",
+                "directWritesExecuted": false,
+            }),
+            queue_status: Some(ExecutionQueueStatus::PendingPermission),
+            blocker_reason: Some("network_policy_consent_required".into()),
+            provider_receipts: Vec::new(),
+            provider_durability_proofs: Vec::new(),
+            canonical_tool_delta: MainChatReactCanonicalToolDelta::empty(),
+        };
+        let kernel_result = kernel_turn_result_from_react_agent_loop_attempt(
+            attempt,
+            &plan,
+            &InferenceScheduler::default(),
+        );
+        assert_eq!(kernel_result.tool_calls[0].status, "needs_confirmation");
+        assert_eq!(
+            kernel_result.tool_calls[0].execution_receipt.as_ref(),
+            Some(&gateway_receipt)
+        );
+
+        let cancellation_registry =
+            crate::main_chat_cancellation::MainChatCancellationRegistry::default();
+        let registration = cancellation_registry.register(&task.id);
+        let execution_epoch = registration.execution_epoch();
+        let mut transcript = Vec::new();
+        let projected_calls = record_kernel_tool_call_evidence(
+            &state,
+            &task.id,
+            &kernel_result.tool_calls,
+            &run_id,
+            &execution_epoch,
+            &mut transcript,
+        )
+        .await
+        .expect("project Tauri pending permission");
+        assert!(matches!(
+            projected_calls[0].status,
+            ToolCallStatus::NeedsConfirmation
+        ));
+        assert!(projected_calls[0].requires_confirmation);
+        assert_eq!(
+            projected_calls[0].execution_receipt.as_ref(),
+            Some(&gateway_receipt)
+        );
+        let queued = state
+            .main_chat_action_queue_store
+            .as_ref()
+            .expect("action queue")
+            .lock()
+            .await
+            .load(projected_calls[0].action_id.as_deref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(queued.status, ExecutionQueueStatus::PendingPermission);
+        assert!(transcript
+            .iter()
+            .any(|entry| entry.kind == ExecutionTranscriptEntryKind::PermissionRequest));
+    }
+
     fn test_kernel(
         model: ScriptedModelClient,
         extra_candidates: Vec<ContextSourceCandidate>,
     ) -> MainChatKernel<ScriptedModelClient> {
-        MainChatKernel::new(model).with_context_config(MainChatKernelContextConfig {
-            load_workspace_knowledge: false,
-            token_budget: 80,
-            extra_candidates,
-            hs_context: None,
-        })
+        MainChatKernel::new(model)
+            .with_context_config(MainChatKernelContextConfig {
+                load_workspace_knowledge: false,
+                token_budget: 80,
+                extra_candidates,
+                hs_context: None,
+                stream_provider_tokens: false,
+                authorized_memory_routing: None,
+            })
+            .with_canonical_run_id("kernel-test-canonical-run")
+    }
+
+    fn test_kernel_with_authorized_memory_routing(
+        model: ScriptedModelClient,
+        extra_candidates: Vec<ContextSourceCandidate>,
+        current_user_message: &str,
+    ) -> MainChatKernel<ScriptedModelClient> {
+        MainChatKernel::new(model)
+            .with_context_config(MainChatKernelContextConfig {
+                load_workspace_knowledge: false,
+                token_budget: 80,
+                extra_candidates,
+                hs_context: None,
+                stream_provider_tokens: false,
+                authorized_memory_routing: Some(
+                    openlife_core::agent::plan_main_chat_memory_routing(current_user_message),
+                ),
+            })
+            .with_canonical_run_id("kernel-test-canonical-run")
     }
 
     fn test_kernel_with_hs(
@@ -7152,12 +11776,36 @@ mod tests {
         hs_context: MainChatKernelHsContext,
         extra_candidates: Vec<ContextSourceCandidate>,
     ) -> MainChatKernel<ScriptedModelClient> {
-        MainChatKernel::new(model).with_context_config(MainChatKernelContextConfig {
-            load_workspace_knowledge: false,
-            token_budget: 120,
-            extra_candidates,
-            hs_context: Some(hs_context),
-        })
+        MainChatKernel::new(model)
+            .with_context_config(MainChatKernelContextConfig {
+                load_workspace_knowledge: false,
+                token_budget: 120,
+                extra_candidates,
+                hs_context: Some(hs_context),
+                stream_provider_tokens: false,
+                authorized_memory_routing: None,
+            })
+            .with_canonical_run_id("kernel-test-canonical-run")
+    }
+
+    fn test_kernel_with_hs_and_authorized_memory_routing(
+        model: ScriptedModelClient,
+        hs_context: MainChatKernelHsContext,
+        extra_candidates: Vec<ContextSourceCandidate>,
+        current_user_message: &str,
+    ) -> MainChatKernel<ScriptedModelClient> {
+        MainChatKernel::new(model)
+            .with_context_config(MainChatKernelContextConfig {
+                load_workspace_knowledge: false,
+                token_budget: 120,
+                extra_candidates,
+                hs_context: Some(hs_context),
+                stream_provider_tokens: false,
+                authorized_memory_routing: Some(
+                    openlife_core::agent::plan_main_chat_memory_routing(current_user_message),
+                ),
+            })
+            .with_canonical_run_id("kernel-test-canonical-run")
     }
 
     fn sample_hs_life_model() -> LifeModel {
@@ -7247,6 +11895,10 @@ mod tests {
                 estimated_tokens: 12,
                 token_budget: 128,
             },
+            provider_authorization:
+                openlife_core::llm::ProviderPolicyAuthorization::local_only_fail_closed(
+                    openlife_core::llm::ProviderLocalOnlyReason::TestFixture,
+                ),
         }
     }
 
@@ -7294,11 +11946,12 @@ mod tests {
             .run_turn(
                 MainChatTurnInput {
                     session_id: "session-review-maturation".into(),
+                    provider_authorization: policy_allowed_authorization("review-maturation"),
                     messages: vec![user_message(
                         "Review what changed in my working style this month.",
                     )],
                     selected_skill_id: None,
-                    selected_strategy: Some(MainChatAgentStrategy::ReviewMaturation),
+                    policy_decision: test_policy_decision(MainChatAgentStrategy::ReviewMaturation),
                     model_supplied_tool_arguments: None,
                     runtime_fact_direct_answer: false,
                 },
@@ -7340,9 +11993,12 @@ mod tests {
             .run_turn(
                 MainChatTurnInput {
                     session_id: "session-react-default-memory".into(),
+                    provider_authorization: policy_allowed_authorization("react-default-memory"),
                     messages: vec![user_message("Search notes about energy.")],
                     selected_skill_id: None,
-                    selected_strategy: Some(MainChatAgentStrategy::ReActToolExecution),
+                    policy_decision: test_policy_decision(
+                        MainChatAgentStrategy::ReActToolExecution,
+                    ),
                     model_supplied_tool_arguments: None,
                     runtime_fact_direct_answer: false,
                 },
@@ -7363,6 +12019,14 @@ mod tests {
         let recorded = decisions.lock().expect("decisions lock");
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].tool_name, "memory.search");
+        assert_eq!(
+            recorded[0]
+                .selection_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("observedCanonicalRunId"))
+                .and_then(Value::as_str),
+            Some("kernel-test-canonical-run")
+        );
     }
 
     #[tokio::test]
@@ -7380,11 +12044,14 @@ mod tests {
             .run_turn(
                 MainChatTurnInput {
                     session_id: "session-react-path-read".into(),
+                    provider_authorization: policy_allowed_authorization("react-path-read"),
                     messages: vec![user_message(
                         "Read frontend/definitely-missing-stage2-file.md before answering.",
                     )],
                     selected_skill_id: None,
-                    selected_strategy: Some(MainChatAgentStrategy::ReActToolExecution),
+                    policy_decision: test_policy_decision(
+                        MainChatAgentStrategy::ReActToolExecution,
+                    ),
                     model_supplied_tool_arguments: None,
                     runtime_fact_direct_answer: false,
                 },
@@ -7415,9 +12082,10 @@ mod tests {
             .run_turn(
                 MainChatTurnInput {
                     session_id: "session-1".into(),
+                    provider_authorization: policy_allowed_authorization("direct-answer"),
                     messages: vec![user_message("Say hello from the kernel.")],
                     selected_skill_id: None,
-                    selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
+                    policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
                     runtime_fact_direct_answer: false,
                 },
@@ -7454,18 +12122,19 @@ mod tests {
     async fn main_chat_kernel_chinese_memory_governance_plans_without_model_even_if_strategy_is_direct(
     ) {
         let model = ScriptedModelClient::ok("model should not be called");
-        let kernel = test_kernel(model.clone(), Vec::new());
+        let user_text = "今天空腹喝咖啡后赶路时心慌，香蕉酸奶有缓解，帮我记下来。以后早上安排工作前先确认我有没有吃东西。";
+        let kernel =
+            test_kernel_with_authorized_memory_routing(model.clone(), Vec::new(), user_text);
         let mut events = BufferedMainChatEventSink::default();
 
         let result = kernel
             .run_turn(
                 MainChatTurnInput {
                     session_id: "session-chinese-memory".into(),
-                    messages: vec![user_message(
-                        "今天空腹喝咖啡后赶路时心慌，香蕉酸奶有缓解，帮我记下来。以后早上安排工作前先确认我有没有吃东西。",
-                    )],
+                    provider_authorization: policy_allowed_authorization("chinese-memory"),
+                    messages: vec![user_message(user_text)],
                     selected_skill_id: None,
-                    selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
+                    policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
                     runtime_fact_direct_answer: false,
                 },
@@ -7498,7 +12167,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn main_chat_kernel_chinese_current_weather_request_uses_web_search_evidence() {
+    async fn policy_authorized_chinese_weather_read_uses_web_search_evidence() {
         let model = ScriptedModelClient::ok("model should not be called");
         let decisions = Arc::new(Mutex::new(Vec::new()));
         let kernel = test_kernel(model.clone(), Vec::new()).with_read_tool_executor(Arc::new(
@@ -7512,9 +12181,12 @@ mod tests {
             .run_turn(
                 MainChatTurnInput {
                     session_id: "session-chinese-weather".into(),
+                    provider_authorization: policy_allowed_authorization("chinese-weather"),
                     messages: vec![user_message("帮我看一下今天上海会不会下雨，我要不要带伞")],
                     selected_skill_id: None,
-                    selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
+                    policy_decision: test_policy_decision(
+                        MainChatAgentStrategy::ReActToolExecution,
+                    ),
                     model_supplied_tool_arguments: None,
                     runtime_fact_direct_answer: false,
                 },
@@ -7528,7 +12200,7 @@ mod tests {
         assert_eq!(result.tool_calls[0].name, "web.search");
         assert_eq!(
             result.tool_calls[0].governed_input["governedInputSource"],
-            serde_json::json!("kernel_external_fact_query_from_governance_intent")
+            serde_json::json!("kernel_external_fact_target_from_policy_authorized_read")
         );
         assert!(result
             .assistant_message
@@ -7537,6 +12209,221 @@ mod tests {
         let recorded = decisions.lock().expect("decisions lock");
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].tool_name, "web.search");
+    }
+
+    #[tokio::test]
+    async fn exact_policy_authorized_weather_prompts_select_web_search_without_kernel_reclassification(
+    ) {
+        for (session_id, user_text) in [
+            (
+                "session-english-live-weather",
+                "What is the live weather in Shanghai right now?",
+            ),
+            (
+                "session-stage6c-native-weather",
+                "请告诉我今天旧金山的天气。必须使用可审计的 web/weather 读取证据；如果当前没有可用外部读取工具，请明确 fail closed，不要猜。",
+            ),
+        ] {
+            let ingress = openlife_core::agent::main_chat_agent_v1::AgentIngress::default()
+                .decide(
+                    session_id,
+                    user_text,
+                    None,
+                    openlife_core::agent::AgentTaskKind::Conversation,
+                );
+            assert_eq!(
+                ingress.policy_decision.allowed_capabilities,
+                vec![AllowedCapability::WebSearch],
+                "{user_text}"
+            );
+            let provider_authorization =
+                MainChatProviderAuthorization::from_ingress_decision(&ingress).unwrap();
+            let decisions = Arc::new(Mutex::new(Vec::new()));
+            let kernel = test_kernel(ScriptedModelClient::ok("model should not be called"), Vec::new())
+                .with_read_tool_executor(Arc::new(RecordingReadToolExecutor {
+                    decisions: decisions.clone(),
+                }));
+            let mut events = BufferedMainChatEventSink::default();
+
+            let result = kernel
+                .run_turn(
+                    MainChatTurnInput {
+                        session_id: session_id.into(),
+                        provider_authorization,
+                        messages: vec![user_message(user_text)],
+                        selected_skill_id: None,
+                        policy_decision: ingress.policy_decision,
+                        model_supplied_tool_arguments: None,
+                        runtime_fact_direct_answer: false,
+                    },
+                    &mut events,
+                )
+                .await;
+
+            assert!(result.blockers.is_empty(), "{user_text}: {:?}", result.blockers);
+            assert_eq!(result.tool_calls.len(), 1, "{user_text}");
+            assert_eq!(result.tool_calls[0].name, "web.search", "{user_text}");
+            let recorded = decisions.lock().expect("decisions lock");
+            assert_eq!(recorded.len(), 1, "{user_text}");
+            assert_eq!(recorded[0].tool_name, "web.search", "{user_text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_answer_policy_route_cannot_be_upgraded_into_tool_execution() {
+        let model = ScriptedModelClient::ok("可以先查看天气，再决定是否带伞。");
+        let kernel = test_kernel(model.clone(), Vec::new());
+        let mut events = BufferedMainChatEventSink::default();
+
+        let result = kernel
+            .run_turn(
+                MainChatTurnInput {
+                    session_id: "session-direct-route-no-tool-upgrade".into(),
+                    provider_authorization: policy_allowed_authorization(
+                        "direct-route-no-tool-upgrade",
+                    ),
+                    messages: vec![user_message("帮我看一下今天上海会不会下雨")],
+                    selected_skill_id: None,
+                    policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
+                    model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
+                },
+                &mut events,
+            )
+            .await;
+
+        assert_eq!(model.call_count(), 1);
+        assert!(result.tool_calls.is_empty());
+        assert!(!events.events().iter().any(|event| matches!(
+            event,
+            MainChatKernelEvent::ToolDecision { .. } | MainChatKernelEvent::ToolObservation { .. }
+        )));
+    }
+
+    #[tokio::test]
+    async fn typed_read_capability_cannot_be_upgraded_to_a_different_target() {
+        let model = ScriptedModelClient::ok("model should not be called");
+        let decisions = Arc::new(Mutex::new(Vec::new()));
+        let kernel = test_kernel(model.clone(), Vec::new()).with_read_tool_executor(Arc::new(
+            RecordingReadToolExecutor {
+                decisions: decisions.clone(),
+            },
+        ));
+        let memory_policy = openlife_core::agent::main_chat_agent_v1::AgentIngress::default()
+            .decide(
+                "memory-policy-cannot-upgrade",
+                "Search my memory for breakfast preferences.",
+                None,
+                openlife_core::agent::AgentTaskKind::Conversation,
+            )
+            .policy_decision;
+        assert!(memory_policy.allows(AllowedCapability::MemoryRead));
+        assert!(!memory_policy.allows(AllowedCapability::WebFetch));
+        let mut events = BufferedMainChatEventSink::default();
+
+        let result = kernel
+            .run_turn(
+                MainChatTurnInput {
+                    session_id: "typed-read-target-no-upgrade".into(),
+                    provider_authorization: policy_allowed_authorization(
+                        "typed-read-target-no-upgrade",
+                    ),
+                    messages: vec![user_message("Fetch https://example.com/private")],
+                    selected_skill_id: None,
+                    policy_decision: memory_policy,
+                    model_supplied_tool_arguments: Some(serde_json::json!({
+                        "tool": "web.fetch",
+                        "url": "https://example.com/private"
+                    })),
+                    runtime_fact_direct_answer: false,
+                },
+                &mut events,
+            )
+            .await;
+
+        assert_eq!(model.call_count(), 0);
+        assert!(decisions.lock().expect("decisions lock").is_empty());
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].name, "unsupported.tool");
+        assert_eq!(
+            result.tool_calls[0].governed_input["governedInputSource"],
+            serde_json::json!("policy_capability_not_allowed")
+        );
+        assert_eq!(
+            result.tool_calls[0].governed_input["requiredCapability"],
+            serde_json::json!("web.fetch")
+        );
+        assert!(!result.direct_writes_executed);
+    }
+
+    #[tokio::test]
+    async fn provider_generation_capability_cannot_be_upgraded_into_a_file_proposal() {
+        let model = ScriptedModelClient::ok("I cannot write without an authorized policy lane.");
+        let kernel = test_kernel(model.clone(), Vec::new());
+        let mut events = BufferedMainChatEventSink::default();
+
+        let result = kernel
+            .run_turn(
+                MainChatTurnInput {
+                    session_id: "typed-direct-no-write-upgrade".into(),
+                    provider_authorization: policy_allowed_authorization(
+                        "typed-direct-no-write-upgrade",
+                    ),
+                    messages: vec![user_message("Write this to file `notes.txt`: `secret`.")],
+                    selected_skill_id: None,
+                    policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
+                    model_supplied_tool_arguments: Some(serde_json::json!({
+                        "path": "notes.txt",
+                        "content": "secret"
+                    })),
+                    runtime_fact_direct_answer: false,
+                },
+                &mut events,
+            )
+            .await;
+
+        assert_eq!(model.call_count(), 1);
+        assert!(result.write_outcome.is_none());
+        assert!(result.proposals.is_empty());
+        assert!(result.tool_calls.is_empty());
+        assert!(!result.direct_writes_executed);
+    }
+
+    #[tokio::test]
+    async fn policy_authorized_file_write_stages_review_without_direct_write() {
+        let model = ScriptedModelClient::ok("model should not be called");
+        let kernel = test_kernel(model.clone(), Vec::new());
+        let mut events = BufferedMainChatEventSink::default();
+
+        let result = kernel
+            .run_turn(
+                MainChatTurnInput {
+                    session_id: "typed-file-write-proposal".into(),
+                    provider_authorization: policy_allowed_authorization(
+                        "typed-file-write-proposal",
+                    ),
+                    messages: vec![user_message("Write this to file `notes.txt`: `hello`.")],
+                    selected_skill_id: None,
+                    policy_decision: test_policy_decision(MainChatAgentStrategy::FileWriteProposal),
+                    model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
+                },
+                &mut events,
+            )
+            .await;
+
+        assert_eq!(model.call_count(), 0);
+        let outcome = result.write_outcome.expect("file proposal outcome");
+        assert_eq!(
+            outcome.kind,
+            MainChatKernelWriteOutcomeKind::FileWriteProposal
+        );
+        assert_eq!(
+            outcome.proposal_type.as_deref(),
+            Some("external_write_action")
+        );
+        assert_eq!(outcome.target, "notes.txt");
+        assert!(!result.direct_writes_executed);
     }
 
     #[tokio::test]
@@ -7550,9 +12437,10 @@ mod tests {
             .run_turn(
                 MainChatTurnInput {
                     session_id: "session-direct-guard-weather".into(),
+                    provider_authorization: policy_allowed_authorization("direct-guard-weather"),
                     messages: vec![user_message("给我一句普通生活建议。")],
                     selected_skill_id: None,
-                    selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
+                    policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
                     runtime_fact_direct_answer: false,
                 },
@@ -7584,9 +12472,10 @@ mod tests {
             .run_turn(
                 MainChatTurnInput {
                     session_id: "session-direct-guard-memory".into(),
+                    provider_authorization: policy_allowed_authorization("direct-guard-memory"),
                     messages: vec![user_message("给我一句普通生活建议。")],
                     selected_skill_id: None,
-                    selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
+                    policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
                     runtime_fact_direct_answer: false,
                 },
@@ -7618,9 +12507,10 @@ mod tests {
             .run_turn(
                 MainChatTurnInput {
                     session_id: "session-1".into(),
+                    provider_authorization: policy_allowed_authorization("empty-input"),
                     messages: vec![user_message("   ")],
                     selected_skill_id: None,
-                    selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
+                    policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
                     runtime_fact_direct_answer: false,
                 },
@@ -7649,9 +12539,10 @@ mod tests {
             .run_turn(
                 MainChatTurnInput {
                     session_id: "   ".into(),
+                    provider_authorization: policy_allowed_authorization("blank-session"),
                     messages: vec![user_message("Hello")],
                     selected_skill_id: None,
-                    selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
+                    policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
                     runtime_fact_direct_answer: false,
                 },
@@ -7685,9 +12576,10 @@ mod tests {
             .run_turn(
                 MainChatTurnInput {
                     session_id: "session-1".into(),
+                    provider_authorization: policy_allowed_authorization("selected-skill"),
                     messages: vec![user_message("Summarize this.")],
                     selected_skill_id: Some(" summarize ".into()),
-                    selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
+                    policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
                     runtime_fact_direct_answer: false,
                 },
@@ -7738,22 +12630,26 @@ mod tests {
         )
         .with_model_router(router)
         .with_scripted_generation_response("Scheduler-backed direct answer.");
-        let kernel = MainChatKernel::with_scheduler(scheduler, LifeModel::default())
-            .with_context_config(MainChatKernelContextConfig {
+        let kernel = MainChatKernel::with_scheduler(scheduler).with_context_config(
+            MainChatKernelContextConfig {
                 load_workspace_knowledge: false,
                 token_budget: 80,
                 extra_candidates: Vec::new(),
                 hs_context: None,
-            });
+                stream_provider_tokens: false,
+                authorized_memory_routing: None,
+            },
+        );
         let mut events = BufferedMainChatEventSink::default();
 
         let result = kernel
             .run_turn(
                 MainChatTurnInput {
                     session_id: "session-1".into(),
+                    provider_authorization: policy_allowed_authorization("route-metadata"),
                     messages: vec![user_message("Route metadata please.")],
                     selected_skill_id: None,
-                    selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
+                    policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
                     runtime_fact_direct_answer: false,
                 },
@@ -7796,9 +12692,12 @@ mod tests {
             .run_turn(
                 MainChatTurnInput {
                     session_id: "session-1".into(),
+                    provider_authorization: policy_allowed_authorization("file-read"),
                     messages: vec![user_message("Please read file `AGENTS.md`.")],
                     selected_skill_id: None,
-                    selected_strategy: Some(MainChatAgentStrategy::ReActToolExecution),
+                    policy_decision: test_policy_decision(
+                        MainChatAgentStrategy::ReActToolExecution,
+                    ),
                     model_supplied_tool_arguments: Some(serde_json::json!({
                         "path": "../outside-secret.txt"
                     })),
@@ -7837,16 +12736,19 @@ mod tests {
     #[tokio::test]
     async fn main_chat_kernel_memory_write_intent_returns_proposal_outcome_without_model_call() {
         let model = ScriptedModelClient::ok("model should not be called");
-        let kernel = test_kernel(model.clone(), Vec::new());
+        let user_text = "Remember this: I prefer short summaries.";
+        let kernel =
+            test_kernel_with_authorized_memory_routing(model.clone(), Vec::new(), user_text);
         let mut events = BufferedMainChatEventSink::default();
 
         let result = kernel
             .run_turn(
                 MainChatTurnInput {
                     session_id: "session-1".into(),
-                    messages: vec![user_message("Remember this: I prefer short summaries.")],
+                    provider_authorization: policy_allowed_authorization("memory-write"),
+                    messages: vec![user_message(user_text)],
                     selected_skill_id: None,
-                    selected_strategy: Some(MainChatAgentStrategy::MemoryProposal),
+                    policy_decision: test_policy_decision(MainChatAgentStrategy::MemoryProposal),
                     model_supplied_tool_arguments: None,
                     runtime_fact_direct_answer: false,
                 },
@@ -7923,11 +12825,14 @@ mod tests {
             .run_turn(
                 MainChatTurnInput {
                     session_id: "session-1".into(),
+                    provider_authorization: policy_allowed_authorization("dangerous-shell"),
                     messages: vec![user_message(
                         "Run shell.destructive rm -rf to delete project files.",
                     )],
                     selected_skill_id: None,
-                    selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
+                    policy_decision: test_policy_decision(
+                        MainChatAgentStrategy::BlockedConfirmation,
+                    ),
                     model_supplied_tool_arguments: None,
                     runtime_fact_direct_answer: false,
                 },
@@ -7995,9 +12900,10 @@ mod tests {
             .run_turn(
                 MainChatTurnInput {
                     session_id: "session-hs-summary".into(),
+                    provider_authorization: policy_allowed_authorization("hs-summary"),
                     messages: vec![user_message("Use my HS context for a short answer.")],
                     selected_skill_id: None,
-                    selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
+                    policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
                     runtime_fact_direct_answer: false,
                 },
@@ -8054,9 +12960,10 @@ mod tests {
             .run_turn(
                 MainChatTurnInput {
                     session_id: "session-hs-guidance".into(),
+                    provider_authorization: policy_allowed_authorization("hs-guidance"),
                     messages: vec![user_message("Plan the next step gently.")],
                     selected_skill_id: None,
-                    selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
+                    policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
                     runtime_fact_direct_answer: false,
                 },
@@ -8089,16 +12996,23 @@ mod tests {
         let life_model = sample_hs_life_model();
         let packet = hs_packet(false, true);
         let hs_context = build_kernel_hs_context(&life_model, true, Some(&packet), Vec::new());
-        let kernel = test_kernel_with_hs(model.clone(), hs_context, Vec::new());
+        let memory_user_text = "Remember this: I prefer morning deep work.";
+        let kernel = test_kernel_with_hs_and_authorized_memory_routing(
+            model.clone(),
+            hs_context.clone(),
+            Vec::new(),
+            memory_user_text,
+        );
         let mut events = BufferedMainChatEventSink::default();
 
         let result = kernel
             .run_turn(
                 MainChatTurnInput {
                     session_id: "session-hs-learning".into(),
-                    messages: vec![user_message("Remember this: I prefer morning deep work.")],
+                    provider_authorization: policy_allowed_authorization("hs-learning"),
+                    messages: vec![user_message(memory_user_text)],
                     selected_skill_id: None,
-                    selected_strategy: Some(MainChatAgentStrategy::MemoryProposal),
+                    policy_decision: test_policy_decision(MainChatAgentStrategy::MemoryProposal),
                     model_supplied_tool_arguments: None,
                     runtime_fact_direct_answer: false,
                 },
@@ -8134,16 +13048,23 @@ mod tests {
             .and_then(|metadata| metadata.hs_context.as_ref())
             .is_some_and(|hs| hs.available));
 
+        let life_model_user_text =
+            "Update my life model: I am switching careers into design leadership.";
+        let life_model_kernel = test_kernel_with_hs_and_authorized_memory_routing(
+            model.clone(),
+            hs_context,
+            Vec::new(),
+            life_model_user_text,
+        );
         let mut life_model_events = BufferedMainChatEventSink::default();
-        let life_model_result = kernel
+        let life_model_result = life_model_kernel
             .run_turn(
                 MainChatTurnInput {
                     session_id: "session-hs-lifemodel-learning".into(),
-                    messages: vec![user_message(
-                        "Update my life model: I am switching careers into design leadership.",
-                    )],
+                    provider_authorization: policy_allowed_authorization("hs-lifemodel-learning"),
+                    messages: vec![user_message(life_model_user_text)],
                     selected_skill_id: None,
-                    selected_strategy: Some(MainChatAgentStrategy::LifeModelProposal),
+                    policy_decision: test_policy_decision(MainChatAgentStrategy::LifeModelProposal),
                     model_supplied_tool_arguments: None,
                     runtime_fact_direct_answer: false,
                 },
@@ -8199,9 +13120,12 @@ mod tests {
             .run_turn(
                 MainChatTurnInput {
                     session_id: "session-hs-policy".into(),
+                    provider_authorization: policy_allowed_authorization("hs-policy"),
                     messages: vec![user_message("Send email to publish this update.")],
                     selected_skill_id: None,
-                    selected_strategy: Some(MainChatAgentStrategy::BlockedConfirmation),
+                    policy_decision: test_policy_decision(
+                        MainChatAgentStrategy::BlockedConfirmation,
+                    ),
                     model_supplied_tool_arguments: None,
                     runtime_fact_direct_answer: false,
                 },
@@ -8253,9 +13177,10 @@ mod tests {
             .run_turn(
                 MainChatTurnInput {
                     session_id: "session-hs-missing".into(),
+                    provider_authorization: policy_allowed_authorization("hs-missing"),
                     messages: vec![user_message("Give a basic direct answer.")],
                     selected_skill_id: None,
-                    selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
+                    policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
                     runtime_fact_direct_answer: false,
                 },
@@ -8315,9 +13240,10 @@ mod tests {
             .run_turn(
                 MainChatTurnInput {
                     session_id: "session-hs-no-raw".into(),
+                    provider_authorization: policy_allowed_authorization("hs-no-raw"),
                     messages: vec![user_message("Answer using bounded context only.")],
                     selected_skill_id: None,
-                    selected_strategy: Some(MainChatAgentStrategy::DirectAnswer),
+                    policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
                     model_supplied_tool_arguments: None,
                     runtime_fact_direct_answer: false,
                 },
@@ -8370,6 +13296,43 @@ mod tests {
         assert!(!hs.raw_life_model_yaml_included);
     }
 
+    #[tokio::test]
+    async fn kernel_task_resolution_never_substitutes_same_chat_strategy_session() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let existing = {
+            let store = state
+                .main_chat_agent_session_store
+                .as_ref()
+                .expect("task session store")
+                .lock()
+                .await;
+            store
+                .create_session(
+                    openlife_core::agent::main_chat_agent_v1::AgentTaskSessionDraft {
+                        chat_session_id: "identity-chat".into(),
+                        user_goal: "existing task".into(),
+                        selected_strategy: MainChatAgentStrategy::ReActToolExecution,
+                        current_plan_summary: None,
+                        context_snapshot_refs: Vec::new(),
+                    },
+                )
+                .unwrap()
+        };
+        let missing = uuid::Uuid::new_v4().to_string();
+
+        let error = resolve_kernel_task_session_id(
+            &state,
+            &missing,
+            &existing.chat_session_id,
+            existing.selected_strategy,
+        )
+        .await
+        .expect_err("missing exact task must not borrow a same-chat task");
+
+        assert!(error.contains("exact_main_chat_task_session_missing"));
+        assert_ne!(missing, existing.id);
+    }
+
     #[test]
     fn main_chat_kernel_is_subordinate_to_openlife_turn_runtime_command_surface() {
         let send_source = include_str!("main_chat_send.rs");
@@ -8383,6 +13346,321 @@ mod tests {
         assert!(runtime_source.contains("StreamingMainChatEventSink"));
         assert!(!send_source.contains("run_main_chat_kernel_direct_answer_with_state"));
         assert!(!stream_source.contains("run_main_chat_kernel_direct_answer_with_state"));
+    }
+
+    #[test]
+    fn explicit_memory_product_gateway_requires_policy_proof_and_execution_epoch() {
+        let gateway_source = include_str!("memory_gateway.rs");
+        let lifecycle_source = include_str!("../../openlife-core/src/agent/memory_lifecycle.rs");
+        assert!(!gateway_source.contains("fn commit_explicit_user_memory_with_state("));
+        assert!(gateway_source.contains("PolicyMemoryAdmissionProof"));
+        assert!(gateway_source.contains("MainChatExecutionEpoch"));
+        assert!(lifecycle_source.contains("admission_proof.consume_for_explicit_input(&input)?"));
+    }
+
+    #[test]
+    fn policy_memory_admission_proof_rejects_forged_policy_candidate_message_and_fact() {
+        let source_message_id = "message-proof-binding";
+        let source_user_message = "Remember this exact policy-bound fact.";
+        let fact = CanonicalMemoryFactDescriptor::from_candidate(
+            "Remember this exact policy-bound fact.",
+            MemoryCandidateKind::SemanticUserFact,
+            MemoryLifecycleScope::Global,
+            MemoryLifecycleRiskLevel::Low,
+            MemoryLifecycleSensitivity::Internal,
+        )
+        .unwrap();
+        let (policy, candidate, _proof) =
+            test_policy_memory_admission_context(source_message_id, source_user_message, &fact);
+        policy
+            .authorize_explicit_memory_admission(
+                IntentSourceKind::CurrentAuthenticatedUserMessage,
+                source_user_message,
+                &candidate,
+                &fact,
+            )
+            .unwrap();
+
+        let mut forged_route = policy.clone();
+        forged_route.route_kind = PolicyRouteKind::DirectAnswer;
+        assert!(forged_route
+            .authorize_explicit_memory_admission(
+                IntentSourceKind::CurrentAuthenticatedUserMessage,
+                source_user_message,
+                &candidate,
+                &fact,
+            )
+            .is_err());
+        let mut forged_consent = policy.clone();
+        forged_consent.consent_disposition = PolicyConsentDisposition::NotRequired;
+        assert!(forged_consent
+            .authorize_explicit_memory_admission(
+                IntentSourceKind::CurrentAuthenticatedUserMessage,
+                source_user_message,
+                &candidate,
+                &fact,
+            )
+            .is_err());
+        let mut forged_version = policy.clone();
+        forged_version.policy_version = "main_chat_policy_v1".into();
+        assert!(forged_version
+            .authorize_explicit_memory_admission(
+                IntentSourceKind::CurrentAuthenticatedUserMessage,
+                source_user_message,
+                &candidate,
+                &fact,
+            )
+            .is_err());
+        let mut unauthorized_candidate = policy.clone();
+        unauthorized_candidate
+            .authorized_memory_candidate_ids
+            .clear();
+        assert!(unauthorized_candidate
+            .authorize_explicit_memory_admission(
+                IntentSourceKind::CurrentAuthenticatedUserMessage,
+                source_user_message,
+                &candidate,
+                &fact,
+            )
+            .is_err());
+        assert!(policy
+            .authorize_explicit_memory_admission(
+                IntentSourceKind::CurrentAuthenticatedUserMessage,
+                "Different user message",
+                &candidate,
+                &fact,
+            )
+            .is_err());
+        let changed_fact = CanonicalMemoryFactDescriptor::from_candidate(
+            "Different fact",
+            MemoryCandidateKind::SemanticUserFact,
+            MemoryLifecycleScope::Global,
+            MemoryLifecycleRiskLevel::Low,
+            MemoryLifecycleSensitivity::Internal,
+        )
+        .unwrap();
+        assert!(policy
+            .authorize_explicit_memory_admission(
+                IntentSourceKind::CurrentAuthenticatedUserMessage,
+                source_user_message,
+                &candidate,
+                &changed_fact,
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn policy_memory_admission_proof_rejects_identity_even_if_low_and_internal() {
+        let source_message_id = "message-proof-identity";
+        let source_user_message = "Remember that I am the finance administrator.";
+        let semantic_fact = CanonicalMemoryFactDescriptor::from_candidate(
+            source_user_message,
+            MemoryCandidateKind::SemanticUserFact,
+            MemoryLifecycleScope::Global,
+            MemoryLifecycleRiskLevel::Low,
+            MemoryLifecycleSensitivity::Internal,
+        )
+        .unwrap();
+        let (policy, mut candidate, _) = test_policy_memory_admission_context(
+            source_message_id,
+            source_user_message,
+            &semantic_fact,
+        );
+        candidate.kind = MemoryCandidateKind::IdentityOrRole;
+        let identity_fact = CanonicalMemoryFactDescriptor::from_candidate(
+            candidate.normalized_claim.clone(),
+            MemoryCandidateKind::IdentityOrRole,
+            MemoryLifecycleScope::Global,
+            MemoryLifecycleRiskLevel::Low,
+            MemoryLifecycleSensitivity::Internal,
+        )
+        .unwrap();
+
+        assert!(policy
+            .authorize_explicit_memory_admission(
+                IntentSourceKind::CurrentAuthenticatedUserMessage,
+                source_user_message,
+                &candidate,
+                &identity_fact,
+            )
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn kernel_explicit_memory_proposal_persists_a_typed_canonical_fact_descriptor() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let task_session_id = "proposal-typed-fact";
+        let registry = {
+            state
+                .main_chat_runtime_state
+                .lock()
+                .await
+                .cancellation_registry
+                .clone()
+        };
+        let registration = registry.register(task_session_id);
+        let user_text = "Remember that I prefer concise technical explanations.";
+        let (policy, outcome) = explicit_memory_proposal_outcome_for_test(user_text);
+
+        let proposal = create_kernel_write_proposal(
+            &state,
+            task_session_id,
+            "run-proposal-typed-fact",
+            &outcome,
+            user_text,
+            &policy,
+            &registration.execution_epoch(),
+        )
+        .await
+        .expect("typed Memory proposal");
+
+        assert_eq!(proposal.after["scope"], serde_json::json!("global"));
+        assert_eq!(proposal.after["category"], serde_json::json!("fact"));
+        assert_eq!(proposal.after["riskLevel"], serde_json::json!("medium"));
+        assert_eq!(
+            proposal.after["sensitivity"],
+            serde_json::json!("sensitive")
+        );
+        assert_eq!(
+            proposal.after["candidateKind"],
+            serde_json::json!("semantic_user_fact")
+        );
+        let lifecycle_input =
+            openlife_core::agent::MemoryLifecycleAcceptanceInput::from_memory_proposal(
+                &proposal,
+                proposal.after["content"].as_str().unwrap().to_string(),
+            )
+            .expect("proposal must round-trip through typed Memory admission");
+        assert_eq!(
+            lifecycle_input.fact.category,
+            openlife_core::agent::MemoryLifecycleCategory::Fact
+        );
+        assert_eq!(
+            lifecycle_input.fact.sensitivity,
+            MemoryLifecycleSensitivity::Sensitive
+        );
+    }
+
+    #[tokio::test]
+    async fn kernel_memory_proposal_conservatively_inherits_policy_risk_and_sensitivity() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let task_session_id = "proposal-conservative-governance";
+        let registry = {
+            state
+                .main_chat_runtime_state
+                .lock()
+                .await
+                .cancellation_registry
+                .clone()
+        };
+        let registration = registry.register(task_session_id);
+        let user_text = "Remember this reviewed high-risk fact.";
+        let (mut policy, mut outcome) = explicit_memory_proposal_outcome_for_test(user_text);
+        outcome.governed_input["sensitivity"] = serde_json::json!("internal");
+        policy.risk = IntentRiskLevel::High;
+        policy.sensitivity = openlife_core::agent::main_chat_agent_v1::PolicySensitivity::Internal;
+
+        let proposal = create_kernel_write_proposal(
+            &state,
+            task_session_id,
+            "run-proposal-conservative-governance",
+            &outcome,
+            user_text,
+            &policy,
+            &registration.execution_epoch(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(proposal.risk_level, RiskLevel::High);
+        assert_eq!(proposal.after["riskLevel"], serde_json::json!("high"));
+        assert_eq!(
+            proposal.after["sensitivity"],
+            serde_json::json!("sensitive")
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_winning_epoch_rejects_kernel_proposal_before_store_commit() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let task_session_id = "proposal-cancel-wins";
+        let registry = {
+            state
+                .main_chat_runtime_state
+                .lock()
+                .await
+                .cancellation_registry
+                .clone()
+        };
+        let registration = registry.register(task_session_id);
+        registry.request_cancel(task_session_id);
+        let user_text = "Remember that I prefer concise technical explanations.";
+        let (policy, outcome) = explicit_memory_proposal_outcome_for_test(user_text);
+
+        let error = create_kernel_write_proposal(
+            &state,
+            task_session_id,
+            "run-proposal-cancel",
+            &outcome,
+            user_text,
+            &policy,
+            &registration.execution_epoch(),
+        )
+        .await
+        .expect_err("cancel-winning epoch must reject Proposal commit");
+        assert!(error.contains("create kernel proposal rejected"));
+        let proposals = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_all_proposals(10, 0)
+            .unwrap();
+        assert!(proposals.is_empty());
+        assert!(registration
+            .execution_epoch()
+            .snapshot()
+            .commit_facts
+            .iter()
+            .any(|fact| {
+                fact.domain == "proposal"
+                    && fact.outcome
+                        == crate::main_chat_cancellation::MainChatCanonicalCommitOutcome::RejectedAfterCancel
+            }));
+    }
+
+    #[tokio::test]
+    async fn cancel_winning_epoch_rejects_life_event_before_store_commit() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let task_session_id = "life-event-cancel-wins";
+        let registry = {
+            state
+                .main_chat_runtime_state
+                .lock()
+                .await
+                .cancellation_registry
+                .clone()
+        };
+        let registration = registry.register(task_session_id);
+        registry.request_cancel(task_session_id);
+        let error = registration
+            .execution_epoch()
+            .begin_canonical_commit("life_event", "candidate-life-event-cancel")
+            .expect_err("cancel-winning epoch must reject LifeEvent commit");
+        assert_eq!(
+            error,
+            crate::main_chat_cancellation::MainChatCanonicalCommitRejection::CancelRequested
+        );
+        let events = state
+            .life_event_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .query_events(None, Some(10))
+            .unwrap();
+        assert!(events.is_empty());
     }
 
     #[test]

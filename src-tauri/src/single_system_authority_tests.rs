@@ -218,6 +218,196 @@ fn source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
         .unwrap_or_else(|| panic!("missing function end marker: {end}"))
 }
 
+#[test]
+fn explicit_provider_probe_authority_has_one_opaque_product_issuance_route() {
+    let network_client = read_repo_file("openlife-core/src/network_client.rs");
+    let grant_fields = source_between(
+        &network_client,
+        "pub struct ExplicitProviderProbeGrant {",
+        "}\n\n/// Non-authorizing",
+    );
+    assert!(
+        !grant_fields.contains("pub ") && !grant_fields.contains("pub("),
+        "ExplicitProviderProbeGrant fields must remain private so sibling modules cannot forge a struct literal"
+    );
+    assert!(
+        !network_client.contains("pub fn issue_explicit_provider_probe_grant"),
+        "the retired raw policy/decision/string grant constructor must stay absent"
+    );
+    assert!(
+        network_client.contains("pub(crate) struct ExplicitProviderProbeIssuer"),
+        "the provider-probe issuer must remain crate-private"
+    );
+    assert!(
+        !network_client.contains("pub struct ExplicitProviderProbeIssuer"),
+        "the provider-probe issuer must never become a public capability"
+    );
+    let tool_permissions = read_repo_file("openlife-core/src/tool_permissions.rs");
+    let reviewed_network_grant = source_between(
+        &tool_permissions,
+        "pub fn grant_reviewed_network_once(",
+        "    pub fn grant_action_bound(",
+    );
+    assert!(
+        reviewed_network_grant.contains("ClaimedReviewAcceptanceSnapshot"),
+        "reviewed network AllowOnce creation must consume non-serializable ReviewWorkflow proof"
+    );
+    let probe_issuance = source_between(
+        &tool_permissions,
+        "pub fn issue_explicit_provider_probe_grant(",
+        "    pub fn consume_reviewed_network_once(",
+    );
+    assert!(
+        probe_issuance.contains("Option<ConsumedReviewedNetworkPermission>")
+            && !probe_issuance.contains("permission_id: Option<&str>"),
+        "provider-probe issuance must consume opaque AllowOnce proof, never a serialized permission id"
+    );
+
+    for path in source_files(&["openlife-core/src"]) {
+        let repo_path = to_repo_path(&path);
+        if repo_path == "openlife-core/src/network_client.rs" {
+            continue;
+        }
+        let source = fs::read_to_string(&path).expect("read core Rust source");
+        let production = strip_cfg_test_module(&source);
+        if production.contains("create_explicit_provider_probe_authority") {
+            assert_eq!(
+                repo_path, "openlife-core/src/tool_permissions.rs",
+                "only the canonical ToolPermissionStore may own the paired probe authority factory"
+            );
+        }
+        assert!(
+            !production.contains("claim_explicit_provider_probe_issuer"),
+            "schedulers and core product modules must not expose issuer claims: {repo_path}"
+        );
+        if production.contains("issue_governed_probe_grant") {
+            assert_eq!(
+                repo_path, "openlife-core/src/tool_permissions.rs",
+                "only the canonical ToolPermissionStore may consume the opaque issuer"
+            );
+        }
+        let has_grant_literal = production.lines().any(|line| {
+            line.contains("= ExplicitProviderProbeGrant {")
+                || line
+                    .trim_start()
+                    .starts_with("ExplicitProviderProbeGrant {")
+        });
+        assert!(
+            !has_grant_literal,
+            "core sibling modules must not construct an explicit provider probe grant: {repo_path}"
+        );
+    }
+
+    for path in source_files(&["src-tauri/src"]) {
+        let repo_path = to_repo_path(&path);
+        if repo_path == "src-tauri/src/single_system_authority_tests.rs" {
+            continue;
+        }
+        let source = fs::read_to_string(&path).expect("read product Rust source");
+        let production = strip_cfg_test_module(&source);
+        assert!(
+            !production.contains("claim_explicit_provider_probe_issuer")
+                && !production.contains("issue_governed_probe_grant")
+                && !production.contains("create_explicit_provider_probe_authority"),
+            "Tauri product code must not own or consume provider-probe issuers: {repo_path}"
+        );
+        if production.contains("grant_reviewed_network_once(") {
+            assert_eq!(
+                repo_path, "src-tauri/src/commands/proposal.rs",
+                "only accepted Proposal application may materialize reviewed network AllowOnce"
+            );
+        }
+        let has_grant_literal = production.lines().any(|line| {
+            line.contains("= ExplicitProviderProbeGrant {")
+                || line
+                    .trim_start()
+                    .starts_with("ExplicitProviderProbeGrant {")
+        });
+        assert!(
+            !has_grant_literal,
+            "product source must not construct an explicit provider probe grant: {repo_path}"
+        );
+    }
+
+    let scheduler_source = read_repo_file("openlife-core/src/scheduler.rs");
+    let scheduler = strip_cfg_test_module(&scheduler_source);
+    assert!(scheduler.contains(
+        "explicit_provider_probe_verifier: Option<crate::network_client::ExplicitProviderProbeVerifier>"
+    ));
+    assert!(scheduler.contains("explicit_provider_probe_verifier: None"));
+    assert!(scheduler.contains("verifier is not bound by ToolPermissionStore"));
+    assert!(!scheduler.contains("create_explicit_provider_probe_authority"));
+
+    let governance = read_repo_file("src-tauri/src/provider_network_consent.rs");
+    assert!(
+        governance.contains(".issue_explicit_provider_probe_grant("),
+        "provider network governance must consume the canonical ToolPermissionStore authority"
+    );
+}
+
+#[test]
+fn replay_reconciliation_requires_event_store_attestation_and_one_product_delivery_route() {
+    let issuer_call = ".issue_replay_prepared_tool_reconciliation_authority_binding(";
+    let apply_call = ".apply_prepared_tool_reconciliation_after_restart(";
+    let mut issuer_calls = BTreeMap::new();
+    let mut apply_calls = BTreeMap::new();
+    for file in source_files(&["openlife-core/src", "src-tauri/src"]) {
+        let rel = to_repo_path(&file);
+        if rel.ends_with("_tests.rs")
+            || rel.contains("/tests/")
+            || rel == "src-tauri/src/single_system_authority_tests.rs"
+        {
+            continue;
+        }
+        let source = fs::read_to_string(&file).unwrap_or_else(|err| panic!("read {rel}: {err}"));
+        let stripped = if rel == "openlife-core/src/agent/main_chat_agent_v1.rs" {
+            source
+                .split("\n#[cfg(test)]\nmod action_queue_replay_claim_tests")
+                .next()
+                .unwrap_or(&source)
+        } else {
+            strip_cfg_test_module(&source)
+        };
+        let issuer_count = count_occurrences(stripped, issuer_call);
+        if issuer_count > 0 {
+            issuer_calls.insert(rel.clone(), issuer_count);
+        }
+        let apply_count = count_occurrences(stripped, apply_call);
+        if apply_count > 0 {
+            apply_calls.insert(rel, apply_count);
+        }
+    }
+    assert_eq!(
+        issuer_calls,
+        BTreeMap::new(),
+        "ActionQueue must not expose a reconciliation issuer over caller-constructible envelopes"
+    );
+    assert_eq!(
+        apply_calls,
+        BTreeMap::from([("src-tauri/src/bootstrap.rs".to_string(), 1)]),
+        "only trusted bootstrap delivery may apply the signed reconciliation envelope"
+    );
+
+    let bootstrap = read_repo_file("src-tauri/src/bootstrap.rs");
+    let load = bootstrap
+        .find(".pending_tool_queue_reconciliation_projections(")
+        .expect("bootstrap loads EventStore-validated projections");
+    let apply = bootstrap
+        .find("apply_tool_queue_reconciliation_projection(&queue, &projection)")
+        .expect("bootstrap calls the sole EventStore-attested reconciliation bridge");
+    let acknowledge = bootstrap
+        .find(".mark_tool_queue_reconciliation_projection_applied(")
+        .expect("bootstrap acknowledges the exact EventStore projection");
+    assert!(
+        load < apply && apply < acknowledge,
+        "release bootstrap must load the EventStore-attested projection, apply it, then acknowledge the outbox in that order"
+    );
+    assert!(
+        bootstrap.contains("event_store_attestation: &projection.event_store_attestation"),
+        "bootstrap must pass through the EventStore attestation instead of minting ActionQueue authority"
+    );
+}
+
 fn expected_count_map(category: &str) -> BTreeMap<String, usize> {
     let inventory = inventory();
     inventory_entries(&inventory, category)
@@ -1705,15 +1895,11 @@ fn single_system_phase4_review_workflow_outcome_is_authoritative() {
         "openlife-core/src/agent/action_executor/declarative_stubs.rs",
         "openlife-core/src/agent/action_executor/execution_tools.rs",
         "openlife-core/src/agent/action_executor/tool_executor.rs",
-        "openlife-core/src/agent/maturation.rs",
         "openlife-core/src/agent/plan_execute.rs",
-        "src-tauri/src/main_chat_proposal_support.rs",
-        "src-tauri/src/main_chat_generation_support.rs",
         "src-tauri/src/main_chat_kernel.rs",
-        "src-tauri/src/commands/agent.rs",
+        "src-tauri/src/provider_network_consent.rs",
         "src-tauri/src/commands/builder.rs",
         "src-tauri/src/commands/calibration.rs",
-        "src-tauri/src/commands/execution.rs",
     ] {
         assert!(
             product_paths.contains(required_path),
@@ -1721,13 +1907,48 @@ fn single_system_phase4_review_workflow_outcome_is_authoritative() {
         );
         let raw_source = read_repo_file(required_path);
         let source = strip_cfg_test_module(&raw_source);
-        assert!(
-            source.contains("ReviewWorkflow::new"),
-            "Phase4 product path {required_path} must call ReviewWorkflow"
-        );
+        if required_path.starts_with("openlife-core/src/agent/action_executor/") {
+            assert!(
+                source.contains("ctx.submit_review_proposal"),
+                "Phase4 ToolGateway product path {required_path} must enter the deep ReviewWorkflow gateway"
+            );
+            assert!(
+                !source.contains("ReviewWorkflow::new"),
+                "Phase4 ToolGateway product path {required_path} must not recreate ReviewWorkflow ownership"
+            );
+        } else {
+            assert!(
+                source.contains("ReviewWorkflow::new"),
+                "Phase4 product path {required_path} must call ReviewWorkflow"
+            );
+        }
         assert!(
             source.contains("outcome.proposal_id()") || source.contains("outcome.proposal"),
             "Phase4 product path {required_path} must consume ReviewWorkflowOutcome as the authoritative proposal fact"
+        );
+    }
+
+    assert!(
+        product_paths.contains("openlife-core/src/agent/action_executor/mod.rs"),
+        "Phase4 source map must expose the deep ActionExecutor ReviewWorkflow gateway"
+    );
+    let action_executor_owner = read_repo_file("openlife-core/src/agent/action_executor/mod.rs");
+    assert_eq!(
+        count_occurrences(&action_executor_owner, "ReviewWorkflow::new"),
+        1,
+        "ActionExecutor must expose one deep ReviewWorkflow owner instead of duplicating it in tool implementations"
+    );
+    for owner_marker in [
+        "pub(crate) fn submit_review_proposal",
+        "canonical_write_admission",
+        "CanonicalWriteAdmissionRequest::new",
+        "permit.finish_committed()",
+        "permit.finish_noop()",
+        "permit.finish_failed()",
+    ] {
+        assert!(
+            action_executor_owner.contains(owner_marker),
+            "ActionExecutor ReviewWorkflow gateway lost ownership marker {owner_marker}"
         );
     }
 
@@ -1736,6 +1957,22 @@ fn single_system_phase4_review_workflow_outcome_is_authoritative() {
         !repo_root().join(retired_stage4_memory_knowledge).exists(),
         "Phase7 contract requires the historical Stage4 memory/knowledge shell to be deleted from the product crate"
     );
+    let retired_proposal_support = "src-tauri/src/main_chat_proposal_support.rs";
+    assert!(
+        !repo_root().join(retired_proposal_support).exists(),
+        "the dormant parallel Main Chat Proposal route must remain deleted"
+    );
+    let lib_source = read_repo_file("src-tauri/src/lib.rs");
+    for retired_symbol in [
+        "mod main_chat_proposal_support;",
+        "create_main_chat_agent_proposal(",
+        "attach_main_chat_tool_permission_proposal_metadata(",
+    ] {
+        assert!(
+            !lib_source.contains(retired_symbol),
+            "retired Proposal symbol {retired_symbol} must remain absent from the product crate"
+        );
+    }
     let memory_proposal_raw = read_repo_file("src-tauri/src/main_chat_memory_proposals.rs");
     let memory_proposal_source = strip_cfg_test_module(&memory_proposal_raw);
     assert!(
@@ -1754,24 +1991,12 @@ fn single_system_phase4_review_workflow_outcome_is_authoritative() {
             "add_generated_proposal(&agent_run.id, &proposal.id)",
         ),
         (
-            "src-tauri/src/main_chat_proposal_support.rs",
-            "let proposal_id = proposal.id.clone();",
-        ),
-        (
             "src-tauri/src/commands/builder.rs",
             "store.add_generated_proposal(&run_id, &proposal.id)",
         ),
         (
             "src-tauri/src/commands/calibration.rs",
             "created_ids.push(proposal.id",
-        ),
-        (
-            "src-tauri/src/commands/agent.rs",
-            "run.add_generated_proposal(&proposal.id)",
-        ),
-        (
-            "src-tauri/src/commands/execution.rs",
-            "run.add_generated_proposal(&proposal.id)",
         ),
         (
             "openlife-core/src/agent/maturation.rs",
@@ -1838,7 +2063,6 @@ fn single_system_phase5_product_memory_lifemodel_writes_use_gateways() {
         ".save_memory_record(",
         ".record_state_entry(",
         ".insert(&session_id",
-        ".insert_batch(",
         ".replace_all_messages(",
         ".replace_all_chunks(",
         ".archive_lifecycle_memory_records(",
@@ -1856,6 +2080,56 @@ fn single_system_phase5_product_memory_lifemodel_writes_use_gateways() {
         lifemodel_gateway.contains("manager.save("),
         "Phase5 LifeModelWriteGateway must own LifeModelManager::save"
     );
+    for required_owner_marker in [
+        "FileMutationJournal",
+        "stage_materialization_patches",
+        "reconcile_lifemodel_file_mutations_with_state",
+        "ensure_projection_snapshot",
+    ] {
+        assert!(
+            lifemodel_gateway.contains(required_owner_marker),
+            "Phase5 LifeModelWriteGateway must own durable file mutation/projection marker {required_owner_marker}"
+        );
+    }
+    for retired_imperative_tail in [".create_patch(", "snapshot_for_patch(&after_model"] {
+        assert!(
+            !lifemodel_gateway.contains(retired_imperative_tail),
+            "Phase5 LifeModelWriteGateway must delete post-canonical imperative tail {retired_imperative_tail}"
+        );
+    }
+    let bootstrap = read_repo_file("src-tauri/src/bootstrap.rs");
+    assert!(
+        bootstrap.contains("reconcile_lifemodel_file_mutations_with_state"),
+        "Phase5 startup must reconcile the canonical LifeModel file journal before product use"
+    );
+    for (path, start, end) in [
+        (
+            "src-tauri/src/commands/life_model.rs",
+            "pub(crate) async fn save_life_model_with_state",
+            "#[tauri::command]\npub async fn save_life_model",
+        ),
+        (
+            "src-tauri/src/commands/version.rs",
+            "async fn restore_snapshot_governed_operation",
+            "#[tauri::command]\npub async fn diff_snapshots",
+        ),
+        (
+            "src-tauri/src/commands/settings.rs",
+            "async fn import_all_data_governed_operation",
+            "async fn apply_import_payload",
+        ),
+    ] {
+        let source = read_repo_file(path);
+        let body = source_between(&source, start, end);
+        assert!(
+            body.contains("ensure_projection_snapshot"),
+            "governed destructive path {path} must create its required pre-change snapshot"
+        );
+        assert!(
+            !body.contains(".ok()"),
+            "governed destructive path {path} must not swallow required pre-change snapshot failure"
+        );
+    }
     assert!(
         !strip_cfg_test_module(&read_repo_file("src-tauri/src/lib.rs")).contains("manager.save("),
         "Phase5 persist_life_model compatibility wrapper must not save directly"
@@ -2330,5 +2604,267 @@ fn single_system_phase7_active_docs_do_not_authorize_old_routes() {
     assert!(
         violations.is_empty(),
         "Phase7 contract requires active docs to point at the single-system path, not old Stage/Beta/Migration routes: {violations:?}"
+    );
+}
+
+#[test]
+fn single_system_memory_context_uses_retrieval_truth_not_asset_liveness() {
+    let preprocess = read_repo_file("src-tauri/src/main_chat_preprocess.rs");
+    let context_loader = read_repo_file("src-tauri/src/main_chat_context_loader.rs");
+    let kernel = read_repo_file("src-tauri/src/main_chat_kernel.rs");
+    let retired_filter = ["filter_canonical_active", "_memory_results"].concat();
+
+    assert!(!preprocess.contains(&retired_filter));
+    assert!(preprocess.contains("filter_canonical_retrievable_memory_results"));
+    assert!(preprocess.contains("is_memory_retrievable(memory_id)"));
+    assert!(context_loader.contains("retrievable_lifecycle_context_candidates(state).await"));
+    assert!(kernel.contains("retrievable_lifecycle_context_candidates(state).await"));
+    assert!(context_loader.contains("list_retrievable_records(None, 8)"));
+
+    let action_executor = read_repo_file("openlife-core/src/agent/action_executor/mod.rs");
+    let core_os_tools = read_repo_file("openlife-core/src/agent/action_executor/core_os_tools.rs");
+    let agent_loop = read_repo_file("openlife-core/src/agent/agent_loop.rs");
+    assert!(action_executor.contains("ctx.filter_retrievable_memory_hits("));
+    assert!(core_os_tools.contains("ctx.filter_retrievable_memory_hits(hits)"));
+    assert!(agent_loop.contains("action_ctx.filter_retrievable_memory_hits("));
+}
+
+#[test]
+fn single_system_memory_archive_contract_has_no_vector_row_id_authority() {
+    let core_os_tools = read_repo_file("openlife-core/src/agent/action_executor/core_os_tools.rs");
+    let manifests = read_repo_file("openlife-core/src/mcp.rs");
+    assert!(core_os_tools.contains("validated_memory_archive_proposal(args)?"));
+    assert!(manifests.contains("memory_archive_owner_parameters()"));
+}
+
+#[test]
+fn single_system_posthoc_proposal_engine_and_product_consumers_stay_absent() {
+    assert!(
+        !repo_root()
+            .join("openlife-core/src/agent/proposal_engine.rs")
+            .exists(),
+        "the former product-wired ProposalEngine must not return as a second proposal authority"
+    );
+    for former_path in [
+        "openlife-core/src/agent/proposal_generators/chat.rs",
+        "openlife-core/src/agent/proposal_generators/mod.rs",
+    ] {
+        assert!(
+            !repo_root().join(former_path).exists(),
+            "the former ProposalEngine generator dependency must stay absent: {former_path}"
+        );
+    }
+
+    let inventory = inventory();
+    let inventoried_ids = inventory_entries(&inventory, "old_runtime_surfaces")
+        .into_iter()
+        .map(|entry| entry_str(entry, "id"))
+        .collect::<BTreeSet<_>>();
+    for required_consumer in [
+        "core_posthoc_proposal_engine_module",
+        "proposal_engine_app_state_owner_symbol",
+        "proposal_engine_bootstrap_constructor_symbol",
+        "proposal_engine_bootstrap_chat_adapter_registration_symbol",
+        "proposal_engine_main_chat_posthoc_generator_symbol",
+        "proposal_engine_main_chat_posthoc_gate_symbol",
+        "proposal_engine_agent_run_replay_consumer_symbol",
+        "proposal_engine_agent_module_reexport_symbol",
+    ] {
+        assert!(
+            inventoried_ids.contains(required_consumer),
+            "ProposalEngine deletion inventory must retain the real former product consumer: {required_consumer}"
+        );
+    }
+
+    let retired_authority_markers = [
+        "ProposalEngine",
+        "ProposalGenerator",
+        "ChatProposalGeneratorAdapter",
+        "generate_and_persist_chat_proposals",
+        "should_generate_chat_proposals",
+        "generate_from_run(&run",
+    ];
+    for file in source_files(&["openlife-core/src", "src-tauri/src", "frontend/src"]) {
+        let rel = to_repo_path(&file);
+        if rel.ends_with("_tests.rs")
+            || rel.ends_with(".test.ts")
+            || rel.ends_with(".test.tsx")
+            || rel == "src-tauri/src/single_system_authority_tests.rs"
+            || rel.starts_with("openlife-core/src/agent/tests/")
+            || rel.starts_with("frontend/src/test/")
+        {
+            continue;
+        }
+        let source = fs::read_to_string(&file).unwrap_or_else(|err| panic!("read {rel}: {err}"));
+        let product_source = strip_cfg_test_module(&source);
+        for retired in retired_authority_markers {
+            assert!(
+                !product_source.contains(retired),
+                "former post-hoc proposal authority or product consumer returned as {retired}: {rel}"
+            );
+        }
+    }
+
+    let command_surface = read_repo_file("src-tauri/src/main_chat_command_surface_tests.rs");
+    assert!(
+        command_surface.contains("ordinary_chat_finalization_never_creates_post_hoc_proposals"),
+        "ordinary provider or assistant output must retain a behavioral counterexample against post-hoc Proposal creation"
+    );
+    let review_memory = read_repo_file("frontend/src/pages/settings/tabs/ReviewMemoryTab.tsx");
+    assert!(
+        review_memory.contains("后端 PolicyRouter 路由")
+            && review_memory.contains("按后端回执显示"),
+        "Mailbox & Memory must describe backend-owned governance after inert controls are removed"
+    );
+
+    let manifest = read_repo_file("plans/openlife_single_system_deletion_manifest.md");
+    let preparation = read_repo_file("plans/openlife_single_system_development_preparation.md");
+    for retired in [
+        "callerless ProposalEngine",
+        "zero-consumer ProposalEngine",
+        "ProposalEngine and its feedback, memory, tool, builder, and calibration generators formed a dormant",
+    ] {
+        assert!(
+            !manifest.contains(retired) && !preparation.contains(retired),
+            "active deletion authority must not restore the false callerless ProposalEngine history: {retired}"
+        );
+    }
+}
+
+#[test]
+fn single_system_d011_conversation_and_retrieval_parallel_routes_stay_absent() {
+    let preprocess = read_repo_file("src-tauri/src/main_chat_preprocess.rs");
+    let kernel = read_repo_file("src-tauri/src/main_chat_kernel.rs");
+    let generation = read_repo_file("src-tauri/src/main_chat_generation_support.rs");
+    let runtime = read_repo_file("src-tauri/src/main_chat_turn_runtime.rs");
+    let gateway = read_repo_file("src-tauri/src/memory_gateway.rs");
+    let memory_store = read_repo_file("openlife-core/src/memory.rs");
+    let action_context = read_repo_file("openlife-core/src/agent/action_executor/mod.rs");
+
+    for retired in [
+        "preprocess_chat_input_v2",
+        "save_turn_message_if_needed",
+        "persist_chat_message_if_needed",
+    ] {
+        assert!(
+            !preprocess.contains(retired)
+                && !kernel.contains(retired)
+                && !generation.contains(retired)
+                && !gateway.contains(retired),
+            "D011 retired content-last/parallel preprocessing route returned: {retired}"
+        );
+    }
+    assert!(runtime.contains("save_turn_user_message_idempotent_with_state("));
+    assert!(generation.contains("main_chat_assistant_message:{}:{}"));
+    assert!(gateway.contains("save_conversation_message_idempotent_with_state("));
+
+    assert!(memory_store.contains("reject_memory_lifecycle_retrieval_insert"));
+    assert!(memory_store
+        .contains("MemoryLifecycle retrieval disposition is owned by MemoryLifecycleStore"));
+    assert!(action_context.contains("MemoryRetrievalAuthorityError"));
+    assert!(action_context.contains("memory_lifecycle_reader_unavailable"));
+}
+
+#[test]
+fn single_system_d049_keyword_conversation_update_routes_stay_absent() {
+    let inventory = inventory();
+    let conversation_update_entry = inventory_entries(&inventory, "old_runtime_surfaces")
+        .into_iter()
+        .find(|entry| entry_str(entry, "id") == "main_chat_conversation_updates_module")
+        .expect("D049 conversation-update deletion inventory entry");
+    let declared_exact_symbols = conversation_update_entry
+        .get("former_symbols")
+        .and_then(serde_json::Value::as_array)
+        .expect("D049 inventory former_symbols")
+        .iter()
+        .map(|value| value.as_str().expect("D049 former symbol string"))
+        .collect::<BTreeSet<_>>();
+    let declared_semantic_markers = conversation_update_entry
+        .get("semantic_markers")
+        .and_then(serde_json::Value::as_array)
+        .expect("D049 inventory semantic_markers")
+        .iter()
+        .map(|value| value.as_str().expect("D049 semantic marker string"))
+        .collect::<BTreeSet<_>>();
+
+    let retired_exact_symbols = [
+        ["try", "_auto_checkin_daily_goals"].concat(),
+        ["build", "_reasoning_trace_prompt"].concat(),
+        ["capture", "_conversation_signals"].concat(),
+    ];
+    let retired_semantic_markers = [["OrdinaryChat", "AutoCheckinSourceData"].concat()];
+    assert_eq!(
+        declared_exact_symbols,
+        retired_exact_symbols
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        "D049 inventory must enumerate every exact retired conversation-update symbol"
+    );
+    assert_eq!(
+        declared_semantic_markers,
+        retired_semantic_markers
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        "D049 inventory must enumerate semantic markers that could rename the retired route"
+    );
+
+    for former_path in ["src-tauri/src/main_chat_conversation_updates.rs"] {
+        assert!(
+            !repo_root().join(former_path).exists(),
+            "D049 callerless conversation-inference module must stay absent: {former_path}"
+        );
+    }
+
+    for file in source_files(&["openlife-core/src", "src-tauri/src", "frontend/src"]) {
+        let rel = to_repo_path(&file);
+        if rel.ends_with("_tests.rs")
+            || rel.ends_with(".test.ts")
+            || rel.ends_with(".test.tsx")
+            || rel == "src-tauri/src/single_system_authority_tests.rs"
+            || rel.starts_with("openlife-core/src/agent/tests/")
+            || rel.starts_with("frontend/src/test/")
+        {
+            continue;
+        }
+        let source = fs::read_to_string(&file).unwrap_or_else(|err| panic!("read {rel}: {err}"));
+        let production = strip_cfg_test_module(&source);
+        for retired in retired_exact_symbols
+            .iter()
+            .chain(retired_semantic_markers.iter())
+        {
+            assert!(
+                !production.contains(retired.as_str()),
+                "D049 retired keyword conversation-update route returned as {retired}: {rel}"
+            );
+        }
+    }
+
+    let command_surface = read_repo_file("src-tauri/src/main_chat_command_surface_tests.rs");
+    let auto_checkin_counterexample = [
+        "main_chat_kernel_goal_4_ordinary_",
+        "auto_checkin_does_not_materialize_truth",
+    ]
+    .concat();
+    assert!(
+        command_surface.contains(&auto_checkin_counterexample),
+        "ordinary Main Chat must retain the counterexample proving auto-checkin cannot silently materialize truth"
+    );
+    let auto_checkin_body = source_between(
+        &command_surface,
+        "async fn main_chat_kernel_goal_4_ordinary_auto_checkin_does_not_materialize_truth()",
+        "async fn main_chat_direct_answer_guard_blocks_false_memory_or_life_event_claims()",
+    );
+    assert!(
+        auto_checkin_body.contains("implicit_life_event_ids.is_empty()")
+            && auto_checkin_body.contains("list_command_surface_life_events(&send_state)")
+            && auto_checkin_body.contains(".is_empty()"),
+        "D049 counterexample must assert zero inferred LifeEvent ids and zero canonical LifeEvent rows, not merely keep the old test name"
+    );
+    assert!(
+        !auto_checkin_body.contains("auto-checkin life event ids")
+            && !auto_checkin_body.contains("await.len(), 1"),
+        "D049 retired auto-checkin expectation must not return behind a green string-only guard"
     );
 }

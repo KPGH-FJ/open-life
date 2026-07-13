@@ -81,6 +81,7 @@ impl From<ProposalStatus> for ReviewItemDecisionStatus {
             ProposalStatus::Rejected => Self::Rejected,
             ProposalStatus::Edited => Self::Edited,
             ProposalStatus::Postponed => Self::Deferred,
+            ProposalStatus::Expired => Self::Unknown,
         }
     }
 }
@@ -367,12 +368,24 @@ fn edit_blocker(
     if is_unsupported_type(proposal.proposal_type) {
         return Some("This review item type has no backend edit/apply pathway yet.".into());
     }
+    if is_builder_lifemodel_patch_batch(proposal) {
+        return Some(
+            "Builder batch review requires a typed Builder editor; generic edit is unavailable."
+                .into(),
+        );
+    }
     if proposal.proposal_type == ProposalType::ExternalWriteAction
         && !is_path_in_safe_paths(external_write_path(proposal), &input.safe_paths)
     {
         return Some("The external write path is outside configured safe paths.".into());
     }
     None
+}
+
+fn is_builder_lifemodel_patch_batch(proposal: &AgentProposal) -> bool {
+    proposal.proposal_type == ProposalType::LifeModelUpdate
+        && proposal.source == ProposalSource::BuilderReview
+        && proposal.affected_path == crate::life_model::patch::LIFEMODEL_PATCH_BATCH_PATH
 }
 
 fn approve_blocker(proposal: &AgentProposal, input: &ReviewCenterBuildInput) -> Option<String> {
@@ -450,7 +463,9 @@ fn materialization_status_for(
     }
     match proposal.status {
         ProposalStatus::Accepted => ReviewItemMaterializationStatus::Unknown,
-        ProposalStatus::Rejected => ReviewItemMaterializationStatus::NotApplicable,
+        ProposalStatus::Rejected | ProposalStatus::Expired => {
+            ReviewItemMaterializationStatus::NotApplicable
+        }
         ProposalStatus::Pending | ProposalStatus::Edited | ProposalStatus::Postponed => {
             ReviewItemMaterializationStatus::NotStarted
         }
@@ -672,6 +687,33 @@ mod tests {
         assert!(!edit.enabled);
         assert!(reject.enabled);
         assert_eq!(model.summary.blocked_action_count, 2);
+    }
+
+    #[test]
+    fn builder_batch_read_model_disables_the_unimplemented_generic_editor() {
+        let mut proposal = proposal(ProposalType::LifeModelUpdate);
+        proposal.source = ProposalSource::BuilderReview;
+        proposal.affected_path = crate::life_model::patch::LIFEMODEL_PATCH_BATCH_PATH.into();
+        proposal.after = json!({
+            "schemaVersion": crate::life_model::patch::LIFEMODEL_PATCH_BATCH_SCHEMA_V1,
+            "operations": [{
+                "candidateId": "candidate-1",
+                "path": "identity.name",
+                "candidate": "Alex"
+            }]
+        });
+
+        let model = build_review_center_view_model(ReviewCenterBuildInput {
+            proposals: vec![proposal],
+            ..Default::default()
+        });
+        let edit = find_action(&model.items[0], ReviewActionKind::Edit);
+        assert!(!edit.enabled);
+        assert!(edit
+            .disabled_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("typed Builder editor")));
+        assert!(find_action(&model.items[0], ReviewActionKind::Approve).enabled);
     }
 
     #[test]

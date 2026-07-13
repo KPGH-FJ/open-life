@@ -9,7 +9,13 @@ use std::sync::Arc;
 /// Assembles context for an AgentRun by combining LifeModel, Memory, Privacy, and Tools.
 pub trait ContextAssembler: Send + Sync {
     fn name(&self) -> &'static str;
-    fn assemble(&self, input: &AssembleInput) -> Result<AssembleOutput>;
+    fn apply(&self, input: &AssembleInput, output: &mut AssembleOutput) -> Result<()>;
+
+    fn assemble(&self, input: &AssembleInput) -> Result<AssembleOutput> {
+        let mut output = AssembleOutput::from_input(input);
+        self.apply(input, &mut output)?;
+        Ok(output)
+    }
 }
 
 /// A single memory hit from vector or text search.
@@ -47,6 +53,28 @@ pub struct AssembleOutput {
     pub embed_error: Option<String>,
 }
 
+impl AssembleOutput {
+    fn from_input(input: &AssembleInput) -> Self {
+        Self {
+            life_model: input.life_model.clone(),
+            tools_prompt: input.tools_prompt.clone(),
+            privacy_map: HashMap::new(),
+            desensitized_messages: input.messages.clone(),
+            memory_context: String::new(),
+            context_summary: ContextSummary {
+                life_model_empty: input.life_model.is_effectively_empty(),
+                included_life_model_sections: Vec::new(),
+                memory_hit_count: 0,
+                memory_sources: Vec::new(),
+                used_tools_prompt: !input.tools_prompt.is_empty(),
+                redaction_applied: false,
+                redaction_level: crate::agent::types::RedactionLevel::None,
+            },
+            embed_error: None,
+        }
+    }
+}
+
 /// LifeModel assembler: loads and refreshes hot cache.
 pub struct LifeModelAssembler;
 
@@ -55,31 +83,16 @@ impl ContextAssembler for LifeModelAssembler {
         "life_model"
     }
 
-    fn assemble(&self, input: &AssembleInput) -> Result<AssembleOutput> {
-        let included_sections = vec![
+    fn apply(&self, input: &AssembleInput, output: &mut AssembleOutput) -> Result<()> {
+        output.life_model = input.life_model.clone();
+        output.context_summary.life_model_empty = input.life_model.is_effectively_empty();
+        output.context_summary.included_life_model_sections = vec![
             "identity".to_string(),
             "goals".to_string(),
             "capabilities".to_string(),
             "state".to_string(),
         ];
-
-        Ok(AssembleOutput {
-            life_model: input.life_model.clone(),
-            tools_prompt: input.tools_prompt.clone(),
-            privacy_map: HashMap::new(),
-            desensitized_messages: input.messages.clone(),
-            memory_context: String::new(),
-            context_summary: ContextSummary {
-                life_model_empty: input.life_model.is_effectively_empty(),
-                included_life_model_sections: included_sections,
-                memory_hit_count: 0,
-                memory_sources: vec![],
-                used_tools_prompt: !input.tools_prompt.is_empty(),
-                redaction_applied: false,
-                redaction_level: crate::agent::types::RedactionLevel::None,
-            },
-            embed_error: None,
-        })
+        Ok(())
     }
 }
 
@@ -91,7 +104,7 @@ impl ContextAssembler for MemoryAssembler {
         "memory"
     }
 
-    fn assemble(&self, input: &AssembleInput) -> Result<AssembleOutput> {
+    fn apply(&self, input: &AssembleInput, output: &mut AssembleOutput) -> Result<()> {
         let hit_count = input.memory_hits.len();
         let memory_context = input.memory_context.clone().unwrap_or_default();
 
@@ -112,27 +125,14 @@ impl ContextAssembler for MemoryAssembler {
             .map(|hit| hit.source.clone())
             .collect();
 
-        Ok(AssembleOutput {
-            life_model: input.life_model.clone(),
-            tools_prompt: input.tools_prompt.clone(),
-            privacy_map: HashMap::new(),
-            desensitized_messages: input.messages.clone(),
-            memory_context: memory_section,
-            context_summary: ContextSummary {
-                life_model_empty: input.life_model.is_effectively_empty(),
-                included_life_model_sections: vec![],
-                memory_hit_count: hit_count as i64,
-                memory_sources,
-                used_tools_prompt: !input.tools_prompt.is_empty(),
-                redaction_applied: false,
-                redaction_level: crate::agent::types::RedactionLevel::None,
-            },
-            embed_error: None,
-        })
+        output.memory_context = memory_section;
+        output.context_summary.memory_hit_count = hit_count as i64;
+        output.context_summary.memory_sources = memory_sources;
+        Ok(())
     }
 }
 
-/// Privacy assembler: desensitizes user messages.
+/// Privacy assembler: desensitizes every message selected for provider context.
 pub struct PrivacyAssembler;
 
 impl ContextAssembler for PrivacyAssembler {
@@ -140,22 +140,22 @@ impl ContextAssembler for PrivacyAssembler {
         "privacy"
     }
 
-    fn assemble(&self, input: &AssembleInput) -> Result<AssembleOutput> {
-        let mut desensitized = Vec::new();
-        let mut privacy_map = HashMap::new();
-
-        for msg in input.messages.iter() {
-            if msg.role == "user" {
-                let (masked, map) = input.privacy_engine.desensitize(&msg.content);
-                privacy_map.extend(map);
-                desensitized.push(ChatMessage {
-                    role: msg.role.clone(),
-                    content: masked,
-                });
-            } else {
-                desensitized.push(msg.clone());
-            }
-        }
+    fn apply(&self, input: &AssembleInput, output: &mut AssembleOutput) -> Result<()> {
+        let contents = input
+            .messages
+            .iter()
+            .map(|message| message.content.clone())
+            .collect::<Vec<_>>();
+        let (masked_contents, privacy_map) = input.privacy_engine.desensitize_batch(&contents);
+        let desensitized = input
+            .messages
+            .iter()
+            .zip(masked_contents)
+            .map(|(message, content)| ChatMessage {
+                role: message.role.clone(),
+                content,
+            })
+            .collect::<Vec<_>>();
 
         let redaction_level = if privacy_map.is_empty() {
             crate::agent::types::RedactionLevel::None
@@ -163,23 +163,11 @@ impl ContextAssembler for PrivacyAssembler {
             crate::agent::types::RedactionLevel::Light
         };
 
-        Ok(AssembleOutput {
-            life_model: input.life_model.clone(),
-            tools_prompt: input.tools_prompt.clone(),
-            privacy_map: privacy_map.clone(),
-            desensitized_messages: Arc::new(desensitized),
-            memory_context: String::new(),
-            context_summary: ContextSummary {
-                life_model_empty: input.life_model.is_effectively_empty(),
-                included_life_model_sections: vec![],
-                memory_hit_count: 0,
-                memory_sources: vec![],
-                used_tools_prompt: !input.tools_prompt.is_empty(),
-                redaction_applied: !privacy_map.is_empty(),
-                redaction_level,
-            },
-            embed_error: None,
-        })
+        output.privacy_map = privacy_map.clone();
+        output.desensitized_messages = Arc::new(desensitized);
+        output.context_summary.redaction_applied = !privacy_map.is_empty();
+        output.context_summary.redaction_level = redaction_level;
+        Ok(())
     }
 }
 
@@ -191,24 +179,10 @@ impl ContextAssembler for ToolsAssembler {
         "tools"
     }
 
-    fn assemble(&self, input: &AssembleInput) -> Result<AssembleOutput> {
-        Ok(AssembleOutput {
-            life_model: input.life_model.clone(),
-            tools_prompt: input.tools_prompt.clone(),
-            privacy_map: HashMap::new(),
-            desensitized_messages: input.messages.clone(),
-            memory_context: String::new(),
-            context_summary: ContextSummary {
-                life_model_empty: input.life_model.is_effectively_empty(),
-                included_life_model_sections: vec![],
-                memory_hit_count: 0,
-                memory_sources: vec![],
-                used_tools_prompt: !input.tools_prompt.is_empty(),
-                redaction_applied: false,
-                redaction_level: crate::agent::types::RedactionLevel::None,
-            },
-            embed_error: None,
-        })
+    fn apply(&self, input: &AssembleInput, output: &mut AssembleOutput) -> Result<()> {
+        output.tools_prompt = input.tools_prompt.clone();
+        output.context_summary.used_tools_prompt = !input.tools_prompt.is_empty();
+        Ok(())
     }
 }
 
@@ -241,59 +215,11 @@ impl ContextAssembler for CompositeAssembler {
         "composite"
     }
 
-    fn assemble(&self, input: &AssembleInput) -> Result<AssembleOutput> {
-        let mut output = AssembleOutput {
-            life_model: input.life_model.clone(),
-            tools_prompt: input.tools_prompt.clone(),
-            privacy_map: HashMap::new(),
-            desensitized_messages: input.messages.clone(),
-            memory_context: String::new(),
-            context_summary: ContextSummary {
-                life_model_empty: input.life_model.is_effectively_empty(),
-                included_life_model_sections: vec![],
-                memory_hit_count: 0,
-                memory_sources: vec![],
-                used_tools_prompt: !input.tools_prompt.is_empty(),
-                redaction_applied: false,
-                redaction_level: crate::agent::types::RedactionLevel::None,
-            },
-            embed_error: None,
-        };
-
+    fn apply(&self, input: &AssembleInput, output: &mut AssembleOutput) -> Result<()> {
         for assembler in &self.assemblers {
-            let partial = assembler.assemble(input)?;
-            // Merge partial output into accumulated output
-            output.privacy_map.extend(partial.privacy_map);
-            if !partial.desensitized_messages.is_empty() {
-                output.desensitized_messages = partial.desensitized_messages;
-            }
-            if !partial.memory_context.is_empty() {
-                output.memory_context = partial.memory_context;
-            }
-            if partial.embed_error.is_some() {
-                output.embed_error = partial.embed_error;
-            }
-            // Merge context summary
-            output.context_summary.memory_hit_count += partial.context_summary.memory_hit_count;
-            output
-                .context_summary
-                .memory_sources
-                .extend(partial.context_summary.memory_sources);
-            if partial.context_summary.redaction_applied {
-                output.context_summary.redaction_applied = true;
-                output.context_summary.redaction_level = partial.context_summary.redaction_level;
-            }
-            if !partial
-                .context_summary
-                .included_life_model_sections
-                .is_empty()
-            {
-                output.context_summary.included_life_model_sections =
-                    partial.context_summary.included_life_model_sections;
-            }
+            assembler.apply(input, output)?;
         }
-
-        Ok(output)
+        Ok(())
     }
 }
 
@@ -410,5 +336,113 @@ mod tests {
         assert_eq!(output.context_summary.included_life_model_sections.len(), 4);
         assert!(output.memory_context.contains("关键记忆"));
         assert_eq!(output.context_summary.memory_hit_count, 1);
+    }
+
+    #[test]
+    fn production_composite_preserves_privacy_transform_after_memory_and_tools() {
+        let assembler = CompositeAssembler::new()
+            .with(Box::new(LifeModelAssembler))
+            .with(Box::new(PrivacyAssembler))
+            .with(Box::new(MemoryAssembler))
+            .with(Box::new(ToolsAssembler));
+        let input = AssembleInput {
+            messages: Arc::new(vec![
+                ChatMessage {
+                    role: "system".into(),
+                    content: "System contact system@example.com.".into(),
+                },
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: "Prior reply restored assistant@example.com.".into(),
+                },
+                ChatMessage {
+                    role: "user".into(),
+                    content: "Contact qa@example.com or 13800138000.".into(),
+                },
+            ]),
+            tools_prompt: "typed tool manifest".into(),
+            memory_context: Some("bounded memory context".into()),
+            memory_hits: vec![MemoryHit {
+                id: 1,
+                content: "bounded memory context".into(),
+                source: "test".into(),
+                score: 1.0,
+                tier: 1,
+            }],
+            ..create_test_input()
+        };
+
+        let output = assembler.assemble(&input).unwrap();
+        let outbound_text = output
+            .desensitized_messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for sensitive in [
+            "system@example.com",
+            "assistant@example.com",
+            "qa@example.com",
+            "13800138000",
+        ] {
+            assert!(!outbound_text.contains(sensitive));
+        }
+        assert!(outbound_text.contains("<EMAIL_0>"));
+        assert!(outbound_text.contains("<EMAIL_1>"));
+        assert!(outbound_text.contains("<EMAIL_2>"));
+        assert!(outbound_text.contains("<PHONE_0>"));
+        assert!(!output.privacy_map.is_empty());
+        assert!(output.context_summary.redaction_applied);
+        assert!(output.memory_context.contains("bounded memory context"));
+        assert_eq!(output.tools_prompt, "typed tool manifest");
+        assert_eq!(output.context_summary.included_life_model_sections.len(), 4);
+    }
+
+    #[test]
+    fn composite_privacy_transform_is_order_invariant() {
+        let input = AssembleInput {
+            messages: Arc::new(vec![ChatMessage {
+                role: "user".into(),
+                content: "Contact qa@example.com or 13800138000.".into(),
+            }]),
+            tools_prompt: "typed tool manifest".into(),
+            memory_context: Some("bounded memory context".into()),
+            memory_hits: vec![MemoryHit {
+                id: 1,
+                content: "bounded memory context".into(),
+                source: "test".into(),
+                score: 1.0,
+                tier: 1,
+            }],
+            ..create_test_input()
+        };
+        let privacy_first = CompositeAssembler::new()
+            .with(Box::new(PrivacyAssembler))
+            .with(Box::new(MemoryAssembler))
+            .with(Box::new(ToolsAssembler))
+            .assemble(&input)
+            .unwrap();
+        let privacy_last = CompositeAssembler::new()
+            .with(Box::new(MemoryAssembler))
+            .with(Box::new(ToolsAssembler))
+            .with(Box::new(PrivacyAssembler))
+            .assemble(&input)
+            .unwrap();
+
+        let message_projection = |messages: &Arc<Vec<ChatMessage>>| {
+            messages
+                .iter()
+                .map(|message| (message.role.clone(), message.content.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            message_projection(&privacy_first.desensitized_messages),
+            message_projection(&privacy_last.desensitized_messages)
+        );
+        assert_eq!(privacy_first.privacy_map, privacy_last.privacy_map);
+        assert_eq!(
+            privacy_first.context_summary.redaction_applied,
+            privacy_last.context_summary.redaction_applied
+        );
     }
 }

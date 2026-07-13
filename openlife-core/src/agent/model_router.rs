@@ -80,28 +80,6 @@ impl ModelRouteDecision {
     }
 }
 
-/// Provider health status with failure tracking.
-#[derive(Debug, Clone)]
-pub struct ProviderHealth {
-    pub available: bool,
-    pub latency_ms: Option<u64>,
-    pub last_error: Option<String>,
-    pub last_check_at: std::time::Instant,
-    pub consecutive_failures: u32,
-}
-
-impl Default for ProviderHealth {
-    fn default() -> Self {
-        Self {
-            available: false,
-            latency_ms: None,
-            last_error: None,
-            last_check_at: std::time::Instant::now(),
-            consecutive_failures: 0,
-        }
-    }
-}
-
 /// Model availability status.
 #[derive(Debug, Clone)]
 pub struct ProviderAvailability {
@@ -117,10 +95,8 @@ pub struct ProviderAvailability {
 /// Intelligent model router with provider-agnostic, role-aware, privacy-aware routing.
 #[derive(Clone)]
 pub struct ModelRouter {
-    /// Available providers and their status
+    /// Canonical provider observations supplied by the product-owned provider boundary.
     pub providers: HashMap<String, ProviderAvailability>,
-    /// Provider health tracking with failure counting
-    pub provider_health: HashMap<String, ProviderHealth>,
     /// Default provider preferences by task type
     pub task_preferences: HashMap<TaskType, Vec<String>>,
     /// Privacy policy: minimum privacy level per task type
@@ -133,10 +109,6 @@ pub struct ModelRouter {
     last_availability_check: Option<chrono::DateTime<chrono::Utc>>,
     /// Cache TTL for availability checks (seconds)
     availability_cache_ttl: i64,
-    /// Minimum interval between health checks
-    health_check_interval: std::time::Duration,
-    /// Last health check time
-    last_health_check: Option<std::time::Instant>,
 }
 
 impl Default for ModelRouter {
@@ -174,15 +146,12 @@ impl Default for ModelRouter {
 
         Self {
             providers: HashMap::new(),
-            provider_health: HashMap::new(),
             task_preferences,
             privacy_policies,
             cost_budgets: HashMap::new(),
             latency_thresholds: HashMap::new(),
             last_availability_check: None,
             availability_cache_ttl: 60, // 1 minute default
-            health_check_interval: std::time::Duration::from_secs(60),
-            last_health_check: None,
         }
     }
 }
@@ -247,160 +216,6 @@ impl ModelRouter {
         );
     }
 
-    fn provider_env_key(provider: &str) -> Option<String> {
-        let candidates: &[&str] = match provider {
-            "deepseek" => &["DEEPSEEK_API_KEY"],
-            "openrouter" => &["OPENROUTER_API_KEY"],
-            "openai" => &["OPENAI_API_KEY"],
-            _ => &[],
-        };
-        candidates.iter().find_map(|key| {
-            std::env::var(key)
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-        })
-    }
-
-    /// Check and update provider availability.
-    pub async fn check_availability(&mut self) -> Result<()> {
-        let now = chrono::Utc::now();
-
-        // Check Ollama
-        let ollama_available = crate::ollama::is_ollama_available("").await;
-        let ollama_latency = if ollama_available {
-            Some(100) // Estimated 100ms for local
-        } else {
-            None
-        };
-
-        self.providers.insert(
-            "ollama".into(),
-            ProviderAvailability {
-                provider: "ollama".into(),
-                available: ollama_available,
-                latency_ms: ollama_latency,
-                models: vec![], // Could populate with installed models
-                last_checked: now,
-                last_error: if ollama_available {
-                    None
-                } else {
-                    Some("ollama_unavailable".into())
-                },
-                health_is_estimated: false,
-            },
-        );
-
-        // Cloud providers are only considered available when a key is configured and
-        // lightweight probing succeeds. Without a key, they are explicitly unavailable.
-        // Probes run in parallel via tokio::join! to reduce latency.
-        let cloud_providers = vec!["deepseek", "openrouter", "openai"];
-        let probes = cloud_providers.into_iter().map(|provider| async move {
-            let has_key = Self::provider_env_key(provider).is_some();
-            let result = if has_key {
-                match Self::probe_provider_lightweight(provider).await {
-                    Ok(latency) => (true, Some(latency), None, false),
-                    Err(e) => (false, None, Some(e.to_string()), false),
-                }
-            } else {
-                (
-                    false,
-                    None,
-                    Some(format!("{}_api_key_missing", provider)),
-                    false,
-                )
-            };
-            (provider.to_string(), result)
-        });
-
-        let results = futures::future::join_all(probes).await;
-        for (provider, (available, latency_ms, last_error, estimated)) in results {
-            self.providers.insert(
-                provider.clone(),
-                ProviderAvailability {
-                    provider,
-                    available,
-                    latency_ms,
-                    models: vec![],
-                    last_checked: now,
-                    last_error,
-                    health_is_estimated: estimated,
-                },
-            );
-        }
-
-        self.last_availability_check = Some(now);
-        Ok(())
-    }
-
-    /// Non-blocking health check: only executes if interval has passed.
-    pub async fn check_availability_if_needed(&mut self) -> Result<()> {
-        if let Some(last_check) = self.last_health_check {
-            if last_check.elapsed() < self.health_check_interval {
-                return Ok(()); // Skip check
-            }
-        }
-
-        // Run health probes in parallel, then update state sequentially.
-        let providers = vec!["deepseek", "openrouter"];
-        let probes = providers.into_iter().map(|provider| async move {
-            match ModelRouter::probe_provider_lightweight(provider).await {
-                Ok(latency) => (provider.to_string(), true, Some(latency), None),
-                Err(e) => (provider.to_string(), false, None, Some(e.to_string())),
-            }
-        });
-
-        let results = futures::future::join_all(probes).await;
-        for (provider, available, latency_ms, last_error) in results {
-            let entry = self.provider_health.entry(provider).or_default();
-            if available {
-                entry.available = true;
-                entry.latency_ms = latency_ms;
-                entry.last_error = None;
-                entry.consecutive_failures = 0;
-            } else {
-                entry.available = false;
-                entry.latency_ms = None;
-                entry.last_error = last_error;
-                entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
-                // Mark as unavailable after 3 consecutive failures
-                if entry.consecutive_failures >= 3 {
-                    entry.available = false;
-                }
-            }
-            entry.last_check_at = std::time::Instant::now();
-        }
-
-        self.last_health_check = Some(std::time::Instant::now());
-        Ok(())
-    }
-
-    /// Lightweight probe using HEAD request to provider's model list API.
-    async fn probe_provider_lightweight(provider: &str) -> Result<u64> {
-        let url = match provider {
-            "deepseek" => "https://api.deepseek.com/models",
-            "openrouter" => "https://openrouter.ai/api/v1/models",
-            "openai" => "https://api.openai.com/v1/models",
-            _ => return Err(anyhow::anyhow!("unknown provider: {}", provider)),
-        };
-
-        let start = std::time::Instant::now();
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()?;
-
-        let res = client.head(url).send().await?;
-
-        // Accept 2xx and 404 as "available" (API exists even if auth fails)
-        if res.status().is_success() || res.status() == 404 {
-            Ok(start.elapsed().as_millis() as u64)
-        } else {
-            Err(anyhow::anyhow!(
-                "provider returned status: {}",
-                res.status()
-            ))
-        }
-    }
-
     /// Check if availability cache is stale.
     pub fn is_availability_stale(&self) -> bool {
         if let Some(last_check) = self.last_availability_check {
@@ -427,14 +242,8 @@ impl ModelRouter {
             return None;
         }
 
-        // Check provider health first (if available), fallback to providers map
-        let (is_available, latency_ms) = if let Some(health) = self.provider_health.get(provider) {
-            (health.available, health.latency_ms)
-        } else if let Some(availability) = self.providers.get(provider) {
-            (availability.available, availability.latency_ms)
-        } else {
-            return None;
-        };
+        let availability = self.providers.get(provider)?;
+        let (is_available, latency_ms) = (availability.available, availability.latency_ms);
 
         if !is_available {
             return None;
@@ -571,6 +380,20 @@ impl ModelRouter {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
+        Ok(Self::decision_from_ranked_scores(
+            task_type,
+            privacy_requirement,
+            tools_needed,
+            &scores,
+        ))
+    }
+
+    fn decision_from_ranked_scores(
+        task_type: TaskType,
+        privacy_requirement: PrivacyRequirement,
+        tools_needed: bool,
+        scores: &[ModelRouteScore],
+    ) -> ModelRouteDecision {
         let best = &scores[0];
         let fallback = scores.get(1);
 
@@ -585,7 +408,7 @@ impl ModelRouter {
             task_type, privacy_requirement, tools_needed, best.provider, best.score
         );
 
-        Ok(ModelRouteDecision {
+        ModelRouteDecision {
             provider: best.provider.clone(),
             model: best.model.clone(),
             route_type: route_type.to_string(),
@@ -601,7 +424,7 @@ impl ModelRouter {
             fallback_provider: fallback.map(|s| s.provider.clone()),
             fallback_model: fallback.map(|s| s.model.clone()),
             governance_report: None,
-        })
+        }
     }
 
     pub fn route_with_hs_packet(
@@ -656,7 +479,7 @@ impl ModelRouter {
     pub fn route_chat(
         &self,
         tools_prompt: Option<&str>,
-        _prefer_local: bool,
+        prefer_local: bool,
     ) -> Result<ModelRouteDecision> {
         let tools_needed = tools_prompt.map(|p| !p.trim().is_empty()).unwrap_or(false);
 
@@ -666,6 +489,36 @@ impl ModelRouter {
                 if decision.provider != "ollama" {
                     return Ok(decision);
                 }
+            }
+        }
+
+        if !prefer_local {
+            let privacy_requirement = self
+                .privacy_policies
+                .get(&TaskType::Chat)
+                .copied()
+                .unwrap_or(PrivacyRequirement::Low);
+            let mut cloud_scores = self
+                .providers
+                .keys()
+                .filter(|provider| provider.as_str() != "ollama")
+                .filter_map(|provider| {
+                    self.score_provider(provider, TaskType::Chat, privacy_requirement, tools_needed)
+                })
+                .collect::<Vec<_>>();
+            cloud_scores.sort_by(|left, right| {
+                right
+                    .score
+                    .partial_cmp(&left.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            if !cloud_scores.is_empty() {
+                return Ok(Self::decision_from_ranked_scores(
+                    TaskType::Chat,
+                    privacy_requirement,
+                    tools_needed,
+                    &cloud_scores,
+                ));
             }
         }
 
@@ -738,6 +591,16 @@ mod tests {
     }
 
     #[test]
+    fn test_route_chat_cloud_preference_does_not_silently_select_local() {
+        let router = create_test_router();
+        let decision = router.route_chat(None, false).unwrap();
+
+        assert_ne!(decision.provider, "ollama");
+        assert_eq!(decision.route_type, "cloud");
+        assert!(!decision.prefer_local);
+    }
+
+    #[test]
     fn test_route_chat_with_tools() {
         let router = create_test_router();
         let decision = router.route_chat(Some("tools available"), true).unwrap();
@@ -803,17 +666,9 @@ mod tests {
     #[test]
     fn test_provider_unavailable_triggers_fallback() {
         let mut router = create_test_router();
-        // Mark deepseek as unavailable via provider_health
-        router.provider_health.insert(
-            "deepseek".into(),
-            ProviderHealth {
-                available: false,
-                latency_ms: None,
-                last_error: Some("connection refused".into()),
-                last_check_at: std::time::Instant::now(),
-                consecutive_failures: 3,
-            },
-        );
+        router.providers.get_mut("deepseek").unwrap().available = false;
+        router.providers.get_mut("deepseek").unwrap().last_error =
+            Some("connection refused".into());
 
         // Route should not pick deepseek
         let decision = router.route_chat(None, true).unwrap();
@@ -823,38 +678,28 @@ mod tests {
     }
 
     #[test]
-    fn test_provider_health_overrides_availability() {
-        let mut router = create_test_router();
-        // providers says available=true, but health says false
-        router.provider_health.insert(
-            "ollama".into(),
-            ProviderHealth {
-                available: false,
-                latency_ms: None,
-                last_error: Some("ollama not running".into()),
-                last_check_at: std::time::Instant::now(),
-                consecutive_failures: 3,
-            },
-        );
+    fn test_provider_observation_is_the_only_availability_authority() {
+        let source = include_str!("model_router.rs");
+        let removed_health_map_field = ["provider", "_health: HashMap"].concat();
+        let removed_health_map_access = [".provider", "_health"].concat();
+        let removed_probe = ["probe_provider", "_lightweight"].concat();
+        let removed_env_lookup = ["provider", "_env_key"].concat();
+        let removed_direct_http = ["reqwest", "::"].concat();
+        let removed_environment_lookup = ["std::env", "::var"].concat();
 
-        let decision = router.route_chat(None, true).unwrap();
-        // Should not pick ollama even though providers map says available
-        assert_ne!(decision.provider, "ollama");
+        assert!(!source.contains(&removed_health_map_field));
+        assert!(!source.contains(&removed_health_map_access));
+        assert!(!source.contains(&removed_probe));
+        assert!(!source.contains(&removed_env_lookup));
+        assert!(!source.contains(&removed_direct_http));
+        assert!(!source.contains(&removed_environment_lookup));
     }
 
     #[test]
     fn test_high_privacy_requires_local_provider() {
         let mut router = create_test_router();
-        router.provider_health.insert(
-            "ollama".into(),
-            ProviderHealth {
-                available: false,
-                latency_ms: None,
-                last_error: Some("ollama not running".into()),
-                last_check_at: std::time::Instant::now(),
-                consecutive_failures: 3,
-            },
-        );
+        router.providers.get_mut("ollama").unwrap().available = false;
+        router.providers.get_mut("ollama").unwrap().last_error = Some("ollama not running".into());
 
         let result = router.route(TaskType::Extractor, false, Some(PrivacyRequirement::High));
         assert!(result.is_err());
@@ -867,16 +712,8 @@ mod tests {
     #[test]
     fn test_critical_privacy_requires_local_provider_and_never_cloud_fallback() {
         let mut router = create_fast_cloud_slow_local_router();
-        router.provider_health.insert(
-            "ollama".into(),
-            ProviderHealth {
-                available: false,
-                latency_ms: None,
-                last_error: Some("ollama not running".into()),
-                last_check_at: std::time::Instant::now(),
-                consecutive_failures: 3,
-            },
-        );
+        router.providers.get_mut("ollama").unwrap().available = false;
+        router.providers.get_mut("ollama").unwrap().last_error = Some("ollama not running".into());
 
         let result = router.route(TaskType::Planner, true, Some(PrivacyRequirement::Critical));
         assert!(result.is_err());

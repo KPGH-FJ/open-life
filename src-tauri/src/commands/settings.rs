@@ -2,26 +2,43 @@ use crate::errors::AppError;
 use openlife_core::config::AppConfig;
 use openlife_core::life_model::LifeModel;
 use openlife_core::llm::{
-    chat_completions_url, default_base_for_provider, effective_api_key, provider_label,
+    chat_completions_url, default_base_for_provider, effective_api_key_for_endpoint,
+    provider_label, ProviderInvocationReceipt, ProviderInvocationStatus,
 };
-use openlife_core::mcp_audit::{AuditExport, AuditKeyConfig, KeyMode};
+use openlife_core::mcp_audit::AuditExport;
+use openlife_core::network_client::resolve_network_policy_decision;
 use openlife_core::privacy::PrivacyPolicy;
 use openlife_core::scheduler::InferenceScheduler;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tauri::State;
 
+use crate::danger_action_confirmation::{
+    issue_danger_action_challenge, require_native_danger_action_confirmation,
+    NativeDangerActionRequest,
+};
 use crate::life_model_materializer_guard::{
     LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
     LifeModelMaterializerCallerPurpose,
+};
+use crate::provider_network_consent::{
+    authorize_explicit_provider_probe, ExplicitProviderProbeAuthorization,
+};
+use crate::secret_store::{
+    create_mcp_audit_key_material, stage_config_secrets, KeyringSecretStore, SecretStore,
 };
 use crate::storage::{
     app_data_dir, mcp_audit_keyring_path, privacy_policy_path, save_mcp_audit_keyring_to_path,
     save_privacy_policy_to_path,
 };
 use crate::AppState;
-use crate::{memory_gateway, persist_life_model};
+use crate::{life_model_write_gateway, memory_gateway};
+
+static GOVERNED_DATA_IMPORT_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
+pub(crate) static CONFIG_WRITE_COORDINATOR: LazyLock<tokio::sync::Mutex<()>> =
+    LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -34,14 +51,24 @@ pub struct GovernedDataImportRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct DangerActionConfirmationEvidence {
-    pub action_type: String,
+pub struct DangerActionConfirmationReference {
+    /// Opaque, random challenge identifier issued by the Rust authority. All
+    /// other client fields are scope hints only and can never authorize an action.
     pub preflight_id: String,
-    pub confirmation_phrase: String,
-    pub confirmation_scope_digest: String,
-    pub safe_mode: bool,
+    #[serde(default)]
+    pub action_type: String,
     #[serde(default)]
     pub target_ids: Vec<String>,
+}
+
+pub(crate) struct DangerActionConfirmationRequest<'a> {
+    pub action_type: &'a str,
+    pub target_ids_for_new_challenge: &'a [String],
+    pub requested_target: Option<&'a str>,
+    pub affected_count: Option<usize>,
+    pub reference: Option<&'a DangerActionConfirmationReference>,
+    pub arguments: &'a serde_json::Value,
+    pub arguments_summary: &'a str,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -99,16 +126,18 @@ fn validate_scope_target_ids(target_ids: &[String]) -> Result<Vec<String>, AppEr
     Ok(safe)
 }
 
-fn danger_action_confirmation_phrase(action_type: &str) -> Option<&'static str> {
-    match action_type {
-        "data_import_overwrite" => Some("IMPORT"),
-        "mcp_audit_cleanup" => Some("CLEANUP"),
-        "mcp_audit_key_rotation" => Some("ROTATE"),
-        "agent_run_delete" => Some("DELETE RUN"),
-        "agent_run_bulk_delete" => Some("DELETE RUNS"),
-        "vector_rebuild" => Some("REBUILD"),
-        _ => None,
-    }
+fn danger_action_requires_native_confirmation(action_type: &str) -> bool {
+    matches!(
+        action_type,
+        "data_export"
+            | "data_import_overwrite"
+            | "mcp_audit_export"
+            | "mcp_audit_cleanup"
+            | "mcp_audit_key_rotation"
+            | "agent_run_delete"
+            | "agent_run_bulk_delete"
+            | "vector_rebuild"
+    )
 }
 
 fn danger_action_scope_digest(
@@ -130,14 +159,6 @@ fn danger_action_scope_digest(
         bytes.len(),
         hasher.finalize()
     ))
-}
-
-fn danger_action_preflight_id(action_type: &str, scope_digest: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(action_type.as_bytes());
-    hasher.update(b"\n");
-    hasher.update(scope_digest.as_bytes());
-    format!("danger-preflight:sha256:{:x}", hasher.finalize())
 }
 
 #[cfg(test)]
@@ -163,9 +184,13 @@ fn danger_action_preflight_for_action_scoped(
         .unwrap_or(safe_target_ids.len())
         .max(safe_target_ids.len());
     let scope_digest = danger_action_scope_digest(action_type, &safe_target_ids, affected_count)?;
-    let confirmation_phrase = danger_action_confirmation_phrase(action_type).map(str::to_string);
-    let confirmation_required = confirmation_phrase.is_some();
-    let preflight_id = danger_action_preflight_id(action_type, &scope_digest);
+    let confirmation_phrase = None;
+    let requires_typed_confirmation = false;
+    let confirmation_required = danger_action_requires_native_confirmation(action_type);
+    // A usable preflight id is created only by `get_danger_action_preflight`
+    // through the Rust-owned challenge authority. The deterministic view builder
+    // intentionally cannot mint authorization state.
+    let preflight_id = String::new();
     let mut view = match action_type {
         "data_export" => DangerActionPreflightView {
             action_type: "data_export".into(),
@@ -178,7 +203,7 @@ fn danger_action_preflight_for_action_scoped(
             external_transmission: "not_sent_externally".into(),
             dry_run_available: false,
             backup_status: "not_required_read_only".into(),
-            requires_typed_confirmation: confirmation_required,
+            requires_typed_confirmation,
             confirmation_required,
             confirmation_phrase,
             confirmation_scope_digest: scope_digest.clone(),
@@ -206,7 +231,7 @@ fn danger_action_preflight_for_action_scoped(
             external_transmission: "not_sent_externally".into(),
             dry_run_available: false,
             backup_status: "will_create_on_execute".into(),
-            requires_typed_confirmation: confirmation_required,
+            requires_typed_confirmation,
             confirmation_required,
             confirmation_phrase,
             confirmation_scope_digest: scope_digest.clone(),
@@ -240,7 +265,7 @@ fn danger_action_preflight_for_action_scoped(
             external_transmission: "not_sent_externally".into(),
             dry_run_available: false,
             backup_status: "not_required_read_only".into(),
-            requires_typed_confirmation: confirmation_required,
+            requires_typed_confirmation,
             confirmation_required,
             confirmation_phrase,
             confirmation_scope_digest: scope_digest.clone(),
@@ -266,7 +291,7 @@ fn danger_action_preflight_for_action_scoped(
             external_transmission: "not_sent_externally".into(),
             dry_run_available: false,
             backup_status: "none".into(),
-            requires_typed_confirmation: confirmation_required,
+            requires_typed_confirmation,
             confirmation_required,
             confirmation_phrase,
             confirmation_scope_digest: scope_digest.clone(),
@@ -293,7 +318,7 @@ fn danger_action_preflight_for_action_scoped(
             external_transmission: "not_sent_externally".into(),
             dry_run_available: false,
             backup_status: "historical_key_epochs_retained".into(),
-            requires_typed_confirmation: confirmation_required,
+            requires_typed_confirmation,
             confirmation_required,
             confirmation_phrase,
             confirmation_scope_digest: scope_digest.clone(),
@@ -321,7 +346,7 @@ fn danger_action_preflight_for_action_scoped(
             external_transmission: "not_sent_externally".into(),
             dry_run_available: false,
             backup_status: "soft_delete_trash_view".into(),
-            requires_typed_confirmation: confirmation_required,
+            requires_typed_confirmation,
             confirmation_required,
             confirmation_phrase,
             confirmation_scope_digest: scope_digest.clone(),
@@ -349,7 +374,7 @@ fn danger_action_preflight_for_action_scoped(
             external_transmission: "not_sent_externally".into(),
             dry_run_available: false,
             backup_status: "soft_delete_trash_view".into(),
-            requires_typed_confirmation: confirmation_required,
+            requires_typed_confirmation,
             confirmation_required,
             confirmation_phrase,
             confirmation_scope_digest: scope_digest.clone(),
@@ -377,7 +402,7 @@ fn danger_action_preflight_for_action_scoped(
             external_transmission: "not_sent_externally".into(),
             dry_run_available: false,
             backup_status: "rollback_previous_vectors_on_failure".into(),
-            requires_typed_confirmation: confirmation_required,
+            requires_typed_confirmation,
             confirmation_required,
             confirmation_phrase,
             confirmation_scope_digest: scope_digest.clone(),
@@ -425,54 +450,39 @@ pub(crate) async fn danger_action_safe_mode_active(state: &Arc<AppState>) -> boo
 }
 
 pub(crate) async fn require_danger_action_confirmation(
-    action_type: &str,
-    target_ids: &[String],
-    affected_count: Option<usize>,
-    evidence: Option<&DangerActionConfirmationEvidence>,
+    request: DangerActionConfirmationRequest<'_>,
+    window: &tauri::WebviewWindow,
     state: &Arc<AppState>,
 ) -> Result<(), AppError> {
-    if danger_action_safe_mode_active(state).await {
+    let scope = DangerActionPreflightScope {
+        target_ids: request.target_ids_for_new_challenge.to_vec(),
+        affected_count: request.affected_count,
+    };
+    let expected = danger_action_preflight_for_action_scoped(request.action_type, false, scope)?;
+    if expected.writes_durable_state && danger_action_safe_mode_active(state).await {
         return Err(AppError::permission(
             "danger action blocked because Safe Mode is active",
         ));
     }
-
-    let scope = DangerActionPreflightScope {
-        target_ids: target_ids.to_vec(),
-        affected_count,
-    };
-    let expected = danger_action_preflight_for_action_scoped(action_type, false, scope)?;
     if !expected.confirmation_required {
         return Ok(());
     }
-
-    let evidence = evidence.ok_or_else(|| {
-        AppError::permission("danger action requires confirmed preflight evidence")
-    })?;
-    if evidence.safe_mode {
-        return Err(AppError::permission(
-            "danger action confirmation evidence was produced under Safe Mode",
-        ));
-    }
-    if evidence.action_type != expected.action_type
-        || evidence.preflight_id != expected.preflight_id
-        || evidence.confirmation_scope_digest != expected.confirmation_scope_digest
-        || Some(evidence.confirmation_phrase.as_str()) != expected.confirmation_phrase.as_deref()
-    {
-        return Err(AppError::permission(
-            "danger action confirmation evidence does not match preflight scope",
-        ));
-    }
-
-    let safe_evidence_targets = validate_scope_target_ids(&evidence.target_ids)?;
-    let expected_targets = validate_scope_target_ids(target_ids)?;
-    if safe_evidence_targets != expected_targets {
-        return Err(AppError::permission(
-            "danger action confirmation target scope does not match final action",
-        ));
-    }
-
-    Ok(())
+    require_native_danger_action_confirmation(
+        window,
+        NativeDangerActionRequest {
+            action_type: request.action_type,
+            target_ids_for_new_challenge: request.target_ids_for_new_challenge,
+            requested_target: request.requested_target,
+            affected_count: expected.affected_item_count,
+            arguments: request.arguments,
+            arguments_summary: request.arguments_summary,
+            scope_summary: &expected.scope_summary,
+            challenge_id: request
+                .reference
+                .map(|reference| reference.preflight_id.as_str()),
+        },
+    )
+    .await
 }
 
 #[tauri::command]
@@ -481,6 +491,7 @@ pub async fn get_danger_action_preflight(
     safe_mode: Option<bool>,
     target_ids: Option<Vec<String>>,
     affected_count: Option<usize>,
+    window: tauri::WebviewWindow,
     state: State<'_, Arc<AppState>>,
 ) -> Result<DangerActionPreflightView, AppError> {
     let mut effective_safe_mode = safe_mode.unwrap_or(false);
@@ -494,14 +505,25 @@ pub async fn get_danger_action_preflight(
     } else {
         affected_count
     };
-    danger_action_preflight_for_action_scoped(
+    let mut view = danger_action_preflight_for_action_scoped(
         &action_type,
         effective_safe_mode,
         DangerActionPreflightScope {
-            target_ids,
+            target_ids: target_ids.clone(),
             affected_count: effective_affected_count,
         },
-    )
+    )?;
+    if view.confirmation_required && view.final_action_enabled {
+        view.preflight_id = issue_danger_action_challenge(
+            window.label(),
+            &action_type,
+            &target_ids,
+            view.affected_item_count,
+        )?;
+        view.source_refs
+            .push("native_confirmation:server_challenge_pending".into());
+    }
+    Ok(view)
 }
 
 impl GovernedDataImportRequest {
@@ -553,7 +575,13 @@ fn validate_import_payload_shape(payload: &serde_json::Value) -> Result<(), AppE
     for key in object.keys() {
         if !matches!(
             key.as_str(),
-            "version" | "app_version" | "exported_at" | "life_model" | "messages" | "vectors"
+            "version"
+                | "app_version"
+                | "exported_at"
+                | "vector_export_semantics"
+                | "life_model"
+                | "messages"
+                | "vectors"
         ) {
             return Err(AppError::permission(format!(
                 "import_all_data received unsupported import target: {key}"
@@ -624,12 +652,84 @@ fn resolve_masked_api_key(submitted_key: &str, current_key: &str) -> String {
     }
 }
 
+fn provider_endpoint_identity(config: &AppConfig) -> Option<String> {
+    let provider = config.llm.provider.trim().to_ascii_lowercase();
+    if provider.is_empty() {
+        return None;
+    }
+    let base = if config.llm.openai_base.trim().is_empty() {
+        default_base_for_provider(&provider).to_string()
+    } else {
+        config.llm.openai_base.trim().to_string()
+    };
+    let endpoint = chat_completions_url(&provider, &base);
+    let parsed = reqwest::Url::parse(&endpoint).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return None;
+    }
+    let host = parsed
+        .host_str()?
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    let port = parsed.port_or_known_default()?;
+    let path = parsed.path().trim_end_matches('/');
+    Some(format!(
+        "{provider}|{}://{host}:{port}{path}",
+        parsed.scheme()
+    ))
+}
+
+fn resolve_submitted_provider_api_key(submitted: &AppConfig, current: &AppConfig) -> String {
+    let submitted_key = submitted.llm.openai_key.trim();
+    if !submitted_key.is_empty() && submitted_key != KEY_MASK {
+        return submitted.llm.openai_key.clone();
+    }
+    let identity_unchanged = provider_endpoint_identity(submitted).is_some_and(|identity| {
+        provider_endpoint_identity(current).as_deref() == Some(identity.as_str())
+    });
+    if identity_unchanged {
+        current.llm.openai_key.clone()
+    } else {
+        String::new()
+    }
+}
+
+fn resolved_provider_credential_version(submitted: &AppConfig, current: &AppConfig) -> u64 {
+    let identity_changed =
+        provider_endpoint_identity(submitted) != provider_endpoint_identity(current);
+    let submitted_key = submitted.llm.openai_key.trim();
+    let explicit_key_changed = !submitted_key.is_empty()
+        && submitted_key != KEY_MASK
+        && submitted_key != current.llm.openai_key;
+    if identity_changed || explicit_key_changed {
+        current.llm.credential_version.saturating_add(1)
+    } else {
+        current.llm.credential_version
+    }
+}
+
+async fn replace_runtime_provider_config(state: &Arc<AppState>, config: AppConfig) {
+    state.replace_provider_runtime_config(config).await;
+}
+
 #[tauri::command]
 pub async fn get_config(state: State<'_, Arc<AppState>>) -> Result<AppConfig, AppError> {
+    state
+        .persistence_coordinator
+        .require_trusted_read("ConfigStore")
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "canonical_state_unknown"))?;
     let mut cfg = state.config.lock().await.clone();
     // Sanitize API keys before sending to frontend
     if !cfg.llm.openai_key.is_empty() {
         cfg.llm.openai_key = KEY_MASK.to_string();
+    }
+    if !cfg.system.search_provider_key.is_empty() {
+        cfg.system.search_provider_key = KEY_MASK.to_string();
     }
     Ok(cfg)
 }
@@ -639,48 +739,80 @@ pub async fn save_config(
     mut config: AppConfig,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), AppError> {
+    state
+        .persistence_coordinator
+        .require_effects_allowed()
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))?;
+    let _config_write_guard = CONFIG_WRITE_COORDINATOR.lock().await;
     config.normalize_provider_from_base();
     let data_dir = app_data_dir();
     let config_path = data_dir.join("config.yaml");
 
     // Preserve existing API key if the submitted config has a mask or empty key
-    let current_key = {
+    let current_config = {
         let cfg = state.config.lock().await;
-        cfg.llm.openai_key.clone()
+        cfg.clone()
     };
-    if config.llm.openai_key.is_empty() || config.llm.openai_key == KEY_MASK {
-        config.llm.openai_key = current_key;
+    let provider_identity_unchanged = provider_endpoint_identity(&config).is_some_and(|identity| {
+        provider_endpoint_identity(&current_config).as_deref() == Some(identity.as_str())
+    });
+    config.llm.credential_version = resolved_provider_credential_version(&config, &current_config);
+    config.llm.openai_key = resolve_submitted_provider_api_key(&config, &current_config);
+    config.system.search_provider_key = resolve_masked_api_key(
+        &config.system.search_provider_key,
+        &current_config.system.search_provider_key,
+    );
+    if !provider_identity_unchanged {
+        // A secret reference is bound to the provider plus canonical endpoint. A masked
+        // frontend value cannot carry an old credential to a different destination.
+        config.llm.openai_key_ref = None;
+    } else if config.llm.openai_key_ref.is_none() {
+        config.llm.openai_key_ref = current_config.llm.openai_key_ref;
+    }
+    if config.system.search_provider_key_ref.is_none() {
+        config.system.search_provider_key_ref = current_config.system.search_provider_key_ref;
     }
 
-    config.save(&config_path).map_err(AppError::from)?;
-    let mut cfg = state.config.lock().await;
-    *cfg = config.clone();
-    let mut scheduler = state.scheduler.lock().await;
-    let mut new_scheduler = InferenceScheduler::new(
-        config.local_model,
-        config.prefer_local_model,
-        config.llm.provider,
-        config.llm.openai_base,
-        config.llm.openai_key,
-        config.llm.chat_model,
-        config.llm.embedding_model,
-        config.llm.embedding_enabled,
-    );
-
-    // ModelRouter is now on the graduated runtime path.
-    let router = openlife_core::agent::ModelRouter::new();
-    new_scheduler = new_scheduler.with_model_router(router);
-    eprintln!("[Scheduler] ModelRouter enabled (graduated runtime path)");
-
-    *scheduler = new_scheduler;
+    let secret_store = KeyringSecretStore;
+    let rollback = stage_config_secrets(&mut config, &secret_store).map_err(AppError::from)?;
+    if let Err(save_error) = config.save(&config_path) {
+        return match rollback.rollback(&secret_store) {
+            Ok(()) => Err(AppError::from(save_error)),
+            Err(rollback_error) => Err(AppError::internal(format!(
+                "config save failed: {save_error}; credential rollback failed: {rollback_error}"
+            ))),
+        };
+    }
+    replace_runtime_provider_config(state.inner(), config).await;
     Ok(())
 }
 
 #[tauri::command]
 pub async fn export_all_data(
+    window: tauri::WebviewWindow,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, AppError> {
-    export_all_data_with_state(state.inner()).await
+    let export = export_all_data_with_state(state.inner()).await?;
+    let export_digest = hash_json_value(&export)?;
+    require_danger_action_confirmation(
+        DangerActionConfirmationRequest {
+            action_type: "data_export",
+            target_ids_for_new_challenge: &[],
+            requested_target: None,
+            affected_count: None,
+            reference: None,
+            arguments: &serde_json::json!({
+                "export_digest": export_digest,
+                "data_categories": ["life_model", "messages", "vectors"],
+            }),
+            arguments_summary:
+                "导出当前 LifeModel、聊天和向量数据快照；原始内容不会复制进 confirmation grant。",
+        },
+        &window,
+        state.inner(),
+    )
+    .await?;
+    Ok(export)
 }
 
 async fn export_all_data_with_state(state: &Arc<AppState>) -> Result<serde_json::Value, AppError> {
@@ -694,12 +826,13 @@ async fn export_all_data_with_state(state: &Arc<AppState>) -> Result<serde_json:
     };
     let vectors = {
         let store = state.vector_store.lock().await;
-        store.export_all_chunks().map_err(AppError::from)?
+        store.export_portable_chunks().map_err(AppError::from)?
     };
     Ok(serde_json::json!({
         "version": "1.0",
         "app_version": env!("CARGO_PKG_VERSION"),
         "exported_at": chrono::Utc::now().to_rfc3339(),
+        "vector_export_semantics": "portable_only_canonical_and_chat_projections_derived",
         "life_model": life_model,
         "messages": messages,
         "vectors": vectors,
@@ -710,18 +843,38 @@ async fn export_all_data_with_state(state: &Arc<AppState>) -> Result<serde_json:
 pub async fn import_all_data(
     payload: serde_json::Value,
     import_request: Option<GovernedDataImportRequest>,
-    confirmation_evidence: Option<DangerActionConfirmationEvidence>,
+    confirmation_evidence: Option<DangerActionConfirmationReference>,
+    window: tauri::WebviewWindow,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, AppError> {
+    state
+        .persistence_coordinator
+        .require_effects_allowed()
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))?;
+    let request = require_governed_data_import_request(import_request.as_ref())?.clone();
+    validate_import_payload_shape(&payload)?;
+    validate_import_targets_cover_payload(&payload, &request)?;
+    let payload_digest = hash_json_value(&payload)?;
+    let confirmation_arguments = serde_json::json!({
+        "payload_digest": payload_digest,
+        "governed_request": request,
+    });
     require_danger_action_confirmation(
-        "data_import_overwrite",
-        &[],
-        None,
-        confirmation_evidence.as_ref(),
+        DangerActionConfirmationRequest {
+            action_type: "data_import_overwrite",
+            target_ids_for_new_challenge: &[],
+            requested_target: None,
+            affected_count: None,
+            reference: confirmation_evidence.as_ref(),
+            arguments: &confirmation_arguments,
+            arguments_summary:
+                "覆盖导入已校验的 OpenLife 备份；参数已绑定到 payload digest 和 governed request。",
+        },
+        &window,
         state.inner(),
     )
     .await?;
-    import_all_data_with_state_gated(payload, state.inner(), import_request).await
+    import_all_data_governed_operation(payload, state.inner(), &request).await
 }
 
 #[cfg(test)]
@@ -741,6 +894,7 @@ async fn import_all_data_with_state_for_governed_import(
     import_all_data_with_state_gated(payload, state, Some(import_request)).await
 }
 
+#[cfg(test)]
 async fn import_all_data_with_state_gated(
     payload: serde_json::Value,
     state: &Arc<AppState>,
@@ -757,6 +911,10 @@ async fn import_all_data_governed_operation(
 ) -> Result<serde_json::Value, AppError> {
     validate_import_payload_shape(&payload)?;
     validate_import_targets_cover_payload(&payload, request)?;
+    // Import snapshots, canonical replacement, and compensation form one
+    // process-local destructive operation. Serializing the whole sequence
+    // prevents two confirmed imports from interleaving their rollback truth.
+    let _import_guard = GOVERNED_DATA_IMPORT_LOCK.lock().await;
     let import_payload_hash = hash_json_value(&payload)?;
     let life_model: LifeModel = serde_json::from_value(
         payload
@@ -765,68 +923,117 @@ async fn import_all_data_governed_operation(
             .unwrap_or(serde_json::Value::Null),
     )
     .map_err(|e| AppError::external(format!("解析 life_model 失败: {}", e)))?;
-    let messages: Vec<openlife_core::memory::ExportedMessage> = serde_json::from_value(
-        payload
-            .get("messages")
-            .cloned()
-            .unwrap_or(serde_json::Value::Array(vec![])),
-    )
-    .map_err(|e| AppError::external(format!("解析 messages 失败: {}", e)))?;
-    let vectors: Vec<openlife_core::vectors::ExportedVectorChunk> = serde_json::from_value(
-        payload
-            .get("vectors")
-            .cloned()
-            .unwrap_or(serde_json::Value::Array(vec![])),
-    )
-    .map_err(|e| AppError::external(format!("解析 vectors 失败: {}", e)))?;
-
-    let imported_message_count = messages.len();
-    let imported_vector_count = vectors.len();
+    // Missing means "not targeted", while an explicit empty array means
+    // "replace this target with an empty set". Conflating the two silently
+    // erased untargeted stores in the former import route.
+    let messages: Option<Vec<openlife_core::memory::ExportedMessage>> = payload
+        .get("messages")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| AppError::external(format!("解析 messages 失败: {}", e)))?;
+    let vectors: Option<Vec<openlife_core::vectors::ExportedVectorChunk>> = payload
+        .get("vectors")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| AppError::external(format!("解析 vectors 失败: {}", e)))?;
+    let messages_targeted = messages.is_some();
+    let vectors_targeted = vectors.is_some();
     let previous_model = {
         let manager = state.life_model_manager.lock().await;
         manager.load().map_err(AppError::from)?
     };
-    let previous_model_hash = hash_json_value(&serde_json::to_value(&previous_model)?)?;
-    let imported_model_hash = hash_json_value(&serde_json::to_value(&life_model)?)?;
+    let previous_model_hash =
+        life_model_write_gateway::hash_life_model(&previous_model).map_err(AppError::from)?;
+    let imported_model_hash =
+        life_model_write_gateway::hash_life_model(&life_model).map_err(AppError::from)?;
     let pre_import_snapshot_version = {
         let vm = state.version_manager.lock().await;
-        vm.snapshot(&previous_model, "auto:pre-import", "导入覆盖之前自动备份")
-            .ok()
-            .map(|snapshot| snapshot.version)
+        Some(
+            vm.ensure_projection_snapshot(
+                &previous_model,
+                &format!("pre-change:import:{import_payload_hash}:{previous_model_hash}"),
+                "auto:pre-import",
+                "导入覆盖之前自动备份",
+            )
+            .map_err(AppError::from)?
+            .version,
+        )
     };
-    let previous_messages = {
+    let previous_messages = if messages_targeted {
         let store = state.memory_store.lock().await;
-        store.export_all_messages().map_err(AppError::from)?
+        Some(store.export_all_messages().map_err(AppError::from)?)
+    } else {
+        None
     };
-    let previous_vectors = {
+    let previous_vectors = if vectors_targeted {
         let store = state.vector_store.lock().await;
-        store.export_all_chunks().map_err(AppError::from)?
+        Some(store.export_portable_chunks().map_err(AppError::from)?)
+    } else {
+        None
     };
     let durable_lifemodel_write = serde_json::to_value(&previous_model).map_err(AppError::from)?
         != serde_json::to_value(&life_model).map_err(AppError::from)?;
 
-    if let Err(import_error) =
-        apply_import_payload(state.clone(), life_model, messages, vectors).await
+    let memory_report = match apply_import_payload(
+        state.clone(),
+        life_model,
+        messages,
+        vectors,
+        Some(previous_model_hash.clone()),
+    )
+    .await
     {
-        let rollback_error = apply_import_payload(
-            state.clone(),
-            previous_model,
-            previous_messages,
-            previous_vectors,
-        )
-        .await
-        .err();
-        if let Some(rollback_error) = rollback_error {
-            return Err(AppError::internal(format!(
+        Ok(report) => report,
+        Err(import_error) => {
+            let rollback_error = apply_import_payload(
+                state.clone(),
+                previous_model,
+                previous_messages,
+                previous_vectors,
+                None,
+            )
+            .await
+            .err();
+            if let Some(rollback_error) = rollback_error {
+                return Err(AppError::internal(format!(
                 "导入失败，且自动回滚失败。请不要继续操作，先备份数据目录。导入错误: {}; 回滚错误: {}",
                 import_error, rollback_error
             )));
+            }
+            return Err(AppError::internal(format!(
+                "导入失败，已自动回滚到导入前状态: {}",
+                import_error
+            )));
         }
-        return Err(AppError::internal(format!(
-            "导入失败，已自动回滚到导入前状态: {}",
-            import_error
-        )));
-    }
+    };
+    let imported_message_count = memory_report.applied_message_count;
+    let supplied_message_count = memory_report.supplied_message_count;
+    let imported_vector_count = memory_report.vectors.applied;
+    let supplied_vector_count = memory_report.vectors.supplied;
+    let skipped_vector_count = memory_report.vectors.skipped();
+    let import_audit = serde_json::json!({
+        "source_kind": "data_import",
+        "operation_purpose": request.purpose,
+        "vector_import_semantics": "portable_only_canonical_and_chat_projections_skipped",
+        "import_targets": request.import_targets,
+        "import_payload_hash": import_payload_hash,
+        "previous_model_hash": previous_model_hash,
+        "imported_model_hash": imported_model_hash,
+        "messages_targeted": memory_report.messages_targeted,
+        "vectors_targeted": memory_report.vectors_targeted,
+        "supplied_message_count": supplied_message_count,
+        "imported_message_count": imported_message_count,
+        "supplied_vector_count": supplied_vector_count,
+        "imported_vector_count": imported_vector_count,
+        "skipped_vector_count": skipped_vector_count,
+        "skipped_canonical_vector_count": memory_report.vectors.skipped_canonical_projection,
+        "skipped_legacy_chat_vector_count": memory_report.vectors.skipped_legacy_chat_projection,
+        "pre_change_snapshot_version": pre_import_snapshot_version,
+        "metadata_safe": true,
+        "contains_raw_content": false,
+    });
     Ok(serde_json::json!({
         "success": true,
         "legacy": false,
@@ -834,39 +1041,36 @@ async fn import_all_data_governed_operation(
         "operation_kind": "data_import",
         "operation_purpose": request.purpose,
         "warning": "data import ran as an explicit governed restore/import operation.",
+        "vector_import_semantics": "portable_only_canonical_and_chat_projections_skipped",
         "metadata_safe": true,
         "contains_raw_content": false,
         "durable_lifemodel_write": durable_lifemodel_write,
+        "messages_targeted": memory_report.messages_targeted,
+        "vectors_targeted": memory_report.vectors_targeted,
+        "supplied_message_count": supplied_message_count,
         "imported_message_count": imported_message_count,
+        "supplied_vector_count": supplied_vector_count,
         "imported_vector_count": imported_vector_count,
+        "skipped_vector_count": skipped_vector_count,
+        "skipped_canonical_vector_count": memory_report.vectors.skipped_canonical_projection,
+        "skipped_legacy_chat_vector_count": memory_report.vectors.skipped_legacy_chat_projection,
         "import_payload_hash": import_payload_hash,
         "previous_model_hash": previous_model_hash,
         "imported_model_hash": imported_model_hash,
         "pre_import_snapshot_created": pre_import_snapshot_version.is_some(),
         "pre_import_snapshot_version": pre_import_snapshot_version,
-        "audit": {
-            "source_kind": "data_import",
-            "operation_purpose": request.purpose,
-            "import_targets": request.import_targets,
-            "import_payload_hash": import_payload_hash,
-            "previous_model_hash": previous_model_hash,
-            "imported_model_hash": imported_model_hash,
-            "imported_message_count": imported_message_count,
-            "imported_vector_count": imported_vector_count,
-            "pre_change_snapshot_version": pre_import_snapshot_version,
-            "metadata_safe": true,
-            "contains_raw_content": false,
-        },
+        "audit": import_audit,
     }))
 }
 
 async fn apply_import_payload(
     state: Arc<AppState>,
     life_model: LifeModel,
-    messages: Vec<openlife_core::memory::ExportedMessage>,
-    vectors: Vec<openlife_core::vectors::ExportedVectorChunk>,
-) -> Result<(), AppError> {
-    persist_life_model(
+    messages: Option<Vec<openlife_core::memory::ExportedMessage>>,
+    vectors: Option<Vec<openlife_core::vectors::ExportedVectorChunk>>,
+    expected_lifemodel_hash: Option<String>,
+) -> Result<memory_gateway::ImportedMemoryReplaceReport, AppError> {
+    life_model_write_gateway::persist_life_model_with_gateway_expected(
         &state,
         life_model,
         false,
@@ -875,39 +1079,15 @@ async fn apply_import_payload(
             LifeModelMaterializerCallerKind::GovernedRestoreImportOperation,
             LifeModelMaterializerCallerPurpose::GovernedRestoreImportOperation,
         ),
+        expected_lifemodel_hash.as_deref(),
     )
     .await?;
-    memory_gateway::replace_imported_memory_with_state(&state, &messages, &vectors).await?;
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn test_api_key(state: State<'_, Arc<AppState>>) -> Result<bool, AppError> {
-    let (base, key) = {
-        let cfg = state.config.lock().await;
-        (cfg.llm.openai_base.clone(), cfg.llm.openai_key.clone())
-    };
-    let api_key = if key.is_empty() {
-        std::env::var("OPENROUTER_API_KEY").unwrap_or_default()
-    } else {
-        key
-    };
-    if api_key.is_empty() {
-        return Ok(false);
-    }
-    let url = if base.is_empty() {
-        "https://openrouter.ai/api/v1/models".to_string()
-    } else {
-        format!("{}/models", base.trim_end_matches('/'))
-    };
-    let client = reqwest::Client::new();
-    let res = client
-        .get(&url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .send()
-        .await
-        .map_err(|e| AppError::external(format!("API request failed: {}", e)))?;
-    Ok(res.status().is_success())
+    memory_gateway::replace_imported_memory_with_state(
+        &state,
+        messages.as_deref(),
+        vectors.as_deref(),
+    )
+    .await
 }
 
 #[derive(serde::Serialize)]
@@ -916,25 +1096,78 @@ pub struct LlmConnectionTestResult {
     pub provider: String,
     pub message: String,
     pub validation_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_policy_decision_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_network_policy_decision_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consent_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_proposal_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_id: Option<String>,
+    /// Exact metadata-only terminal from the scheduler's provider adapter seam.
+    /// Provider request/response bodies and credentials are never included.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_invocation_receipt: Option<ProviderInvocationReceipt>,
 }
 
 #[tauri::command]
 pub async fn test_llm_connection(
-    mut config: AppConfig,
+    config: AppConfig,
     state: State<'_, Arc<AppState>>,
+) -> Result<LlmConnectionTestResult, AppError> {
+    test_llm_connection_with_state_and_validation_path(
+        config,
+        state.inner(),
+        &crate::provider_validation::provider_validation_path(),
+    )
+    .await
+}
+
+pub(crate) async fn test_llm_connection_with_state_and_validation_path(
+    mut config: AppConfig,
+    state: &Arc<AppState>,
+    validation_path: &std::path::Path,
 ) -> Result<LlmConnectionTestResult, AppError> {
     config.normalize_provider_from_base();
     let provider = config.llm.provider.clone();
     let label = provider_label(&provider);
 
-    let current_key = {
-        let cfg = state.config.lock().await;
-        cfg.llm.openai_key.clone()
-    };
-    let resolved_key = resolve_masked_api_key(&config.llm.openai_key, &current_key);
-    config.llm.openai_key = resolved_key;
+    let current_runtime = state.provider_runtime_snapshot().await;
+    let current_runtime_coherent = current_runtime.coherent;
+    let current_config = current_runtime.config;
+    config.llm.credential_version = resolved_provider_credential_version(&config, &current_config);
+    config.llm.openai_key = resolve_submitted_provider_api_key(&config, &current_config);
 
-    let api_key = effective_api_key(&provider, &config.llm.openai_key);
+    if !current_runtime_coherent {
+        let record = crate::provider_validation::failed_provider_validation_record(
+            &config,
+            "settings_manual_test",
+            "provider_runtime_generation_incoherent",
+            chrono::Utc::now(),
+        );
+        crate::provider_validation::save_provider_validation_record_to_path(
+            validation_path,
+            &record,
+        )?;
+        return Ok(LlmConnectionTestResult {
+            ok: false,
+            provider: label,
+            message: "Provider 配置与执行适配器不属于同一运行代；连接测试已在网络请求前失败关闭。"
+                .into(),
+            validation_status: "runtime_generation_incoherent".into(),
+            network_policy_decision_id: None,
+            effective_network_policy_decision_id: None,
+            consent_status: Some("blocked".into()),
+            review_proposal_id: None,
+            permission_id: None,
+            provider_invocation_receipt: None,
+        });
+    }
+
+    let api_key =
+        effective_api_key_for_endpoint(&provider, &config.llm.openai_base, &config.llm.openai_key);
     if api_key.trim().is_empty() {
         let record = crate::provider_validation::failed_provider_validation_record(
             &config,
@@ -943,7 +1176,7 @@ pub async fn test_llm_connection(
             chrono::Utc::now(),
         );
         crate::provider_validation::save_provider_validation_record_to_path(
-            &crate::provider_validation::provider_validation_path(),
+            validation_path,
             &record,
         )?;
         return Ok(LlmConnectionTestResult {
@@ -951,10 +1184,20 @@ pub async fn test_llm_connection(
             provider: label,
             message: "未检测到 API Key，请填写后再测试。".to_string(),
             validation_status: "failed".into(),
+            network_policy_decision_id: None,
+            effective_network_policy_decision_id: None,
+            consent_status: None,
+            review_proposal_id: None,
+            permission_id: None,
+            provider_invocation_receipt: None,
         });
     }
 
-    if !config.system.network_policy.enabled {
+    let backend_network_policy = current_config.system.network_policy.clone();
+    // The submitted Settings payload cannot choose the network authority used
+    // for either dispatch or durable validation identity.
+    config.system.network_policy = backend_network_policy.clone();
+    if !backend_network_policy.enabled {
         let record = crate::provider_validation::failed_provider_validation_record(
             &config,
             "settings_manual_test",
@@ -962,7 +1205,7 @@ pub async fn test_llm_connection(
             chrono::Utc::now(),
         );
         crate::provider_validation::save_provider_validation_record_to_path(
-            &crate::provider_validation::provider_validation_path(),
+            validation_path,
             &record,
         )?;
         return Ok(LlmConnectionTestResult {
@@ -970,6 +1213,12 @@ pub async fn test_llm_connection(
             provider: label,
             message: "连接测试被当前网络策略阻止。请先启用网络访问后再验证 provider。".to_string(),
             validation_status: "failed".into(),
+            network_policy_decision_id: None,
+            effective_network_policy_decision_id: None,
+            consent_status: Some("blocked".into()),
+            review_proposal_id: None,
+            permission_id: None,
+            provider_invocation_receipt: None,
         });
     }
 
@@ -978,54 +1227,216 @@ pub async fn test_llm_connection(
     } else {
         config.llm.openai_base.trim_end_matches('/').to_string()
     };
-    let url = chat_completions_url(&provider, &base);
-    let model = if config.llm.chat_model.trim().is_empty() {
-        "deepseek-chat"
-    } else {
-        config.llm.chat_model.as_str()
-    };
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [{"role": "user", "content": "ping"}],
-        "max_tokens": 8,
-        "temperature": 0.0
-    });
-
-    let client = reqwest::Client::new();
-    let res = client
-        .post(url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| {
-            let record = crate::provider_validation::failed_provider_validation_record(
-                &config,
-                "settings_manual_test",
-                crate::provider_validation::reqwest_validation_error_label(&e),
-                chrono::Utc::now(),
-            );
-            let _ = crate::provider_validation::save_provider_validation_record_to_path(
-                &crate::provider_validation::provider_validation_path(),
-                &record,
-            );
-            AppError::external(format!(
-                "API request failed: {}",
-                crate::provider_validation::reqwest_validation_error_label(&e)
-            ))
-        })?;
-    let status = res.status();
-    if status.is_success() {
-        let record = crate::provider_validation::successful_provider_validation_record(
+    let model = config.llm.chat_model.trim().to_string();
+    if model.is_empty() {
+        let record = crate::provider_validation::failed_provider_validation_record(
             &config,
             "settings_manual_test",
+            "missing_model",
             chrono::Utc::now(),
         );
         crate::provider_validation::save_provider_validation_record_to_path(
-            &crate::provider_validation::provider_validation_path(),
+            validation_path,
             &record,
         )?;
+        return Ok(LlmConnectionTestResult {
+            ok: false,
+            provider: label,
+            message: "未配置要验证的模型；连接测试没有发送 provider 请求。".into(),
+            validation_status: "failed".into(),
+            network_policy_decision_id: None,
+            effective_network_policy_decision_id: None,
+            consent_status: None,
+            review_proposal_id: None,
+            permission_id: None,
+            provider_invocation_receipt: None,
+        });
+    }
+    config.llm.openai_base = base.clone();
+    config.llm.chat_model = model.clone();
+    config.llm.openai_key = api_key.clone();
+    let probe_scheduler = InferenceScheduler::new(
+        config.local_model.clone(),
+        false,
+        provider.clone(),
+        base.clone(),
+        api_key,
+        model.clone(),
+        config.llm.embedding_model.clone(),
+        false,
+    )
+    .with_provider_credential_version(config.llm.credential_version);
+    let probe_scheduler = {
+        let permission_store = state.tool_permission_store.lock().await;
+        permission_store.bind_explicit_provider_probe_scheduler(probe_scheduler)
+    };
+    let url = chat_completions_url(&provider, &base);
+    let network_capability = format!("provider.{provider}");
+    let network_policy_decision =
+        resolve_network_policy_decision(&backend_network_policy, &url, &network_capability)
+            .map_err(|_| AppError::external("provider network policy decision failed"))?;
+    let original_network_policy_decision_id = network_policy_decision.decision_id.clone();
+    let (probe_grant, effective_network_policy_decision_id, permission_id) =
+        match authorize_explicit_provider_probe(
+            state,
+            &probe_scheduler,
+            &backend_network_policy,
+            &network_policy_decision,
+            &url,
+            &network_capability,
+            &provider,
+        )
+        .await?
+        {
+            ExplicitProviderProbeAuthorization::Authorized {
+                grant,
+                effective_network_policy_decision_id,
+                permission_id,
+            } => (grant, effective_network_policy_decision_id, permission_id),
+            ExplicitProviderProbeAuthorization::ConsentRequired { proposal_id } => {
+                return Ok(LlmConnectionTestResult {
+                    ok: false,
+                    provider: label,
+                    message: "需要在 Review Center 明确批准一次 provider 网络连接；批准前不会发送请求，批准后请重试连接测试。".into(),
+                    validation_status: "consent_required".into(),
+                    network_policy_decision_id: Some(original_network_policy_decision_id),
+                    effective_network_policy_decision_id: None,
+                    consent_status: Some("pending_review".into()),
+                    review_proposal_id: Some(proposal_id),
+                    permission_id: None,
+                    provider_invocation_receipt: None,
+                });
+            }
+            ExplicitProviderProbeAuthorization::Denied { reason_code } => {
+                return Ok(LlmConnectionTestResult {
+                    ok: false,
+                    provider: label,
+                    message: format!("连接测试被当前网络策略阻止（{reason_code}）。"),
+                    validation_status: "blocked".into(),
+                    network_policy_decision_id: Some(original_network_policy_decision_id),
+                    effective_network_policy_decision_id: None,
+                    consent_status: Some("blocked".into()),
+                    review_proposal_id: None,
+                    permission_id: None,
+                    provider_invocation_receipt: None,
+                });
+            }
+        };
+    let prepared = match probe_scheduler.prepare_explicit_provider_probe(probe_grant) {
+        Ok(prepared) => prepared,
+        Err(_) => {
+            let record = crate::provider_validation::failed_provider_validation_record(
+                &config,
+                "settings_manual_test",
+                "provider_probe_pre_dispatch_rejected",
+                chrono::Utc::now(),
+            );
+            crate::provider_validation::save_provider_validation_record_to_path(
+                validation_path,
+                &record,
+            )?;
+            return Ok(LlmConnectionTestResult {
+                ok: false,
+                provider: label,
+                message: "连接测试在 provider 请求发出前被拒绝，未建立可用性证据。".into(),
+                validation_status: "failed".into(),
+                network_policy_decision_id: Some(original_network_policy_decision_id),
+                effective_network_policy_decision_id: Some(
+                    effective_network_policy_decision_id.clone(),
+                ),
+                consent_status: Some(if permission_id.is_some() {
+                    "allow_once_consumed".into()
+                } else {
+                    "not_required".into()
+                }),
+                review_proposal_id: None,
+                permission_id,
+                provider_invocation_receipt: None,
+            });
+        }
+    };
+    // These are the exact prepared-generation facts later sealed into the
+    // adapter terminal proof. They are captured before ownership moves into
+    // execution; the submitted Settings payload is not proof authority.
+    let prepared_provider_config_generation = prepared.provider_config_generation.clone();
+    let prepared_network_policy = prepared.network_policy.clone();
+    let prepared_network_policy_decision = prepared.network_policy_decision.clone();
+    let outcome = probe_scheduler.execute_prepared(prepared).await;
+    let result_has_content = outcome
+        .result
+        .as_ref()
+        .is_ok_and(|content| !content.trim().is_empty());
+    let observed_receipt = outcome.receipt;
+    let terminal_proof = outcome.terminal_proof;
+    let write_observed_at = chrono::Utc::now();
+    let mut receipt = None;
+    let mut terminal_status = None;
+    let mut completed = false;
+    let record = match (observed_receipt.as_ref(), terminal_proof) {
+        (Some(observed), Some(proof)) if proof.receipt() == observed => {
+            let candidate_status = proof.receipt().status;
+            let candidate_receipt = proof.receipt().clone();
+            let candidate_completed =
+                candidate_status == ProviderInvocationStatus::Completed && result_has_content;
+            let safe_error = match candidate_status {
+                ProviderInvocationStatus::RemoteUnknown => "provider_remote_state_unknown",
+                ProviderInvocationStatus::Failed => "provider_confirmed_failure",
+                ProviderInvocationStatus::Completed if !candidate_completed => {
+                    "provider_completion_inconsistent"
+                }
+                ProviderInvocationStatus::Completed => "validation_failed",
+            };
+            match crate::provider_validation::provider_validation_record_with_terminal_proof(
+                &config,
+                "settings_manual_test",
+                proof,
+                &prepared_provider_config_generation,
+                &prepared_network_policy,
+                &prepared_network_policy_decision,
+                candidate_completed,
+                (!candidate_completed).then_some(safe_error),
+                write_observed_at,
+            ) {
+                Ok(record) => {
+                    // A receipt reaches product/durable projection only after
+                    // the opaque proof passes every exact runtime binding.
+                    receipt = Some(candidate_receipt);
+                    terminal_status = Some(candidate_status);
+                    completed = candidate_completed;
+                    record
+                }
+                Err(_) => crate::provider_validation::failed_provider_validation_record(
+                    &config,
+                    "settings_manual_test",
+                    "provider_terminal_proof_invalid",
+                    write_observed_at,
+                ),
+            }
+        }
+        (Some(_), None) => crate::provider_validation::failed_provider_validation_record(
+            &config,
+            "settings_manual_test",
+            "provider_terminal_proof_missing",
+            write_observed_at,
+        ),
+        (None, None) => crate::provider_validation::failed_provider_validation_record(
+            &config,
+            "settings_manual_test",
+            "provider_not_attempted",
+            write_observed_at,
+        ),
+        (None, Some(_)) | (Some(_), Some(_)) => {
+            crate::provider_validation::failed_provider_validation_record(
+                &config,
+                "settings_manual_test",
+                "provider_terminal_proof_mismatch",
+                write_observed_at,
+            )
+        }
+    };
+    crate::provider_validation::save_provider_validation_record_to_path(validation_path, &record)?;
+
+    if completed {
         let model_note = if model.to_lowercase().contains("reasoner") {
             " 当前选择的是推理模型，首次可见输出可能更慢；试用聊天建议优先使用 deepseek-chat 这类通用聊天模型。"
         } else {
@@ -1036,27 +1447,50 @@ pub async fn test_llm_connection(
             provider: label,
             message: format!("连接成功，云端模型可用。{}", model_note),
             validation_status: "validated".into(),
+            network_policy_decision_id: Some(original_network_policy_decision_id),
+            effective_network_policy_decision_id: Some(
+                effective_network_policy_decision_id.clone(),
+            ),
+            consent_status: Some(if permission_id.is_some() {
+                "allow_once_consumed".into()
+            } else {
+                "not_required".into()
+            }),
+            review_proposal_id: None,
+            permission_id,
+            provider_invocation_receipt: receipt,
         })
     } else {
-        let safe_error = format!("http_status:{}", status.as_u16());
-        let record = crate::provider_validation::failed_provider_validation_record(
-            &config,
-            "settings_manual_test",
-            &safe_error,
-            chrono::Utc::now(),
-        );
-        crate::provider_validation::save_provider_validation_record_to_path(
-            &crate::provider_validation::provider_validation_path(),
-            &record,
-        )?;
+        let remote_unknown = terminal_status == Some(ProviderInvocationStatus::RemoteUnknown);
         Ok(LlmConnectionTestResult {
             ok: false,
             provider: label,
-            message: format!(
-                "连接失败（HTTP {}）。请检查 provider、模型和 API Key。",
-                status
+            message: if remote_unknown {
+                "连接请求已开始，但没有观察到可信的远端终态；当前状态为 unknown，不能标记为可用。"
+                    .into()
+            } else if terminal_status == Some(ProviderInvocationStatus::Failed) {
+                "Provider 已返回明确失败，连接不能标记为可用。请检查 provider、模型和 API Key。"
+                    .into()
+            } else {
+                "没有获得完整且可信的 provider 响应，连接不能标记为可用。".into()
+            },
+            validation_status: if remote_unknown {
+                "remote_unknown".into()
+            } else {
+                "failed".into()
+            },
+            network_policy_decision_id: Some(original_network_policy_decision_id),
+            effective_network_policy_decision_id: Some(
+                effective_network_policy_decision_id.clone(),
             ),
-            validation_status: "failed".into(),
+            consent_status: Some(if permission_id.is_some() {
+                "allow_once_consumed".into()
+            } else {
+                "not_required".into()
+            }),
+            review_proposal_id: None,
+            permission_id,
+            provider_invocation_receipt: receipt,
         })
     }
 }
@@ -1064,23 +1498,59 @@ pub async fn test_llm_connection(
 #[tauri::command]
 pub async fn export_mcp_audit_logs(
     days: i64,
+    window: tauri::WebviewWindow,
     state: State<'_, Arc<AppState>>,
 ) -> Result<AuditExport, AppError> {
-    let store = state.mcp_audit_store.lock().await;
-    store.export_logs(days).map_err(AppError::from)
+    let export = {
+        let store = state.mcp_audit_store.lock().await;
+        store.export_logs(days).map_err(AppError::from)?
+    };
+    let export_value = serde_json::to_value(&export)?;
+    require_danger_action_confirmation(
+        DangerActionConfirmationRequest {
+            action_type: "mcp_audit_export",
+            target_ids_for_new_challenge: &[],
+            requested_target: None,
+            affected_count: None,
+            reference: None,
+            arguments: &serde_json::json!({
+                "days": days,
+                "export_digest": hash_json_value(&export_value)?,
+            }),
+            arguments_summary: &format!(
+                "导出最近 {days} 天的 MCP 审计快照；原始日志不会复制进 confirmation grant。"
+            ),
+        },
+        &window,
+        state.inner(),
+    )
+    .await?;
+    Ok(export)
 }
 
 #[tauri::command]
 pub async fn cleanup_mcp_audit_logs(
     retention_days: i64,
-    confirmation_evidence: Option<DangerActionConfirmationEvidence>,
+    confirmation_evidence: Option<DangerActionConfirmationReference>,
+    window: tauri::WebviewWindow,
     state: State<'_, Arc<AppState>>,
 ) -> Result<usize, AppError> {
+    state
+        .persistence_coordinator
+        .require_effects_allowed()
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))?;
+    let confirmation_arguments = serde_json::json!({ "retention_days": retention_days });
     require_danger_action_confirmation(
-        "mcp_audit_cleanup",
-        &[],
-        None,
-        confirmation_evidence.as_ref(),
+        DangerActionConfirmationRequest {
+            action_type: "mcp_audit_cleanup",
+            target_ids_for_new_challenge: &[],
+            requested_target: None,
+            affected_count: None,
+            reference: confirmation_evidence.as_ref(),
+            arguments: &confirmation_arguments,
+            arguments_summary: &format!("删除超过 {retention_days} 天保留期的 MCP 审计记录。"),
+        },
+        &window,
         state.inner(),
     )
     .await?;
@@ -1090,27 +1560,46 @@ pub async fn cleanup_mcp_audit_logs(
 
 #[tauri::command]
 pub async fn rotate_mcp_audit_key(
-    confirmation_evidence: Option<DangerActionConfirmationEvidence>,
+    confirmation_evidence: Option<DangerActionConfirmationReference>,
+    window: tauri::WebviewWindow,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), AppError> {
+    state
+        .persistence_coordinator
+        .require_effects_allowed()
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))?;
     require_danger_action_confirmation(
-        "mcp_audit_key_rotation",
-        &[],
-        None,
-        confirmation_evidence.as_ref(),
+        DangerActionConfirmationRequest {
+            action_type: "mcp_audit_key_rotation",
+            target_ids_for_new_challenge: &[],
+            requested_target: None,
+            affected_count: None,
+            reference: confirmation_evidence.as_ref(),
+            arguments: &serde_json::json!({ "operation": "rotate_mcp_audit_key_epoch" }),
+            arguments_summary: "轮换 MCP 审计加密 epoch，并保留历史 epoch 供旧记录解密。",
+        },
+        &window,
         state.inner(),
     )
     .await?;
     let mut store = state.mcp_audit_store.lock().await;
-    let new_config = AuditKeyConfig {
-        mode: KeyMode::Derived,
-        salt_b64: None,
-        env_var: None,
-        epoch: chrono::Utc::now().timestamp() as u64,
-        created_at: chrono::Utc::now().to_rfc3339(),
-    };
-    store.rotate_key(new_config);
-    save_mcp_audit_keyring_to_path(&mcp_audit_keyring_path(), store.key_configs())?;
+    let timestamp_epoch = chrono::Utc::now().timestamp().max(0) as u64;
+    let epoch = timestamp_epoch.max(store.key_config().epoch.saturating_add(1));
+    let secret_store = KeyringSecretStore;
+    let material = create_mcp_audit_key_material(epoch, &secret_store).map_err(AppError::from)?;
+    let secret_ref = material.config.key_ref.clone().unwrap_or_default();
+    let snapshot = store.clone();
+    if let Err(error) = store.rotate_key_material(material) {
+        let _ = secret_store.delete(&secret_ref);
+        return Err(AppError::from(error));
+    }
+    if let Err(error) =
+        save_mcp_audit_keyring_to_path(&mcp_audit_keyring_path(), store.key_configs())
+    {
+        *store = snapshot;
+        let _ = secret_store.delete(&secret_ref);
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -1118,6 +1607,10 @@ pub async fn rotate_mcp_audit_key(
 pub async fn get_privacy_policy(
     state: State<'_, Arc<AppState>>,
 ) -> Result<PrivacyPolicy, AppError> {
+    state
+        .persistence_coordinator
+        .require_trusted_read("PrivacyPolicyStore")
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "canonical_state_unknown"))?;
     let engine = state.privacy_engine.lock().await;
     Ok(engine.policy().clone())
 }
@@ -1127,6 +1620,10 @@ pub async fn set_privacy_policy(
     policy: PrivacyPolicy,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), AppError> {
+    state
+        .persistence_coordinator
+        .require_effects_allowed()
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))?;
     save_privacy_policy_to_path(&privacy_policy_path(), &policy)?;
     let mut engine = state.privacy_engine.lock().await;
     engine.set_policy(policy);
@@ -1136,7 +1633,11 @@ pub async fn set_privacy_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openlife_core::llm::ChatMessage;
+    use crate::provider_network_consent::{
+        authorize_provider_network_dispatch, NetworkConsentSubmissionScope,
+        ProviderNetworkAuthorization,
+    };
+    use openlife_core::llm::{provider_endpoint_is_official, ChatMessage};
 
     const W84_IMPORT_CURRENT_NAME_SECRET: &str = "W84_IMPORT_CURRENT_LIFEMODEL_SECRET";
     const W84_IMPORT_PAYLOAD_NAME_SECRET: &str = "W84_IMPORT_PAYLOAD_LIFEMODEL_SECRET";
@@ -1159,6 +1660,437 @@ mod tests {
     }
 
     #[test]
+    fn masked_provider_key_is_bound_to_the_same_provider_endpoint_identity() {
+        let mut current = AppConfig::default();
+        current.llm.provider = "openai".into();
+        current.llm.openai_base = "https://api.openai.com/v1".into();
+        current.llm.openai_key = "sk-current-openai".into();
+
+        let mut same = current.clone();
+        same.llm.openai_key = KEY_MASK.into();
+        assert_eq!(
+            resolve_submitted_provider_api_key(&same, &current),
+            "sk-current-openai"
+        );
+
+        let mut changed_provider = same.clone();
+        changed_provider.llm.provider = "deepseek".into();
+        changed_provider.llm.openai_base = "https://api.deepseek.com".into();
+        assert!(resolve_submitted_provider_api_key(&changed_provider, &current).is_empty());
+
+        let mut changed_endpoint = same;
+        changed_endpoint.llm.openai_base = "https://capture.example/v1".into();
+        assert!(resolve_submitted_provider_api_key(&changed_endpoint, &current).is_empty());
+    }
+
+    #[test]
+    fn only_canonical_provider_endpoint_can_implicitly_use_environment_credentials() {
+        let mut config = AppConfig::default();
+        config.llm.provider = "openai".into();
+        config.llm.openai_base = "https://api.openai.com/v1/".into();
+        assert!(provider_endpoint_is_official(
+            &config.llm.provider,
+            &config.llm.openai_base,
+        ));
+
+        config.llm.openai_base = "https://proxy.example/v1".into();
+        assert!(!provider_endpoint_is_official(
+            &config.llm.provider,
+            &config.llm.openai_base,
+        ));
+    }
+
+    #[test]
+    fn provider_credential_version_changes_only_with_secret_identity() {
+        let mut current = AppConfig::default();
+        current.llm.provider = "openai".into();
+        current.llm.openai_base = "https://api.openai.com/v1".into();
+        current.llm.openai_key = "sk-current".into();
+        current.llm.credential_version = 7;
+
+        let mut masked_same = current.clone();
+        masked_same.llm.openai_key = KEY_MASK.into();
+        assert_eq!(
+            resolved_provider_credential_version(&masked_same, &current),
+            7
+        );
+
+        let mut replaced = masked_same.clone();
+        replaced.llm.openai_key = "sk-replaced".into();
+        assert_eq!(resolved_provider_credential_version(&replaced, &current), 8);
+
+        let mut moved = masked_same;
+        moved.llm.openai_base = "https://custom.example/v1".into();
+        assert_eq!(resolved_provider_credential_version(&moved, &current), 8);
+    }
+
+    #[tokio::test]
+    async fn explicit_provider_probe_uses_scheduler_receipt_and_keeps_loopback_capability() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let captured = Arc::new(std::sync::Mutex::new(String::new()));
+        let captured_server = Arc::clone(&captured);
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 16 * 1024];
+            let read = socket.read(&mut request).await.unwrap();
+            *captured_server.lock().unwrap() =
+                String::from_utf8_lossy(&request[..read]).to_string();
+            let body = r#"{"choices":[{"message":{"content":"pong"}}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let mut runtime_config = state.config.lock().await.clone();
+        runtime_config.system.network_policy = openlife_core::config::NetworkPolicy {
+            default_decision: "allow".into(),
+            ..Default::default()
+        };
+        state.replace_provider_runtime_config(runtime_config).await;
+        let mut config = AppConfig::default();
+        config.llm.provider = "openai".into();
+        config.llm.openai_base = base;
+        config.llm.openai_key = "sk-test".into();
+        config.llm.chat_model = "gpt-test".into();
+        let dir = tempfile::tempdir().unwrap();
+        let validation_path = dir.path().join("provider-validation.json");
+
+        let result =
+            test_llm_connection_with_state_and_validation_path(config, &state, &validation_path)
+                .await
+                .unwrap();
+        server.await.unwrap();
+        assert!(result.ok);
+        assert_eq!(result.validation_status, "validated");
+        let receipt = result.provider_invocation_receipt.unwrap();
+        assert_eq!(receipt.status, ProviderInvocationStatus::Completed);
+        assert_eq!(receipt.provider, "openai");
+        assert_eq!(receipt.model, "gpt-test");
+        assert!(!receipt.simulated);
+        let request = captured.lock().unwrap().clone();
+        assert!(request.contains(r#""content":"ping""#));
+        let persisted =
+            crate::provider_validation::load_provider_validation_record_from_path(&validation_path)
+                .as_record()
+                .expect("completed probe must persist a valid validation record")
+                .clone();
+        assert_eq!(
+            persisted
+                .invocation_receipt
+                .as_ref()
+                .map(|receipt| receipt.request_id.as_str()),
+            Some(receipt.request_id.as_str())
+        );
+        let raw = std::fs::read_to_string(validation_path).unwrap();
+        assert!(!raw.contains("ping"));
+        assert!(!raw.contains("pong"));
+        assert!(!raw.contains("sk-test"));
+    }
+
+    #[tokio::test]
+    async fn explicit_provider_probe_remote_unknown_is_persisted_and_never_reports_success() {
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = socket.read(&mut request).await.unwrap();
+            // Drop after the adapter start boundary without a terminal response.
+        });
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let mut runtime_config = state.config.lock().await.clone();
+        runtime_config.system.network_policy = openlife_core::config::NetworkPolicy {
+            default_decision: "allow".into(),
+            ..Default::default()
+        };
+        state.replace_provider_runtime_config(runtime_config).await;
+        let mut config = AppConfig::default();
+        config.llm.provider = "openai".into();
+        config.llm.openai_base = base;
+        config.llm.openai_key = "sk-test".into();
+        config.llm.chat_model = "gpt-test".into();
+        config.system.network_policy = openlife_core::config::NetworkPolicy {
+            default_decision: "allow".into(),
+            ..Default::default()
+        };
+        let validation_config = config.clone();
+        let dir = tempfile::tempdir().unwrap();
+        let validation_path = dir.path().join("provider-validation.json");
+
+        let result =
+            test_llm_connection_with_state_and_validation_path(config, &state, &validation_path)
+                .await
+                .unwrap();
+        server.await.unwrap();
+        assert!(!result.ok);
+        assert_eq!(result.validation_status, "remote_unknown");
+        assert!(result.message.contains("unknown"));
+        assert_eq!(
+            result
+                .provider_invocation_receipt
+                .as_ref()
+                .map(|receipt| receipt.status),
+            Some(ProviderInvocationStatus::RemoteUnknown)
+        );
+        let persisted =
+            crate::provider_validation::load_provider_validation_record_from_path(&validation_path)
+                .as_record()
+                .expect("remote-unknown probe must persist a valid validation record")
+                .clone();
+        assert_eq!(
+            crate::provider_validation::summarize_provider_validation(
+                &validation_config,
+                Some(&persisted),
+                chrono::Utc::now(),
+            )
+            .status,
+            "remote_unknown"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_provider_probe_ask_stages_review_and_performs_zero_dispatch() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let mut runtime_config = state.config.lock().await.clone();
+        runtime_config.system.network_policy = openlife_core::config::NetworkPolicy::default();
+        state.replace_provider_runtime_config(runtime_config).await;
+        let mut config = AppConfig::default();
+        config.llm.provider = "openai".into();
+        config.llm.openai_base = base;
+        config.llm.openai_key = "sk-test".into();
+        config.llm.chat_model = "gpt-test".into();
+        let dir = tempfile::tempdir().unwrap();
+        let validation_path = dir.path().join("provider-validation.json");
+
+        let result =
+            test_llm_connection_with_state_and_validation_path(config, &state, &validation_path)
+                .await
+                .unwrap();
+        assert!(!result.ok);
+        assert_eq!(result.validation_status, "consent_required");
+        assert!(result.review_proposal_id.is_some());
+        assert!(result.provider_invocation_receipt.is_none());
+        assert!(!validation_path.exists());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), listener.accept())
+                .await
+                .is_err(),
+            "an Ask decision must stage review before any provider dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_network_ask_reuses_review_workflow_and_allow_once_is_recoverable() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let policy = openlife_core::config::NetworkPolicy::default();
+        let capability = "provider.openai";
+        let url = "https://api.openai.com/v1/chat/completions";
+        let ask = resolve_network_policy_decision(&policy, url, capability).unwrap();
+
+        let proposal_id = match authorize_provider_network_dispatch(
+            &state,
+            &policy,
+            &ask,
+            url,
+            capability,
+            "openai",
+            None,
+            NetworkConsentSubmissionScope::ExplicitCommand,
+        )
+        .await
+        .unwrap()
+        {
+            ProviderNetworkAuthorization::ConsentRequired { proposal_id } => proposal_id,
+            _ => panic!("Ask must stage consent without dispatch authorization"),
+        };
+        let proposal = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&proposal_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            proposal.proposal_type,
+            openlife_core::agent::ProposalType::ToolPermission
+        );
+        assert_eq!(
+            proposal.status,
+            openlife_core::agent::ProposalStatus::Pending
+        );
+        assert_eq!(
+            proposal.source,
+            openlife_core::agent::ProposalSource::NetworkConsent,
+            "an explicit Settings probe must not claim Main Chat proposal authority"
+        );
+
+        crate::commands::proposal::accept_proposal_with_state(proposal_id, &state)
+            .await
+            .unwrap();
+        let authorized = authorize_provider_network_dispatch(
+            &state,
+            &policy,
+            &ask,
+            url,
+            capability,
+            "openai",
+            None,
+            NetworkConsentSubmissionScope::ExplicitCommand,
+        )
+        .await
+        .unwrap();
+        match authorized {
+            ProviderNetworkAuthorization::Authorized {
+                network_policy,
+                network_policy_decision,
+                permission_id,
+                ..
+            } => {
+                assert_eq!(
+                    network_policy_decision.disposition,
+                    openlife_core::network_client::NetworkPolicyDisposition::Allow
+                );
+                assert_eq!(
+                    network_policy
+                        .tool_overrides
+                        .get(capability)
+                        .map(String::as_str),
+                    Some("allow")
+                );
+                assert!(permission_id.is_some());
+            }
+            _ => panic!("accepted AllowOnce must authorize exactly one retry"),
+        }
+
+        assert!(matches!(
+            authorize_provider_network_dispatch(
+                &state,
+                &policy,
+                &ask,
+                url,
+                capability,
+                "openai",
+                None,
+                NetworkConsentSubmissionScope::ExplicitCommand,
+            )
+            .await
+            .unwrap(),
+            ProviderNetworkAuthorization::ConsentRequired { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn replacing_provider_runtime_config_invalidates_cached_provider_truth() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        *state.provider_health_cache.lock().await = Some(crate::state::ProviderHealthCache {
+            providers: Vec::new(),
+            checked_at: chrono::Utc::now().to_rfc3339(),
+            identity_digest: "stale-provider-identity".into(),
+        });
+        let mut replacement = AppConfig::default();
+        replacement.llm.provider = "openai".into();
+        replacement.llm.openai_base = "https://api.openai.com/v1/changed-path".into();
+        replacement.llm.chat_model = "changed-model".into();
+        replacement.llm.openai_key = String::new();
+
+        replace_runtime_provider_config(&state, replacement).await;
+
+        assert!(state.provider_health_cache.lock().await.is_none());
+        let scheduler = state.scheduler.lock().await;
+        assert_eq!(
+            scheduler.openai_base,
+            "https://api.openai.com/v1/changed-path"
+        );
+        assert_eq!(scheduler.chat_model, "changed-model");
+        assert!(scheduler.openai_key.is_empty());
+    }
+
+    #[tokio::test]
+    async fn concurrent_provider_replacement_never_exposes_a_mixed_status_generation() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let configured = |suffix: &str, credential_version: u64| {
+            let mut config = AppConfig::default();
+            config.local_model = format!("local-{suffix}");
+            config.prefer_local_model = false;
+            config.llm.provider = "openai".into();
+            config.llm.openai_base = format!("https://api.example.test/{suffix}");
+            config.llm.openai_key = format!("sk-{suffix}");
+            config.llm.chat_model = format!("model-{suffix}");
+            config.llm.credential_version = credential_version;
+            config
+        };
+        let first = configured("generation-a", 41);
+        let second = configured("generation-b", 42);
+        replace_runtime_provider_config(&state, first.clone()).await;
+
+        let writer = async {
+            for index in 0..64 {
+                let next = if index % 2 == 0 {
+                    second.clone()
+                } else {
+                    first.clone()
+                };
+                replace_runtime_provider_config(&state, next).await;
+                tokio::task::yield_now().await;
+            }
+        };
+        let reader = async {
+            for _ in 0..128 {
+                let snapshot = state.provider_runtime_snapshot().await;
+                assert!(
+                    snapshot.coherent,
+                    "a status snapshot must never combine config and adapter generations"
+                );
+                let observed = (
+                    snapshot.config.llm.openai_base.as_str(),
+                    snapshot.scheduler.openai_base.as_str(),
+                    snapshot.config.llm.chat_model.as_str(),
+                    snapshot.scheduler.chat_model.as_str(),
+                    snapshot.config.llm.credential_version,
+                    snapshot.scheduler.provider_credential_version(),
+                );
+                assert!(matches!(
+                    observed,
+                    (
+                        "https://api.example.test/generation-a",
+                        "https://api.example.test/generation-a",
+                        "model-generation-a",
+                        "model-generation-a",
+                        41,
+                        41
+                    ) | (
+                        "https://api.example.test/generation-b",
+                        "https://api.example.test/generation-b",
+                        "model-generation-b",
+                        "model-generation-b",
+                        42,
+                        42
+                    )
+                ));
+                assert!(!snapshot
+                    .scheduler
+                    .provider_config_generation()
+                    .trim()
+                    .is_empty());
+                tokio::task::yield_now().await;
+            }
+        };
+
+        tokio::join!(writer, reader);
+    }
+
+    #[test]
     fn danger_action_preflight_returns_safe_data_export_scope() {
         let view = danger_action_preflight_for_action("data_export", false).unwrap();
 
@@ -1172,6 +2104,9 @@ mod tests {
         assert!(view.privacy_sensitive);
         assert_eq!(view.external_transmission, "not_sent_externally");
         assert_eq!(view.backup_status, "not_required_read_only");
+        assert!(view.confirmation_required);
+        assert!(!view.requires_typed_confirmation);
+        assert!(view.confirmation_phrase.is_none());
         assert!(view.final_action_enabled);
         assert!(!view.safe_mode_blocked);
         assert!(view
@@ -1232,6 +2167,9 @@ mod tests {
         assert!(view.privacy_sensitive);
         assert_eq!(view.external_transmission, "not_sent_externally");
         assert_eq!(view.backup_status, "not_required_read_only");
+        assert!(view.confirmation_required);
+        assert!(!view.requires_typed_confirmation);
+        assert!(view.confirmation_phrase.is_none());
         assert!(view.final_action_enabled);
     }
 
@@ -1267,7 +2205,8 @@ mod tests {
         assert_eq!(view.action_type, "agent_run_bulk_delete");
         assert!(view.writes_durable_state);
         assert!(view.confirmation_required);
-        assert_eq!(view.confirmation_phrase.as_deref(), Some("DELETE RUNS"));
+        assert!(!view.requires_typed_confirmation);
+        assert!(view.confirmation_phrase.is_none());
         assert_eq!(view.affected_item_count, 2);
         assert!(view.affected_item_digest.starts_with("bytes:"));
         assert!(view
@@ -1288,7 +2227,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(vector.action_type, "vector_rebuild");
-        assert_eq!(vector.confirmation_phrase.as_deref(), Some("REBUILD"));
+        assert!(vector.confirmation_required);
+        assert!(!vector.requires_typed_confirmation);
+        assert!(vector.confirmation_phrase.is_none());
         assert_eq!(vector.affected_item_count, 12);
         assert!(vector
             .source_refs
@@ -1296,85 +2237,25 @@ mod tests {
             .any(|source| source == "final_command:rebuild_memory_index"));
     }
 
-    #[tokio::test]
-    async fn danger_action_confirmation_requires_exact_phrase_and_scope() {
-        let state = crate::test_utils::test_app_state();
-        let target_ids = vec!["run-confirm-1".to_string()];
+    #[test]
+    fn deterministic_preflight_view_cannot_mint_confirmation_authority() {
         let view = danger_action_preflight_for_action_scoped(
             "agent_run_delete",
             false,
             DangerActionPreflightScope {
-                target_ids: target_ids.clone(),
+                target_ids: vec!["run-confirm-1".to_string()],
                 affected_count: Some(1),
             },
         )
         .unwrap();
-        let evidence = DangerActionConfirmationEvidence {
-            action_type: "agent_run_delete".into(),
-            preflight_id: view.preflight_id.clone(),
-            confirmation_phrase: view.confirmation_phrase.clone().unwrap(),
-            confirmation_scope_digest: view.confirmation_scope_digest.clone(),
-            safe_mode: false,
-            target_ids: target_ids.clone(),
-        };
-
-        require_danger_action_confirmation(
-            "agent_run_delete",
-            &target_ids,
-            Some(1),
-            Some(&evidence),
-            &state,
-        )
-        .await
-        .unwrap();
-
-        let missing = require_danger_action_confirmation(
-            "agent_run_delete",
-            &target_ids,
-            Some(1),
-            None,
-            &state,
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(missing, AppError::PermissionDenied { .. }));
-
-        let mut wrong_phrase = evidence.clone();
-        wrong_phrase.confirmation_phrase = "WRONG".into();
-        let err = require_danger_action_confirmation(
-            "agent_run_delete",
-            &target_ids,
-            Some(1),
-            Some(&wrong_phrase),
-            &state,
-        )
-        .await
-        .unwrap_err();
-        assert!(err.message().contains("does not match"));
-
-        let mut safe_mode_evidence = evidence.clone();
-        safe_mode_evidence.safe_mode = true;
-        let err = require_danger_action_confirmation(
-            "agent_run_delete",
-            &target_ids,
-            Some(1),
-            Some(&safe_mode_evidence),
-            &state,
-        )
-        .await
-        .unwrap_err();
-        assert!(err.message().contains("Safe Mode"));
-
-        let err = require_danger_action_confirmation(
-            "agent_run_delete",
-            &["run-other".into()],
-            Some(1),
-            Some(&evidence),
-            &state,
-        )
-        .await
-        .unwrap_err();
-        assert!(err.message().contains("does not match"));
+        assert!(view.confirmation_required);
+        assert!(!view.requires_typed_confirmation);
+        assert!(view.confirmation_phrase.is_none());
+        assert!(view.preflight_id.is_empty());
+        assert!(!view
+            .source_refs
+            .iter()
+            .any(|source| source == "native_confirmation:server_challenge_pending"));
     }
 
     #[test]
@@ -1479,11 +2360,21 @@ mod tests {
         }
         {
             let store = state.vector_store.lock().await;
+            let profile = openlife_core::embedding::EmbeddingProfile::new(
+                openlife_core::embedding::EmbeddingRouteKind::DeterministicHash,
+                "openlife-test",
+                "settings-import-test-v1",
+                "builtin:test",
+                "settings-import-test-artifact-v1",
+                4,
+            )
+            .unwrap();
             store
                 .insert(
                     "w84-current-session",
                     W84_IMPORT_CURRENT_VECTOR_SECRET,
                     &[0.1, 0.2, 0.3, 0.4],
+                    &profile,
                     "w84-current",
                 )
                 .unwrap();
@@ -1649,6 +2540,163 @@ mod tests {
         assert_eq!(
             exported_vector_contents(&state).await,
             vec![W84_IMPORT_PAYLOAD_VECTOR_SECRET.to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn governed_import_missing_memory_targets_preserves_existing_memory() {
+        let state = crate::test_utils::test_app_state();
+        seed_current_data(&state).await;
+        let mut payload = import_payload();
+        payload.as_object_mut().unwrap().remove("messages");
+        payload.as_object_mut().unwrap().remove("vectors");
+
+        let result = import_all_data_with_state_for_governed_import(
+            payload,
+            &state,
+            GovernedDataImportRequest {
+                purpose: "manual_restore".into(),
+                explicit_user_intent: true,
+                create_pre_change_snapshot: true,
+                import_targets: vec!["life_model".into()],
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["messages_targeted"], false);
+        assert_eq!(result["vectors_targeted"], false);
+        assert_eq!(result["imported_message_count"], 0);
+        assert_eq!(result["imported_vector_count"], 0);
+        assert_eq!(
+            exported_message_contents(&state).await,
+            vec![W84_IMPORT_CURRENT_MESSAGE_SECRET.to_string()]
+        );
+        assert_eq!(
+            exported_vector_contents(&state).await,
+            vec![W84_IMPORT_CURRENT_VECTOR_SECRET.to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn governed_import_skips_derived_vectors_and_reports_only_applied_rows() {
+        let state = crate::test_utils::test_app_state();
+        seed_current_data(&state).await;
+        let profile = openlife_core::embedding::EmbeddingProfile::new(
+            openlife_core::embedding::EmbeddingRouteKind::DeterministicHash,
+            "openlife-test",
+            "settings-import-canonical-v1",
+            "builtin:test",
+            "settings-import-canonical-artifact-v1",
+            4,
+        )
+        .unwrap();
+        let owner = openlife_core::vectors::CanonicalVectorOwnerRef::new(
+            "knowledge_note",
+            "settings-import-owner",
+        )
+        .unwrap();
+        state
+            .vector_store
+            .lock()
+            .await
+            .project_memory_embedding(
+                "outbox:settings-import-owner",
+                &owner,
+                "canonical-settings-session",
+                "CANONICAL_DESTINATION_VECTOR",
+                &[0.1, 0.3, 0.2, 0.4],
+                &profile,
+            )
+            .unwrap();
+
+        let mut payload = import_payload();
+        let portable = payload["vectors"][0].clone();
+        let mut canonical = portable.clone();
+        canonical["source"] = serde_json::Value::String(owner.source());
+        canonical["content"] = serde_json::Value::String("SPOOFED_CANONICAL_VECTOR".into());
+        let mut legacy_chat = portable;
+        legacy_chat["source"] = serde_json::Value::String("user_message".into());
+        legacy_chat["content"] = serde_json::Value::String("LEGACY_CHAT_VECTOR".into());
+        payload["vectors"]
+            .as_array_mut()
+            .unwrap()
+            .extend([canonical, legacy_chat]);
+
+        let result = import_all_data_with_state_for_governed_import(
+            payload,
+            &state,
+            GovernedDataImportRequest::manual_restore_all_targets(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["supplied_vector_count"], 3);
+        assert_eq!(result["imported_vector_count"], 1);
+        assert_eq!(result["skipped_vector_count"], 2);
+        assert_eq!(result["skipped_canonical_vector_count"], 1);
+        assert_eq!(result["skipped_legacy_chat_vector_count"], 1);
+        let vectors = state.vector_store.lock().await.export_all_chunks().unwrap();
+        assert!(vectors
+            .iter()
+            .any(|chunk| chunk.content == "CANONICAL_DESTINATION_VECTOR"));
+        assert!(vectors
+            .iter()
+            .any(|chunk| chunk.content == W84_IMPORT_PAYLOAD_VECTOR_SECRET));
+        assert!(!vectors
+            .iter()
+            .any(|chunk| chunk.content == "SPOOFED_CANONICAL_VECTOR"));
+        assert!(!vectors
+            .iter()
+            .any(|chunk| chunk.content == "LEGACY_CHAT_VECTOR"));
+
+        let exported = export_all_data_with_state(&state).await.unwrap();
+        assert_eq!(
+            exported["vector_export_semantics"],
+            "portable_only_canonical_and_chat_projections_derived"
+        );
+        assert_eq!(exported["vectors"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            exported["vectors"][0]["content"],
+            W84_IMPORT_PAYLOAD_VECTOR_SECRET
+        );
+    }
+
+    #[tokio::test]
+    async fn governed_import_vector_tombstone_failure_restores_all_preimport_truth() {
+        let state = crate::test_utils::test_app_state();
+        seed_current_data(&state).await;
+        state
+            .vector_store
+            .lock()
+            .await
+            .project_conversation_tombstone("settings-import-tombstone", "blocked-import-session")
+            .unwrap();
+        let mut payload = import_payload();
+        payload["messages"][0]["session_id"] =
+            serde_json::Value::String("blocked-import-session".into());
+        payload["vectors"][0]["session_id"] =
+            serde_json::Value::String("blocked-import-session".into());
+
+        let error = import_all_data_with_state_for_governed_import(
+            payload,
+            &state,
+            GovernedDataImportRequest::manual_restore_all_targets(),
+        )
+        .await
+        .expect_err("a projected conversation tombstone must reject archive resurrection");
+        assert!(error.message().contains("已自动回滚"));
+        assert_eq!(
+            current_model_name(&state).await,
+            W84_IMPORT_CURRENT_NAME_SECRET
+        );
+        assert_eq!(
+            exported_message_contents(&state).await,
+            vec![W84_IMPORT_CURRENT_MESSAGE_SECRET.to_string()]
+        );
+        assert_eq!(
+            exported_vector_contents(&state).await,
+            vec![W84_IMPORT_CURRENT_VECTOR_SECRET.to_string()]
         );
     }
 

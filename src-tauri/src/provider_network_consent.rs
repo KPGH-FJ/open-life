@@ -1,0 +1,414 @@
+use crate::errors::AppError;
+use crate::AppState;
+use openlife_core::network_client::{
+    resolve_network_policy_decision, NetworkPolicyDecision, NetworkPolicyDisposition,
+};
+use std::sync::Arc;
+
+pub(crate) enum ProviderNetworkAuthorization {
+    Authorized {
+        network_policy: Box<openlife_core::config::NetworkPolicy>,
+        network_policy_decision: NetworkPolicyDecision,
+        permission_id: Option<String>,
+        reviewed_permission:
+            Option<openlife_core::tool_permissions::ConsumedReviewedNetworkPermission>,
+    },
+    ConsentRequired {
+        proposal_id: String,
+    },
+    Denied {
+        reason_code: String,
+    },
+}
+
+pub(crate) enum ExplicitProviderProbeAuthorization {
+    Authorized {
+        grant: openlife_core::network_client::ExplicitProviderProbeGrant,
+        effective_network_policy_decision_id: String,
+        permission_id: Option<String>,
+    },
+    ConsentRequired {
+        proposal_id: String,
+    },
+    Denied {
+        reason_code: String,
+    },
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct NetworkConsentSubject<'a> {
+    pub permission_source: &'a str,
+    pub target: &'a str,
+    pub affected_path_prefix: &'a str,
+    pub blocked_action_type: &'a str,
+    pub proposal_summary: &'a str,
+}
+
+impl<'a> NetworkConsentSubject<'a> {
+    fn validate(self) -> Result<Self, AppError> {
+        if [
+            self.permission_source,
+            self.target,
+            self.affected_path_prefix,
+            self.blocked_action_type,
+            self.proposal_summary,
+        ]
+        .iter()
+        .any(|value| value.trim().is_empty())
+        {
+            return Err(AppError::internal(
+                "network consent subject contains an empty authority field",
+            ));
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum NetworkConsentSubmissionScope<'a> {
+    MainChatTurn(&'a dyn openlife_core::agent::CanonicalWriteAdmission),
+    ExplicitCommand,
+}
+
+fn provider_network_endpoint_fingerprint(url: &str) -> (usize, String) {
+    openlife_core::agent::metadata_safe::metadata_safe_value_digest(
+        &serde_json::json!({ "endpoint": url }),
+    )
+}
+
+fn provider_network_permission_scope(
+    capability: &str,
+    decision: &NetworkPolicyDecision,
+    endpoint_digest: &str,
+) -> String {
+    format!(
+        "{capability}@{}#endpoint:{endpoint_digest}",
+        decision.decision_id
+    )
+}
+
+async fn stage_network_consent(
+    state: &Arc<AppState>,
+    decision: &NetworkPolicyDecision,
+    capability: &str,
+    subject: NetworkConsentSubject<'_>,
+    originating_task_session_id: Option<&str>,
+    endpoint_length_bytes: usize,
+    endpoint_digest: &str,
+    submission_scope: NetworkConsentSubmissionScope<'_>,
+) -> Result<String, AppError> {
+    use openlife_core::agent::{
+        AgentProposal, DurableWriteRequest, DurableWriteSource, DurableWriteSubject,
+        ProposalSource, ProposalType, ReviewWorkflow, RiskLevel,
+    };
+
+    let subject = subject.validate()?;
+    let proposal_store = state
+        .proposal_store
+        .as_ref()
+        .ok_or_else(|| AppError::internal("Proposal store not available"))?;
+    let permission_scope = provider_network_permission_scope(capability, decision, endpoint_digest);
+    let mut after = serde_json::json!({
+        "permission_action": "grant",
+        "permission_scope_kind": "network_policy",
+        "permission": "allow_once",
+        "tool_name": permission_scope,
+        "source": subject.permission_source,
+        "risk_level": "high",
+        "action_type": "network",
+        "capabilities": ["network", "external_transmission"],
+        "canonical_scope": {
+            "tool_name": permission_scope,
+            "source": subject.permission_source,
+            "risk_level": "high",
+            "action_type": "network",
+            "network_capability": capability,
+            "network_policy_decision_id": decision.decision_id,
+            "endpoint_digest": endpoint_digest,
+            "endpoint_length_bytes": endpoint_length_bytes,
+        },
+        "blocked_action": {
+            "action_type": subject.blocked_action_type,
+            "target": subject.target,
+            "resolved_target": capability,
+            "network_policy_decision_id": decision.decision_id,
+            "endpoint_digest": endpoint_digest,
+            "endpoint_length_bytes": endpoint_length_bytes,
+        },
+        "reason": decision.reason_code,
+        "auto_generated": true,
+        "directWritesExecuted": false,
+    });
+    if let Some(task_session_id) = originating_task_session_id {
+        if let Some(object) = after.as_object_mut() {
+            object.insert(
+                "originatingTaskSessionId".into(),
+                serde_json::Value::String(task_session_id.to_string()),
+            );
+        }
+    }
+    let affected_path = format!("{}.{}", subject.affected_path_prefix, subject.target);
+    let proposal_source = match submission_scope {
+        NetworkConsentSubmissionScope::MainChatTurn(_) => ProposalSource::ChatConversation,
+        NetworkConsentSubmissionScope::ExplicitCommand => ProposalSource::NetworkConsent,
+    };
+    let durable_source = match submission_scope {
+        NetworkConsentSubmissionScope::MainChatTurn(_) => DurableWriteSource::MainChat,
+        NetworkConsentSubmissionScope::ExplicitCommand => DurableWriteSource::NetworkConsent,
+    };
+    let mut proposal = AgentProposal::new(
+        ProposalType::ToolPermission,
+        &affected_path,
+        after,
+        subject.proposal_summary,
+        1.0,
+        RiskLevel::High,
+        proposal_source,
+    );
+    proposal.source_detail = Some(format!(
+        "{}_network_consent:{}",
+        subject.permission_source, decision.decision_id
+    ));
+    let outcome = {
+        let store = proposal_store.lock().await;
+        let request = DurableWriteRequest::from_agent_proposal(
+            durable_source,
+            DurableWriteSubject::ToolPermission,
+            proposal,
+            "External network consent is pending Review Center approval.",
+        )
+        .with_evidence_refs(vec![
+            format!("network_policy_decision:{}", decision.decision_id),
+            format!("network_endpoint:{endpoint_digest}"),
+        ]);
+        let workflow = ReviewWorkflow::new(&store);
+        match submission_scope {
+            NetworkConsentSubmissionScope::MainChatTurn(admission) => {
+                workflow.submit_with_admission(request, admission)
+            }
+            NetworkConsentSubmissionScope::ExplicitCommand => workflow.submit(request),
+        }
+        .map_err(|error| {
+            AppError::internal(format!("stage external network consent failed: {error}"))
+        })?
+    };
+    Ok(outcome.proposal_id().to_string())
+}
+
+pub(crate) async fn authorize_provider_network_dispatch(
+    state: &Arc<AppState>,
+    network_policy: &openlife_core::config::NetworkPolicy,
+    decision: &NetworkPolicyDecision,
+    url: &str,
+    capability: &str,
+    provider: &str,
+    originating_task_session_id: Option<&str>,
+    submission_scope: NetworkConsentSubmissionScope<'_>,
+) -> Result<ProviderNetworkAuthorization, AppError> {
+    authorize_external_network_dispatch(
+        state,
+        network_policy,
+        decision,
+        url,
+        capability,
+        NetworkConsentSubject {
+            permission_source: "provider",
+            target: provider,
+            affected_path_prefix: "tool_permission.provider",
+            blocked_action_type: "provider_dispatch",
+            proposal_summary:
+                "Allow one provider network retry after explicit Review Center approval.",
+        },
+        originating_task_session_id,
+        submission_scope,
+    )
+    .await
+}
+
+/// Govern and issue one opaque explicit-provider-probe grant.
+///
+/// The scheduler cannot create this grant from policy/decision strings.  This
+/// function first applies ReviewWorkflow/AllowOnce governance, then the core
+/// network layer re-resolves the exact effective decision and final URL before
+/// issuing the consumed in-process capability.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn authorize_explicit_provider_probe(
+    state: &Arc<AppState>,
+    scheduler: &openlife_core::scheduler::InferenceScheduler,
+    network_policy: &openlife_core::config::NetworkPolicy,
+    decision: &NetworkPolicyDecision,
+    url: &str,
+    capability: &str,
+    provider: &str,
+) -> Result<ExplicitProviderProbeAuthorization, AppError> {
+    match authorize_provider_network_dispatch(
+        state,
+        network_policy,
+        decision,
+        url,
+        capability,
+        provider,
+        None,
+        NetworkConsentSubmissionScope::ExplicitCommand,
+    )
+    .await?
+    {
+        ProviderNetworkAuthorization::Authorized {
+            network_policy,
+            network_policy_decision,
+            permission_id,
+            reviewed_permission,
+        } => {
+            let effective_network_policy_decision_id = network_policy_decision.decision_id.clone();
+            let challenge = scheduler
+                .explicit_provider_probe_challenge()
+                .map_err(|error| {
+                    AppError::permission(format!(
+                        "explicit provider probe runtime identity rejected: {error}"
+                    ))
+                })?;
+            let grant = {
+                let permission_store = state.tool_permission_store.lock().await;
+                permission_store
+                    .issue_explicit_provider_probe_grant(
+                        challenge,
+                        *network_policy,
+                        decision,
+                        network_policy_decision,
+                        reviewed_permission,
+                    )
+                    .map_err(|error| {
+                        AppError::permission(format!(
+                            "explicit provider probe governance rejected issuance: {error}"
+                        ))
+                    })?
+            };
+            Ok(ExplicitProviderProbeAuthorization::Authorized {
+                grant,
+                effective_network_policy_decision_id,
+                permission_id,
+            })
+        }
+        ProviderNetworkAuthorization::ConsentRequired { proposal_id } => {
+            Ok(ExplicitProviderProbeAuthorization::ConsentRequired { proposal_id })
+        }
+        ProviderNetworkAuthorization::Denied { reason_code } => {
+            Ok(ExplicitProviderProbeAuthorization::Denied { reason_code })
+        }
+    }
+}
+
+pub(crate) async fn authorize_external_network_dispatch(
+    state: &Arc<AppState>,
+    network_policy: &openlife_core::config::NetworkPolicy,
+    decision: &NetworkPolicyDecision,
+    url: &str,
+    capability: &str,
+    subject: NetworkConsentSubject<'_>,
+    originating_task_session_id: Option<&str>,
+    submission_scope: NetworkConsentSubmissionScope<'_>,
+) -> Result<ProviderNetworkAuthorization, AppError> {
+    let subject = subject.validate()?;
+    match decision.disposition {
+        NetworkPolicyDisposition::Allow => Ok(ProviderNetworkAuthorization::Authorized {
+            network_policy: Box::new(network_policy.clone()),
+            network_policy_decision: decision.clone(),
+            permission_id: None,
+            reviewed_permission: None,
+        }),
+        NetworkPolicyDisposition::Deny => Ok(ProviderNetworkAuthorization::Denied {
+            reason_code: decision.reason_code.clone(),
+        }),
+        NetworkPolicyDisposition::Ask => {
+            let (endpoint_length_bytes, endpoint_digest) =
+                provider_network_endpoint_fingerprint(url);
+            let permission_scope =
+                provider_network_permission_scope(capability, decision, &endpoint_digest);
+            let reviewed_permission = {
+                let store = state.tool_permission_store.lock().await;
+                store
+                    .consume_reviewed_network_once(
+                        &permission_scope,
+                        subject.permission_source,
+                        "high",
+                        "network",
+                    )
+                    .map_err(|error| {
+                        AppError::internal(format!(
+                            "consume reviewed external network permission failed: {error}"
+                        ))
+                    })?
+            };
+            let Some(reviewed_permission) = reviewed_permission else {
+                let proposal_id = stage_network_consent(
+                    state,
+                    decision,
+                    capability,
+                    subject,
+                    originating_task_session_id,
+                    endpoint_length_bytes,
+                    &endpoint_digest,
+                    submission_scope,
+                )
+                .await?;
+                return Ok(ProviderNetworkAuthorization::ConsentRequired { proposal_id });
+            };
+            let permission_id = Some(reviewed_permission.permission_id().to_string());
+
+            let mut effective_policy = network_policy.clone();
+            effective_policy
+                .tool_overrides
+                .insert(capability.to_string(), "allow".into());
+            let effective_decision =
+                resolve_network_policy_decision(&effective_policy, url, capability).map_err(
+                    |error| {
+                        AppError::internal(format!(
+                            "resolve granted external network policy failed: {error}"
+                        ))
+                    },
+                )?;
+            if effective_decision.disposition != NetworkPolicyDisposition::Allow {
+                return Err(AppError::permission(
+                    "accepted network consent did not produce an allowed edge decision",
+                ));
+            }
+            Ok(ProviderNetworkAuthorization::Authorized {
+                network_policy: Box::new(effective_policy),
+                network_policy_decision: effective_decision,
+                permission_id,
+                reviewed_permission: Some(reviewed_permission),
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_network_permission_scope_is_endpoint_bound_and_metadata_safe() {
+        let decision = NetworkPolicyDecision {
+            decision_id: "network-policy:test".into(),
+            disposition: NetworkPolicyDisposition::Ask,
+            reason_code: "network_policy_consent_required".into(),
+            capability: "provider.openai".into(),
+            host: "api.example.test".into(),
+            endpoint_digest: format!("sha256:{}", "0".repeat(64)),
+        };
+        let first_url = "https://api.example.test/v1/chat/completions";
+        let second_url = "https://api.example.test/v2/responses";
+        let (_, first_digest) = provider_network_endpoint_fingerprint(first_url);
+        let (_, second_digest) = provider_network_endpoint_fingerprint(second_url);
+        let first_scope =
+            provider_network_permission_scope("provider.openai", &decision, &first_digest);
+        let second_scope =
+            provider_network_permission_scope("provider.openai", &decision, &second_digest);
+
+        assert_ne!(first_scope, second_scope);
+        assert!(!first_scope.contains(first_url));
+        assert!(!second_scope.contains(second_url));
+        assert!(first_scope.contains(&first_digest));
+        assert!(second_scope.contains(&second_digest));
+    }
+}

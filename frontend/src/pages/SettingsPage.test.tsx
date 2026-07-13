@@ -152,6 +152,22 @@ describe("SettingsPage", () => {
     expect(screen.queryByText(/Chat migration/i)).not.toBeInTheDocument();
   });
 
+  it("does not expose retired chat-proposal controls without a runtime consumer", async () => {
+    renderSettings();
+
+    await clickTab("Mailbox & Memory");
+
+    expect(await screen.findByText(/后端 PolicyRouter 路由/)).toBeInTheDocument();
+    for (const retiredControl of [
+      "启用对话中的记忆建议",
+      "置信度阈值",
+      "最小消息长度",
+      "提取冷却时间（秒）",
+    ]) {
+      expect(screen.queryByText(retiredControl)).not.toBeInTheDocument();
+    }
+  });
+
   it("shows readiness issues when diagnostics reports chat is not ready", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_system_diagnostics") {

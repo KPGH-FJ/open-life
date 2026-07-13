@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, fireEvent, act } from "@testing-library/react";
 import { BrowserRouter, MemoryRouter, Route, Routes } from "react-router-dom";
-import ChatPage, { buildMainChatAgentStatusView } from "./ChatPage";
+import ChatPage, {
+  buildMainChatAgentStatusView,
+  selectAuthoritativeTaskViewItem,
+} from "./ChatPage";
 import MailboxPage from "./MailboxPage";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -9,6 +12,9 @@ import { mockInvoke, mockLifeModel } from "@/test/mocks/tauri";
 import type {
   LifeStateProjection,
   MainChatAgentStateSnapshot,
+  ProductRunEvidenceView,
+  ProductTaskSession,
+  ProductQueuedExecutionAction,
   SystemDiagnostics,
   TaskControl,
   TaskControlEffect,
@@ -202,6 +208,37 @@ function buildTaskViewModelItem(overrides: Partial<TaskViewModelItem> = {}): Tas
   };
 }
 
+function buildProductRunEvidenceView(
+  taskSessionId: string,
+  title: string,
+  lifecycleState: string,
+  overrides: Partial<ProductRunEvidenceView> = {}
+): ProductRunEvidenceView {
+  return {
+    runId: null,
+    taskSessionId,
+    title,
+    lifecycleState,
+    projectionState: "projected",
+    identityState: "consistent",
+    snapshotState: "stable",
+    durableSequenceBefore: 1,
+    durableSequenceAfter: 1,
+    durableLifecycleReceipt: null,
+    routeEvidence: null,
+    eventTimeline: [],
+    actionCount: 0,
+    observationCount: 0,
+    blockers: [],
+    proposals: [],
+    planRefs: [],
+    allowedControls: [],
+    nextRecommendedControl: "open_trace",
+    redactionState: "metadata_only",
+    ...overrides,
+  };
+}
+
 function buildTasksViewModelEnvelope(
   items: TaskViewModelItem[]
 ): ViewModelEnvelope<TasksViewModel> {
@@ -247,6 +284,16 @@ function projectionWithEditedOnlyReview(): LifeStateProjection {
   return {
     version: "life_state_projection_v1",
     generatedAt: "2026-07-07T05:00:00.000Z",
+    persistence: {
+      mode: "isolated_evaluation",
+      canonicalWritesAllowed: true,
+      providerDispatchAllowed: false,
+      toolDispatchAllowed: false,
+      liveOrCanonicalCreditEligible: false,
+      sealed: true,
+      stores: [],
+      globalReasonCodes: ["isolated_evaluation"],
+    },
     pending: {
       pendingProposalCount: 0,
       editedProposalCount: 1,
@@ -384,7 +431,7 @@ describe("ChatPage", () => {
     vi.clearAllMocks();
   });
 
-  it("maps structured agent evidence to the default product status vocabulary", () => {
+  it("derives product status only from matching task and verified run evidence", () => {
     const viewFor = (
       generation: Record<string, unknown>,
       overrides: Partial<Parameters<typeof buildMainChatAgentStatusView>[0]> = {}
@@ -400,29 +447,213 @@ describe("ChatPage", () => {
       });
 
     expect(viewFor({ completedResponse: true })?.status).toBe("trace_gap");
+    const completedTask = buildTaskViewModelItem({
+      lifecycleStatus: "completed",
+      terminalDeliveryStatus: "delivered",
+      finalDeliveryEvidencePresent: true,
+    });
     expect(
       viewFor(
         {},
         {
-          taskViewItem: buildTaskViewModelItem({
-            lifecycleStatus: "completed",
-            terminalDeliveryStatus: "delivered",
-            finalDeliveryEvidencePresent: true,
-          }),
+          taskViewItem: completedTask,
+          runEvidence: buildProductRunEvidenceView(
+            completedTask.taskSessionId!,
+            completedTask.title,
+            "completed",
+            {
+              runId: completedTask.relatedRunIds[0],
+              projectionState: "consistent",
+            }
+          ),
         }
       )?.status
     ).toBe("completed");
-    expect(viewFor({}, { reasoningTrace: null, sending: true })?.status).toBe("running");
-    expect(viewFor({ taskStatus: "waiting_permission" })?.status).toBe("waiting_for_user");
-    expect(viewFor({ uiStatus: "restricted" })?.status).toBe("restricted");
+
+    const runningTask = buildTaskViewModelItem({
+      lifecycleStatus: "running",
+      terminalDeliveryStatus: "not_terminal",
+      finalDeliveryEvidencePresent: false,
+    });
+    expect(
+      viewFor(
+        { taskStatus: "completed", pendingProposalCount: 7 },
+        {
+          taskViewItem: runningTask,
+          runEvidence: buildProductRunEvidenceView(
+            runningTask.taskSessionId!,
+            runningTask.title,
+            "running",
+            {
+              runId: runningTask.relatedRunIds[0],
+              projectionState: "active",
+            }
+          ),
+          sending: false,
+        }
+      )?.status
+    ).toBe("running");
+    expect(viewFor({}, { reasoningTrace: null, sending: true })?.status).toBe("trace_gap");
+    expect(viewFor({ taskStatus: "waiting_permission" })?.status).toBe("trace_gap");
+    expect(viewFor({ uiStatus: "restricted" })?.status).toBe("trace_gap");
     expect(viewFor({ taskStatus: "blocked", blockerCodes: ["safe_read_failed"] })?.status).toBe(
-      "blocked"
+      "trace_gap"
     );
     expect(
       viewFor({ runtimeFactTraceGap: true, traceGapCode: "task_session_missing" })?.status
     ).toBe("trace_gap");
-    expect(viewFor({ pendingProposalCount: 1 })?.status).toBe("proposal_pending");
-    expect(viewFor({ pendingPermissionCount: 1 })?.status).toBe("permission_pending");
+    expect(viewFor({ pendingProposalCount: 1 })?.status).toBe("trace_gap");
+    expect(viewFor({ pendingPermissionCount: 1 })?.status).toBe("trace_gap");
+  });
+
+  it("keeps backend task truth and controls when raw completion, proposal, and blocker facts conflict", () => {
+    const taskId = "mainchat-task-authority-counterfactual-1";
+    const taskViewItem = buildTaskViewModelItem({
+      canonicalTaskId: taskId,
+      taskSessionId: taskId,
+      relatedRunIds: ["run-authority-counterfactual-1"],
+      lifecycleStatus: "waiting_permission",
+      terminalDeliveryStatus: "not_terminal",
+      finalDeliveryEvidencePresent: false,
+      pendingBlockers: ["tool_permission_required"],
+      pendingReviewItemRefs: [
+        {
+          id: "review-authority-counterfactual-1",
+          kind: "review_item",
+          label: "Tool permission",
+        },
+      ],
+      allowedControls: [
+        buildTaskControl(taskId, "cancel", "task_cancel_request"),
+        buildTaskControl(taskId, "open_review_item", "navigation_only"),
+      ],
+    });
+    const runEvidence = buildProductRunEvidenceView(
+      taskId,
+      taskViewItem.title,
+      "waiting_permission",
+      {
+        runId: "run-authority-counterfactual-1",
+        allowedControls: ["cancel", "open_review_item"],
+      }
+    );
+    const rawCompletedState = buildMainChatAgentStateSnapshot();
+
+    const view = buildMainChatAgentStatusView({
+      reasoningTrace: {
+        generation_result: {
+          taskStatus: "completed",
+          deliveryStatus: "delivered",
+          pendingPermissionCount: 0,
+          pendingProposalCount: 0,
+          blockerCodes: [],
+        },
+      },
+      taskState: null,
+      taskViewItem,
+      runEvidence,
+      agentState: rawCompletedState,
+      pendingProposals: [{ status: "pending", title: "raw proposal" } as any],
+      sending: false,
+      canCancel: false,
+    });
+
+    expect(view).toMatchObject({
+      status: "permission_pending",
+      pendingPermissionCount: 1,
+      pendingProposalCount: 1,
+      blockerLabels: ["tool_permission_required"],
+      actions: ["cancel", "review_permission"],
+      sourceLabel: "TasksViewModel + ProductRunEvidenceView",
+    });
+  });
+
+  it("fails closed when task and run evidence identity, lifecycle, or controls do not match", () => {
+    const taskViewItem = buildTaskViewModelItem({
+      lifecycleStatus: "completed",
+      terminalDeliveryStatus: "delivered",
+      finalDeliveryEvidencePresent: true,
+      allowedControls: [
+        buildTaskControl("mainchat-task-product-ui-1", "open_trace", "evidence_only"),
+      ],
+    });
+    const mismatchedEvidence = buildProductRunEvidenceView(
+      "different-task",
+      taskViewItem.title,
+      "running",
+      {
+        runId: taskViewItem.relatedRunIds[0],
+        allowedControls: ["cancel"],
+      }
+    );
+
+    expect(
+      buildMainChatAgentStatusView({
+        reasoningTrace: { generation_result: { taskStatus: "completed" } },
+        taskState: null,
+        taskViewItem,
+        runEvidence: mismatchedEvidence,
+        agentState: buildMainChatAgentStateSnapshot(),
+        pendingProposals: [],
+        sending: false,
+        canCancel: true,
+      })
+    ).toMatchObject({
+      status: "trace_gap",
+      actions: [],
+      pendingProposalCount: 0,
+      pendingPermissionCount: 0,
+      sourceLabel: "Task evidence unavailable",
+    });
+
+    const wrongControlTarget = buildTaskViewModelItem({
+      canonicalTaskId: "task-control-owner-a",
+      taskSessionId: "task-control-owner-a",
+      relatedRunIds: ["run-control-owner-a"],
+      lifecycleStatus: "running",
+      terminalDeliveryStatus: "not_terminal",
+      allowedControls: [buildTaskControl("task-control-owner-b", "cancel", "task_cancel_request")],
+    });
+    expect(
+      buildMainChatAgentStatusView({
+        reasoningTrace: null,
+        taskState: null,
+        taskViewItem: wrongControlTarget,
+        runEvidence: buildProductRunEvidenceView(
+          "task-control-owner-a",
+          wrongControlTarget.title,
+          "running",
+          {
+            runId: "run-control-owner-a",
+            projectionState: "active",
+            allowedControls: ["cancel"],
+          }
+        ),
+        agentState: null,
+        pendingProposals: [],
+        sending: false,
+        canCancel: true,
+      })
+    ).toMatchObject({
+      status: "trace_gap",
+      actions: [],
+      sourceLabel: "Task evidence unavailable",
+    });
+  });
+
+  it("never borrows another same-conversation task when an exact task id is missing", () => {
+    const otherTask = buildTaskViewModelItem({
+      canonicalTaskId: "task-b",
+      taskSessionId: "task-b",
+      conversationId: "shared-conversation",
+    });
+
+    expect(
+      selectAuthoritativeTaskViewItem([otherTask], "task-a", "shared-conversation")
+    ).toBeNull();
+    expect(
+      selectAuthoritativeTaskViewItem([otherTask], undefined, "shared-conversation")?.taskSessionId
+    ).toBe("task-b");
   });
 
   it("renders chat page with session list", async () => {
@@ -476,6 +707,12 @@ describe("ChatPage", () => {
       staleState: "fresh",
       resumeSafetyDigest:
         "bytes:48 hash:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      routeEvidence: null,
+      evidenceView: buildProductRunEvidenceView(
+        "task-continuity-blocked",
+        "Blocked safe read",
+        "blocked"
+      ),
     };
     const staleSummary = {
       taskSessionId: "task-continuity-stale",
@@ -492,27 +729,32 @@ describe("ChatPage", () => {
       staleState: "stale",
       resumeSafetyDigest:
         "bytes:47 hash:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      routeEvidence: null,
+      evidenceView: buildProductRunEvidenceView(
+        "task-continuity-stale",
+        "Stale context task",
+        "blocked"
+      ),
     };
     const blockedDetail = {
       taskSession: {
         id: blockedSummary.taskSessionId,
         chatSessionId: "session-1",
-        userGoal: blockedSummary.title,
         selectedStrategy: "react_tool_execution",
         status: "blocked",
-        currentPlanSummary: "Read before continuing.",
         actionQueueIds: ["action-continuity-read"],
         pendingBlockers: ["safe_read_failed"],
-        contextSnapshotRefs: ["context:v1"],
+        contextSnapshotCount: 1,
+        hasPlanSummary: true,
+        hasFinalSummary: true,
         createdAt: "2026-06-17T00:59:00.000Z",
         updatedAt: blockedSummary.lastUpdatedAt,
-        finalSummary: "The safe read failed and can be retried.",
       },
       actions: [
         {
           id: "action-continuity-read",
           sessionId: blockedSummary.taskSessionId,
-          action: { actionType: "file.read", description: "Read a safe workspace file." },
+          actionType: "file.read",
           policy: {
             level: "l1_read_only_auto",
             reasonCode: "read_only_action_allowed",
@@ -524,8 +766,8 @@ describe("ChatPage", () => {
           },
           status: "failed",
           attempts: 0,
-          observationMetadata: { target: "AGENTS.md", directWritesExecuted: false },
-          error: "fixture read failed",
+          revision: 1,
+          failureCode: "action_failed",
           createdAt: "2026-06-17T00:59:10.000Z",
           updatedAt: "2026-06-17T00:59:20.000Z",
         },
@@ -536,7 +778,6 @@ describe("ChatPage", () => {
           sessionId: blockedSummary.taskSessionId,
           kind: "observation",
           summary: blockedSummary.lastObservationPreview,
-          metadata: { actionId: "action-continuity-read" },
           createdAt: "2026-06-17T00:59:30.000Z",
         },
       ],
@@ -559,19 +800,26 @@ describe("ChatPage", () => {
       allowedControls: ["retry", "cancel", "refresh_context", "open_trace"],
       nextRecommendedControl: "retry",
       lastSafeResumePoint: "action-continuity-read",
+      retryTargetActionId: "action-continuity-read",
       contextDigest: "bytes:12 hash:sha256:context",
       selectedSkillDigest: null,
       toolManifestDigest: "bytes:12 hash:sha256:tools",
+      evidenceView: {
+        ...blockedSummary.evidenceView,
+        runId: blockedSummary.runId,
+        actionCount: 1,
+        blockers: ["safe_read_failed"],
+        allowedControls: ["retry", "cancel", "refresh_context", "open_trace"],
+        nextRecommendedControl: "retry",
+      },
     };
     const staleDetail = {
       ...blockedDetail,
       taskSession: {
         ...blockedDetail.taskSession,
         id: staleSummary.taskSessionId,
-        userGoal: staleSummary.title,
         actionQueueIds: [],
-        contextSnapshotRefs: ["context:v2"],
-        finalSummary: "Context requires review.",
+        contextSnapshotCount: 1,
       },
       actions: [],
       transcript: [
@@ -580,7 +828,6 @@ describe("ChatPage", () => {
           sessionId: staleSummary.taskSessionId,
           kind: "observation",
           summary: staleSummary.lastObservationPreview,
-          metadata: { continuityContextDigest: "bytes:12 hash:sha256:old" },
           createdAt: "2026-06-16T00:59:30.000Z",
         },
       ],
@@ -595,6 +842,12 @@ describe("ChatPage", () => {
       nextRecommendedControl: "refresh_context",
       lastSafeResumePoint: null,
       contextDigest: "bytes:14 hash:sha256:new-context",
+      evidenceView: {
+        ...staleSummary.evidenceView,
+        blockers: ["stale_context"],
+        allowedControls: ["refresh_context", "open_trace"],
+        nextRecommendedControl: "refresh_context",
+      },
     };
 
     vi.mocked(invoke).mockImplementation((cmd: string, args?: any) => {
@@ -662,6 +915,19 @@ describe("ChatPage", () => {
       staleState: "fresh",
       resumeSafetyDigest:
         "bytes:52 hash:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      routeEvidence: null,
+      evidenceView: buildProductRunEvidenceView(
+        "task-continuity-proposals",
+        "Pending proposal controls",
+        "waiting_permission",
+        {
+          runId: "run-continuity-proposals",
+          proposals: ["proposal-detail-tool", "proposal-detail-memory"],
+          blockers: ["tool_permission_required"],
+          allowedControls: ["open_trace"],
+          nextRecommendedControl: "review_permission",
+        }
+      ),
     };
     const proposalStatuses = {
       "proposal-detail-tool": "pending",
@@ -669,55 +935,39 @@ describe("ChatPage", () => {
     };
     const proposal = (
       id: keyof typeof proposalStatuses,
-      proposalType: "tool_permission" | "memory_write",
-      reason: string
+      proposalType: "tool_permission" | "memory_write"
     ) => ({
       id,
-      runId: summary.runId,
+      runRef: summary.runId,
       proposalType,
       source: "chat_conversation",
-      sourceDetail: summary.taskSessionId,
-      affectedPath:
-        proposalType === "tool_permission"
-          ? "tool_permission.builtin.builtin_echo"
-          : "memory.stage1.deferred_preference",
-      after: {},
-      reason,
-      confidence: 0.7,
       riskLevel: proposalType === "tool_permission" ? "medium" : "low",
       status: proposalStatuses[id],
       createdAt: "2026-06-17T02:00:00.000Z",
     });
+    let detailEvidenceCurrent = false;
     const detail = () => ({
       taskSession: {
         id: summary.taskSessionId,
         chatSessionId: "session-1",
-        userGoal: summary.title,
         selectedStrategy: "react_tool_execution",
         status: "waiting_permission",
-        currentPlanSummary: "Review linked proposal controls.",
         actionQueueIds: ["action-proposal-control"],
         pendingBlockers: ["tool_permission_required"],
-        contextSnapshotRefs: [],
+        contextSnapshotCount: 0,
+        hasPlanSummary: true,
+        hasFinalSummary: false,
         createdAt: "2026-06-17T01:59:00.000Z",
         updatedAt: summary.lastUpdatedAt,
-        finalSummary: null,
-      },
+      } satisfies ProductTaskSession,
       actions: [],
       transcript: [],
       proposals: [
-        proposal("proposal-detail-tool", "tool_permission", "Allow a read-only tool once."),
-        proposal("proposal-detail-memory", "memory_write", "Remember a planning preference."),
+        proposal("proposal-detail-tool", "tool_permission"),
+        proposal("proposal-detail-memory", "memory_write"),
       ],
       blockers: ["tool_permission_required"],
-      finalDelivery: {
-        summary: "Proposal controls are pending.",
-        metadata: {
-          proposalsCreated: ["tool permission proposal", "memory proposal"],
-          blockers: ["tool_permission_required"],
-          nextSteps: ["Reject or defer a linked proposal."],
-        },
-      },
+      finalDelivery: null,
       continuityDiagnostics: {
         staleContext: false,
         missingActionEvidence: false,
@@ -737,6 +987,14 @@ describe("ChatPage", () => {
       contextDigest: "bytes:12 hash:sha256:context",
       selectedSkillDigest: null,
       toolManifestDigest: "bytes:12 hash:sha256:tools",
+      evidenceView: detailEvidenceCurrent
+        ? summary.evidenceView
+        : {
+            ...summary.evidenceView,
+            taskSessionId: "different-task-session",
+            projectionState: "pending",
+            allowedControls: [],
+          },
     });
 
     vi.mocked(invoke).mockImplementation((cmd: string, args?: any) => {
@@ -767,6 +1025,26 @@ describe("ChatPage", () => {
       await screen.findByRole("button", { name: "Open task Pending proposal controls" })
     );
     expect(await screen.findByTestId("task-continuity-proposals")).toBeInTheDocument();
+    expect(screen.getByTestId("task-continuity-detail")).toHaveAttribute(
+      "data-evidence-state",
+      "unknown"
+    );
+    expect(
+      screen.getByText(
+        "Product run evidence is missing or does not match this task. Controls stay disabled until the backend projection is current."
+      )
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reject proposal" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Defer" })).not.toBeInTheDocument();
+
+    detailEvidenceCurrent = true;
+    fireEvent.click(screen.getByRole("button", { name: "Open task Pending proposal controls" }));
+    await waitFor(() => {
+      expect(screen.getByTestId("task-continuity-detail")).toHaveAttribute(
+        "data-evidence-state",
+        "current"
+      );
+    });
 
     fireEvent.click(screen.getAllByRole("button", { name: "Reject proposal" })[0]);
     await waitFor(() => {
@@ -2091,20 +2369,21 @@ describe("ChatPage", () => {
       observations: [],
       finalDelivery: undefined,
     });
+    const runningTaskSession: ProductTaskSession = {
+      id: "mainchat-task-cancel-k5-1",
+      chatSessionId: "session-1",
+      selectedStrategy: "react_tool_execution",
+      status: "running",
+      actionQueueIds: ["action-product-ui-1"],
+      pendingBlockers: [],
+      contextSnapshotCount: 0,
+      hasPlanSummary: true,
+      hasFinalSummary: false,
+      createdAt: "2026-06-16T00:00:00.000Z",
+      updatedAt: "2026-06-16T00:00:01.000Z",
+    };
     const runningTaskState = {
-      session: {
-        id: "mainchat-task-cancel-k5-1",
-        chatSessionId: "session-1",
-        userGoal: "Cancelable tool run",
-        selectedStrategy: "react_tool_execution",
-        status: "running",
-        currentPlanSummary: "Read with cancel support.",
-        actionQueueIds: ["action-product-ui-1"],
-        pendingBlockers: [],
-        contextSnapshotRefs: [],
-        createdAt: "2026-06-16T00:00:00.000Z",
-        updatedAt: "2026-06-16T00:00:01.000Z",
-      },
+      session: runningTaskSession,
       actions: [],
       transcript: [],
       pendingApprovalCount: 0,
@@ -2112,46 +2391,60 @@ describe("ChatPage", () => {
       canResume: false,
       canCancel: true,
       canRetry: false,
+      cancellationPending: false,
     };
     const canceledTaskState = {
       ...runningTaskState,
       session: {
-        ...runningTaskState.session,
-        status: "cancelled",
-        finalSummary: "Cancelled from Main Chat controls.",
+        ...runningTaskSession,
+        status: "cancelled" as const,
       },
       activeToolCount: 0,
       canCancel: false,
     };
     let taskCancelled = false;
+    const currentTaskViewItem = () =>
+      buildTaskViewModelItem({
+        canonicalTaskId: "mainchat-task-cancel-k5-1",
+        taskSessionId: "mainchat-task-cancel-k5-1",
+        relatedRunIds: ["run-cancel-k5-1"],
+        title: "Cancelable tool run",
+        strategy: "react_tool_execution",
+        lifecycleStatus: taskCancelled ? "cancelled" : "running",
+        terminalDeliveryStatus: taskCancelled ? "cancelled" : "not_terminal",
+        finalDeliveryEvidencePresent: false,
+        pendingBlockers: [],
+        allowedControls: taskCancelled
+          ? []
+          : [buildTaskControl("mainchat-task-cancel-k5-1", "cancel", "task_cancel_request")],
+        latestResultPreview: {
+          status: taskCancelled ? "cancelled" : "not_terminal",
+          label: taskCancelled ? "cancelled" : "running",
+          preview: taskCancelled
+            ? "Cancelled from Main Chat controls."
+            : "Read with cancel support.",
+          evidenceRefs: [],
+        },
+      });
     vi.mocked(invoke).mockImplementation((cmd: string, args?: any) => {
       if (cmd === "get_tasks_view_model") {
-        return Promise.resolve(
-          buildTasksViewModelEnvelope([
-            buildTaskViewModelItem({
-              canonicalTaskId: "mainchat-task-cancel-k5-1",
-              taskSessionId: "mainchat-task-cancel-k5-1",
-              relatedRunIds: ["run-cancel-k5-1"],
-              title: "Cancelable tool run",
-              strategy: "react_tool_execution",
-              lifecycleStatus: taskCancelled ? "cancelled" : "running",
-              terminalDeliveryStatus: taskCancelled ? "cancelled" : "not_terminal",
-              finalDeliveryEvidencePresent: false,
-              pendingBlockers: [],
-              allowedControls: taskCancelled
-                ? []
-                : [buildTaskControl("mainchat-task-cancel-k5-1", "cancel", "task_cancel_request")],
-              latestResultPreview: {
-                status: taskCancelled ? "cancelled" : "not_terminal",
-                label: taskCancelled ? "cancelled" : "running",
-                preview: taskCancelled
-                  ? "Cancelled from Main Chat controls."
-                  : "Read with cancel support.",
-                evidenceRefs: [],
-              },
-            }),
-          ])
-        );
+        return Promise.resolve(buildTasksViewModelEnvelope([currentTaskViewItem()]));
+      }
+      if (cmd === "get_main_chat_agent_task_detail") {
+        const item = currentTaskViewItem();
+        return Promise.resolve({
+          taskSession: { id: item.taskSessionId },
+          evidenceView: buildProductRunEvidenceView(
+            item.taskSessionId!,
+            item.title,
+            taskCancelled ? "cancelled" : "running",
+            {
+              runId: "run-cancel-k5-1",
+              projectionState: taskCancelled ? "consistent" : "active",
+              allowedControls: taskCancelled ? [] : ["cancel"],
+            }
+          ),
+        });
       }
       if (cmd === "get_main_chat_agent_task_state") {
         return Promise.resolve(taskCancelled ? canceledTaskState : runningTaskState);
@@ -2217,7 +2510,7 @@ describe("ChatPage", () => {
         expect.objectContaining({ taskSessionId: "mainchat-task-cancel-k5-1" })
       );
     });
-    expect(await screen.findByText("Canceled")).toBeInTheDocument();
+    expect((await screen.findAllByText("Canceled")).length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Cancelled from Main Chat controls.")).toBeInTheDocument();
     expect(screen.queryByText("Final answer")).not.toBeInTheDocument();
   });
@@ -2289,6 +2582,8 @@ describe("ChatPage", () => {
             scope: "preference",
             category: "work_style",
             riskLevel: "low",
+            sensitivity: "internal",
+            auditDigest: `sha256:${"b".repeat(64)}`,
             status: "materialized",
             materializationStatus: "materialized",
             createdBy: "main_chat",
@@ -2321,7 +2616,13 @@ describe("ChatPage", () => {
     });
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "accept_proposal") {
-        return Promise.resolve({ id: "proposal-memory-accept-ui-1", status: "accepted" } as any);
+        return Promise.resolve({
+          success: true,
+          effectStatus: "confirmed",
+          proposalProjectionStatus: "confirmed",
+          warnings: [],
+          memoryPersistence: { canonicalCommitted: true, projectionState: "applied" },
+        } as any);
       }
       if (cmd === "get_main_chat_agent_state_snapshot") {
         return Promise.resolve(acceptedMemoryState as any);
@@ -3284,6 +3585,21 @@ describe("ChatPage", () => {
           ])
         );
       }
+      if (cmd === "get_main_chat_agent_task_detail") {
+        return Promise.resolve({
+          taskSession: { id: "mainchat-task-permission-inline-1" },
+          evidenceView: buildProductRunEvidenceView(
+            "mainchat-task-permission-inline-1",
+            "Read a registered MCP note.",
+            toolPermissionAccepted ? "running" : "waiting_permission",
+            {
+              runId: "run-permission-inline-1",
+              projectionState: toolPermissionAccepted ? "active" : "projected",
+              allowedControls: toolPermissionAccepted ? ["resume"] : [],
+            }
+          ),
+        });
+      }
       if (cmd === "get_main_chat_agent_task_state") {
         return Promise.resolve({
           session: {
@@ -3336,7 +3652,12 @@ describe("ChatPage", () => {
       }
       if (cmd === "accept_proposal") {
         toolPermissionAccepted = true;
-        return Promise.resolve({ success: true });
+        return Promise.resolve({
+          success: true,
+          effectStatus: "confirmed",
+          proposalProjectionStatus: "confirmed",
+          warnings: [],
+        });
       }
       if (cmd === "resume_main_chat_agent_task") {
         return Promise.resolve({
@@ -3663,90 +3984,84 @@ describe("ChatPage", () => {
           ])
         );
       }
+      if (cmd === "get_main_chat_agent_task_detail") {
+        return Promise.resolve({
+          taskSession: { id: "mainchat-task-ui-1" },
+          evidenceView: buildProductRunEvidenceView(
+            "mainchat-task-ui-1",
+            "Prepare a low energy weekly plan",
+            "waiting_permission",
+            {
+              runId: "run-mainchat-ui-1",
+              allowedControls: ["resume", "retry", "cancel"],
+            }
+          ),
+        });
+      }
       if (cmd === "get_main_chat_agent_task_state") {
+        const actions: ProductQueuedExecutionAction[] = [
+          {
+            id: "action-memory-1",
+            sessionId: "mainchat-task-ui-1",
+            actionType: "memory.search",
+            policy: {
+              level: "low",
+              reasonCode: "read_only_memory",
+              executionAllowed: true,
+              requiresConfirmation: false,
+              requiresProposal: false,
+              requiresBlocker: false,
+              silentWriteAllowed: false,
+            },
+            status: "observed",
+            attempts: 1,
+            revision: 1,
+            createdAt: "2026-06-08T00:00:00.000Z",
+            updatedAt: "2026-06-08T00:00:01.000Z",
+          },
+          {
+            id: "action-write-1",
+            sessionId: "mainchat-task-ui-1",
+            actionType: "review_center.propose_scheduled_task",
+            policy: {
+              level: "medium",
+              reasonCode: "proposal_first_write",
+              executionAllowed: false,
+              requiresConfirmation: true,
+              requiresProposal: true,
+              requiresBlocker: true,
+              silentWriteAllowed: false,
+            },
+            status: "failed",
+            attempts: 1,
+            revision: 1,
+            failureCode: "action_failed",
+            createdAt: "2026-06-08T00:00:00.000Z",
+            updatedAt: "2026-06-08T00:00:01.000Z",
+          },
+        ];
         return Promise.resolve({
           session: {
             id: args?.taskSessionId ?? "mainchat-task-ui-1",
             chatSessionId: "session-1",
-            userGoal: "Prepare a low energy weekly plan",
             selectedStrategy: "react_tool_execution",
             status: "waiting_permission",
-            currentPlanSummary: "Search planning memory, then ask before creating tasks.",
             actionQueueIds: ["action-memory-1", "action-write-1"],
             pendingBlockers: ["resumeBlockedByPendingPermission"],
-            contextSnapshotRefs: ["ctx_weekly_digest"],
+            contextSnapshotCount: 1,
+            hasPlanSummary: true,
+            hasFinalSummary: false,
             createdAt: "2026-06-08T00:00:00.000Z",
             updatedAt: "2026-06-08T00:00:01.000Z",
-            finalSummary: undefined,
-          },
-          actions: [
-            {
-              id: "action-memory-1",
-              sessionId: "mainchat-task-ui-1",
-              action: {
-                actionType: "memory.search",
-                description: "Search accepted planning memory",
-              },
-              policy: {
-                level: "low",
-                reasonCode: "read_only_memory",
-                executionAllowed: true,
-                requiresConfirmation: false,
-                requiresProposal: false,
-                requiresBlocker: false,
-                silentWriteAllowed: false,
-              },
-              status: "observed",
-              attempts: 1,
-              observationMetadata: { matchedCount: 2, directWritesExecuted: false },
-              createdAt: "2026-06-08T00:00:00.000Z",
-              updatedAt: "2026-06-08T00:00:01.000Z",
-            },
-            {
-              id: "action-write-1",
-              sessionId: "mainchat-task-ui-1",
-              action: {
-                actionType: "review_center.propose_scheduled_task",
-                description: "Create reviewable weekly task proposal",
-              },
-              policy: {
-                level: "medium",
-                reasonCode: "proposal_first_write",
-                executionAllowed: false,
-                requiresConfirmation: true,
-                requiresProposal: true,
-                requiresBlocker: true,
-                silentWriteAllowed: false,
-              },
-              status: "failed",
-              attempts: 1,
-              error: "Proposal store unavailable",
-              createdAt: "2026-06-08T00:00:00.000Z",
-              updatedAt: "2026-06-08T00:00:01.000Z",
-            },
-          ],
-          transcript: [
-            {
-              id: "tx-plan-1",
-              sessionId: "mainchat-task-ui-1",
-              kind: "plan",
-              summary: "Use read-only memory before proposing any write.",
-              createdAt: "2026-06-08T00:00:00.000Z",
-            },
-            {
-              id: "tx-permission-1",
-              sessionId: "mainchat-task-ui-1",
-              kind: "permission_request",
-              summary: "Waiting for explicit approval before write-like task creation.",
-              metadata: { pendingPermissionCount: 1 },
-              createdAt: "2026-06-08T00:00:01.000Z",
-            },
-          ],
+          } satisfies ProductTaskSession,
+          actions,
+          transcript: [],
           pendingApprovalCount: 1,
           activeToolCount: 1,
           canResume: true,
           canCancel: true,
           canRetry: true,
+          cancellationPending: false,
         });
       }
       return mockInvoke(cmd, args);
@@ -3822,21 +4137,17 @@ describe("ChatPage", () => {
         "Typed AgentControlPlane snapshot is not available yet; this shell is derived from AgentIngress and task detail only."
       )
     ).toBeInTheDocument();
-    expect(screen.getByText("Goal")).toBeInTheDocument();
+    expect(screen.getByText("Task")).toBeInTheDocument();
+    expect(screen.getByText("Main Chat task")).toBeInTheDocument();
     expect(screen.getAllByText("Prepare a low energy weekly plan").length).toBeGreaterThanOrEqual(
       1
     );
     expect(screen.getByText("Current plan")).toBeInTheDocument();
-    expect(
-      screen.getByText("Search planning memory, then ask before creating tasks.")
-    ).toBeInTheDocument();
+    expect(screen.getByText("Available in task trace")).toBeInTheDocument();
     expect(screen.getByText("Diagnostic queue preview")).toBeInTheDocument();
     expect(screen.getByText("memory.search")).toBeInTheDocument();
-    expect(screen.getByText("Search accepted planning memory")).toBeInTheDocument();
-    expect(screen.getByText("matchedCount: 2")).toBeInTheDocument();
-    expect(screen.getByText("directWritesExecuted: false")).toBeInTheDocument();
     expect(screen.getByText("review_center.propose_scheduled_task")).toBeInTheDocument();
-    expect(screen.getByText("Proposal store unavailable")).toBeInTheDocument();
+    expect(screen.getByText("action_failed")).toBeInTheDocument();
     expect(screen.getByText("Proposal required")).toBeInTheDocument();
     expect(screen.getByText("Permission required")).toBeInTheDocument();
     expect(screen.getAllByRole("link", { name: "Open Mailbox" })[0]).toHaveAttribute(
@@ -3849,6 +4160,13 @@ describe("ChatPage", () => {
     );
     expect(screen.queryByText(/Fallback notice/)).not.toBeInTheDocument();
     expect(screen.queryByText(/visible legacy fallback/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Search planning memory, then ask before creating tasks.")
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Search accepted planning memory")).not.toBeInTheDocument();
+    expect(screen.queryByText("Proposal store unavailable")).not.toBeInTheDocument();
+    expect(screen.queryByText("matchedCount: 2")).not.toBeInTheDocument();
+    expect(screen.queryByText("directWritesExecuted: false")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Resume task" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Retry failed action" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Cancel task" })).toBeEnabled();
@@ -3874,6 +4192,9 @@ describe("ChatPage", () => {
               lifecycleStatus: "completed",
               terminalDeliveryStatus: "delivered",
               finalDeliveryEvidencePresent: true,
+              allowedControls: [
+                buildTaskControl("task-default-status-complete", "open_trace", "evidence_only"),
+              ],
               latestResultPreview: {
                 status: "delivered",
                 label: "delivered",
@@ -3883,6 +4204,21 @@ describe("ChatPage", () => {
             }),
           ])
         );
+      }
+      if (cmd === "get_main_chat_agent_task_detail") {
+        return Promise.resolve({
+          taskSession: { id: "task-default-status-complete" },
+          evidenceView: buildProductRunEvidenceView(
+            "task-default-status-complete",
+            "Structured completion evidence.",
+            "completed",
+            {
+              runId: "run-default-status-complete",
+              projectionState: "consistent",
+              allowedControls: ["open_trace"],
+            }
+          ),
+        });
       }
       return mockInvoke(cmd, args);
     });
@@ -3966,10 +4302,11 @@ describe("ChatPage", () => {
     const status = await screen.findByTestId("main-chat-agent-status");
     expect(status).toHaveAttribute("data-agent-product-status", "completed");
     expect(screen.getByText("Completed")).toBeInTheDocument();
-    expect(screen.getByText("Local runtime")).toBeInTheDocument();
-    expect(screen.getByText("已记录到本地生活事件")).toBeInTheDocument();
-    expect(screen.getByText("待确认记忆")).toBeInTheDocument();
-    expect(screen.getByText("待确认 LifeModel 更新")).toBeInTheDocument();
+    expect(screen.getByText("TasksViewModel + ProductRunEvidenceView")).toBeInTheDocument();
+    expect(screen.queryByText("Local runtime")).not.toBeInTheDocument();
+    expect(screen.queryByText("已记录到本地生活事件")).not.toBeInTheDocument();
+    expect(screen.queryByText("待确认记忆")).not.toBeInTheDocument();
+    expect(screen.queryByText("待确认 LifeModel 更新")).not.toBeInTheDocument();
     expect(screen.queryByText("Diagnostic task shell")).not.toBeInTheDocument();
     expect(screen.queryByText("为什么这样回答")).not.toBeInTheDocument();
 
@@ -4106,6 +4443,7 @@ describe("ChatPage", () => {
                 }),
                 buildTaskControl("task-default-actions", "cancel", "task_cancel_request"),
                 buildTaskControl("task-default-actions", "refresh_context", "task_refresh_request"),
+                buildTaskControl("task-default-actions", "open_review_item", "navigation_only"),
               ],
               nextRecommendedControl: "refresh_context",
               latestResultPreview: {
@@ -4117,6 +4455,20 @@ describe("ChatPage", () => {
             }),
           ])
         );
+      }
+      if (cmd === "get_main_chat_agent_task_detail") {
+        return Promise.resolve({
+          taskSession: { id: "task-default-actions" },
+          evidenceView: buildProductRunEvidenceView(
+            "task-default-actions",
+            "Review permission before continuing",
+            "waiting_permission",
+            {
+              runId: "run-default-actions",
+              allowedControls: ["resume", "retry", "cancel", "refresh_context", "open_review_item"],
+            }
+          ),
+        });
       }
       if (
         cmd === "get_main_chat_agent_task_state" ||
@@ -4487,7 +4839,12 @@ describe("ChatPage", () => {
       }
       if (cmd === "accept_proposal") {
         proposalAccepted = true;
-        return Promise.resolve({ success: true });
+        return Promise.resolve({
+          success: true,
+          effectStatus: "confirmed",
+          proposalProjectionStatus: "confirmed",
+          warnings: [],
+        });
       }
       if (cmd === "resume_main_chat_agent_task") {
         return Promise.resolve({
@@ -4948,6 +5305,17 @@ describe("ChatPage", () => {
       session_id: "session-1",
       message: { role: "assistant" },
     });
+    const operationIds = saveCalls.map(
+      call => (call[1] as Record<string, unknown> | undefined)?.operationId
+    );
+    expect(operationIds).toHaveLength(2);
+    expect(operationIds[0]).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+    );
+    expect(operationIds[1]).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+    );
+    expect(operationIds[0]).not.toBe(operationIds[1]);
   });
 
   it("supports adding a daily goal from slash command", async () => {
@@ -4962,9 +5330,67 @@ describe("ChatPage", () => {
     fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
 
     await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith("add_daily_goal", { name: "阅读30分钟" });
+      expect(invoke).toHaveBeenCalledWith(
+        "add_daily_goal",
+        expect.objectContaining({
+          operationId: expect.stringMatching(
+            /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+          ),
+          name: "阅读30分钟",
+        })
+      );
     });
     expect(await screen.findByText(/已添加今日目标：阅读30分钟/)).toBeInTheDocument();
+  });
+
+  it("reuses one effect and message identity when the effect succeeded but message persistence failed", async () => {
+    const effectOperationIds: string[] = [];
+    const messageAttempts: Array<{ role: string; operationId: string }> = [];
+    let failFirstAssistantSave = true;
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "add_daily_goal") {
+        effectOperationIds.push(String(args?.operationId));
+        return Promise.resolve({
+          operationId: args?.operationId,
+          operationDigest: "sha256:test",
+          replayed: effectOperationIds.length > 1,
+          canonicalCommitted: true,
+        });
+      }
+      if (cmd === "save_chat_message") {
+        const role = String(args?.message?.role);
+        messageAttempts.push({ role, operationId: String(args?.operationId) });
+        if (role === "assistant" && failFirstAssistantSave) {
+          failFirstAssistantSave = false;
+          return Promise.reject(new Error("assistant message response lost"));
+        }
+        return Promise.resolve({ replayed: messageAttempts.length > 2 });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    fireEvent.change(textarea, { target: { value: "/goal add 重试不重复" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+    await waitFor(() => expect(messageAttempts).toHaveLength(2));
+
+    fireEvent.change(textarea, { target: { value: "/goal add 重试不重复" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+    await waitFor(() => expect(effectOperationIds).toHaveLength(2));
+    await waitFor(() => expect(messageAttempts).toHaveLength(4));
+
+    expect(effectOperationIds[0]).toBe(effectOperationIds[1]);
+    expect(effectOperationIds[0]).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+    );
+    expect(messageAttempts[0]).toEqual(messageAttempts[2]);
+    expect(messageAttempts[1]).toEqual(messageAttempts[3]);
   });
 
   it("blocks governance blocker text from slash goal add without saving it", async () => {
@@ -5033,7 +5459,7 @@ describe("ChatPage", () => {
     expect(await screen.findByText(/已完成今日目标：早起/)).toBeInTheDocument();
   });
 
-  it("shows safe mode warning and blocks add-to-memory action when diagnostics are degraded", async () => {
+  it("never direct-indexes assistant content and only drafts a governed memory proposal prompt", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_system_diagnostics") {
         return Promise.resolve({
@@ -5128,8 +5554,11 @@ describe("ChatPage", () => {
     );
 
     expect(await screen.findByText(/Safe Mode：/)).toBeInTheDocument();
-    fireEvent.click((await screen.findAllByText("加入记忆"))[0]);
-    expect(await screen.findByText(/建议先去设置页恢复控制台处理数据风险/)).toBeInTheDocument();
-    expect(invoke).not.toHaveBeenCalledWith("index_memory_chunk", expect.anything());
+    expect(screen.queryByText("加入记忆")).not.toBeInTheDocument();
+    fireEvent.click((await screen.findAllByText("草拟记忆提案"))[0]);
+    expect(screen.getByPlaceholderText(/输入消息/)).toHaveValue(
+      "请把上一条助手回复中值得保留的内容整理成一条记忆提案；不要直接写入，先让我审核。"
+    );
+    expect(invoke).not.toHaveBeenCalledWith("create_knowledge_note", expect.anything());
   });
 });

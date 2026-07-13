@@ -1,4 +1,5 @@
 use crate::life_model::ValueItem;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -167,9 +168,56 @@ pub struct QuickBuildAnswers {
     pub companion_style: String,
 }
 
+/// Durable retention metadata for resumable Builder drafts.
+///
+/// Every field is optional so sessions written before the retention contract
+/// can still be decoded. `BuilderSessionStore` owns the one-time migration to
+/// the current schema and persists the resulting deadlines; callers must not
+/// derive retention from filesystem metadata.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BuilderSessionRetention {
+    #[serde(default)]
+    pub schema_version: u8,
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_activity_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub purge_after: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BuilderSessionRetentionStatus {
+    Active,
+    ExpiredRecoverable,
+}
+
+impl BuilderSessionRetention {
+    pub fn status_at(&self, now: DateTime<Utc>) -> Option<BuilderSessionRetentionStatus> {
+        let expires_at = self.expires_at?;
+        let purge_after = self.purge_after?;
+        if now >= purge_after {
+            None
+        } else if now >= expires_at {
+            Some(BuilderSessionRetentionStatus::ExpiredRecoverable)
+        } else {
+            Some(BuilderSessionRetentionStatus::Active)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuilderSession {
     pub session_id: String,
+    #[serde(default)]
+    pub revision: u64,
+    #[serde(default)]
+    pub review_claim_id: Option<String>,
+    #[serde(default)]
+    pub retention: BuilderSessionRetention,
     pub mode: BuilderMode,
     pub step_index: usize,
     pub finished: bool,
@@ -213,6 +261,9 @@ impl BuilderSession {
     pub fn new(session_id: impl Into<String>, mode: BuilderMode) -> Self {
         Self {
             session_id: session_id.into(),
+            revision: 0,
+            review_claim_id: None,
+            retention: BuilderSessionRetention::default(),
             mode,
             step_index: 0,
             finished: false,

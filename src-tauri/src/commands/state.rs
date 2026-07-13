@@ -14,6 +14,7 @@ use tauri::State;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn record_state_with_state(
+    operation_id: String,
     dimension_name: String,
     value: f64,
     unit: String,
@@ -22,17 +23,39 @@ pub(crate) async fn record_state_with_state(
     max_threshold: Option<f32>,
     alert_days: Option<u32>,
     state: &Arc<AppState>,
-) -> Result<i64, AppError> {
-    let id = memory_gateway::record_state_entry_with_state(
+) -> Result<openlife_core::memory::CanonicalStateEntryWrite, AppError> {
+    let canonical_write = memory_gateway::record_state_entry_with_state(
+        &operation_id,
         &dimension_name,
         value,
         &unit,
         note.as_deref(),
+        min_threshold,
+        max_threshold,
+        alert_days,
         state,
     )
     .await?;
     let manager = state.life_model_manager.lock().await;
     let mut model = manager.load().map_err(AppError::from)?;
+    let projection_already_applied = model
+        .state
+        .custom_dimensions
+        .iter()
+        .find(|dimension| dimension.name == dimension_name)
+        .is_some_and(|dimension| {
+            dimension.current_value == value as f32
+                && min_threshold.map_or(true, |minimum| dimension.min_threshold == Some(minimum))
+                && max_threshold.map_or(true, |maximum| dimension.max_threshold == Some(maximum))
+                && alert_days.map_or(true, |days| dimension.alert_days == days)
+        });
+    if canonical_write.replayed && projection_already_applied {
+        drop(manager);
+        crate::life_model_write_gateway::reconcile_lifemodel_file_mutations_with_state(state)
+            .await
+            .map_err(AppError::from)?;
+        return Ok(canonical_write);
+    }
     if let Some(dim) = model
         .state
         .custom_dimensions
@@ -73,12 +96,13 @@ pub(crate) async fn record_state_with_state(
     )
     .await
     .map_err(AppError::from)?;
-    Ok(id)
+    Ok(canonical_write)
 }
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn record_state(
+    operation_id: String,
     dimension_name: String,
     value: f64,
     unit: String,
@@ -87,8 +111,9 @@ pub async fn record_state(
     max_threshold: Option<f32>,
     alert_days: Option<u32>,
     state: State<'_, Arc<AppState>>,
-) -> Result<i64, AppError> {
+) -> Result<openlife_core::memory::CanonicalStateEntryWrite, AppError> {
     record_state_with_state(
+        operation_id,
         dimension_name,
         value,
         unit,
@@ -189,23 +214,26 @@ pub async fn get_daily_goals(state: State<'_, Arc<AppState>>) -> Result<Vec<Dail
 }
 
 #[tauri::command]
-pub async fn add_daily_goal(
+pub(crate) async fn add_daily_goal(
+    operation_id: String,
     name: String,
     time_block: Option<TimeBlock>,
     state: State<'_, Arc<AppState>>,
-) -> Result<(), AppError> {
-    let manager = state.life_model_manager.lock().await;
-    let mut model = manager.load().map_err(AppError::from)?;
-    model.goals.daily.push(DailyGoal {
+) -> Result<crate::life_model_write_gateway::DailyGoalEffectReceipt, AppError> {
+    add_daily_goal_with_state(operation_id, name, time_block, state.inner()).await
+}
+
+pub(crate) async fn add_daily_goal_with_state(
+    operation_id: String,
+    name: String,
+    time_block: Option<TimeBlock>,
+    state: &Arc<AppState>,
+) -> Result<crate::life_model_write_gateway::DailyGoalEffectReceipt, AppError> {
+    crate::life_model_write_gateway::add_daily_goal_idempotent_with_gateway(
+        state,
+        &operation_id,
         name,
-        done: false,
         time_block,
-    });
-    drop(manager);
-    persist_life_model(
-        &state.inner().clone(),
-        model,
-        true,
         LifeModelMaterializerCallerContext::new(
             "state_add_daily_goal_source_data",
             LifeModelMaterializerCallerKind::SourceDataCompatibilityMaterialization,
@@ -213,8 +241,13 @@ pub async fn add_daily_goal(
         ),
     )
     .await
-    .map_err(AppError::from)
-    .map(|_| ())
+    .map_err(|error| {
+        if error.contains("operation id") || error.contains("name must not be empty") {
+            AppError::permission(error)
+        } else {
+            AppError::from(error)
+        }
+    })
 }
 
 #[tauri::command]
@@ -314,7 +347,6 @@ pub async fn toggle_daily_goal(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     fn test_app_state(temp_dir: &tempfile::TempDir) -> Arc<AppState> {
         let config = openlife_core::config::AppConfig::default();
@@ -322,12 +354,16 @@ mod tests {
             tokio::sync::RwLock::new(openlife_core::memory_cache::HotMemoryCache::default()),
         );
         Arc::new(AppState {
+            persistence_coordinator: Arc::new(
+                crate::persistence_coordinator::PersistenceCoordinator::isolated_evaluation(),
+            ),
             config: Arc::new(tokio::sync::Mutex::new(config.clone())),
             life_model_manager: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::life_model::LifeModelManager::new(
                     temp_dir.path().join("life-model").join("current"),
                 ),
             )),
+            life_model_write_coordinator: Arc::new(tokio::sync::Mutex::new(())),
             memory_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::memory::MemoryStore::new_in_memory().unwrap(),
             )),
@@ -361,7 +397,6 @@ mod tests {
                 openlife_core::vectors::VectorStore::new_in_memory().unwrap(),
             )),
             vector_persistence_mode: crate::state::VectorPersistenceMode::Enabled,
-            builder_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             builder_session_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::builder::BuilderSessionStore::new(
                     temp_dir.path().join("builder_sessions.json"),
@@ -423,12 +458,11 @@ mod tests {
                 openlife_core::plugins::PluginRegistry::new(temp_dir.path().join("plugins")),
             )),
             hot_cache,
-            proposal_engine: Arc::new(tokio::sync::Mutex::new(
-                openlife_core::agent::ProposalEngine::new(),
-            )),
             startup_warnings: vec![],
             provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
-            scheduled_task_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            scheduled_task_store: Arc::new(
+                openlife_core::tasks::TaskStore::new_in_memory().unwrap(),
+            ),
             runtime_clock_source: Arc::new(tokio::sync::Mutex::new(
                 crate::main_chat_runtime_facts::MainChatRuntimeClockSource::default(),
             )),
@@ -450,6 +484,8 @@ mod tests {
                 name: "Exercise".to_string(),
                 done: false,
                 time_block: None,
+                operation_id: None,
+                operation_digest: None,
             });
             manager.save(&model).unwrap();
         }
@@ -474,6 +510,8 @@ mod tests {
                 name: "Read".to_string(),
                 done: false,
                 time_block: None,
+                operation_id: None,
+                operation_digest: None,
             });
             manager.save(&model).unwrap();
         }
@@ -489,5 +527,158 @@ mod tests {
         // Toggle back
         let completed = toggle_daily_goal_with_state(0, &state).await.unwrap();
         assert!(!completed);
+    }
+
+    #[tokio::test]
+    async fn daily_goal_effect_reuses_uuid_and_rejects_payload_drift() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let operation_id = uuid::Uuid::new_v4().to_string();
+
+        let first = add_daily_goal_with_state(operation_id.clone(), "Read".into(), None, &state)
+            .await
+            .unwrap();
+        let replay = add_daily_goal_with_state(operation_id.clone(), "Read".into(), None, &state)
+            .await
+            .unwrap();
+
+        assert!(!first.replayed);
+        assert!(replay.replayed);
+        assert_eq!(first.operation_digest, replay.operation_digest);
+        let goals = get_daily_goals_with_state(&state).await.unwrap();
+        assert_eq!(goals.len(), 1);
+        assert_eq!(
+            goals[0].operation_id.as_deref(),
+            Some(operation_id.as_str())
+        );
+        assert!(
+            add_daily_goal_with_state(operation_id, "Write".into(), None, &state)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("different payload")
+        );
+    }
+
+    #[tokio::test]
+    async fn state_effect_replay_fills_projection_without_duplicate_history() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let operation_id = uuid::Uuid::new_v4().to_string();
+
+        let first = record_state_with_state(
+            operation_id.clone(),
+            "focus".into(),
+            8.0,
+            "points".into(),
+            Some("afternoon".into()),
+            Some(1.0),
+            Some(10.0),
+            Some(2),
+            &state,
+        )
+        .await
+        .unwrap();
+        let replay = record_state_with_state(
+            operation_id.clone(),
+            "focus".into(),
+            8.0,
+            "points".into(),
+            Some("afternoon".into()),
+            Some(1.0),
+            Some(10.0),
+            Some(2),
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!first.replayed);
+        assert!(replay.replayed);
+        assert_eq!(first.state_entry_id, replay.state_entry_id);
+        assert_eq!(
+            state
+                .memory_store
+                .lock()
+                .await
+                .get_state_history("focus", 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(record_state_with_state(
+            operation_id.clone(),
+            "focus".into(),
+            9.0,
+            "points".into(),
+            Some("afternoon".into()),
+            Some(1.0),
+            Some(10.0),
+            Some(2),
+            &state,
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("different payload"));
+        for (dimension_name, unit, note) in [
+            ("energy", "points", Some("afternoon")),
+            ("focus", "percent", Some("afternoon")),
+            ("focus", "points", Some("evening")),
+        ] {
+            assert!(record_state_with_state(
+                operation_id.clone(),
+                dimension_name.into(),
+                8.0,
+                unit.into(),
+                note.map(str::to_string),
+                Some(1.0),
+                Some(10.0),
+                Some(2),
+                &state,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("different payload"));
+        }
+        for (min_threshold, max_threshold, alert_days) in [
+            (Some(2.0), Some(10.0), Some(2)),
+            (Some(1.0), Some(9.0), Some(2)),
+            (Some(1.0), Some(10.0), Some(3)),
+        ] {
+            assert!(record_state_with_state(
+                operation_id.clone(),
+                "focus".into(),
+                8.0,
+                "points".into(),
+                Some("afternoon".into()),
+                min_threshold,
+                max_threshold,
+                alert_days,
+                &state,
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("different payload"));
+        }
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        let focus = model
+            .state
+            .custom_dimensions
+            .iter()
+            .find(|dimension| dimension.name == "focus")
+            .expect("focus projection");
+        assert_eq!(focus.current_value, 8.0);
+        assert_eq!(focus.unit, "points");
+        assert_eq!(focus.min_threshold, Some(1.0));
+        assert_eq!(focus.max_threshold, Some(10.0));
+        assert_eq!(focus.alert_days, 2);
+        assert!(model
+            .state
+            .custom_dimensions
+            .iter()
+            .all(|dimension| dimension.name != "energy"));
     }
 }

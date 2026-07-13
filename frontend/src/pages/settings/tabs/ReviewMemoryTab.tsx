@@ -1,23 +1,15 @@
 import { Link } from "react-router-dom";
-import type { AppConfig, LifeStateProjection, MemoryViewModel } from "../../../tauri";
+import type { LifeStateProjection, MemoryViewModel } from "../../../tauri";
 import { CapabilityCard, StatusChip } from "../../../components/product/ProductPrimitives";
 import { mailboxRoute } from "../../../productShellContract";
 import { reviewRequiredCountFromProjection } from "../../../utils/lifeStateProjection";
 
 interface ReviewMemoryTabProps {
-  config: AppConfig;
-  setConfig: React.Dispatch<React.SetStateAction<AppConfig>>;
   projection: LifeStateProjection | null;
   memoryViewModel: MemoryViewModel | null;
 }
 
-export default function ReviewMemoryTab({
-  config,
-  setConfig,
-  projection,
-  memoryViewModel,
-}: ReviewMemoryTabProps) {
-  const proposalEnabled = config.chat_proposal?.enabled ?? true;
+export default function ReviewMemoryTab({ projection, memoryViewModel }: ReviewMemoryTabProps) {
   const pendingCount = reviewRequiredCountFromProjection(projection, "settings");
   const highRiskCount = projection?.pending.highRiskReviewRequiredCount ?? 0;
   const memorySummary = memoryViewModel?.summary ?? null;
@@ -77,94 +69,13 @@ export default function ReviewMemoryTab({
         ))}
       </section>
 
-      <section className="space-y-4 border-t pt-4">
+      <section className="space-y-2 border-t pt-4">
         <div>
-          <h3 className="text-sm font-medium text-gray-700">记忆建议设置</h3>
+          <h3 className="text-sm font-medium text-gray-700">记忆治理</h3>
           <p className="mt-1 text-xs leading-5 text-gray-500">
-            Chat 里抽取到的长期记忆只会进入 Mailbox，不会静默写入 Life Model 或长期记忆。
+            对话中的记忆候选由后端 PolicyRouter 路由。需要审阅的项目进入
+            Mailbox；可撤销的显式低风险记忆按后端回执显示。
           </p>
-        </div>
-        <div className="grid gap-4">
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={proposalEnabled}
-              onChange={e =>
-                setConfig(prev => ({
-                  ...prev,
-                  chat_proposal: {
-                    ...prev.chat_proposal,
-                    enabled: e.target.checked,
-                  },
-                }))
-              }
-              className="rounded border-gray-300"
-            />
-            <span className="text-sm text-gray-700">启用对话中的记忆建议</span>
-          </label>
-
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="mb-1 block text-xs text-gray-500">置信度阈值</label>
-              <input
-                type="number"
-                min="0"
-                max="1"
-                step="0.1"
-                value={config.chat_proposal?.confidence_threshold ?? 0.6}
-                onChange={e =>
-                  setConfig(prev => ({
-                    ...prev,
-                    chat_proposal: {
-                      ...prev.chat_proposal,
-                      confidence_threshold: parseFloat(e.target.value),
-                    },
-                  }))
-                }
-                className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs text-gray-500">最小消息长度</label>
-              <input
-                type="number"
-                min="5"
-                max="100"
-                value={config.chat_proposal?.min_message_length ?? 10}
-                onChange={e =>
-                  setConfig(prev => ({
-                    ...prev,
-                    chat_proposal: {
-                      ...prev.chat_proposal,
-                      min_message_length: parseInt(e.target.value),
-                    },
-                  }))
-                }
-                className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
-              />
-            </div>
-          </div>
-
-          <div>
-            <label className="mb-1 block text-xs text-gray-500">提取冷却时间（秒）</label>
-            <input
-              type="number"
-              min="0"
-              max="3600"
-              step="60"
-              value={config.chat_proposal?.cooldown_seconds ?? 300}
-              onChange={e =>
-                setConfig(prev => ({
-                  ...prev,
-                  chat_proposal: {
-                    ...prev.chat_proposal,
-                    cooldown_seconds: parseInt(e.target.value),
-                  },
-                }))
-              }
-              className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
-            />
-          </div>
         </div>
       </section>
     </>

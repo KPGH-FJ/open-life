@@ -79,7 +79,7 @@ Read these supporting areas with that path:
 - `src-tauri/src/main_chat_context_loader.rs`
 - `src-tauri/src/main_chat_hs_runtime.rs`
 - `src-tauri/src/main_chat_react_*`
-- `src-tauri/src/main_chat_proposal_support.rs`
+- `src-tauri/src/provider_network_consent.rs`
 - `src-tauri/src/main_chat_runtime_support.rs`
 - `src-tauri/src/main_chat_task_controls.rs`
 - `src-tauri/src/main_chat_event_stream.rs`

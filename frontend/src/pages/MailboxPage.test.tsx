@@ -492,7 +492,16 @@ function mockProposals(proposals: AgentProposal[], safeMode = false) {
   });
 }
 
-function mockMutableProposals(initialProposals: AgentProposal[], safeMode = false) {
+function mockMutableProposals(
+  initialProposals: AgentProposal[],
+  safeMode = false,
+  acceptResponse: Record<string, unknown> = {
+    success: true,
+    effectStatus: "confirmed",
+    proposalProjectionStatus: "confirmed",
+    warnings: [],
+  }
+) {
   let mutableProposals = initialProposals.map(proposal => ({ ...proposal }));
   vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
     if (cmd === "list_proposals") {
@@ -508,7 +517,7 @@ function mockMutableProposals(initialProposals: AgentProposal[], safeMode = fals
       mutableProposals = mutableProposals.map(proposal =>
         proposal.id === args?.proposalId ? { ...proposal, status: "accepted" } : proposal
       );
-      return Promise.resolve({ success: true });
+      return Promise.resolve(acceptResponse);
     }
     if (cmd === "reject_proposal") {
       mutableProposals = mutableProposals.map(proposal =>
@@ -766,6 +775,29 @@ describe("MailboxPage", () => {
         })
       );
     });
+  });
+
+  it("keeps a confirmed Memory write visibly pending when its projection is degraded", async () => {
+    mockMutableProposals([{ ...editedMemoryProposal, status: "pending" }], false, {
+      success: true,
+      effectStatus: "confirmed",
+      proposalProjectionStatus: "confirmed",
+      warnings: ["projection delivery failed"],
+      memoryPersistence: {
+        canonicalCommitted: true,
+        projectionState: "degraded",
+        reasonCode: "projection_delivery_failed",
+      },
+    });
+
+    renderMailboxPage();
+    fireEvent.click(await screen.findByRole("button", { name: "同意" }));
+
+    expect(
+      await screen.findByText(
+        "Memory 已写入 canonical store，但派生视图仍为 degraded；Mailbox 保持等待状态。"
+      )
+    ).toBeInTheDocument();
   });
 
   it("notifies the shell to refresh diagnostics after accepting a proposal", async () => {

@@ -2,6 +2,7 @@ use crate::agent::product_read_model::{
     EvidenceRef, ExternalTransmissionStatus, ProductRiskLevel, ProviderPrivacyBoundarySummary,
     ProviderRouteType,
 };
+use crate::network_client::{NetworkPolicyDecision, NetworkPolicyDisposition};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,6 +17,7 @@ pub struct ProviderPrivacyBoundaryBuildInput {
     pub provider_validation_validated: bool,
     pub network_policy_enabled: bool,
     pub network_default_decision: Option<String>,
+    pub network_policy_decision: Option<NetworkPolicyDecision>,
     pub local_only_required: bool,
     pub latest_route_type: Option<ProviderRouteType>,
     pub latest_external_transmission: Option<ExternalTransmissionStatus>,
@@ -49,7 +51,7 @@ pub fn build_provider_privacy_boundary_summary(
     if input.local_only_required || input.prefer_local_model {
         let observed_not_sent =
             input.latest_external_transmission == Some(ExternalTransmissionStatus::NotSent);
-        let route_type = input.latest_route_type.unwrap_or_else(|| {
+        let route_type = input.latest_route_type.unwrap_or({
             if observed_not_sent {
                 ProviderRouteType::Local
             } else {
@@ -60,14 +62,16 @@ pub fn build_provider_privacy_boundary_summary(
             .latest_external_transmission
             .unwrap_or(ExternalTransmissionStatus::Unknown);
         let evidence_missing = input.latest_external_transmission.is_none();
-        let blocked_reason = evidence_missing.then(|| {
-            if input.local_only_required {
-                "LocalOnly is required, but no runtime route evidence proves external transmission was not sent."
-                    .into()
-            } else {
-                "Local model preference is configured, but no runtime route evidence proves external transmission was not sent."
-                    .into()
-            }
+        let blocked_reason = network_policy_blocked_reason(&input).or_else(|| {
+            evidence_missing.then(|| {
+                if input.local_only_required {
+                    "LocalOnly is required, but no runtime route evidence proves external transmission was not sent."
+                        .into()
+                } else {
+                    "Local model preference is configured, but no runtime route evidence proves external transmission was not sent."
+                        .into()
+                }
+            })
         });
         return ProviderPrivacyBoundarySummary {
             route_type,
@@ -160,6 +164,9 @@ fn cloud_model_label(input: &ProviderPrivacyBoundaryBuildInput) -> String {
 }
 
 fn cloud_blocked_reason(input: &ProviderPrivacyBoundaryBuildInput) -> Option<String> {
+    if let Some(reason) = network_policy_blocked_reason(input) {
+        return Some(reason);
+    }
     if !input.network_policy_enabled {
         return Some("Network policy is disabled; cloud route cannot be treated as ready.".into());
     }
@@ -182,6 +189,21 @@ fn cloud_blocked_reason(input: &ProviderPrivacyBoundaryBuildInput) -> Option<Str
     None
 }
 
+fn network_policy_blocked_reason(input: &ProviderPrivacyBoundaryBuildInput) -> Option<String> {
+    let decision = input.network_policy_decision.as_ref()?;
+    match decision.disposition {
+        NetworkPolicyDisposition::Allow => None,
+        NetworkPolicyDisposition::Ask => Some(format!(
+            "Network consent is required before provider dispatch (decision_id={}).",
+            decision.decision_id
+        )),
+        NetworkPolicyDisposition::Deny => Some(format!(
+            "Cloud provider network route is blocked by {} (decision_id={}).",
+            decision.reason_code, decision.decision_id
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,6 +219,7 @@ mod tests {
             provider_validation_validated: true,
             network_policy_enabled: true,
             network_default_decision: Some("ask".into()),
+            network_policy_decision: None,
             local_only_required: false,
             latest_route_type: None,
             latest_external_transmission: None,
@@ -291,6 +314,27 @@ mod tests {
             .blocked_reason
             .as_deref()
             .is_some_and(|reason| reason.contains("stale")));
+    }
+
+    #[test]
+    fn provider_privacy_uses_the_enforced_typed_network_decision() {
+        let policy = crate::config::NetworkPolicy::default();
+        let decision = crate::network_client::resolve_network_policy_decision(
+            &policy,
+            "https://api.openai.com/v1/models",
+            "provider.openai",
+        )
+        .unwrap();
+        let decision_id = decision.decision_id.clone();
+        let summary = build_provider_privacy_boundary_summary(ProviderPrivacyBoundaryBuildInput {
+            network_policy_decision: Some(decision),
+            ..input()
+        });
+
+        assert!(summary
+            .blocked_reason
+            .as_deref()
+            .is_some_and(|reason| { reason.contains("consent") && reason.contains(&decision_id) }));
     }
 
     #[test]

@@ -119,6 +119,150 @@ describe("AgentRunDetail evidence view", () => {
     vi.clearAllMocks();
   });
 
+  it("renders remote unknown as amber uncertainty instead of a failed error card", async () => {
+    const remoteUnknownRun = {
+      ...baseRun("run-remote-unknown"),
+      status: "remote_unknown",
+      kind: "tool_execution",
+      error: {
+        message: "remote_state_unknown",
+        phase: "startup_projection_recovery",
+        recoverable: false,
+      },
+    };
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "get_agent_run") return Promise.resolve(remoteUnknownRun);
+      if (cmd === "list_main_chat_agent_tasks") return Promise.resolve([]);
+      return Promise.reject(new Error(`unexpected command ${cmd}`));
+    });
+
+    renderDetail("run-remote-unknown");
+
+    expect((await screen.findAllByText("远端状态未知")).length).toBeGreaterThan(0);
+    expect(screen.getByText(/请求已离开本地，但尚未观察到可信的远端终态/)).toBeInTheDocument();
+    expect(screen.queryByText("错误")).not.toBeInTheDocument();
+    expect(screen.queryByText("run_failed")).not.toBeInTheDocument();
+  });
+
+  it("labels migrated legacy metadata as unverified and suppresses fake execution claims", async () => {
+    const legacyRun = {
+      ...baseRun("run-legacy-unverified"),
+      legacyPayloadUnverified: true,
+      generatedProposals: ["LEGACY_PROPOSAL_MUST_NOT_RENDER"],
+      reasoningStrategy: "layered",
+      error: {
+        message: "LEGACY_ERROR_MUST_NOT_RENDER",
+        phase: "provider",
+        recoverable: false,
+      },
+      contextSummary: {
+        lifeModelEmpty: false,
+        memoryHitCount: 99,
+        usedToolsPrompt: true,
+        redactionApplied: false,
+      },
+      actions: [
+        {
+          id: "legacy-action",
+          actionType: "tool",
+          input: {},
+          status: "succeeded",
+          timestamp: now,
+          reactTrace: {
+            actionId: "legacy-action",
+            stepIndex: 1,
+            toolCallIndex: 1,
+            actionType: "tool",
+            toolId: "legacy.tool",
+            toolName: "legacy.tool",
+            toolSource: "legacy",
+            actionCategory: "read",
+            riskLevel: "low",
+            status: "succeeded",
+            outputReceipt: {
+              version: 2,
+              kind: "tool_output",
+              provenance: "observed_tool_adapter_body",
+              byteCount: 1,
+              digest: `sha256:${"f".repeat(64)}`,
+              verified: true,
+            },
+            metadataSafe: true,
+          },
+        },
+      ],
+    };
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "get_agent_run") return Promise.resolve(legacyRun);
+      if (cmd === "list_main_chat_agent_tasks") {
+        return Promise.resolve([
+          {
+            taskSessionId: "task-legacy-unverified",
+            conversationId: "chat-timeout-1",
+            runId: "run-legacy-unverified",
+            title: "legacy task",
+            strategy: "legacy",
+            status: "completed",
+            lifecycleState: "completed",
+            lastUpdatedAt: now,
+            lastObservationPreview: "LEGACY_OBSERVATION_MUST_NOT_RENDER",
+            pendingBlockerCount: 0,
+            pendingProposalCount: 1,
+            nextRecommendedControl: "retry",
+            staleState: "stale",
+            resumeSafetyDigest: "legacy digest",
+          },
+        ]);
+      }
+      if (cmd === "get_main_chat_agent_task_detail") {
+        return Promise.resolve({
+          taskSession: baseTaskSession("completed"),
+          actions: [],
+          transcript: [],
+          proposals: ["LEGACY_PROPOSAL_MUST_NOT_RENDER"],
+          blockers: [],
+          finalDelivery: null,
+          continuityDiagnostics: diagnostics(),
+          allowedControls: ["retry", "cancel"],
+          nextRecommendedControl: "retry",
+          retryTargetActionId: "legacy-retry-target",
+          lastSafeResumePoint: null,
+          contextDigest: "legacy digest",
+          selectedSkillDigest: null,
+          toolManifestDigest: "legacy digest",
+          evidenceView: null,
+        });
+      }
+      return Promise.reject(new Error(`unexpected command ${cmd}`));
+    });
+
+    renderDetail("run-legacy-unverified");
+
+    expect(await screen.findByText(/旧版 payload 迁移的未验证执行记录/)).toBeInTheDocument();
+    expect(screen.getByText("计划路线（非调用证据）")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Provider、model、route、privacy、retry 与 health 均未获得/)
+    ).toBeInTheDocument();
+    expect(screen.getByText("旧版 trace 未验证")).toBeInTheDocument();
+    expect(screen.getByText(/旧版协作规则、工具与行为检查未验证/)).toBeInTheDocument();
+    expect(screen.queryByText(/wrong-provider/)).not.toBeInTheDocument();
+    expect(screen.queryByText(new RegExp(`sha256:${"f".repeat(64)}`))).not.toBeInTheDocument();
+    expect(screen.queryByText("legacy.tool")).not.toBeInTheDocument();
+    expect(screen.getAllByText("unknown").length).toBeGreaterThan(0);
+    expect(screen.queryByText("failed")).not.toBeInTheDocument();
+    expect(screen.queryByText("错误")).not.toBeInTheDocument();
+    expect(screen.queryByText("LEGACY_ERROR_MUST_NOT_RENDER")).not.toBeInTheDocument();
+    expect(screen.queryByText("上下文摘要")).not.toBeInTheDocument();
+    expect(screen.queryByText("记忆命中: 99")).not.toBeInTheDocument();
+    expect(screen.queryByText("completed")).not.toBeInTheDocument();
+    expect(screen.queryByText(/连续性需复核/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/LEGACY_OBSERVATION_MUST_NOT_RENDER/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/LEGACY_PROPOSAL_MUST_NOT_RENDER/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /retry/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /cancel/i })).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/失败|已完成|可重试|可取消|无需操作|无阻断/);
+  });
+
   it("renders timeout and final timeline from evidence view and uses RuntimeRouteEvidence", async () => {
     const evidenceView = {
       runId: "run-timeout-1",

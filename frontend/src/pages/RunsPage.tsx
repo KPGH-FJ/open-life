@@ -42,6 +42,13 @@ import {
   RefreshCw,
 } from "lucide-react";
 
+const CONTENT_ABSENT_RECEIPT = /^[a-z0-9_]+:bytes=\d+:sha256:[0-9a-f]{64}$/;
+
+function executionSummary(value: string | undefined): string {
+  if (!value || CONTENT_ABSENT_RECEIPT.test(value)) return "正文未保存在执行记录中";
+  return safePreviewText(value, 96);
+}
+
 function statusIcon(status: string) {
   switch (status) {
     case "running":
@@ -50,6 +57,7 @@ function statusIcon(status: string) {
     case "blocked":
     case "completed_with_pending_review":
     case "completed_needs_evidence":
+    case "remote_unknown":
       return <AlertTriangle size={16} className="text-amber-500" />;
     case "timed_out":
       return <Clock size={16} className="text-red-500" />;
@@ -81,11 +89,13 @@ function kindLabel(kind: string): string {
 }
 
 function runKindLabel(run: AgentRun): string {
+  if (run.legacyPayloadUnverified) return "旧版运行记录";
   if (getPlanExecuteProductTrace(run)) return "计划执行";
   return kindLabel(run.kind);
 }
 
 function runSubtitle(run: AgentRun): string {
+  if (run.legacyPayloadUnverified) return "旧版执行元数据未验证";
   const productTrace = getPlanExecuteProductTrace(run);
   if (productTrace) {
     return planExecuteProductSubtitle(productTrace);
@@ -107,6 +117,7 @@ function taskStatusLabel(status: string): string {
     completed_with_pending_review: "待审核，未完成",
     completed_needs_evidence: "缺少完成证据",
     failed: "失败",
+    remote_unknown: "远端状态未知",
     cancelled: "已取消",
     unknown: "未知",
   };
@@ -151,7 +162,7 @@ function reactTraceSearchText(run: AgentRun): string {
     .map(observation => {
       const trace = observation.reactTrace;
       if (!trace) return observation.source;
-      return `${trace.toolName} ${trace.toolSource} ${trace.observationStatus ?? ""} ${trace.outputHash ?? ""}`;
+      return `${trace.toolName} ${trace.toolSource} ${trace.observationStatus ?? ""} ${trace.outputReceipt?.digest ?? ""}`;
     })
     .join(" ");
   return `${actionText} ${observationText}`;
@@ -162,12 +173,16 @@ const STALE_RUN_THRESHOLD_MS = 10 * 60 * 1000;
 
 function isPossiblyStaleRun(run?: AgentRun): boolean {
   if (!run) return false;
+  if (run.legacyPayloadUnverified) return false;
   if (run.status !== "running") return false;
   const startedAt = new Date(run.startedAt).getTime();
   return Number.isFinite(startedAt) && Date.now() - startedAt > STALE_RUN_THRESHOLD_MS;
 }
 
 function taskItemSearchText(item: TaskViewModelItem, run?: AgentRun): string {
+  if (run?.legacyPayloadUnverified) {
+    return [item.title, item.strategy, "unknown", run.id].join(" ");
+  }
   return [
     item.title,
     item.strategy,
@@ -275,7 +290,7 @@ export default function RunsPage() {
 
   const filteredItems = taskItems.filter(item => {
     const run = item.relatedRunIds.map(runId => runById.get(runId)).find(Boolean);
-    const lifecycle = item.lifecycleStatus;
+    const lifecycle = run?.legacyPayloadUnverified ? "unknown" : item.lifecycleStatus;
     // Trash filter
     if (showTrash) {
       return !!run?.deletedAt;
@@ -292,7 +307,8 @@ export default function RunsPage() {
     // Search
     if (searchQuery) {
       const query = searchQuery.toLowerCase();
-      const productTrace = run ? getPlanExecuteProductTrace(run) : null;
+      const productTrace =
+        run && !run.legacyPayloadUnverified ? getPlanExecuteProductTrace(run) : null;
       const productText = productTrace ? planExecuteProductSearchText(productTrace) : "";
       const text = `${taskItemSearchText(item, run)} ${productText}`.toLowerCase();
       if (!text.includes(query)) return false;
@@ -585,15 +601,18 @@ export default function RunsPage() {
 
               {paginatedItems.map(item => {
                 const run = item.relatedRunIds.map(runId => runById.get(runId)).find(Boolean);
-                const productTrace = run ? getPlanExecuteProductTrace(run) : null;
-                const lifecycle = item.lifecycleStatus;
-                const subtitle = productTrace
-                  ? runSubtitle(run!)
-                  : item.latestResultPreview?.preview
-                    ? safePreviewText(item.latestResultPreview.preview, 96)
-                    : terminalDeliveryLabel(item.terminalDeliveryStatus);
+                const legacyUnknown = run?.legacyPayloadUnverified === true;
+                const productTrace = run && !legacyUnknown ? getPlanExecuteProductTrace(run) : null;
+                const lifecycle = legacyUnknown ? "unknown" : item.lifecycleStatus;
+                const subtitle = legacyUnknown
+                  ? "旧版执行元数据未验证"
+                  : productTrace
+                    ? runSubtitle(run!)
+                    : item.latestResultPreview?.preview
+                      ? safePreviewText(item.latestResultPreview.preview, 96)
+                      : terminalDeliveryLabel(item.terminalDeliveryStatus);
                 const stale = isPossiblyStaleRun(run);
-                const actionControls = enabledActionControls(item);
+                const actionControls = legacyUnknown ? [] : enabledActionControls(item);
                 const checkboxRunId = run?.id;
                 return (
                   <div
@@ -639,9 +658,9 @@ export default function RunsPage() {
                                 {new Date(item.updatedAt).toLocaleString()}
                               </div>
                             )}
-                            {!productTrace && run?.outputPreview && (
+                            {!legacyUnknown && !productTrace && run?.outputPreview && (
                               <div className="text-xs text-stone-500 mt-1 max-w-xs truncate">
-                                {safePreviewText(run.outputPreview, 96)}
+                                {executionSummary(run.outputPreview)}
                               </div>
                             )}
                           </div>
@@ -650,7 +669,7 @@ export default function RunsPage() {
                           <div className="mt-3">
                             <RuntimeDisclosureStrip
                               view={buildRuntimeDisclosure(run, {
-                                strictRuntimeRouteEvidence: false,
+                                strictRuntimeRouteEvidence: legacyUnknown,
                               })}
                               runId={run.id}
                               compact
@@ -663,7 +682,9 @@ export default function RunsPage() {
                           </span>
                           <span>
                             下一步：
-                            {nextControlLabel(item.nextRecommendedControl)}
+                            {nextControlLabel(
+                              legacyUnknown ? "open_trace" : item.nextRecommendedControl
+                            )}
                           </span>
                           {stale && (
                             <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 font-medium text-amber-800">
@@ -672,12 +693,14 @@ export default function RunsPage() {
                           )}
                           <span>
                             交付：
-                            {terminalDeliveryLabel(item.terminalDeliveryStatus)}
+                            {terminalDeliveryLabel(
+                              legacyUnknown ? "unknown" : item.terminalDeliveryStatus
+                            )}
                           </span>
-                          {item.pendingBlockers.length > 0 && (
+                          {!legacyUnknown && item.pendingBlockers.length > 0 && (
                             <span>阻断：{item.pendingBlockers.slice(0, 3).join(", ")}</span>
                           )}
-                          {item.pendingReviewItemRefs.length > 0 && (
+                          {!legacyUnknown && item.pendingReviewItemRefs.length > 0 && (
                             <span>待审核：{item.pendingReviewItemRefs.length}</span>
                           )}
                           {actionControls.length > 0 && (
@@ -737,16 +760,32 @@ export default function RunsPage() {
                               )}
                           </div>
                         )}
-                        {run?.error && (
-                          <div className="mt-2 text-xs text-red-500 bg-red-50 rounded px-2 py-1">
-                            {run.error.message}
+                        {run?.error && !legacyUnknown && (
+                          <div
+                            className={`mt-2 rounded px-2 py-1 text-xs ${
+                              run.status === "remote_unknown"
+                                ? "bg-amber-50 text-amber-700"
+                                : "bg-red-50 text-red-500"
+                            }`}
+                          >
+                            {run.status === "remote_unknown"
+                              ? "远端状态未知，未自动重试"
+                              : executionSummary(run.error.message)}
                           </div>
                         )}
-                        {!productTrace && run && run.generatedProposals.length > 0 && (
-                          <div className="mt-2 text-xs text-blue-600 bg-blue-50 rounded px-2 py-1">
-                            待确认 {run.generatedProposals.length}
+                        {run?.legacyPayloadUnverified && (
+                          <div className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800">
+                            旧版执行记录：receipt、route 与 digest 均不可作为已观察事实。
                           </div>
                         )}
+                        {!legacyUnknown &&
+                          !productTrace &&
+                          run &&
+                          run.generatedProposals.length > 0 && (
+                            <div className="mt-2 text-xs text-blue-600 bg-blue-50 rounded px-2 py-1">
+                              待确认 {run.generatedProposals.length}
+                            </div>
+                          )}
                       </div>
                     </div>
                   </div>

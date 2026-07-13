@@ -319,7 +319,8 @@ async fn collect_main_chat_capability_eval_artifacts(
     let network_policy_enabled = state.config.lock().await.system.network_policy.enabled;
     let session_id = main_chat_capability_eval_session_id(scenario, fixture_mode);
     let prompt = main_chat_capability_eval_prompt(scenario, fixture_mode);
-    let response = crate::main_chat_send::send_message_with_state(
+    let response = crate::main_chat_send::send_message_with_operation_state(
+        uuid::Uuid::new_v4().to_string(),
         session_id.clone(),
         vec![ChatMessage {
             role: "user".into(),

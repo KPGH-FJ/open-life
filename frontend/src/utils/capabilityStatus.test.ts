@@ -138,6 +138,27 @@ describe("capabilityStatus", () => {
     expect(stale.cloudApiStatusLabel).toBe("DeepSeek 验证已过期或配置已变更");
   });
 
+  it.each([
+    ["remote_unknown", "远端终态未知"],
+    ["runtime_generation_incoherent", "运行代不一致，已失败关闭"],
+    ["validation_record_corrupt", "验证记录损坏"],
+    ["validation_record_io_error", "验证记录不可读"],
+    ["unknown", "状态未知"],
+  ] as const)("keeps %s visible instead of collapsing it to unvalidated", (status, label) => {
+    const view = buildCapabilityStatusViewModel(
+      diagnostics({
+        cloud_api_configured: true,
+        cloud_api_validated: false,
+        cloud_api_validation_status: status,
+      }),
+      0
+    );
+
+    expect(view.cloudApiStatusLabel).toContain(label);
+    expect(view.cloudApiStatusLabel).not.toContain("连接未验证");
+    expect(view.modelRouteLabel).not.toContain("备用");
+  });
+
   it("maps exact governance blocker reasons without exposing raw reason codes", () => {
     const disallowed = explainGovernanceBlocker(
       "That tool call is blocked by governance: model_selected_disallowed_tool",

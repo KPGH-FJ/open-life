@@ -2,6 +2,7 @@ use openlife_core::llm::ChatMessage;
 
 use crate::main_chat_react_tool_selection::{
     build_main_chat_react_action_plan, main_chat_react_agent_loop_execution_plan,
+    rank_main_chat_react_tool_candidates_with_authorization,
     rank_main_chat_react_tool_candidates_with_model, MainChatReactActionPlan,
     MainChatReactToolCandidate,
 };
@@ -207,6 +208,11 @@ async fn configure_http_provider_scheduler(
     provider_base: &str,
     chat_model: &str,
 ) {
+    {
+        let mut config = state.config.lock().await;
+        config.system.network_policy.enabled = true;
+        config.system.network_policy.default_decision = "allow".into();
+    }
     let mut scheduler = state.scheduler.lock().await;
     *scheduler = openlife_core::scheduler::InferenceScheduler::new(
         "unused-local-model".into(),
@@ -594,6 +600,49 @@ async fn main_chat_react_registered_mcp_agent_loop_uses_provider_ranked_candidat
             .and_then(serde_json::Value::as_str),
         Some("no_tools")
     );
+    assert_eq!(
+        completed_entry
+            .metadata
+            .get("liveProviderInvoked")
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "live-provider truth must come from adapter-edge receipts"
+    );
+
+    let durable_events = crate::main_chat_event_stream::list_main_chat_agent_events_with_state(
+        &state,
+        task_session_id.to_string(),
+        None,
+        Some(200),
+    )
+    .await
+    .expect("list provider-ranked durable events");
+    let provider_started = durable_events
+        .iter()
+        .filter(|event| event.event_type == "provider.started")
+        .collect::<Vec<_>>();
+    let provider_completed = durable_events
+        .iter()
+        .filter(|event| event.event_type == "provider.completed")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        provider_started.len(),
+        3,
+        "candidate ranking and both AgentLoop generations must each have a durable start fact"
+    );
+    assert_eq!(provider_completed.len(), 3);
+    assert!(durable_events
+        .iter()
+        .all(|event| event.event_type != "provider.failed"));
+    let started_request_ids = provider_started
+        .iter()
+        .map(|event| event.object_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let completed_request_ids = provider_completed
+        .iter()
+        .map(|event| event.object_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(started_request_ids, completed_request_ids);
 }
 
 #[tokio::test]
@@ -689,6 +738,105 @@ async fn main_chat_react_provider_candidate_ranking_masks_sensitive_context_befo
         captured_request.contains("<PHONE_0>"),
         "provider-ranking prompt should keep metadata-safe phone placeholder"
     );
+}
+
+#[tokio::test]
+async fn main_chat_react_provider_candidate_ranking_uses_the_configured_privacy_policy() {
+    let (provider_base, request_rx) = fake_capturing_chat_provider_endpoint(
+        serde_json::json!({
+            "ranked_candidate_ids": ["candidate.alpha", "candidate.beta"]
+        })
+        .to_string(),
+    )
+    .await;
+    let scheduler = openlife_core::scheduler::InferenceScheduler::new(
+        "unused-local-model".into(),
+        false,
+        "openai".into(),
+        provider_base,
+        "test-key".into(),
+        "gpt-provider-ranking-custom-privacy".into(),
+        "text-embedding-test".into(),
+        false,
+    );
+    let plan = MainChatReactActionPlan {
+        queue_action_type: "mcp.read_only".into(),
+        executor_action_type: "mcp_tool".into(),
+        target: "target.alpha".into(),
+        arguments: serde_json::json!({}),
+        description: "Custom privacy provider ranking boundary.".into(),
+        requires_network: false,
+        uses_ephemeral_file_permission: false,
+        uses_ephemeral_mcp_wrapper_permission: true,
+        tool_candidates: vec![
+            MainChatReactToolCandidate {
+                candidate_id: "candidate.alpha".into(),
+                executor_action_type: "mcp_tool".into(),
+                target: "target.alpha".into(),
+                arguments: serde_json::json!({}),
+                manifest_source: "boundary".into(),
+                capabilities: vec!["read".into()],
+                selection_rank: 1,
+                match_reason: "manifest_default_order".into(),
+            },
+            MainChatReactToolCandidate {
+                candidate_id: "candidate.beta".into(),
+                executor_action_type: "mcp_tool".into(),
+                target: "target.beta".into(),
+                arguments: serde_json::json!({}),
+                manifest_source: "boundary".into(),
+                capabilities: vec!["read".into()],
+                selection_rank: 2,
+                match_reason: "manifest_default_order".into(),
+            },
+        ],
+    };
+    let privacy_engine =
+        openlife_core::privacy::PrivacyEngine::with_policy(openlife_core::privacy::PrivacyPolicy {
+            enabled: true,
+            rules: vec![openlife_core::privacy::PrivacyRule {
+                ptype: openlife_core::privacy::PrivacyType::Generic,
+                enabled: true,
+                action: openlife_core::privacy::PrivacyAction::Block,
+                custom_pattern: Some("CUSTOM-SECRET-[0-9]+".into()),
+            }],
+        });
+    let current_user_text = "Rank the governed read-only candidates for this request.";
+    let authorization =
+        crate::main_chat_kernel::MainChatProviderAuthorization::test_fixture_for_user_text(
+            "custom-ranking-privacy",
+            true,
+            current_user_text,
+        );
+
+    let (_, ranking) = rank_main_chat_react_tool_candidates_with_authorization(
+        &scheduler,
+        &[
+            ChatMessage {
+                role: "user".into(),
+                content: current_user_text.into(),
+            },
+            ChatMessage {
+                role: "assistant".into(),
+                content: "Use CUSTOM-SECRET-4815162342 only as private relevance context.".into(),
+            },
+        ],
+        plan,
+        &authorization,
+        &openlife_core::config::NetworkPolicy {
+            default_decision: "allow".into(),
+            ..openlife_core::config::NetworkPolicy::default()
+        },
+        &privacy_engine,
+    )
+    .await;
+
+    assert!(ranking.model_ranked);
+    let captured_request = request_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("capture configured-policy ranking request");
+    assert!(!captured_request.contains("CUSTOM-SECRET-4815162342"));
+    assert!(captured_request.contains("<BLOCKED_SENSITIVE_0>"));
 }
 
 #[tokio::test]
@@ -865,10 +1013,13 @@ async fn main_chat_react_provider_candidate_ranking_requires_route_identity_to_m
 
     assert!(
         !ranking.model_ranked,
-        "provider ranking must fail soft when previewed route identity does not match the configured request provider"
+        "provider ranking must fail soft when the routed identity does not match the configured request adapter"
     );
     assert_eq!(ranking.ranking_source, "deterministic_local");
-    assert_eq!(ranking.ranking_provider.as_deref(), Some("deepseek"));
+    assert_eq!(
+        ranking.ranking_provider, None,
+        "a rejected preparation must not be reported as an observed provider invocation"
+    );
     assert_eq!(
         ranked_plan.tool_candidate_ids(),
         vec!["candidate.alpha".to_string(), "candidate.beta".to_string()]
@@ -953,10 +1104,13 @@ async fn main_chat_react_provider_candidate_ranking_rejects_wrapping_control_rou
 
     assert!(
         !ranking.model_ranked,
-        "provider ranking must fail soft when previewed route identity only matches after trimming control characters"
+        "provider ranking must fail soft when route identity only matches after trimming control characters"
     );
     assert_eq!(ranking.ranking_source, "deterministic_local");
-    assert_eq!(ranking.ranking_provider.as_deref(), Some("openai\n"));
+    assert_eq!(
+        ranking.ranking_provider, None,
+        "an invalid route identity must not become an observed provider fact"
+    );
     assert_eq!(
         ranked_plan.tool_candidate_ids(),
         vec!["candidate.alpha".to_string(), "candidate.beta".to_string()]
@@ -2062,14 +2216,24 @@ async fn main_chat_react_registered_mcp_agent_loop_records_selected_candidate_ex
         .expect("mcp read action");
     assert_eq!(
         mcp_action.status,
-        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Completed
+        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Completed,
+        "full command-surface success requires the live ToolGateway receipt sidecar to survive AgentLoop and ReAct"
     );
-    assert_selected_candidate_policy_metadata(
-        mcp_action
-            .observation_metadata
-            .as_ref()
-            .expect("selected policy observation metadata"),
+    let observation_metadata = mcp_action
+        .observation_metadata
+        .as_ref()
+        .expect("selected policy observation metadata");
+    assert_selected_candidate_policy_metadata(observation_metadata);
+    assert_eq!(
+        observation_metadata
+            .get("toolExecutionReceipt")
+            .and_then(|receipt| receipt.get("transportStatus"))
+            .and_then(serde_json::Value::as_str),
+        Some("response_observed")
     );
+    assert!(observation_metadata
+        .get("receiptInvariantViolation")
+        .is_none());
 }
 
 #[tokio::test]
@@ -2092,6 +2256,8 @@ async fn main_chat_react_registered_mcp_agent_loop_uses_governed_candidate_argum
                 enabled: true,
                 declarative_only: false,
                 action_type: "read".into(),
+                idempotency_contract:
+                    openlife_core::tool_manifest::ToolIdempotencyContract::Idempotent,
                 tags: vec!["argument_guard".into()],
             },
             Box::new(|args| {

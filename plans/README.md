@@ -12,6 +12,8 @@ planning documents from steering new work.
 2. `plans/README.md`
 3. `plans/openlife_single_system_deletion_manifest.md`
 4. `plans/openlife_single_system_development_preparation.md`
+5. `plans/openlife_backend_remediation_v4.md` for the currently approved backend
+   remediation work package, always subordinate to items 1-4.
 
 All older Goal, Stage, Beta, dogfood, eval, adapter, and route-transition
 documents are historical reference only unless a future user task explicitly
@@ -38,9 +40,19 @@ The shipped product must have:
 - `plans/openlife_single_system_deletion_manifest.md`
 - `plans/openlife_single_system_development_preparation.md`
 - `plans/openlife_single_system_phase1_inventory.json`
+- `plans/openlife_backend_remediation_v4.md`
+- `plans/openlife_backend_remediation_v4_inventory.json`
+- `plans/openlife_backend_remediation_v4_traceability.json`
+- `plans/openlife_backend_remediation_v4_scenarios.json`
+- `plans/openlife_backend_remediation_v4_scenario_waivers.json`
+- `plans/openlife_backend_remediation_v4_phase0_evidence.md`
+- `plans/adr/0014-explicit-user-memory-write-lane.md`
+- `plans/adr/0015-transient-state-command-lane.md`
 
 These documents define the current cleanup scope, deletion manifest, and
-acceptance gates. The deletion manifest is a contract artifact: objects marked
+acceptance gates. The backend remediation work package implements the Phase7
+single-system contract; it does not supersede or create a second authority.
+The deletion manifest is a contract artifact: objects marked
 `not-done` are blockers, and objects marked `done` must be absent from product
 build, product UI, product bridge, and active docs.
 

@@ -2,9 +2,9 @@ import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it } from "vitest";
 import RunTracePanel from "./RunTracePanel";
-import type { AgentRun } from "../tauri";
+import type { ProductAgentRun } from "../tauri";
 
-const baseRun: AgentRun = {
+const baseRun: ProductAgentRun = {
   id: "run-1",
   taskId: "task-1",
   status: "completed",
@@ -12,10 +12,16 @@ const baseRun: AgentRun = {
   generatedProposals: [],
   actions: [],
   observations: [],
+  legacyPayloadUnverified: false,
+  behaviorChecks: [],
+  statusUpdates: [],
+  stepCount: 0,
+  toolCallCount: 0,
+  warnings: [],
   startedAt: new Date().toISOString(),
 };
 
-function renderPanel(run: AgentRun) {
+function renderPanel(run: ProductAgentRun) {
   return render(
     <MemoryRouter>
       <RunTracePanel run={run} />
@@ -42,7 +48,7 @@ describe("RunTracePanel", () => {
         },
       ],
       outputPreview: "raw-sensitive-payload-should-not-drive-trace",
-    });
+    } as unknown as ProductAgentRun);
 
     expect(screen.getByText("AI collaboration rules used")).toBeInTheDocument();
     expect(screen.getByText("Confirm before external writes")).toBeInTheDocument();
@@ -59,8 +65,51 @@ describe("RunTracePanel", () => {
   it("renders an empty state when no HS assets affect a run", () => {
     renderPanel(baseRun);
 
-    expect(screen.getByText("No collaboration rules affected this run.")).toBeInTheDocument();
+    expect(
+      screen.getByText("Verified runtime trace is unavailable; execution details remain unknown.")
+    ).toBeInTheDocument();
     expect(screen.queryByText("AI collaboration style")).not.toBeInTheDocument();
+  });
+
+  it("suppresses migrated legacy trace claims", () => {
+    renderPanel({
+      ...baseRun,
+      legacyPayloadUnverified: true,
+      actions: [
+        {
+          id: "legacy-action",
+          actionType: "tool",
+          status: "succeeded",
+          timestamp: new Date().toISOString(),
+          reactTrace: {
+            actionId: "legacy-action",
+            stepIndex: 1,
+            toolCallIndex: 1,
+            actionType: "tool",
+            toolName: "legacy.tool",
+            toolSource: "legacy",
+            actionCategory: "read",
+            riskLevel: "low",
+            status: "succeeded",
+            outputReceipt: {
+              version: 2,
+              kind: "tool_output",
+              provenance: "observed_tool_adapter_body",
+              byteCount: 1,
+              digest: `sha256:${"f".repeat(64)}`,
+              verified: true,
+            },
+            metadataSafe: true,
+          },
+        },
+      ],
+    } as ProductAgentRun);
+
+    expect(
+      screen.getByText(/Legacy collaboration, tool, and strategy metadata is unverified/)
+    ).toBeInTheDocument();
+    expect(screen.queryByText("legacy.tool")).not.toBeInTheDocument();
+    expect(screen.queryByText(new RegExp(`sha256:${"f".repeat(64)}`))).not.toBeInTheDocument();
   });
 
   it("renders ReAct action lifecycle metadata without raw payloads or PII", () => {
@@ -71,7 +120,6 @@ describe("RunTracePanel", () => {
           id: "action-1",
           actionType: "mcp_tool",
           target: "file.write_proposal",
-          input: { arguments: { content: "raw-file-secret@example.com" } },
           status: "succeeded",
           timestamp: new Date().toISOString(),
           reactTrace: {
@@ -79,7 +127,6 @@ describe("RunTracePanel", () => {
             stepIndex: 1,
             toolCallIndex: 1,
             actionType: "mcp_tool",
-            toolId: "file.write_proposal",
             toolName: "file.write_proposal",
             toolSource: "builtin",
             actionCategory: "proposal",
@@ -87,10 +134,15 @@ describe("RunTracePanel", () => {
             status: "succeeded",
             proposalId: "proposal-1",
             observationId: "observation-1",
-            observationStatus: "succeeded",
             outputPreview: "128 bytes redacted",
-            outputHash: "sha256:def456",
-            outputByteCount: 128,
+            outputReceipt: {
+              version: 2,
+              kind: "tool_output",
+              provenance: "observed_tool_adapter_body",
+              byteCount: 128,
+              digest: `sha256:${"d".repeat(64)}`,
+              verified: true,
+            },
             metadataSafe: true,
           },
         },
@@ -107,7 +159,6 @@ describe("RunTracePanel", () => {
             stepIndex: 1,
             toolCallIndex: 1,
             actionType: "mcp_tool",
-            toolId: "file.write_proposal",
             toolName: "file.write_proposal",
             toolSource: "builtin",
             actionCategory: "proposal",
@@ -115,10 +166,15 @@ describe("RunTracePanel", () => {
             status: "succeeded",
             proposalId: "proposal-1",
             observationId: "observation-1",
-            observationStatus: "succeeded",
             outputPreview: "128 bytes redacted",
-            outputHash: "sha256:def456",
-            outputByteCount: 128,
+            outputReceipt: {
+              version: 2,
+              kind: "tool_output",
+              provenance: "observed_tool_adapter_body",
+              byteCount: 128,
+              digest: `sha256:${"d".repeat(64)}`,
+              verified: true,
+            },
             metadataSafe: true,
           },
         },
@@ -137,94 +193,116 @@ describe("RunTracePanel", () => {
       "/mailbox?proposal=proposal-1"
     );
     expect(screen.getByText("128 bytes redacted")).toBeInTheDocument();
-    expect(screen.getByText("sha256:def456")).toBeInTheDocument();
+    expect(screen.getAllByText(new RegExp(`sha256:${"d".repeat(64)}`)).length).toBeGreaterThan(0);
     expect(screen.queryByText(/raw-file-secret/)).not.toBeInTheDocument();
     expect(screen.queryByText(/secret@example.com/)).not.toBeInTheDocument();
     expect(screen.queryByText(/raw output should not render/)).not.toBeInTheDocument();
   });
 
-  it("renders Skill Runtime trace metadata without raw skill payloads", () => {
+  it("keeps a missing Product output receipt explicitly unknown", () => {
     renderPanel({
       ...baseRun,
-      kind: "skill",
-      generatedProposals: ["proposal-skill-1"],
       actions: [
         {
-          id: "action-skill-1",
+          id: "action-with-unknown-receipt",
+          actionType: "mcp_tool",
+          status: "failed",
+          timestamp: new Date().toISOString(),
+          reactTrace: {
+            actionId: "action-with-unknown-receipt",
+            stepIndex: 1,
+            toolCallIndex: 1,
+            actionType: "mcp_tool",
+            toolName: "unknown_result_tool",
+            toolSource: "mcp",
+            actionCategory: "read",
+            riskLevel: "low",
+            status: "failed",
+            metadataSafe: true,
+          },
+        },
+      ],
+    });
+
+    expect(screen.getByText("unknown_result_tool")).toBeInTheDocument();
+    expect(screen.getByText("Output receipt: unknown")).toBeInTheDocument();
+    expect(screen.queryByText("Output receipt: verified")).not.toBeInTheDocument();
+  });
+
+  it("does not promote a Product trace that is explicitly not metadata-safe", () => {
+    renderPanel({
+      ...baseRun,
+      actions: [
+        {
+          id: "unsafe-trace-action",
+          actionType: "mcp_tool",
+          status: "succeeded",
+          timestamp: new Date().toISOString(),
+          reactTrace: {
+            actionId: "unsafe-trace-action",
+            stepIndex: 1,
+            toolCallIndex: 1,
+            actionType: "mcp_tool",
+            toolName: "D010_UNSAFE_TRACE_MUST_NOT_RENDER",
+            toolSource: "mcp",
+            actionCategory: "read",
+            riskLevel: "low",
+            status: "succeeded",
+            metadataSafe: false,
+          },
+        },
+      ],
+    });
+
+    expect(screen.queryByText("D010_UNSAFE_TRACE_MUST_NOT_RENDER")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Verified runtime trace is unavailable; execution details remain unknown.")
+    ).toBeInTheDocument();
+  });
+
+  it("does not reinterpret compatibility action output or observation structuredResult as product trace", () => {
+    const hostileCompatibilityRun = {
+      ...baseRun,
+      kind: "skill",
+      actions: [
+        {
+          id: "compat-action",
           actionType: "skill_run",
-          target: "weekly_review",
-          input: { text: "raw private skill input should not render" },
           status: "completed_with_warnings",
           timestamp: new Date().toISOString(),
           output: {
             skillTrace: {
               traceKind: "skill_runtime",
-              skillId: "weekly_review",
-              executionStatus: "ExecutableBuiltIn",
-              parseStatus: "parsed",
-              validationStatus: "valid_with_warnings",
-              warningCount: 1,
-              proposalCandidateCount: 2,
-              acceptedProposalCandidateCount: 1,
-              skippedProposalCandidateCount: 1,
-              generatedProposalIds: ["proposal-skill-1"],
-              guidanceConsumptionMode: "disabled",
-              metadataSafe: true,
-              containsRawContent: false,
-              contextReport: {
-                requiredContextCount: 4,
-                availableContextCount: 3,
-                promptContextDigest: "sha256:context",
-              },
+              skillId: "D010_COMPAT_ACTION_OUTPUT_MUST_NOT_BECOME_FACT",
             },
-            rawModelOutput: "raw assistant output should not render",
           },
         },
       ],
       observations: [
         {
-          id: "observation-skill-1",
-          actionId: "action-skill-1",
-          content: "raw observation with private model payload",
-          source: "skill:weekly_review",
+          id: "compat-observation",
+          actionId: "compat-action",
+          content: "D010_PRIVATE_OBSERVATION_BODY_MUST_NOT_RENDER",
+          source: "unknown",
           timestamp: new Date().toISOString(),
           structuredResult: {
             skillTrace: {
               traceKind: "skill_runtime",
-              skillId: "weekly_review",
-              parseStatus: "parsed",
-              validationStatus: "valid_with_warnings",
-              warningCount: 1,
-              generatedProposalIds: ["proposal-skill-1"],
-              contextReport: {
-                requiredContextCount: 4,
-                availableContextCount: 3,
-                promptContextDigest: "sha256:context",
-              },
+              skillId: "D010_COMPAT_STRUCTURED_RESULT_MUST_NOT_BECOME_FACT",
             },
           },
         },
       ],
-      outputPreview: "raw skill output preview should not render",
-    });
+    } as unknown as ProductAgentRun;
 
-    expect(screen.getByText("Skill Runtime trace")).toBeInTheDocument();
-    expect(screen.getAllByText("weekly_review").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Parse: parsed").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Validation: valid_with_warnings").length).toBeGreaterThan(0);
-    expect(screen.getByText("Candidates: 2")).toBeInTheDocument();
-    expect(screen.getByText("Accepted: 1")).toBeInTheDocument();
-    expect(screen.getByText("Skipped: 1")).toBeInTheDocument();
-    expect(screen.getAllByText("Warnings: 1").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Proposal: proposal-skill-1").length).toBeGreaterThan(0);
-    for (const link of screen.getAllByRole("link", { name: "Proposal: proposal-skill-1" })) {
-      expect(link).toHaveAttribute("href", "/mailbox?proposal=proposal-skill-1");
-    }
-    expect(screen.getAllByText("sha256:context").length).toBeGreaterThan(0);
-    expect(screen.queryByText(/raw private skill input/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/raw assistant output/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/raw observation/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/raw skill output preview/)).not.toBeInTheDocument();
+    renderPanel(hostileCompatibilityRun);
+
+    expect(screen.queryByText("Skill Runtime trace")).not.toBeInTheDocument();
+    expect(screen.queryByText(/D010_COMPAT/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/D010_PRIVATE/)).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Verified runtime trace is unavailable; execution details remain unknown.")
+    ).toBeInTheDocument();
   });
 
   it("does not render retired multi-strategy preview audit metadata", () => {
@@ -256,19 +334,21 @@ describe("RunTracePanel", () => {
         },
       },
       outputPreview: "raw-sensitive-payload-should-not-drive-trace",
-    });
+    } as unknown as ProductAgentRun);
 
     expect(screen.queryByText("Multi-strategy preview trace")).not.toBeInTheDocument();
     expect(screen.queryByText("Strategy: planExecute")).not.toBeInTheDocument();
     expect(screen.queryByText("Descriptor: plan_execute")).not.toBeInTheDocument();
     expect(screen.queryByText("preview runtime forces allowWrites=false")).not.toBeInTheDocument();
-    expect(screen.getByText("No collaboration rules affected this run.")).toBeInTheDocument();
+    expect(
+      screen.getByText("Verified runtime trace is unavailable; execution details remain unknown.")
+    ).toBeInTheDocument();
     expect(
       screen.queryByText("raw-sensitive-payload-should-not-drive-trace")
     ).not.toBeInTheDocument();
   });
 
-  it("renders metadata-safe Plan-Execute product trace metadata", () => {
+  it("does not reinterpret compatibility reasoningTrace as a Product runtime fact", () => {
     renderPanel({
       ...baseRun,
       reasoningStrategy: "plan_execute_product",
@@ -318,23 +398,15 @@ describe("RunTracePanel", () => {
         },
       },
       outputPreview: "raw-sensitive-weekly-plan-should-not-render",
-    });
+    } as unknown as ProductAgentRun);
 
-    expect(screen.getByText("Plan-Execute product trace")).toBeInTheDocument();
-    expect(screen.getByText("Descriptor: plan_execute")).toBeInTheDocument();
-    expect(screen.getByText("Registry: ready")).toBeInTheDocument();
-    expect(screen.getByText("Scenario: weekly_planning")).toBeInTheDocument();
-    expect(screen.getByText("Session: plan-session-1")).toBeInTheDocument();
-    expect(screen.getByText("Steps: 3")).toBeInTheDocument();
-    expect(screen.getByText("Proposals: 1")).toBeInTheDocument();
-    expect(screen.getByText("requires proposal: 1")).toBeInTheDocument();
-    expect(screen.getByText("Direct writes: none")).toBeInTheDocument();
-    expect(screen.getByText("External writes: none")).toBeInTheDocument();
-    expect(screen.getByText("proposal-1")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "proposal-1" })).toHaveAttribute(
-      "href",
-      "/mailbox?proposal=proposal-1"
-    );
+    expect(screen.queryByText("Plan-Execute product trace")).not.toBeInTheDocument();
+    expect(screen.queryByText("Descriptor: plan_execute")).not.toBeInTheDocument();
+    expect(screen.queryByText("Direct writes: none")).not.toBeInTheDocument();
+    expect(screen.queryByText("External writes: none")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Verified runtime trace is unavailable; execution details remain unknown.")
+    ).toBeInTheDocument();
     expect(
       screen.queryByText("raw-sensitive-weekly-plan-should-not-render")
     ).not.toBeInTheDocument();

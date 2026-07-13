@@ -1,5 +1,7 @@
 use crate::main_chat_acceptance_test_support::{
-    configure_live_provider_eval_state, configure_live_provider_eval_state_with_local_http_provider,
+    configure_live_provider_eval_state,
+    configure_live_provider_eval_state_with_captured_local_http_provider,
+    configure_live_provider_eval_state_with_local_http_provider,
 };
 use crate::main_chat_final_gate::{
     main_chat_live_provider_acceptance_evidence, MainChatLiveProviderEvalHarnessScenario,
@@ -327,7 +329,7 @@ async fn main_chat_live_provider_eval_harness_executes_local_http_provider_witho
     .await;
 
     let report = run_main_chat_live_provider_eval_harness(
-        state,
+        state.clone(),
         MainChatLiveProviderEvalHarnessInput {
             scenario: MainChatLiveProviderEvalHarnessScenario::DirectAnswer,
             session_id: "local-http-provider-harness-direct".into(),
@@ -364,6 +366,110 @@ async fn main_chat_live_provider_eval_harness_executes_local_http_provider_witho
     let evidence = main_chat_live_provider_acceptance_evidence(&[report]);
     assert!(!evidence.generation_eval_executed);
     assert!(evidence.no_silent_writes);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn main_chat_provider_capture_excludes_raw_life_model_data() {
+    const RAW_SENTINEL: &str = "RAW_LIFEMODEL_PROVIDER_SENTINEL_DO_NOT_TRANSMIT";
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let captured_requests = configure_live_provider_eval_state_with_captured_local_http_provider(
+        &state,
+        "bounded provider response",
+    )
+    .await;
+    {
+        let manager = state.life_model_manager.lock().await;
+        let mut life_model = manager.load().expect("load isolated LifeModel");
+        life_model.identity.name = RAW_SENTINEL.into();
+        life_model.identity.mission_statement = RAW_SENTINEL.into();
+        manager
+            .save(&life_model)
+            .expect("save isolated LifeModel sentinel");
+    }
+
+    let report = run_main_chat_live_provider_eval_harness(
+        state.clone(),
+        MainChatLiveProviderEvalHarnessInput {
+            scenario: MainChatLiveProviderEvalHarnessScenario::DirectAnswer,
+            session_id: "local-http-provider-privacy-capture".into(),
+            prompt:
+                "Summarize this sentence in five words: The blue folder belongs to qa@example.com."
+                    .into(),
+            explicit_live_eval_requested: true,
+            local_only_required: false,
+        },
+    )
+    .await
+    .expect("captured local provider report");
+
+    assert!(
+        report.ready,
+        "provider harness blocked: {:?}",
+        report.blockers
+    );
+    assert!(report.model_invoked, "provider was not invoked: {report:?}");
+    let requests = captured_requests
+        .lock()
+        .expect("read captured provider requests");
+    let capture = requests.join("\n");
+    drop(requests);
+    assert!(
+        capture.contains("blue folder"),
+        "captured HTTP request did not contain the user prompt; report={report:?}; capture={capture:?}"
+    );
+    assert!(!capture.contains("qa@example.com"));
+    assert!(capture.contains("<EMAIL_0>"));
+    assert!(
+        !capture.contains(RAW_SENTINEL),
+        "raw LifeModel data reached the HTTP provider boundary"
+    );
+    let task_session_id = report
+        .task_session_id
+        .as_deref()
+        .expect("provider report task session");
+    let events = crate::main_chat_event_stream::list_main_chat_agent_events_with_state(
+        &state,
+        task_session_id.to_string(),
+        Some(0),
+        Some(250),
+    )
+    .await
+    .expect("provider receipt events");
+    let event_types = events
+        .iter()
+        .map(|event| event.event_type.as_str())
+        .collect::<Vec<_>>();
+    let started = event_types
+        .iter()
+        .position(|event| *event == "provider.started")
+        .expect("provider.started event");
+    let completed = event_types
+        .iter()
+        .position(|event| *event == "provider.completed")
+        .expect("provider.completed event");
+    assert!(
+        started < completed,
+        "provider receipt order: {event_types:?}"
+    );
+    let completed_payload = &events[completed].payload;
+    assert_eq!(
+        completed_payload
+            .get("provider")
+            .and_then(serde_json::Value::as_str),
+        Some("openai")
+    );
+    assert_eq!(
+        completed_payload
+            .get("model")
+            .and_then(serde_json::Value::as_str),
+        Some("gpt-local-provider-harness")
+    );
+    assert_eq!(
+        completed_payload
+            .get("status")
+            .and_then(serde_json::Value::as_str),
+        Some("completed")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

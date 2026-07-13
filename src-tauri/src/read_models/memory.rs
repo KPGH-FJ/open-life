@@ -34,11 +34,15 @@ pub(crate) async fn get_memory_view_model_with_state(
         source_refs: vec![
             source_ref("memory_lifecycle_store", "Memory lifecycle store"),
             source_ref("review_center_view_model", "ReviewCenterViewModel"),
-            source_ref("vector_store_tier_stats", "Vector tier stats"),
+            source_ref("vector_store_tier_stats", "Vector access-tier telemetry"),
+            source_ref(
+                "memory_store_retrieval_state",
+                "Canonical Memory retrieval state",
+            ),
         ],
         contract_limitations: vec![
             "Accepted proposal decisions remain decision state until lifecycle materialization evidence proves applied.".into(),
-            "Archive and restore controls are durable write requests and remain governed by Safe Mode and gateway checks.".into(),
+            "Archived count comes from proven canonical Memory retrieval state; vector archive flags are projection telemetry only.".into(),
         ],
     });
 

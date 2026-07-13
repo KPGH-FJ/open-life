@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "last_updated": "2026-07-09",
+  "last_updated": "2026-07-12",
   "status": "phase7_backend_readmodel_r4_tasks_workspace_synchronized",
   "product_authorities": [
     {
@@ -73,6 +73,298 @@
       "retired": true,
       "expected_absent": true,
       "reason": "Deprecated product-shaped loop is no longer compiled as a product module."
+    },
+    {
+      "id": "main_chat_conversation_updates_module",
+      "former_path": "src-tauri/src/main_chat_conversation_updates.rs",
+      "former_symbols": [
+        "try_auto_checkin_daily_goals",
+        "build_reasoning_trace_prompt",
+        "capture_conversation_signals"
+      ],
+      "semantic_markers": [
+        "OrdinaryChatAutoCheckinSourceData"
+      ],
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "The callerless keyword auto-check-in, reasoning-prompt, and conversation-inference module and its auto-check-in materializer admission kind were dormant write and inference routes protected only by tests. ProposalEngine and its product consumers are tracked separately because they were shipped, not callerless."
+    },
+    {
+      "id": "core_keyword_chat_proposal_generator_module",
+      "former_path": "openlife-core/src/agent/proposal_generators/chat.rs",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "The keyword chat-to-Goal/State/Capability/Memory proposal generator was registered through the shipped ProposalEngine route. It derived caller-shaped proposals without PolicyRouter authorization before ReviewWorkflow submission."
+    },
+    {
+      "id": "core_keyword_chat_proposal_generators_module",
+      "former_path": "openlife-core/src/agent/proposal_generators/mod.rs",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "The proposal_generators namespace exposed the keyword generator consumed by the shipped ProposalEngine route and was deleted with that second authority."
+    },
+    {
+      "id": "core_posthoc_proposal_engine_module",
+      "former_path": "openlife-core/src/agent/proposal_engine.rs",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "The product-wired ProposalEngine and its feedback, memory, tool, builder, calibration, and keyword generators formed a second proposal authority. AppState/bootstrap owned it and Main Chat finalization plus AgentRun replay invoked it without PolicyRouter authorization before ReviewWorkflow submission."
+    },
+    {
+      "id": "proposal_engine_app_state_owner_symbol",
+      "host_path": "src-tauri/src/state.rs",
+      "path_kind": "symbol",
+      "former_symbol": "pub proposal_engine:",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "AppState must not retain the former ProposalEngine as a shipped product authority."
+    },
+    {
+      "id": "proposal_engine_bootstrap_constructor_symbol",
+      "host_path": "src-tauri/src/bootstrap.rs",
+      "path_kind": "symbol",
+      "former_symbol": "ProposalEngine::new()",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Bootstrap must not recreate or register the former second proposal authority."
+    },
+    {
+      "id": "proposal_engine_bootstrap_chat_adapter_registration_symbol",
+      "host_path": "src-tauri/src/bootstrap.rs",
+      "path_kind": "symbol",
+      "former_symbol": "ChatProposalGeneratorAdapter::new()",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Bootstrap must not restore the raw chat-output proposal adapter registration."
+    },
+    {
+      "id": "proposal_engine_main_chat_posthoc_generator_symbol",
+      "host_path": "src-tauri/src/main_chat_generation_support.rs",
+      "path_kind": "symbol",
+      "former_symbol": "generate_and_persist_chat_proposals",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Ordinary Main Chat finalization must not infer and persist proposals from provider or assistant output after execution."
+    },
+    {
+      "id": "proposal_engine_main_chat_posthoc_gate_symbol",
+      "host_path": "src-tauri/src/main_chat_generation_support.rs",
+      "path_kind": "symbol",
+      "former_symbol": "should_generate_chat_proposals",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "A finalizer-local gate cannot substitute for PolicyRouter proposal authorization."
+    },
+    {
+      "id": "proposal_engine_agent_run_replay_consumer_symbol",
+      "host_path": "src-tauri/src/commands/agent.rs",
+      "path_kind": "symbol",
+      "former_symbol": "generate_from_run(&run",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "AgentRun replay must not invoke a second proposal authority from caller-shaped run output."
+    },
+    {
+      "id": "proposal_engine_agent_module_reexport_symbol",
+      "host_path": "openlife-core/src/agent/mod.rs",
+      "path_kind": "symbol",
+      "former_symbol": "ProposalEngine",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "The deleted ProposalEngine must not remain available through the public agent module."
+    },
+    {
+      "id": "ordinary_chat_auto_checkin_materializer_kind_symbol",
+      "host_path": "src-tauri/src/life_model_materializer_guard.rs",
+      "path_kind": "symbol",
+      "former_symbol": "OrdinaryChatAutoCheckinSourceData",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "The unused caller kind kept an authorization lane for ordinary-chat auto-check-in LifeModel materialization after its only helper was deleted."
+    },
+    {
+      "id": "ordinary_chat_auto_checkin_gateway_match_symbol",
+      "host_path": "src-tauri/src/life_model_write_gateway.rs",
+      "path_kind": "symbol",
+      "former_symbol": "OrdinaryChatAutoCheckinSourceData",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "The LifeModelWriteGateway must not map the retired ordinary-chat auto-check-in caller kind to an allowed compatibility write."
+    },
+    {
+      "id": "agent_keyword_chat_generator_adapter_reexport_symbol",
+      "host_path": "openlife-core/src/agent/mod.rs",
+      "path_kind": "symbol",
+      "former_symbol": "ChatProposalGeneratorAdapter",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "The retired product-wired keyword chat proposal adapter must not remain publicly re-exported."
+    },
+    {
+      "id": "agent_keyword_chat_generator_reexport_symbol",
+      "host_path": "openlife-core/src/agent/mod.rs",
+      "path_kind": "symbol",
+      "former_symbol": "pub use proposal_generators::ChatProposalGenerator;",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "The retired keyword chat proposal generator must not remain publicly re-exported."
+    },
+    {
+      "id": "core_chat_proposal_config_symbol",
+      "host_path": "openlife-core/src/config.rs",
+      "path_kind": "symbol",
+      "former_symbol": "pub struct ChatProposalConfig",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "The chat proposal thresholds had no runtime reader even while the product-wired ProposalEngine route existed, so the inert setting was deleted with that route."
+    },
+    {
+      "id": "core_app_config_chat_proposal_field",
+      "host_path": "openlife-core/src/config.rs",
+      "path_kind": "symbol",
+      "former_symbol": "pub chat_proposal: ChatProposalConfig",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "AppConfig must not serialize an inert chat proposal setting that no runtime reads."
+    },
+    {
+      "id": "frontend_chat_proposal_config_contract",
+      "host_path": "frontend/src/tauri.ts",
+      "path_kind": "symbol",
+      "former_symbol": "export interface ChatProposalConfig",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "The frontend bridge must not expose an inert chat proposal configuration contract."
+    },
+    {
+      "id": "frontend_app_config_chat_proposal_field",
+      "host_path": "frontend/src/tauri.ts",
+      "path_kind": "symbol",
+      "former_symbol": "chat_proposal?: ChatProposalConfig",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "The frontend AppConfig must match the backend and omit the retired inert setting."
+    },
+    {
+      "id": "settings_chat_proposal_control_symbol",
+      "host_path": "frontend/src/pages/SettingsPage.tsx",
+      "path_kind": "symbol",
+      "former_symbol": "chat_proposal",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Settings must not initialize, diagnose, or save a toggle with no runtime consumer."
+    },
+    {
+      "id": "review_memory_chat_proposal_controls_symbol",
+      "host_path": "frontend/src/pages/settings/tabs/ReviewMemoryTab.tsx",
+      "path_kind": "symbol",
+      "former_symbol": "chat_proposal",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Mailbox and Memory settings must display backend governance truth instead of inert confidence, length, and cooldown controls."
+    },
+    {
+      "id": "main_chat_non_stream_fallback_symbol",
+      "host_path": "src-tauri/src/main_chat_generation_support.rs",
+      "path_kind": "symbol",
+      "former_symbol": "generate_non_stream_fallback",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Dormant second-provider completion and fail-soft route was deleted instead of being wrapped by the single runtime."
+    },
+    {
+      "id": "main_chat_react_follow_up_symbol",
+      "host_path": "src-tauri/src/main_chat_react_runtime.rs",
+      "path_kind": "symbol",
+      "former_symbol": "synthesize_main_chat_react_follow_up",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Unused ReAct follow-up synthesis route was a second provider/final-delivery authority and must stay absent."
+    },
+    {
+      "id": "main_chat_react_follow_up_result_symbol",
+      "host_path": "src-tauri/src/main_chat_react_runtime.rs",
+      "path_kind": "symbol",
+      "former_symbol": "MainChatReactFollowUp",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "The result contract for the dormant second final-delivery route was deleted with its producer."
+    },
+    {"id":"skill_runtime_envelope_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"SkillJsonEnvelope","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Self-consumed generic Skill Runtime JSON envelope was deleted with the parallel runtime."},
+    {"id":"skill_runtime_candidate_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"SkillProposalCandidate","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Generic Skill Runtime proposal candidate contract had no product consumer."},
+    {"id":"skill_runtime_result_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"SkillRunResult","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Generic Skill Runtime result contract had no product consumer."},
+    {"id":"skill_runtime_descriptor_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"SkillRuntimeDescriptor","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Migration-era runtime descriptor was not a product execution fact."},
+    {"id":"skill_runtime_readiness_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"SkillRuntimeReadinessReport","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Migration-era readiness report was deleted with the generic runtime."},
+    {"id":"skill_runtime_context_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"SkillContext","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Second context assembler contract was deleted; Main Chat ContextCompiler remains authoritative."},
+    {"id":"skill_runtime_normalized_output_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"NormalizedSkillOutput","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Generic output normalizer had no product consumer after command deletion."},
+    {"id":"skill_runtime_governed_candidate_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"GovernedSkillProposalCandidate","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Parallel proposal governor contract was deleted; ReviewWorkflow remains authoritative."},
+    {"id":"skill_runtime_build_prompt_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"build_skill_prompt","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Legacy model-output prompt builder was not a TurnRuntime-native skill contract."},
+    {"id":"skill_runtime_parse_json_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"parse_skill_json","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Legacy generic runtime JSON parser had no product consumer."},
+    {"id":"skill_runtime_validate_envelope_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"validate_skill_envelope","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Legacy envelope validator was deleted with its parser."},
+    {"id":"skill_runtime_evaluate_readiness_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"evaluate_skill_runtime_readiness","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Generic runtime readiness evaluator was migration evidence, not product truth."},
+    {"id":"skill_runtime_assemble_context_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"assemble_skill_context","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Parallel skill context assembler was deleted in favor of the Main Chat context authority."},
+    {"id":"skill_runtime_build_context_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"build_skill_context","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Parallel skill context builder was deleted in favor of the Main Chat context authority."},
+    {"id":"skill_runtime_normalize_output_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"normalize_skill_output","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Legacy generic runtime output normalizer had no product consumer."},
+    {"id":"skill_runtime_govern_candidates_symbol","host_path":"openlife-core/src/skills.rs","path_kind":"symbol","former_symbol":"govern_skill_proposal_candidates","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Parallel skill proposal governor was deleted; ReviewWorkflow owns governed writes."},
+    {"id":"proposal_store_batch_accept_low_risk_symbol","host_path":"openlife-core/src/agent/proposal_store.rs","path_kind":"symbol","former_symbol":"batch_accept_low_risk","phase":7,"disposition":"deleted","retired":true,"expected_absent":true,"reason":"Unused status-only acceptance helper bypassed effect materialization and was deleted."},
+    {
+      "id": "agent_run_direct_replay_command_symbol",
+      "host_path": "src-tauri/src/commands/agent.rs",
+      "path_kind": "symbol",
+      "former_symbol": "replay_agent_action",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Shipped AgentRun replay directly invoked ToolGateway without the canonical task replay claim, cancellation owner, durable receipt projection, or canonical-write admission. Retry and resume remain available only through Main Chat task controls."
     },
     {
       "id": "main_chat_route_preview",
@@ -405,13 +697,25 @@
       "reason": "ProposalStore remains storage only and does not decide product durable-write policy."
     },
     {
-      "id": "phase4_main_chat_proposal_support",
-      "path": "src-tauri/src/main_chat_proposal_support.rs",
+      "id": "phase4_action_executor_review_gateway",
+      "path": "openlife-core/src/agent/action_executor/mod.rs",
       "phase": 4,
       "disposition": "keep",
       "phase4_classification": "product_path",
       "proposal_creation_route": "ReviewWorkflow",
-      "reason": "Main Chat memory/LifeModel/ToolPermission proposals now route through ReviewWorkflow."
+      "reason": "ActionExecutionContext owns the one deep ToolGateway ReviewWorkflow submission path and canonical-write admission permit used by tool implementations."
+    },
+    {
+      "id": "phase4_main_chat_proposal_support",
+      "former_path": "src-tauri/src/main_chat_proposal_support.rs",
+      "phase": 4,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "phase4_classification": "deleted",
+      "proposal_creation_route": "none",
+      "absorbed_by": "src-tauri/src/main_chat_kernel.rs",
+      "reason": "The module was compile-live but had no product caller and duplicated Proposal orchestration without execution-epoch admission. Active Main Chat governance remains in the kernel and typed ReviewWorkflow gateways."
     },
     {
       "id": "phase4_builder",
@@ -481,36 +785,12 @@
       "path": "openlife-core/src/agent/maturation.rs",
       "phase": 4,
       "disposition": "keep",
-      "phase4_classification": "product_path",
+      "phase4_classification": "to_delete_later",
       "proposal_creation_route": "ReviewWorkflow",
-      "reason": "Maturation candidate proposals now route through ReviewWorkflow."
-    },
-    {
-      "id": "phase4_agent_command",
-      "path": "src-tauri/src/commands/agent.rs",
-      "phase": 4,
-      "disposition": "keep",
-      "phase4_classification": "product_path",
-      "proposal_creation_route": "ReviewWorkflow",
-      "reason": "Agent command generated proposals now route through ReviewWorkflow."
-    },
-    {
-      "id": "phase4_execution_command",
-      "path": "src-tauri/src/commands/execution.rs",
-      "phase": 4,
-      "disposition": "keep",
-      "phase4_classification": "product_path",
-      "proposal_creation_route": "ReviewWorkflow",
-      "reason": "Skill runtime accepted proposal candidates now route through ReviewWorkflow."
-    },
-    {
-      "id": "phase4_main_chat_generation_support",
-      "path": "src-tauri/src/main_chat_generation_support.rs",
-      "phase": 4,
-      "disposition": "keep",
-      "phase4_classification": "product_path",
-      "proposal_creation_route": "ReviewWorkflow",
-      "reason": "Main Chat generated proposals now route through ReviewWorkflow."
+      "shipped_reachable": false,
+      "execution_scope": "unwired_library",
+      "admission_route": "missing_until_product_wiring",
+      "reason": "Maturation proposal writers have no shipped caller. They are not product-path evidence and must gain an explicit admission contract before any future wiring."
     },
     {
       "id": "phase4_main_chat_kernel",
@@ -520,6 +800,18 @@
       "phase4_classification": "product_path",
       "proposal_creation_route": "ReviewWorkflow",
       "reason": "MainChatKernel write and memory-governance proposals now route through ReviewWorkflow."
+    },
+    {
+      "id": "phase4_provider_network_consent",
+      "path": "src-tauri/src/provider_network_consent.rs",
+      "phase": 4,
+      "disposition": "keep",
+      "phase4_classification": "product_path",
+      "proposal_creation_route": "ReviewWorkflow",
+      "shipped_reachable": true,
+      "execution_scope": "main_chat_turn_and_explicit_provider_command",
+      "admission_route": "turn_epoch_admission_under_remediation",
+      "reason": "Provider network Ask consent is an active Proposal writer. It must carry typed execution-epoch admission on Main Chat turns; the inventory records this real callsite instead of the deleted dormant helper."
     },
     {
       "id": "phase4_stage4_memory_knowledge",
@@ -589,15 +881,6 @@
       "expected_count": 2
     },
     {
-      "id": "lifemodel_write_manual_editor",
-      "path": "src-tauri/src/commands/life_model.rs",
-      "phase": 5,
-      "disposition": "absorb_then_delete",
-      "reason": "Manual LifeModel save must move behind LifeModelWriteGateway with explicit override policy.",
-      "match": "direct_memory_lifemodel_write",
-      "expected_count": 1
-    },
-    {
       "id": "memory_write_memory_commands",
       "path": "src-tauri/src/commands/memory.rs",
       "phase": 5,
@@ -612,15 +895,6 @@
       "phase": 5,
       "disposition": "absorb_then_delete",
       "reason": "Proposal command delegates materialization to MemoryGateway and LifeModelWriteGateway; remaining marker is the rollback command wrapper.",
-      "match": "direct_memory_lifemodel_write",
-      "expected_count": 1
-    },
-    {
-      "id": "memory_lifemodel_write_settings_import",
-      "path": "src-tauri/src/commands/settings.rs",
-      "phase": 5,
-      "disposition": "absorb_then_delete",
-      "reason": "Import path now delegates LifeModel writes to LifeModelWriteGateway and memory replacement to MemoryGateway.",
       "match": "direct_memory_lifemodel_write",
       "expected_count": 1
     },
@@ -649,7 +923,7 @@
       "disposition": "storage_only",
       "reason": "LifeModelWriteGateway is the only production adapter allowed to call LifeModelManager::save.",
       "match": "direct_memory_lifemodel_write",
-      "expected_count": 2
+      "expected_count": 1
     },
     {
       "id": "memory_write_gateway_storage_adapter",
@@ -1812,6 +2086,86 @@
         "stage",
         "debug"
       ]
+    },
+    {
+      "id": "command_builder_apply_signals",
+      "host_path": "src-tauri/src/lib.rs",
+      "path_kind": "symbol",
+      "former_symbol": "builder_apply_signals",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Retired direct-apply-shaped Builder command and product bridge were deleted; Builder updates enter ReviewWorkflow only through builder_create_proposals.",
+      "command": "builder_apply_signals",
+      "matched_tokens": [
+        "builder_apply"
+      ]
+    },
+    {
+      "id": "command_run_skill",
+      "host_path": "src-tauri/src/lib.rs",
+      "path_kind": "symbol",
+      "former_symbol": "run_skill",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "Generic Skill Runtime was a second provider and proposal authority outside OpenLifeTurnRuntime; product skills remain available through governed Main Chat skill selection.",
+      "command": "run_skill",
+      "matched_tokens": ["skill_runtime"]
+    },
+    {
+      "id": "command_get_skill_runtime_status",
+      "host_path": "src-tauri/src/lib.rs",
+      "path_kind": "symbol",
+      "former_symbol": "get_skill_runtime_status",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "The migration-era generic Skill Runtime status surface described a deleted parallel runtime.",
+      "command": "get_skill_runtime_status",
+      "matched_tokens": ["skill_runtime"]
+    },
+    {
+      "id": "command_get_skill_run_status",
+      "host_path": "src-tauri/src/lib.rs",
+      "path_kind": "symbol",
+      "former_symbol": "get_skill_run_status",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "The generic Skill Runtime run lookup was deleted with its parallel execution command.",
+      "command": "get_skill_run_status",
+      "matched_tokens": ["skill_runtime"]
+    },
+    {
+      "id": "command_list_skills",
+      "host_path": "src-tauri/src/lib.rs",
+      "path_kind": "symbol",
+      "former_symbol": "list_skills",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "The unused generic Skill Runtime catalog bridge was deleted; Main Chat exposes the governed product skill catalog.",
+      "command": "list_skills",
+      "matched_tokens": ["skill_runtime"]
+    },
+    {
+      "id": "command_replay_agent_action",
+      "host_path": "src-tauri/src/lib.rs",
+      "path_kind": "symbol",
+      "former_symbol": "replay_agent_action",
+      "phase": 7,
+      "disposition": "deleted",
+      "retired": true,
+      "expected_absent": true,
+      "reason": "The shipped direct AgentRun replay handler and product bridge were deleted. Canonical retry and permission resume use TaskViewModel controls with replay claim CAS, cancellation registration, and durable execution truth.",
+      "command": "replay_agent_action",
+      "matched_tokens": ["agent_action_replay"]
     }
   ]
 }

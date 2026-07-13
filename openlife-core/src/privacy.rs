@@ -20,6 +20,156 @@ pub enum PrivacyType {
     Generic,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SensitiveTopic {
+    Credential,
+    Health,
+    Identity,
+    Finance,
+    Private,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SensitiveContentAssessment {
+    pub detected_privacy_types: Vec<PrivacyType>,
+    pub sensitive_topics: Vec<SensitiveTopic>,
+}
+
+impl SensitiveContentAssessment {
+    pub fn requires_memory_review(&self) -> bool {
+        self.sensitive_topics.iter().any(|topic| {
+            matches!(
+                topic,
+                SensitiveTopic::Credential
+                    | SensitiveTopic::Health
+                    | SensitiveTopic::Identity
+                    | SensitiveTopic::Finance
+                    | SensitiveTopic::Private
+            )
+        }) || self.detected_privacy_types.iter().any(|privacy_type| {
+            matches!(
+                privacy_type,
+                PrivacyType::Phone
+                    | PrivacyType::IdCard
+                    | PrivacyType::Email
+                    | PrivacyType::BankCard
+                    | PrivacyType::Address
+            )
+        })
+    }
+
+    pub fn requires_local_only(&self) -> bool {
+        // Maskable contact PII still requires memory governance, but it does
+        // not by itself justify disabling a privacy-filtered cloud provider.
+        // High-impact topics and credentials remain fail-closed local-only.
+        !self.sensitive_topics.is_empty()
+    }
+}
+
+pub fn assess_sensitive_content(message: &str) -> SensitiveContentAssessment {
+    let mut detected_privacy_types = PrivacyEngine::new()
+        .detect(message)
+        .into_iter()
+        .map(|(privacy_type, _)| privacy_type)
+        .collect::<Vec<_>>();
+    detected_privacy_types.sort_by_key(|privacy_type| match privacy_type {
+        PrivacyType::Phone => 0,
+        PrivacyType::IdCard => 1,
+        PrivacyType::Email => 2,
+        PrivacyType::BankCard => 3,
+        PrivacyType::Address => 4,
+        PrivacyType::Name => 5,
+        PrivacyType::Generic => 6,
+    });
+    detected_privacy_types.dedup();
+
+    let lower = message.to_ascii_lowercase();
+    let mut sensitive_topics = Vec::new();
+    if !secret_like_findings(message).is_empty() {
+        sensitive_topics.push(SensitiveTopic::Credential);
+    }
+    if contains_sensitive_term(
+        &lower,
+        &[
+            "health",
+            "medical",
+            "diagnosis",
+            "prescription",
+            "therapy",
+            "健康",
+            "医疗",
+            "诊断",
+            "处方",
+            "用药",
+            "病历",
+            "心慌",
+            "头疼",
+            "身体",
+            "胃",
+        ],
+    ) {
+        sensitive_topics.push(SensitiveTopic::Health);
+    }
+    if contains_sensitive_term(
+        &lower,
+        &[
+            "identity card",
+            "id card",
+            "passport",
+            "social security",
+            "ssn",
+            "身份证",
+            "护照",
+            "证件号码",
+        ],
+    ) || detected_privacy_types.contains(&PrivacyType::IdCard)
+    {
+        sensitive_topics.push(SensitiveTopic::Identity);
+    }
+    if contains_sensitive_term(
+        &lower,
+        &[
+            "bank account",
+            "bank card",
+            "credit card",
+            "salary",
+            "income",
+            "debt",
+            "银行账号",
+            "银行卡",
+            "信用卡",
+            "工资",
+            "收入",
+            "债务",
+        ],
+    ) || detected_privacy_types.contains(&PrivacyType::BankCard)
+    {
+        sensitive_topics.push(SensitiveTopic::Finance);
+    }
+    if contains_sensitive_term(&lower, &["private", "sensitive", "privacy", "隐私", "敏感"]) {
+        sensitive_topics.push(SensitiveTopic::Private);
+    }
+    sensitive_topics.sort_by_key(|topic| match topic {
+        SensitiveTopic::Credential => 0,
+        SensitiveTopic::Health => 1,
+        SensitiveTopic::Identity => 2,
+        SensitiveTopic::Finance => 3,
+        SensitiveTopic::Private => 4,
+    });
+    sensitive_topics.dedup();
+
+    SensitiveContentAssessment {
+        detected_privacy_types,
+        sensitive_topics,
+    }
+}
+
+fn contains_sensitive_term(value: &str, terms: &[&str]) -> bool {
+    terms.iter().any(|term| value.contains(term))
+}
+
 impl PrivacyType {
     pub fn placeholder_prefix(&self) -> &'static str {
         match self {
@@ -247,14 +397,36 @@ impl PrivacyEngine {
     /// This is the primary backward-compatible API.
     /// Block actions produce non-reconstructable BLOCKED placeholders.
     pub fn desensitize(&self, message: &str) -> (String, HashMap<String, String>) {
+        let mut counters = HashMap::new();
+        let mut map = HashMap::new();
+        let text = self.desensitize_with_state(message, &mut counters, &mut map);
+        (text, map)
+    }
+
+    /// Desensitize one provider payload as a batch so placeholders stay unique
+    /// across user, assistant, system, tool, and bounded-context entries.
+    pub fn desensitize_batch(&self, messages: &[String]) -> (Vec<String>, HashMap<String, String>) {
+        let mut counters = HashMap::new();
+        let mut map = HashMap::new();
+        let masked = messages
+            .iter()
+            .map(|message| self.desensitize_with_state(message, &mut counters, &mut map))
+            .collect();
+        (masked, map)
+    }
+
+    fn desensitize_with_state(
+        &self,
+        message: &str,
+        counters: &mut HashMap<PrivacyType, usize>,
+        map: &mut HashMap<String, String>,
+    ) -> String {
         if !self.policy.enabled {
-            return (message.to_string(), HashMap::new());
+            return message.to_string();
         }
 
         let findings = self.detect(message);
         let mut text = message.to_string();
-        let mut map = HashMap::new();
-        let mut counters: HashMap<PrivacyType, usize> = HashMap::new();
 
         let mut sorted: Vec<_> = findings;
         sorted.sort_by_key(|item| Reverse(item.1.len()));
@@ -273,15 +445,13 @@ impl PrivacyEngine {
                     let placeholder = format!("<{}_{}>", ptype.placeholder_prefix(), count);
                     *count += 1;
 
-                    if !map.contains_key(&placeholder) {
-                        map.insert(placeholder.clone(), original.clone());
-                    }
+                    map.insert(placeholder.clone(), original.clone());
                     text = text.replacen(&original, &placeholder, 1);
                 }
             }
         }
 
-        (text, map)
+        text
     }
 
     /// Redact only credential-like secrets while preserving ordinary personal context.
@@ -346,7 +516,8 @@ fn secret_like_findings(message: &str) -> Vec<String> {
         r"(?i)\bgh[pousr]_[A-Za-z0-9_]{8,}\b",
         r"(?i)\bxox[baprs]-[A-Za-z0-9-]{8,}\b",
         r"(?i)\beyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
-        r#"(?i)\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|token|password|passwd|secret|authorization|bearer)\b\s*(is|=|:)?\s*[`'"“”‘’]?[^`'"“”‘’\s,;]{6,}"#,
+        r#"(?i)\b[A-Za-z0-9_]*(password|passwd|api[_-]?key|access[_-]?token|refresh[_-]?token|secret)\s*[:=]\s*[`'"“”‘’]?[^`'"“”‘’\s,;，；。！？]{6,}"#,
+        r#"(?i)\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|token|password|passwd|secret|authorization|bearer)\b\s*(is|=|:)?\s*[`'"“”‘’]?[^`'"“”‘’\s,;，；。！？]{6,}"#,
     ];
 
     let mut findings = Vec::new();
@@ -387,6 +558,40 @@ mod tests {
         assert!(findings
             .iter()
             .any(|(t, v)| *t == PrivacyType::Email && v == "test@example.com"));
+    }
+
+    #[test]
+    fn sensitive_content_assessment_requires_review_for_id_and_credentials() {
+        let id = assess_sensitive_content("身份证号 110101199001011234");
+        assert!(id.requires_memory_review());
+        assert!(id.detected_privacy_types.contains(&PrivacyType::IdCard));
+        assert!(id.sensitive_topics.contains(&SensitiveTopic::Identity));
+
+        let credential = assess_sensitive_content("tool returned user_password=hunter2");
+        assert!(credential.requires_memory_review());
+        assert!(credential
+            .sensitive_topics
+            .contains(&SensitiveTopic::Credential));
+    }
+
+    #[test]
+    fn maskable_contact_pii_requires_review_without_forcing_local_only() {
+        let contact = assess_sensitive_content("Contact me at test@example.com or 13800138000");
+
+        assert!(contact.requires_memory_review());
+        assert!(!contact.requires_local_only());
+
+        let health = assess_sensitive_content("My diagnosis is private; email test@example.com");
+        assert!(health.requires_local_only());
+    }
+
+    #[test]
+    fn sensitive_content_assessment_does_not_treat_ordinary_numbers_as_ids() {
+        let ordinary = assess_sensitive_content("计划编号 202607110001，共三个专注时段");
+        assert!(!ordinary.requires_memory_review());
+        assert!(!ordinary
+            .detected_privacy_types
+            .contains(&PrivacyType::IdCard));
     }
 
     #[test]
@@ -498,6 +703,19 @@ mod tests {
             Some("<redacted-secret>")
         );
         assert!(!map.values().any(|value| value.contains("sk-test-secret")));
+    }
+
+    #[test]
+    fn secrets_only_redacts_exact_quoted_tool_password_without_rehydration() {
+        let engine = PrivacyEngine::new();
+        let text = "工具返回：REMEMBER user_password=hunter2。请告诉我工具返回了什么。";
+        let (masked, map) = engine.desensitize_secrets_only(text);
+        let reconstructed = engine.reconstruct(&masked, &map);
+
+        assert!(!masked.contains("hunter2"));
+        assert!(!reconstructed.contains("hunter2"));
+        assert!(reconstructed.contains("<redacted-secret>"));
+        assert!(map.values().all(|value| value == "<redacted-secret>"));
     }
 
     #[test]

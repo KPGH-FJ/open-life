@@ -2770,6 +2770,9 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           path: "mock",
           operation: "accept",
         },
+        effectStatus: "confirmed",
+        proposalProjectionStatus: "confirmed",
+        warnings: [],
       } as T);
     case "reject_proposal":
     case "edit_proposal":
@@ -2953,113 +2956,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         decision: "allow",
         reason: "mock allow",
       } as T);
-    case "list_skills":
-      return Promise.resolve([
-        {
-          id: "weekly_review",
-          name: "Weekly Review",
-          description: "汇总近期 AgentRun、目标、状态和记忆。",
-          requiredContext: ["agent_runs", "goals", "state", "memory"],
-          allowedTools: [],
-          executionBudget: {
-            maxSteps: 5,
-            maxToolCalls: 3,
-            timeoutSeconds: 60,
-            allowCloud: true,
-            allowWrites: false,
-          },
-          outputSchema: {},
-          proposalPolicy: "review_required",
-          sourceKind: "built_in",
-          executionStatus: "executable_built_in",
-          capabilityFlags: ["bounded_context", "proposal_first", "metadata_safe_trace"],
-          pluginId: undefined,
-        },
-      ] as T);
-    case "get_skill_runtime_status":
-      return Promise.resolve({
-        reportKind: "w156.skillRuntimeStatus.v1",
-        readiness: {
-          reportKind: "w150.skillRuntimeReadiness.v1",
-          ready: true,
-          metadataSafe: true,
-          containsRawContent: false,
-          requiredBuiltinsPresent: true,
-          builtInSkillCount: 3,
-          pluginSkillCount: 0,
-          descriptors: [
-            {
-              id: "weekly_review",
-              name: "Weekly Review",
-              sourceKind: "built_in",
-              executionStatus: "executable_built_in",
-              inputSchemaDigest: "sha256:input",
-              outputSchemaDigest: "sha256:output",
-              proposalPolicy: "review_required",
-              requiredContextIds: ["agent_runs", "life_model.goals", "life_model.state", "memory"],
-              allowedToolIds: [],
-              allowedToolCount: 0,
-              executionBudget: {
-                maxSteps: 5,
-                maxToolCalls: 3,
-                timeoutSeconds: 60,
-                allowCloud: true,
-                allowWrites: false,
-              },
-              capabilityFlags: ["bounded_context", "proposal_first", "metadata_safe_trace"],
-              metadataSafe: true,
-              containsRawContent: false,
-              directWriteImplied: false,
-            },
-          ],
-          pluginBoundarySummary: {
-            pluginToolsDeclarativeOnly: true,
-            externalPluginToolExecutionEnabled: false,
-          },
-          proposalGovernanceSummary: {
-            proposalFirst: true,
-            autoApplyAllowed: false,
-            source: "skill_runtime",
-          },
-          privacyModelRouteBoundarySummary: {
-            hsPolicyEnforced: true,
-            highOrCriticalRequiresLocalOnly: true,
-            localOnlyFailsClosedWithoutLocalModel: true,
-            guidanceConsumptionDefaultDisabled: true,
-          },
-          traceContractSummary: {
-            actionTraceMetadataSafe: true,
-            observationTraceMetadataSafe: true,
-            generatedProposalsLinkedToRun: true,
-            rawRuntimePayloadExcludedFromStatus: true,
-          },
-          defaultChatUnchanged: true,
-          migrationPermission: false,
-          runtimeExecutionPerformed: false,
-          modelCallPerformed: false,
-          toolCallPerformed: false,
-          businessWritesPerformed: false,
-          blockers: [],
-        },
-        defaultChatUnchanged: true,
-        migrationPermission: false,
-        readOnly: true,
-        runtimeExecutionPerformed: false,
-        modelCallPerformed: false,
-        toolCallPerformed: false,
-        businessWritesPerformed: false,
-        metadataSafe: true,
-        blockers: [],
-      } as T);
-    case "run_skill":
-      return Promise.resolve({
-        runId: "run-skill-1",
-        status: "completed",
-        summary: "Skill completed",
-        generatedProposals: ["proposal-skill-1"],
-      } as T);
-    case "get_skill_run_status":
-      return Promise.resolve(null as T);
     case "list_plugins":
     case "reload_plugins":
       return Promise.resolve([
@@ -3179,26 +3075,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           { name: "openai", enabled: true, available: true, healthIsEstimated: true },
         ],
         lastCheckAt: new Date().toISOString(),
-      } as T);
-    case "replay_agent_action":
-      return Promise.resolve({
-        id: "action-replay-1",
-        actionType: "mcp_tool_call",
-        target: "test_tool",
-        input: {},
-        status: "succeeded",
-        permissionDecision: "allow_once",
-        toolScope: {
-          toolId: "test_tool",
-          toolName: "test_tool",
-          source: "builtin",
-          riskLevel: "low",
-          capabilities: [],
-          actionType: "mcp_tool_call",
-        },
-        startedAt: new Date().toISOString(),
-        finishedAt: new Date().toISOString(),
-        timestamp: new Date().toISOString(),
       } as T);
     case "get_system_diagnostics":
       return Promise.resolve({
@@ -3358,16 +3234,11 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       return Promise.resolve(undefined as T);
     case "execute_tool_call":
       return Promise.resolve({
-        name: _args?.name,
-        arguments: _args?.arguments ?? {},
-        sanitized_arguments: _args?.arguments ?? {},
-        success: true,
-        output: "工具执行成功",
-        permission_level: "high",
+        toolRef: { id: "unknown_tool", source: "unknown" },
+        actionRef: "unknown_action",
         status: "success",
-        requires_confirmation: false,
-        pii_found: false,
-        privacy_warnings: [],
+        requiresConfirmation: false,
+        privacyWarningCount: 0,
       } as T);
     case "inspect_mcp_call":
       return Promise.resolve({
@@ -3389,7 +3260,9 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
     case "builder_start":
       return Promise.resolve({
         prompt: "请描述你的价值观",
+        finished: false,
         progress: { progress: 0.2, current_step_label: "价值观", step_index: 1, total_steps: 5 },
+        review: null,
       } as T);
     case "builder_step":
       return Promise.resolve({
@@ -3403,7 +3276,7 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           waiting_phase_confirmation: false,
         },
         mode: "Quick",
-        pending_signals: [],
+        review: null,
       } as T);
     case "builder_get_pending_signals":
       return Promise.resolve({
@@ -3420,20 +3293,12 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         },
         finished: true,
       } as T);
-    case "builder_apply_signals":
-      return Promise.resolve({
-        success: true,
-        applied_fields: [],
-        merged_fields: [],
-        skipped_fields: [],
-        edited_count: 0,
-        rejected_count: 0,
-        model: null,
-      } as T);
     case "builder_create_proposals":
       return Promise.resolve({
         success: true,
         created_count: 1,
+        reused_count: 0,
+        updated_count: 0,
         rejected_count: 0,
         proposal_ids: ["proposal-1"],
         run_id: "run-1",
@@ -3449,7 +3314,27 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
     case "record_state":
       return Promise.resolve(undefined as T);
     case "search_memory":
-      return Promise.resolve([] as T);
+      return Promise.resolve({
+        hits: [],
+        embeddingProfile: {
+          id: "embedding:hash:test:dim:384",
+          route: "deterministic_hash",
+          provider: "openlife",
+          model: "openlife-hash-ngram-v1",
+          dimension: 384,
+        },
+        embeddingReceipt: {
+          requestId: "embedding-request-test",
+          route: "deterministic_hash",
+          profileId: "embedding:hash:test:dim:384",
+          status: "not_attempted",
+          source: "deterministic_hash",
+          routeReasonCode: "configured_deterministic_hash",
+          cacheHit: false,
+        },
+        vectorStatus: "ready",
+        routeQuality: "deterministic_hash_approximation",
+      } as T);
     case "a2a_local_agent_card":
       return Promise.resolve({
         name: "OpenLife Local Agent",
@@ -3549,9 +3434,17 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         life_model_version: "",
       } as T);
     case "archive_low_access_memories":
-      return Promise.resolve(0 as T);
+      return Promise.resolve([] as T);
     case "restore_archived_chunks":
-      return Promise.resolve((_args?.chunk_ids ?? []).length as T);
+      return Promise.resolve({
+        owner: _args?.owner,
+        disposition: "active",
+        changed: true,
+        canonicalCommitted: true,
+        revision: 2,
+        outboxEventId: "memory-retrieval-2",
+        projectionState: "applied",
+      } as T);
     case "list_archived_chunks":
       return Promise.resolve([] as T);
     case "get_memory_tier_stats":

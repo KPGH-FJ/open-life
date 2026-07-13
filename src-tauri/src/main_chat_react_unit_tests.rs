@@ -1,10 +1,47 @@
 use openlife_core::llm::ChatMessage;
 
+use crate::main_chat_react_runtime::project_main_chat_agent_loop_terminal;
 use crate::main_chat_react_tool_selection::{
     build_main_chat_react_action_plan, build_main_chat_react_agent_loop_messages,
     main_chat_react_agent_loop_execution_plan, resolve_main_chat_mcp_read_target,
     MainChatReactActionPlan, MainChatReactToolCandidate,
 };
+
+#[test]
+fn failed_agent_loop_terminal_cannot_project_completed_or_follow_up() {
+    let projection = project_main_chat_agent_loop_terminal(
+        openlife_core::agent::AgentLoopTerminalDisposition::Failed,
+        "succeeded",
+    );
+
+    assert!(!projection.succeeded);
+    assert_eq!(
+        projection.queue_status,
+        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed
+    );
+    assert_eq!(
+        projection.transcript_kind,
+        openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Error
+    );
+}
+
+#[test]
+fn waiting_agent_loop_terminal_projects_permission_not_failure_or_completion() {
+    let projection = project_main_chat_agent_loop_terminal(
+        openlife_core::agent::AgentLoopTerminalDisposition::WaitingPermission,
+        "needs_confirmation",
+    );
+
+    assert!(!projection.succeeded);
+    assert_eq!(
+        projection.queue_status,
+        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::PendingPermission
+    );
+    assert_eq!(
+        projection.transcript_kind,
+        openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::PermissionRequest
+    );
+}
 
 #[test]
 fn retired_main_chat_runtime_modules_do_not_exist_as_product_sources() {
@@ -23,18 +60,22 @@ fn retired_main_chat_runtime_modules_do_not_exist_as_product_sources() {
 }
 
 #[test]
-fn main_chat_react_runtime_synthesizes_follow_up_after_observation() {
+fn dormant_react_follow_up_fallback_route_is_absent() {
     let module_path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_react_runtime.rs");
     let source = std::fs::read_to_string(module_path).expect("read main_chat_react_runtime.rs");
 
     assert!(
-        source.contains("synthesize_main_chat_react_follow_up("),
-        "ReActToolExecution must synthesize a governed follow-up/final answer after observation instead of echoing the observation"
+        !source.contains("synthesize_main_chat_react_follow_up")
+            && !source.contains("MainChatReactFollowUp")
+            && !source.contains("generate_non_stream_fallback"),
+        "an unused second provider/fail-soft completion route must not remain in the product runtime"
     );
     assert!(
-        !source.contains("reply = observation.final_answer;"),
-        "ReActToolExecution should not use the raw observation answer as its final response"
+        !source.contains("pub(crate) final_answer:")
+            && !source.contains("pub(crate) output_preview:")
+            && !source.contains("pub(crate) summary:"),
+        "tool observations must not carry a second assistant reply/final-delivery contract"
     );
 }
 
@@ -352,6 +393,8 @@ fn main_chat_react_agent_loop_mcp_candidate_set_deduplicates_model_selectable_ta
                 enabled: true,
                 declarative_only: false,
                 action_type: "read".into(),
+                idempotency_contract:
+                    openlife_core::tool_manifest::ToolIdempotencyContract::Idempotent,
                 tags: vec!["utility".into()],
             },
             Box::new(|_| Ok("metadata-safe duplicate target placeholder".into())),
@@ -403,6 +446,7 @@ fn main_chat_react_agent_loop_mcp_candidate_contract_labels_read_action_manifest
             enabled: true,
             declarative_only: false,
             action_type: "read".into(),
+            idempotency_contract: openlife_core::tool_manifest::ToolIdempotencyContract::Idempotent,
             tags: vec!["utility".into()],
         },
         Box::new(|_| Ok("metadata-safe action read placeholder".into())),
@@ -441,6 +485,7 @@ fn main_chat_react_agent_loop_ranks_mcp_candidates_by_manifest_capability_match(
             enabled: true,
             declarative_only: false,
             action_type: "read".into(),
+            idempotency_contract: openlife_core::tool_manifest::ToolIdempotencyContract::Idempotent,
             tags: vec!["calendar".into()],
         },
         Box::new(|_| Ok("metadata-safe calendar read placeholder".into())),
@@ -497,6 +542,7 @@ fn main_chat_react_agent_loop_ranking_ignores_raw_manifest_descriptions() {
             enabled: true,
             declarative_only: false,
             action_type: "read".into(),
+            idempotency_contract: openlife_core::tool_manifest::ToolIdempotencyContract::Idempotent,
             tags: vec!["utility".into()],
         },
         Box::new(|_| Ok("metadata-safe description-only read placeholder".into())),
@@ -516,6 +562,7 @@ fn main_chat_react_agent_loop_ranking_ignores_raw_manifest_descriptions() {
             enabled: true,
             declarative_only: false,
             action_type: "read".into(),
+            idempotency_contract: openlife_core::tool_manifest::ToolIdempotencyContract::Idempotent,
             tags: vec!["calendar".into()],
         },
         Box::new(|_| Ok("metadata-safe capability read placeholder".into())),
@@ -566,6 +613,7 @@ fn main_chat_react_agent_loop_ranking_ignores_raw_manifest_ids() {
             enabled: true,
             declarative_only: false,
             action_type: "read".into(),
+            idempotency_contract: openlife_core::tool_manifest::ToolIdempotencyContract::Idempotent,
             tags: vec!["utility".into()],
         },
         Box::new(|_| Ok("metadata-safe id-only read placeholder".into())),
@@ -585,6 +633,7 @@ fn main_chat_react_agent_loop_ranking_ignores_raw_manifest_ids() {
             enabled: true,
             declarative_only: false,
             action_type: "read".into(),
+            idempotency_contract: openlife_core::tool_manifest::ToolIdempotencyContract::Idempotent,
             tags: vec!["calendar".into()],
         },
         Box::new(|_| Ok("metadata-safe capability read placeholder".into())),
@@ -635,6 +684,7 @@ fn main_chat_react_agent_loop_mcp_candidate_set_excludes_high_risk_confirmation_
             enabled: true,
             declarative_only: false,
             action_type: "read".into(),
+            idempotency_contract: openlife_core::tool_manifest::ToolIdempotencyContract::Idempotent,
             tags: vec!["secrets".into()],
         },
         Box::new(|_| Ok("metadata-safe secret read placeholder".into())),
@@ -685,6 +735,7 @@ fn main_chat_react_agent_loop_mcp_candidate_set_excludes_write_like_read_shaped_
             enabled: true,
             declarative_only: false,
             action_type: "read".into(),
+            idempotency_contract: openlife_core::tool_manifest::ToolIdempotencyContract::Idempotent,
             tags: vec!["write".into(), "calendar".into()],
         },
         Box::new(|_| Ok("metadata-safe write-like read placeholder".into())),
@@ -704,6 +755,7 @@ fn main_chat_react_agent_loop_mcp_candidate_set_excludes_write_like_read_shaped_
             enabled: true,
             declarative_only: false,
             action_type: "read".into(),
+            idempotency_contract: openlife_core::tool_manifest::ToolIdempotencyContract::Idempotent,
             tags: vec!["utility".into()],
         },
         Box::new(|_| Ok("metadata-safe embedded send read placeholder".into())),
@@ -764,6 +816,7 @@ fn main_chat_react_agent_loop_mcp_candidate_set_excludes_contract_unsafe_manifes
             enabled: true,
             declarative_only: false,
             action_type: "read".into(),
+            idempotency_contract: openlife_core::tool_manifest::ToolIdempotencyContract::Idempotent,
             tags: vec!["utility".into()],
         },
         Box::new(|_| Ok("metadata-safe contract injection placeholder".into())),
@@ -820,6 +873,7 @@ fn main_chat_react_agent_loop_mcp_candidate_set_excludes_contract_unsafe_manifes
             enabled: true,
             declarative_only: false,
             action_type: "read".into(),
+            idempotency_contract: openlife_core::tool_manifest::ToolIdempotencyContract::Idempotent,
             tags: vec!["utility".into()],
         },
         Box::new(|_| Ok("metadata-safe contract source placeholder".into())),
@@ -875,6 +929,7 @@ fn main_chat_react_agent_loop_mcp_candidate_set_excludes_oversized_manifest_name
             enabled: true,
             declarative_only: false,
             action_type: "read".into(),
+            idempotency_contract: openlife_core::tool_manifest::ToolIdempotencyContract::Idempotent,
             tags: vec!["utility".into()],
         },
         Box::new(|_| Ok("metadata-safe oversized candidate placeholder".into())),
@@ -925,6 +980,7 @@ fn main_chat_react_explicit_mcp_read_resolution_rejects_unsafe_read_shaped_manif
             enabled: true,
             declarative_only: false,
             action_type: "read".into(),
+            idempotency_contract: openlife_core::tool_manifest::ToolIdempotencyContract::Idempotent,
             tags: vec!["secrets".into()],
         },
         Box::new(|_| Ok("metadata-safe secret read placeholder".into())),
@@ -944,6 +1000,7 @@ fn main_chat_react_explicit_mcp_read_resolution_rejects_unsafe_read_shaped_manif
             enabled: true,
             declarative_only: false,
             action_type: "read".into(),
+            idempotency_contract: openlife_core::tool_manifest::ToolIdempotencyContract::Idempotent,
             tags: vec!["write".into(), "calendar".into()],
         },
         Box::new(|_| Ok("metadata-safe write-like read placeholder".into())),
@@ -1052,9 +1109,7 @@ fn main_chat_react_runtime_helpers_are_extracted_from_lib_rs() {
 
     for expected in [
         "pub(crate) struct MainChatObservation",
-        "pub(crate) struct MainChatReactFollowUp",
         "pub(crate) struct MainChatReactAgentLoopAttempt",
-        "pub(crate) async fn synthesize_main_chat_react_follow_up(",
         "pub(crate) fn main_chat_permission_blocker_reason(",
         "pub(crate) fn blocked_main_chat_observation(",
         "pub(crate) fn tool_call_from_action(",
@@ -1066,6 +1121,12 @@ fn main_chat_react_runtime_helpers_are_extracted_from_lib_rs() {
             "ReAct runtime helper module must expose {expected}"
         );
     }
+    assert!(
+        !module_source.contains("MainChatReactFollowUp")
+            && !module_source.contains("synthesize_main_chat_react_follow_up")
+            && !module_source.contains("generate_non_stream_fallback"),
+        "the dormant ReAct follow-up provider route must stay deleted"
+    );
     for forbidden in [
         "\npub(crate) struct MainChatObservation",
         "\nstruct MainChatReactFollowUp",
@@ -1118,6 +1179,115 @@ fn main_chat_react_execution_helper_is_extracted_from_lib_rs() {
         !source.contains("\npub(crate) async fn execute_main_chat_react_action_with_tool_gateway("),
         "ToolGateway read helper should not remain in lib.rs"
     );
+}
+
+#[test]
+fn react_tool_projection_rejects_display_receipt_json_without_live_sidecar() {
+    let action_input = serde_json::json!({"query": "display receipt cannot authorize"});
+    let receipt =
+        openlife_core::tool_execution_receipt::ToolExecutionReceipt::test_observed_local_read(
+            Some("react-sidecar-run".into()),
+            Some("memory.search".into()),
+            "react-sidecar-request".into(),
+            true,
+        )
+        .test_bound_to_action(
+            "react-sidecar-run",
+            "react-sidecar-action",
+            "memory_search",
+            Some("memory.search"),
+            &action_input,
+        );
+    let now = chrono::Utc::now();
+    let mut action = openlife_core::agent::AgentAction {
+        id: "react-sidecar-action".into(),
+        action_type: "memory_search".into(),
+        target: Some("memory.search".into()),
+        input: action_input,
+        output: Some(serde_json::json!({
+            "toolExecutionReceipt": receipt.clone(),
+            "text": "display-only result",
+        })),
+        status: "succeeded".into(),
+        permission_decision: None,
+        started_at: Some(now),
+        finished_at: Some(now),
+        error: None,
+        timestamp: now,
+        tool_scope: None,
+        react_trace: None,
+        runtime_execution_receipt: None,
+    };
+
+    let error = crate::main_chat_react_runtime::agent_actions_to_tool_call_results(
+        std::slice::from_ref(&action),
+        "react-sidecar-run",
+    )
+    .expect_err("JSON receipt mirror must not recreate live ToolGateway authority");
+
+    assert!(error.contains("live ToolGateway receipt sidecar missing"));
+
+    action.runtime_execution_receipt = Some(receipt.clone());
+    let projected = crate::main_chat_react_runtime::agent_actions_to_tool_call_results(
+        std::slice::from_ref(&action),
+        "react-sidecar-run",
+    )
+    .expect("the matching live sidecar remains authoritative");
+    assert_eq!(
+        projected[0]
+            .execution_receipt
+            .as_ref()
+            .map(|receipt| receipt.receipt_id.as_str()),
+        Some(receipt.receipt_id.as_str())
+    );
+
+    let mut second_action = action.clone();
+    second_action.id = "react-sidecar-action-2".into();
+    second_action.input = serde_json::json!({"query": "second governed action"});
+    let second_receipt =
+        openlife_core::tool_execution_receipt::ToolExecutionReceipt::test_observed_local_read(
+            Some("react-sidecar-run".into()),
+            Some("memory.search".into()),
+            "react-sidecar-request-2".into(),
+            true,
+        )
+        .test_bound_to_action(
+            "react-sidecar-run",
+            &second_action.id,
+            &second_action.action_type,
+            second_action.target.as_deref(),
+            &second_action.input,
+        );
+    action.runtime_execution_receipt = Some(second_receipt);
+    second_action.runtime_execution_receipt = Some(receipt.clone());
+    let error = crate::main_chat_react_runtime::agent_actions_to_tool_call_results(
+        &[action.clone(), second_action],
+        "react-sidecar-run",
+    )
+    .expect_err("two valid receipts from the same run and manifest must not be swappable");
+    assert!(error.contains("live ToolGateway receipt action binding mismatch"));
+
+    action.runtime_execution_receipt = Some(
+        openlife_core::tool_execution_receipt::ToolExecutionReceipt::test_observed_local_read(
+            Some("different-run".into()),
+            Some("memory.search".into()),
+            "react-sidecar-request".into(),
+            true,
+        )
+        .test_bound_to_action(
+            "different-run",
+            "react-sidecar-action",
+            "memory_search",
+            Some("memory.search"),
+            &action.input,
+        ),
+    );
+    let error = crate::main_chat_react_runtime::agent_actions_to_tool_call_results(
+        std::slice::from_ref(&action),
+        "react-sidecar-run",
+    )
+    .expect_err("a live receipt from another run must not be transplanted");
+    assert!(error.contains("live ToolGateway receipt run mismatch"));
 }
 
 fn extract_rust_function_body(source: &str, signature: &str) -> String {

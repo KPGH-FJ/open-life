@@ -73,6 +73,16 @@ export function makeLifeStateProjection(
   return {
     version: overrides.version ?? "life_state_projection_v1",
     generatedAt: overrides.generatedAt ?? "2026-07-09T00:00:00.000Z",
+    persistence: overrides.persistence ?? {
+      mode: "isolated_evaluation",
+      canonicalWritesAllowed: true,
+      providerDispatchAllowed: false,
+      toolDispatchAllowed: false,
+      liveOrCanonicalCreditEligible: false,
+      sealed: true,
+      stores: [],
+      globalReasonCodes: ["isolated_evaluation"],
+    },
     pending,
     readiness,
     taskState,

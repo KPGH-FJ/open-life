@@ -1,5 +1,6 @@
 use crate::agent::main_chat_agent_v1::{
-    AgentTaskSession, AgentTaskSessionStatus, ExecutionQueueStatus, ExecutionTranscriptEntry,
+    action_replay_effect_is_safe_to_claim, ActionReplayEffectCertainty, AgentTaskSession,
+    AgentTaskSessionStatus, ExecutionQueueStatus, ExecutionTranscriptEntry,
     ExecutionTranscriptEntryKind, MainChatAgentStrategy, MainChatPolicyLevel,
     QueuedExecutionAction,
 };
@@ -21,6 +22,7 @@ pub enum MainChatAgentProductStrategyRoute {
     ReadAction,
     ReactToolExecution,
     PlanExecute,
+    MemoryCommit,
     MemoryProposal,
     PermissionRequest,
     TaskControl,
@@ -36,6 +38,7 @@ impl MainChatAgentProductStrategyRoute {
             Self::ReadAction => "read_action",
             Self::ReactToolExecution => "react_tool_execution",
             Self::PlanExecute => "plan_execute",
+            Self::MemoryCommit => "memory_commit",
             Self::MemoryProposal => "memory_proposal",
             Self::PermissionRequest => "permission_request",
             Self::TaskControl => "task_control",
@@ -51,6 +54,7 @@ impl MainChatAgentProductStrategyRoute {
             Self::ReadAction.as_str(),
             Self::ReactToolExecution.as_str(),
             Self::PlanExecute.as_str(),
+            Self::MemoryCommit.as_str(),
             Self::MemoryProposal.as_str(),
             Self::PermissionRequest.as_str(),
             Self::TaskControl.as_str(),
@@ -67,9 +71,10 @@ impl MainChatAgentProductStrategyRoute {
             MainChatAgentStrategy::PlanExecute | MainChatAgentStrategy::ReviewMaturation => {
                 Self::PlanExecute
             }
-            MainChatAgentStrategy::MemoryProposal | MainChatAgentStrategy::LifeModelProposal => {
-                Self::MemoryProposal
-            }
+            MainChatAgentStrategy::ReversibleMemoryCommit => Self::MemoryCommit,
+            MainChatAgentStrategy::MemoryProposal
+            | MainChatAgentStrategy::LifeModelProposal
+            | MainChatAgentStrategy::FileWriteProposal => Self::MemoryProposal,
             MainChatAgentStrategy::BlockedConfirmation => Self::Blocked,
         }
     }
@@ -80,7 +85,10 @@ impl MainChatAgentProductStrategyRoute {
             "read_action" => Self::ReadAction,
             "react_tool_execution" => Self::ReactToolExecution,
             "plan_execute" => Self::PlanExecute,
-            "memory_proposal" | "life_model_proposal" => Self::MemoryProposal,
+            "memory_commit" | "reversible_memory_commit" => Self::MemoryCommit,
+            "memory_proposal" | "life_model_proposal" | "file_write_proposal" => {
+                Self::MemoryProposal
+            }
             "permission_request" => Self::PermissionRequest,
             "task_control" => Self::TaskControl,
             "blocked" | "blocked_confirmation" => Self::Blocked,
@@ -182,6 +190,7 @@ impl MainChatAgentProductProposalStatus {
             ProposalStatus::Rejected => Self::Rejected,
             ProposalStatus::Edited => Self::PendingReview,
             ProposalStatus::Postponed => Self::Deferred,
+            ProposalStatus::Expired => Self::Stale,
         }
     }
 }
@@ -1059,6 +1068,8 @@ pub struct ProviderRouteEvidence {
     pub provider: String,
     pub model: String,
     pub route_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_config_generation: Option<String>,
     pub reason: String,
     pub evidence_id: String,
 }
@@ -1464,7 +1475,15 @@ pub struct MainChatAgentStateSnapshot {
 #[derive(Debug, Clone)]
 pub struct MainChatAgentStateAssemblerInput {
     pub session: AgentTaskSession,
+    /// Canonical run identity supplied by the current TurnRuntime or by the
+    /// durable event-store task/run binding. AgentRun is a projection and is
+    /// never the owner of this identity.
+    pub run_identity: Option<String>,
     pub run: Option<AgentRun>,
+    /// Exact provider-route evidence is supplied by the durable provider
+    /// lifecycle authority. AgentRun.model_route is a minimized execution
+    /// summary and must never be promoted back into provider identity.
+    pub provider: Option<ProviderRouteEvidence>,
     pub transcript: Vec<ExecutionTranscriptEntry>,
     pub actions: Vec<QueuedExecutionAction>,
     pub proposals: Vec<AgentProposal>,
@@ -1480,20 +1499,40 @@ pub fn assemble_main_chat_agent_state(
     let mut sequence = 0u64;
 
     let run_id = input
-        .run
+        .run_identity
         .as_ref()
-        .map(|run| run.id.clone())
+        .filter(|run_id| !run_id.trim().is_empty())
+        .cloned()
         .unwrap_or_else(|| {
             diagnostics.push(gap(
                 "missing_run_identity",
-                "Cannot prove AgentRun identity for this task snapshot.",
+                "No canonical TurnRuntime or durable event-store run identity is available for this task snapshot.",
                 Some(input.session.id.clone()),
             ));
             "unknown".into()
         });
 
-    let context = context_from_evidence(&input.session, input.run.as_ref());
-    let provider = provider_from_run(input.run.as_ref());
+    let verified_run = input.run.as_ref().and_then(|run| {
+        if run_id == "unknown" || run.id != run_id {
+            diagnostics.push(gap(
+                "agent_run_identity_mismatch",
+                "AgentRun projection identity did not match the canonical run identity and was excluded.",
+                Some(run_id.clone()),
+            ));
+            return None;
+        }
+        if run.legacy_payload_unverified {
+            diagnostics.push(gap(
+                "legacy_agent_run_payload_unverified",
+                "Legacy AgentRun payload is unverified and was excluded from runtime context evidence.",
+                Some(run_id.clone()),
+            ));
+            return None;
+        }
+        Some(run)
+    });
+    let context = context_from_evidence(&input.session, verified_run);
+    let provider = input.provider;
     let plan = plan_from_evidence(&input.session, &input.transcript);
     let mut actions = actions_from_evidence(&input.actions);
     let action_ids = actions
@@ -1751,9 +1790,9 @@ fn route_from_evidence(
 
 fn context_from_evidence(
     session: &AgentTaskSession,
-    run: Option<&AgentRun>,
+    _run: Option<&AgentRun>,
 ) -> Vec<ContextEvidence> {
-    let mut context = session
+    session
         .context_snapshot_refs
         .iter()
         .map(|context_ref| ContextEvidence {
@@ -1762,32 +1801,7 @@ fn context_from_evidence(
             source_label: context_ref.clone(),
             evidence_id: context_ref.clone(),
         })
-        .collect::<Vec<_>>();
-    if let Some(summary) = run.and_then(|run| run.context_summary.as_ref()) {
-        for source in &summary.memory_sources {
-            if !context.iter().any(|item| item.context_id == *source) {
-                context.push(ContextEvidence {
-                    context_id: source.clone(),
-                    source_kind: "run_context".into(),
-                    source_label: source.clone(),
-                    evidence_id: source.clone(),
-                });
-            }
-        }
-    }
-    context
-}
-
-fn provider_from_run(run: Option<&AgentRun>) -> Option<ProviderRouteEvidence> {
-    run.and_then(|run| {
-        run.model_route.as_ref().map(|route| ProviderRouteEvidence {
-            provider: route.provider.clone(),
-            model: route.model.clone(),
-            route_type: route.route_type.clone(),
-            reason: route.reason.clone(),
-            evidence_id: run.id.clone(),
-        })
-    })
+        .collect::<Vec<_>>()
 }
 
 fn plan_from_evidence(
@@ -1859,7 +1873,7 @@ fn actions_from_evidence(actions: &[QueuedExecutionAction]) -> Vec<ActionEvidenc
             action_type: action.action.action_type.clone(),
             target: action.action.description.clone(),
             label: action.action.description.clone(),
-            status: product_action_status(action.status).into(),
+            status: product_action_status(action).into(),
             risk_level: risk_level_for_policy(action.policy.level).into(),
             policy_decision_id: format!("policy:{}:{}", action.id, action.policy.reason_code),
             started_at: matches!(
@@ -1880,6 +1894,7 @@ fn actions_from_evidence(actions: &[QueuedExecutionAction]) -> Vec<ActionEvidenc
             .then_some(action.updated_at),
             observation_ids: Vec::new(),
             retryable: action.status == ExecutionQueueStatus::Failed
+                && action_replay_effect_is_safe_to_claim(action)
                 && matches!(
                     action.policy.level,
                     MainChatPolicyLevel::L1ReadOnlyAuto
@@ -1889,8 +1904,13 @@ fn actions_from_evidence(actions: &[QueuedExecutionAction]) -> Vec<ActionEvidenc
         .collect()
 }
 
-fn product_action_status(status: ExecutionQueueStatus) -> &'static str {
-    match status {
+fn product_action_status(action: &QueuedExecutionAction) -> &'static str {
+    if action.replay_effect_certainty == ActionReplayEffectCertainty::DispatchedUnknown
+        && !matches!(action.status, ExecutionQueueStatus::Completed)
+    {
+        return "unknown";
+    }
+    match action.status {
         ExecutionQueueStatus::Planned => "queued",
         ExecutionQueueStatus::PendingPermission => "blocked",
         ExecutionQueueStatus::Executing | ExecutionQueueStatus::Retrying => "running",

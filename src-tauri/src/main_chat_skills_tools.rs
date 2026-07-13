@@ -5,6 +5,7 @@ use crate::main_chat_react_tool_selection::{
 use crate::AppState;
 use chrono::{DateTime, Utc};
 use openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus;
+use openlife_core::skills::{SkillExecutionStatus, SkillManifest, SkillSourceKind};
 use openlife_core::tool_manifest::ToolManifest;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -16,6 +17,23 @@ use std::sync::Arc;
 const MAX_SKILL_PREVIEW_CHARS: usize = 900;
 const MAX_SKILL_SUMMARY_CHARS: usize = 220;
 const SKILL_SURFACE_SCOPE: &str = "session";
+
+fn manifest_product_available(manifest: &SkillManifest) -> bool {
+    manifest.source_kind == SkillSourceKind::BuiltIn
+        && manifest.execution_status == SkillExecutionStatus::ExecutableBuiltIn
+        && !manifest.execution_budget.allow_writes
+        && manifest
+            .capability_flags
+            .iter()
+            .any(|flag| flag == "main_chat_turn_runtime_native")
+}
+
+fn manifest_source_kind(manifest: &SkillManifest) -> &'static str {
+    match manifest.source_kind {
+        SkillSourceKind::BuiltIn => "bundled",
+        SkillSourceKind::Plugin => "plugin",
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -132,7 +150,10 @@ pub(crate) async fn list_main_chat_skills_with_state(
     let mut summaries = Vec::new();
     let mut seen = BTreeSet::new();
 
-    for record in discover_local_skill_records() {
+    let local_records = tokio::task::spawn_blocking(discover_local_skill_records)
+        .await
+        .map_err(|error| format!("local skill discovery task failed: {error}"))?;
+    for record in local_records {
         seen.insert(record.skill_id.clone());
         summaries.push(skill_summary(record, selected_skill_id.as_deref()));
     }
@@ -149,6 +170,8 @@ pub(crate) async fn list_main_chat_skills_with_state(
             "allowedTools": manifest.allowed_tools,
             "executionStatus": manifest.execution_status,
         }));
+        let available = manifest_product_available(&manifest);
+        let source_kind = manifest_source_kind(&manifest).to_string();
         summaries.push(MainChatSkillSummary {
             skill_id: manifest.id.clone(),
             name: manifest.name,
@@ -161,10 +184,10 @@ pub(crate) async fn list_main_chat_skills_with_state(
                 "low"
             }
             .into(),
-            available: !manifest.execution_budget.allow_writes,
+            available,
             selected: selected_skill_id.as_deref() == Some(manifest.id.as_str()),
             instruction_digest: digest,
-            source_kind: "bundled".into(),
+            source_kind,
             last_used_at: None,
         });
     }
@@ -183,7 +206,10 @@ pub(crate) async fn get_main_chat_skill_detail_with_state(
     skill_id: &str,
 ) -> Result<MainChatSkillDetail, String> {
     let skill_id = sanitize_skill_id(skill_id).ok_or_else(|| "invalid_skill_id".to_string())?;
-    if let Some(record) = discover_local_skill_records()
+    let local_records = tokio::task::spawn_blocking(discover_local_skill_records)
+        .await
+        .map_err(|error| format!("local skill discovery task failed: {error}"))?;
+    if let Some(record) = local_records
         .into_iter()
         .find(|record| record.skill_id == skill_id)
     {
@@ -208,9 +234,9 @@ pub(crate) async fn get_main_chat_skill_detail_with_state(
         skill_id,
         manifest: json!({
             "name": manifest.name,
-            "source": "bundled:skill_registry",
-            "sourceKind": "bundled",
-            "available": !manifest.execution_budget.allow_writes,
+            "source": format!("{}:skill_registry", manifest_source_kind(&manifest)),
+            "sourceKind": manifest_source_kind(&manifest),
+            "available": manifest_product_available(&manifest),
             "executionStatus": manifest.execution_status,
         }),
         bounded_instructions_preview: preview,
@@ -360,8 +386,8 @@ async fn tool_failure_recovery(
         .into_iter()
         .find(|action| {
             action.status == ExecutionQueueStatus::Failed
-                && openlife_core::agent::main_chat_agent_v1::main_chat_action_type_supports_automatic_retry(
-                    &action.action.action_type,
+                && openlife_core::agent::main_chat_agent_v1::typed_tool_receipt_allows_automatic_retry(
+                    action,
                 )
         })?;
     Some(MainChatToolFailureRecovery {
@@ -794,4 +820,33 @@ fn short_hash(value: &str) -> String {
     hasher.update(value.as_bytes());
     let digest = format!("{:x}", hasher.finalize());
     digest.chars().take(16).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn registry_skill_without_turn_runtime_native_contract_is_not_selectable() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let skills = list_main_chat_skills_with_state(&state, Some("skill-truth"))
+            .await
+            .unwrap();
+        let weekly_review = skills
+            .iter()
+            .find(|skill| skill.skill_id == "weekly_review")
+            .expect("registry built-in remains inspectable");
+        assert!(!weekly_review.available);
+
+        let error = select_main_chat_skill_with_state(&state, "skill-truth", "weekly_review")
+            .await
+            .expect_err("a skill with no TurnRuntime-native context path must fail closed");
+        assert_eq!(error, "skill_not_available_for_main_chat_context");
+        assert!(state
+            .main_chat_selected_skill_ids
+            .lock()
+            .await
+            .get("skill-truth")
+            .is_none());
+    }
 }

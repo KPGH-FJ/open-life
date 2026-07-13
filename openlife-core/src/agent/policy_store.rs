@@ -50,13 +50,57 @@ pub struct PolicyConflictAudit {
     pub policy_won: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextPolicyDecision {
-    pub policy_id: String,
-    pub route: ModelRoutePolicy,
-    pub hard_boundary: bool,
-    pub conflicts: Vec<PolicyConflictAudit>,
+    policy_id: String,
+    route: ModelRoutePolicy,
+    hard_boundary: bool,
+    conflicts: Vec<PolicyConflictAudit>,
+}
+
+impl ContextPolicyDecision {
+    pub fn policy_id(&self) -> &str {
+        &self.policy_id
+    }
+
+    pub fn route(&self) -> ModelRoutePolicy {
+        self.route
+    }
+
+    pub fn hard_boundary(&self) -> bool {
+        self.hard_boundary
+    }
+
+    pub fn conflicts(&self) -> &[PolicyConflictAudit] {
+        &self.conflicts
+    }
+
+    /// Re-check the invariant that makes this value an authority object rather
+    /// than a caller-authored route label.
+    pub(crate) fn validate_provider_authority(&self) -> anyhow::Result<()> {
+        match self.policy_id.as_str() {
+            BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY => {
+                if self.route != ModelRoutePolicy::LocalOnly || !self.hard_boundary {
+                    anyhow::bail!("sensitive-topic provider policy is not fail closed");
+                }
+                if self.conflicts.iter().any(|conflict| {
+                    conflict.policy_id != BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY
+                        || conflict.enforced_route != ModelRoutePolicy::LocalOnly
+                        || !conflict.policy_won
+                }) {
+                    anyhow::bail!("sensitive-topic provider policy has invalid conflict evidence");
+                }
+            }
+            "policy.general.default_route" => {
+                if self.hard_boundary || !self.conflicts.is_empty() {
+                    anyhow::bail!("general provider policy has non-canonical boundary evidence");
+                }
+            }
+            _ => anyhow::bail!("unknown HS provider policy authority"),
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

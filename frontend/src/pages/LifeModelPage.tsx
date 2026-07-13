@@ -220,7 +220,7 @@ function BuildSection({
     projection == null
       ? null
       : unfinishedSessions.filter(
-          session => session.finished && (session.pending_signals?.length ?? 0) > 0
+          session => session.waiting_for_review && session.pending_signal_count > 0
         ).length;
 
   return (

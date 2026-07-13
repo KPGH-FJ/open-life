@@ -1,6 +1,6 @@
 # OpenLife Single-System Deletion Manifest
 
-> Date: 2026-07-07
+> Date: 2026-07-11
 > Status: Phase7 rerun deletion manifest
 > Authority: active Phase7 contract evidence only. Historical stage, beta,
 > migration, cutover, productization, maturity, step6, multi-strategy, react
@@ -34,6 +34,16 @@ counted as product completion evidence.
 | `src-tauri/src/main_chat_stage4_memory_knowledge.rs` | `product-valid-rename` | `done` | Product-valid pending memory proposal edit logic moved to `src-tauri/src/main_chat_memory_proposals.rs`; old Stage4 inventory/report shell was deleted. |
 | `src-tauri/src/main_chat_stage5_release_debug.rs` | `delete-now` | `done` | Old Stage5 debug/report backend module and tests were deleted from the product crate. |
 | `src-tauri/src/main_chat_step6_product_acceptance.rs` | `delete-now` | `done` | Old Step6 backend acceptance module and tests were deleted from the product crate. |
+| Dormant `generate_non_stream_fallback` / `synthesize_main_chat_react_follow_up` route | `delete-now` | `done` | The unused second provider and fail-soft final-delivery route, its result contract, and duplicate observation reply fields were deleted; the active AgentLoop remains the only governed multi-step synthesis path. |
+| `src-tauri/src/main_chat_conversation_updates.rs` dormant keyword-write and inference route | `delete-now` | `done` | All three helpers had zero product callers and survived only because an extraction test required the module to exist. The compiled module/declaration and its unused `OrdinaryChatAutoCheckinSourceData` gateway admission kind are deleted. The source-wide guard covers the three exact symbols plus semantic rename markers; the pending Cargo gate remains tracked in D049 traceability. |
+| Core keyword chat proposal generators, adapter, and inert setting | `delete-now` | `done` | The keyword implementations and adapter were wired through the former ProposalEngine product route; they were not callerless. They derived proposal candidates from user/assistant output without PolicyRouter authorization, then relied on ReviewWorkflow to accept a caller-shaped proposal. The generator namespace, adapter, exports, engine consumers, and existence-only tests were removed together. The separate backend/frontend `chat_proposal` thresholds had no runtime reader and were also removed; Mailbox & Memory now describes governed backend truth instead of offering inert controls. |
+| `openlife-core/src/agent/proposal_engine.rs` post-hoc proposal system and shipped consumers | `delete-now` | `done` | Baseline `AppState` and bootstrap owned the engine; ordinary Main Chat finalization and the shipped AgentRun replay command invoked `generate_from_run`. The engine could construct `AgentProposal` from raw run output without PolicyRouter authorization before submitting it to ReviewWorkflow. The engine, generator trait, registrations, state field, finalizer/replay consumers, exports, and self-owned tests were deleted as one second-authority dependency graph. Capability non-regression and product-wide absence remain tracked by BR4-D052 rather than being inferred from symbol deletion. |
+| `src-tauri/src/main_chat_proposal_support.rs` dormant parallel Proposal helper | `delete-now` | `done` | The module was compiled into the shipped crate but had no product caller; its only behavioral caller was an isolated test. It also lacked execution-epoch admission. The file, module declaration, and existence-preserving tests are deleted; active Main Chat governance remains in the kernel and typed ReviewWorkflow gateways. |
+| `builder_apply_signals` command and frontend bridge | `delete-now` | `done` | The shipped command only returned a permanent retirement error and kept a second direct-apply-shaped contract alive; Builder candidates now have only the `builder_create_proposals` ReviewWorkflow route. |
+| Generic `run_skill`, `get_skill_runtime_status`, `get_skill_run_status`, and `list_skills` commands/bridges | `delete-now` | `done` | The unused generic Skill Runtime was a second provider/proposal authority and exposed migration-era status. Executable local `SKILL.md` context remains on the governed Main Chat route; registry-only built-ins are truthfully blocked until a TurnRuntime-native contract exists. |
+| Generic Skill Runtime JSON-envelope parser, readiness evaluator, context assembler, output normalizer, and proposal governor | `delete-now` | `done` | These helpers had no product consumer after the generic command deletion and would otherwise preserve a dormant parallel runtime. Manifest/catalog types and the read-only registry preview remain. |
+| `ProposalStore::batch_accept_low_risk` status-only helper | `delete-now` | `done` | The unused helper could mark proposals accepted without effect materialization. All product acceptance now enters the claimed dispatcher/materializer/reconciler path. |
+| `replay_agent_action` command, frontend bridge, card-level execute/retry props, and replay-only ToolGateway snapshot | `delete-now` | `done` | The route bypassed canonical replay claim CAS, cancellation ownership, durable tool receipt projection, canonical-write admission, and AllowOnce consumption. AgentRun Detail and Main Chat now retain only the existing TaskViewModel retry/resume/cancel controls; permission review routes to Mailbox. |
 | `src-tauri/src/main_chat_agent_productization_eval.rs` | `delete-now` | `done` | Old productization eval module and tests were deleted from the product crate. |
 | `src-tauri/src/main_chat_live_productization_eval.rs` | `delete-now` | `done` | Old live productization eval module was deleted from the product crate. |
 | `src-tauri/src/main_chat_product_maturity_v2_final_readiness.rs` | `delete-now` | `done` | Old maturity readiness module was deleted from the product crate. |
@@ -166,6 +176,7 @@ Tauri handler and cannot be called through the product bridge.
 | `get_main_chat_internal_issue_report` | `done` |
 | `delete_main_chat_internal_issue_report` | `done` |
 | `run_main_chat_stage5_release_debug_report` | `done` |
+| `replay_agent_action` | `done` |
 
 ## Guard Coverage
 
@@ -179,6 +190,11 @@ Phase7 hard-delete guards now require:
 - product frontend pages/components do not import `tauriDev.ts`;
 - product frontend pages do not consume `legacy_fallback_used` or
   `legacyFallbackUsed`;
+- D049 exact retired symbols and semantic rename markers are absent across
+  production Rust source, including the ordinary-chat auto-check-in write
+  admission kind. BR4-D052 separately guards the former product-wired
+  ProposalEngine, bootstrap/state/finalizer/replay consumers, and post-hoc
+  proposal semantics;
 - active docs do not authorize Stage/Beta/migration/cutover/legacy route
   development.
 

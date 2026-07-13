@@ -130,11 +130,20 @@ fn test_action_parser_final_envelope() {
         calendar_ics_paths: &[],
         life_model: None,
         memory_store: None,
+        memory_lifecycle_retrieval_reader: None,
         proposal_store: None,
         agent_run_store: None,
+        bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
         hs_runtime_packet: None,
+        tool_dispatch_observer: None,
+        tool_started_transition_observer: None,
+        a2a_outbound_authorization: None,
+        action_bound_tool_permission: None,
+        canonical_write_admission: Some(
+            &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
+        ),
     };
 
     let reply = r#"{"final": "Hello, I can help you!", "thought_summary": "User greeted me"}"#;
@@ -163,11 +172,20 @@ fn test_action_parser_actions_envelope() {
         calendar_ics_paths: &[],
         life_model: None,
         memory_store: None,
+        memory_lifecycle_retrieval_reader: None,
         proposal_store: None,
         agent_run_store: None,
+        bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
         hs_runtime_packet: None,
+        tool_dispatch_observer: None,
+        tool_started_transition_observer: None,
+        a2a_outbound_authorization: None,
+        action_bound_tool_permission: None,
+        canonical_write_admission: Some(
+            &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
+        ),
     };
 
     let reply = r#"{"actions": [{"name": "weather", "arguments": {"city": "Beijing"}}], "warnings": ["Test warning"]}"#;
@@ -203,11 +221,20 @@ fn test_action_parser_direct_read_actions_keep_executor_input_shape() {
         calendar_ics_paths: &[],
         life_model: None,
         memory_store: None,
+        memory_lifecycle_retrieval_reader: None,
         proposal_store: None,
         agent_run_store: None,
+        bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
         hs_runtime_packet: None,
+        tool_dispatch_observer: None,
+        tool_started_transition_observer: None,
+        a2a_outbound_authorization: None,
+        action_bound_tool_permission: None,
+        canonical_write_admission: Some(
+            &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
+        ),
     };
 
     let reply = r#"{"actions": [{"name": "memory.search", "action_type": "memory_search", "arguments": {"query": "budget review", "session_id": "s1", "limit": 3}}]}"#;
@@ -241,11 +268,20 @@ fn test_action_parser_legacy_tool_calls() {
         calendar_ics_paths: &[],
         life_model: None,
         memory_store: None,
+        memory_lifecycle_retrieval_reader: None,
         proposal_store: None,
         agent_run_store: None,
+        bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
         hs_runtime_packet: None,
+        tool_dispatch_observer: None,
+        tool_started_transition_observer: None,
+        a2a_outbound_authorization: None,
+        action_bound_tool_permission: None,
+        canonical_write_admission: Some(
+            &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
+        ),
     };
 
     let reply = r#"{"tool_calls": [{"name": "echo", "arguments": {"text": "hello"}}]}"#;
@@ -274,11 +310,20 @@ fn test_action_parser_malformed_json_fail_soft() {
         calendar_ics_paths: &[],
         life_model: None,
         memory_store: None,
+        memory_lifecycle_retrieval_reader: None,
         proposal_store: None,
         agent_run_store: None,
+        bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
         hs_runtime_packet: None,
+        tool_dispatch_observer: None,
+        tool_started_transition_observer: None,
+        a2a_outbound_authorization: None,
+        action_bound_tool_permission: None,
+        canonical_write_admission: Some(
+            &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
+        ),
     };
 
     let reply = "{broken json";
@@ -308,11 +353,20 @@ fn test_action_parser_no_json() {
         calendar_ics_paths: &[],
         life_model: None,
         memory_store: None,
+        memory_lifecycle_retrieval_reader: None,
         proposal_store: None,
         agent_run_store: None,
+        bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
         hs_runtime_packet: None,
+        tool_dispatch_observer: None,
+        tool_started_transition_observer: None,
+        a2a_outbound_authorization: None,
+        action_bound_tool_permission: None,
+        canonical_write_admission: Some(
+            &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
+        ),
     };
 
     let reply = "This is just a plain text response without any JSON.";
@@ -341,11 +395,20 @@ fn test_action_parser_final_with_actions() {
         calendar_ics_paths: &[],
         life_model: None,
         memory_store: None,
+        memory_lifecycle_retrieval_reader: None,
         proposal_store: None,
         agent_run_store: None,
+        bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
         hs_runtime_packet: None,
+        tool_dispatch_observer: None,
+        tool_started_transition_observer: None,
+        a2a_outbound_authorization: None,
+        action_bound_tool_permission: None,
+        canonical_write_admission: Some(
+            &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
+        ),
     };
 
     // Model returns both final text and tool calls
@@ -421,11 +484,20 @@ fn test_max_tool_calls_stop_reason() {
         calendar_ics_paths: &[],
         life_model: None,
         memory_store: None,
+        memory_lifecycle_retrieval_reader: None,
         proposal_store: None,
         agent_run_store: None,
+        bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
         hs_runtime_packet: None,
+        tool_dispatch_observer: None,
+        tool_started_transition_observer: None,
+        a2a_outbound_authorization: None,
+        action_bound_tool_permission: None,
+        canonical_write_admission: Some(
+            &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
+        ),
     };
 
     // Simulate model returning actions when budget is already exceeded
@@ -456,11 +528,20 @@ fn test_json_self_repair_flag_on_malformed_json() {
         calendar_ics_paths: &[],
         life_model: None,
         memory_store: None,
+        memory_lifecycle_retrieval_reader: None,
         proposal_store: None,
         agent_run_store: None,
+        bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
         hs_runtime_packet: None,
+        tool_dispatch_observer: None,
+        tool_started_transition_observer: None,
+        a2a_outbound_authorization: None,
+        action_bound_tool_permission: None,
+        canonical_write_admission: Some(
+            &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
+        ),
     };
 
     // Malformed JSON: missing closing brace
@@ -494,11 +575,20 @@ fn test_json_self_repair_flag_not_set_on_valid_json() {
         calendar_ics_paths: &[],
         life_model: None,
         memory_store: None,
+        memory_lifecycle_retrieval_reader: None,
         proposal_store: None,
         agent_run_store: None,
+        bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
         hs_runtime_packet: None,
+        tool_dispatch_observer: None,
+        tool_started_transition_observer: None,
+        a2a_outbound_authorization: None,
+        action_bound_tool_permission: None,
+        canonical_write_admission: Some(
+            &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
+        ),
     };
 
     let valid = r#"{"actions": [{"name": "web.search", "arguments": {"query": "test"}}], "final": "Let me search"}"#;
@@ -535,6 +625,8 @@ async fn agent_loop_executes_multi_step_read_observe_follow_up_without_network()
     };
     let (registry, permission_store, audit_store, privacy_engine) = create_test_action_ctx();
     let memory_store = crate::memory::MemoryStore::new_in_memory().unwrap();
+    let memory_lifecycle_store = crate::agent::MemoryLifecycleStore::new_in_memory().unwrap();
+    let memory_lifecycle_retrieval_reader = memory_lifecycle_store.retrieval_reader();
     memory_store
         .save_message(
             "session-multistep",
@@ -553,11 +645,20 @@ async fn agent_loop_executes_multi_step_read_observe_follow_up_without_network()
         calendar_ics_paths: &[],
         life_model: None,
         memory_store: Some(&memory_store),
+        memory_lifecycle_retrieval_reader: Some(&memory_lifecycle_retrieval_reader),
         proposal_store: None,
         agent_run_store: None,
+        bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
         hs_runtime_packet: None,
+        tool_dispatch_observer: None,
+        tool_started_transition_observer: None,
+        a2a_outbound_authorization: None,
+        action_bound_tool_permission: None,
+        canonical_write_admission: Some(
+            &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
+        ),
     };
 
     let result = loop_instance
@@ -590,9 +691,378 @@ async fn agent_loop_executes_multi_step_read_observe_follow_up_without_network()
     assert_eq!(structured["directWritesExecuted"], serde_json::json!(false));
 }
 
-/// Test 16: Proposal-generation tools bypass permission-confirmation blocking.
 #[test]
-fn test_proposal_tool_bypass_permission_blocking() {
+fn action_context_filters_lifecycle_body_from_tools_before_projection_catches_up() {
+    const SENTINEL: &str = "TOOL_CONTEXT_ARCHIVE_LAG_SENTINEL";
+    let (registry, permission_store, audit_store, privacy_engine) = create_test_action_ctx();
+    let memory_store = crate::memory::MemoryStore::new_in_memory().unwrap();
+    let lifecycle_store = crate::agent::MemoryLifecycleStore::new_in_memory().unwrap();
+    let mut proposal = crate::agent::AgentProposal::new(
+        crate::agent::ProposalType::MemoryWrite,
+        "memory.candidates",
+        serde_json::json!({
+            "content": SENTINEL,
+            "scope": "global",
+            "category": "fact",
+            "candidateKind": "semantic_user_fact",
+            "riskLevel": "low",
+            "sensitivity": "internal"
+        }),
+        "User reviewed a lifecycle Memory candidate.",
+        0.9,
+        crate::agent::RiskLevel::Low,
+        crate::agent::ProposalSource::Manual,
+    );
+    proposal.id = format!("proposal:tool-retrieval:{}", uuid::Uuid::new_v4());
+    let accepted = lifecycle_store
+        .accept_memory_proposal(
+            crate::agent::MemoryLifecycleAcceptanceInput::from_memory_proposal(
+                &proposal,
+                SENTINEL.to_string(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let creation_event = accepted.canonical_mutation.as_ref().unwrap();
+    memory_store
+        .project_lifecycle_memory(
+            &creation_event.event_id,
+            &accepted.record.memory_id,
+            "tool-retrieval-session",
+            SENTINEL,
+            "lifecycle_memory_projection",
+            &[
+                "canonical_owner:memory_lifecycle".into(),
+                format!("memory_id:{}", accepted.record.memory_id),
+                format!("proposal_id:{}", accepted.record.proposal_id),
+                format!("memory_category:{}", accepted.record.category),
+            ],
+            "private",
+            None,
+        )
+        .unwrap();
+    let retrieval_reader = lifecycle_store.retrieval_reader();
+    let ctx = ActionExecutionContext::new(
+        &registry,
+        &permission_store,
+        &audit_store,
+        &privacy_engine,
+        &[],
+    )
+    .with_memory_store(&memory_store)
+    .with_memory_lifecycle_retrieval_reader(&retrieval_reader);
+    let before = memory_store
+        .search_text_memories(None, SENTINEL, 10)
+        .unwrap();
+    assert_eq!(ctx.filter_retrievable_memory_hits(before).unwrap().len(), 1);
+
+    let archived = lifecycle_store
+        .set_memory_retrieval_disposition(
+            &accepted.record.memory_id,
+            crate::memory::MemoryRetrievalDisposition::Archived,
+            "user_reviewed_archive",
+        )
+        .unwrap();
+    assert_eq!(
+        lifecycle_store
+            .projection_summary(
+                &archived
+                    .canonical_mutation
+                    .as_ref()
+                    .expect("archive outbox")
+                    .event_id,
+            )
+            .unwrap()
+            .pending,
+        1
+    );
+    let lagging_projection = memory_store
+        .search_text_memories(None, SENTINEL, 10)
+        .unwrap();
+    assert_eq!(lagging_projection.len(), 1);
+    assert!(ctx
+        .filter_retrievable_memory_hits(lagging_projection)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn memory_search_without_lifecycle_reader_is_degraded_not_healthy_empty() {
+    let (registry, permission_store, audit_store, privacy_engine) = create_test_action_ctx();
+    let memory_store = crate::memory::MemoryStore::new_in_memory().unwrap();
+    let ctx = ActionExecutionContext::new(
+        &registry,
+        &permission_store,
+        &audit_store,
+        &privacy_engine,
+        &[],
+    )
+    .with_memory_store(&memory_store);
+
+    let error = ctx
+        .filter_retrievable_memory_hits(Vec::new())
+        .expect_err("missing canonical lifecycle authority must not become success+0");
+    assert_eq!(error.reason_code(), "memory_lifecycle_reader_unavailable");
+}
+
+#[tokio::test]
+async fn agent_loop_stops_when_canonical_memory_retrieval_is_degraded() {
+    let loop_instance = create_test_agent_loop(AgentLoopConfig::default());
+    let task = create_test_task(vec![ChatMessage {
+        role: "user".into(),
+        content: "Search memory safely".into(),
+    }]);
+    let (registry, permission_store, audit_store, privacy_engine) = create_test_action_ctx();
+    let memory_store = crate::memory::MemoryStore::new_in_memory().unwrap();
+    let action_ctx = ActionExecutionContext::new(
+        &registry,
+        &permission_store,
+        &audit_store,
+        &privacy_engine,
+        &[],
+    )
+    .with_memory_store(&memory_store);
+
+    let result = loop_instance
+        .run(
+            &task,
+            &LifeModel::default(),
+            "Available tools: memory.search",
+            None,
+            privacy_engine.clone(),
+            &action_ctx,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.stop_reason, "memory_retrieval_degraded");
+    assert_eq!(result.run.status, AgentRunStatus::Failed);
+    assert_eq!(
+        result
+            .run
+            .error
+            .as_ref()
+            .map(|error| error.message.as_str()),
+        Some("memory_retrieval_degraded")
+    );
+}
+
+struct BreakLifecycleReadAfterDispatch {
+    reader: crate::agent::MemoryLifecycleRetrievalReader,
+}
+
+#[async_trait::async_trait]
+impl crate::agent::ToolDispatchObserver for BreakLifecycleReadAfterDispatch {
+    async fn before_dispatch(
+        &self,
+        _attempt: &crate::agent::ToolDispatchAttempt,
+    ) -> anyhow::Result<()> {
+        self.reader.install_query_failure_for_test()
+    }
+}
+
+#[tokio::test]
+async fn dispatched_memory_tool_failure_has_one_failed_terminal_truth() {
+    let loop_instance = create_test_agent_loop(AgentLoopConfig {
+        max_steps: 2,
+        max_tool_calls: 1,
+        allow_writes: false,
+        allow_cloud: false,
+        ..AgentLoopConfig::default()
+    })
+    .with_scripted_replies(vec![
+        r#"{"final":"Searching canonical memory.","actions":[{"name":"memory.search","action_type":"memory_search","arguments":{"query":"runtime lifecycle fault","session_id":"test-session","limit":5}}]}"#.into(),
+    ]);
+    let task = create_test_task(vec![ChatMessage {
+        role: "user".into(),
+        content: "Use the governed memory tool.".into(),
+    }]);
+    let (registry, permission_store, audit_store, privacy_engine) = create_test_action_ctx();
+    let memory_store = crate::memory::MemoryStore::new_in_memory().unwrap();
+    let lifecycle_store = crate::agent::MemoryLifecycleStore::new_in_memory().unwrap();
+    let lifecycle_reader = lifecycle_store.retrieval_reader();
+    let dispatch_fault = BreakLifecycleReadAfterDispatch {
+        reader: lifecycle_reader.clone(),
+    };
+    let action_ctx = ActionExecutionContext::new(
+        &registry,
+        &permission_store,
+        &audit_store,
+        &privacy_engine,
+        &[],
+    )
+    .with_memory_store(&memory_store)
+    .with_memory_lifecycle_retrieval_reader(&lifecycle_reader)
+    .with_tool_dispatch_observer(&dispatch_fault);
+
+    let result = loop_instance
+        .run(
+            &task,
+            &LifeModel::default(),
+            "Available tools: memory.search",
+            None,
+            privacy_engine.clone(),
+            &action_ctx,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.stop_reason, "tool_execution_failed");
+    assert_eq!(
+        result.terminal_disposition,
+        crate::agent::AgentLoopTerminalDisposition::Failed
+    );
+    assert_eq!(result.run.status, AgentRunStatus::Failed);
+    assert_eq!(
+        result
+            .run
+            .error
+            .as_ref()
+            .map(|error| error.message.as_str()),
+        Some("agent_loop_terminal:tool_execution_failed")
+    );
+    assert_eq!(result.run.actions.len(), 1);
+    assert_eq!(result.run.actions[0].status, "failed");
+    let typed_receipt = result.run.actions[0]
+        .runtime_execution_receipt
+        .as_ref()
+        .expect("AgentLoop must retain the live ToolGateway receipt sidecar");
+    assert_eq!(
+        typed_receipt.transport_status,
+        crate::tool_execution_receipt::ToolTransportStatus::ResponseObserved
+    );
+    assert_eq!(
+        typed_receipt.execution_outcome,
+        crate::tool_execution_receipt::ToolExecutionOutcome::Failed
+    );
+    assert!(result
+        .status_updates
+        .iter()
+        .all(|update| { update.phase != crate::agent::types::AgentLoopPhase::Completed }));
+    let receipt = result.run.observations[0]
+        .structured_result
+        .as_ref()
+        .and_then(|value| value.get("toolExecutionReceipt"))
+        .expect("gateway must expose the dispatched tool receipt");
+    assert_eq!(
+        receipt["transportStatus"],
+        serde_json::json!("response_observed")
+    );
+    assert_eq!(receipt["dispatchKind"], serde_json::json!("local"));
+    assert_eq!(receipt["executionOutcome"], serde_json::json!("failed"));
+}
+
+struct BreakLifecycleReadOnSecondDispatch {
+    reader: crate::agent::MemoryLifecycleRetrievalReader,
+    dispatch_count: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl crate::agent::ToolDispatchObserver for BreakLifecycleReadOnSecondDispatch {
+    async fn before_dispatch(
+        &self,
+        _attempt: &crate::agent::ToolDispatchAttempt,
+    ) -> anyhow::Result<()> {
+        if self
+            .dispatch_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            == 1
+        {
+            self.reader.install_query_failure_for_test()?;
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn agent_loop_retains_one_live_receipt_per_action_in_stable_order() {
+    let loop_instance = create_test_agent_loop(AgentLoopConfig {
+        max_steps: 2,
+        max_tool_calls: 2,
+        allow_writes: false,
+        allow_cloud: false,
+        ..AgentLoopConfig::default()
+    })
+    .with_scripted_replies(vec![
+        r#"{"final":"Search twice.","actions":[{"name":"memory.search","action_type":"memory_search","arguments":{"query":"first","session_id":"test-session","limit":5}},{"name":"memory.search","action_type":"memory_search","arguments":{"query":"second","session_id":"test-session","limit":5}}]}"#.into(),
+    ]);
+    let task = create_test_task(vec![ChatMessage {
+        role: "user".into(),
+        content: "Run two governed memory reads.".into(),
+    }]);
+    let (registry, permission_store, audit_store, privacy_engine) = create_test_action_ctx();
+    let memory_store = crate::memory::MemoryStore::new_in_memory().unwrap();
+    let lifecycle_store = crate::agent::MemoryLifecycleStore::new_in_memory().unwrap();
+    let lifecycle_reader = lifecycle_store.retrieval_reader();
+    let dispatch_fault = BreakLifecycleReadOnSecondDispatch {
+        reader: lifecycle_reader.clone(),
+        dispatch_count: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let action_ctx = ActionExecutionContext::new(
+        &registry,
+        &permission_store,
+        &audit_store,
+        &privacy_engine,
+        &[],
+    )
+    .with_memory_store(&memory_store)
+    .with_memory_lifecycle_retrieval_reader(&lifecycle_reader)
+    .with_tool_dispatch_observer(&dispatch_fault);
+
+    let result = loop_instance
+        .run(
+            &task,
+            &LifeModel::default(),
+            "Available tools: memory.search",
+            None,
+            privacy_engine.clone(),
+            &action_ctx,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.run.actions.len(), 2);
+    assert_eq!(result.run.actions[0].status, "succeeded");
+    assert_eq!(result.run.actions[1].status, "failed");
+    let receipts = result
+        .run
+        .actions
+        .iter()
+        .map(|action| {
+            action
+                .runtime_execution_receipt
+                .as_ref()
+                .expect("each AgentLoop action retains its live ToolGateway receipt")
+        })
+        .collect::<Vec<_>>();
+    assert_ne!(receipts[0].receipt_id, receipts[1].receipt_id);
+    assert_eq!(
+        receipts[0].execution_outcome,
+        crate::tool_execution_receipt::ToolExecutionOutcome::Succeeded
+    );
+    assert_eq!(
+        receipts[1].execution_outcome,
+        crate::tool_execution_receipt::ToolExecutionOutcome::Failed
+    );
+    assert_eq!(
+        result
+            .run
+            .observations
+            .iter()
+            .filter_map(|observation| observation.action_id.as_deref())
+            .collect::<Vec<_>>(),
+        result
+            .run
+            .actions
+            .iter()
+            .map(|action| action.id.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Test 16: Proposal-generation tools bypass permission-confirmation blocking.
+#[tokio::test]
+async fn test_proposal_tool_bypass_permission_blocking() {
     let mut registry = crate::mcp::McpRegistry::new();
     registry.register_default_builtins();
 
@@ -615,11 +1085,20 @@ fn test_proposal_tool_bypass_permission_blocking() {
         calendar_ics_paths: &[],
         life_model: None,
         memory_store: None,
+        memory_lifecycle_retrieval_reader: None,
         proposal_store: Some(&prop_store),
         agent_run_store: None,
+        bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
         hs_runtime_packet: None,
+        tool_dispatch_observer: None,
+        tool_started_transition_observer: None,
+        a2a_outbound_authorization: None,
+        action_bound_tool_permission: None,
+        canonical_write_admission: Some(
+            &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
+        ),
     };
 
     let executor = ToolGateway::from_executor_config(ActionExecutorConfig::default());
@@ -640,7 +1119,7 @@ fn test_proposal_tool_bypass_permission_blocking() {
         step_index: 0,
     };
 
-    let result = executor.execute(request, &ctx).unwrap();
+    let result = executor.execute(request, &ctx).await.unwrap();
 
     // A1 fix: proposal tool bypasses permission blocking → Proposal is created.
     // The action status is Succeeded because the handler creates the Proposal.
@@ -654,8 +1133,8 @@ fn test_proposal_tool_bypass_permission_blocking() {
 }
 
 /// Test 17: permission.check tool returns a valid permission decision.
-#[test]
-fn test_permission_check_tool() {
+#[tokio::test]
+async fn test_permission_check_tool() {
     let mut registry = crate::mcp::McpRegistry::new();
     registry.register_default_builtins();
 
@@ -685,11 +1164,20 @@ fn test_permission_check_tool() {
         calendar_ics_paths: &[],
         life_model: None,
         memory_store: None,
+        memory_lifecycle_retrieval_reader: None,
         proposal_store: None,
         agent_run_store: None,
+        bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
         hs_runtime_packet: None,
+        tool_dispatch_observer: None,
+        tool_started_transition_observer: None,
+        a2a_outbound_authorization: None,
+        action_bound_tool_permission: None,
+        canonical_write_admission: Some(
+            &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
+        ),
     };
 
     let executor = ToolGateway::from_executor_config(ActionExecutorConfig::default());
@@ -708,7 +1196,7 @@ fn test_permission_check_tool() {
         step_index: 0,
     };
 
-    let result = executor.execute(request, &ctx).unwrap();
+    let result = executor.execute(request, &ctx).await.unwrap();
     assert_eq!(
         result.status,
         crate::agent::ActionExecutionStatus::Succeeded
@@ -719,8 +1207,8 @@ fn test_permission_check_tool() {
 }
 
 /// Test 18: memory.propose_write generates a MemoryWrite Proposal instead of being blocked.
-#[test]
-fn test_memory_propose_write_creates_proposal() {
+#[tokio::test]
+async fn test_memory_propose_write_creates_proposal() {
     let mut registry = crate::mcp::McpRegistry::new();
     registry.register_default_builtins();
 
@@ -739,11 +1227,20 @@ fn test_memory_propose_write_creates_proposal() {
         calendar_ics_paths: &[],
         life_model: None,
         memory_store: None,
+        memory_lifecycle_retrieval_reader: None,
         proposal_store: Some(&prop_store),
         agent_run_store: None,
+        bound_content_receipt_issuer: None,
         network_policy: None,
         web_search_fixture_output: None,
         hs_runtime_packet: None,
+        tool_dispatch_observer: None,
+        tool_started_transition_observer: None,
+        a2a_outbound_authorization: None,
+        action_bound_tool_permission: None,
+        canonical_write_admission: Some(
+            &crate::agent::canonical_write_admission::DeterministicFixtureCanonicalWriteAdmission,
+        ),
     };
 
     let executor = ToolGateway::from_executor_config(ActionExecutorConfig::default());
@@ -761,7 +1258,7 @@ fn test_memory_propose_write_creates_proposal() {
         step_index: 0,
     };
 
-    let result = executor.execute(request, &ctx).unwrap();
+    let result = executor.execute(request, &ctx).await.unwrap();
 
     // Should succeed because memory.propose_write is a proposal-generation tool
     // that was exempted from permission blocking in Sprint A1

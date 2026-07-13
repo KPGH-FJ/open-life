@@ -15,6 +15,7 @@ pub enum TaskLifecycleStatus {
     WaitingPermission,
     Blocked,
     Failed,
+    RemoteUnknown,
     Cancelled,
     Completed,
     CompletedWithPendingReview,
@@ -29,6 +30,7 @@ impl TaskLifecycleStatus {
             Self::WaitingPermission => "waiting_permission",
             Self::Blocked => "blocked",
             Self::Failed => "failed",
+            Self::RemoteUnknown => "remote_unknown",
             Self::Cancelled => "cancelled",
             Self::Completed => "completed",
             Self::CompletedWithPendingReview => "completed_with_pending_review",
@@ -44,7 +46,15 @@ impl TaskLifecycleStatus {
                 | Self::CompletedWithPendingReview
                 | Self::CompletedNeedsEvidence
                 | Self::Failed
+                | Self::RemoteUnknown
                 | Self::Cancelled
+        )
+    }
+
+    fn is_active(self) -> bool {
+        matches!(
+            self,
+            Self::Running | Self::WaitingPermission | Self::Blocked
         )
     }
 }
@@ -342,7 +352,7 @@ pub fn build_tasks_view_model(input: TasksViewModelBuildInput) -> TasksViewModel
         items.push(run_only_item(run_input.run));
     }
 
-    items.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    items.sort_by_key(|item| std::cmp::Reverse(item.updated_at));
     let summary = summarize_tasks(&items);
 
     TasksViewModel {
@@ -365,8 +375,13 @@ pub fn build_workspace_view_model(
     let active = tasks
         .items
         .iter()
-        .find(|item| !item.lifecycle_status.is_terminal())
-        .or_else(|| tasks.items.first());
+        .find(|item| item.lifecycle_status.is_active())
+        .or_else(|| {
+            tasks
+                .items
+                .iter()
+                .find(|item| item.lifecycle_status != TaskLifecycleStatus::Unknown)
+        });
     let active_task_ref = active.map(task_ref);
     let recent_task_refs = tasks.items.iter().take(6).map(task_ref).collect::<Vec<_>>();
     let pending_review_item_refs = tasks
@@ -460,12 +475,18 @@ fn task_item_from_input(input: TaskViewModelTaskInput) -> TaskViewModelItem {
 }
 
 fn run_only_item(run: AgentRun) -> TaskViewModelItem {
-    let lifecycle_status = lifecycle_status_for_run(run.status);
+    let legacy_payload_unverified = run.legacy_payload_unverified;
+    let lifecycle_status = if legacy_payload_unverified {
+        TaskLifecycleStatus::Unknown
+    } else {
+        lifecycle_status_for_run(run.status)
+    };
     let terminal_delivery_status = match lifecycle_status {
         TaskLifecycleStatus::CompletedNeedsEvidence => {
             TaskTerminalDeliveryStatus::MissingFinalDeliveryEvidence
         }
         TaskLifecycleStatus::Failed => TaskTerminalDeliveryStatus::Failed,
+        TaskLifecycleStatus::RemoteUnknown => TaskTerminalDeliveryStatus::Unknown,
         TaskLifecycleStatus::Cancelled => TaskTerminalDeliveryStatus::Cancelled,
         _ => TaskTerminalDeliveryStatus::Unknown,
     };
@@ -474,16 +495,27 @@ fn run_only_item(run: AgentRun) -> TaskViewModelItem {
     } else {
         run.task_id.clone()
     };
-    let title = run
-        .user_input
-        .clone()
-        .or_else(|| run.output_preview.clone())
-        .unwrap_or_else(|| format!("{} run", run.kind));
-    let preview = run.output_preview.clone().or_else(|| {
-        run.error
-            .as_ref()
-            .map(|error| format!("{}: {}", error.phase, error.message))
-    });
+    let title = if legacy_payload_unverified {
+        format!("{} run", run.kind)
+    } else {
+        run.user_input
+            .clone()
+            .or_else(|| run.output_preview.clone())
+            .unwrap_or_else(|| format!("{} run", run.kind))
+    };
+    let preview = if legacy_payload_unverified {
+        None
+    } else {
+        run.output_preview.clone().or_else(|| {
+            run.error
+                .as_ref()
+                .map(|error| format!("{}: {}", error.phase, error.message))
+        })
+    };
+    let mut pending_blockers = run.warnings.clone();
+    if legacy_payload_unverified {
+        pending_blockers.push("legacy_payload_unverified".into());
+    }
     let evidence_refs = vec![EvidenceRef {
         id: run.id.clone(),
         label: "AgentRun without task session read model evidence".into(),
@@ -496,14 +528,17 @@ fn run_only_item(run: AgentRun) -> TaskViewModelItem {
         related_run_ids: vec![run.id.clone()],
         conversation_id: run.session_id.clone(),
         title,
-        strategy: run
-            .reasoning_strategy
-            .clone()
-            .unwrap_or_else(|| run.kind.to_string()),
+        strategy: if legacy_payload_unverified {
+            "unknown".into()
+        } else {
+            run.reasoning_strategy
+                .clone()
+                .unwrap_or_else(|| run.kind.to_string())
+        },
         lifecycle_status,
         terminal_delivery_status,
         final_delivery_evidence_present: false,
-        pending_blockers: run.warnings.clone(),
+        pending_blockers: dedup_strings(pending_blockers),
         pending_review_item_refs: Vec::new(),
         allowed_controls: vec![
             TaskControl::new(
@@ -589,6 +624,7 @@ fn terminal_delivery_status_for_task(
             TaskTerminalDeliveryStatus::Blocked
         }
         TaskLifecycleStatus::Failed => TaskTerminalDeliveryStatus::Failed,
+        TaskLifecycleStatus::RemoteUnknown => TaskTerminalDeliveryStatus::Unknown,
         TaskLifecycleStatus::Cancelled => TaskTerminalDeliveryStatus::Cancelled,
         TaskLifecycleStatus::Running => TaskTerminalDeliveryStatus::NotTerminal,
         TaskLifecycleStatus::Unknown => TaskTerminalDeliveryStatus::Unknown,
@@ -615,6 +651,7 @@ fn lifecycle_status_for_run(status: AgentRunStatus) -> TaskLifecycleStatus {
         AgentRunStatus::WaitingPermission => TaskLifecycleStatus::WaitingPermission,
         AgentRunStatus::Completed => TaskLifecycleStatus::CompletedNeedsEvidence,
         AgentRunStatus::Failed => TaskLifecycleStatus::Failed,
+        AgentRunStatus::RemoteUnknown => TaskLifecycleStatus::RemoteUnknown,
         AgentRunStatus::Cancelled => TaskLifecycleStatus::Cancelled,
     }
 }
@@ -783,6 +820,7 @@ fn summarize_tasks(items: &[TaskViewModelItem]) -> TasksViewModelSummary {
                 summary.completed_needs_evidence_count += 1;
             }
             TaskLifecycleStatus::Failed => summary.failed_count += 1,
+            TaskLifecycleStatus::RemoteUnknown => {}
             TaskLifecycleStatus::Cancelled => summary.cancelled_count += 1,
             TaskLifecycleStatus::Unknown => {}
         }
@@ -849,6 +887,32 @@ mod tests {
     use super::*;
     use crate::agent::main_chat_agent_v1::AgentTaskSessionStatus;
     use crate::agent::product_read_model::ProductRiskLevel;
+
+    #[test]
+    fn remote_unknown_agent_run_remains_unknown_in_tasks_projection() {
+        let mut run = AgentRun::new_tool_execution_run("a2a.call_agent");
+        run.status = AgentRunStatus::RemoteUnknown;
+        run.finished_at = Some(Utc::now());
+        let model = build_tasks_view_model(TasksViewModelBuildInput {
+            run_inputs: vec![TaskViewModelRunInput { run }],
+            ..Default::default()
+        });
+
+        assert_eq!(model.items.len(), 1);
+        assert_eq!(
+            model.items[0].lifecycle_status,
+            TaskLifecycleStatus::RemoteUnknown
+        );
+        assert_eq!(
+            model.items[0].terminal_delivery_status,
+            TaskTerminalDeliveryStatus::Unknown
+        );
+        assert_eq!(model.summary.failed_count, 0);
+        assert_eq!(
+            model.summary.by_lifecycle_status.get("remote_unknown"),
+            Some(&1)
+        );
+    }
 
     #[test]
     fn completed_task_without_final_delivery_fails_closed() {
@@ -1058,5 +1122,54 @@ mod tests {
             workspace.provider_privacy_boundary_summary.risk,
             ProductRiskLevel::Unknown
         );
+    }
+
+    #[test]
+    fn unverified_legacy_run_only_item_exposes_unknown_not_persisted_status_or_strategy() {
+        let mut run = AgentRun::new_chat_run("legacy-session", "legacy input");
+        run.status = AgentRunStatus::Failed;
+        run.user_input = None;
+        run.output_preview = Some("run_output:bytes=14:hmac-sha256:legacy".into());
+        run.error = Some(crate::agent::types::AgentRunError {
+            message: "legacy error must not become product truth".into(),
+            phase: "provider".into(),
+            recoverable: false,
+        });
+        run.reasoning_strategy = Some("layered".into());
+        run.legacy_payload_unverified = true;
+
+        let tasks = build_tasks_view_model(TasksViewModelBuildInput {
+            run_inputs: vec![TaskViewModelRunInput { run }],
+            ..Default::default()
+        });
+        let item = &tasks.items[0];
+
+        assert_eq!(item.lifecycle_status, TaskLifecycleStatus::Unknown);
+        assert_eq!(
+            item.terminal_delivery_status,
+            TaskTerminalDeliveryStatus::Unknown
+        );
+        assert_eq!(item.strategy, "unknown");
+        assert_eq!(
+            item.latest_result_preview
+                .as_ref()
+                .map(|preview| preview.status),
+            Some(TaskTerminalDeliveryStatus::Unknown)
+        );
+        assert!(item
+            .latest_result_preview
+            .as_ref()
+            .is_some_and(|preview| preview.preview.is_none()));
+        assert!(item
+            .pending_blockers
+            .iter()
+            .any(|warning| warning == "legacy_payload_unverified"));
+        assert_eq!(tasks.summary.failed_count, 0);
+        assert_eq!(tasks.summary.completed_count, 0);
+
+        let workspace =
+            build_workspace_view_model(&tasks, ProviderPrivacyBoundarySummary::unknown(), vec![]);
+        assert!(workspace.active_task_ref.is_none());
+        assert_eq!(workspace.timeline[0].status, TaskLifecycleStatus::Unknown);
     }
 }

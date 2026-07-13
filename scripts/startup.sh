@@ -155,7 +155,12 @@ json_escape() {
 
 configure_runtime_profile() {
     local command="${1:-dev}"
-    if [ -z "${OPENLIFE_PROFILE:-}" ] && [ "$command" = "dev" ]; then
+    if [ "$command" = "dev" ] || [ "$command" = "a2a" ]; then
+        if [ -n "${OPENLIFE_DATA_DIR:-}" ] && [ "${OPENLIFE_ALLOW_DEV_EXTENSIONS_WITH_CUSTOM_DATA_DIR:-0}" != "1" ]; then
+            log_error "dev-extensions 拒绝使用 OPENLIFE_DATA_DIR；请使用隔离 dev profile"
+            log_info "如确需隔离的自定义目录，请显式设置 OPENLIFE_ALLOW_DEV_EXTENSIONS_WITH_CUSTOM_DATA_DIR=1"
+            exit 1
+        fi
         OPENLIFE_PROFILE="dev"
         export OPENLIFE_PROFILE
     else
@@ -201,6 +206,11 @@ HTML
     "beforeDevCommand": "cd \"$frontend_dir_json\" && corepack pnpm dev --host 127.0.0.1 --port $VITE_PORT",
     "devUrl": "$dev_url_json",
     "frontendDist": "$frontend_dist_json"
+  },
+  "app": {
+    "security": {
+      "capabilities": ["default", "dev-extensions"]
+    }
   }
 }
 JSON
@@ -418,16 +428,22 @@ start_dev() {
         exit 1
     fi
 
-    log_info "构建 A2A sidecar..."
-    cargo build --bin openlife-a2a-server
+    if [ "${OPENLIFE_DEV_AUTOSTART_A2A:-0}" = "1" ]; then
+        if [ "${OPENLIFE_ENABLE_DEV_A2A:-0}" != "1" ] || [ "${#OPENLIFE_A2A_PAIRED_TOKEN}" -lt 32 ]; then
+            log_error "A2A autostart requires OPENLIFE_ENABLE_DEV_A2A=1 and a 32+ character OPENLIFE_A2A_PAIRED_TOKEN"
+            exit 1
+        fi
+        log_info "构建显式启用的开发 A2A sidecar..."
+        cargo build --bin openlife-a2a-server --features dev-extensions
+    fi
 
     # 检查使用哪种方式启动 Tauri
     if [ -f "$FRONTEND_DIR/node_modules/.bin/tauri" ]; then
         log_info "使用本地 Tauri CLI 启动..."
-        "$FRONTEND_DIR/node_modules/.bin/tauri" dev --config "$config_override"
+        "$FRONTEND_DIR/node_modules/.bin/tauri" dev --features dev-extensions --config "$TAURI_DIR/tauri.dev.conf.json" --config "$config_override"
     elif command -v tauri &>/dev/null; then
         log_info "使用全局 Tauri CLI 启动..."
-        tauri dev --config "$config_override"
+        tauri dev --features dev-extensions --config "$TAURI_DIR/tauri.dev.conf.json" --config "$config_override"
     else
         log_error "Tauri CLI 不可用"
         log_info "请先运行: corepack pnpm --dir \"$FRONTEND_DIR\" install"
@@ -437,6 +453,14 @@ start_dev() {
 
 start_a2a() {
     log_step "启动 A2A 独立服务器"
+
+    if [ "${OPENLIFE_ENABLE_DEV_A2A:-0}" != "1" ] || [ "${#OPENLIFE_A2A_PAIRED_TOKEN}" -lt 32 ]; then
+        log_error "A2A 默认关闭；启动需要显式启用并配置强配对凭据"
+        log_info "设置 OPENLIFE_ENABLE_DEV_A2A=1 和 32+ 字符 OPENLIFE_A2A_PAIRED_TOKEN"
+        exit 1
+    fi
+    OPENLIFE_PROFILE="dev"
+    export OPENLIFE_PROFILE
 
     # 检查端口
     check_port "$A2A_PORT" || {
@@ -448,10 +472,11 @@ start_a2a() {
     log_info "A2A 服务器将监听: http://127.0.0.1:$A2A_PORT"
     log_info "API 端点:"
     log_info "  GET  http://127.0.0.1:$A2A_PORT/agent.json"
-    log_info "  POST http://127.0.0.1:$A2A_PORT/tasks/send"
+    log_info "  GET  http://127.0.0.1:$A2A_PORT/.well-known/agent.json (public minimal)"
+    log_info "  POST http://127.0.0.1:$A2A_PORT/tasks/send (Bearer paired)"
 
     cd "$TAURI_DIR"
-    cargo run --bin openlife-a2a-server
+    cargo run --bin openlife-a2a-server --features dev-extensions
 }
 
 # =============================================================================

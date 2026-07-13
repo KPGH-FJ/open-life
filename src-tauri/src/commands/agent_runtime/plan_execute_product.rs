@@ -227,6 +227,30 @@ pub(crate) async fn create_plan_execute_session_with_state(
     input: CreatePlanExecuteSessionInput,
     state: &Arc<AppState>,
 ) -> Result<PlanExecuteSession, String> {
+    create_plan_execute_session_with_source_run(input, state, None, None).await
+}
+
+pub(crate) async fn create_plan_execute_session_for_main_chat_with_state(
+    input: CreatePlanExecuteSessionInput,
+    state: &Arc<AppState>,
+    source_run_id: &str,
+    execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
+) -> Result<PlanExecuteSession, String> {
+    create_plan_execute_session_with_source_run(
+        input,
+        state,
+        Some(source_run_id),
+        Some(execution_epoch),
+    )
+    .await
+}
+
+async fn create_plan_execute_session_with_source_run(
+    input: CreatePlanExecuteSessionInput,
+    state: &Arc<AppState>,
+    source_run_id: Option<&str>,
+    execution_epoch: Option<&crate::main_chat_cancellation::MainChatExecutionEpoch>,
+) -> Result<PlanExecuteSession, String> {
     let scenario = PlanExecuteProductScenario::try_from_id(
         input.scenario_id.as_deref().unwrap_or("weekly_planning"),
     )
@@ -243,9 +267,15 @@ pub(crate) async fn create_plan_execute_session_with_state(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "workspace_weekly_planning".into());
 
-    let mut run = new_plan_execute_product_run(&source_chat_session_id);
-    let run_id = run.id.clone();
-    create_product_run(state, &run).await?;
+    let mut owned_plan_run = if source_run_id.is_some() {
+        None
+    } else {
+        Some(new_plan_execute_product_run(&source_chat_session_id))
+    };
+    let run_id = source_run_id
+        .map(str::to_string)
+        .or_else(|| owned_plan_run.as_ref().map(|run| run.id.clone()))
+        .ok_or_else(|| "Plan-Execute source AgentRun id missing".to_string())?;
 
     let life_model = {
         let manager = state.life_model_manager.lock().await;
@@ -310,21 +340,50 @@ pub(crate) async fn create_plan_execute_session_with_state(
     )
     .map_err(|e| e.to_string())?;
 
+    if let Some(run) = owned_plan_run.as_mut() {
+        run.task_id = session.session_id.clone();
+        create_product_run(state, run).await?;
+    }
+
     {
         let store_arc = state
             .plan_execute_session_store
             .as_ref()
             .ok_or_else(|| "Plan-Execute session store not available".to_string())?;
         let store = store_arc.lock().await;
-        store
+        let commit_permit = execution_epoch
+            .map(|epoch| {
+                epoch.begin_canonical_commit(
+                    "plan_execute",
+                    format!("session:{}", session.session_id),
+                )
+            })
+            .transpose()
+            .map_err(|rejection| format!("Plan-Execute session commit rejected: {rejection:?}"))?;
+        let creation = store
             .create_session(&session)
-            .map_err(|e| format!("failed to create Plan-Execute session: {e}"))?;
+            .map_err(|e| format!("failed to create Plan-Execute session: {e}"));
+        match creation {
+            Ok(()) => {
+                if let Some(commit_permit) = commit_permit {
+                    commit_permit.finish_committed();
+                }
+            }
+            Err(error) => {
+                if let Some(commit_permit) = commit_permit {
+                    commit_permit.finish_failed();
+                }
+                return Err(error);
+            }
+        }
     }
     append_plan_created_events(state, &session).await?;
 
-    run.hs_selection_audit = hs_selection_audit;
-    run.behavior_checks = behavior_checks;
-    update_product_run_for_session(state, &mut run, &session).await?;
+    if let Some(run) = owned_plan_run.as_mut() {
+        run.hs_selection_audit = hs_selection_audit;
+        run.behavior_checks = behavior_checks;
+        update_product_run_for_session(state, run, &session).await?;
+    }
     Ok(session)
 }
 
@@ -1228,6 +1287,7 @@ async fn append_plan_step_execution_events(
                 "stepId": step_result.step_id,
                 "revision": step_result.revision,
                 "actionType": "plan_execute.read_only",
+                "status": "queued",
                 "metadataSafe": true,
                 "directWritesExecuted": false,
             }),
@@ -1241,6 +1301,7 @@ async fn append_plan_step_execution_events(
             action_id,
             json!({
                 "actionId": action_id,
+                "status": "succeeded",
                 "planId": step_result.plan_id,
                 "stepId": step_result.step_id,
                 "revision": step_result.revision,
@@ -1327,6 +1388,7 @@ async fn append_plan_step_skipped_events(
             "stepId": step_result.step_id,
             "revision": step_result.revision,
             "basePlanRevision": step_result.base_plan_revision,
+            "status": "skipped",
             "skipReason": step_result.skip_reason,
             "evidenceIds": step_result.evidence_ids,
             "metadataSafe": true,
@@ -1411,15 +1473,44 @@ async fn append_plan_runtime_event(
     event_type: &str,
     object_type: &str,
     object_id: &str,
-    payload: Value,
+    mut payload: Value,
 ) -> Result<crate::main_chat_event_stream::MainChatAgentDurableEvent, String> {
+    let run_id = session
+        .source_agent_run_id
+        .as_deref()
+        .ok_or_else(|| "Plan-Execute source AgentRun id missing".to_string())?;
+    let task_session_id = {
+        let store_arc = state
+            .agent_run_store
+            .as_ref()
+            .ok_or_else(|| "AgentRun store not available for Plan-Execute event".to_string())?;
+        let store = store_arc.lock().await;
+        store
+            .get_run(run_id)
+            .map_err(|error| format!("load Plan-Execute source AgentRun failed: {error}"))?
+            .ok_or_else(|| "Plan-Execute source AgentRun missing".to_string())?
+            .task_id
+    };
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("taskSessionId".into(), serde_json::json!(task_session_id));
+        object.insert(
+            "planSessionId".into(),
+            serde_json::json!(session.session_id),
+        );
+        object.insert(
+            "childWorkflowProvenance".into(),
+            serde_json::json!({
+                "kind": "plan_execute_session",
+                "id": session.session_id,
+                "sourceRunId": run_id,
+                "eventTaskBoundToSourceRun": true,
+            }),
+        );
+    }
     crate::main_chat_event_stream::append_main_chat_agent_runtime_event(
         state,
-        session.session_id.clone(),
-        session
-            .source_agent_run_id
-            .clone()
-            .unwrap_or_else(|| session.session_id.clone()),
+        task_session_id,
+        run_id.to_string(),
         event_type,
         object_type,
         object_id,
@@ -1433,7 +1524,6 @@ fn plan_event_payload(session: &PlanExecuteSession) -> Value {
     json!({
         "planId": session.plan_id,
         "planSessionId": session.session_id,
-        "taskSessionId": session.session_id,
         "runId": session.source_agent_run_id,
         "status": session.status.to_string(),
         "revision": session.revision,
@@ -1605,6 +1695,9 @@ async fn update_existing_product_run_for_session(
         return Ok(());
     };
     drop(store);
+    if run.kind != AgentTaskKind::Planning {
+        return Ok(());
+    }
     update_product_run_for_session(state, &mut run, session).await
 }
 
@@ -1811,21 +1904,14 @@ mod tests {
             run.reasoning_strategy.as_deref(),
             Some("plan_execute_product")
         );
-        let trace = run.reasoning_trace.unwrap().strategy_result.unwrap();
-        let serialized = serde_json::to_string(&trace).unwrap();
-        assert_eq!(trace["planExecuteProductVertical"], true);
-        assert_eq!(trace["scenarioId"], "weekly_planning");
-        assert_eq!(trace["planSessionId"], session.session_id);
-        assert_eq!(trace["runtimeStrategyTraceKind"], "plan_execute_product");
-        assert_eq!(trace["selectedStrategyKind"], "plan_execute");
-        assert_eq!(trace["payloadKind"], "plan_execute");
-        assert_eq!(trace["strategyDescriptorId"], "plan_execute");
-        assert_eq!(trace["selectionReasonCode"], "weekly_planning_product");
-        assert_eq!(trace["registryReady"], true);
-        assert_eq!(trace["defaultChatUnchanged"], true);
-        assert_eq!(trace["sideEffectBudget"]["externalWrites"], 0);
-        assert!(!serialized.contains("Use my LifeModel"));
-        assert!(!serialized.contains("raw weekly"));
+        assert!(
+            run.reasoning_trace.is_none(),
+            "AgentRun persists a digest, not a second copy of reasoning payload"
+        );
+        assert!(run
+            .reasoning_trace_digest
+            .as_deref()
+            .is_some_and(|digest| digest.starts_with("sha256:")));
     }
 
     #[tokio::test]
@@ -2006,10 +2092,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(run.generated_proposals.len(), 1);
-        let trace = run.reasoning_trace.unwrap().strategy_result.unwrap();
-        assert_eq!(trace["generatedProposalIds"][0], proposals[0].id);
-        assert_eq!(trace["externalWritesExecuted"], false);
-        assert_eq!(trace["directLifeModelWrites"], false);
+        assert_eq!(run.generated_proposals[0], proposals[0].id);
+        assert!(run.reasoning_trace.is_none());
+        assert!(run
+            .reasoning_trace_digest
+            .as_deref()
+            .is_some_and(|digest| digest.starts_with("sha256:")));
         drop(agent_run_store);
 
         let replay = crate::main_chat_event_stream::list_main_chat_agent_events_with_state(
@@ -2319,5 +2407,54 @@ mod tests {
             .contains("No source/tool evidence is attached to this plan artifact yet."));
         assert!(artifact.body.contains("Review current priorities"));
         assert!(!artifact.body.contains("created governed draft"));
+    }
+
+    #[tokio::test]
+    async fn cancel_winning_epoch_rejects_main_chat_plan_session_commit() {
+        let state = crate::test_utils::test_app_state();
+        let task_session_id = "plan-cancel-wins";
+        let registry = {
+            state
+                .main_chat_runtime_state
+                .lock()
+                .await
+                .cancellation_registry
+                .clone()
+        };
+        let registration = registry.register(task_session_id);
+        registry.request_cancel(task_session_id);
+
+        let error = create_plan_execute_session_for_main_chat_with_state(
+            CreatePlanExecuteSessionInput {
+                scenario_id: Some("weekly_planning".into()),
+                source_chat_session_id: Some("plan-cancel-chat".into()),
+                max_steps: Some(5),
+            },
+            &state,
+            "run-plan-cancel",
+            &registration.execution_epoch(),
+        )
+        .await
+        .expect_err("cancel-winning epoch must reject PlanExecute canonical commit");
+        assert!(error.contains("Plan-Execute session commit rejected"));
+        let sessions = state
+            .plan_execute_session_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_sessions(10)
+            .unwrap();
+        assert!(sessions.is_empty());
+        assert!(registration
+            .execution_epoch()
+            .snapshot()
+            .commit_facts
+            .iter()
+            .any(|fact| {
+                fact.domain == "plan_execute"
+                    && fact.outcome
+                        == crate::main_chat_cancellation::MainChatCanonicalCommitOutcome::RejectedAfterCancel
+            }));
     }
 }

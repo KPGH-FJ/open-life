@@ -3,7 +3,7 @@
 //! store handles, registries, configuration, and lifecycle signals.
 
 use crate::a2a_sidecar;
-use openlife_core::builder::{BuilderSession, BuilderSessionStore};
+use openlife_core::builder::BuilderSessionStore;
 use openlife_core::config::AppConfig;
 use openlife_core::feedback::FeedbackStore;
 use openlife_core::life_model::LifeModelManager;
@@ -23,6 +23,9 @@ use tokio::sync::Mutex;
 pub struct ProviderHealthCache {
     pub providers: Vec<crate::commands::router::ProviderStatus>,
     pub checked_at: String,
+    /// Metadata-only digest of provider/base/model/local preference,
+    /// credential version, and the concrete network decision.
+    pub identity_digest: String,
 }
 
 impl ProviderHealthCache {
@@ -37,6 +40,38 @@ impl ProviderHealthCache {
     }
 }
 
+/// One atomically captured provider runtime generation.
+///
+/// `AppConfig` owns the canonical policy/configuration while
+/// `InferenceScheduler` owns the executable adapter binding.  They are still
+/// stored separately for their existing domain responsibilities, but product
+/// status/read-model code must consume this snapshot instead of locking them
+/// in two independent generations.
+#[derive(Clone)]
+pub(crate) struct ProviderRuntimeSnapshot {
+    pub config: AppConfig,
+    pub scheduler: InferenceScheduler,
+    pub coherent: bool,
+}
+
+fn provider_runtime_is_coherent(config: &AppConfig, scheduler: &InferenceScheduler) -> bool {
+    let config_provider = config.llm.provider.trim().to_ascii_lowercase();
+    let scheduler_provider = scheduler.provider.trim().to_ascii_lowercase();
+    let config_endpoint =
+        openlife_core::llm::chat_completions_url(&config_provider, &config.llm.openai_base);
+    let scheduler_endpoint =
+        openlife_core::llm::chat_completions_url(&scheduler_provider, &scheduler.openai_base);
+
+    scheduler.provider_runtime_identity_is_valid()
+        && config_provider == scheduler_provider
+        && config_endpoint == scheduler_endpoint
+        && config.llm.chat_model.trim() == scheduler.chat_model.trim()
+        && config.local_model.trim() == scheduler.local_model.trim()
+        && config.prefer_local_model == scheduler.prefer_local
+        && config.llm.credential_version == scheduler.provider_credential_version()
+        && config.effective_cloud_api_key() == scheduler.effective_api_key()
+}
+
 /// In-memory Main Chat route evidence for the current app process.
 #[derive(Clone, Debug, Default)]
 pub struct MainChatRuntimeState {
@@ -46,6 +81,7 @@ pub struct MainChatRuntimeState {
     pub last_kernel_event_count: Option<usize>,
     pub latest_turn_route_evidence: Option<MainChatTurnRouteEvidenceSnapshot>,
     pub latest_final_gate_readiness: Option<MainChatFinalGateReadinessSnapshot>,
+    pub(crate) cancellation_registry: crate::main_chat_cancellation::MainChatCancellationRegistry,
 }
 
 impl MainChatRuntimeState {
@@ -97,8 +133,12 @@ pub struct MainChatTurnRouteEvidenceSnapshot {
 /// Central application state shared across all Tauri commands.
 #[derive(Clone)]
 pub struct AppState {
+    pub persistence_coordinator: Arc<crate::persistence_coordinator::PersistenceCoordinator>,
     pub config: Arc<Mutex<AppConfig>>,
     pub life_model_manager: Arc<Mutex<LifeModelManager>>,
+    /// Operation-level serialization for the file journal, canonical rename,
+    /// and derived projection protocol. It never owns product data itself.
+    pub life_model_write_coordinator: Arc<Mutex<()>>,
     pub memory_store: Arc<Mutex<MemoryStore>>,
     pub mcp_registry: Arc<Mutex<McpRegistry>>,
     pub scheduler: Arc<Mutex<InferenceScheduler>>,
@@ -107,7 +147,6 @@ pub struct AppState {
     pub feedback_store: Arc<Mutex<FeedbackStore>>,
     pub vector_store: Arc<Mutex<VectorStore>>,
     pub vector_persistence_mode: VectorPersistenceMode,
-    pub builder_sessions: Arc<Mutex<HashMap<String, BuilderSession>>>,
     pub builder_session_store: Arc<Mutex<BuilderSessionStore>>,
     pub a2a_sidecar: Arc<Mutex<a2a_sidecar::A2ASidecar>>,
     pub last_snapshot_date: Arc<Mutex<Option<String>>>,
@@ -135,10 +174,9 @@ pub struct AppState {
     pub skill_registry: Arc<Mutex<openlife_core::skills::SkillRegistry>>,
     pub plugin_registry: Arc<Mutex<openlife_core::plugins::PluginRegistry>>,
     pub hot_cache: SharedHotCache,
-    pub proposal_engine: Arc<tokio::sync::Mutex<openlife_core::agent::ProposalEngine>>,
     pub startup_warnings: Vec<String>,
     pub provider_health_cache: Arc<tokio::sync::Mutex<Option<ProviderHealthCache>>>,
-    pub scheduled_task_mutex: Arc<tokio::sync::Mutex<()>>,
+    pub scheduled_task_store: Arc<openlife_core::tasks::TaskStore>,
     pub(crate) runtime_clock_source:
         Arc<tokio::sync::Mutex<crate::main_chat_runtime_facts::MainChatRuntimeClockSource>>,
     pub web_search_fixture_output: Arc<tokio::sync::Mutex<Option<String>>>,
@@ -146,15 +184,43 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Acquire MCP-related locks in a fixed order to prevent deadlocks.
-    pub async fn get_mcp_state(
-        &self,
-    ) -> (
-        tokio::sync::MutexGuard<'_, McpRegistry>,
-        tokio::sync::MutexGuard<'_, McpAuditStore>,
-    ) {
-        let reg = self.mcp_registry.lock().await;
-        let audit = self.mcp_audit_store.lock().await;
-        (reg, audit)
+    /// Capture config and executable provider state while both generation locks
+    /// are held in the canonical order.  A legacy/direct partial mutation is
+    /// exposed as `coherent = false`; readers must fail closed instead of
+    /// combining fields from two authorities.
+    pub(crate) async fn provider_runtime_snapshot(&self) -> ProviderRuntimeSnapshot {
+        let config = self.config.lock().await;
+        let scheduler = self.scheduler.lock().await;
+        ProviderRuntimeSnapshot {
+            config: config.clone(),
+            scheduler: scheduler.clone(),
+            coherent: provider_runtime_is_coherent(&config, &scheduler),
+        }
+    }
+
+    /// Replace the canonical provider configuration and its executable
+    /// scheduler as one in-process generation.  The cache is invalidated under
+    /// the same lock order, so a status reader observes either the old or the
+    /// new generation, never a mixed pair.
+    pub(crate) async fn replace_provider_runtime_config(&self, config: AppConfig) -> String {
+        let new_scheduler = InferenceScheduler::new(
+            config.local_model.clone(),
+            config.prefer_local_model,
+            config.llm.provider.clone(),
+            config.llm.openai_base.clone(),
+            config.llm.openai_key.clone(),
+            config.llm.chat_model.clone(),
+            config.llm.embedding_model.clone(),
+            config.llm.embedding_enabled,
+        )
+        .with_provider_credential_version(config.llm.credential_version);
+        let generation = new_scheduler.provider_config_generation().to_string();
+        let mut current_config = self.config.lock().await;
+        let mut scheduler = self.scheduler.lock().await;
+        let mut provider_health_cache = self.provider_health_cache.lock().await;
+        *current_config = config;
+        *scheduler = new_scheduler;
+        *provider_health_cache = None;
+        generation
     }
 }

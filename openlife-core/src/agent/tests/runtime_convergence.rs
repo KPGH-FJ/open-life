@@ -23,13 +23,22 @@ fn no_network_scheduler() -> InferenceScheduler {
         },
     );
 
-    InferenceScheduler {
-        prefer_local: false,
-        provider: "contract-test".into(),
-        openai_key: String::new(),
-        model_router: Some(router),
-        ..InferenceScheduler::default()
-    }
+    let defaults = InferenceScheduler::default();
+    InferenceScheduler::new(
+        defaults.local_model,
+        false,
+        "contract-test".into(),
+        "https://provider.invalid/v1".into(),
+        String::new(),
+        "runtime-convergence-fixture".into(),
+        defaults.embedding_model,
+        false,
+    )
+    .with_model_router(router)
+    // This convergence suite validates RuntimeInput/RuntimeOutput ownership,
+    // not a live provider. Keep its generation deterministic and explicit so
+    // it cannot depend on the retired missing-provider success fallback.
+    .with_scripted_generation_response(r#"{"final":"runtime convergence fixture"}"#)
 }
 
 fn test_task(text: &str) -> AgentTask {
@@ -92,7 +101,7 @@ async fn runtime_input_executes_through_agent_runtime_and_returns_runtime_output
         test_task("Summarize the current context without writing anything."),
         LifeModel::default(),
         Some("memory: prefers concise answers".into()),
-        "Available tools: memory.search",
+        "No tools available.",
         None,
         AgentExecutionBudget::default(),
     );

@@ -1,11 +1,12 @@
 use crate::commands::settings::{
-    require_danger_action_confirmation, DangerActionConfirmationEvidence,
+    require_danger_action_confirmation, DangerActionConfirmationReference,
+    DangerActionConfirmationRequest,
 };
 use crate::errors::AppError;
 use crate::memory_gateway;
 use crate::AppState;
 use openlife_core::memory_cache::HotMemoryCache;
-use openlife_core::vectors::{ArchivedChunkSummary, MemoryChunk, TierStats};
+use openlife_core::vectors::{TierStats, VectorRebuildJob};
 use std::sync::Arc;
 use tauri::State;
 
@@ -24,22 +25,31 @@ pub async fn count_memory_chunks(state: State<'_, Arc<AppState>>) -> Result<i64,
 }
 
 #[tauri::command]
-pub async fn index_memory_chunk(
+pub async fn create_knowledge_note(
+    operation_id: String,
     session_id: String,
     content: String,
     source: String,
     state: State<'_, Arc<AppState>>,
-) -> Result<i64, AppError> {
-    index_memory_chunk_with_state(session_id, content, source, state.inner()).await
+) -> Result<crate::memory_gateway::KnowledgeNoteWriteResult, AppError> {
+    create_knowledge_note_with_state(operation_id, session_id, content, source, state.inner()).await
 }
 
-pub(crate) async fn index_memory_chunk_with_state(
+pub(crate) async fn create_knowledge_note_with_state(
+    operation_id: String,
     session_id: String,
     content: String,
     source: String,
     state: &Arc<AppState>,
-) -> Result<i64, AppError> {
-    memory_gateway::index_memory_chunk_with_state(session_id, content, source, state).await
+) -> Result<crate::memory_gateway::KnowledgeNoteWriteResult, AppError> {
+    memory_gateway::create_knowledge_note_with_state(
+        operation_id,
+        session_id,
+        content,
+        source,
+        state,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -47,7 +57,7 @@ pub async fn search_memory(
     query: String,
     top_k: usize,
     state: State<'_, Arc<AppState>>,
-) -> Result<Vec<(MemoryChunk, f32)>, AppError> {
+) -> Result<crate::memory_gateway::MemorySearchResult, AppError> {
     search_memory_with_state(query, top_k, state.inner()).await
 }
 
@@ -55,8 +65,51 @@ pub(crate) async fn search_memory_with_state(
     query: String,
     top_k: usize,
     state: &Arc<AppState>,
-) -> Result<Vec<(MemoryChunk, f32)>, AppError> {
+) -> Result<crate::memory_gateway::MemorySearchResult, AppError> {
     memory_gateway::search_memory_with_state(query, top_k, state).await
+}
+
+#[tauri::command]
+pub async fn undo_explicit_memory(
+    receipt_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<openlife_core::agent::MemoryRollbackReport>, AppError> {
+    undo_explicit_memory_with_state(receipt_id, state.inner()).await
+}
+
+pub(crate) async fn undo_explicit_memory_with_state(
+    receipt_id: String,
+    state: &Arc<AppState>,
+) -> Result<Option<openlife_core::agent::MemoryRollbackReport>, AppError> {
+    let normalized = receipt_id.trim();
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+    let lifecycle_store = state
+        .memory_lifecycle_store
+        .as_ref()
+        .ok_or_else(|| AppError::internal("MemoryLifecycleStore unavailable"))?;
+    let record = {
+        let store = lifecycle_store.lock().await;
+        store.get_record(normalized).map_err(AppError::from)?
+    };
+    let Some(record) = record else {
+        return Ok(None);
+    };
+    if !record.proposal_id.starts_with("explicit_memory:")
+        || !record.status.is_runtime_active()
+        || record.runtime_context_excluded_at.is_some()
+    {
+        return Ok(None);
+    }
+    crate::memory_gateway::rollback_memory_asset_with_state(
+        normalized.to_string(),
+        "user_undo_explicit_memory".to_string(),
+        state,
+    )
+    .await
+    .map(Some)
+    .map_err(AppError::internal)
 }
 
 #[tauri::command]
@@ -68,23 +121,23 @@ pub async fn get_hot_cache(state: State<'_, Arc<AppState>>) -> Result<HotMemoryC
 #[tauri::command]
 pub async fn archive_low_access_memories(
     state: State<'_, Arc<AppState>>,
-) -> Result<usize, AppError> {
+) -> Result<Vec<crate::memory_gateway::LowAccessCanonicalMemoryCandidate>, AppError> {
     memory_gateway::archive_low_access_memories_with_state(state.inner()).await
 }
 
 #[tauri::command]
 pub async fn restore_archived_chunks(
-    chunk_ids: Vec<i64>,
+    owner: crate::memory_gateway::CanonicalMemoryOwnerInput,
     state: State<'_, Arc<AppState>>,
-) -> Result<usize, AppError> {
-    memory_gateway::restore_archived_chunks_with_state(&chunk_ids, state.inner()).await
+) -> Result<crate::memory_gateway::MemoryRetrievalMutationResult, AppError> {
+    memory_gateway::restore_archived_chunks_with_state(&owner, state.inner()).await
 }
 
 #[tauri::command]
 pub async fn list_archived_chunks(
     limit: usize,
     state: State<'_, Arc<AppState>>,
-) -> Result<Vec<ArchivedChunkSummary>, AppError> {
+) -> Result<Vec<crate::memory_gateway::ArchivedCanonicalMemoryView>, AppError> {
     memory_gateway::list_archived_chunks_with_state(limit, state.inner()).await
 }
 
@@ -95,18 +148,35 @@ pub async fn get_memory_tier_stats(state: State<'_, Arc<AppState>>) -> Result<Ti
 
 #[tauri::command]
 pub async fn rebuild_memory_index(
-    confirmation_evidence: Option<DangerActionConfirmationEvidence>,
+    confirmation_evidence: Option<DangerActionConfirmationReference>,
+    window: tauri::WebviewWindow,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, AppError> {
     let affected_count = {
-        let store = state.memory_store.lock().await;
-        store.export_all_messages().map_err(AppError::from)?.len()
+        let store = state.memory_store.lock().await.clone();
+        store
+            .vector_rebuild_source_snapshot()
+            .map_err(AppError::from)?
+            .total_count
     };
     require_danger_action_confirmation(
-        "vector_rebuild",
-        &[],
-        Some(affected_count),
-        confirmation_evidence.as_ref(),
+        DangerActionConfirmationRequest {
+            action_type: "vector_rebuild",
+            target_ids_for_new_challenge: &[],
+            requested_target: None,
+            affected_count: Some(affected_count),
+            reference: confirmation_evidence.as_ref(),
+            arguments: &serde_json::json!({
+                "canonical_memory_row_count": affected_count,
+                "owner_scope": ["knowledge_note", "memory_lifecycle", "legacy_memory_record"],
+                "unverified_rows": "reported_as_skipped",
+                "operation": "rebuild_vector_index",
+            }),
+            arguments_summary: &format!(
+                "扫描 {affected_count} 条 canonical Memory 记录重建本地索引；仅关系证据完整的 KnowledgeNote/Lifecycle 资产会进入向量空间，未验证记录计入 skipped。"
+            ),
+        },
+        &window,
         state.inner(),
     )
     .await?;
@@ -116,18 +186,47 @@ pub async fn rebuild_memory_index(
 pub(crate) async fn rebuild_memory_index_with_state(
     state: &Arc<AppState>,
 ) -> Result<serde_json::Value, AppError> {
-    memory_gateway::rebuild_memory_index_with_state(state).await
+    let report = memory_gateway::rebuild_memory_index_with_state(state).await?;
+    if report.get("status").and_then(serde_json::Value::as_str) == Some("completed") {
+        Ok(report)
+    } else {
+        Err(AppError::external(
+            serde_json::json!({
+                "operation": "rebuild_memory_index",
+                "terminal": false,
+                "rebuild": report,
+            })
+            .to_string(),
+        ))
+    }
+}
+
+#[tauri::command]
+pub async fn get_memory_index_rebuild_progress(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<VectorRebuildJob>, AppError> {
+    memory_gateway::get_memory_index_rebuild_progress_with_state(state.inner()).await
+}
+
+#[tauri::command]
+pub async fn cancel_memory_index_rebuild(
+    job_id: Option<String>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<VectorRebuildJob, AppError> {
+    memory_gateway::cancel_memory_index_rebuild_with_state(job_id, state.inner()).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openlife_core::{llm::ChatMessage, vectors::clear_embedding_cache};
+    use openlife_core::{embedding::clear_embedding_cache, llm::ChatMessage};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc as StdArc,
+        Arc as StdArc, Mutex,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    static OLLAMA_ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     async fn fake_cloud_embedding_endpoint() -> (String, StdArc<AtomicUsize>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -159,6 +258,22 @@ mod tests {
         (format!("http://{}", addr), cloud_call_count)
     }
 
+    async fn fake_hanging_embedding_endpoint() -> (String, StdArc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted_count = StdArc::new(AtomicUsize::new(0));
+        let accepted_count_clone = accepted_count.clone();
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                accepted_count_clone.fetch_add(1, Ordering::SeqCst);
+                let mut buffer = [0_u8; 2048];
+                let _ = socket.read(&mut buffer).await;
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+        });
+        (format!("http://{}", addr), accepted_count)
+    }
+
     async fn configure_cloud_embeddings(state: &Arc<AppState>, openai_base: String) {
         let mut cfg = state.config.lock().await;
         cfg.llm.provider = "openai".to_string();
@@ -169,13 +284,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn index_memory_chunk_sensitive_content_does_not_call_cloud_embedding() {
+    async fn create_knowledge_note_sensitive_content_does_not_call_cloud_embedding() {
         clear_embedding_cache();
         let state = crate::test_utils::test_app_state();
         let (openai_base, cloud_call_count) = fake_cloud_embedding_endpoint().await;
         configure_cloud_embeddings(&state, openai_base).await;
 
-        let id = index_memory_chunk_with_state(
+        let id = create_knowledge_note_with_state(
+            uuid::Uuid::new_v4().to_string(),
             "memory-index-sensitive".to_string(),
             "身份证 11010519491231002X，邮箱 index-sensitive@example.com，最近用药焦虑".to_string(),
             "manual".to_string(),
@@ -184,8 +300,296 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(id > 0);
+        assert!(id.canonical_committed);
+        assert_eq!(
+            id.projection_state,
+            openlife_core::persistence_outbox::ProjectionDeliveryState::Pending
+        );
+        assert!(id.embedding_id.is_none());
+        assert!(id.embedding_receipt.is_none());
         assert_eq!(cloud_call_count.load(Ordering::SeqCst), 0);
+
+        let background = crate::memory_gateway::reconcile_canonical_outboxes_with_state(&state, 20)
+            .await
+            .unwrap();
+        assert_eq!(background.applied, 1);
+        assert_eq!(
+            state.vector_store.lock().await.count_all_chunks().unwrap(),
+            1
+        );
+        assert_eq!(cloud_call_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn create_knowledge_note_command_replays_one_operation_and_rejects_payload_drift() {
+        clear_embedding_cache();
+        let state = crate::test_utils::test_app_state();
+        state.config.lock().await.llm.embedding_enabled = false;
+        let operation_id = uuid::Uuid::new_v4().to_string();
+
+        let first = create_knowledge_note_with_state(
+            operation_id.clone(),
+            "memory-index-operation".to_string(),
+            "COMMAND_OPERATION_SENTINEL".to_string(),
+            "manual".to_string(),
+            &state,
+        )
+        .await
+        .unwrap();
+        let replay = create_knowledge_note_with_state(
+            operation_id.clone(),
+            "memory-index-operation".to_string(),
+            "COMMAND_OPERATION_SENTINEL".to_string(),
+            "manual".to_string(),
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!first.replayed);
+        assert!(replay.replayed);
+        assert_eq!(first.operation_id, operation_id);
+        assert_eq!(first.knowledge_note_id, replay.knowledge_note_id);
+        assert_eq!(first.outbox_event_id, replay.outbox_event_id);
+        assert_eq!(
+            state
+                .memory_store
+                .lock()
+                .await
+                .search_text_memories(None, "COMMAND_OPERATION_SENTINEL", 10)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let drift = create_knowledge_note_with_state(
+            operation_id,
+            "memory-index-operation".to_string(),
+            "DIFFERENT_COMMAND_PAYLOAD".to_string(),
+            "manual".to_string(),
+            &state,
+        )
+        .await;
+        assert!(
+            drift.is_err(),
+            "operation id payload drift must fail closed"
+        );
+        assert!(state
+            .memory_store
+            .lock()
+            .await
+            .search_text_memories(None, "DIFFERENT_COMMAND_PAYLOAD", 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_knowledge_note_commits_canonical_before_failed_vector_projection_and_replays() {
+        clear_embedding_cache();
+        let state = crate::test_utils::test_app_state();
+        state.config.lock().await.llm.embedding_enabled = false;
+        state
+            .vector_store
+            .lock()
+            .await
+            .install_memory_projection_failure_for_test()
+            .unwrap();
+
+        let result = create_knowledge_note_with_state(
+            uuid::Uuid::new_v4().to_string(),
+            "memory-index-degraded".to_string(),
+            "canonical note survives embedding failure".to_string(),
+            "manual".to_string(),
+            &state,
+        )
+        .await
+        .expect("embedding failure must not erase canonical success");
+
+        assert!(result.canonical_committed);
+        assert!(result.embedding_id.is_none());
+        assert_eq!(
+            result.projection_state,
+            openlife_core::persistence_outbox::ProjectionDeliveryState::Pending
+        );
+        assert!(state
+            .memory_store
+            .lock()
+            .await
+            .get_active_memory_record(result.knowledge_note_id)
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            state.vector_store.lock().await.count_all_chunks().unwrap(),
+            0
+        );
+        assert_eq!(
+            state
+                .memory_store
+                .lock()
+                .await
+                .projection_summary(&result.outbox_event_id)
+                .unwrap()
+                .pending,
+            1
+        );
+
+        let failed_background =
+            crate::memory_gateway::reconcile_canonical_outboxes_with_state(&state, 20)
+                .await
+                .unwrap();
+        assert_eq!(failed_background.degraded, 1);
+        assert_eq!(
+            state
+                .memory_store
+                .lock()
+                .await
+                .projection_summary(&result.outbox_event_id)
+                .unwrap()
+                .degraded,
+            1
+        );
+
+        clear_embedding_cache();
+        state
+            .vector_store
+            .lock()
+            .await
+            .remove_memory_projection_failure_for_test()
+            .unwrap();
+        let replay = crate::memory_gateway::reconcile_canonical_outboxes_with_state(&state, 20)
+            .await
+            .unwrap();
+
+        assert_eq!(replay.applied, 1);
+        assert_eq!(
+            state
+                .memory_store
+                .lock()
+                .await
+                .projection_summary(&result.outbox_event_id)
+                .unwrap()
+                .state(),
+            openlife_core::persistence_outbox::ProjectionDeliveryState::Applied
+        );
+        assert_eq!(
+            state.vector_store.lock().await.count_all_chunks().unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn conversation_tombstone_after_rebuild_preserves_canonical_knowledge_note() {
+        clear_embedding_cache();
+        let state = crate::test_utils::test_app_state();
+        state.config.lock().await.llm.embedding_enabled = false;
+        let session_id = "knowledge-note-survives-conversation-delete";
+        let write = create_knowledge_note_with_state(
+            uuid::Uuid::new_v4().to_string(),
+            session_id.to_string(),
+            "CANONICAL_KNOWLEDGE_NOTE_SURVIVES_DELETE".to_string(),
+            "manual".to_string(),
+            &state,
+        )
+        .await
+        .unwrap();
+        let projected = crate::memory_gateway::reconcile_canonical_outboxes_with_state(&state, 20)
+            .await
+            .unwrap();
+        assert_eq!(projected.applied, 1);
+        assert_eq!(
+            state.vector_store.lock().await.count_all_chunks().unwrap(),
+            1
+        );
+
+        let rebuilt = crate::memory_gateway::rebuild_memory_index_with_state(&state)
+            .await
+            .unwrap();
+        assert_eq!(rebuilt["status"], "completed");
+        assert_eq!(rebuilt["indexed"], 1);
+        state
+            .memory_store
+            .lock()
+            .await
+            .create_chat_session(session_id, "temporary conversation")
+            .unwrap();
+        state
+            .memory_store
+            .lock()
+            .await
+            .save_message(
+                session_id,
+                &ChatMessage {
+                    role: "user".into(),
+                    content: "conversation body must be deleted".into(),
+                },
+            )
+            .unwrap();
+
+        crate::memory_gateway::delete_chat_session_with_state(session_id, &state)
+            .await
+            .unwrap();
+
+        let chunks = state.vector_store.lock().await.export_all_chunks().unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(
+            chunks[0].source,
+            format!("knowledge_note:{}", write.knowledge_note_id)
+        );
+        assert_eq!(
+            chunks[0].content,
+            "CANONICAL_KNOWLEDGE_NOTE_SURVIVES_DELETE"
+        );
+        assert!(state
+            .memory_store
+            .lock()
+            .await
+            .load_recent_messages(session_id, 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_canonical_knowledge_note_can_never_be_marked_projection_applied() {
+        clear_embedding_cache();
+        let state = crate::test_utils::test_app_state();
+        state.config.lock().await.llm.embedding_enabled = false;
+        let write = create_knowledge_note_with_state(
+            uuid::Uuid::new_v4().to_string(),
+            "missing-canonical-knowledge-note".to_string(),
+            "MISSING_CANONICAL_ROW_MUST_DEGRADE".to_string(),
+            "manual".to_string(),
+            &state,
+        )
+        .await
+        .unwrap();
+        state
+            .memory_store
+            .lock()
+            .await
+            .remove_canonical_memory_row_for_corruption_test(write.knowledge_note_id)
+            .unwrap();
+
+        let report = crate::memory_gateway::reconcile_canonical_outboxes_with_state(&state, 20)
+            .await
+            .unwrap();
+        assert_eq!(report.applied, 0);
+        assert_eq!(report.degraded, 1);
+        assert_eq!(
+            state.vector_store.lock().await.count_all_chunks().unwrap(),
+            0
+        );
+        let summary = state
+            .memory_store
+            .lock()
+            .await
+            .projection_summary(&write.outbox_event_id)
+            .unwrap();
+        assert_eq!(
+            summary.state(),
+            openlife_core::persistence_outbox::ProjectionDeliveryState::Degraded
+        );
+        assert_eq!(summary.applied, 0);
+        assert_eq!(summary.degraded, 1);
     }
 
     #[tokio::test]
@@ -203,12 +607,62 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(hits.is_empty());
+        assert!(hits.hits.is_empty());
+        assert_eq!(hits.vector_status, "ready");
         assert_eq!(cloud_call_count.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
-    async fn rebuild_memory_index_sensitive_history_does_not_call_cloud_embedding() {
+    async fn search_memory_returns_legacy_profile_rebuild_evidence() {
+        clear_embedding_cache();
+        let state = crate::test_utils::test_app_state();
+        {
+            let mut cfg = state.config.lock().await;
+            cfg.llm.provider = "openai".into();
+            cfg.llm.openai_key.clear();
+            cfg.llm.embedding_enabled = false;
+        }
+        {
+            let store = state.vector_store.lock().await;
+            store
+                .import_chunks(&[openlife_core::vectors::ExportedVectorChunk {
+                    session_id: "legacy-profile-session".into(),
+                    content: "legacy profiled memory".into(),
+                    embedding: vec![0.1, 0.2, 0.3, 0.4],
+                    embedding_profile_id: openlife_core::embedding::UNKNOWN_EMBEDDING_PROFILE_ID
+                        .into(),
+                    embedding_dimension: 0,
+                    source: "note".into(),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    tier: 2,
+                    access_count: 0,
+                    last_accessed_at: String::new(),
+                    importance_score: 0.5,
+                    archived: false,
+                    archived_at: None,
+                    summary: None,
+                }])
+                .unwrap();
+        }
+
+        let result = search_memory_with_state("legacy profile".into(), 5, &state)
+            .await
+            .unwrap();
+
+        assert_eq!(result.vector_status, "rebuild_required");
+        assert_eq!(result.rebuild.as_ref().unwrap().unknown_profile_count, 1);
+        assert_eq!(
+            result.embedding_receipt.status,
+            openlife_core::embedding::EmbeddingInvocationStatus::NotAttempted
+        );
+        assert_eq!(
+            result.embedding_receipt.route_reason_code,
+            "configured_deterministic_hash"
+        );
+    }
+
+    #[tokio::test]
+    async fn rebuild_memory_index_uses_long_term_memory_not_canonical_conversation_bodies() {
         clear_embedding_cache();
         let state = crate::test_utils::test_app_state();
         let (openai_base, cloud_call_count) = fake_cloud_embedding_endpoint().await;
@@ -222,25 +676,388 @@ mod tests {
                     &ChatMessage {
                         role: "user".to_string(),
                         content:
-                            "身份证 11010519491231002X，邮箱 rebuild-sensitive@example.com，健康诊断"
+                            "CONVERSATION_ONLY_SENTINEL 身份证 11010519491231002X，邮箱 rebuild-sensitive@example.com，健康诊断"
                                 .to_string(),
                     },
                 )
                 .unwrap();
             store
-                .save_message(
+                .save_knowledge_note_idempotent_with_outbox(
+                    &uuid::Uuid::new_v4().to_string(),
                     "rebuild-sensitive",
-                    &ChatMessage {
-                        role: "user".to_string(),
-                        content: "银行卡 6222 0202 0202 0202，负债和贷款压力".to_string(),
-                    },
+                    "LONG_TERM_MEMORY_SENTINEL 银行卡 6222 0202 0202 0202，负债和贷款压力",
+                    "knowledge_note",
+                    "manual",
+                    &[
+                        "canonical_owner:knowledge_note".into(),
+                        "source:manual".into(),
+                    ],
+                    "private",
                 )
                 .unwrap();
         }
 
         let report = rebuild_memory_index_with_state(&state).await.unwrap();
+        let vectors = state.vector_store.lock().await.export_all_chunks().unwrap();
 
         assert_eq!(report["skipped"], 0);
+        assert_eq!(report["indexed"], 1);
+        assert_eq!(report["processed"], 1);
+        assert_eq!(report["status"], "completed");
+        assert_eq!(report["providerInvocations"], 0);
+        assert!(vectors
+            .iter()
+            .any(|chunk| chunk.content.contains("LONG_TERM_MEMORY_SENTINEL")));
+        assert!(vectors
+            .iter()
+            .all(|chunk| !chunk.content.contains("CONVERSATION_ONLY_SENTINEL")));
         assert_eq!(cloud_call_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn ordinary_and_sensitive_notes_share_one_local_rebuild_and_query_profile() {
+        clear_embedding_cache();
+        let state = crate::test_utils::test_app_state();
+        let (openai_base, cloud_call_count) = fake_cloud_embedding_endpoint().await;
+        configure_cloud_embeddings(&state, openai_base).await;
+
+        for (session_id, content) in [
+            (
+                "mixed-profile-ordinary",
+                "ORDINARY_CANONICAL_NOTE about weekend reading",
+            ),
+            (
+                "mixed-profile-sensitive",
+                "SENSITIVE_CANONICAL_NOTE 身份证 11010519491231002X 最近用药焦虑",
+            ),
+        ] {
+            create_knowledge_note_with_state(
+                uuid::Uuid::new_v4().to_string(),
+                session_id.to_string(),
+                content.to_string(),
+                "manual".to_string(),
+                &state,
+            )
+            .await
+            .unwrap();
+        }
+        let projected = crate::memory_gateway::reconcile_canonical_outboxes_with_state(&state, 20)
+            .await
+            .unwrap();
+        assert_eq!(projected.applied, 2);
+        assert_eq!(cloud_call_count.load(Ordering::SeqCst), 0);
+
+        let rebuilt = rebuild_memory_index_with_state(&state).await.unwrap();
+        assert_eq!(rebuilt["status"], "completed");
+        assert_eq!(rebuilt["indexed"], 2);
+        assert_eq!(rebuilt["skipped"], 0);
+        let chunks = state.vector_store.lock().await.export_all_chunks().unwrap();
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.embedding_profile_id.as_str())
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            1
+        );
+
+        for sentinel in ["ORDINARY_CANONICAL_NOTE", "SENSITIVE_CANONICAL_NOTE"] {
+            let result = search_memory_with_state(sentinel.to_string(), 10, &state)
+                .await
+                .unwrap();
+            assert!(result
+                .hits
+                .iter()
+                .any(|(chunk, _)| chunk.content.contains(sentinel)));
+        }
+        assert_eq!(cloud_call_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_hung_rebuild_keeps_the_active_projection_unchanged() {
+        let _env_guard = OLLAMA_ENV_TEST_LOCK.lock().unwrap();
+        clear_embedding_cache();
+        let state = crate::test_utils::test_app_state();
+        let (ollama_base, accepted_count) = fake_hanging_embedding_endpoint().await;
+        std::env::set_var("OPENLIFE_OLLAMA_BASE_URL", &ollama_base);
+        std::env::remove_var("OLLAMA_HOST");
+        {
+            let mut cfg = state.config.lock().await;
+            cfg.llm.provider = "ollama".into();
+            cfg.llm.embedding_enabled = true;
+            cfg.llm.embedding_model = "nomic-embed-text:latest".into();
+        }
+        {
+            let profile = openlife_core::embedding::EmbeddingProfile::new(
+                openlife_core::embedding::EmbeddingRouteKind::DeterministicHash,
+                "openlife-test",
+                "existing-vector-v1",
+                "builtin:test",
+                "existing-vector-artifact-v1",
+                4,
+            )
+            .unwrap();
+            state
+                .vector_store
+                .lock()
+                .await
+                .insert(
+                    "old-session",
+                    "ACTIVE_VECTOR_BEFORE_CANCEL",
+                    &[1.0, 0.0, 0.0, 0.0],
+                    &profile,
+                    "unowned:old",
+                )
+                .unwrap();
+            state
+                .memory_store
+                .lock()
+                .await
+                .save_knowledge_note_idempotent_with_outbox(
+                    &uuid::Uuid::new_v4().to_string(),
+                    "rebuild-cancel",
+                    "Plan a calm weekend with reading and a walk",
+                    "knowledge_note",
+                    "manual",
+                    &[
+                        "canonical_owner:knowledge_note".into(),
+                        "source:manual".into(),
+                    ],
+                    "private",
+                )
+                .unwrap();
+        }
+
+        let runner_state = state.clone();
+        let runner = tokio::spawn(async move {
+            memory_gateway::rebuild_memory_index_with_state(&runner_state).await
+        });
+        let job = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Some(job) =
+                    memory_gateway::get_memory_index_rebuild_progress_with_state(&state)
+                        .await
+                        .unwrap()
+                {
+                    break job;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("rebuild must publish durable progress before provider completion");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while accepted_count.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the cancellable embedding must reach the provider edge");
+        let requested = memory_gateway::cancel_memory_index_rebuild_with_state(
+            Some(job.job_id.clone()),
+            &state,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            requested.status,
+            openlife_core::vectors::VectorRebuildJobStatus::CancelRequested
+        );
+        let report = tokio::time::timeout(std::time::Duration::from_secs(2), runner)
+            .await
+            .expect("local rebuild cancellation must interrupt a hung embedding")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(report["status"], "cancelled");
+        assert_eq!(report["remoteUnknownProviderAttempts"], 1);
+        let active = state.vector_store.lock().await.export_all_chunks().unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].content, "ACTIVE_VECTOR_BEFORE_CANCEL");
+        assert_eq!(accepted_count.load(Ordering::SeqCst), 1);
+        std::env::remove_var("OPENLIFE_OLLAMA_BASE_URL");
+    }
+
+    #[tokio::test]
+    async fn embedding_failure_preserves_text_hits_with_degraded_receipt() {
+        let _env_guard = OLLAMA_ENV_TEST_LOCK.lock().unwrap();
+        clear_embedding_cache();
+        let state = crate::test_utils::test_app_state();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        std::env::set_var("OPENLIFE_OLLAMA_BASE_URL", format!("http://{address}"));
+        std::env::remove_var("OLLAMA_HOST");
+        {
+            let mut cfg = state.config.lock().await;
+            cfg.llm.provider = "ollama".into();
+            cfg.llm.embedding_enabled = true;
+            cfg.llm.embedding_model = "nomic-embed-text:latest".into();
+        }
+        {
+            let store = state.memory_store.lock().await;
+            store
+                .save_memory_record(
+                    "degraded-search",
+                    "DEGRADED_TEXT_HIT_SENTINEL",
+                    "explicit_memory",
+                    "manual:degraded-search-fixture",
+                    &["memory_id:memory:degraded".into()],
+                    "private",
+                    None,
+                )
+                .unwrap();
+        }
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = socket.read(&mut request).await.unwrap();
+            let body = r#"{"error":"ollama unavailable"}"#;
+            let response = format!(
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let result = search_memory_with_state("DEGRADED_TEXT_HIT_SENTINEL".into(), 5, &state).await;
+        std::env::remove_var("OPENLIFE_OLLAMA_BASE_URL");
+        server.await.unwrap();
+        let result = result.unwrap();
+
+        assert!(result
+            .hits
+            .iter()
+            .any(|(chunk, _)| chunk.content == "DEGRADED_TEXT_HIT_SENTINEL"));
+        assert_eq!(result.vector_status, "embedding_failed");
+        assert_eq!(
+            result.embedding_receipt.status,
+            openlife_core::embedding::EmbeddingInvocationStatus::Failed
+        );
+        assert!(result.embedding_receipt.error_digest.is_some());
+    }
+
+    #[tokio::test]
+    async fn mutable_ollama_profile_is_text_only_and_rebuild_required() {
+        let _env_guard = OLLAMA_ENV_TEST_LOCK.lock().unwrap();
+        clear_embedding_cache();
+        let state = crate::test_utils::test_app_state();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        std::env::set_var("OPENLIFE_OLLAMA_BASE_URL", format!("http://{address}"));
+        std::env::remove_var("OLLAMA_HOST");
+        {
+            let mut cfg = state.config.lock().await;
+            cfg.llm.provider = "ollama".into();
+            cfg.llm.embedding_enabled = true;
+            cfg.llm.embedding_model = "nomic-embed-text:latest".into();
+        }
+        {
+            let store = state.memory_store.lock().await;
+            store
+                .save_memory_record(
+                    "mutable-profile-search",
+                    "MUTABLE_PROFILE_TEXT_HIT",
+                    "explicit_memory",
+                    "manual:mutable-profile-fixture",
+                    &["memory_id:memory:mutable-profile".into()],
+                    "private",
+                    None,
+                )
+                .unwrap();
+        }
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = socket.read(&mut request).await.unwrap();
+            let body = r#"{"embedding":[0.1,0.2,0.3,0.4]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let result = search_memory_with_state("MUTABLE_PROFILE_TEXT_HIT".into(), 5, &state).await;
+        std::env::remove_var("OPENLIFE_OLLAMA_BASE_URL");
+        server.await.unwrap();
+        let result = result.unwrap();
+
+        assert!(result
+            .hits
+            .iter()
+            .any(|(chunk, _)| chunk.content == "MUTABLE_PROFILE_TEXT_HIT"));
+        assert_eq!(result.vector_status, "rebuild_required");
+        assert_eq!(result.embedding_profile.id, "unknown");
+        assert_eq!(
+            result.embedding_receipt.status,
+            openlife_core::embedding::EmbeddingInvocationStatus::Completed
+        );
+        assert_eq!(
+            result
+                .degraded_evidence
+                .as_ref()
+                .map(|evidence| evidence.reason_code.as_str()),
+            Some("embedding_profile_identity_unknown")
+        );
+    }
+
+    #[tokio::test]
+    async fn undo_explicit_memory_command_archives_the_canonical_memory_once() {
+        let state = crate::test_utils::test_app_state();
+        let source_user_message = "我早餐喜欢咖啡和面包";
+        let fact = openlife_core::agent::CanonicalMemoryFactDescriptor::new(
+            source_user_message,
+            openlife_core::agent::MemoryLifecycleScope::Global,
+            openlife_core::agent::MemoryLifecycleCategory::Fact,
+            openlife_core::agent::MemoryLifecycleRiskLevel::Low,
+            openlife_core::agent::MemoryLifecycleSensitivity::Internal,
+        )
+        .unwrap();
+        let (_policy, candidate, proof) =
+            crate::main_chat_kernel::test_policy_memory_admission_context(
+                "message-1",
+                source_user_message,
+                &fact,
+            );
+        let registry = {
+            state
+                .main_chat_runtime_state
+                .lock()
+                .await
+                .cancellation_registry
+                .clone()
+        };
+        let registration = registry.register("undo-command-session");
+        let receipt = crate::memory_gateway::commit_explicit_user_memory_for_turn_with_state(
+            &state,
+            "undo-command-session".into(),
+            "run-1".into(),
+            "message-1".into(),
+            fact,
+            proof,
+            source_user_message,
+            &candidate,
+            &registration.execution_epoch(),
+        )
+        .await
+        .unwrap();
+
+        let undo = undo_explicit_memory_with_state(receipt.receipt_id.clone(), &state)
+            .await
+            .unwrap()
+            .expect("canonical undo receipt");
+        assert!(undo.canonical_committed);
+        assert!(undo_explicit_memory_with_state(receipt.receipt_id, &state)
+            .await
+            .unwrap()
+            .is_none());
+        let active = {
+            let store = state.memory_lifecycle_store.as_ref().unwrap().lock().await;
+            store.list_active_records(None, 10).unwrap()
+        };
+        assert!(active.is_empty());
     }
 }

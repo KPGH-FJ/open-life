@@ -9,6 +9,10 @@ edition = "2021"
 rust-version = "1.75"
 default-run = "openlife-tauri"
 
+[features]
+default = []
+dev-extensions = []
+
 [lib]
 name = "openlife_tauri_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -21,14 +25,12 @@ tauri-build = { version = "2.2", features = [] }
 tauri = { version = "2.5", features = [] }
 futures = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-tauri-plugin-shell = "2.2"
 tauri-plugin-fs = "2.2"
 tauri-plugin-dialog = "2.2"
-tauri-plugin-store = "2.2"
-tauri-plugin-http = { version = "2.4", features = ["unsafe-headers"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.35", features = ["full"] }
+tokio-util = "0.7"
 async-trait = "0.1"
 anyhow = "1.0"
 dirs = "5.0"
@@ -36,6 +38,9 @@ chrono = "0.4"
 serde_yaml = "0.9"
 uuid = { version = "1.0", features = ["v4"] }
 sha2 = "0.10"
+rand = "0.8"
+base64 = "0.22"
+ring = "0.17"
 rusqlite = { version = "0.32", features = ["bundled"] }
 # open: cross-platform URL/file opening (used for mailto: links)
 open = "5.3"
@@ -43,10 +48,21 @@ axum = "0.7"
 log = "0.4"
 openlife-core = { path = "../openlife-core" }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service"] }
+
 [dev-dependencies]
 tauri = { version = "2.5", features = ["test"] }
 tempfile = "3.14"
+openlife-core = { path = "../openlife-core", features = ["test-utils"] }
 
 [[bin]]
 name = "openlife-a2a-server"
 path = "src/bin/a2a_server.rs"
+required-features = ["dev-extensions"]

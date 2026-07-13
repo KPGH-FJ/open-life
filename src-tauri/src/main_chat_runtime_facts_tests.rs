@@ -1,8 +1,8 @@
 use crate::main_chat_runtime_facts::{
     build_settings_runtime_route_evidence, classify_agent_self_state_query,
     classify_provider_route_query, classify_runtime_clock_query, classify_tool_availability_query,
-    provider_transmission_history_from_runs, resolve_provider_route_fact_answer,
-    run_main_chat_runtime_facts_slice_a_backend_report,
+    provider_transmission_history_from_runs, provider_transmission_history_from_runs_with_state,
+    resolve_provider_route_fact_answer, run_main_chat_runtime_facts_slice_a_backend_report,
     run_main_chat_runtime_facts_slice_b_provider_route_report,
     run_main_chat_runtime_facts_slice_c_tool_availability_report,
     run_main_chat_runtime_facts_slice_d_agent_self_state_report, FallbackEvidence,
@@ -1165,11 +1165,12 @@ mod provider_route_focused_tests {
         current_model_generated: bool,
     ) -> RuntimeRouteEvidence {
         let state = crate::test_utils::test_app_state();
-        let scheduler = state.scheduler.lock().await.clone();
+        let runtime = state.provider_runtime_snapshot().await;
         let answer = resolve_provider_route_fact_answer(
             "你现在用什么模型",
             &state,
-            &scheduler,
+            &runtime.config,
+            &runtime.scheduler,
             "session-runtime-route-focused",
             Some(current_route),
             current_model_generated,
@@ -1290,9 +1291,32 @@ async fn provider_route_runtime_route_evidence_reports_local_fallback_and_transm
         let store = state.agent_run_store.as_ref().expect("agent run store");
         store.lock().await.create_run(&run).expect("create run");
     }
+    for (event_type, status) in [
+        ("provider.started", "started"),
+        ("provider.completed", "completed"),
+    ] {
+        crate::main_chat_event_stream::append_main_chat_agent_runtime_event(
+            &state,
+            "task-route-evidence",
+            &run.id,
+            event_type,
+            "provider_request",
+            "request-route-evidence",
+            "provider_adapter",
+            serde_json::json!({
+                "requestId": "request-route-evidence",
+                "provider": "ollama",
+                "model": "llama3",
+                "status": status,
+            }),
+        )
+        .await
+        .expect("persist exact-request provider lifecycle");
+    }
 
-    let scheduler = state.scheduler.lock().await.clone();
-    let evidence = build_settings_runtime_route_evidence(&state, &scheduler).await;
+    let runtime = state.provider_runtime_snapshot().await;
+    let evidence =
+        build_settings_runtime_route_evidence(&state, &runtime.config, &runtime.scheduler).await;
 
     assert_eq!(
         evidence
@@ -1303,12 +1327,19 @@ async fn provider_route_runtime_route_evidence_reports_local_fallback_and_transm
     );
     assert_eq!(evidence.provider_readiness.validated, false);
     assert_eq!(evidence.external_transmission, "not_sent");
+    let historical_fallback = evidence
+        .fallback
+        .as_ref()
+        .expect("same-run fallback metadata remains visible");
+    assert_eq!(historical_fallback.reason, "provider_api_key_missing");
+    assert_eq!(historical_fallback.from_route, None);
+    assert!(historical_fallback.blocker_codes.is_empty());
     assert_eq!(
-        evidence
-            .fallback
+        historical_fallback
+            .to_route
             .as_ref()
-            .map(|fallback| fallback.reason.as_str()),
-        Some("provider_api_key_missing")
+            .map(|route| route.provider.as_str()),
+        Some("ollama")
     );
     assert!(evidence
         .source_refs
@@ -1317,11 +1348,87 @@ async fn provider_route_runtime_route_evidence_reports_local_fallback_and_transm
 }
 
 #[tokio::test]
+async fn provider_route_does_not_join_route_metadata_across_provider_attempts() {
+    let state = crate::test_utils::test_app_state();
+    let mut run = openlife_core::agent::AgentRun::new_chat_run(
+        "session-cross-attempt-route",
+        "exercise an exact provider request receipt",
+    );
+    run.complete(
+        "answer",
+        openlife_core::agent::ModelRouteTrace {
+            provider: "openai".into(),
+            model: "gpt-planned".into(),
+            route_type: "cloud".into(),
+            prefer_local: false,
+            local_model: "local-unused".into(),
+            reason: "planned-openai-route".into(),
+            privacy_level: openlife_core::agent::RedactionLevel::Strict,
+            latency_ms: None,
+            retry_count: 1,
+            fallback_reason: Some("first_attempt_failed".into()),
+            provider_health_is_estimated: Some(true),
+        },
+        openlife_core::agent::ContextSummary {
+            life_model_empty: true,
+            included_life_model_sections: vec![],
+            memory_hit_count: 0,
+            memory_sources: vec![],
+            used_tools_prompt: false,
+            redaction_applied: true,
+            redaction_level: openlife_core::agent::RedactionLevel::Strict,
+        },
+    );
+    {
+        let store = state.agent_run_store.as_ref().expect("agent run store");
+        store.lock().await.create_run(&run).expect("create run");
+    }
+    for (event_type, status) in [
+        ("provider.started", "started"),
+        ("provider.completed", "completed"),
+    ] {
+        crate::main_chat_event_stream::append_main_chat_agent_runtime_event(
+            &state,
+            "task-cross-attempt-route",
+            &run.id,
+            event_type,
+            "provider_request",
+            "request-anthropic-completed",
+            "provider_adapter",
+            serde_json::json!({
+                "requestId": "request-anthropic-completed",
+                "provider": "anthropic",
+                "model": "claude-actual",
+                "status": status,
+            }),
+        )
+        .await
+        .expect("persist exact second-attempt lifecycle");
+    }
+
+    let runtime = state.provider_runtime_snapshot().await;
+    let evidence =
+        build_settings_runtime_route_evidence(&state, &runtime.config, &runtime.scheduler).await;
+    let actual = evidence
+        .last_completed_route
+        .as_ref()
+        .expect("exact completed provider receipt");
+
+    assert_eq!(actual.provider, "anthropic");
+    assert_eq!(actual.model, "claude-actual");
+    assert_eq!(actual.reason, "durable_exact_request_provider_completed");
+    assert_eq!(actual.privacy_level, "unknown");
+    assert_eq!(evidence.fallback, None);
+    assert!(!actual.provider_health_is_estimated);
+}
+
+#[tokio::test]
 async fn provider_route_runtime_route_evidence_keeps_missing_transmission_instrumentation_unknown()
 {
     let state = crate::test_utils::test_app_state();
-    let scheduler = state.scheduler.lock().await.clone();
-    let evidence = build_settings_runtime_route_evidence(&state, &scheduler).await;
+    let runtime = state.provider_runtime_snapshot().await;
+    let evidence =
+        build_settings_runtime_route_evidence(&state, &runtime.config, &runtime.scheduler).await;
 
     assert_eq!(evidence.answer_scope, "settings_readiness");
     assert_eq!(evidence.actual_route, None);
@@ -1330,7 +1437,7 @@ async fn provider_route_runtime_route_evidence_keeps_missing_transmission_instru
 }
 
 #[test]
-fn provider_transmission_view_records_local_not_sent_with_positive_route_evidence() {
+fn provider_transmission_view_keeps_route_only_local_transmission_unknown() {
     let run = provider_transmission_completed_run(
         "run-local-route",
         "ollama",
@@ -1341,11 +1448,11 @@ fn provider_transmission_view_records_local_not_sent_with_positive_route_evidenc
 
     let item = provider_transmission_item(&run);
 
-    assert_eq!(item.status, "not_sent");
+    assert_eq!(item.status, "unknown");
     assert_eq!(item.provider, "ollama");
     assert_eq!(item.model, "llama3");
     assert_eq!(item.route_type, "local");
-    assert_eq!(item.truth_confidence, "verified");
+    assert_eq!(item.truth_confidence, "unknown");
     assert!(item
         .source_refs
         .iter()
@@ -1353,7 +1460,7 @@ fn provider_transmission_view_records_local_not_sent_with_positive_route_evidenc
 }
 
 #[test]
-fn provider_transmission_view_records_cloud_sent_with_cloud_route_evidence() {
+fn provider_transmission_view_keeps_route_only_cloud_transmission_unknown() {
     let run = provider_transmission_completed_run(
         "run-cloud-route",
         "deepseek",
@@ -1364,11 +1471,11 @@ fn provider_transmission_view_records_cloud_sent_with_cloud_route_evidence() {
 
     let item = provider_transmission_item(&run);
 
-    assert_eq!(item.status, "sent");
+    assert_eq!(item.status, "unknown");
     assert_eq!(item.provider, "deepseek");
     assert_eq!(item.model, "deepseek-chat");
     assert_eq!(item.route_type, "cloud");
-    assert_eq!(item.truth_confidence, "verified");
+    assert_eq!(item.truth_confidence, "unknown");
 }
 
 #[test]
@@ -1555,7 +1662,10 @@ fn provider_transmission_view_never_serializes_key_material() {
     let item = provider_transmission_item(&run);
     let serialized = serde_json::to_string(&item).expect("serialize provider transmission view");
 
-    assert_eq!(item.status, "sent");
+    assert_eq!(
+        item.status, "unknown",
+        "AgentRun prose and liveProviderInvoked booleans are not durable exact-request proof"
+    );
     for forbidden in [
         "sk-provider-secret",
         "secret-token",
@@ -1569,6 +1679,57 @@ fn provider_transmission_view_never_serializes_key_material() {
             "provider transmission view leaked {forbidden}: {serialized}"
         );
     }
+}
+
+#[tokio::test]
+async fn provider_transmission_sent_requires_durable_exact_request_completion() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let run = provider_transmission_completed_run(
+        "run-durable-provider-history",
+        "openai",
+        "gpt-test",
+        "cloud",
+        "configured_cloud_route",
+    );
+    for (event_type, status) in [
+        ("provider.started", "started"),
+        ("provider.completed", "completed"),
+    ] {
+        crate::main_chat_event_stream::append_main_chat_agent_runtime_event(
+            &state,
+            "task-durable-provider-history",
+            &run.id,
+            event_type,
+            "provider_request",
+            "request-durable-provider-history",
+            "provider_adapter",
+            serde_json::json!({
+                "requestId": "request-durable-provider-history",
+                "provider": "openai",
+                "model": "gpt-test",
+                "status": status,
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    let item = provider_transmission_history_from_runs_with_state(&state, &[run])
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+
+    assert_eq!(item.status, "sent");
+    assert_eq!(item.truth_confidence, "verified");
+    assert!(item
+        .reason
+        .contains("durable_exact_request_provider_completed"));
+    assert!(item
+        .source_refs
+        .iter()
+        .any(|source| source.source == "turn_event_store"));
 }
 
 fn provider_transmission_item(

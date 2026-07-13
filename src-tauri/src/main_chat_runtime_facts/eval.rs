@@ -3,7 +3,6 @@ use openlife_core::agent::main_chat_agent_v1::{
     ExecutionTranscriptEntryKind, MainChatAgentStrategy, MainChatPolicyLevel,
 };
 use openlife_core::agent::model_router::{ModelRouter, ProviderAvailability};
-use openlife_core::agent::ModelRouteTrace;
 use openlife_core::llm::ChatMessage;
 use openlife_core::scheduler::InferenceScheduler;
 use openlife_core::tool_manifest::{ToolManifest, ToolSource};
@@ -1049,7 +1048,8 @@ async fn run_slice_d_rf16_case(entry_point: &'static str) -> MainChatRuntimeFact
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     configure_agent_self_state_direct_answer_state(&state).await;
     let session_id = format!("runtime-facts-slice-d-{entry_point}-rf16");
-    let _ = crate::main_chat_send::send_message_with_state(
+    let _ = crate::main_chat_send::send_message_with_operation_state(
+        uuid::Uuid::new_v4().to_string(),
         session_id.clone(),
         vec![ChatMessage {
             role: "user".into(),
@@ -1066,7 +1066,8 @@ async fn run_slice_d_rf17_case(entry_point: &'static str) -> MainChatRuntimeFact
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     configure_agent_self_state_direct_answer_state(&state).await;
     let session_id = format!("runtime-facts-slice-d-{entry_point}-rf17");
-    let _ = crate::main_chat_send::send_message_with_state(
+    let _ = crate::main_chat_send::send_message_with_operation_state(
+        uuid::Uuid::new_v4().to_string(),
         session_id.clone(),
         vec![ChatMessage {
             role: "user".into(),
@@ -1083,7 +1084,8 @@ async fn run_slice_d_rf18_case(entry_point: &'static str) -> MainChatRuntimeFact
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     configure_agent_self_state_direct_answer_state(&state).await;
     let session_id = format!("runtime-facts-slice-d-{entry_point}-rf18");
-    let _ = crate::main_chat_send::send_message_with_state(
+    let _ = crate::main_chat_send::send_message_with_operation_state(
+        uuid::Uuid::new_v4().to_string(),
         session_id.clone(),
         vec![ChatMessage {
             role: "user".into(),
@@ -1610,6 +1612,7 @@ async fn run_slice_b_rf07_case(entry_point: &'static str) -> MainChatRuntimeFact
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     configure_provider_route_state(
         &state,
+        entry_point,
         ProviderRouteStateConfig {
             configured_provider: "openai",
             configured_model: "gpt-configured-default",
@@ -1617,7 +1620,9 @@ async fn run_slice_b_rf07_case(entry_point: &'static str) -> MainChatRuntimeFact
             scheduler_model: "gpt-slice-b-current",
             api_key: "slice-b-current-test-key",
             network_enabled: true,
-            scripted_response: Some("model output should be replaced by provider route facts"),
+            local_provider_response: Some(
+                "model output should be replaced by provider route facts",
+            ),
         },
     )
     .await;
@@ -1635,6 +1640,7 @@ async fn run_slice_b_rf08_case(entry_point: &'static str) -> MainChatRuntimeFact
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     configure_provider_route_state(
         &state,
+        entry_point,
         ProviderRouteStateConfig {
             configured_provider: "openai",
             configured_model: "gpt-configured-default",
@@ -1642,7 +1648,7 @@ async fn run_slice_b_rf08_case(entry_point: &'static str) -> MainChatRuntimeFact
             scheduler_model: "gpt-slice-b-planned",
             api_key: "slice-b-planned-test-key",
             network_enabled: true,
-            scripted_response: Some("model should not answer previous runtime fact route"),
+            local_provider_response: Some("model should not answer previous runtime fact route"),
         },
     )
     .await;
@@ -1651,7 +1657,8 @@ async fn run_slice_b_rf08_case(entry_point: &'static str) -> MainChatRuntimeFact
         *source = fixed_clock_source();
     }
     let session_id = format!("runtime-facts-slice-b-{entry_point}-rf08");
-    let _ = crate::main_chat_send::send_message_with_state(
+    let _ = crate::main_chat_send::send_message_with_operation_state(
+        uuid::Uuid::new_v4().to_string(),
         session_id.clone(),
         vec![ChatMessage {
             role: "user".into(),
@@ -1673,8 +1680,21 @@ async fn run_slice_b_rf08_case(entry_point: &'static str) -> MainChatRuntimeFact
 
 async fn run_slice_b_rf09_case(entry_point: &'static str) -> MainChatRuntimeFactsScenarioEvidence {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let session_id = format!("runtime-facts-slice-b-{entry_point}-rf09");
+    if let Err(error) =
+        seed_completed_model_generation(&state, &session_id, "anthropic", "claude-last", "cloud")
+            .await
+    {
+        return MainChatRuntimeFactsScenarioEvidence::failed(
+            "RF-09",
+            entry_point,
+            "你现在用什么模型",
+            error,
+        );
+    }
     configure_provider_route_state(
         &state,
+        entry_point,
         ProviderRouteStateConfig {
             configured_provider: "deepseek",
             configured_model: "deepseek-chat",
@@ -1682,32 +1702,20 @@ async fn run_slice_b_rf09_case(entry_point: &'static str) -> MainChatRuntimeFact
             scheduler_model: "gpt-slice-b-current",
             api_key: "slice-b-route-differs-test-key",
             network_enabled: true,
-            scripted_response: Some("model output should be replaced by separated route facts"),
+            local_provider_response: Some(
+                "model output should be replaced by separated route facts",
+            ),
         },
     )
     .await;
-    seed_completed_model_generation(
-        &state,
-        &format!("runtime-facts-slice-b-{entry_point}-rf09"),
-        "anthropic",
-        "claude-last",
-        "cloud",
-    )
-    .await;
-    run_slice_b_case(
-        "RF-09",
-        format!("runtime-facts-slice-b-{entry_point}-rf09"),
-        entry_point,
-        "你现在用什么模型",
-        state,
-    )
-    .await
+    run_slice_b_case("RF-09", session_id, entry_point, "你现在用什么模型", state).await
 }
 
 async fn run_slice_b_rf10_case(entry_point: &'static str) -> MainChatRuntimeFactsScenarioEvidence {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     configure_provider_route_state(
         &state,
+        entry_point,
         ProviderRouteStateConfig {
             configured_provider: "openai",
             configured_model: "gpt-blocked",
@@ -1715,7 +1723,7 @@ async fn run_slice_b_rf10_case(entry_point: &'static str) -> MainChatRuntimeFact
             scheduler_model: "gpt-blocked",
             api_key: "",
             network_enabled: false,
-            scripted_response: None,
+            local_provider_response: None,
         },
     )
     .await;
@@ -1764,20 +1772,38 @@ struct ProviderRouteStateConfig {
     scheduler_model: &'static str,
     api_key: &'static str,
     network_enabled: bool,
-    scripted_response: Option<&'static str>,
+    local_provider_response: Option<&'static str>,
 }
 
 async fn configure_provider_route_state(
     state: &Arc<AppState>,
+    entry_point: &'static str,
     route_config: ProviderRouteStateConfig,
 ) {
+    let (provider_base, scripted_fallback) = match route_config.local_provider_response {
+        Some(response) => match configure_runtime_facts_loopback_provider(
+            state,
+            response,
+            entry_point == "stream",
+        )
+        .await
+        {
+            Ok(provider_base) => (provider_base, None),
+            Err(_) => ("https://example.invalid/v1".into(), Some(response)),
+        },
+        None => ("https://example.invalid/v1".into(), None),
+    };
     {
         let mut config = state.config.lock().await;
         config.prefer_local_model = false;
         config.llm.provider = route_config.configured_provider.into();
+        config.llm.openai_base = provider_base.clone();
         config.llm.chat_model = route_config.configured_model.into();
         config.llm.openai_key = route_config.api_key.into();
         config.system.network_policy.enabled = route_config.network_enabled;
+        if route_config.local_provider_response.is_some() {
+            config.system.network_policy.default_decision = "allow".into();
+        }
     }
     {
         let mut scheduler = state.scheduler.lock().await;
@@ -1785,18 +1811,52 @@ async fn configure_provider_route_state(
             "unused-local-model".into(),
             false,
             route_config.scheduler_provider.into(),
-            "https://example.invalid/v1".into(),
+            provider_base,
             route_config.api_key.into(),
             route_config.scheduler_model.into(),
             "text-embedding-test".into(),
             false,
         );
-        *scheduler = if let Some(response) = route_config.scripted_response {
+        *scheduler = if let Some(response) = scripted_fallback {
+            // Non-test builds keep the diagnostic report callable without
+            // exposing a loopback harness. Scripted output remains explicitly
+            // `not_attempted`, so it cannot earn provider invocation credit.
             next_scheduler.with_scripted_generation_response(response)
         } else {
             next_scheduler
         };
     }
+}
+
+#[cfg(test)]
+async fn configure_runtime_facts_loopback_provider(
+    state: &Arc<AppState>,
+    response: &'static str,
+    streaming: bool,
+) -> Result<String, String> {
+    if streaming {
+        let release = crate::main_chat_acceptance_test_support::configure_live_provider_eval_state_with_barriered_streaming_local_http_provider(
+            state,
+            vec![(response, std::time::Duration::ZERO)],
+        )
+        .await;
+        release.store(true, std::sync::atomic::Ordering::SeqCst);
+    } else {
+        crate::main_chat_acceptance_test_support::configure_live_provider_eval_state_with_local_http_provider(
+            state, response,
+        )
+        .await;
+    }
+    Ok(state.scheduler.lock().await.openai_base.clone())
+}
+
+#[cfg(not(test))]
+async fn configure_runtime_facts_loopback_provider(
+    _state: &Arc<AppState>,
+    _response: &'static str,
+    _streaming: bool,
+) -> Result<String, String> {
+    Err("runtime_facts_loopback_provider_harness_unavailable".into())
 }
 
 async fn run_slice_c_rf11_case(entry_point: &'static str) -> MainChatRuntimeFactsScenarioEvidence {
@@ -1840,6 +1900,7 @@ async fn run_slice_c_rf13_case(entry_point: &'static str) -> MainChatRuntimeFact
             "low",
             false,
             "rf13_server",
+            openlife_core::tool_manifest::ToolIdempotencyContract::NonIdempotent,
         ),
     )
     .await;
@@ -1868,6 +1929,7 @@ async fn run_slice_c_rf14_case(entry_point: &'static str) -> MainChatRuntimeFact
             "low",
             false,
             "rf14_unknown_server",
+            openlife_core::tool_manifest::ToolIdempotencyContract::Idempotent,
         ),
     )
     .await;
@@ -1938,6 +2000,7 @@ fn mcp_manifest_snapshot(
     permission_level: &str,
     requires_confirmation: bool,
     server_name: &str,
+    idempotency_contract: openlife_core::tool_manifest::ToolIdempotencyContract,
 ) -> ToolManifest {
     ToolManifest {
         id: id.into(),
@@ -1958,6 +2021,7 @@ fn mcp_manifest_snapshot(
         enabled: true,
         declarative_only: false,
         action_type: action_type.into(),
+        idempotency_contract,
         tags: vec!["runtime_facts_eval".into()],
     }
 }
@@ -1968,37 +2032,69 @@ async fn seed_completed_model_generation(
     provider: &str,
     model: &str,
     route_type: &str,
-) {
-    let Some(store_arc) = state.agent_run_store.as_ref() else {
-        return;
-    };
-    let mut run =
-        openlife_core::agent::AgentRun::new_chat_run(session_id, "seed previous model generation");
-    let route = ModelRouteTrace {
-        provider: provider.into(),
-        model: model.into(),
-        route_type: route_type.into(),
-        prefer_local: false,
-        local_model: "unused-local-model".into(),
-        reason: "seeded_last_completed_generation".into(),
-        privacy_level: openlife_core::agent::RedactionLevel::None,
-        latency_ms: None,
-        retry_count: 0,
-        fallback_reason: None,
-        provider_health_is_estimated: Some(false),
-    };
-    let context_summary = openlife_core::agent::ContextSummary {
-        life_model_empty: true,
-        included_life_model_sections: Vec::new(),
-        memory_hit_count: 0,
-        memory_sources: Vec::new(),
-        used_tools_prompt: false,
-        redaction_applied: false,
-        redaction_level: openlife_core::agent::RedactionLevel::None,
-    };
-    run.complete("seeded previous model generation", route, context_summary);
-    let store = store_arc.lock().await;
-    let _ = store.create_run(&run);
+) -> Result<(), String> {
+    if route_type != "cloud" {
+        return Err("runtime-facts seed currently requires a cloud adapter route".into());
+    }
+    let provider_base =
+        configure_runtime_facts_loopback_provider(state, "seeded previous model generation", false)
+            .await?;
+    {
+        let mut config = state.config.lock().await;
+        config.prefer_local_model = false;
+        config.llm.provider = provider.into();
+        config.llm.openai_base = provider_base.clone();
+        config.llm.chat_model = model.into();
+        config.llm.openai_key = "runtime-facts-seed-key".into();
+        config.system.network_policy.enabled = true;
+        config.system.network_policy.default_decision = "allow".into();
+    }
+    {
+        let mut scheduler = state.scheduler.lock().await;
+        *scheduler = InferenceScheduler::new(
+            "unused-local-model".into(),
+            false,
+            provider.into(),
+            provider_base,
+            "runtime-facts-seed-key".into(),
+            model.into(),
+            "text-embedding-test".into(),
+            false,
+        );
+    }
+    let result = crate::main_chat_send::send_message_with_operation_state(
+        uuid::Uuid::new_v4().to_string(),
+        session_id.into(),
+        vec![ChatMessage {
+            role: "user".into(),
+            content: "Answer with one short sentence about this route-evidence seed.".into(),
+        }],
+        None,
+        state,
+    )
+    .await?;
+    let response = serde_json::to_value(result).map_err(|error| error.to_string())?;
+    let generation = response
+        .get("reasoning_trace")
+        .and_then(|trace| trace.get("generation_result"))
+        .ok_or_else(|| "seeded provider generation metadata missing".to_string())?;
+    let exact_receipt = generation
+        .get("providerReceiptStatus")
+        .and_then(Value::as_str)
+        == Some("completed")
+        && generation
+            .get("providerReceiptProvider")
+            .and_then(Value::as_str)
+            == Some(provider)
+        && generation
+            .get("providerReceiptModel")
+            .and_then(Value::as_str)
+            == Some(model)
+        && generation.get("modelGenerated").and_then(Value::as_bool) == Some(true);
+    if !exact_receipt {
+        return Err("seeded provider generation lacked an exact completed receipt".into());
+    }
+    Ok(())
 }
 
 async fn run_slice_b_case(
@@ -2588,7 +2684,8 @@ async fn runtime_fact_command_response(
 ) -> Result<Value, String> {
     match entry_point {
         "send" => {
-            let result = crate::main_chat_send::send_message_with_state(
+            let result = crate::main_chat_send::send_message_with_operation_state(
+                uuid::Uuid::new_v4().to_string(),
                 session_id,
                 vec![ChatMessage {
                     role: "user".into(),
@@ -2603,7 +2700,8 @@ async fn runtime_fact_command_response(
         }
         "stream" => {
             let mut emitted_events = Vec::<(String, Value)>::new();
-            crate::main_chat_streaming::start_stream_message_with_state(
+            crate::main_chat_streaming::start_stream_message_with_operation_state(
+                uuid::Uuid::new_v4().to_string(),
                 session_id,
                 vec![ChatMessage {
                     role: "user".into(),
@@ -2665,7 +2763,8 @@ async fn run_slice_a_case(
     let session_id = format!("runtime-facts-{entry_point}-{scenario_id}");
     let response = match entry_point {
         "send" => {
-            let result = crate::main_chat_send::send_message_with_state(
+            let result = crate::main_chat_send::send_message_with_operation_state(
+                uuid::Uuid::new_v4().to_string(),
                 session_id,
                 vec![ChatMessage {
                     role: "user".into(),
@@ -2683,7 +2782,8 @@ async fn run_slice_a_case(
         }
         "stream" => {
             let mut emitted_events = Vec::<(String, Value)>::new();
-            let result = crate::main_chat_streaming::start_stream_message_with_state(
+            let result = crate::main_chat_streaming::start_stream_message_with_operation_state(
+                uuid::Uuid::new_v4().to_string(),
                 session_id,
                 vec![ChatMessage {
                     role: "user".into(),
@@ -3086,7 +3186,8 @@ async fn run_runtime_clock_negative_planning_case() -> bool {
         )
         .with_scripted_generation_response("provider handled planning question");
     }
-    let result = crate::main_chat_send::send_message_with_state(
+    let result = crate::main_chat_send::send_message_with_operation_state(
+        uuid::Uuid::new_v4().to_string(),
         "runtime-facts-negative-planning".into(),
         vec![ChatMessage {
             role: "user".into(),
@@ -3114,13 +3215,21 @@ async fn run_runtime_clock_negative_planning_case() -> bool {
             .and_then(Value::as_str)
             != Some(RUNTIME_FACT_SOURCE_TYPE)
         && generation
-            .and_then(|value| value.get("modelGenerated"))
+            .and_then(|value| value.get("providerGenerationPath"))
+            .and_then(Value::as_str)
+            == Some("main_chat_direct_answer_scheduler")
+        && generation
+            .and_then(|value| value.get("scriptedProviderResponse"))
             .and_then(Value::as_bool)
             == Some(true)
         && generation
-            .and_then(|value| value.get("schedulerGenerationCalled"))
+            .and_then(|value| value.get("modelGenerated"))
             .and_then(Value::as_bool)
-            == Some(true)
+            == Some(false)
+        && generation
+            .and_then(|value| value.get("providerReceiptStatus"))
+            .and_then(Value::as_str)
+            == Some("not_attempted")
 }
 
 async fn seed_conflicting_knowledge_root(

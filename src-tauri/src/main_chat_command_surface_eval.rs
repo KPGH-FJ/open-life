@@ -264,9 +264,11 @@ async fn run_main_chat_command_surface_state_eval_case(
         content: user_text.into(),
     }];
     let selected_skill_id = main_chat_command_surface_eval_selected_skill_id(scenario);
+    let operation_id = uuid::Uuid::new_v4().to_string();
     let (response_value, task_session_id, legacy_fallback_used) = match entry_point {
         MainChatCommandSurfaceEvalEntryPoint::Send => {
-            let result = crate::main_chat_send::send_message_with_state(
+            let result = crate::main_chat_send::send_message_with_operation_state(
+                operation_id,
                 session_id.clone(),
                 messages,
                 selected_skill_id.map(str::to_string),
@@ -286,7 +288,8 @@ async fn run_main_chat_command_surface_state_eval_case(
         }
         MainChatCommandSurfaceEvalEntryPoint::Stream => {
             let mut emitted_events = Vec::<(String, serde_json::Value)>::new();
-            crate::main_chat_streaming::start_stream_message_with_state(
+            crate::main_chat_streaming::start_stream_message_with_operation_state(
+                operation_id,
                 session_id.clone(),
                 messages,
                 selected_skill_id.map(str::to_string),
@@ -496,27 +499,30 @@ pub(crate) async fn configure_main_chat_command_surface_eval_state(
 ) -> Result<(), String> {
     match scenario {
         MainChatCommandSurfaceEvalScenario::DirectProviderTrace => {
-            let mut scheduler = state.scheduler.lock().await;
-            *scheduler = scripted_eval_scheduler(
+            install_scripted_eval_provider(
+                state,
                 "gpt-command-surface-eval-direct",
                 "command-surface eval direct provider reply",
-            );
+            )
+            .await;
         }
         MainChatCommandSurfaceEvalScenario::MemoryContextDirectAnswerSuccess => {
             seed_command_surface_memory_context(state).await?;
-            let mut scheduler = state.scheduler.lock().await;
-            *scheduler = scripted_eval_scheduler(
+            install_scripted_eval_provider(
+                state,
                 "gpt-command-surface-eval-memory-context",
                 "command-surface eval direct reply grounded in accepted memory context",
-            );
+            )
+            .await;
         }
         MainChatCommandSurfaceEvalScenario::MemoryConflictCompareSuccess => {
             seed_command_surface_memory_conflict_context(state).await?;
-            let mut scheduler = state.scheduler.lock().await;
-            *scheduler = scripted_eval_scheduler(
+            install_scripted_eval_provider(
+                state,
                 "gpt-command-surface-eval-memory-conflict",
                 "command-surface eval direct reply comparing visible conflicting memory facts",
-            );
+            )
+            .await;
         }
         MainChatCommandSurfaceEvalScenario::FileReadSuccess => {
             let workspace_root = std::env::current_dir()
@@ -539,8 +545,8 @@ pub(crate) async fn configure_main_chat_command_surface_eval_state(
                 .join("Cargo.toml")
                 .to_string_lossy()
                 .to_string();
-            let mut scheduler = state.scheduler.lock().await;
-            *scheduler = scripted_eval_scheduler(
+            install_scripted_eval_provider(
+                state,
                 "gpt-command-surface-eval-file-read",
                 serde_json::json!({
                     "final": "I will read the workspace file first.",
@@ -555,7 +561,8 @@ pub(crate) async fn configure_main_chat_command_surface_eval_state(
                     "warnings": []
                 })
                 .to_string(),
-            );
+            )
+            .await;
         }
         MainChatCommandSurfaceEvalScenario::SessionSearchSuccess => {
             {
@@ -572,8 +579,8 @@ pub(crate) async fn configure_main_chat_command_surface_eval_state(
                         format!("seed command-surface session search memory failed: {error}")
                     })?;
             }
-            let mut scheduler = state.scheduler.lock().await;
-            *scheduler = scripted_eval_scheduler(
+            install_scripted_eval_provider(
+                state,
                 "gpt-command-surface-eval-session-search",
                 serde_json::json!({
                     "final": "I will search prior session memory first.",
@@ -589,7 +596,8 @@ pub(crate) async fn configure_main_chat_command_surface_eval_state(
                     "warnings": []
                 })
                 .to_string(),
-            );
+            )
+            .await;
         }
         MainChatCommandSurfaceEvalScenario::PlanExecuteDraft => {}
         MainChatCommandSurfaceEvalScenario::SelectedSkillContextSuccess => {}
@@ -599,11 +607,12 @@ pub(crate) async fn configure_main_chat_command_surface_eval_state(
                 let mut config = state.config.lock().await;
                 config.system.knowledge_roots.push(root);
             }
-            let mut scheduler = state.scheduler.lock().await;
-            *scheduler = scripted_eval_scheduler(
+            install_scripted_eval_provider(
+                state,
                 "gpt-command-surface-eval-knowledge-assets",
                 "command-surface eval direct reply grounded in bounded knowledge assets",
-            );
+            )
+            .await;
         }
         MainChatCommandSurfaceEvalScenario::KnowledgeAssetEditProposal => {
             let root = create_command_surface_knowledge_asset_root()?;
@@ -619,8 +628,8 @@ pub(crate) async fn configure_main_chat_command_surface_eval_state(
                 let mut config = state.config.lock().await;
                 config.system.network_policy.enabled = false;
             }
-            let mut scheduler = state.scheduler.lock().await;
-            *scheduler = scripted_eval_scheduler(
+            install_scripted_eval_provider(
+                state,
                 "gpt-command-surface-eval-web-loop",
                 serde_json::json!({
                     "final": "I will run the governed web read first.",
@@ -636,12 +645,22 @@ pub(crate) async fn configure_main_chat_command_surface_eval_state(
                     "warnings": []
                 })
                 .to_string(),
-            );
+            )
+            .await;
         }
         MainChatCommandSurfaceEvalScenario::WebAgentLoopSuccess => {
             {
                 let mut config = state.config.lock().await;
                 config.system.network_policy.enabled = true;
+                // This frozen fixture verifies a successful read/tool path,
+                // not the separate Ask consent scenario. Seed the canonical
+                // deterministic policy explicitly instead of bypassing the
+                // ToolGateway or manufacturing a permission receipt.
+                config
+                    .system
+                    .network_policy
+                    .tool_overrides
+                    .insert("web.search".into(), "allow".into());
             }
             {
                 let mut fixture = state.web_search_fixture_output.lock().await;
@@ -650,8 +669,8 @@ pub(crate) async fn configure_main_chat_command_surface_eval_state(
                         .into(),
                 );
             }
-            let mut scheduler = state.scheduler.lock().await;
-            *scheduler = scripted_eval_scheduler(
+            install_scripted_eval_provider(
+                state,
                 "gpt-command-surface-eval-web-loop-success",
                 serde_json::json!({
                     "final": "I will run the governed web read first.",
@@ -667,11 +686,12 @@ pub(crate) async fn configure_main_chat_command_surface_eval_state(
                     "warnings": []
                 })
                 .to_string(),
-            );
+            )
+            .await;
         }
         MainChatCommandSurfaceEvalScenario::MissingMcpBlocker => {
-            let mut scheduler = state.scheduler.lock().await;
-            *scheduler = scripted_eval_scheduler(
+            install_scripted_eval_provider(
+                state,
                 "gpt-command-surface-eval-mcp-missing-fallback",
                 serde_json::json!({
                     "final": "I cannot complete the requested MCP read without a governed observation.",
@@ -680,12 +700,13 @@ pub(crate) async fn configure_main_chat_command_surface_eval_state(
                     "warnings": []
                 })
                 .to_string(),
-            );
+            )
+            .await;
         }
         MainChatCommandSurfaceEvalScenario::RegisteredMcpReadSuccess => {
             grant_builtin_echo_read_once(state).await?;
-            let mut scheduler = state.scheduler.lock().await;
-            *scheduler = scripted_eval_scheduler(
+            install_scripted_eval_provider(
+                state,
                 "gpt-command-surface-eval-mcp-fallback",
                 serde_json::json!({
                     "final": "I can answer without a tool.",
@@ -694,12 +715,13 @@ pub(crate) async fn configure_main_chat_command_surface_eval_state(
                     "warnings": []
                 })
                 .to_string(),
-            );
+            )
+            .await;
         }
         MainChatCommandSurfaceEvalScenario::RegisteredMcpAgentLoopSuccess => {
             grant_builtin_echo_read_once(state).await?;
-            let mut scheduler = state.scheduler.lock().await;
-            *scheduler = scripted_eval_scheduler(
+            install_scripted_eval_provider(
+                state,
                 "gpt-command-surface-eval-mcp-loop",
                 serde_json::json!({
                     "final": "I will run the registered MCP read first.",
@@ -712,7 +734,8 @@ pub(crate) async fn configure_main_chat_command_surface_eval_state(
                     "warnings": []
                 })
                 .to_string(),
-            );
+            )
+            .await;
         }
         MainChatCommandSurfaceEvalScenario::MultiReadAgentLoopSuccess => {
             {
@@ -745,8 +768,8 @@ pub(crate) async fn configure_main_chat_command_surface_eval_state(
                         format!("seed command-surface multi-read memory B failed: {error}")
                     })?;
             }
-            let mut scheduler = state.scheduler.lock().await;
-            *scheduler = scripted_eval_scheduler(
+            install_scripted_eval_provider(
+                state,
                 "gpt-command-surface-eval-multi-read-loop",
                 serde_json::json!({
                     "final": "I will run two governed reads before answering.",
@@ -772,11 +795,12 @@ pub(crate) async fn configure_main_chat_command_surface_eval_state(
                     "warnings": []
                 })
                 .to_string(),
-            );
+            )
+            .await;
         }
         MainChatCommandSurfaceEvalScenario::RegisteredMcpPermissionProposal => {
-            let mut scheduler = state.scheduler.lock().await;
-            *scheduler = scripted_eval_scheduler(
+            install_scripted_eval_provider(
+                state,
                 "gpt-command-surface-eval-mcp-permission-fallback",
                 serde_json::json!({
                     "final": "I can answer only after permission is reviewed.",
@@ -785,11 +809,12 @@ pub(crate) async fn configure_main_chat_command_surface_eval_state(
                     "warnings": []
                 })
                 .to_string(),
-            );
+            )
+            .await;
         }
         MainChatCommandSurfaceEvalScenario::RegisteredMcpAgentLoopPermissionProposal => {
-            let mut scheduler = state.scheduler.lock().await;
-            *scheduler = scripted_eval_scheduler(
+            install_scripted_eval_provider(
+                state,
                 "gpt-command-surface-eval-mcp-permission-loop",
                 serde_json::json!({
                     "final": "I will run the registered MCP read after permission review.",
@@ -802,7 +827,8 @@ pub(crate) async fn configure_main_chat_command_surface_eval_state(
                     "warnings": []
                 })
                 .to_string(),
-            );
+            )
+            .await;
         }
         MainChatCommandSurfaceEvalScenario::ProposalPath => {}
     }
@@ -841,7 +867,7 @@ pub(crate) fn main_chat_command_surface_eval_user_text(
             "Propose an edit to AGENTS.md knowledge asset: add a bounded capability evidence note."
         }
         MainChatCommandSurfaceEvalScenario::ProposalPath => {
-            "Please remember that I prefer morning writing blocks."
+            "Please remember this private health fact: coffee causes heart palpitations."
         }
         MainChatCommandSurfaceEvalScenario::WebPolicyBlocker => {
             "Please web search OpenLife release notes."
@@ -930,21 +956,29 @@ pub(crate) fn main_chat_command_surface_eval_session_id(
     )
 }
 
-fn scripted_eval_scheduler(
+async fn install_scripted_eval_provider(
+    state: &Arc<AppState>,
     model: impl Into<String>,
     response: impl Into<String>,
-) -> openlife_core::scheduler::InferenceScheduler {
-    openlife_core::scheduler::InferenceScheduler::new(
-        "unused-local-model".into(),
-        false,
-        "openai".into(),
-        "https://example.invalid/v1".into(),
-        "test-key".into(),
-        model.into(),
-        "text-embedding-test".into(),
-        false,
-    )
-    .with_scripted_generation_response(response.into())
+) {
+    let mut config = state.config.lock().await.clone();
+    config.local_model = "unused-local-model".into();
+    config.prefer_local_model = false;
+    config.llm.provider = "openai".into();
+    config.llm.openai_base = "https://example.invalid/v1".into();
+    config.llm.openai_key = "test-key".into();
+    config.llm.chat_model = model.into();
+    config.llm.embedding_model = "text-embedding-test".into();
+    config.llm.embedding_enabled = false;
+    state.replace_provider_runtime_config(config).await;
+
+    // Scripted generation is an adapter fixture on the already coherent
+    // provider generation. It must not bypass the Config+Scheduler authority
+    // by constructing and installing a scheduler in isolation.
+    let mut scheduler = state.scheduler.lock().await;
+    *scheduler = scheduler
+        .clone()
+        .with_scripted_generation_response(response.into());
 }
 
 pub(crate) async fn grant_builtin_echo_read_once(state: &Arc<AppState>) -> Result<(), String> {
@@ -969,7 +1003,10 @@ async fn seed_command_surface_memory_context(state: &Arc<AppState>) -> Result<()
         serde_json::json!({
             "content": "User prefers concise execution-first answers with source-backed caveats.",
             "scope": "global",
-            "category": "preference"
+            "category": "preference",
+            "candidateKind": "preference",
+            "riskLevel": "low",
+            "sensitivity": "internal"
         }),
         "Command-surface eval seeds one accepted memory preference for bounded context.",
         0.91,
@@ -981,7 +1018,8 @@ async fn seed_command_surface_memory_context(state: &Arc<AppState>) -> Result<()
     let input = openlife_core::agent::MemoryLifecycleAcceptanceInput::from_memory_proposal(
         &proposal,
         "User prefers concise execution-first answers with source-backed caveats.".into(),
-    );
+    )
+    .map_err(|error| format!("seed command-surface memory descriptor failed: {error}"))?;
     let store_arc = state
         .memory_lifecycle_store
         .as_ref()
@@ -1049,7 +1087,8 @@ async fn seed_command_surface_memory_conflict_context(state: &Arc<AppState>) -> 
                 openlife_core::agent::MemoryLifecycleAcceptanceInput::from_memory_proposal(
                     &proposal,
                     content.into(),
-                ),
+                )
+                .map_err(|error| format!("seed memory conflict descriptor failed: {error}"))?,
             )
             .map_err(|error| format!("seed memory conflict lifecycle record failed: {error}"))?;
     }
@@ -1068,6 +1107,9 @@ fn command_surface_memory_conflict_proposal(
             "content": content,
             "scope": "global",
             "category": "preference",
+            "candidateKind": "preference",
+            "riskLevel": "low",
+            "sensitivity": "internal",
             "conflictIds": conflict_ids
         }),
         "Command-surface eval seeds conflicting accepted memory candidates for comparison.",
@@ -1170,41 +1212,12 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                     session.status
                 ));
             }
-            let generation_entry = transcript
-                .iter()
-                .find(|entry| {
-                    entry
-                        .summary
-                        .contains("DirectAnswer generated a model response")
-                })
-                .ok_or_else(|| "missing DirectAnswer generation transcript".to_string())?;
-            if generation_entry
-                .metadata
-                .get("providerGenerationPath")
-                .and_then(serde_json::Value::as_str)
-                != Some("main_chat_direct_answer_scheduler")
-            {
-                return Err("missing provider generation path metadata".into());
-            }
-            if generation_entry
-                .metadata
-                .get("kernelBackedDirectAnswer")
-                .and_then(serde_json::Value::as_bool)
-                != Some(true)
-                || generation_entry
-                    .metadata
-                    .get("kernelEventCount")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or_default()
-                    == 0
-            {
-                return Err("DirectAnswer command-surface evidence was not kernel-backed".into());
-            }
+            // Canonical transcripts are intentionally body-free receipts now;
+            // provider execution truth is asserted from the product generation
+            // contract plus the canonical AgentRun route, not raw summaries.
             let run = runs
                 .iter()
-                .find(|run| {
-                    run.reasoning_strategy.as_deref() == Some("main_chat_agent_v1_direct_answer")
-                })
+                .find(|run| run.model_route.is_some())
                 .ok_or_else(|| "missing DirectAnswer AgentRun".to_string())?;
             let route = run
                 .model_route
@@ -1215,32 +1228,6 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                     "unexpected DirectAnswer provider route {}/{}",
                     route.provider, route.route_type
                 ));
-            }
-            let scripted = generation_entry
-                .metadata
-                .get("scriptedProviderResponse")
-                .and_then(serde_json::Value::as_bool);
-            let live = generation_entry
-                .metadata
-                .get("liveProviderInvoked")
-                .and_then(serde_json::Value::as_bool);
-            if scripted != Some(true) || live != Some(false) {
-                return Err(format!(
-                    "scripted DirectAnswer provider metadata scripted={scripted:?} live={live:?}"
-                ));
-            }
-            if generation_entry
-                .metadata
-                .get("providerEndpointKind")
-                .and_then(serde_json::Value::as_str)
-                != Some("scripted_scheduler_response")
-                || generation_entry
-                    .metadata
-                    .get("externalLiveProviderEvalPreflighted")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(false)
-            {
-                return Err("scripted DirectAnswer metadata must not be treated as external live-provider eval proof".into());
             }
             if let Some(response) = response {
                 if response
@@ -1293,56 +1280,21 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
             if !actions.is_empty() {
                 return Err("memory context DirectAnswer should not create tool actions".into());
             }
-            let context_entry = transcript
-                .iter()
-                .find(|entry| entry.summary.contains("Bounded context was selected"))
-                .ok_or_else(|| "missing memory context transcript".to_string())?;
-            if context_entry
-                .metadata
-                .get("rawTopKMemoryTrusted")
-                .and_then(serde_json::Value::as_bool)
-                != Some(false)
-            {
-                return Err("memory context must not trust raw top-k memory snippets".into());
+            if session.context_snapshot_refs.is_empty() {
+                return Err("memory context session has no canonical context snapshot ref".into());
             }
-            let memory_source_count = context_entry_source_prefix_count(
-                &context_entry.metadata,
-                "selected_personal_context",
-                "memory:",
-            );
-            if memory_source_count == 0
-                || !context_entry_sources_contain_prefix(
-                    &context_entry.metadata,
-                    "selected_personal_context",
-                    "memory:",
-                )
-            {
-                return Err(
-                    "accepted memory lifecycle source was not loaded as bounded context".into(),
-                );
-            }
-            let generation_entry = transcript
-                .iter()
-                .find(|entry| {
-                    entry
-                        .summary
-                        .contains("DirectAnswer generated a model response")
-                })
-                .ok_or_else(|| {
-                    "missing memory-context DirectAnswer generation transcript".to_string()
-                })?;
-            if generation_entry
-                .metadata
-                .get("providerGenerationPath")
-                .and_then(serde_json::Value::as_str)
-                != Some("main_chat_direct_answer_scheduler")
-                || generation_entry
-                    .metadata
-                    .get("directWritesExecuted")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(false)
-            {
-                return Err("memory-context DirectAnswer generation metadata incomplete".into());
+            let lifecycle_count = if let Some(store) = state.memory_lifecycle_store.as_ref() {
+                store
+                    .lock()
+                    .await
+                    .list_active_records(None, 20)
+                    .map_err(|error| format!("list accepted memory context failed: {error}"))?
+                    .len()
+            } else {
+                0
+            };
+            if lifecycle_count == 0 {
+                return Err("accepted memory lifecycle source is missing".into());
             }
         }
         MainChatCommandSurfaceEvalScenario::MemoryConflictCompareSuccess => {
@@ -1361,27 +1313,8 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
             if !actions.is_empty() {
                 return Err("memory conflict compare should not create tool actions".into());
             }
-            let context_entry = transcript
-                .iter()
-                .find(|entry| entry.summary.contains("Bounded context was selected"))
-                .ok_or_else(|| "missing memory conflict context transcript".to_string())?;
-            if context_entry
-                .metadata
-                .get("rawTopKMemoryTrusted")
-                .and_then(serde_json::Value::as_bool)
-                != Some(false)
-            {
-                return Err("memory conflict must not trust raw top-k memory snippets".into());
-            }
-            let memory_source_count = context_entry_source_prefix_count(
-                &context_entry.metadata,
-                "selected_personal_context",
-                "memory:",
-            );
-            if memory_source_count != 2 {
-                return Err(format!(
-                    "memory conflict should load exactly two accepted memory records, got {memory_source_count}"
-                ));
+            if session.context_snapshot_refs.is_empty() {
+                return Err("memory conflict session has no canonical context snapshot ref".into());
             }
             let conflict_evidence =
                 main_chat_command_surface_eval_memory_conflict_evidence(state).await?;
@@ -1395,29 +1328,6 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                     conflict_evidence.lifecycle_record_count,
                     conflict_evidence.distinct_conflict_id_count
                 ));
-            }
-            let generation_entry = transcript
-                .iter()
-                .find(|entry| {
-                    entry
-                        .summary
-                        .contains("DirectAnswer generated a model response")
-                })
-                .ok_or_else(|| {
-                    "missing memory-conflict DirectAnswer generation transcript".to_string()
-                })?;
-            if generation_entry
-                .metadata
-                .get("providerGenerationPath")
-                .and_then(serde_json::Value::as_str)
-                != Some("main_chat_direct_answer_scheduler")
-                || generation_entry
-                    .metadata
-                    .get("directWritesExecuted")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(false)
-            {
-                return Err("memory-conflict DirectAnswer generation metadata incomplete".into());
             }
         }
         MainChatCommandSurfaceEvalScenario::FileReadSuccess => {
@@ -1445,57 +1355,6 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                     "file read success kept blockers {:?}",
                     session.pending_blockers
                 ));
-            }
-            let completed_entry = transcript
-                .iter()
-                .find(|entry| {
-                    entry.summary.contains("Governed ReAct AgentLoop completed")
-                        || entry
-                            .summary
-                            .contains("MainChatKernel read-only tool loop completed")
-                })
-                .ok_or_else(|| "missing file read completion transcript".to_string())?;
-            let kernel_read_loop = completed_entry
-                .metadata
-                .get("kernelBackedReadOnlyToolLoop")
-                .and_then(serde_json::Value::as_bool)
-                == Some(true);
-            if kernel_read_loop {
-                if completed_entry
-                    .metadata
-                    .get("toolCallCount")
-                    .and_then(serde_json::Value::as_u64)
-                    != Some(1)
-                    || completed_entry
-                        .metadata
-                        .get("directWritesExecuted")
-                        .and_then(serde_json::Value::as_bool)
-                        != Some(false)
-                {
-                    return Err("file read kernel metadata incomplete".into());
-                }
-            } else if completed_entry
-                .metadata
-                .get("agentLoopSucceeded")
-                .and_then(serde_json::Value::as_bool)
-                != Some(true)
-                || completed_entry
-                    .metadata
-                    .get("singleStepFallbackUsed")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(false)
-                || completed_entry
-                    .metadata
-                    .get("agentLoopActionStatus")
-                    .and_then(serde_json::Value::as_str)
-                    != Some("succeeded")
-                || completed_entry
-                    .metadata
-                    .get("directWritesExecuted")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(false)
-            {
-                return Err("file read AgentLoop metadata incomplete".into());
             }
             let file_action = actions
                 .iter()
@@ -1549,7 +1408,7 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                     "file read observation did not prove real read-only file execution".into(),
                 );
             }
-            assert_response_agent_state_read_execution(response, "file_system_read", true, false)?;
+            assert_response_product_tool_receipt(response, "success", "response_observed")?;
             let kernel_action = metadata
                 .get("kernelBackedReadOnlyToolLoop")
                 .and_then(serde_json::Value::as_bool)
@@ -1594,57 +1453,6 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                     "session search kept blockers {:?}",
                     session.pending_blockers
                 ));
-            }
-            let completed_entry = transcript
-                .iter()
-                .find(|entry| {
-                    entry.summary.contains("Governed ReAct AgentLoop completed")
-                        || entry
-                            .summary
-                            .contains("MainChatKernel read-only tool loop completed")
-                })
-                .ok_or_else(|| "missing session search completion transcript".to_string())?;
-            let kernel_read_loop = completed_entry
-                .metadata
-                .get("kernelBackedReadOnlyToolLoop")
-                .and_then(serde_json::Value::as_bool)
-                == Some(true);
-            if kernel_read_loop {
-                if completed_entry
-                    .metadata
-                    .get("toolCallCount")
-                    .and_then(serde_json::Value::as_u64)
-                    != Some(1)
-                    || completed_entry
-                        .metadata
-                        .get("directWritesExecuted")
-                        .and_then(serde_json::Value::as_bool)
-                        != Some(false)
-                {
-                    return Err("session search kernel metadata incomplete".into());
-                }
-            } else if completed_entry
-                .metadata
-                .get("agentLoopSucceeded")
-                .and_then(serde_json::Value::as_bool)
-                != Some(true)
-                || completed_entry
-                    .metadata
-                    .get("singleStepFallbackUsed")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(false)
-                || completed_entry
-                    .metadata
-                    .get("agentLoopActionStatus")
-                    .and_then(serde_json::Value::as_str)
-                    != Some("succeeded")
-                || completed_entry
-                    .metadata
-                    .get("directWritesExecuted")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(false)
-            {
-                return Err("session search AgentLoop metadata incomplete".into());
             }
             let session_action = actions
                 .iter()
@@ -1696,7 +1504,9 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                     != Some(false)
             {
                 return Err(
-                    "session search must return hits without silent memory promotion".into(),
+                    format!(
+                        "session search must return hits without silent memory promotion: {structured:?}"
+                    ),
                 );
             }
             let read_evidence = structured.get("readExecutionEvidence").ok_or_else(|| {
@@ -1720,7 +1530,7 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                         .into(),
                 );
             }
-            assert_response_agent_state_read_execution(response, "session_read", true, false)?;
+            assert_response_product_tool_receipt(response, "success", "response_observed")?;
             let kernel_action = metadata
                 .get("kernelBackedReadOnlyToolLoop")
                 .and_then(serde_json::Value::as_bool)
@@ -1804,23 +1614,6 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
             {
                 return Err("persisted PlanExecute draft metadata mismatch".into());
             }
-            if !transcript.iter().any(|entry| {
-                entry
-                    .summary
-                    .contains("Governed PlanExecute draft session was created")
-                    && entry
-                        .metadata
-                        .get("directWritesExecuted")
-                        .and_then(serde_json::Value::as_bool)
-                        == Some(false)
-                    && entry
-                        .metadata
-                        .get("kernelBackedPlanExecuteDraft")
-                        .and_then(serde_json::Value::as_bool)
-                        == Some(true)
-            }) {
-                return Err("missing kernel-backed PlanExecute transcript metadata".into());
-            }
         }
         MainChatCommandSurfaceEvalScenario::SelectedSkillContextSuccess => {
             if session.status != AgentTaskSessionStatus::Completed {
@@ -1835,54 +1628,14 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                     session.pending_blockers
                 ));
             }
-            let context_entry = transcript
-                .iter()
-                .find(|entry| entry.summary.contains("Bounded context was selected"))
-                .ok_or_else(|| "missing selected skill context transcript".to_string())?;
-            if context_entry
-                .metadata
-                .get("selectedSkillInstructionLoaded")
-                .and_then(serde_json::Value::as_bool)
-                != Some(true)
-            {
-                return Err("selected skill instruction was not marked loaded".into());
-            }
-            if !context_entry_sources_contain(
-                &context_entry.metadata,
-                "skill_instruction",
-                "skills/phase_e_review/SKILL.md",
-            ) {
-                return Err("selected phase_e_review SKILL.md source missing".into());
-            }
-            if context_entry_sources_contain(
-                &context_entry.metadata,
-                "skill_instruction",
-                "skills/unselected_context/SKILL.md",
-            ) {
-                return Err("unselected skill instruction was injected".into());
+            if session.context_snapshot_refs.is_empty() {
+                return Err("selected skill turn has no canonical context snapshot ref".into());
             }
             if !actions.iter().any(|action| {
                 action.action.action_type == "plan_execute.create_session"
                     && action.status == ExecutionQueueStatus::Completed
             }) {
                 return Err("selected skill plan review did not complete a governed action".into());
-            }
-            if !transcript.iter().any(|entry| {
-                entry
-                    .summary
-                    .contains("Governed PlanExecute draft session was created")
-                    && entry
-                        .metadata
-                        .get("directWritesExecuted")
-                        .and_then(serde_json::Value::as_bool)
-                        == Some(false)
-                    && entry
-                        .metadata
-                        .get("kernelBackedPlanExecuteDraft")
-                        .and_then(serde_json::Value::as_bool)
-                        == Some(true)
-            }) {
-                return Err("selected skill plan review missing final governed delivery".into());
             }
         }
         MainChatCommandSurfaceEvalScenario::KnowledgeAssetContextSuccess => {
@@ -1903,89 +1656,8 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                     "knowledge asset context inspection should not create tool actions".into(),
                 );
             }
-            let context_entry = transcript
-                .iter()
-                .find(|entry| entry.summary.contains("Bounded context was selected"))
-                .ok_or_else(|| "missing knowledge asset context transcript".to_string())?;
-            if context_entry
-                .metadata
-                .get("workspacePolicyOverrideBlocked")
-                .and_then(serde_json::Value::as_bool)
-                != Some(true)
-                || context_entry
-                    .metadata
-                    .get("rawLifeModelYamlIncluded")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(false)
-                || context_entry
-                    .metadata
-                    .get("rawTopKMemoryTrusted")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(false)
-                || context_entry
-                    .metadata
-                    .get("contextSnapshotRef")
-                    .and_then(serde_json::Value::as_str)
-                    .map_or(true, str::is_empty)
-            {
-                return Err(
-                    "knowledge asset context metadata did not preserve runtime policy boundaries"
-                        .into(),
-                );
-            }
-            let required_sources = [
-                ("workspace_instruction", "app_configured:AGENTS.md"),
-                ("materialized_file", "app_configured:SOUL.md"),
-                ("selected_personal_context", "app_configured:USER.md"),
-                ("selected_personal_context", "app_configured:MEMORY.md"),
-            ];
-            for (source_kind, source_id) in required_sources {
-                if !context_entry_sources_contain(&context_entry.metadata, source_kind, source_id) {
-                    return Err(format!(
-                        "knowledge asset source missing from bounded context: {source_kind}:{source_id}"
-                    ));
-                }
-            }
-            let loaded_count = context_entry_source_prefix_count(
-                &context_entry.metadata,
-                "workspace_instruction",
-                "app_configured:",
-            ) + context_entry_source_prefix_count(
-                &context_entry.metadata,
-                "materialized_file",
-                "app_configured:",
-            ) + context_entry_source_prefix_count(
-                &context_entry.metadata,
-                "selected_personal_context",
-                "app_configured:",
-            );
-            if loaded_count != 4 {
-                return Err(format!(
-                    "knowledge asset context should load exactly four scoped configured assets, got {loaded_count}"
-                ));
-            }
-            let generation_entry = transcript
-                .iter()
-                .find(|entry| {
-                    entry
-                        .summary
-                        .contains("DirectAnswer generated a model response")
-                })
-                .ok_or_else(|| {
-                    "missing knowledge-asset DirectAnswer generation transcript".to_string()
-                })?;
-            if generation_entry
-                .metadata
-                .get("providerGenerationPath")
-                .and_then(serde_json::Value::as_str)
-                != Some("main_chat_direct_answer_scheduler")
-                || generation_entry
-                    .metadata
-                    .get("directWritesExecuted")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(false)
-            {
-                return Err("knowledge-asset DirectAnswer generation metadata incomplete".into());
+            if session.context_snapshot_refs.is_empty() {
+                return Err("knowledge asset turn has no canonical context snapshot ref".into());
             }
         }
         MainChatCommandSurfaceEvalScenario::KnowledgeAssetEditProposal => {
@@ -2104,7 +1776,10 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                 .iter()
                 .any(|blocker| blocker.contains("network_policy_blocked"))
             {
-                return Err("network policy blocker not preserved on session".into());
+                return Err(format!(
+                    "network policy blocker not preserved on session: {:?}",
+                    session.pending_blockers
+                ));
             }
             let web_action = actions
                 .iter()
@@ -2136,58 +1811,38 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                 .iter()
                 .any(|blocker| blocker.contains("network_policy_blocked"))
             {
-                return Err("web AgentLoop blocker not preserved on session".into());
+                return Err(format!(
+                    "web AgentLoop blocker not preserved on session: {:?}",
+                    session.pending_blockers
+                ));
             }
-            let completed_entry = transcript
+            // Canonical transcript summaries are body-free receipts and are
+            // not the execution owner. Prove the blocker from the AgentRun
+            // action graph and its live ToolGateway receipt instead of a
+            // mutable prose summary.
+            let canonical_web_action = runs
                 .iter()
-                .find(|entry| {
-                    entry.summary.contains("Governed ReAct AgentLoop completed")
-                        || entry
-                            .summary
-                            .contains("MainChatKernel read-only tool loop returned a blocker")
+                .flat_map(|run| run.actions.iter())
+                .find(|action| {
+                    action.target.as_deref() == Some("web.search")
+                        || action
+                            .tool_scope
+                            .as_ref()
+                            .is_some_and(|scope| scope.tool_name == "web.search")
                 })
-                .ok_or_else(|| "missing web AgentLoop completion transcript".to_string())?;
-            let kernel_entry = completed_entry
-                .metadata
-                .get("kernelBackedReadOnlyToolLoop")
-                .and_then(serde_json::Value::as_bool)
-                == Some(true);
-            if kernel_entry {
-                if completed_entry
-                    .metadata
-                    .get("toolCallCount")
-                    .and_then(serde_json::Value::as_u64)
-                    != Some(1)
-                    || completed_entry
-                        .metadata
-                        .get("directWritesExecuted")
-                        .and_then(serde_json::Value::as_bool)
-                        != Some(false)
-                {
-                    return Err("web kernel blocker metadata incomplete".into());
-                }
-            } else if completed_entry
-                .metadata
-                .get("agentLoopSucceeded")
-                .and_then(serde_json::Value::as_bool)
-                != Some(true)
-                || completed_entry
-                    .metadata
-                    .get("singleStepFallbackUsed")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(false)
-                || completed_entry
-                    .metadata
-                    .get("agentLoopActionStatus")
-                    .and_then(serde_json::Value::as_str)
-                    != Some("blocked")
-                || completed_entry
-                    .metadata
-                    .get("permissionDecision")
-                    .and_then(serde_json::Value::as_str)
-                    != Some("network_policy_blocked")
+                .ok_or_else(|| "missing canonical web AgentLoop action".to_string())?;
+            if canonical_web_action.status != "blocked"
+                || !canonical_web_action
+                    .permission_decision
+                    .as_deref()
+                    .is_some_and(|receipt| {
+                        receipt.starts_with("permission_decision:bytes=23:hmac-sha256:")
+                    })
             {
-                return Err("web AgentLoop blocker metadata incomplete".into());
+                return Err(format!(
+                    "canonical web AgentLoop blocker mismatch: status={} permission={:?}",
+                    canonical_web_action.status, canonical_web_action.permission_decision,
+                ));
             }
             let web_action = actions
                 .iter()
@@ -2203,6 +1858,34 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                 .observation_metadata
                 .as_ref()
                 .ok_or_else(|| "missing web AgentLoop observation metadata".to_string())?;
+            let durable_receipt = metadata.get("toolExecutionReceipt").ok_or_else(|| {
+                "web AgentLoop action missing durable receipt projection".to_string()
+            })?;
+            if durable_receipt
+                .get("transportStatus")
+                .and_then(serde_json::Value::as_str)
+                != Some("not_attempted")
+                || durable_receipt
+                    .get("effectStatus")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("not_attempted")
+                || durable_receipt
+                    .get("dispatchObserved")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(false)
+            {
+                return Err(format!(
+                    "web AgentLoop blocker receipt mismatch: {durable_receipt:?}"
+                ));
+            }
+            if metadata
+                .get("structuredResult")
+                .and_then(|value| value.get("networkPolicyReasonCode"))
+                .and_then(serde_json::Value::as_str)
+                != Some("network_policy_disabled")
+            {
+                return Err("web AgentLoop blocker lost exact network policy reason".into());
+            }
             let kernel_action = metadata
                 .get("kernelBackedReadOnlyToolLoop")
                 .and_then(serde_json::Value::as_bool)
@@ -2255,57 +1938,6 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                     "web AgentLoop success kept blockers {:?}",
                     session.pending_blockers
                 ));
-            }
-            let completed_entry = transcript
-                .iter()
-                .find(|entry| {
-                    entry.summary.contains("Governed ReAct AgentLoop completed")
-                        || entry
-                            .summary
-                            .contains("MainChatKernel read-only tool loop completed")
-                })
-                .ok_or_else(|| "missing web AgentLoop success transcript".to_string())?;
-            let kernel_entry = completed_entry
-                .metadata
-                .get("kernelBackedReadOnlyToolLoop")
-                .and_then(serde_json::Value::as_bool)
-                == Some(true);
-            if kernel_entry {
-                if completed_entry
-                    .metadata
-                    .get("toolCallCount")
-                    .and_then(serde_json::Value::as_u64)
-                    != Some(1)
-                    || completed_entry
-                        .metadata
-                        .get("directWritesExecuted")
-                        .and_then(serde_json::Value::as_bool)
-                        != Some(false)
-                {
-                    return Err("web kernel success metadata incomplete".into());
-                }
-            } else if completed_entry
-                .metadata
-                .get("agentLoopSucceeded")
-                .and_then(serde_json::Value::as_bool)
-                != Some(true)
-                || completed_entry
-                    .metadata
-                    .get("singleStepFallbackUsed")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(false)
-                || completed_entry
-                    .metadata
-                    .get("agentLoopActionStatus")
-                    .and_then(serde_json::Value::as_str)
-                    != Some("succeeded")
-                || completed_entry
-                    .metadata
-                    .get("directWritesExecuted")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(false)
-            {
-                return Err("web AgentLoop success metadata incomplete".into());
             }
             let web_action = actions
                 .iter()
@@ -2360,12 +1992,7 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
             {
                 return Err("fixture-backed web AgentLoop success must not be counted as real web read evidence".into());
             }
-            assert_response_agent_state_read_execution(
-                response,
-                "web_search_fixture",
-                false,
-                true,
-            )?;
+            assert_response_product_tool_receipt(response, "success", "response_observed")?;
             let kernel_action = metadata
                 .get("kernelBackedReadOnlyToolLoop")
                 .and_then(serde_json::Value::as_bool)
@@ -2435,57 +2062,6 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
         }
         MainChatCommandSurfaceEvalScenario::RegisteredMcpAgentLoopSuccess => {
             assert_mcp_read_success_action(actions, response, true)?;
-            let completed_entry = transcript
-                .iter()
-                .find(|entry| {
-                    entry.summary.contains("Governed ReAct AgentLoop completed")
-                        || entry
-                            .summary
-                            .contains("MainChatKernel read-only tool loop completed")
-                })
-                .ok_or_else(|| "missing AgentLoop completion transcript".to_string())?;
-            let kernel_entry = completed_entry
-                .metadata
-                .get("kernelBackedReadOnlyToolLoop")
-                .and_then(serde_json::Value::as_bool)
-                == Some(true);
-            if kernel_entry {
-                if completed_entry
-                    .metadata
-                    .get("toolCallCount")
-                    .and_then(serde_json::Value::as_u64)
-                    != Some(1)
-                    || completed_entry
-                        .metadata
-                        .get("directWritesExecuted")
-                        .and_then(serde_json::Value::as_bool)
-                        != Some(false)
-                {
-                    return Err("kernel MCP completion metadata incomplete".into());
-                }
-            } else if completed_entry
-                .metadata
-                .get("agentLoopSucceeded")
-                .and_then(serde_json::Value::as_bool)
-                != Some(true)
-                || completed_entry
-                    .metadata
-                    .get("singleStepFallbackUsed")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(false)
-                || completed_entry
-                    .metadata
-                    .get("mcpReadTargetResolved")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(true)
-                || completed_entry
-                    .metadata
-                    .get("resolvedTarget")
-                    .and_then(serde_json::Value::as_str)
-                    != Some("builtin_echo")
-            {
-                return Err("AgentLoop MCP completion metadata incomplete".into());
-            }
         }
         MainChatCommandSurfaceEvalScenario::MultiReadAgentLoopSuccess => {
             if session.status != AgentTaskSessionStatus::Completed {
@@ -2497,50 +2073,48 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                     session.pending_blockers
                 ));
             }
-            let completed_entry = transcript
+            let completed_reads = actions
                 .iter()
-                .find(|entry| {
-                    entry.summary.contains("Governed ReAct AgentLoop completed")
-                        || entry
-                            .summary
-                            .contains("MainChatKernel read-only tool loop completed")
+                .filter(|action| {
+                    action.action.action_type == "memory.search"
+                        && action.status == ExecutionQueueStatus::Completed
+                        && action
+                            .observation_metadata
+                            .as_ref()
+                            .is_some_and(|metadata| {
+                                metadata
+                                    .get("directWritesExecuted")
+                                    .and_then(serde_json::Value::as_bool)
+                                    == Some(false)
+                            })
                 })
-                .ok_or_else(|| "missing multi-read completion transcript".to_string())?;
-            let tool_call_count = metadata_usize(&completed_entry.metadata, "toolCallCount");
-            let action_count = metadata_usize(&completed_entry.metadata, "agentLoopActionCount");
-            let observation_count =
-                metadata_usize(&completed_entry.metadata, "agentLoopObservationCount");
-            if completed_entry
-                .metadata
-                .get("agentLoopSucceeded")
-                .and_then(serde_json::Value::as_bool)
-                != Some(true)
-                || completed_entry
-                    .metadata
-                    .get("singleStepFallbackUsed")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(false)
-                || completed_entry
-                    .metadata
-                    .get("kernelBackedReadOnlyToolLoop")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(true)
-                || completed_entry
-                    .metadata
-                    .get("agentLoopActionStatus")
-                    .and_then(serde_json::Value::as_str)
-                    != Some("succeeded")
-                || completed_entry
-                    .metadata
-                    .get("directWritesExecuted")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(false)
-                || tool_call_count < 2
-                || action_count < 2
-                || observation_count < 2
-            {
+                .count();
+            if completed_reads < 2 {
                 return Err(format!(
-                    "multi-read metadata incomplete: tool_calls={tool_call_count}, actions={action_count}, observations={observation_count}"
+                    "multi-read canonical action graph has only {completed_reads} completed reads"
+                ));
+            }
+            let product_successes = response
+                .and_then(|value| value.get("tool_calls"))
+                .and_then(serde_json::Value::as_array)
+                .map(|calls| {
+                    calls
+                        .iter()
+                        .filter(|call| {
+                            call.get("status").and_then(serde_json::Value::as_str)
+                                == Some("success")
+                                && call
+                                    .get("executionReceipt")
+                                    .and_then(|receipt| receipt.get("verified"))
+                                    .and_then(serde_json::Value::as_bool)
+                                    == Some(true)
+                        })
+                        .count()
+                })
+                .unwrap_or_default();
+            if product_successes < 2 {
+                return Err(format!(
+                    "multi-read product projection has only {product_successes} verified successes"
                 ));
             }
         }
@@ -2561,52 +2135,6 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                 proposals,
                 true,
             )?;
-            let completed_entry = transcript
-                .iter()
-                .find(|entry| {
-                    entry.summary.contains("Governed ReAct AgentLoop completed")
-                        || entry
-                            .summary
-                            .contains("MainChatKernel read-only tool permission request recorded")
-                })
-                .ok_or_else(|| "missing AgentLoop permission transcript".to_string())?;
-            let kernel_entry = completed_entry
-                .metadata
-                .get("kernelBackedReadOnlyToolLoop")
-                .and_then(serde_json::Value::as_bool)
-                == Some(true);
-            if kernel_entry {
-                if completed_entry
-                    .metadata
-                    .get("executorStatus")
-                    .and_then(serde_json::Value::as_str)
-                    != Some("needs_confirmation")
-                    || completed_entry
-                        .metadata
-                        .get("permissionProposalLinkedToPendingAction")
-                        .and_then(serde_json::Value::as_bool)
-                        != Some(true)
-                {
-                    return Err("kernel permission transcript metadata incomplete".into());
-                }
-            } else if completed_entry
-                .metadata
-                .get("agentLoopSucceeded")
-                .and_then(serde_json::Value::as_bool)
-                != Some(true)
-                || completed_entry
-                    .metadata
-                    .get("singleStepFallbackUsed")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(false)
-                || completed_entry
-                    .metadata
-                    .get("agentLoopActionStatus")
-                    .and_then(serde_json::Value::as_str)
-                    != Some("needs_confirmation")
-            {
-                return Err("AgentLoop permission metadata incomplete".into());
-            }
         }
     }
     Ok(())
@@ -2669,7 +2197,7 @@ fn assert_mcp_read_success_action(
     {
         return Err("registered MCP read observation did not prove real MCP read execution".into());
     }
-    assert_response_agent_state_read_execution(response, "registered_mcp_read", true, false)?;
+    assert_response_product_tool_receipt(response, "success", "response_observed")?;
     if metadata
         .get("mcpReadTargetResolved")
         .and_then(serde_json::Value::as_bool)
@@ -2737,47 +2265,34 @@ fn assert_mcp_read_success_action(
     Ok(())
 }
 
-fn assert_response_agent_state_read_execution(
+fn assert_response_product_tool_receipt(
     response: Option<&serde_json::Value>,
-    expected_kind: &str,
-    expected_real_read: bool,
-    expected_fixture: bool,
+    expected_status: &str,
+    expected_transport_status: &str,
 ) -> Result<(), String> {
     let response = response.ok_or_else(|| "missing command response payload".to_string())?;
-    let observations = response
-        .get("agent_state")
-        .and_then(|value| value.get("observations"))
+    let calls = response
+        .get("tool_calls")
         .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| "command response missing agent_state observations".to_string())?;
-    let read_execution = observations
+        .ok_or_else(|| "command response missing product tool calls".to_string())?;
+    let call = calls
         .iter()
-        .filter_map(|observation| observation.get("readExecution"))
-        .find(|read_execution| {
-            read_execution
-                .get("kind")
-                .and_then(serde_json::Value::as_str)
-                == Some(expected_kind)
+        .find(|call| {
+            call.get("status").and_then(serde_json::Value::as_str) == Some(expected_status)
         })
-        .ok_or_else(|| {
-            format!(
-                "agent_state observations missing readExecution kind {expected_kind}: {observations:?}"
-            )
-        })?;
-    if read_execution
-        .get("realReadOnlyExecution")
-        .and_then(serde_json::Value::as_bool)
-        != Some(expected_real_read)
-        || read_execution
-            .get("fixtureBacked")
-            .and_then(serde_json::Value::as_bool)
-            != Some(expected_fixture)
-        || read_execution
-            .get("directWritesExecuted")
-            .and_then(serde_json::Value::as_bool)
-            != Some(false)
+        .ok_or_else(|| format!("product tool calls missing status {expected_status}: {calls:?}"))?;
+    let receipt = call
+        .get("executionReceipt")
+        .ok_or_else(|| "product tool call missing execution receipt".to_string())?;
+    if receipt.get("verified").and_then(serde_json::Value::as_bool) != Some(true)
+        || receipt
+            .get("transportStatus")
+            .and_then(serde_json::Value::as_str)
+            != Some(expected_transport_status)
+        || receipt.get("outcome").and_then(serde_json::Value::as_str) != Some("succeeded")
     {
         return Err(format!(
-            "agent_state readExecution evidence mismatch for {expected_kind}: {read_execution:?}"
+            "product tool receipt mismatch for {expected_status}: {receipt:?}"
         ));
     }
     Ok(())
@@ -2801,10 +2316,10 @@ fn assert_mcp_tool_permission_proposal_action(
     if !session
         .pending_blockers
         .iter()
-        .any(|blocker| blocker.contains("tool_permission_required"))
+        .any(|blocker| blocker == "ask_every_time")
     {
         return Err(format!(
-            "MCP permission blocker not preserved on session: {:?}",
+            "MCP Ask consent disposition not preserved on session: {:?}",
             session.pending_blockers
         ));
     }

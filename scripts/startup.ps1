@@ -160,7 +160,12 @@ function Get-OpenLifeAppDirName {
 }
 
 function Set-RuntimeProfile($commandName) {
-    if (-not $env:OPENLIFE_PROFILE -and $commandName -eq "dev") {
+    if ($commandName -eq "dev" -or $commandName -eq "a2a") {
+        if ($env:OPENLIFE_DATA_DIR -and $env:OPENLIFE_ALLOW_DEV_EXTENSIONS_WITH_CUSTOM_DATA_DIR -ne "1") {
+            Write-Error "dev-extensions 拒绝使用 OPENLIFE_DATA_DIR；请使用隔离 dev profile"
+            Write-Info "如确需隔离的自定义目录，请显式设置 OPENLIFE_ALLOW_DEV_EXTENSIONS_WITH_CUSTOM_DATA_DIR=1"
+            exit 1
+        }
         $env:OPENLIFE_PROFILE = "dev"
     }
     elseif (-not $env:OPENLIFE_PROFILE) {
@@ -198,6 +203,11 @@ function New-TauriConfigOverride {
             beforeDevCommand = "cd `"$FrontendDir`" && corepack pnpm dev --host 127.0.0.1 --port $script:VitePort"
             devUrl = $env:OPENLIFE_DEV_URL
             frontendDist = $env:OPENLIFE_FRONTEND_DIST
+        }
+        app = @{
+            security = @{
+                capabilities = @("default", "dev-extensions")
+            }
         }
     } | ConvertTo-Json -Compress -Depth 4
 }
@@ -430,8 +440,14 @@ function Start-Dev {
         Write-Error "cargo 不可用"
         exit 1
     }
-    Write-Info "构建 A2A sidecar..."
-    cargo build --manifest-path (Join-Path $RepoRoot "Cargo.toml") --bin openlife-a2a-server
+    if ($env:OPENLIFE_DEV_AUTOSTART_A2A -eq "1") {
+        if ($env:OPENLIFE_ENABLE_DEV_A2A -ne "1" -or -not $env:OPENLIFE_A2A_PAIRED_TOKEN -or $env:OPENLIFE_A2A_PAIRED_TOKEN.Length -lt 32) {
+            Write-Error "A2A autostart requires OPENLIFE_ENABLE_DEV_A2A=1 and a 32+ character OPENLIFE_A2A_PAIRED_TOKEN"
+            exit 1
+        }
+        Write-Info "构建显式启用的开发 A2A sidecar..."
+        cargo build --manifest-path (Join-Path $RepoRoot "Cargo.toml") --bin openlife-a2a-server --features dev-extensions
+    }
 
     # 检查使用哪种方式启动 Tauri
     $localTauri = Join-Path $FrontendDir "node_modules\.bin\tauri.cmd"
@@ -441,11 +457,11 @@ function Start-Dev {
     try {
         if (Test-Path $localTauri) {
             Write-Info "使用本地 Tauri CLI 启动..."
-            & $localTauri dev --config $tauriConfigOverride
+            & $localTauri dev --features dev-extensions --config (Join-Path $TauriDir "tauri.dev.conf.json") --config $tauriConfigOverride
         }
         elseif ($globalTauri) {
             Write-Info "使用全局 Tauri CLI 启动..."
-            tauri dev --config $tauriConfigOverride
+            tauri dev --features dev-extensions --config (Join-Path $TauriDir "tauri.dev.conf.json") --config $tauriConfigOverride
         }
         else {
             Write-Error "Tauri CLI 不可用"
@@ -461,6 +477,13 @@ function Start-Dev {
 function Start-A2A {
     Write-Step "启动 A2A 独立服务器"
 
+    if ($env:OPENLIFE_ENABLE_DEV_A2A -ne "1" -or -not $env:OPENLIFE_A2A_PAIRED_TOKEN -or $env:OPENLIFE_A2A_PAIRED_TOKEN.Length -lt 32) {
+        Write-Error "A2A 默认关闭；启动需要显式启用并配置强配对凭据"
+        Write-Info "设置 OPENLIFE_ENABLE_DEV_A2A=1 和 32+ 字符 OPENLIFE_A2A_PAIRED_TOKEN"
+        exit 1
+    }
+    $env:OPENLIFE_PROFILE = "dev"
+
     # 检查端口
     if (-not (Test-Port $A2aPort)) {
         Write-Error "A2A 端口 $A2aPort 被占用"
@@ -475,7 +498,7 @@ function Start-A2A {
 
     Push-Location $TauriDir
     try {
-        cargo run --bin openlife-a2a-server
+        cargo run --bin openlife-a2a-server --features dev-extensions
     }
     finally {
         Pop-Location
