@@ -2,11 +2,18 @@ use super::{
     __cmd__list_mcp_audit_logs, __tauri_command_name_list_mcp_audit_logs, list_mcp_audit_logs,
 };
 use crate::persistence_coordinator::{PersistenceCoordinator, EXPECTED_BOOTSTRAP_STORES};
-use openlife_core::mcp_audit::McpAuditStore;
+use openlife_core::mcp_audit::{AuditKeyConfig, AuditKeyMaterial, KeyMode, McpAuditStore};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 fn d065_state(path: &std::path::Path) -> Arc<crate::AppState> {
+    d065_state_with_store(
+        crate::main_chat_eval_state::isolated_mcp_audit_store_for_test(path.to_path_buf()),
+    )
+}
+
+fn d065_state_with_store(store: McpAuditStore) -> Arc<crate::AppState> {
     let base = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let mut state = (*base).clone();
     let persistence = Arc::new(PersistenceCoordinator::for_release_bootstrap());
@@ -15,10 +22,33 @@ fn d065_state(path: &std::path::Path) -> Arc<crate::AppState> {
     }
     persistence.seal();
     state.persistence_coordinator = persistence;
-    state.mcp_audit_store = Arc::new(Mutex::new(
-        crate::main_chat_eval_state::isolated_mcp_audit_store_for_test(path.to_path_buf()),
-    ));
+    state.mcp_audit_store = Arc::new(Mutex::new(store));
     Arc::new(state)
+}
+
+fn d065_keychain_material(epoch: u64, key: [u8; 32]) -> AuditKeyMaterial {
+    AuditKeyMaterial {
+        config: AuditKeyConfig {
+            mode: KeyMode::Keychain,
+            salt_b64: None,
+            env_var: None,
+            key_ref: Some(format!("openlife/mcp-audit/test/{epoch}")),
+            epoch,
+            created_at: "2026-07-13T00:00:00Z".into(),
+        },
+        key,
+    }
+}
+
+fn d065_artifact_snapshot(database_path: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+    ["", "-wal", "-shm"]
+        .into_iter()
+        .map(|suffix| {
+            let path = PathBuf::from(format!("{}{suffix}", database_path.display()));
+            let bytes = std::fs::read(&path).ok();
+            (path, bytes)
+        })
+        .collect()
 }
 
 async fn d065_insert_audit_row(state: &Arc<crate::AppState>) {
@@ -85,10 +115,10 @@ async fn d065_diagnostics(state: &Arc<crate::AppState>) -> serde_json::Value {
     .expect("serialize D065 diagnostics")
 }
 
-fn assert_d065_unknown(diagnostics: &serde_json::Value) {
+fn assert_d065_untrusted(diagnostics: &serde_json::Value, expected_status: &str) {
     assert_eq!(
-        diagnostics["mcp_audit_read_status"], "unavailable",
-        "audit-read availability must be explicit"
+        diagnostics["mcp_audit_read_status"], expected_status,
+        "audit-read availability must distinguish unavailable substrate from an unknown read result"
     );
     assert!(
         diagnostics["mcp_recent_audit_count"].is_null(),
@@ -101,13 +131,27 @@ fn assert_d065_unknown(diagnostics: &serde_json::Value) {
 }
 
 #[tokio::test]
-async fn d065_trusted_empty_and_nonempty_audit_reads_remain_exact() {
+async fn d065_trusted_empty_and_nonempty_diagnostics_are_available_and_exact() {
     let directory = tempfile::tempdir().unwrap();
     let state = d065_state(&directory.path().join("mcp_audit.db"));
 
     let empty = d065_diagnostics(&state).await;
+    assert_eq!(empty["mcp_audit_read_status"], "available");
     assert_eq!(empty["mcp_recent_audit_count"], 0);
     assert_eq!(empty["mcp_recent_pii_count"], 0);
+
+    d065_insert_audit_row(&state).await;
+    let nonempty = d065_diagnostics(&state).await;
+    assert_eq!(nonempty["mcp_audit_read_status"], "available");
+    assert_eq!(nonempty["mcp_recent_audit_count"], 1);
+    assert_eq!(nonempty["mcp_recent_pii_count"], 1);
+}
+
+#[tokio::test]
+async fn d065_trusted_empty_and_nonempty_list_command_remains_exact() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = d065_state(&directory.path().join("mcp_audit.db"));
+
     assert_eq!(
         d065_list_audit_logs_command(state.clone())
             .expect("trusted empty audit list")
@@ -116,11 +160,7 @@ async fn d065_trusted_empty_and_nonempty_audit_reads_remain_exact() {
             .len(),
         0
     );
-
     d065_insert_audit_row(&state).await;
-    let nonempty = d065_diagnostics(&state).await;
-    assert_eq!(nonempty["mcp_recent_audit_count"], 1);
-    assert_eq!(nonempty["mcp_recent_pii_count"], 1);
     assert_eq!(
         d065_list_audit_logs_command(state)
             .expect("trusted nonempty audit list")
@@ -142,7 +182,7 @@ async fn d065_key_reference_unavailable_projects_unknown_not_data_or_zero() {
         "key reference unavailable",
     );
 
-    assert_d065_unknown(&d065_diagnostics(&state).await);
+    assert_d065_untrusted(&d065_diagnostics(&state).await, "unavailable");
 }
 
 #[tokio::test]
@@ -172,11 +212,27 @@ async fn d065_audit_store_unavailable_projects_unknown_not_healthy_zero() {
         "audit store unavailable",
     );
 
-    assert_d065_unknown(&d065_diagnostics(&state).await);
+    assert_d065_untrusted(&d065_diagnostics(&state).await, "unavailable");
 }
 
 #[tokio::test]
-async fn d065_corrupt_ciphertext_is_unknown_and_list_fails_without_mutation() {
+async fn d065_audit_store_unavailable_fails_list_command() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = d065_state(&directory.path().join("mcp_audit.db"));
+    state.persistence_coordinator.register_unavailable(
+        "McpAuditStore",
+        "d065_injected_audit_store_failure",
+        "audit store unavailable",
+    );
+
+    assert!(
+        d065_list_audit_logs_command(state).is_err(),
+        "an unavailable audit store must fail the shipped list command"
+    );
+}
+
+#[tokio::test]
+async fn d065_corrupt_ciphertext_projects_unknown_without_mutation() {
     let directory = tempfile::tempdir().unwrap();
     let database_path = directory.path().join("mcp_audit.db");
     let state = d065_state(&database_path);
@@ -189,25 +245,111 @@ async fn d065_corrupt_ciphertext_is_unknown_and_list_fails_without_mutation() {
         )
         .unwrap();
     drop(connection);
-    let before = std::fs::read(&database_path).unwrap();
+    let before = d065_artifact_snapshot(&database_path);
 
-    assert_d065_unknown(&d065_diagnostics(&state).await);
+    assert_d065_untrusted(&d065_diagnostics(&state).await, "unknown");
+    assert_eq!(
+        d065_artifact_snapshot(&database_path),
+        before,
+        "failed diagnostics must not rewrite the canonical SQLite family"
+    );
+}
+
+#[tokio::test]
+async fn d065_corrupt_ciphertext_list_fails_without_mutation() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("mcp_audit.db");
+    let state = d065_state(&database_path);
+    d065_insert_audit_row(&state).await;
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    connection
+        .execute(
+            "UPDATE mcp_log SET arguments_encrypted = 'invalid-ciphertext' WHERE id = 1",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let before = d065_artifact_snapshot(&database_path);
+
     assert!(
         d065_list_audit_logs_command(state).is_err(),
         "corrupt ciphertext must not be returned as a successful placeholder row"
     );
     assert_eq!(
-        std::fs::read(&database_path).unwrap(),
+        d065_artifact_snapshot(&database_path),
         before,
-        "failed reads must not rewrite or delete canonical audit evidence"
+        "failed list reads must not rewrite or delete the canonical SQLite family"
     );
 }
 
 #[tokio::test]
-async fn d065_verified_canonical_read_only_mode_retains_read_capability() {
+async fn d065_sqlite_query_failure_projects_unknown_not_zero() {
     let directory = tempfile::tempdir().unwrap();
-    let state = d065_state(&directory.path().join("mcp_audit.db"));
-    d065_insert_audit_row(&state).await;
+    let database_path = directory.path().join("mcp_audit.db");
+    let state = d065_state(&database_path);
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    connection.execute("DROP TABLE mcp_log", []).unwrap();
+    drop(connection);
+    let before = d065_artifact_snapshot(&database_path);
+
+    assert_d065_untrusted(&d065_diagnostics(&state).await, "unknown");
+    assert_eq!(
+        d065_artifact_snapshot(&database_path),
+        before,
+        "a failed SQLite diagnostics query must not repair or replace canonical evidence"
+    );
+}
+
+#[tokio::test]
+async fn d065_sqlite_query_failure_fails_list_without_mutation() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("mcp_audit.db");
+    let state = d065_state(&database_path);
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    connection.execute("DROP TABLE mcp_log", []).unwrap();
+    drop(connection);
+    let before = d065_artifact_snapshot(&database_path);
+
+    assert!(
+        d065_list_audit_logs_command(state).is_err(),
+        "a real SQLite query failure must fail the shipped list command"
+    );
+    assert_eq!(d065_artifact_snapshot(&database_path), before);
+}
+
+#[tokio::test]
+async fn d065_verified_canonical_read_only_mode_projects_degraded_counts() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("mcp_audit.db");
+    let material = d065_keychain_material(65, [0x65; 32]);
+    let writable = McpAuditStore::with_key_materials(&database_path, vec![material.clone()])
+        .expect("create writable D065 fixture");
+    writable
+        .insert_log(
+            "d065_read_only_fixture",
+            &serde_json::json!({"private": "not-returned"}),
+            "fixture-result",
+            true,
+            true,
+        )
+        .unwrap();
+    drop(writable);
+    let read_only =
+        McpAuditStore::open_read_only_existing_with_key_materials(&database_path, vec![material])
+            .expect("open a real canonical read-only D065 fixture");
+    assert!(
+        read_only
+            .insert_log(
+                "must_not_write",
+                &serde_json::json!({}),
+                "must-not-write",
+                true,
+                false,
+            )
+            .is_err(),
+        "the read-only control must use a genuinely non-writable store handle"
+    );
+    let state = d065_state_with_store(read_only);
     state.persistence_coordinator.register_read_only(
         "McpAuditKeyReferenceStore",
         "d065_verified_read_only",
@@ -220,7 +362,54 @@ async fn d065_verified_canonical_read_only_mode_retains_read_capability() {
     );
 
     let diagnostics = d065_diagnostics(&state).await;
+    assert_eq!(diagnostics["mcp_audit_read_status"], "degraded");
     assert_eq!(diagnostics["mcp_recent_audit_count"], 1);
+}
+
+#[tokio::test]
+async fn d065_verified_canonical_read_only_store_retains_list_capability() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("mcp_audit.db");
+    let material = d065_keychain_material(66, [0x66; 32]);
+    let writable = McpAuditStore::with_key_materials(&database_path, vec![material.clone()])
+        .expect("create writable D065 fixture");
+    writable
+        .insert_log(
+            "d065_read_only_list_fixture",
+            &serde_json::json!({"private": "not-returned"}),
+            "fixture-result",
+            true,
+            false,
+        )
+        .unwrap();
+    drop(writable);
+    let read_only =
+        McpAuditStore::open_read_only_existing_with_key_materials(&database_path, vec![material])
+            .expect("open a real canonical read-only D065 fixture");
+    assert!(
+        read_only
+            .insert_log(
+                "must_not_write",
+                &serde_json::json!({}),
+                "must-not-write",
+                true,
+                false,
+            )
+            .is_err(),
+        "the read-only control must use a genuinely non-writable store handle"
+    );
+    let state = d065_state_with_store(read_only);
+    state.persistence_coordinator.register_read_only(
+        "McpAuditKeyReferenceStore",
+        "d065_verified_read_only",
+        "fixture read-only authority",
+    );
+    state.persistence_coordinator.register_read_only(
+        "McpAuditStore",
+        "d065_verified_read_only",
+        "fixture read-only database",
+    );
+
     assert_eq!(
         d065_list_audit_logs_command(state)
             .expect("verified canonical read-only audit list")
@@ -232,15 +421,42 @@ async fn d065_verified_canonical_read_only_mode_retains_read_capability() {
 }
 
 #[test]
-fn d065_shipped_audit_read_consumers_do_not_own_raw_store_interpretation() {
+fn d065_shipped_audit_read_consumers_use_one_gateway_without_raw_store_reads() {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    for relative in ["src/commands/diagnostics.rs", "src/commands/mcp.rs"] {
+    let cases = [
+        (
+            "src/commands/diagnostics.rs",
+            "pub(crate) async fn get_system_diagnostics_with_state",
+            "pub async fn check_ollama_status",
+        ),
+        (
+            "src/commands/mcp.rs",
+            "pub async fn list_mcp_audit_logs",
+            "pub async fn list_tool_manifests",
+        ),
+        (
+            "src/commands/settings.rs",
+            "pub async fn export_mcp_audit_logs",
+            "pub async fn cleanup_mcp_audit_logs",
+        ),
+    ];
+    for (relative, start, next) in cases {
         let source = std::fs::read_to_string(manifest.join(relative)).unwrap();
+        let body = source
+            .split_once(start)
+            .unwrap_or_else(|| panic!("missing shipped audit-read function in {relative}"))
+            .1
+            .split_once(next)
+            .unwrap_or_else(|| {
+                panic!("missing end marker for shipped audit-read function in {relative}")
+            })
+            .0;
         assert!(
-            !source.contains("mcp_audit_store.lock()")
-                && !source.contains("mcp_audit_store\n")
-                && !source.contains("audit.list_logs("),
-            "{relative} still interprets the raw audit store instead of one trusted-read gateway"
+            body.contains("mcp_audit_read_gateway")
+                && !body.contains("mcp_audit_store")
+                && !body.contains(".list_logs(")
+                && !body.contains(".export_logs("),
+            "{relative} still owns or bypasses the single typed MCP audit read gateway"
         );
     }
 }
@@ -249,18 +465,22 @@ fn d065_shipped_audit_read_consumers_do_not_own_raw_store_interpretation() {
 fn d065_product_contract_can_distinguish_unknown_from_zero() {
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let bridge = std::fs::read_to_string(repo.join("frontend/src/tauri.ts")).unwrap();
-    let privacy =
-        std::fs::read_to_string(repo.join("frontend/src/pages/settings/tabs/PrivacyTab.tsx"))
-            .unwrap();
+    let diagnostics_contract = bridge
+        .split_once("export interface SystemDiagnostics")
+        .expect("SystemDiagnostics frontend contract")
+        .1
+        .split_once("\n}")
+        .expect("SystemDiagnostics frontend contract end")
+        .0;
 
     assert!(
-        bridge.contains("mcp_recent_audit_count: number | null")
-            && bridge.contains("mcp_recent_pii_count: number | null"),
-        "the frontend contract must preserve nullable unknown counts"
-    );
-    assert!(
-        privacy.contains("未知") || privacy.contains("不可用"),
-        "the audit UI must render unknown explicitly instead of formatting it as zero"
+        diagnostics_contract.contains("mcp_recent_audit_count: number | null")
+            && diagnostics_contract.contains("mcp_recent_pii_count: number | null")
+            && diagnostics_contract.contains("mcp_audit_read_status")
+            && ["available", "unavailable", "degraded", "unknown"]
+                .iter()
+                .all(|status| diagnostics_contract.contains(status)),
+        "the frontend diagnostics contract must preserve all four typed audit-read states and nullable unknown counts"
     );
 }
 

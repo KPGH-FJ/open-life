@@ -14,6 +14,10 @@ use sha2::{Digest, Sha256};
 use std::sync::{Arc, LazyLock};
 use tauri::State;
 
+#[cfg(test)]
+#[path = "../mcp_audit_export_gateway_tests.rs"]
+mod mcp_audit_export_gateway_tests;
+
 use crate::danger_action_confirmation::{
     issue_danger_action_challenge, require_native_danger_action_confirmation,
     NativeDangerActionRequest,
@@ -1501,10 +1505,7 @@ pub async fn export_mcp_audit_logs(
     window: tauri::WebviewWindow,
     state: State<'_, Arc<AppState>>,
 ) -> Result<AuditExport, AppError> {
-    let export = {
-        let store = state.mcp_audit_store.lock().await;
-        store.export_logs(days).map_err(AppError::from)?
-    };
+    let export = export_mcp_audit_logs_with_state(days, state.inner()).await?;
     let export_value = serde_json::to_value(&export)?;
     require_danger_action_confirmation(
         DangerActionConfirmationRequest {
@@ -1526,6 +1527,14 @@ pub async fn export_mcp_audit_logs(
     )
     .await?;
     Ok(export)
+}
+
+pub(crate) async fn export_mcp_audit_logs_with_state(
+    days: i64,
+    state: &Arc<AppState>,
+) -> Result<AuditExport, AppError> {
+    let store = state.mcp_audit_store.lock().await;
+    store.export_logs(days).map_err(AppError::from)
 }
 
 #[tauri::command]

@@ -88,6 +88,39 @@ describe("PrivacyTab", () => {
     expect(screen.getByText(/PII 与隐私策略/)).toBeInTheDocument();
   });
 
+  it.each([
+    ["available", "可用", 2, 1],
+    ["degraded", "只读降级", 2, 1],
+    ["unavailable", "不可用", null, null],
+    ["unknown", "未知", null, null],
+  ])(
+    "renders MCP audit %s as explicit product truth",
+    async (status, statusLabel, auditCount, piiCount) => {
+      render(
+        <PrivacyTab
+          {...baseProps}
+          diagnostics={
+            {
+              mcp_audit_read_status: status,
+              mcp_recent_audit_count: auditCount,
+              mcp_recent_pii_count: piiCount,
+            } as any
+          }
+        />
+      );
+
+      await screen.findByText(/旧 run 可能未接入/);
+      expect(screen.getByText(new RegExp(`审计状态：${statusLabel}`))).toBeInTheDocument();
+      if (auditCount === null) {
+        expect(screen.getByText("近期审计：未知")).toBeInTheDocument();
+        expect(screen.getByText("PII 命中：未知")).toBeInTheDocument();
+      } else {
+        expect(screen.getByText(`近期审计：${auditCount}`)).toBeInTheDocument();
+        expect(screen.getByText(`PII 命中：${piiCount}`)).toBeInTheDocument();
+      }
+    }
+  );
+
   it("does not render tool permissions in the privacy tab", async () => {
     render(<PrivacyTab {...baseProps} />);
     await screen.findByText(/旧 run 可能未接入/);
