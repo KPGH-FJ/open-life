@@ -129,6 +129,31 @@ fn legal_receipts() -> (String, String) {
     )
 }
 
+fn flip_authenticated_ciphertext(ciphertext: &str) -> String {
+    const AES_GCM_NONCE_BYTES: usize = 12;
+    const AES_GCM_TAG_BYTES: usize = 16;
+
+    let original = general_purpose::STANDARD
+        .decode(ciphertext)
+        .expect("decode source-backed AEAD fixture");
+    assert!(
+        original.len() > AES_GCM_NONCE_BYTES + AES_GCM_TAG_BYTES,
+        "source-backed AEAD fixture must contain nonce, ciphertext, and authentication tag"
+    );
+    let mut corrupted = original.clone();
+    let flip_index = corrupted.len() - 1;
+    assert!(flip_index >= AES_GCM_NONCE_BYTES);
+    corrupted[flip_index] ^= 0x01;
+
+    let encoded = general_purpose::STANDARD.encode(&corrupted);
+    let decoded = general_purpose::STANDARD
+        .decode(&encoded)
+        .expect("bit-flipped AEAD fixture remains valid base64");
+    assert_eq!(decoded.len(), original.len());
+    assert_ne!(decoded, original);
+    encoded
+}
+
 #[derive(Debug)]
 struct ProductReadObservation {
     list: std::result::Result<Vec<McpLogEntry>, String>,
@@ -320,89 +345,108 @@ fn d068_legal_version_zero_legacy_payload_migrates_transactionally_and_stays_rea
     assert_eq!(version, MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION);
 }
 
-fn invalid_current_receipt_variants() -> Vec<(&'static str, &'static str, Value)> {
-    vec![
-        (
-            "wrong_kind",
-            "arguments",
-            json!({"kind":"result","payloadStored":false,"valueType":"object","bytes":1,"digest":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}),
-        ),
-        (
-            "payload_stored",
-            "arguments",
-            json!({"kind":"arguments","payloadStored":true,"valueType":"object","bytes":1,"digest":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}),
-        ),
-        (
-            "invalid_value_type",
-            "arguments",
-            json!({"kind":"arguments","payloadStored":false,"valueType":"secret_object","bytes":1,"digest":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}),
-        ),
-        (
-            "negative_bytes",
-            "arguments",
-            json!({"kind":"arguments","payloadStored":false,"valueType":"object","bytes":-1,"digest":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}),
-        ),
-        (
-            "bad_digest",
-            "arguments",
-            json!({"kind":"arguments","payloadStored":false,"valueType":"object","bytes":1,"digest":"sha256:not-a-sha256-digest"}),
-        ),
-        (
-            "unknown_field",
-            "arguments",
-            json!({"kind":"arguments","payloadStored":false,"valueType":"object","bytes":1,"digest":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","raw":"must-not-be-accepted"}),
-        ),
-        (
-            "missing_digest",
-            "arguments",
-            json!({"kind":"arguments","payloadStored":false,"valueType":"object","bytes":1}),
-        ),
-        (
-            "missing_payload_stored",
-            "arguments",
-            json!({"kind":"arguments","valueType":"object","bytes":1,"digest":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}),
-        ),
-        (
-            "wrong_result_kind",
-            "result",
-            json!({"kind":"arguments","payloadStored":false,"valueType":"string","bytes":1,"digest":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}),
-        ),
-        (
-            "wrong_result_value_type",
-            "result",
-            json!({"kind":"result","payloadStored":false,"valueType":"object","bytes":1,"digest":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}),
-        ),
-        (
-            "result_payload_stored",
-            "result",
-            json!({"kind":"result","payloadStored":true,"valueType":"string","bytes":1,"digest":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}),
-        ),
-        (
-            "result_negative_bytes",
-            "result",
-            json!({"kind":"result","payloadStored":false,"valueType":"string","bytes":-1,"digest":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}),
-        ),
-        (
-            "result_bad_digest",
-            "result",
-            json!({"kind":"result","payloadStored":false,"valueType":"string","bytes":1,"digest":"sha256:not-a-sha256-digest"}),
-        ),
-        (
-            "result_unknown_field",
-            "result",
-            json!({"kind":"result","payloadStored":false,"valueType":"string","bytes":1,"digest":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","raw":"must-not-be-accepted"}),
-        ),
-        (
-            "result_missing_digest",
-            "result",
-            json!({"kind":"result","payloadStored":false,"valueType":"string","bytes":1}),
-        ),
-        (
-            "result_missing_payload_stored",
-            "result",
-            json!({"kind":"result","valueType":"string","bytes":1,"digest":"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}),
-        ),
-    ]
+fn valid_receipt_value(role: &str) -> Value {
+    let value_type = if role == "arguments" {
+        "object"
+    } else {
+        "string"
+    };
+    json!({
+        "kind": role,
+        "payloadStored": false,
+        "valueType": value_type,
+        "bytes": 1,
+        "digest": "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    })
+}
+
+fn receipt_with(role: &str, field: &str, value: Value) -> Value {
+    let mut receipt = valid_receipt_value(role);
+    receipt
+        .as_object_mut()
+        .expect("D068 receipt fixture is an object")
+        .insert(field.to_string(), value);
+    receipt
+}
+
+fn receipt_without(role: &str, field: &str) -> Value {
+    let mut receipt = valid_receipt_value(role);
+    receipt
+        .as_object_mut()
+        .expect("D068 receipt fixture is an object")
+        .remove(field);
+    receipt
+}
+
+fn invalid_current_receipt_variants() -> Vec<(String, &'static str, Value)> {
+    let mut variants = Vec::new();
+    for (role, wrong_kind) in [("arguments", "result"), ("result", "arguments")] {
+        variants.extend([
+            (
+                format!("{role}_wrong_kind"),
+                role,
+                receipt_with(role, "kind", json!(wrong_kind)),
+            ),
+            (
+                format!("{role}_payload_stored"),
+                role,
+                receipt_with(role, "payloadStored", json!(true)),
+            ),
+            (
+                format!("{role}_invalid_value_type"),
+                role,
+                receipt_with(role, "valueType", json!("secret_object")),
+            ),
+            (
+                format!("{role}_negative_bytes"),
+                role,
+                receipt_with(role, "bytes", json!(-1)),
+            ),
+            (
+                format!("{role}_fractional_bytes"),
+                role,
+                receipt_with(role, "bytes", json!(1.5)),
+            ),
+            (
+                format!("{role}_oversized_bytes"),
+                role,
+                receipt_with(role, "bytes", json!(1e100)),
+            ),
+            (
+                format!("{role}_bad_digest"),
+                role,
+                receipt_with(role, "digest", json!("sha256:not-a-sha256-digest")),
+            ),
+            (
+                format!("{role}_unknown_field"),
+                role,
+                receipt_with(role, "raw", json!("must-not-be-accepted")),
+            ),
+        ]);
+
+        for field in ["kind", "payloadStored", "valueType", "bytes", "digest"] {
+            variants.push((
+                format!("{role}_missing_{field}"),
+                role,
+                receipt_without(role, field),
+            ));
+        }
+
+        for (field, wrong_type) in [
+            ("kind", json!(false)),
+            ("payloadStored", json!("false")),
+            ("valueType", json!(false)),
+            ("bytes", json!("1")),
+            ("digest", json!(false)),
+        ] {
+            variants.push((
+                format!("{role}_{field}_wrong_type"),
+                role,
+                receipt_with(role, field, wrong_type),
+            ));
+        }
+    }
+    variants
 }
 
 #[test]
@@ -493,9 +537,9 @@ fn d068_corrupt_current_ciphertext_fails_list_and_export_without_rewrite() {
             )
             .unwrap();
         if corrupt_role == "arguments" {
-            arguments = "not-valid-aead-ciphertext".to_string();
+            arguments = flip_authenticated_ciphertext(&arguments);
         } else {
-            result = "not-valid-aead-ciphertext".to_string();
+            result = flip_authenticated_ciphertext(&result);
         }
         insert_encrypted_row(
             &store,
@@ -524,26 +568,46 @@ fn d068_corrupt_current_ciphertext_fails_list_and_export_without_rewrite() {
 fn d068_envelope_role_version_and_column_swaps_fail_closed_without_rewrite() {
     let mut accepted = Vec::new();
     let mut rewritten = Vec::new();
-    for scenario in ["envelope_version", "swap_columns", "column_version"] {
+    for scenario in [
+        "envelope_version",
+        "arguments_envelope_role",
+        "result_envelope_role",
+        "swap_columns",
+        "column_version",
+        "matching_unsupported_version",
+    ] {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mcp_audit.db");
         let store = create_store(&path);
         let (arguments_receipt, result_receipt) = legal_receipts();
-        let envelope_version = if scenario == "envelope_version" {
+        let envelope_version = if matches!(
+            scenario,
+            "envelope_version" | "matching_unsupported_version"
+        ) {
             MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION + 1
         } else {
             MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION
         };
+        let arguments_envelope_role = if scenario == "arguments_envelope_role" {
+            "result"
+        } else {
+            "arguments"
+        };
+        let result_envelope_role = if scenario == "result_envelope_role" {
+            "arguments"
+        } else {
+            "result"
+        };
         let mut arguments = store
             .d068_encrypt_current_payload_fixture_for_test(
-                "arguments",
+                arguments_envelope_role,
                 envelope_version,
                 &arguments_receipt,
             )
             .unwrap();
         let mut result = store
             .d068_encrypt_current_payload_fixture_for_test(
-                "result",
+                result_envelope_role,
                 envelope_version,
                 &result_receipt,
             )
@@ -551,11 +615,12 @@ fn d068_envelope_role_version_and_column_swaps_fail_closed_without_rewrite() {
         if scenario == "swap_columns" {
             std::mem::swap(&mut arguments, &mut result);
         }
-        let database_version = if scenario == "column_version" {
-            MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION + 1
-        } else {
-            MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION
-        };
+        let database_version =
+            if matches!(scenario, "column_version" | "matching_unsupported_version") {
+                MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION + 1
+            } else {
+                MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION
+            };
         insert_encrypted_row(
             &store,
             &format!("d068_{scenario}"),
@@ -588,11 +653,12 @@ fn d068_migration_authentication_failure_is_atomic_and_performs_zero_rewrite() {
     let path = directory.path().join("mcp_audit.db");
     let store = create_store(&path);
     let (arguments, result) = legacy_ciphertexts(&store);
+    let corrupted_arguments = flip_authenticated_ciphertext(&arguments);
     insert_encrypted_row(&store, "d068_legacy_valid_first", &arguments, &result, 0);
     insert_encrypted_row(
         &store,
         "d068_legacy_corrupt_second",
-        "not-valid-aead-ciphertext",
+        &corrupted_arguments,
         &result,
         0,
     );
