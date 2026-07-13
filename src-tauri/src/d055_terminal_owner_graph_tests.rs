@@ -974,3 +974,98 @@ fn turn_bound_writer_matrix_has_no_direct_product_bypass_after_gateway_cutover()
         "D055 RED: covered product writers still bypass one terminal-owner gateway: {direct_hits:#?}; allowed exceptions={ALLOWED_EXCEPTIONS:#?}"
     );
 }
+
+#[test]
+fn terminal_origin_authority_surface_has_no_naked_id_or_string_minter_after_cutover() {
+    // This is deliberately deletion/absence evidence only. Dynamic authority
+    // behavior is proven by the file-backed compile target; source strings
+    // cannot establish that a typed proof is valid or invalid at runtime.
+    fn collect_rust_files(root: &std::path::Path, output: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(root).expect("read production authority source tree") {
+            let entry = entry.expect("read production authority source entry");
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().and_then(|name| name.to_str()) != Some("tests") {
+                    collect_rust_files(&path, output);
+                }
+            } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+                let name = path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("");
+                if !name.ends_with("_tests.rs")
+                    && !matches!(
+                        name,
+                        "d055_terminal_owner_graph_tests.rs"
+                            | "d055_terminal_owner_graph_compile_red.rs"
+                    )
+                {
+                    output.push(path);
+                }
+            }
+        }
+    }
+
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let roots = [manifest.join("src"), manifest.join("../openlife-core/src")];
+    let forbidden = [
+        "issue_review_origin_proof(",
+        "TerminalOwnerOriginProof::new(",
+        "TerminalOwnerOriginProof::from_ids(",
+        "TerminalOwnerOriginProof::from_strings(",
+        "TerminalOwnerOriginProof::from_source_detail(",
+        "TerminalOwnerOriginProof::from_after(",
+        "TerminalOwnerEpochAdmission::new(",
+        "TerminalOwnerEpochAdmission::from_ids(",
+        "TerminalOwnerEpochAdmission::from_strings(",
+        "TerminalOwnerOriginBinding::new(",
+        "fn mint_terminal_owner",
+        "fn issue_terminal_owner_origin",
+        "fn create_terminal_owner_origin",
+        "fn terminal_owner_origin_from_",
+        ".get(\"originatingTaskSessionId\")",
+        ".get(\"originating_task_session_id\")",
+        "\"originatingTaskSessionId\"",
+        "\"originating_task_session_id\"",
+        "main_chat_agent_task_session:",
+        "proposal.source_detail.as_deref() == Some(task_session_id)",
+        "source_detail == task_session_id",
+    ];
+    let mut files = Vec::new();
+    for root in roots {
+        collect_rust_files(&root, &mut files);
+    }
+    files.sort();
+    let mut hits = Vec::new();
+    for file in files {
+        let source = std::fs::read_to_string(&file).expect("read production authority source");
+        // Repository convention places named unit-test modules at the end.
+        // Test-only imports/helpers can appear earlier, so truncate only at a
+        // cfg(test) module declaration rather than the first cfg(test) item.
+        let production = source
+            .split_once("#[cfg(test)]\nmod ")
+            .map(|(before, _)| before)
+            .unwrap_or(source.as_str());
+        for (line_index, line) in production.lines().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            for pattern in forbidden {
+                if line.contains(pattern) {
+                    hits.push(format!(
+                        "{}:{}:{pattern}",
+                        file.strip_prefix(&manifest)
+                            .unwrap_or(file.as_path())
+                            .display(),
+                        line_index + 1
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        hits.is_empty(),
+        "D055 RED deletion evidence: production authority surfaces still contain caller-shaped terminal-origin minters/fields: {hits:#?}"
+    );
+}
