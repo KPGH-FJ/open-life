@@ -1,8 +1,12 @@
 use super::export_mcp_audit_logs_with_state;
 use crate::mcp_audit_read_contract_test_support::{
-    corrupt_ciphertext, sqlite_family_snapshot, CiphertextColumn,
+    assert_d065_composite_read_owners, assert_d065_effects_blocked_independently,
+    assert_d065_store_mode, corrupt_ciphertext, sqlite_family_snapshot, CiphertextColumn,
+    D065_AUDIT_KEY_REFERENCE_STORE, D065_AUDIT_STORE, D065_UNRELATED_STORE,
 };
-use crate::persistence_coordinator::{PersistenceCoordinator, EXPECTED_BOOTSTRAP_STORES};
+use crate::persistence_coordinator::{
+    PersistenceCoordinator, PersistenceStoreMode, EXPECTED_BOOTSTRAP_STORES,
+};
 use openlife_core::mcp_audit::{AuditKeyConfig, AuditKeyMaterial, KeyMode, McpAuditStore};
 use std::path::Path;
 use std::sync::Arc;
@@ -56,6 +60,18 @@ async fn d065_insert_export_row(state: &Arc<crate::AppState>) {
         .expect("insert D065 export row");
 }
 
+async fn assert_d065_exact_one_row_export(state: &Arc<crate::AppState>, expected_tool_name: &str) {
+    let export = export_mcp_audit_logs_with_state(30, state)
+        .await
+        .expect("independently trusted D065 audit export");
+    assert_eq!(export.days, 30);
+    assert_eq!(export.entry_count, 1);
+    assert_eq!(export.entries.len(), 1);
+    assert_eq!(export.entries[0].tool_name, expected_tool_name);
+    assert!(export.entries[0].success);
+    assert!(export.entries[0].pii_found);
+}
+
 async fn d065_assert_unavailable_export_gate(store_name: &'static str) {
     let directory = tempfile::tempdir().unwrap();
     let state = d065_export_state(&directory.path().join("mcp_audit.db"));
@@ -85,6 +101,126 @@ async fn d065_key_reference_unavailable_export_fails_at_composite_trust_gate() {
 #[tokio::test]
 async fn d065_audit_store_unavailable_export_fails_at_composite_trust_gate() {
     d065_assert_unavailable_export_gate("McpAuditStore").await;
+}
+
+#[tokio::test]
+async fn d065_unrelated_read_only_store_does_not_block_exact_audit_export() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = d065_export_state(&directory.path().join("mcp_audit.db"));
+    d065_insert_export_row(&state).await;
+    state.persistence_coordinator.register_read_only(
+        D065_UNRELATED_STORE,
+        "d065_export_unrelated_read_only",
+        "unrelated canonical store is read-only",
+    );
+
+    assert_d065_composite_read_owners(
+        &state.persistence_coordinator,
+        PersistenceStoreMode::ReadWriteCanonical,
+        PersistenceStoreMode::ReadWriteCanonical,
+    );
+    assert_d065_store_mode(
+        &state.persistence_coordinator,
+        D065_UNRELATED_STORE,
+        PersistenceStoreMode::ReadOnlyCanonical,
+    );
+    assert_d065_effects_blocked_independently(&state.persistence_coordinator);
+    assert_d065_exact_one_row_export(&state, "d065_export_fixture_tool").await;
+}
+
+#[tokio::test]
+async fn d065_unrelated_unavailable_store_does_not_block_exact_audit_export() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = d065_export_state(&directory.path().join("mcp_audit.db"));
+    d065_insert_export_row(&state).await;
+    state.persistence_coordinator.register_unavailable(
+        D065_UNRELATED_STORE,
+        "d065_export_unrelated_unavailable",
+        "unrelated canonical store is unavailable",
+    );
+
+    assert_d065_composite_read_owners(
+        &state.persistence_coordinator,
+        PersistenceStoreMode::ReadWriteCanonical,
+        PersistenceStoreMode::ReadWriteCanonical,
+    );
+    assert_d065_store_mode(
+        &state.persistence_coordinator,
+        D065_UNRELATED_STORE,
+        PersistenceStoreMode::Unavailable,
+    );
+    assert_d065_effects_blocked_independently(&state.persistence_coordinator);
+    assert_d065_exact_one_row_export(&state, "d065_export_fixture_tool").await;
+}
+
+#[tokio::test]
+async fn d065_read_only_key_reference_with_writable_audit_store_retains_exact_export() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = d065_export_state(&directory.path().join("mcp_audit.db"));
+    d065_insert_export_row(&state).await;
+    state.persistence_coordinator.register_read_only(
+        D065_AUDIT_KEY_REFERENCE_STORE,
+        "d065_export_key_reference_read_only",
+        "key-reference owner is canonical read-only",
+    );
+
+    assert_d065_composite_read_owners(
+        &state.persistence_coordinator,
+        PersistenceStoreMode::ReadOnlyCanonical,
+        PersistenceStoreMode::ReadWriteCanonical,
+    );
+    assert_d065_effects_blocked_independently(&state.persistence_coordinator);
+    assert_d065_exact_one_row_export(&state, "d065_export_fixture_tool").await;
+}
+
+#[tokio::test]
+async fn d065_read_only_audit_store_with_writable_key_reference_retains_exact_export() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("mcp_audit.db");
+    let material = d065_export_keychain_material(69, [0x69; 32]);
+    let writable = McpAuditStore::with_key_materials(&database_path, vec![material.clone()])
+        .expect("create writable D065 one-sided export fixture");
+    writable
+        .insert_log(
+            "d065_audit_only_read_only_export_fixture",
+            &serde_json::json!({"private": "not-returned"}),
+            "fixture-result",
+            true,
+            true,
+        )
+        .expect("insert D065 one-sided read-only export row");
+    drop(writable);
+    let read_only =
+        McpAuditStore::open_read_only_existing_with_key_materials(&database_path, vec![material])
+            .expect("open genuine D065 one-sided canonical read-only export store");
+    assert!(
+        read_only
+            .insert_log(
+                "must_not_write",
+                &serde_json::json!({}),
+                "must-not-write",
+                true,
+                false,
+            )
+            .is_err(),
+        "the one-sided audit-store export fixture must be genuinely non-writable"
+    );
+    let state = d065_export_state_with_store(read_only);
+    state.persistence_coordinator.register_read_only(
+        D065_AUDIT_STORE,
+        "d065_export_audit_store_read_only",
+        "audit database owner is canonical read-only",
+    );
+    let before = sqlite_family_snapshot(&database_path);
+
+    assert_d065_composite_read_owners(
+        &state.persistence_coordinator,
+        PersistenceStoreMode::ReadWriteCanonical,
+        PersistenceStoreMode::ReadOnlyCanonical,
+    );
+    assert_d065_effects_blocked_independently(&state.persistence_coordinator);
+    assert_d065_exact_one_row_export(&state, "d065_audit_only_read_only_export_fixture").await;
+    assert_eq!(sqlite_family_snapshot(&database_path), before);
 }
 
 #[tokio::test]

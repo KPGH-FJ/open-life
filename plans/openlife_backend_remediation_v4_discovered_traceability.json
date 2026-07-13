@@ -454,12 +454,21 @@
         ],
         "failing_test": [
           "test_defined:D065-composite-trust-failure-projects-unknown-not-zero",
-          "test_defined:D065-list-and-decrypt-failure-fail-closed"
+          "test_defined:D065-list-and-decrypt-failure-fail-closed",
+          "test_defined:D065-unrelated-read-only-or-unavailable-store-does-not-pollute-exact-audit-owner-truth",
+          "test_defined:D065-either-single-canonical-read-only-audit-owner-projects-degraded-with-exact-readable-data",
+          "test_run:D065-Rust-34-selected-14-controls-pass-20-target-RED-2026-07-13"
         ],
-        "positive": [],
+        "positive": [
+          "test_run:D065-counterfactual-shipped-export-capability-controls-4-of-4-2026-07-13"
+        ],
         "counterfactual": [
           "test_defined:trusted-empty-audit-db-is-available-zero",
-          "test_defined:trusted-nonempty-audit-db-returns-exact-counts"
+          "test_defined:trusted-nonempty-audit-db-returns-exact-counts",
+          "test_defined:both-audit-owners-read-write-plus-unrelated-read-only-store-remains-available-and-exact-while-global-effects-are-independently-blocked",
+          "test_defined:both-audit-owners-read-write-plus-unrelated-unavailable-store-remains-available-and-exact-while-global-effects-are-independently-blocked",
+          "test_defined:read-only-key-reference-plus-read-write-audit-store-is-degraded-and-readable",
+          "test_defined:read-write-key-reference-plus-genuine-read-only-audit-store-is-degraded-and-readable-with-write-rejected"
         ],
         "deletion_or_absence": [
           "deletion_required:diagnostics-audit-error-to-zero",
@@ -467,11 +476,16 @@
           "deletion_required:decrypt-failure-success-placeholder"
         ],
         "capability_non_regression": [
-          "test_defined:canonical-read-only-audit-store-with-complete-keyring-remains-readable"
+          "test_defined:canonical-read-only-audit-store-with-complete-keyring-remains-readable",
+          "test_defined:unrelated-persistence-degradation-does-not-block-exact-audit-list-or-export"
         ],
         "live_boundary": [
           "D057-GREEN-blocked-until-composite-audit-read-truth-is-proved-end-to-end",
-          "typed-audit-read-gateway-and-product-projection-not-implemented"
+          "typed-audit-read-gateway-and-product-projection-not-implemented",
+          "red_contract_baseline:D065-Rust-26-selected-10-controls-pass-16-target-RED",
+          "red_contract_repair:D065-Rust-34-selected-14-controls-pass-20-target-RED",
+          "test_run:D065-UI-21-selected-16-surrounding-pass-5-target-RED-2026-07-13",
+          "zero_credit:D063-legacy-clear-route-test-is-one-surrounding-pass-and-not-a-D065-control"
         ]
       },
       "independent_review": {
@@ -645,7 +659,7 @@
         "BR4-D065"
       ],
       "kind": "mcp_audit_composite_trusted_read_truth",
-      "scenario": "An unavailable key-reference authority, unavailable audit store, list failure or decrypt failure returns typed unknown or unavailable from diagnostics and the shipped audit list and is never displayed as zero; only a trusted empty database earns available-zero truth, while normal trusted rows retain exact bounded read capability.",
+      "scenario": "Only the exact McpAuditKeyReferenceStore and McpAuditStore owners determine audit-read status: either unavailable owner, list failure or decrypt failure returns typed unknown or unavailable from diagnostics and shipped reads and is never displayed as zero; either exact owner in ReadOnlyCanonical projects degraded while diagnostics, list and export remain exact and readable; an unrelated read-only or unavailable store may independently block global effects but cannot degrade, hide or block audit reads when both audit owners are ReadWriteCanonical; a genuine read-only audit-store handle rejects writes, only a trusted empty database earns available-zero truth, and normal trusted rows retain exact bounded read capability.",
       "frozen_denominator_credit": false
     },
     {
