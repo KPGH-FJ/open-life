@@ -1,6 +1,12 @@
 use crate::errors::AppError;
 use openlife_core::mcp_audit::AuditKeyConfig;
 use openlife_core::privacy::PrivacyPolicy;
+#[cfg(test)]
+use std::collections::HashSet;
+#[cfg(test)]
+use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::{LazyLock, Mutex};
 
 const RELEASE_APP_DIR_NAME: &str = "ai.openlife.app";
 const DEV_APP_DIR_NAME: &str = "ai.openlife.app.dev";
@@ -59,19 +65,70 @@ pub(crate) fn mcp_audit_keyring_path() -> std::path::PathBuf {
     app_data_dir().join("mcp_audit_keys.json")
 }
 
-pub(crate) fn load_mcp_audit_keyring_from_path(path: &std::path::Path) -> Vec<AuditKeyConfig> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<Vec<AuditKeyConfig>>(&text).ok())
-        .unwrap_or_default()
+#[derive(Debug, Clone)]
+pub(crate) enum McpAuditKeyringLoad {
+    Absent,
+    Present(Vec<AuditKeyConfig>),
+    PresentInvalid { error: String },
+    Unreadable { error: String },
+}
+
+pub(crate) fn load_mcp_audit_keyring_from_path(path: &std::path::Path) -> McpAuditKeyringLoad {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return McpAuditKeyringLoad::Absent;
+        }
+        Err(error) => {
+            return McpAuditKeyringLoad::Unreadable {
+                error: AppError::from(error).to_string(),
+            };
+        }
+    };
+    let configs = match serde_json::from_slice::<Vec<AuditKeyConfig>>(&bytes) {
+        Ok(configs) => configs,
+        Err(error) => {
+            return McpAuditKeyringLoad::PresentInvalid {
+                error: error.to_string(),
+            };
+        }
+    };
+    if configs.is_empty() {
+        return McpAuditKeyringLoad::PresentInvalid {
+            error: "MCP audit keyring is present but contains no key authority".into(),
+        };
+    }
+    McpAuditKeyringLoad::Present(configs)
 }
 
 pub(crate) fn save_mcp_audit_keyring_to_path(
     path: &std::path::Path,
     configs: &[AuditKeyConfig],
 ) -> Result<(), AppError> {
+    #[cfg(test)]
+    if MCP_AUDIT_KEYRING_SAVE_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(path)
+    {
+        return Err(AppError::db(
+            "injected MCP audit key-reference save failure",
+        ));
+    }
     let text = serde_json::to_string_pretty(configs).map_err(AppError::from)?;
     openlife_core::atomic_file::write_atomic(path, text.as_bytes()).map_err(AppError::from)
+}
+
+#[cfg(test)]
+static MCP_AUDIT_KEYRING_SAVE_FAILURES: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+#[cfg(test)]
+pub(crate) fn fail_next_mcp_audit_keyring_save_for_test(path: impl Into<PathBuf>) {
+    MCP_AUDIT_KEYRING_SAVE_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(path.into());
 }
 
 #[cfg(test)]
@@ -129,7 +186,33 @@ mod tests {
 
         save_mcp_audit_keyring_to_path(&path, &configs).unwrap();
         let loaded = load_mcp_audit_keyring_from_path(&path);
+        let McpAuditKeyringLoad::Present(loaded) = loaded else {
+            panic!("saved MCP audit keyring must be present");
+        };
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[1].epoch, 123);
+    }
+
+    #[test]
+    fn missing_and_present_invalid_mcp_audit_keyrings_are_distinct() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mcp_audit_keys.json");
+
+        assert!(matches!(
+            load_mcp_audit_keyring_from_path(&path),
+            McpAuditKeyringLoad::Absent
+        ));
+
+        std::fs::write(&path, b"[]\n").unwrap();
+        assert!(matches!(
+            load_mcp_audit_keyring_from_path(&path),
+            McpAuditKeyringLoad::PresentInvalid { .. }
+        ));
+
+        std::fs::write(&path, b"{ malformed\n").unwrap();
+        assert!(matches!(
+            load_mcp_audit_keyring_from_path(&path),
+            McpAuditKeyringLoad::PresentInvalid { .. }
+        ));
     }
 }

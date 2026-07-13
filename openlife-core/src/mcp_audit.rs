@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use aes_gcm::{
@@ -129,6 +129,19 @@ pub struct AuditKeyMaterial {
     pub key: [u8; 32],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpAuditDatabaseInspection {
+    pub exists: bool,
+    pub row_count: u64,
+    pub key_epochs: Vec<u64>,
+}
+
+impl McpAuditDatabaseInspection {
+    pub fn is_empty_or_absent(&self) -> bool {
+        self.row_count == 0
+    }
+}
+
 /// Encrypted SQLite-backed store for MCP call logs with configurable key management.
 #[derive(Clone)]
 pub struct McpAuditStore {
@@ -141,7 +154,226 @@ pub struct McpAuditStore {
     key_configs: Vec<AuditKeyConfig>,
 }
 
+fn mcp_audit_log_columns(conn: &Connection) -> Result<HashSet<String>> {
+    let mut statement = conn.prepare("PRAGMA table_info(mcp_log)")?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    columns
+        .collect::<std::result::Result<HashSet<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn mcp_audit_material_keyring(materials: &[AuditKeyMaterial]) -> Result<HashMap<u64, [u8; 32]>> {
+    let mut previous_epoch = None;
+    let mut keyring = HashMap::new();
+    for material in materials {
+        i64::try_from(material.config.epoch)
+            .context("MCP audit key epoch exceeds the SQLite integer range")?;
+        if previous_epoch.is_some_and(|epoch| epoch >= material.config.epoch) {
+            anyhow::bail!("MCP audit key materials must be strictly increasing by epoch");
+        }
+        if material.key.iter().all(|byte| *byte == 0) {
+            anyhow::bail!("MCP audit key material must not be all-zero");
+        }
+        if keyring
+            .insert(material.config.epoch, material.key)
+            .is_some()
+        {
+            anyhow::bail!("duplicate MCP audit key epoch");
+        }
+        previous_epoch = Some(material.config.epoch);
+    }
+    Ok(keyring)
+}
+
+fn decrypt_mcp_audit_ciphertext(combined_b64: &str, key: &[u8; 32]) -> Result<String> {
+    let combined = general_purpose::STANDARD
+        .decode(combined_b64)
+        .context("invalid base64")?;
+    if combined.len() < 12 {
+        anyhow::bail!("ciphertext too short");
+    }
+    let (nonce_bytes, ciphertext) = combined.split_at(12);
+    let cipher = Aes256Gcm::new_from_slice(key).map_err(|error| anyhow::anyhow!("{error:?}"))?;
+    let nonce = Nonce::from_slice(nonce_bytes);
+    let plaintext = cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|error| anyhow::anyhow!("decrypt failed: {error:?}"))?;
+    String::from_utf8(plaintext).context("utf8 decode")
+}
+
+fn validate_mcp_audit_ciphertext_row(
+    id: i64,
+    arguments_encrypted: &str,
+    result_encrypted: &str,
+    key_epoch: i64,
+    keyring: &HashMap<u64, [u8; 32]>,
+) -> Result<()> {
+    let key_epoch = u64::try_from(key_epoch)
+        .with_context(|| format!("MCP audit row {id} contains a negative key epoch"))?;
+    let key = keyring.get(&key_epoch).ok_or_else(|| {
+        anyhow::anyhow!("MCP audit row {id} requires unavailable key epoch {key_epoch}")
+    })?;
+    decrypt_mcp_audit_ciphertext(arguments_encrypted, key).with_context(|| {
+        format!("authenticate MCP audit arguments for row {id} epoch {key_epoch}")
+    })?;
+    decrypt_mcp_audit_ciphertext(result_encrypted, key)
+        .with_context(|| format!("authenticate MCP audit result for row {id} epoch {key_epoch}"))?;
+    Ok(())
+}
+
 impl McpAuditStore {
+    pub fn inspect_existing_database(path: impl AsRef<Path>) -> Result<McpAuditDatabaseInspection> {
+        let path = path.as_ref();
+        match std::fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(McpAuditDatabaseInspection {
+                    exists: false,
+                    row_count: 0,
+                    key_epochs: Vec::new(),
+                });
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("inspect MCP audit database at {}", path.display()));
+            }
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                anyhow::bail!("MCP audit database symlinks are not accepted");
+            }
+            Ok(metadata) if !metadata.is_file() => {
+                anyhow::bail!("MCP audit database path is not a regular file");
+            }
+            Ok(_) => {}
+        }
+
+        let conn = crate::sqlite_migration::open_existing_read_only(
+            path,
+            "mcp_audit_store_preflight",
+            &["mcp_log"],
+        )?;
+        let columns = mcp_audit_log_columns(&conn)?;
+        for required in [
+            "id",
+            "tool_name",
+            "arguments_encrypted",
+            "result_encrypted",
+            "success",
+            "pii_found",
+            "created_at",
+        ] {
+            if !columns.contains(required) {
+                anyhow::bail!("MCP audit database is missing required column {required}");
+            }
+        }
+        let row_count = conn.query_row("SELECT COUNT(*) FROM mcp_log", [], |row| {
+            row.get::<_, i64>(0)
+        })?;
+        let row_count =
+            u64::try_from(row_count).context("MCP audit database reported a negative row count")?;
+        let key_epochs = if row_count == 0 {
+            Vec::new()
+        } else if columns.contains("key_epoch") {
+            let mut statement =
+                conn.prepare("SELECT DISTINCT key_epoch FROM mcp_log ORDER BY key_epoch ASC")?;
+            let rows = statement.query_map([], |row| row.get::<_, i64>(0))?;
+            let mut epochs = Vec::new();
+            for epoch in rows {
+                let epoch = u64::try_from(epoch?)
+                    .context("MCP audit database contains a negative key epoch")?;
+                epochs.push(epoch);
+            }
+            epochs
+        } else {
+            vec![0]
+        };
+        Ok(McpAuditDatabaseInspection {
+            exists: true,
+            row_count,
+            key_epochs,
+        })
+    }
+
+    pub fn preflight_existing_database_key_materials(
+        path: impl AsRef<Path>,
+        materials: &[AuditKeyMaterial],
+    ) -> Result<McpAuditDatabaseInspection> {
+        let path = path.as_ref();
+        let inspection = Self::inspect_existing_database(path)?;
+        if !inspection.exists || inspection.row_count == 0 {
+            return Ok(inspection);
+        }
+        let keyring = mcp_audit_material_keyring(materials)?;
+        for epoch in &inspection.key_epochs {
+            if !keyring.contains_key(epoch) {
+                anyhow::bail!("MCP audit database requires uncovered key epoch {epoch}");
+            }
+        }
+        let conn = crate::sqlite_migration::open_existing_read_only(
+            path,
+            "mcp_audit_store_key_preflight",
+            &["mcp_log"],
+        )?;
+        let columns = mcp_audit_log_columns(&conn)?;
+        let epoch_expression = if columns.contains("key_epoch") {
+            "key_epoch"
+        } else {
+            "0"
+        };
+        let pending_predicate = if columns.contains("payload_minimized_version") {
+            format!(" WHERE payload_minimized_version < {MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION}")
+        } else {
+            String::new()
+        };
+        let pending_sql = format!(
+            "SELECT id, arguments_encrypted, result_encrypted, {epoch_expression} FROM mcp_log{pending_predicate} ORDER BY id ASC"
+        );
+        let mut pending_statement = conn.prepare(&pending_sql)?;
+        let pending_rows = pending_statement.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        let mut authenticated_epochs = HashSet::new();
+        for row in pending_rows {
+            let (id, arguments, result, epoch) = row?;
+            validate_mcp_audit_ciphertext_row(id, &arguments, &result, epoch, &keyring)?;
+            authenticated_epochs
+                .insert(u64::try_from(epoch).with_context(|| {
+                    format!("MCP audit row {id} contains a negative key epoch")
+                })?);
+        }
+        for epoch in &inspection.key_epochs {
+            if authenticated_epochs.contains(epoch) {
+                continue;
+            }
+            let sample_sql = if columns.contains("key_epoch") {
+                "SELECT id, arguments_encrypted, result_encrypted, key_epoch FROM mcp_log WHERE key_epoch = ?1 ORDER BY id ASC LIMIT 1"
+            } else {
+                "SELECT id, arguments_encrypted, result_encrypted, 0 FROM mcp_log ORDER BY id ASC LIMIT 1"
+            };
+            let mut sample_statement = conn.prepare(sample_sql)?;
+            let mut sample_rows = if columns.contains("key_epoch") {
+                sample_statement.query([i64::try_from(*epoch)
+                    .context("MCP audit key epoch exceeds SQLite integer range")?])?
+            } else {
+                sample_statement.query([])?
+            };
+            let sample = sample_rows.next()?.ok_or_else(|| {
+                anyhow::anyhow!("MCP audit key epoch {epoch} has no validation row")
+            })?;
+            validate_mcp_audit_ciphertext_row(
+                sample.get(0)?,
+                &sample.get::<_, String>(1)?,
+                &sample.get::<_, String>(2)?,
+                sample.get(3)?,
+                &keyring,
+            )?;
+        }
+        Ok(inspection)
+    }
+
     /// Test/fixture-only constructor for the historical deterministic key.
     /// Product code must hydrate a random keychain epoch and call
     /// `with_key_materials`.
@@ -210,33 +442,26 @@ impl McpAuditStore {
 
     pub fn with_key_materials(
         db_path: impl Into<PathBuf>,
-        mut materials: Vec<AuditKeyMaterial>,
+        materials: Vec<AuditKeyMaterial>,
     ) -> Result<Self> {
         if materials.is_empty() {
             anyhow::bail!("MCP audit key material is empty");
         }
-        materials.sort_by_key(|material| material.config.epoch);
-        for pair in materials.windows(2) {
-            if pair[0].config.epoch == pair[1].config.epoch {
-                anyhow::bail!("duplicate MCP audit key epoch");
-            }
-        }
+        let keyring = mcp_audit_material_keyring(&materials)?;
         let active = materials.last().cloned().expect("non-empty key materials");
         if active.config.mode != KeyMode::Keychain || active.config.key_ref.is_none() {
             anyhow::bail!(
                 "active MCP audit key must be random keychain material; legacy modes are read-only migration keys"
             );
         }
-        let keyring = materials
-            .iter()
-            .map(|material| (material.config.epoch, material.key))
-            .collect::<HashMap<_, _>>();
+        let db_path = db_path.into();
+        Self::preflight_existing_database_key_materials(&db_path, &materials)?;
         let key_configs = materials
             .iter()
             .map(|material| material.config.clone())
             .collect::<Vec<_>>();
         let store = Self {
-            db_path: db_path.into(),
+            db_path,
             read_only: false,
             unavailable_reason: None,
             key: active.key,
@@ -250,22 +475,18 @@ impl McpAuditStore {
 
     pub fn open_read_only_existing_with_key_materials(
         db_path: impl Into<PathBuf>,
-        mut materials: Vec<AuditKeyMaterial>,
+        materials: Vec<AuditKeyMaterial>,
     ) -> Result<Self> {
         if materials.is_empty() {
             anyhow::bail!("MCP audit key material is empty");
         }
-        materials.sort_by_key(|material| material.config.epoch);
-        for pair in materials.windows(2) {
-            if pair[0].config.epoch == pair[1].config.epoch {
-                anyhow::bail!("duplicate MCP audit key epoch");
-            }
-        }
+        let keyring = mcp_audit_material_keyring(&materials)?;
         let active = materials.last().cloned().expect("non-empty key materials");
         if active.config.mode != KeyMode::Keychain || active.config.key_ref.is_none() {
             anyhow::bail!("active MCP audit key must be random keychain material");
         }
         let db_path = db_path.into();
+        Self::preflight_existing_database_key_materials(&db_path, &materials)?;
         crate::sqlite_migration::open_existing_read_only(
             &db_path,
             "mcp_audit_store",
@@ -277,10 +498,7 @@ impl McpAuditStore {
             unavailable_reason: None,
             key: active.key,
             key_config: active.config,
-            keyring: materials
-                .iter()
-                .map(|material| (material.config.epoch, material.key))
-                .collect(),
+            keyring,
             key_configs: materials
                 .into_iter()
                 .map(|material| material.config)
@@ -499,31 +717,16 @@ impl McpAuditStore {
         Ok(general_purpose::STANDARD.encode(&combined))
     }
 
-    fn decrypt(&self, combined_b64: &str) -> Result<String> {
-        self.decrypt_with_key(combined_b64, &self.key)
-    }
-
     fn decrypt_for_epoch(&self, combined_b64: &str, key_epoch: u64) -> Result<String> {
-        if let Some(key) = self.keyring.get(&key_epoch) {
-            return self.decrypt_with_key(combined_b64, key);
-        }
-        self.decrypt(combined_b64)
+        let key = self
+            .keyring
+            .get(&key_epoch)
+            .ok_or_else(|| anyhow::anyhow!("MCP audit key epoch {key_epoch} is unavailable"))?;
+        self.decrypt_with_key(combined_b64, key)
     }
 
     fn decrypt_with_key(&self, combined_b64: &str, key: &[u8; 32]) -> Result<String> {
-        let combined = general_purpose::STANDARD
-            .decode(combined_b64)
-            .context("invalid base64")?;
-        if combined.len() < 12 {
-            return Err(anyhow::anyhow!("ciphertext too short"));
-        }
-        let (nonce_bytes, ciphertext) = combined.split_at(12);
-        let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| anyhow::anyhow!("{:?}", e))?;
-        let nonce = Nonce::from_slice(nonce_bytes);
-        let plaintext = cipher
-            .decrypt(nonce, ciphertext)
-            .map_err(|e| anyhow::anyhow!("decrypt failed: {:?}", e))?;
-        String::from_utf8(plaintext).context("utf8 decode")
+        decrypt_mcp_audit_ciphertext(combined_b64, key)
     }
 
     fn migrate_legacy_payloads(&self) -> Result<()> {
@@ -540,7 +743,7 @@ impl McpAuditStore {
                         row.get::<_, i64>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
-                        row.get::<_, i64>(3)?.max(0) as u64,
+                        row.get::<_, i64>(3)?,
                     ))
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -552,9 +755,14 @@ impl McpAuditStore {
 
         let mut migrated = Vec::with_capacity(rows.len());
         for (id, arguments_encrypted, result_encrypted, key_epoch) in rows {
+            let key_epoch = u64::try_from(key_epoch).with_context(|| {
+                format!("legacy MCP audit row {id} contains a negative key epoch")
+            })?;
             let arguments_plaintext = self
                 .decrypt_for_epoch(&arguments_encrypted, key_epoch)
-                .unwrap_or(arguments_encrypted);
+                .with_context(|| {
+                    format!("decrypt legacy MCP audit arguments for row {id} epoch {key_epoch}")
+                })?;
             let arguments_receipt = serde_json::from_str::<Value>(&arguments_plaintext)
                 .ok()
                 .map(|value| audit_arguments_receipt(&value))
@@ -568,7 +776,9 @@ impl McpAuditStore {
                 });
             let result_plaintext = self
                 .decrypt_for_epoch(&result_encrypted, key_epoch)
-                .unwrap_or(result_encrypted);
+                .with_context(|| {
+                    format!("decrypt legacy MCP audit result for row {id} epoch {key_epoch}")
+                })?;
             migrated.push((
                 id,
                 self.encrypt(&arguments_receipt)?,
@@ -654,19 +864,25 @@ impl McpAuditStore {
                 success != 0,
                 pii_found != 0,
                 created_at,
-                key_epoch as u64,
+                key_epoch,
             ))
         })?;
 
         let mut out = Vec::new();
         for r in rows {
             let (id, tool_name, args_enc, res_enc, success, pii_found, created_at, key_epoch) = r?;
+            let key_epoch = u64::try_from(key_epoch)
+                .with_context(|| format!("MCP audit row {id} contains a negative key epoch"))?;
             let arguments = self
                 .decrypt_for_epoch(&args_enc, key_epoch)
-                .unwrap_or_else(|_| "[decrypt failed]".into());
+                .with_context(|| {
+                    format!("decrypt MCP audit arguments for row {id} epoch {key_epoch}")
+                })?;
             let result = self
                 .decrypt_for_epoch(&res_enc, key_epoch)
-                .unwrap_or_else(|_| "[decrypt failed]".into());
+                .with_context(|| {
+                    format!("decrypt MCP audit result for row {id} epoch {key_epoch}")
+                })?;
             out.push(McpLogEntry {
                 id,
                 tool_name,
@@ -728,6 +944,20 @@ fn openlife_default_data_dir() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn keychain_material(epoch: u64, key: [u8; 32]) -> AuditKeyMaterial {
+        AuditKeyMaterial {
+            config: AuditKeyConfig {
+                mode: KeyMode::Keychain,
+                salt_b64: None,
+                env_var: None,
+                key_ref: Some(format!("test-mcp-audit-key-{epoch}")),
+                epoch,
+                created_at: "2026-07-13T00:00:00Z".to_string(),
+            },
+            key,
+        }
+    }
 
     #[test]
     fn legacy_key_material_cannot_become_the_active_product_write_epoch() {
@@ -864,6 +1094,150 @@ mod tests {
             )
             .unwrap();
         assert_eq!(version, MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION);
+    }
+
+    #[test]
+    fn missing_epoch_never_falls_back_to_the_active_audit_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.db");
+        let material = keychain_material(41, [0x41; 32]);
+        let store = McpAuditStore::with_key_materials(&path, vec![material]).unwrap();
+        store
+            .insert_log(
+                "epoch_bound_tool",
+                &serde_json::json!({"bounded": true}),
+                "epoch-bound-result",
+                true,
+                false,
+            )
+            .unwrap();
+        store
+            .conn()
+            .unwrap()
+            .execute("UPDATE mcp_log SET key_epoch = 42", [])
+            .unwrap();
+
+        let error = store
+            .list_logs(10)
+            .expect_err("an unknown epoch must not decrypt with the active key");
+
+        assert!(format!("{error:#}").contains("epoch 42 is unavailable"));
+        let row_count: i64 = store
+            .conn()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM mcp_log", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            row_count, 1,
+            "failed authentication must not delete evidence"
+        );
+    }
+
+    #[test]
+    fn wrong_key_preflight_is_read_only_and_preserves_database_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.db");
+        let config = keychain_material(51, [0x51; 32]);
+        let store = McpAuditStore::with_key_materials(&path, vec![config.clone()]).unwrap();
+        store
+            .insert_log(
+                "preflight_tool",
+                &serde_json::json!({"private": "source"}),
+                "private-result",
+                true,
+                true,
+            )
+            .unwrap();
+        drop(store);
+        let before = std::fs::read(&path).unwrap();
+        let wrong_material = keychain_material(51, [0x52; 32]);
+
+        let error = match McpAuditStore::with_key_materials(&path, vec![wrong_material]) {
+            Ok(_) => panic!("wrong key material must fail before writable initialization"),
+            Err(error) => error,
+        };
+        let after = std::fs::read(&path).unwrap();
+
+        assert!(error.to_string().contains("authenticate MCP audit"));
+        assert_eq!(after, before, "failed preflight must be byte-preserving");
+    }
+
+    #[test]
+    fn negative_legacy_epoch_fails_before_migration_or_read_mutates_the_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.db");
+        let material = keychain_material(61, [0x61; 32]);
+        let store = McpAuditStore::with_key_materials(&path, vec![material]).unwrap();
+        let arguments_encrypted = store.encrypt(r#"{"legacy":true}"#).unwrap();
+        let result_encrypted = store.encrypt("legacy-result").unwrap();
+        store
+            .conn()
+            .unwrap()
+            .execute(
+                "INSERT INTO mcp_log (
+                    tool_name, arguments_encrypted, result_encrypted, success, pii_found,
+                    created_at, key_epoch, payload_minimized_version
+                 ) VALUES (?1, ?2, ?3, 1, 0, ?4, -1, 0)",
+                params![
+                    "negative_epoch_fixture",
+                    arguments_encrypted,
+                    result_encrypted,
+                    chrono::Utc::now().to_rfc3339(),
+                ],
+            )
+            .unwrap();
+        let before: (String, String, i64) = store
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT arguments_encrypted, result_encrypted, payload_minimized_version
+                 FROM mcp_log WHERE tool_name = 'negative_epoch_fixture'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+
+        let migration_error = store
+            .migrate_legacy_payloads()
+            .expect_err("negative epochs must not be coerced into epoch zero");
+        let read_error = store
+            .list_logs(10)
+            .expect_err("negative epochs must remain unreadable, not placeholder success");
+        let after: (String, String, i64) = store
+            .conn()
+            .unwrap()
+            .query_row(
+                "SELECT arguments_encrypted, result_encrypted, payload_minimized_version
+                 FROM mcp_log WHERE tool_name = 'negative_epoch_fixture'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+
+        assert!(migration_error.to_string().contains("negative key epoch"));
+        assert!(read_error.to_string().contains("negative key epoch"));
+        assert_eq!(
+            after, before,
+            "failed migration/read must preserve ciphertext"
+        );
+    }
+
+    #[test]
+    fn key_epoch_outside_sqlite_range_is_rejected_before_database_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.db");
+        let material = keychain_material(i64::MAX as u64 + 1, [0x71; 32]);
+
+        let error = match McpAuditStore::with_key_materials(&path, vec![material]) {
+            Ok(_) => panic!("out-of-range epochs must not create a writable audit store"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("SQLite integer range"));
+        assert!(
+            !path.exists(),
+            "invalid key metadata must fail before creating the database"
+        );
     }
 }
 

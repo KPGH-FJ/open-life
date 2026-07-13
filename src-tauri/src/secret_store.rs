@@ -506,14 +506,41 @@ pub(crate) struct McpAuditKeyHydration {
     pub(crate) configs: Vec<AuditKeyConfig>,
     pub(crate) materials: Vec<AuditKeyMaterial>,
     pub(crate) config_changed: bool,
+    staged_secret_ref: Option<String>,
 }
 
-pub(crate) fn hydrate_or_create_mcp_audit_keys(
-    mut configs: Vec<AuditKeyConfig>,
+impl McpAuditKeyHydration {
+    pub(crate) fn ensure_write_epoch(&mut self, store: &dyn SecretStore) -> Result<()> {
+        let needs_keychain_epoch = match self.configs.last() {
+            Some(config) => config.mode != KeyMode::Keychain,
+            None => true,
+        };
+        if !needs_keychain_epoch {
+            return Ok(());
+        }
+        let latest_epoch = self.configs.last().map_or(0, |config| config.epoch);
+        let material = create_mcp_audit_key_material(next_audit_epoch(latest_epoch)?, store)?;
+        self.staged_secret_ref = material.config.key_ref.clone();
+        self.configs.push(material.config.clone());
+        self.materials.push(material);
+        self.config_changed = true;
+        Ok(())
+    }
+
+    pub(crate) fn rollback_staged_secret(&mut self, store: &dyn SecretStore) -> Result<()> {
+        if let Some(secret_ref) = self.staged_secret_ref.take() {
+            store.delete(&secret_ref)?;
+        }
+        self.config_changed = false;
+        Ok(())
+    }
+}
+
+pub(crate) fn hydrate_existing_mcp_audit_keys(
+    configs: Vec<AuditKeyConfig>,
     store: &dyn SecretStore,
 ) -> Result<McpAuditKeyHydration> {
-    configs.sort_by_key(|config| config.epoch);
-    configs.dedup_by_key(|config| config.epoch);
+    validate_mcp_audit_key_configs(&configs)?;
     let mut materials = Vec::new();
     for config in &configs {
         if config.mode == KeyMode::Keychain {
@@ -529,6 +556,9 @@ pub(crate) fn hydrate_or_create_mcp_audit_keys(
             let key: [u8; 32] = decoded
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("MCP audit key must contain exactly 32 bytes"))?;
+            if key.iter().all(|byte| *byte == 0) {
+                anyhow::bail!("MCP audit key must not be all-zero");
+            }
             materials.push(AuditKeyMaterial {
                 config: config.clone(),
                 key,
@@ -539,24 +569,60 @@ pub(crate) fn hydrate_or_create_mcp_audit_keys(
             )?);
         }
     }
-
-    let latest_epoch = configs.last().map_or(0, |config| config.epoch);
-    let needs_keychain_epoch = match configs.last() {
-        Some(config) => config.mode != KeyMode::Keychain,
-        None => true,
-    };
-    if needs_keychain_epoch {
-        let epoch = next_audit_epoch(latest_epoch);
-        let material = create_mcp_audit_key_material(epoch, store)?;
-        configs.push(material.config.clone());
-        materials.push(material);
-    }
-
     Ok(McpAuditKeyHydration {
         configs,
         materials,
-        config_changed: needs_keychain_epoch,
+        config_changed: false,
+        staged_secret_ref: None,
     })
+}
+
+#[cfg(test)]
+pub(crate) fn hydrate_or_create_mcp_audit_keys(
+    configs: Vec<AuditKeyConfig>,
+    store: &dyn SecretStore,
+) -> Result<McpAuditKeyHydration> {
+    let mut hydration = hydrate_existing_mcp_audit_keys(configs, store)?;
+    hydration.ensure_write_epoch(store)?;
+    Ok(hydration)
+}
+
+fn validate_mcp_audit_key_configs(configs: &[AuditKeyConfig]) -> Result<()> {
+    for pair in configs.windows(2) {
+        if pair[0].epoch >= pair[1].epoch {
+            anyhow::bail!("MCP audit key epochs must be strictly increasing in persisted order");
+        }
+    }
+    for config in configs {
+        i64::try_from(config.epoch)
+            .context("MCP audit key epoch exceeds the SQLite integer range")?;
+        chrono::DateTime::parse_from_rfc3339(&config.created_at)
+            .context("MCP audit key created_at must be RFC3339")?;
+        if config.mode != KeyMode::Keychain {
+            continue;
+        }
+        let secret_ref = config
+            .key_ref
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("MCP audit keychain config has no secret reference"))?;
+        let encoded_epoch = secret_ref
+            .strip_prefix(MCP_AUDIT_KEY_REF_PREFIX)
+            .ok_or_else(|| anyhow::anyhow!("MCP audit keychain reference has an invalid prefix"))?;
+        if encoded_epoch.is_empty()
+            || !encoded_epoch
+                .chars()
+                .all(|character| character.is_ascii_digit())
+        {
+            anyhow::bail!("MCP audit keychain reference has an invalid epoch");
+        }
+        let reference_epoch = encoded_epoch
+            .parse::<u64>()
+            .context("parse MCP audit keychain reference epoch")?;
+        if reference_epoch != config.epoch {
+            anyhow::bail!("MCP audit keychain reference epoch does not match its config epoch");
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn create_mcp_audit_key_material(
@@ -564,7 +630,15 @@ pub(crate) fn create_mcp_audit_key_material(
     store: &dyn SecretStore,
 ) -> Result<AuditKeyMaterial> {
     let secret_ref = format!("{MCP_AUDIT_KEY_REF_PREFIX}{epoch}");
-    let key = rand::random::<[u8; 32]>();
+    if store.get(&secret_ref)?.is_some() {
+        anyhow::bail!("MCP audit key reference already contains credential material");
+    }
+    let key = loop {
+        let candidate = rand::random::<[u8; 32]>();
+        if candidate.iter().any(|byte| *byte != 0) {
+            break candidate;
+        }
+    };
     store.set(&secret_ref, &general_purpose::STANDARD.encode(key))?;
     Ok(AuditKeyMaterial {
         config: AuditKeyConfig {
@@ -579,9 +653,15 @@ pub(crate) fn create_mcp_audit_key_material(
     })
 }
 
-fn next_audit_epoch(previous: u64) -> u64 {
+fn next_audit_epoch(previous: u64) -> Result<u64> {
     let timestamp = chrono::Utc::now().timestamp().max(0) as u64;
-    timestamp.max(previous.saturating_add(1))
+    let next = timestamp.max(
+        previous
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("MCP audit key epoch is exhausted"))?,
+    );
+    i64::try_from(next).context("MCP audit key epoch exceeds the SQLite integer range")?;
+    Ok(next)
 }
 
 #[cfg(test)]

@@ -5,14 +5,15 @@ use crate::a2a_sidecar;
 use crate::main_chat_event_stream::{MainChatAgentEventStore, MainChatEventDigestKey};
 use crate::persistence_coordinator::PersistenceCoordinator;
 use crate::secret_store::{
-    hydrate_config_secrets, hydrate_or_create_canonical_store_integrity_key,
-    hydrate_or_create_integrity_key, hydrate_or_create_mcp_audit_keys, KeyringSecretStore,
-    SecretStore, ACTION_QUEUE_AUTHORITY_KEY_REF, AGENT_RUN_RECEIPT_KEY_REF,
+    hydrate_config_secrets, hydrate_existing_mcp_audit_keys,
+    hydrate_or_create_canonical_store_integrity_key, hydrate_or_create_integrity_key,
+    KeyringSecretStore, SecretStore, ACTION_QUEUE_AUTHORITY_KEY_REF, AGENT_RUN_RECEIPT_KEY_REF,
     MAIN_CHAT_EVENT_INTEGRITY_KEY_REF, TASK_STORE_AUTHORITY_KEY_REF,
 };
 use crate::state::AppState;
 use crate::storage::{
     load_mcp_audit_keyring_from_path, privacy_policy_path, save_mcp_audit_keyring_to_path,
+    McpAuditKeyringLoad,
 };
 use openlife_core::agent::{
     main_chat_agent_v1::{ActionQueueAuthorityKey, ActionQueueStore, AgentTaskSessionStore},
@@ -2214,10 +2215,55 @@ fn bootstrap_with_secret_store(
     let privacy_engine = PrivacyEngine::with_policy(privacy_policy);
     let version_manager = VersionManager::new(data_dir.join("life-model").join("versions"));
     let audit_keyring_path = data_dir.join("mcp_audit_keys.json");
-    let audit_key_hydration = hydrate_or_create_mcp_audit_keys(
-        load_mcp_audit_keyring_from_path(&audit_keyring_path),
-        secret_store,
-    );
+    let mcp_audit_db_path = data_dir.join("mcp_audit.db");
+    let audit_key_hydration = (|| -> anyhow::Result<_> {
+        let configs = match load_mcp_audit_keyring_from_path(&audit_keyring_path) {
+            McpAuditKeyringLoad::Absent => {
+                let inspection = McpAuditStore::inspect_existing_database(&mcp_audit_db_path)
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "missing MCP audit keyring beside an untrusted audit database: {error}"
+                        )
+                    })?;
+                if !inspection.is_empty_or_absent() {
+                    anyhow::bail!(
+                        "MCP audit keyring is missing while the canonical audit database contains {} rows",
+                        inspection.row_count
+                    );
+                }
+                Vec::new()
+            }
+            McpAuditKeyringLoad::Present(configs) => configs,
+            McpAuditKeyringLoad::PresentInvalid { error } => {
+                anyhow::bail!("MCP audit keyring is present but invalid: {error}");
+            }
+            McpAuditKeyringLoad::Unreadable { error } => {
+                anyhow::bail!("MCP audit keyring is unreadable: {error}");
+            }
+        };
+        let mut hydration = hydrate_existing_mcp_audit_keys(configs, secret_store)?;
+        McpAuditStore::preflight_existing_database_key_materials(
+            &mcp_audit_db_path,
+            &hydration.materials,
+        )?;
+        hydration.ensure_write_epoch(secret_store)?;
+        if hydration.config_changed {
+            if let Err(save_error) =
+                save_mcp_audit_keyring_to_path(&audit_keyring_path, &hydration.configs)
+            {
+                let rollback_error = hydration.rollback_staged_secret(secret_store).err();
+                return Err(match rollback_error {
+                    Some(rollback_error) => anyhow::anyhow!(
+                        "persist MCP audit key references failed: {save_error}; staged secret rollback also failed: {rollback_error}"
+                    ),
+                    None => anyhow::anyhow!(
+                        "persist MCP audit key references failed: {save_error}"
+                    ),
+                });
+            }
+        }
+        Ok(hydration)
+    })();
     let audit_key_hydration = match audit_key_hydration {
         Ok(hydration) => {
             persistence.register_read_write("McpAuditKeyReferenceStore");
@@ -2235,25 +2281,6 @@ fn bootstrap_with_secret_store(
             None
         }
     };
-    if audit_key_hydration
-        .as_ref()
-        .is_some_and(|hydration| hydration.config_changed)
-    {
-        if let Err(error) = save_mcp_audit_keyring_to_path(
-            &audit_keyring_path,
-            &audit_key_hydration.as_ref().expect("checked Some").configs,
-        ) {
-            persistence.register_unavailable(
-                "McpAuditKeyReferenceStore",
-                "mcp_audit_key_reference_persistence_failed",
-                &error.to_string(),
-            );
-            startup_warnings.borrow_mut().push(format!(
-                "MCP audit key reference persistence failed; effects disabled: {error}"
-            ));
-        }
-    }
-    let mcp_audit_db_path = data_dir.join("mcp_audit.db");
     let audit_materials = audit_key_hydration
         .map(|hydration| hydration.materials)
         .unwrap_or_default();
@@ -3894,7 +3921,7 @@ mod tests {
 
         let directory = tempfile::tempdir().unwrap();
         let keyring_path = directory.path().join("mcp_audit_keys.json");
-        std::fs::create_dir(&keyring_path).unwrap();
+        crate::storage::fail_next_mcp_audit_keyring_save_for_test(keyring_path.clone());
         let secrets = D057RecordingSecretStore::default();
 
         let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
@@ -3904,7 +3931,7 @@ mod tests {
             set_refs.len(),
             deleted_refs == set_refs,
             secrets.live_mcp_refs().is_empty(),
-            keyring_path.is_dir(),
+            !keyring_path.exists(),
             !directory.path().join("mcp_audit.db").exists(),
             d057_store_mode(&result, "McpAuditKeyReferenceStore"),
             d057_store_mode(&result, "McpAuditStore"),
