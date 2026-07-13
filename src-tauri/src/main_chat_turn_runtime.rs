@@ -4165,7 +4165,7 @@ async fn persist_openlife_turn_final_delivery_receipt(
             .list_for_session(task_session_id)
             .map_err(|error| format!("list canonical final actions failed: {error}"))?
     };
-    let (task_owner, transcript_owners) = {
+    let (task_owner, task_owner_digest, transcript_owners) = {
         let sessions = state
             .main_chat_agent_session_store
             .as_ref()
@@ -4176,10 +4176,14 @@ async fn persist_openlife_turn_final_delivery_receipt(
             .load_session(task_session_id)
             .map_err(|error| format!("load canonical final task failed: {error}"))?
             .ok_or_else(|| "turn_final_task_owner_missing".to_string())?;
+        let task_digest = sessions
+            .canonical_owner_digest(task_session_id)
+            .map_err(|error| format!("digest canonical final task failed: {error}"))?
+            .ok_or_else(|| "turn_final_task_owner_missing".to_string())?;
         let transcript = sessions
             .list_transcript_entries(task_session_id)
             .map_err(|error| format!("list canonical final transcript failed: {error}"))?;
-        (task, transcript)
+        (task, task_digest, transcript)
     };
     let (run_owner, run_owner_revision) = {
         let runs = state
@@ -4205,7 +4209,6 @@ async fn persist_openlife_turn_final_delivery_receipt(
     {
         return Err("turn_final_canonical_owner_graph_mismatch".into());
     }
-    let task_owner_digest = canonical_final_owner_digest("task_session", &task_owner)?;
     let run_owner_digest = canonical_final_owner_digest("agent_run", &run_owner)?;
     let action_queue_refs = action_queue_owners
         .iter()
@@ -4775,15 +4778,27 @@ async fn recover_openlife_turn_from_durable_final(
     let durable_change_rollback_states =
         final_event_string_array(&final_event, "durableChangeRollbackStates")?;
 
-    let task = state
-        .main_chat_agent_session_store
-        .as_ref()
-        .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?
-        .lock()
-        .await
-        .load_session(operation_id)
-        .map_err(|error| format!("load operation-bound task for recovery failed: {error}"))?
-        .ok_or_else(|| "turn_operation_final_reconciliation_required:task_missing".to_string())?;
+    let (task, task_owner_digest) = {
+        let sessions = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?
+            .lock()
+            .await;
+        let task = sessions
+            .load_session(operation_id)
+            .map_err(|error| format!("load operation-bound task for recovery failed: {error}"))?
+            .ok_or_else(|| {
+                "turn_operation_final_reconciliation_required:task_missing".to_string()
+            })?;
+        let digest = sessions
+            .canonical_owner_digest(operation_id)
+            .map_err(|error| format!("digest operation-bound task for recovery failed: {error}"))?
+            .ok_or_else(|| {
+                "turn_operation_final_reconciliation_required:task_missing".to_string()
+            })?;
+        (task, digest)
+    };
     let (run, run_owner_revision) = {
         let runs = state
             .agent_run_store
@@ -4811,7 +4826,6 @@ async fn recover_openlife_turn_from_durable_final(
     {
         return Err("turn_operation_final_reconciliation_required:owner_graph_mismatch".into());
     }
-    let task_owner_digest = canonical_final_owner_digest("task_session", &task)?;
     let run_owner_digest = canonical_final_owner_digest("agent_run", &run)?;
     if final_event_string(&final_event, "taskOwnerStatus")? != task.status.as_str()
         || final_event_string(&final_event, "taskOwnerDigest")? != task_owner_digest
@@ -6595,7 +6609,6 @@ mod turn_admission_tests {
             .iter()
             .filter(|event| event.event_type.starts_with("provider."))
             .count();
-
         drop(state);
         let reopened = paths.open_state();
         let retry = crate::main_chat_send::send_message_with_operation_state(
@@ -6743,6 +6756,134 @@ mod turn_admission_tests {
                 .count(),
             1,
             "owner drift must not redispatch the original tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_id_task_final_summary_receipt_drift_after_reopen_requires_reconciliation() {
+        let directory = tempfile::tempdir().expect("create task receipt drift store directory");
+        let paths = D050FileBackedStorePaths::new(directory.path());
+        let state = paths.open_state();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let session_id = "d050-file-backed-task-receipt-drift";
+        let body = "Please read file `Cargo.toml`.";
+        fail_main_chat_once_after_durable_final_for_test(&operation_id);
+        crate::main_chat_send::send_message_with_operation_state(
+            operation_id.clone(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: body.into(),
+            }],
+            None,
+            &state,
+        )
+        .await
+        .expect_err("lose live delivery after file-backed final commit");
+        drop(state);
+
+        let reopened = paths.open_state();
+        crate::main_chat_send::send_message_with_operation_state(
+            operation_id.clone(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: body.into(),
+            }],
+            None,
+            &reopened,
+        )
+        .await
+        .expect("unchanged durable Task owner must recover before the drift fixture is applied");
+        let final_payload = {
+            let events = reopened
+                .main_chat_agent_event_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .list(&operation_id, 0, 250)
+                .expect("list unchanged durable final receipt");
+            let final_event = events
+                .iter()
+                .find(|event| event.event_type == "final_delivery.created")
+                .expect("one durable final receipt");
+            assert!(final_event
+                .payload
+                .get("taskOwnerDigest")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| value.starts_with("sha256:")));
+            serde_json::to_string(&final_event.payload).expect("serialize final receipt payload")
+        };
+        drop(reopened);
+
+        let (user_goal_receipt, final_summary_receipt) = {
+            let conn = rusqlite::Connection::open(&paths.task_session)
+                .expect("open TaskSession database for receipt drift fixture");
+            let (user_goal_receipt, final_summary_receipt): (String, String) = conn
+                .query_row(
+                    "SELECT user_goal, final_summary FROM agent_task_sessions WHERE id = ?1",
+                    [&operation_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("load canonical Task body receipts");
+            let mut drifted_receipt = final_summary_receipt.clone().into_bytes();
+            let last = drifted_receipt
+                .last_mut()
+                .expect("canonical receipt is non-empty");
+            *last = if *last == b'0' { b'1' } else { b'0' };
+            let drifted_receipt =
+                String::from_utf8(drifted_receipt).expect("receipt remains lowercase ASCII");
+            conn.execute(
+                "UPDATE agent_task_sessions SET final_summary = ?2 WHERE id = ?1",
+                rusqlite::params![operation_id, drifted_receipt],
+            )
+            .expect("mutate the same Task owner final-summary receipt");
+            (user_goal_receipt, final_summary_receipt)
+        };
+        assert!(!final_payload.contains(&user_goal_receipt));
+        assert!(!final_payload.contains(&final_summary_receipt));
+
+        let drifted = paths.open_state();
+        let error = crate::main_chat_send::send_message_with_operation_state(
+            operation_id.clone(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: body.into(),
+            }],
+            None,
+            &drifted,
+        )
+        .await
+        .expect_err("same-ID durable Task receipt drift must fail closed");
+        assert!(
+            error.contains("canonical_owner_digest_drift"),
+            "unexpected Task receipt drift disposition: {error}"
+        );
+        let events = drifted
+            .main_chat_agent_event_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list(&operation_id, 0, 250)
+            .expect("list durable events after Task receipt drift");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == "tool.completed")
+                .count(),
+            1,
+            "Task receipt drift must not redispatch the tool"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == "final_delivery.created")
+                .count(),
+            1,
+            "Task receipt drift must not create another final receipt"
         );
     }
 

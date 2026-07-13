@@ -1063,12 +1063,31 @@ fn ordinary_final_delivery_has_one_durable_turn_runtime_owner() {
         .expect("read TurnRuntime final owner");
     let event_store = std::fs::read_to_string(root.join("main_chat_event_stream.rs"))
         .expect("read durable event projection");
+    let final_receipt_persistence = runtime
+        .split_once("async fn persist_openlife_turn_final_delivery_receipt(")
+        .expect("TurnRuntime final receipt persistence owner must exist")
+        .1
+        .split_once("fn canonical_final_owner_digest(")
+        .expect("TurnRuntime final receipt persistence boundary must exist")
+        .0;
     assert_eq!(
-        runtime
+        final_receipt_persistence
             .matches("openlife_turn_runtime.final_delivery_owner")
             .count(),
         1,
         "ordinary FinalDelivery must have exactly one durable TurnRuntime append owner"
+    );
+    let final_receipt_recovery = runtime
+        .split_once("async fn recover_openlife_turn_from_durable_final(")
+        .expect("TurnRuntime final receipt recovery must exist")
+        .1
+        .split_once("fn emit_stream_send_message_result(")
+        .expect("TurnRuntime final receipt recovery boundary must exist")
+        .0;
+    assert!(
+        final_receipt_recovery
+            .contains("final_event.source != \"openlife_turn_runtime.final_delivery_owner\""),
+        "durable FinalDelivery recovery must authenticate the one append owner"
     );
     assert!(!runtime.contains("replay-final:"));
     assert!(!runtime.contains("openlife_turn_runtime.replay_aggregate"));
