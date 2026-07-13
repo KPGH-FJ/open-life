@@ -154,12 +154,22 @@ pub struct McpAuditStore {
     key_configs: Vec<AuditKeyConfig>,
 }
 
-fn mcp_audit_log_columns(conn: &Connection) -> Result<HashSet<String>> {
+fn mcp_audit_log_columns(
+    conn: &Connection,
+    path: &Path,
+    component: &str,
+    operation: &str,
+) -> Result<HashSet<String>> {
+    #[cfg(not(any(test, feature = "test-utils")))]
+    let _ = (path, component, operation);
     let mut statement = conn.prepare("PRAGMA table_info(mcp_log)")?;
     let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
-    columns
-        .collect::<std::result::Result<HashSet<_>, _>>()
-        .map_err(Into::into)
+    let columns = columns.collect::<std::result::Result<HashSet<_>, rusqlite::Error>>()?;
+    #[cfg(any(test, feature = "test-utils"))]
+    crate::sqlite_migration::observe_sqlite_statement_for_test(
+        path, component, operation, &statement, None,
+    );
+    Ok(columns)
 }
 
 fn mcp_audit_material_keyring(materials: &[AuditKeyMaterial]) -> Result<HashMap<u64, [u8; 32]>> {
@@ -245,12 +255,24 @@ impl McpAuditStore {
             Ok(_) => {}
         }
 
+        #[cfg(any(test, feature = "test-utils"))]
+        crate::sqlite_migration::observe_sqlite_runtime_event_for_test(
+            path,
+            "mcp_audit_store_preflight",
+            "mcp_audit_inspection_preflight_start",
+        );
+
         let conn = crate::sqlite_migration::open_existing_read_only(
             path,
             "mcp_audit_store_preflight",
             &["mcp_log"],
         )?;
-        let columns = mcp_audit_log_columns(&conn)?;
+        let columns = mcp_audit_log_columns(
+            &conn,
+            path,
+            "mcp_audit_store_preflight",
+            "mcp_audit_schema_table_info",
+        )?;
         for required in [
             "id",
             "tool_name",
@@ -264,9 +286,16 @@ impl McpAuditStore {
                 anyhow::bail!("MCP audit database is missing required column {required}");
             }
         }
-        let row_count = conn.query_row("SELECT COUNT(*) FROM mcp_log", [], |row| {
-            row.get::<_, i64>(0)
-        })?;
+        let mut row_count_statement = conn.prepare("SELECT COUNT(*) FROM mcp_log")?;
+        let row_count = row_count_statement.query_row([], |row| row.get::<_, i64>(0))?;
+        #[cfg(any(test, feature = "test-utils"))]
+        crate::sqlite_migration::observe_sqlite_statement_for_test(
+            path,
+            "mcp_audit_store_preflight",
+            "mcp_audit_row_count",
+            &row_count_statement,
+            None,
+        );
         let row_count =
             u64::try_from(row_count).context("MCP audit database reported a negative row count")?;
         let key_epochs = if row_count == 0 {
@@ -281,6 +310,14 @@ impl McpAuditStore {
                     .context("MCP audit database contains a negative key epoch")?;
                 epochs.push(epoch);
             }
+            #[cfg(any(test, feature = "test-utils"))]
+            crate::sqlite_migration::observe_sqlite_statement_for_test(
+                path,
+                "mcp_audit_store_preflight",
+                "mcp_audit_distinct_key_epochs",
+                &statement,
+                None,
+            );
             epochs
         } else {
             vec![0]
@@ -297,6 +334,14 @@ impl McpAuditStore {
         materials: &[AuditKeyMaterial],
     ) -> Result<McpAuditDatabaseInspection> {
         let path = path.as_ref();
+        #[cfg(any(test, feature = "test-utils"))]
+        if path.is_file() {
+            crate::sqlite_migration::observe_sqlite_runtime_event_for_test(
+                path,
+                "mcp_audit_store_key_preflight",
+                "mcp_audit_key_preflight_start",
+            );
+        }
         let inspection = Self::inspect_existing_database(path)?;
         if !inspection.exists || inspection.row_count == 0 {
             return Ok(inspection);
@@ -312,7 +357,12 @@ impl McpAuditStore {
             "mcp_audit_store_key_preflight",
             &["mcp_log"],
         )?;
-        let columns = mcp_audit_log_columns(&conn)?;
+        let columns = mcp_audit_log_columns(
+            &conn,
+            path,
+            "mcp_audit_store_key_preflight",
+            "mcp_audit_key_schema_table_info",
+        )?;
         let epoch_expression = if columns.contains("key_epoch") {
             "key_epoch"
         } else {
@@ -327,7 +377,7 @@ impl McpAuditStore {
             "SELECT id, arguments_encrypted, result_encrypted, {epoch_expression} FROM mcp_log{pending_predicate} ORDER BY id ASC"
         );
         let mut pending_statement = conn.prepare(&pending_sql)?;
-        let pending_rows = pending_statement.query_map([], |row| {
+        let mut pending_rows = pending_statement.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
@@ -336,7 +386,7 @@ impl McpAuditStore {
             ))
         })?;
         let mut authenticated_epochs = HashSet::new();
-        for row in pending_rows {
+        for row in pending_rows.by_ref() {
             let (id, arguments, result, epoch) = row?;
             validate_mcp_audit_ciphertext_row(id, &arguments, &result, epoch, &keyring)?;
             authenticated_epochs
@@ -344,6 +394,15 @@ impl McpAuditStore {
                     format!("MCP audit row {id} contains a negative key epoch")
                 })?);
         }
+        drop(pending_rows);
+        #[cfg(any(test, feature = "test-utils"))]
+        crate::sqlite_migration::observe_sqlite_statement_for_test(
+            path,
+            "mcp_audit_store_key_preflight",
+            "mcp_audit_pending_payload_rows",
+            &pending_statement,
+            None,
+        );
         for epoch in &inspection.key_epochs {
             if authenticated_epochs.contains(epoch) {
                 continue;
@@ -354,22 +413,32 @@ impl McpAuditStore {
                 "SELECT id, arguments_encrypted, result_encrypted, 0 FROM mcp_log ORDER BY id ASC LIMIT 1"
             };
             let mut sample_statement = conn.prepare(sample_sql)?;
-            let mut sample_rows = if columns.contains("key_epoch") {
-                sample_statement.query([i64::try_from(*epoch)
-                    .context("MCP audit key epoch exceeds SQLite integer range")?])?
-            } else {
-                sample_statement.query([])?
+            let sample = {
+                let mut sample_rows = if columns.contains("key_epoch") {
+                    sample_statement.query([i64::try_from(*epoch)
+                        .context("MCP audit key epoch exceeds SQLite integer range")?])?
+                } else {
+                    sample_statement.query([])?
+                };
+                let sample = sample_rows.next()?.ok_or_else(|| {
+                    anyhow::anyhow!("MCP audit key epoch {epoch} has no validation row")
+                })?;
+                (
+                    sample.get(0)?,
+                    sample.get::<_, String>(1)?,
+                    sample.get::<_, String>(2)?,
+                    sample.get(3)?,
+                )
             };
-            let sample = sample_rows.next()?.ok_or_else(|| {
-                anyhow::anyhow!("MCP audit key epoch {epoch} has no validation row")
-            })?;
-            validate_mcp_audit_ciphertext_row(
-                sample.get(0)?,
-                &sample.get::<_, String>(1)?,
-                &sample.get::<_, String>(2)?,
-                sample.get(3)?,
-                &keyring,
-            )?;
+            #[cfg(any(test, feature = "test-utils"))]
+            crate::sqlite_migration::observe_sqlite_statement_for_test(
+                path,
+                "mcp_audit_store_key_preflight",
+                "mcp_audit_epoch_sample",
+                &sample_statement,
+                None,
+            );
+            validate_mcp_audit_ciphertext_row(sample.0, &sample.1, &sample.2, sample.3, &keyring)?;
         }
         Ok(inspection)
     }
@@ -747,6 +816,14 @@ impl McpAuditStore {
                     ))
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
+            #[cfg(any(test, feature = "test-utils"))]
+            crate::sqlite_migration::observe_sqlite_statement_for_test(
+                &self.db_path,
+                "mcp_audit_store_migration",
+                "mcp_audit_legacy_payload_migration_scan",
+                &statement,
+                None,
+            );
             rows
         };
         if rows.is_empty() {
@@ -837,6 +914,55 @@ impl McpAuditStore {
             ],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    /// Test-only bulk fixture writer that uses the real encryption and current
+    /// schema in one SQLite transaction. `payload_minimized=true` produces
+    /// ordinary current-v3 rows; `false` produces rows for the explicitly
+    /// one-time legacy/D068 migration path.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn insert_fixture_logs_batch_for_test(
+        &self,
+        tool_prefix: &str,
+        count: usize,
+        payload_minimized: bool,
+    ) -> Result<()> {
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction()?;
+        for index in 0..count {
+            let arguments = serde_json::json!({"fixtureIndex": index});
+            let result = format!("fixture-result-{index}");
+            let arguments_plaintext = if payload_minimized {
+                audit_arguments_receipt(&arguments)?
+            } else {
+                serde_json::to_string(&arguments)?
+            };
+            let result_plaintext = if payload_minimized {
+                audit_result_receipt(&result)
+            } else {
+                result
+            };
+            transaction.execute(
+                "INSERT INTO mcp_log (
+                    tool_name, arguments_encrypted, result_encrypted, success, pii_found,
+                    created_at, key_epoch, payload_minimized_version
+                 ) VALUES (?1, ?2, ?3, 1, 0, ?4, ?5, ?6)",
+                params![
+                    format!("{tool_prefix}_{index}"),
+                    self.encrypt(&arguments_plaintext)?,
+                    self.encrypt(&result_plaintext)?,
+                    chrono::Utc::now().to_rfc3339(),
+                    self.key_config.epoch as i64,
+                    if payload_minimized {
+                        MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION
+                    } else {
+                        0
+                    },
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn list_logs(&self, limit: usize) -> Result<Vec<McpLogEntry>> {

@@ -7,6 +7,54 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
+/// Test-only runtime evidence for SQLite work performed during a canonical
+/// store preflight. Counters come from SQLite itself, not from SQL source
+/// matching or an inferred query plan.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SqliteRuntimeObservation {
+    pub database_path: PathBuf,
+    pub database_identity: String,
+    pub component: String,
+    pub operation: String,
+    pub fullscan_steps: i64,
+    pub vm_steps: i64,
+    pub quick_check_result: Option<String>,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+std::thread_local! {
+    static SQLITE_RUNTIME_OBSERVATIONS: std::cell::RefCell<Option<Vec<SqliteRuntimeObservation>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub struct SqliteRuntimeObserverGuard {
+    previous: Option<Vec<SqliteRuntimeObservation>>,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl SqliteRuntimeObserverGuard {
+    pub fn snapshot(&self) -> Vec<SqliteRuntimeObservation> {
+        SQLITE_RUNTIME_OBSERVATIONS.with(|slot| slot.borrow().clone().unwrap_or_default())
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl Drop for SqliteRuntimeObserverGuard {
+    fn drop(&mut self) {
+        SQLITE_RUNTIME_OBSERVATIONS.with(|slot| {
+            slot.replace(self.previous.take());
+        });
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub fn begin_sqlite_runtime_observation_for_test() -> SqliteRuntimeObserverGuard {
+    let previous = SQLITE_RUNTIME_OBSERVATIONS.with(|slot| slot.replace(Some(Vec::new())));
+    SqliteRuntimeObserverGuard { previous }
+}
+
 fn valid_identifier(value: &str) -> bool {
     !value.is_empty()
         && value
@@ -107,6 +155,62 @@ impl DatabaseFileIdentity {
         })?;
         Self::from_metadata(&metadata, path, component)
     }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+fn sqlite_runtime_observation_identity(path: &Path, component: &str) -> String {
+    DatabaseFileIdentity::from_path(path, component)
+        .map(|identity| identity.binding_material())
+        .unwrap_or_else(|error| format!("identity_unavailable:{error}"))
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+fn push_sqlite_runtime_observation(
+    path: &Path,
+    component: &str,
+    operation: &str,
+    fullscan_steps: i64,
+    vm_steps: i64,
+    quick_check_result: Option<String>,
+) {
+    SQLITE_RUNTIME_OBSERVATIONS.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(observations) = slot.as_mut() else {
+            return;
+        };
+        observations.push(SqliteRuntimeObservation {
+            database_path: path.to_path_buf(),
+            database_identity: sqlite_runtime_observation_identity(path, component),
+            component: component.to_string(),
+            operation: operation.to_string(),
+            fullscan_steps,
+            vm_steps,
+            quick_check_result,
+        });
+    });
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) fn observe_sqlite_runtime_event_for_test(path: &Path, component: &str, operation: &str) {
+    push_sqlite_runtime_observation(path, component, operation, 0, 0, None);
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) fn observe_sqlite_statement_for_test(
+    path: &Path,
+    component: &str,
+    operation: &str,
+    statement: &rusqlite::Statement<'_>,
+    quick_check_result: Option<&str>,
+) {
+    push_sqlite_runtime_observation(
+        path,
+        component,
+        operation,
+        i64::from(statement.get_status(rusqlite::StatementStatus::FullscanStep)),
+        i64::from(statement.get_status(rusqlite::StatementStatus::VmStep)),
+        quick_check_result.map(str::to_string),
+    );
 }
 
 /// Read-only binding between a store handle and the exact database file that
@@ -665,6 +769,21 @@ pub fn record_schema_version(conn: &Connection, component: &str, version: i64) -
     Ok(())
 }
 
+fn sqlite_quick_check(
+    conn: &Connection,
+    path: &Path,
+    component: &str,
+    operation: &str,
+) -> Result<String> {
+    #[cfg(not(any(test, feature = "test-utils")))]
+    let _ = (path, component, operation);
+    let mut statement = conn.prepare("PRAGMA quick_check(1)")?;
+    let integrity = statement.query_row([], |row| row.get::<_, String>(0))?;
+    #[cfg(any(test, feature = "test-utils"))]
+    observe_sqlite_statement_for_test(path, component, operation, &statement, Some(&integrity));
+    Ok(integrity)
+}
+
 /// Opens an existing SQLite canonical store without acquiring write authority.
 ///
 /// This is deliberately not a migration path: callers may use it only to keep
@@ -689,6 +808,9 @@ pub fn open_existing_read_only(
         }
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
+    observe_sqlite_runtime_event_for_test(path, component, "sqlite_read_only_reader_open_start");
+
     let conn = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -702,7 +824,7 @@ pub fn open_existing_read_only(
     conn.busy_timeout(Duration::from_secs(5))?;
     conn.pragma_update(None, "query_only", true)?;
 
-    let integrity: String = conn.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+    let integrity = sqlite_quick_check(&conn, path, component, "sqlite_quick_check_read_only")?;
     if integrity != "ok" {
         anyhow::bail!("{component} read-only integrity check failed: {integrity}");
     }
@@ -795,7 +917,7 @@ pub fn open_existing_immutable_read_only(
     })?;
     conn.busy_timeout(Duration::from_secs(5))?;
     conn.pragma_update(None, "query_only", true)?;
-    let integrity: String = conn.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+    let integrity = sqlite_quick_check(&conn, path, component, "sqlite_quick_check_immutable")?;
     if integrity != "ok" {
         anyhow::bail!("{component} immutable integrity check failed: {integrity}");
     }

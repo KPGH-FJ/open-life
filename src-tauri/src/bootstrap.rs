@@ -3101,6 +3101,43 @@ mod tests {
             .collect()
     }
 
+    fn d057_audit_artifact_receipts(
+        snapshot: &[(String, Option<Vec<u8>>)],
+    ) -> Vec<(String, Option<(usize, String)>)> {
+        use sha2::{Digest, Sha256};
+
+        snapshot
+            .iter()
+            .map(|(name, bytes)| {
+                (
+                    name.clone(),
+                    bytes.as_ref().map(|bytes| {
+                        let digest = Sha256::digest(bytes);
+                        (bytes.len(), format!("{digest:x}"))
+                    }),
+                )
+            })
+            .collect()
+    }
+
+    fn d057_sqlite_schema_snapshot(
+        connection: &rusqlite::Connection,
+    ) -> Vec<(String, String, String)> {
+        let mut statement = connection
+            .prepare(
+                "SELECT type, name, COALESCE(sql, '')
+                 FROM sqlite_schema
+                 WHERE name NOT LIKE 'sqlite_%'
+                 ORDER BY type, name",
+            )
+            .expect("prepare D057 schema snapshot");
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("query D057 schema snapshot")
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("collect D057 schema snapshot")
+    }
+
     #[test]
     fn d057_malformed_keyring_never_creates_secret_or_overwrites_bytes() {
         use crate::persistence_coordinator::PersistenceStoreMode;
@@ -3965,90 +4002,280 @@ mod tests {
     }
 
     #[test]
-    fn d057_lookalike_empty_schema_is_not_first_boot_and_remains_byte_exact() {
+    fn d057_schema_identity_rejects_near_matches_versions_and_unknown_objects_byte_exact() {
         use crate::persistence_coordinator::PersistenceStoreMode;
 
-        let directory = tempfile::tempdir().unwrap();
-        let database_path = directory.path().join("mcp_audit.db");
-        let connection = rusqlite::Connection::open(&database_path).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE mcp_log (
-                    id TEXT,
-                    tool_name BLOB,
-                    arguments_encrypted INTEGER,
-                    result_encrypted REAL,
-                    success TEXT,
-                    pii_found TEXT,
-                    created_at BLOB
-                );",
-            )
-            .unwrap();
-        drop(connection);
-        let before = d057_audit_artifact_snapshot(directory.path());
-        let secrets = D057RecordingSecretStore::default();
+        const REBUILD_WRONG_PRIMARY_KEY: &str = "
+            DROP TABLE mcp_log;
+            CREATE TABLE mcp_log (
+                id INTEGER NOT NULL,
+                tool_name TEXT NOT NULL,
+                arguments_encrypted TEXT NOT NULL,
+                result_encrypted TEXT NOT NULL,
+                success INTEGER NOT NULL,
+                pii_found INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                key_epoch INTEGER NOT NULL DEFAULT 0,
+                payload_minimized_version INTEGER NOT NULL DEFAULT 0
+            );";
+        const REBUILD_MISSING_NOT_NULL: &str = "
+            DROP TABLE mcp_log;
+            CREATE TABLE mcp_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tool_name TEXT,
+                arguments_encrypted TEXT NOT NULL,
+                result_encrypted TEXT NOT NULL,
+                success INTEGER NOT NULL,
+                pii_found INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                key_epoch INTEGER NOT NULL DEFAULT 0,
+                payload_minimized_version INTEGER NOT NULL DEFAULT 0
+            );";
+        const REBUILD_WRONG_DEFAULT: &str = "
+            DROP TABLE mcp_log;
+            CREATE TABLE mcp_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tool_name TEXT NOT NULL,
+                arguments_encrypted TEXT NOT NULL,
+                result_encrypted TEXT NOT NULL,
+                success INTEGER NOT NULL,
+                pii_found INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                key_epoch INTEGER NOT NULL DEFAULT 7,
+                payload_minimized_version INTEGER NOT NULL DEFAULT 0
+            );";
+        const REBUILD_WRONG_ORDER: &str = "
+            DROP TABLE mcp_log;
+            CREATE TABLE mcp_log (
+                tool_name TEXT NOT NULL,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                arguments_encrypted TEXT NOT NULL,
+                result_encrypted TEXT NOT NULL,
+                success INTEGER NOT NULL,
+                pii_found INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                key_epoch INTEGER NOT NULL DEFAULT 0,
+                payload_minimized_version INTEGER NOT NULL DEFAULT 0
+            );";
+        const REBUILD_EXTRA_COLUMN: &str = "
+            DROP TABLE mcp_log;
+            CREATE TABLE mcp_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tool_name TEXT NOT NULL,
+                arguments_encrypted TEXT NOT NULL,
+                result_encrypted TEXT NOT NULL,
+                success INTEGER NOT NULL,
+                pii_found INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                key_epoch INTEGER NOT NULL DEFAULT 0,
+                payload_minimized_version INTEGER NOT NULL DEFAULT 0,
+                unauthorized_extra TEXT
+            );";
+        const REBUILD_WRONG_TYPES: &str = "
+            DROP TABLE mcp_log;
+            CREATE TABLE mcp_log (
+                id TEXT PRIMARY KEY,
+                tool_name BLOB NOT NULL,
+                arguments_encrypted INTEGER NOT NULL,
+                result_encrypted REAL NOT NULL,
+                success TEXT NOT NULL,
+                pii_found TEXT NOT NULL,
+                created_at BLOB NOT NULL,
+                key_epoch TEXT NOT NULL DEFAULT '0',
+                payload_minimized_version TEXT NOT NULL DEFAULT '0'
+            );";
+        let cases = [
+            ("wrong_primary_key", REBUILD_WRONG_PRIMARY_KEY),
+            ("missing_not_null", REBUILD_MISSING_NOT_NULL),
+            ("wrong_default", REBUILD_WRONG_DEFAULT),
+            ("wrong_column_order", REBUILD_WRONG_ORDER),
+            ("extra_column", REBUILD_EXTRA_COLUMN),
+            ("wrong_types", REBUILD_WRONG_TYPES),
+            (
+                "unsupported_historical_version_2",
+                "UPDATE openlife_schema_versions SET version = 2 WHERE component = 'mcp_audit_store';",
+            ),
+            (
+                "future_version_4",
+                "UPDATE openlife_schema_versions SET version = 4 WHERE component = 'mcp_audit_store';",
+            ),
+            (
+                "unknown_index",
+                "CREATE INDEX hostile_audit_index ON mcp_log(tool_name);",
+            ),
+            (
+                "unknown_trigger",
+                "CREATE TRIGGER hostile_audit_insert BEFORE INSERT ON mcp_log BEGIN SELECT RAISE(ABORT, 'hostile trigger retained'); END;",
+            ),
+        ];
+        let mut accepted_or_mutated = Vec::new();
 
-        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        for (case_name, mutation) in cases {
+            let directory = tempfile::tempdir().unwrap();
+            let database_path = directory.path().join("mcp_audit.db");
+            let fixture_material =
+                d057_material(d057_keychain_config(65, d057_key_ref(65)), [0x65; 32]);
+            drop(
+                McpAuditStore::with_key_materials(&database_path, vec![fixture_material])
+                    .expect("create source-backed current-v3 schema baseline"),
+            );
+            rusqlite::Connection::open(&database_path)
+                .unwrap()
+                .execute_batch(mutation)
+                .unwrap_or_else(|error| panic!("apply D057 schema case {case_name}: {error}"));
+            let before = d057_audit_artifact_snapshot(directory.path());
+            let secrets = D057RecordingSecretStore::default();
 
-        assert!(secrets.mcp_set_refs().is_empty());
-        assert!(!directory.path().join("mcp_audit_keys.json").exists());
-        assert_eq!(
-            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
-            PersistenceStoreMode::Unavailable
-        );
-        assert_eq!(
-            d057_store_mode(&result, "McpAuditStore"),
-            PersistenceStoreMode::Unavailable
-        );
-        assert!(d057_audit_reads_fail_closed(&result));
-        assert_eq!(
-            d057_audit_artifact_snapshot(directory.path()),
-            before,
-            "lookalike schemas must fail before migration or secret creation"
+            let result =
+                bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+            let reference_mode = d057_store_mode(&result, "McpAuditKeyReferenceStore");
+            let audit_mode = d057_store_mode(&result, "McpAuditStore");
+            let reads_fail_closed = d057_audit_reads_fail_closed(&result);
+            let after = d057_audit_artifact_snapshot(directory.path());
+            let keyring_exists = directory.path().join("mcp_audit_keys.json").exists();
+            let rejected_without_mutation = secrets.mcp_set_refs().is_empty()
+                && !keyring_exists
+                && reference_mode == PersistenceStoreMode::Unavailable
+                && audit_mode == PersistenceStoreMode::Unavailable
+                && reads_fail_closed
+                && after == before;
+            if !rejected_without_mutation {
+                accepted_or_mutated.push(format!(
+                    "{case_name}: sets={:?}, keyring_exists={keyring_exists}, reference_mode={reference_mode:?}, audit_mode={audit_mode:?}, reads_fail_closed={reads_fail_closed}, byte_exact={}",
+                    secrets.mcp_set_refs(),
+                    after == before,
+                ));
+            }
+        }
+
+        assert!(
+            accepted_or_mutated.is_empty(),
+            "D057 RED: only exact source-backed unversioned-eight-column legacy or current-v3 schemas may activate; near matches, unsupported/future versions, indexes and triggers must fail before mutation: {accepted_or_mutated:#?}"
         );
     }
 
     #[test]
-    fn d057_unknown_audit_trigger_is_not_first_boot_and_cannot_survive_activation() {
+    fn d057_schema_identity_positive_controls_are_only_unversioned_eight_column_and_current_v3() {
         use crate::persistence_coordinator::PersistenceStoreMode;
 
-        let directory = tempfile::tempdir().unwrap();
-        let database_path = directory.path().join("mcp_audit.db");
-        let connection = rusqlite::Connection::open(&database_path).unwrap();
-        connection
+        let legacy_directory = tempfile::tempdir().unwrap();
+        let legacy_database = legacy_directory.path().join("mcp_audit.db");
+        let legacy_ref = d057_key_ref(66);
+        let legacy_config = d057_keychain_config(66, legacy_ref.clone());
+        let legacy_material = d057_material(legacy_config.clone(), [0x66; 32]);
+        let legacy_store =
+            McpAuditStore::with_key_materials(&legacy_database, vec![legacy_material])
+                .expect("create source-backed current schema before deriving the legacy control");
+        legacy_store
+            .insert_fixture_logs_batch_for_test("unversioned_eight_column_control", 1, false)
+            .unwrap();
+        drop(legacy_store);
+        let legacy_connection = rusqlite::Connection::open(&legacy_database).unwrap();
+        legacy_connection
             .execute_batch(
-                "CREATE TABLE mcp_log (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    tool_name TEXT NOT NULL,
-                    arguments_encrypted TEXT NOT NULL,
-                    result_encrypted TEXT NOT NULL,
-                    success INTEGER NOT NULL,
-                    pii_found INTEGER NOT NULL,
-                    created_at TEXT NOT NULL
-                );
-                CREATE TRIGGER hostile_audit_insert
-                BEFORE INSERT ON mcp_log
-                BEGIN
-                    SELECT RAISE(ABORT, 'hostile trigger retained');
-                END;",
+                "ALTER TABLE mcp_log DROP COLUMN payload_minimized_version;
+                 DROP TABLE openlife_schema_versions;",
+            )
+            .expect("derive the source-evidenced unversioned eight-column predecessor");
+        let legacy_columns = legacy_connection
+            .prepare("PRAGMA table_info(mcp_log)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            legacy_columns,
+            vec![
+                "id",
+                "tool_name",
+                "arguments_encrypted",
+                "result_encrypted",
+                "success",
+                "pii_found",
+                "created_at",
+                "key_epoch",
+            ]
+        );
+        drop(legacy_connection);
+        d057_write_keyring(
+            &legacy_directory.path().join("mcp_audit_keys.json"),
+            std::slice::from_ref(&legacy_config),
+        );
+        let legacy_secrets = D057RecordingSecretStore::default();
+        legacy_secrets.preload_key(&legacy_ref, [0x66; 32]);
+        let legacy_result = bootstrap_with_secret_store_for_test(
+            legacy_directory.path().to_path_buf(),
+            &legacy_secrets,
+        );
+        let legacy_logs = legacy_result
+            .state
+            .mcp_audit_store
+            .try_lock()
+            .unwrap()
+            .list_logs(10)
+            .unwrap();
+        assert_eq!(
+            d057_store_mode(&legacy_result, "McpAuditStore"),
+            PersistenceStoreMode::ReadWriteCanonical
+        );
+        assert_eq!(legacy_logs.len(), 1);
+        assert_eq!(
+            legacy_logs[0].tool_name,
+            "unversioned_eight_column_control_0"
+        );
+
+        let current_directory = tempfile::tempdir().unwrap();
+        let current_database = current_directory.path().join("mcp_audit.db");
+        let current_ref = d057_key_ref(67);
+        let current_config = d057_keychain_config(67, current_ref.clone());
+        let current_material = d057_material(current_config.clone(), [0x67; 32]);
+        let current_store =
+            McpAuditStore::with_key_materials(&current_database, vec![current_material])
+                .expect("create source-backed current-v3 control");
+        current_store
+            .insert_fixture_logs_batch_for_test("current_v3_control", 3, true)
+            .unwrap();
+        drop(current_store);
+        let current_connection = rusqlite::Connection::open(&current_database).unwrap();
+        let current_version: i64 = current_connection
+            .query_row(
+                "SELECT version FROM openlife_schema_versions WHERE component = 'mcp_audit_store'",
+                [],
+                |row| row.get(0),
             )
             .unwrap();
-        drop(connection);
-        let before = d057_audit_artifact_snapshot(directory.path());
-        let secrets = D057RecordingSecretStore::default();
-
-        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
-
-        assert!(secrets.mcp_set_refs().is_empty());
-        assert_eq!(
-            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
-            PersistenceStoreMode::Unavailable
+        let current_column_count: i64 = current_connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('mcp_log')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!((current_version, current_column_count), (3, 9));
+        drop(current_connection);
+        d057_write_keyring(
+            &current_directory.path().join("mcp_audit_keys.json"),
+            std::slice::from_ref(&current_config),
         );
-        assert_eq!(
-            d057_store_mode(&result, "McpAuditStore"),
-            PersistenceStoreMode::Unavailable
+        let current_secrets = D057RecordingSecretStore::default();
+        current_secrets.preload_key(&current_ref, [0x67; 32]);
+        let current_result = bootstrap_with_secret_store_for_test(
+            current_directory.path().to_path_buf(),
+            &current_secrets,
         );
-        assert_eq!(d057_audit_artifact_snapshot(directory.path()), before);
+        let current_logs = current_result
+            .state
+            .mcp_audit_store
+            .try_lock()
+            .unwrap()
+            .list_logs(10)
+            .unwrap();
+        assert_eq!(
+            d057_store_mode(&current_result, "McpAuditStore"),
+            PersistenceStoreMode::ReadWriteCanonical
+        );
+        assert_eq!(current_logs.len(), 3);
     }
 
     #[test]
@@ -4071,36 +4298,76 @@ mod tests {
         drop(legacy_store);
         let keyring_path = directory.path().join("mcp_audit_keys.json");
         let keyring_before = d057_write_keyring(&keyring_path, &[legacy_config]);
+        let artifacts_before = d057_audit_artifact_snapshot(directory.path());
         let secrets = D057RecordingSecretStore::default();
         secrets.fail_mcp_key_creation();
 
         let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
-
-        assert_eq!(std::fs::read(&keyring_path).unwrap(), keyring_before);
-        assert!(secrets.live_mcp_refs().is_empty());
-        assert_eq!(
-            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
-            PersistenceStoreMode::ReadOnlyCanonical
-        );
-        assert_eq!(
-            d057_store_mode(&result, "McpAuditStore"),
-            PersistenceStoreMode::ReadOnlyCanonical
-        );
-        let logs = result
-            .state
-            .mcp_audit_store
-            .try_lock()
-            .unwrap()
-            .list_logs(10)
-            .expect("verified legacy material remains a canonical read authority");
-        assert_eq!(logs.len(), 1);
-        assert_eq!(logs[0].tool_name, "legacy_read_only_fixture");
-        assert!(
-            !result
+        let reference_mode = d057_store_mode(&result, "McpAuditKeyReferenceStore");
+        let audit_mode = d057_store_mode(&result, "McpAuditStore");
+        let artifacts_after_bootstrap = d057_audit_artifact_snapshot(directory.path());
+        let (read_result, write_result) = {
+            let audit = result
                 .state
-                .persistence_coordinator
-                .snapshot()
-                .tool_dispatch_allowed
+                .mcp_audit_store
+                .try_lock()
+                .expect("D057 legacy read-only handle is available for observation");
+            let read_result = audit
+                .list_logs(10)
+                .map(|logs| {
+                    logs.into_iter()
+                        .map(|log| log.tool_name)
+                        .collect::<Vec<_>>()
+                })
+                .map_err(|error| error.to_string());
+            let write_result = audit
+                .insert_log(
+                    "must_not_write_in_legacy_read_only",
+                    &serde_json::json!({"forbidden": true}),
+                    "forbidden",
+                    false,
+                    false,
+                )
+                .map_err(|error| error.to_string());
+            (read_result, write_result)
+        };
+        let artifacts_after_write_attempt = d057_audit_artifact_snapshot(directory.path());
+        let health = result.state.persistence_coordinator.snapshot();
+        let effects_gate_blocked = result
+            .state
+            .persistence_coordinator
+            .require_effects_allowed()
+            .is_err();
+        let (keyring_unchanged, keyring_read_error) = match std::fs::read(&keyring_path) {
+            Ok(bytes) => (bytes == keyring_before, None),
+            Err(error) => (false, Some(error.to_string())),
+        };
+        let health_flags = (
+            health.canonical_writes_allowed,
+            health.provider_dispatch_allowed,
+            health.tool_dispatch_allowed,
+            effects_gate_blocked,
+        );
+        let artifact_receipts = (
+            d057_audit_artifact_receipts(&artifacts_before),
+            d057_audit_artifact_receipts(&artifacts_after_bootstrap),
+            d057_audit_artifact_receipts(&artifacts_after_write_attempt),
+        );
+
+        assert!(
+            keyring_unchanged
+                && secrets.live_mcp_refs().is_empty()
+                && reference_mode == PersistenceStoreMode::ReadOnlyCanonical
+                && audit_mode == PersistenceStoreMode::ReadOnlyCanonical
+                && read_result == Ok(vec!["legacy_read_only_fixture".to_string()])
+                && write_result.is_err()
+                && artifacts_after_bootstrap == artifacts_before
+                && artifacts_after_write_attempt == artifacts_before
+                && !health.canonical_writes_allowed
+                && !health.provider_dispatch_allowed
+                && !health.tool_dispatch_allowed
+                && effects_gate_blocked,
+            "D057 RED: verified legacy material must remain a real byte-preserving read-only handle when new-key creation fails; reference_mode={reference_mode:?}, audit_mode={audit_mode:?}, read_result={read_result:?}, write_result={write_result:?}, keyring_unchanged={keyring_unchanged}, keyring_read_error={keyring_read_error:?}, health_flags={health_flags:?}, artifact_receipts={artifact_receipts:?}"
         );
     }
 
@@ -4124,32 +4391,79 @@ mod tests {
         drop(legacy_store);
         let keyring_path = directory.path().join("mcp_audit_keys.json");
         let keyring_before = d057_write_keyring(&keyring_path, &[legacy_config]);
+        let artifacts_before = d057_audit_artifact_snapshot(directory.path());
         crate::storage::fail_next_mcp_audit_keyring_save_for_test(keyring_path.clone());
         let secrets = D057RecordingSecretStore::default();
 
         let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
-
-        assert_eq!(std::fs::read(&keyring_path).unwrap(), keyring_before);
-        assert_eq!(secrets.mcp_set_refs(), secrets.mcp_deleted_refs());
-        assert!(secrets.live_mcp_refs().is_empty());
-        assert_eq!(
-            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
-            PersistenceStoreMode::ReadOnlyCanonical
-        );
-        assert_eq!(
-            d057_store_mode(&result, "McpAuditStore"),
-            PersistenceStoreMode::ReadOnlyCanonical
-        );
-        assert_eq!(
-            result
+        let reference_mode = d057_store_mode(&result, "McpAuditKeyReferenceStore");
+        let audit_mode = d057_store_mode(&result, "McpAuditStore");
+        let artifacts_after_bootstrap = d057_audit_artifact_snapshot(directory.path());
+        let (read_result, write_result) = {
+            let audit = result
                 .state
                 .mcp_audit_store
                 .try_lock()
-                .unwrap()
+                .expect("D057 save-failure legacy handle is available for observation");
+            let read_result = audit
                 .list_logs(10)
-                .unwrap()
-                .len(),
-            1
+                .map(|logs| {
+                    logs.into_iter()
+                        .map(|log| log.tool_name)
+                        .collect::<Vec<_>>()
+                })
+                .map_err(|error| error.to_string());
+            let write_result = audit
+                .insert_log(
+                    "must_not_write_after_reference_save_failure",
+                    &serde_json::json!({"forbidden": true}),
+                    "forbidden",
+                    false,
+                    false,
+                )
+                .map_err(|error| error.to_string());
+            (read_result, write_result)
+        };
+        let artifacts_after_write_attempt = d057_audit_artifact_snapshot(directory.path());
+        let health = result.state.persistence_coordinator.snapshot();
+        let effects_gate_blocked = result
+            .state
+            .persistence_coordinator
+            .require_effects_allowed()
+            .is_err();
+        let (keyring_unchanged, keyring_read_error) = match std::fs::read(&keyring_path) {
+            Ok(bytes) => (bytes == keyring_before, None),
+            Err(error) => (false, Some(error.to_string())),
+        };
+        let health_flags = (
+            health.canonical_writes_allowed,
+            health.provider_dispatch_allowed,
+            health.tool_dispatch_allowed,
+            effects_gate_blocked,
+        );
+        let artifact_receipts = (
+            d057_audit_artifact_receipts(&artifacts_before),
+            d057_audit_artifact_receipts(&artifacts_after_bootstrap),
+            d057_audit_artifact_receipts(&artifacts_after_write_attempt),
+        );
+
+        assert!(
+            keyring_unchanged
+                && secrets.mcp_set_refs() == secrets.mcp_deleted_refs()
+                && secrets.live_mcp_refs().is_empty()
+                && reference_mode == PersistenceStoreMode::ReadOnlyCanonical
+                && audit_mode == PersistenceStoreMode::ReadOnlyCanonical
+                && read_result == Ok(vec!["legacy_save_failure_fixture".to_string()])
+                && write_result.is_err()
+                && artifacts_after_bootstrap == artifacts_before
+                && artifacts_after_write_attempt == artifacts_before
+                && !health.canonical_writes_allowed
+                && !health.provider_dispatch_allowed
+                && !health.tool_dispatch_allowed
+                && effects_gate_blocked,
+            "D057 RED: reference-save failure must roll back the staged key yet retain a real byte-preserving legacy read-only handle; reference_mode={reference_mode:?}, audit_mode={audit_mode:?}, read_result={read_result:?}, write_result={write_result:?}, keyring_unchanged={keyring_unchanged}, keyring_read_error={keyring_read_error:?}, health_flags={health_flags:?}, sets={:?}, deletes={:?}, artifact_receipts={artifact_receipts:?}",
+            secrets.mcp_set_refs(),
+            secrets.mcp_deleted_refs(),
         );
     }
 
@@ -4161,7 +4475,6 @@ mod tests {
         let database_path = directory.path().join("mcp_audit.db");
         let legacy_store = McpAuditStore::new(&database_path);
         let legacy_config = legacy_store.key_config().clone();
-        drop(legacy_store);
         let keyring_path = directory.path().join("mcp_audit_keys.json");
         let keyring_before = d057_write_keyring(&keyring_path, &[legacy_config]);
         let connection = rusqlite::Connection::open(&database_path).unwrap();
@@ -4170,12 +4483,26 @@ mod tests {
             .unwrap();
         assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
         connection
-            .execute_batch(
-                "PRAGMA wal_autocheckpoint = 0;
-             CREATE TABLE d057_wal_marker(value TEXT NOT NULL);
-             INSERT INTO d057_wal_marker(value) VALUES ('uncheckpointed');",
-            )
+            .execute_batch("PRAGMA wal_autocheckpoint = 0;")
             .unwrap();
+        let schema_before_wal_write = d057_sqlite_schema_snapshot(&connection);
+        legacy_store
+            .insert_log(
+                "live_wal_legal_mcp_log_row",
+                &serde_json::json!({"wal": "legal-current-schema-write"}),
+                "uncheckpointed legal audit row",
+                true,
+                false,
+            )
+            .expect("create a live WAL through the legal mcp_log write path");
+        let schema_after_wal_write = d057_sqlite_schema_snapshot(&connection);
+        assert_eq!(
+            schema_after_wal_write, schema_before_wal_write,
+            "the live-WAL fixture must not add a test-only schema object"
+        );
+        assert!(schema_after_wal_write
+            .iter()
+            .all(|(_, name, sql)| !name.contains("d057") && !sql.contains("d057")));
         let before = d057_audit_artifact_snapshot(directory.path());
         assert!(before
             .iter()
@@ -4183,35 +4510,284 @@ mod tests {
         let secrets = D057RecordingSecretStore::default();
 
         let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        let reference_mode = d057_store_mode(&result, "McpAuditKeyReferenceStore");
+        let audit_mode = d057_store_mode(&result, "McpAuditStore");
+        let reads_fail_closed = d057_audit_reads_fail_closed(&result);
+        let after = d057_audit_artifact_snapshot(directory.path());
+        let schema_after_bootstrap = d057_sqlite_schema_snapshot(&connection);
+        let artifact_receipts = (
+            d057_audit_artifact_receipts(&before),
+            d057_audit_artifact_receipts(&after),
+        );
 
-        assert!(secrets.mcp_set_refs().is_empty());
-        assert_eq!(std::fs::read(&keyring_path).unwrap(), keyring_before);
-        assert_eq!(
-            d057_store_mode(&result, "McpAuditKeyReferenceStore"),
-            PersistenceStoreMode::Unavailable
+        assert!(
+            secrets.mcp_set_refs().is_empty()
+                && std::fs::read(&keyring_path).unwrap() == keyring_before
+                && reference_mode == PersistenceStoreMode::Unavailable
+                && audit_mode == PersistenceStoreMode::Unavailable
+                && reads_fail_closed
+                && after == before
+                && schema_after_bootstrap == schema_before_wal_write,
+            "D057 RED: a legal uncheckpointed mcp_log WAL must be rejected before key/reference/store mutation and without schema pollution; reference_mode={reference_mode:?}, audit_mode={audit_mode:?}, reads_fail_closed={reads_fail_closed}, sets={:?}, artifact_receipts={artifact_receipts:?}, schema_before={schema_before_wal_write:?}, schema_after={schema_after_bootstrap:?}",
+            secrets.mcp_set_refs(),
         );
-        assert_eq!(
-            d057_store_mode(&result, "McpAuditStore"),
-            PersistenceStoreMode::Unavailable
-        );
-        assert_eq!(d057_audit_artifact_snapshot(directory.path()), before);
+        drop(result);
+        drop(legacy_store);
         drop(connection);
     }
 
-    #[test]
-    fn d057_normal_startup_source_has_no_unbounded_audit_log_scan_or_duplicate_preflight() {
-        let core_source = include_str!("../../openlife-core/src/mcp_audit.rs");
+    #[derive(Debug)]
+    struct D057PreflightMetrics {
+        key_preflight_starts: usize,
+        inspection_preflight_starts: usize,
+        read_only_reader_starts: usize,
+        quick_checks: usize,
+        database_identities: std::collections::BTreeSet<String>,
+        sqlite_operations: Vec<String>,
+        total_fullscan_steps: i64,
+        total_vm_steps: i64,
+        legacy_fullscan_steps: i64,
+        legacy_vm_steps: i64,
+        quick_check_fullscan_steps: i64,
+        quick_check_vm_steps: i64,
+        quick_check_results: Vec<Option<String>>,
+    }
 
-        for forbidden in [
-            "SELECT COUNT(*) FROM mcp_log",
-            "SELECT DISTINCT key_epoch FROM mcp_log",
-            "Self::preflight_existing_database_key_materials(&db_path, &materials)?",
-        ] {
-            assert!(
-                !core_source.contains(forbidden),
-                "normal startup still carries an unbounded or duplicate preflight route: {forbidden}"
-            );
+    fn d057_preflight_metrics(
+        observations: Vec<openlife_core::sqlite_migration::SqliteRuntimeObservation>,
+        database_path: &std::path::Path,
+    ) -> D057PreflightMetrics {
+        let observations = observations
+            .into_iter()
+            .filter(|observation| observation.database_path == database_path)
+            .collect::<Vec<_>>();
+        let key_preflight_starts = observations
+            .iter()
+            .filter(|observation| observation.operation == "mcp_audit_key_preflight_start")
+            .count();
+        let inspection_preflight_starts = observations
+            .iter()
+            .filter(|observation| observation.operation == "mcp_audit_inspection_preflight_start")
+            .count();
+        let read_only_reader_starts = observations
+            .iter()
+            .filter(|observation| observation.operation == "sqlite_read_only_reader_open_start")
+            .count();
+        let quick_checks = observations
+            .iter()
+            .filter(|observation| observation.operation.starts_with("sqlite_quick_check_"))
+            .count();
+        let database_identities = observations
+            .iter()
+            .map(|observation| observation.database_identity.clone())
+            .collect();
+        let legacy_observations = observations
+            .iter()
+            .filter(|observation| {
+                matches!(
+                    observation.operation.as_str(),
+                    "mcp_audit_pending_payload_rows" | "mcp_audit_legacy_payload_migration_scan"
+                )
+            })
+            .collect::<Vec<_>>();
+        let quick_check_observations = observations
+            .iter()
+            .filter(|observation| observation.operation.starts_with("sqlite_quick_check_"))
+            .collect::<Vec<_>>();
+        D057PreflightMetrics {
+            key_preflight_starts,
+            inspection_preflight_starts,
+            read_only_reader_starts,
+            quick_checks,
+            database_identities,
+            sqlite_operations: observations
+                .iter()
+                .map(|observation| observation.operation.clone())
+                .collect(),
+            total_fullscan_steps: observations
+                .iter()
+                .map(|observation| observation.fullscan_steps)
+                .sum(),
+            total_vm_steps: observations
+                .iter()
+                .map(|observation| observation.vm_steps)
+                .sum(),
+            legacy_fullscan_steps: legacy_observations
+                .iter()
+                .map(|observation| observation.fullscan_steps)
+                .sum(),
+            legacy_vm_steps: legacy_observations
+                .iter()
+                .map(|observation| observation.vm_steps)
+                .sum(),
+            quick_check_fullscan_steps: quick_check_observations
+                .iter()
+                .map(|observation| observation.fullscan_steps)
+                .sum(),
+            quick_check_vm_steps: quick_check_observations
+                .iter()
+                .map(|observation| observation.vm_steps)
+                .sum(),
+            quick_check_results: quick_check_observations
+                .iter()
+                .map(|observation| observation.quick_check_result.clone())
+                .collect(),
         }
+    }
+
+    fn d057_observe_current_v3_startup(row_count: usize, epoch: u64) -> D057PreflightMetrics {
+        use crate::persistence_coordinator::PersistenceStoreMode;
+
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("mcp_audit.db");
+        let secret_ref = d057_key_ref(epoch);
+        let config = d057_keychain_config(epoch, secret_ref.clone());
+        let material = d057_material(config.clone(), [epoch as u8; 32]);
+        let store = McpAuditStore::with_key_materials(&database_path, vec![material])
+            .expect("create current-v3 performance fixture");
+        store
+            .insert_fixture_logs_batch_for_test("current_v3_performance", row_count, true)
+            .expect("bulk insert legal current-v3 encrypted rows");
+        drop(store);
+        d057_write_keyring(
+            &directory.path().join("mcp_audit_keys.json"),
+            std::slice::from_ref(&config),
+        );
+        let secrets = D057RecordingSecretStore::default();
+        secrets.preload_key(&secret_ref, [epoch as u8; 32]);
+        let observer = openlife_core::sqlite_migration::begin_sqlite_runtime_observation_for_test();
+        let result = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        let observations = observer.snapshot();
+        assert_eq!(
+            d057_store_mode(&result, "McpAuditStore"),
+            PersistenceStoreMode::ReadWriteCanonical,
+            "performance fixture must remain an otherwise valid current-v3 startup"
+        );
+        drop(result);
+        drop(observer);
+        d057_preflight_metrics(observations, &database_path)
+    }
+
+    #[test]
+    fn d057_current_v3_preflight_is_once_per_database_identity_and_bounded_by_epochs() {
+        let small = d057_observe_current_v3_startup(32, 71);
+        let large = d057_observe_current_v3_startup(2_048, 72);
+        let counters_are_real = small.total_vm_steps > 0
+            && large.total_vm_steps > 0
+            && !small.sqlite_operations.is_empty()
+            && !large.sqlite_operations.is_empty();
+        let bounded_current_work = large.total_fullscan_steps <= small.total_fullscan_steps + 16
+            && large.total_vm_steps <= small.total_vm_steps + 128;
+
+        assert!(
+            counters_are_real
+                && small.database_identities.len() == 1
+                && large.database_identities.len() == 1
+                && small.key_preflight_starts == 1
+                && large.key_preflight_starts == 1
+                && small.inspection_preflight_starts == 1
+                && large.inspection_preflight_starts == 1
+                && small.read_only_reader_starts == 1
+                && large.read_only_reader_starts == 1
+                && small.quick_checks == 0
+                && large.quick_checks == 0
+                && small.quick_check_fullscan_steps == 0
+                && large.quick_check_fullscan_steps == 0
+                && small.quick_check_vm_steps == 0
+                && large.quick_check_vm_steps == 0
+                && small.quick_check_results.is_empty()
+                && large.quick_check_results.is_empty()
+                && bounded_current_work,
+            "D057 RED: runtime SQLite evidence must show one preflight and one reader per DB identity, no normal-startup full-database quick_check, and total current-v3 work bounded by epoch cardinality rather than row count; quick_check work is included in total work, not filtered out; small={small:#?}, large={large:#?}"
+        );
+    }
+
+    #[test]
+    fn d057_legacy_payload_scan_is_explicitly_one_time_and_restart_returns_to_bounded_preflight() {
+        use crate::persistence_coordinator::PersistenceStoreMode;
+
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("mcp_audit.db");
+        let secret_ref = d057_key_ref(73);
+        let config = d057_keychain_config(73, secret_ref.clone());
+        let material = d057_material(config.clone(), [0x73; 32]);
+        let store = McpAuditStore::with_key_materials(&database_path, vec![material])
+            .expect("create legacy/D068 performance fixture");
+        store
+            .insert_fixture_logs_batch_for_test("legacy_d068_performance", 256, false)
+            .expect("bulk insert legal legacy encrypted rows");
+        drop(store);
+        d057_write_keyring(
+            &directory.path().join("mcp_audit_keys.json"),
+            std::slice::from_ref(&config),
+        );
+        let secrets = D057RecordingSecretStore::default();
+        secrets.preload_key(&secret_ref, [0x73; 32]);
+
+        let first_observer =
+            openlife_core::sqlite_migration::begin_sqlite_runtime_observation_for_test();
+        let first = bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        let first_observations = first_observer.snapshot();
+        assert_eq!(
+            d057_store_mode(&first, "McpAuditStore"),
+            PersistenceStoreMode::ReadWriteCanonical
+        );
+        assert_eq!(
+            first
+                .state
+                .mcp_audit_store
+                .try_lock()
+                .unwrap()
+                .list_logs(300)
+                .unwrap()
+                .len(),
+            256
+        );
+        drop(first);
+        drop(first_observer);
+        let first_metrics = d057_preflight_metrics(first_observations, &database_path);
+
+        let restart_observer =
+            openlife_core::sqlite_migration::begin_sqlite_runtime_observation_for_test();
+        let restart =
+            bootstrap_with_secret_store_for_test(directory.path().to_path_buf(), &secrets);
+        let restart_observations = restart_observer.snapshot();
+        assert_eq!(
+            d057_store_mode(&restart, "McpAuditStore"),
+            PersistenceStoreMode::ReadWriteCanonical
+        );
+        drop(restart);
+        drop(restart_observer);
+        let restart_metrics = d057_preflight_metrics(restart_observations, &database_path);
+
+        assert!(
+            first_metrics.total_vm_steps > 0
+                && restart_metrics.total_vm_steps > 0
+                && first_metrics.database_identities.len() == 1
+                && first_metrics.database_identities == restart_metrics.database_identities
+                && first_metrics.key_preflight_starts == 1
+                && restart_metrics.key_preflight_starts == 1
+                && first_metrics.inspection_preflight_starts == 1
+                && restart_metrics.inspection_preflight_starts == 1
+                && first_metrics.read_only_reader_starts == 1
+                && restart_metrics.read_only_reader_starts == 1
+                && first_metrics.quick_checks <= 1
+                && first_metrics
+                    .quick_check_results
+                    .iter()
+                    .all(|result| result.as_deref() == Some("ok"))
+                && first_metrics.total_fullscan_steps
+                    >= first_metrics.quick_check_fullscan_steps
+                && first_metrics.total_vm_steps >= first_metrics.quick_check_vm_steps
+                && restart_metrics.quick_checks == 0
+                && restart_metrics.quick_check_fullscan_steps == 0
+                && restart_metrics.quick_check_vm_steps == 0
+                && restart_metrics.quick_check_results.is_empty()
+                && first_metrics.legacy_vm_steps > restart_metrics.legacy_vm_steps + 256
+                && restart_metrics.legacy_fullscan_steps == 0
+                && restart_metrics.total_fullscan_steps <= 16,
+            "D057 RED: O(N) authentication and at most one observed full-database quick_check belong only to the explicit one-time legacy/D068 path; the same DB identity must restart with one reader, zero quick_checks and bounded total work; quick_check work remains included in totals; legacy={first_metrics:#?}, restart={restart_metrics:#?}"
+        );
     }
 
     async fn seed_failed_main_chat_owner_fixture(
