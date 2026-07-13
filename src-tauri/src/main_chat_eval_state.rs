@@ -115,6 +115,9 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
         mcp_audit_store: Arc::new(Mutex::new(isolated_eval_mcp_audit_store(
             base.join("mcp_audit.db"),
         ))),
+        mcp_audit_read_gateway: Arc::new(
+            crate::mcp_audit_read_gateway::McpAuditReadGateway::default(),
+        ),
         agent_run_store: Some(Arc::new(Mutex::new(agent_run_store))),
         evidence_store: Arc::new(Mutex::new(
             openlife_core::agent::EvidenceStore::new_in_memory().unwrap(),

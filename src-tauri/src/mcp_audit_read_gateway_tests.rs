@@ -1,9 +1,11 @@
 use super::{
     __cmd__list_mcp_audit_logs, __tauri_command_name_list_mcp_audit_logs, list_mcp_audit_logs,
 };
+use crate::mcp_audit_read_contract_test_support::{
+    corrupt_ciphertext, sqlite_family_snapshot, CiphertextColumn,
+};
 use crate::persistence_coordinator::{PersistenceCoordinator, EXPECTED_BOOTSTRAP_STORES};
 use openlife_core::mcp_audit::{AuditKeyConfig, AuditKeyMaterial, KeyMode, McpAuditStore};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -38,17 +40,6 @@ fn d065_keychain_material(epoch: u64, key: [u8; 32]) -> AuditKeyMaterial {
         },
         key,
     }
-}
-
-fn d065_artifact_snapshot(database_path: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
-    ["", "-wal", "-shm"]
-        .into_iter()
-        .map(|suffix| {
-            let path = PathBuf::from(format!("{}{suffix}", database_path.display()));
-            let bytes = std::fs::read(&path).ok();
-            (path, bytes)
-        })
-        .collect()
 }
 
 async fn d065_insert_audit_row(state: &Arc<crate::AppState>) {
@@ -172,6 +163,25 @@ async fn d065_trusted_empty_and_nonempty_list_command_remains_exact() {
 }
 
 #[tokio::test]
+async fn d065_all_audit_read_paths_share_one_concrete_gateway_instance() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = d065_state(&directory.path().join("mcp_audit.db"));
+    let gateway = Arc::clone(&state.mcp_audit_read_gateway);
+
+    let _ = d065_diagnostics(&state).await;
+    let _ = d065_list_audit_logs_command(Arc::clone(&state)).expect("trusted list command");
+    let _ = gateway
+        .export_logs(&state, 30)
+        .await
+        .expect("trusted export gateway path");
+
+    let calls = gateway.call_counts();
+    assert_eq!(calls.diagnostics, 1);
+    assert_eq!(calls.list, 1);
+    assert_eq!(calls.export, 1);
+}
+
+#[tokio::test]
 async fn d065_key_reference_unavailable_projects_unknown_not_data_or_zero() {
     let directory = tempfile::tempdir().unwrap();
     let state = d065_state(&directory.path().join("mcp_audit.db"));
@@ -231,55 +241,66 @@ async fn d065_audit_store_unavailable_fails_list_command() {
     );
 }
 
-#[tokio::test]
-async fn d065_corrupt_ciphertext_projects_unknown_without_mutation() {
+async fn d065_assert_corrupt_ciphertext_projects_unknown_without_mutation(
+    column: CiphertextColumn,
+) {
     let directory = tempfile::tempdir().unwrap();
     let database_path = directory.path().join("mcp_audit.db");
     let state = d065_state(&database_path);
     d065_insert_audit_row(&state).await;
-    let connection = rusqlite::Connection::open(&database_path).unwrap();
-    connection
-        .execute(
-            "UPDATE mcp_log SET arguments_encrypted = 'invalid-ciphertext' WHERE id = 1",
-            [],
-        )
-        .unwrap();
-    drop(connection);
-    let before = d065_artifact_snapshot(&database_path);
+    corrupt_ciphertext(&database_path, column);
+    let before = sqlite_family_snapshot(&database_path);
 
     assert_d065_untrusted(&d065_diagnostics(&state).await, "unknown");
     assert_eq!(
-        d065_artifact_snapshot(&database_path),
+        sqlite_family_snapshot(&database_path),
         before,
-        "failed diagnostics must not rewrite the canonical SQLite family"
+        "failed {} diagnostics must not rewrite the canonical SQLite family",
+        column.label()
     );
 }
 
 #[tokio::test]
-async fn d065_corrupt_ciphertext_list_fails_without_mutation() {
+async fn d065_corrupt_arguments_ciphertext_projects_unknown_without_mutation() {
+    d065_assert_corrupt_ciphertext_projects_unknown_without_mutation(CiphertextColumn::Arguments)
+        .await;
+}
+
+#[tokio::test]
+async fn d065_corrupt_result_ciphertext_projects_unknown_without_mutation() {
+    d065_assert_corrupt_ciphertext_projects_unknown_without_mutation(CiphertextColumn::Result)
+        .await;
+}
+
+async fn d065_assert_corrupt_ciphertext_list_fails_without_mutation(column: CiphertextColumn) {
     let directory = tempfile::tempdir().unwrap();
     let database_path = directory.path().join("mcp_audit.db");
     let state = d065_state(&database_path);
     d065_insert_audit_row(&state).await;
-    let connection = rusqlite::Connection::open(&database_path).unwrap();
-    connection
-        .execute(
-            "UPDATE mcp_log SET arguments_encrypted = 'invalid-ciphertext' WHERE id = 1",
-            [],
-        )
-        .unwrap();
-    drop(connection);
-    let before = d065_artifact_snapshot(&database_path);
+    corrupt_ciphertext(&database_path, column);
+    let before = sqlite_family_snapshot(&database_path);
 
     assert!(
         d065_list_audit_logs_command(state).is_err(),
-        "corrupt ciphertext must not be returned as a successful placeholder row"
+        "corrupt {} must not be returned as a successful placeholder row",
+        column.label()
     );
     assert_eq!(
-        d065_artifact_snapshot(&database_path),
+        sqlite_family_snapshot(&database_path),
         before,
-        "failed list reads must not rewrite or delete the canonical SQLite family"
+        "failed {} list reads must not rewrite or delete the canonical SQLite family",
+        column.label()
     );
+}
+
+#[tokio::test]
+async fn d065_corrupt_arguments_ciphertext_list_fails_without_mutation() {
+    d065_assert_corrupt_ciphertext_list_fails_without_mutation(CiphertextColumn::Arguments).await;
+}
+
+#[tokio::test]
+async fn d065_corrupt_result_ciphertext_list_fails_without_mutation() {
+    d065_assert_corrupt_ciphertext_list_fails_without_mutation(CiphertextColumn::Result).await;
 }
 
 #[tokio::test]
@@ -290,11 +311,11 @@ async fn d065_sqlite_query_failure_projects_unknown_not_zero() {
     let connection = rusqlite::Connection::open(&database_path).unwrap();
     connection.execute("DROP TABLE mcp_log", []).unwrap();
     drop(connection);
-    let before = d065_artifact_snapshot(&database_path);
+    let before = sqlite_family_snapshot(&database_path);
 
     assert_d065_untrusted(&d065_diagnostics(&state).await, "unknown");
     assert_eq!(
-        d065_artifact_snapshot(&database_path),
+        sqlite_family_snapshot(&database_path),
         before,
         "a failed SQLite diagnostics query must not repair or replace canonical evidence"
     );
@@ -308,13 +329,13 @@ async fn d065_sqlite_query_failure_fails_list_without_mutation() {
     let connection = rusqlite::Connection::open(&database_path).unwrap();
     connection.execute("DROP TABLE mcp_log", []).unwrap();
     drop(connection);
-    let before = d065_artifact_snapshot(&database_path);
+    let before = sqlite_family_snapshot(&database_path);
 
     assert!(
         d065_list_audit_logs_command(state).is_err(),
         "a real SQLite query failure must fail the shipped list command"
     );
-    assert_eq!(d065_artifact_snapshot(&database_path), before);
+    assert_eq!(sqlite_family_snapshot(&database_path), before);
 }
 
 #[tokio::test]
@@ -360,10 +381,13 @@ async fn d065_verified_canonical_read_only_mode_projects_degraded_counts() {
         "d065_verified_read_only",
         "fixture read-only database",
     );
+    let before = sqlite_family_snapshot(&database_path);
 
     let diagnostics = d065_diagnostics(&state).await;
+    assert_eq!(sqlite_family_snapshot(&database_path), before);
     assert_eq!(diagnostics["mcp_audit_read_status"], "degraded");
     assert_eq!(diagnostics["mcp_recent_audit_count"], 1);
+    assert_eq!(diagnostics["mcp_recent_pii_count"], 1);
 }
 
 #[tokio::test]
@@ -409,6 +433,7 @@ async fn d065_verified_canonical_read_only_store_retains_list_capability() {
         "d065_verified_read_only",
         "fixture read-only database",
     );
+    let before = sqlite_family_snapshot(&database_path);
 
     assert_eq!(
         d065_list_audit_logs_command(state)
@@ -418,11 +443,54 @@ async fn d065_verified_canonical_read_only_store_retains_list_capability() {
             .len(),
         1
     );
+    assert_eq!(sqlite_family_snapshot(&database_path), before);
 }
 
 #[test]
-fn d065_shipped_audit_read_consumers_use_one_gateway_without_raw_store_reads() {
+fn d065_shipped_audit_read_graph_has_one_concrete_gateway_owner() {
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let state_source = std::fs::read_to_string(manifest.join("src/state.rs")).unwrap();
+    let app_state = state_source
+        .split_once("pub struct AppState {")
+        .expect("AppState declaration")
+        .1
+        .split_once("\n}")
+        .expect("AppState declaration end")
+        .0;
+    assert_eq!(
+        app_state
+            .matches("pub(crate) mcp_audit_read_gateway:")
+            .count(),
+        1,
+        "AppState must own exactly one concrete MCP audit read gateway instance"
+    );
+    assert_eq!(app_state.matches("McpAuditReadGateway").count(), 1);
+
+    let gateway_source =
+        std::fs::read_to_string(manifest.join("src/mcp_audit_read_gateway.rs")).unwrap();
+    assert!(
+        gateway_source.contains("pub(crate) struct McpAuditReadGateway")
+            && gateway_source.contains("async fn diagnostic_counts")
+            && gateway_source.contains("async fn list_logs")
+            && gateway_source.contains("async fn export_logs"),
+        "one concrete gateway type must own all three MCP audit read projections"
+    );
+    assert_eq!(gateway_source.matches(".list_logs(").count(), 2);
+    assert_eq!(gateway_source.matches(".export_logs(").count(), 1);
+    let settings_source =
+        std::fs::read_to_string(manifest.join("src/commands/settings.rs")).unwrap();
+    assert!(
+        settings_source.contains("async fn export_mcp_audit_logs_with_state")
+            && !settings_source.contains("pub(crate) async fn export_mcp_audit_logs_with_state"),
+        "the test seam must not expose a crate-wide confirmation-bypass helper"
+    );
+    assert_eq!(settings_source.matches(".export_logs(").count(), 1);
+    let mcp_source = std::fs::read_to_string(manifest.join("src/commands/mcp.rs")).unwrap();
+    assert_eq!(mcp_source.matches(".list_logs(").count(), 1);
+    let diagnostics_source =
+        std::fs::read_to_string(manifest.join("src/commands/diagnostics.rs")).unwrap();
+    assert_eq!(diagnostics_source.matches(".diagnostic_counts(").count(), 1);
+
     let cases = [
         (
             "src/commands/diagnostics.rs",
@@ -452,11 +520,27 @@ fn d065_shipped_audit_read_consumers_use_one_gateway_without_raw_store_reads() {
             })
             .0;
         assert!(
-            body.contains("mcp_audit_read_gateway")
+            body.contains(".mcp_audit_read_gateway")
                 && !body.contains("mcp_audit_store")
-                && !body.contains(".list_logs(")
-                && !body.contains(".export_logs("),
-            "{relative} still owns or bypasses the single typed MCP audit read gateway"
+                && !body.contains("store.list_logs(")
+                && !body.contains("store.export_logs("),
+            "{relative} still owns or bypasses the AppState MCP audit read gateway instance"
+        );
+    }
+
+    for entry in std::fs::read_dir(manifest.join("src/commands")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|value| value.to_str()) != Some("rs") {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !source.contains("mcp_audit_store.lock().await.list_logs(")
+                && !source.contains("mcp_audit_store.lock().await.export_logs(")
+                && !source.contains("store.list_logs(")
+                && !source.contains("store.export_logs("),
+            "{} contains a parallel raw MCP audit read wrapper outside the concrete gateway",
+            path.display()
         );
     }
 }
@@ -482,6 +566,34 @@ fn d065_product_contract_can_distinguish_unknown_from_zero() {
                 .all(|status| diagnostics_contract.contains(status)),
         "the frontend diagnostics contract must preserve all four typed audit-read states and nullable unknown counts"
     );
+}
+
+#[test]
+fn d065_sqlite_family_snapshot_tracks_main_wal_shm_and_journal_with_stable_metadata() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("mcp_audit.db");
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let mut path = database_path.as_os_str().to_os_string();
+        path.push(suffix);
+        std::fs::write(std::path::PathBuf::from(path), format!("fixture:{suffix}"))
+            .expect("write SQLite family control");
+    }
+
+    let snapshot = sqlite_family_snapshot(&database_path);
+    assert_eq!(snapshot.members.len(), 4);
+    assert_eq!(snapshot.files.len(), 4);
+    assert!(snapshot.files.iter().all(|file| {
+        file.exists
+            && file.bytes.is_some()
+            && file.len.is_some()
+            && file.modified.is_some()
+            && file.permissions_read_only.is_some()
+    }));
+    assert!(snapshot.files.iter().any(|file| file
+        .path
+        .as_os_str()
+        .to_string_lossy()
+        .ends_with("-journal")));
 }
 
 #[test]

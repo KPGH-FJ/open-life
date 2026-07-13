@@ -73,24 +73,8 @@ pub(crate) async fn get_system_diagnostics_with_state(
             registry.list_all_tools().len(),
         )
     };
-    let (mcp_recent_audit_count, mcp_recent_pii_count) = {
-        if state
-            .persistence_coordinator
-            .require_trusted_read("McpAuditStore")
-            .is_ok()
-        {
-            let audit = state.mcp_audit_store.lock().await;
-            match audit.list_logs(50) {
-                Ok(logs) => {
-                    let pii_count = logs.iter().filter(|log| log.pii_found).count();
-                    (logs.len(), pii_count)
-                }
-                Err(_) => (0, 0),
-            }
-        } else {
-            (0, 0)
-        }
-    };
+    let (mcp_recent_audit_count, mcp_recent_pii_count) =
+        state.mcp_audit_read_gateway.diagnostic_counts(state).await;
     let (
         memory_chunk_count,
         vector_corrupt_embedding_count,

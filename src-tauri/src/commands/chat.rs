@@ -180,6 +180,9 @@ mod tests {
             mcp_audit_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::mcp_audit::McpAuditStore::new(temp_dir.path().join("mcp_audit.db")),
             )),
+            mcp_audit_read_gateway: Arc::new(
+                crate::mcp_audit_read_gateway::McpAuditReadGateway::default(),
+            ),
             agent_run_store: None,
             evidence_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::EvidenceStore::new_in_memory().unwrap(),

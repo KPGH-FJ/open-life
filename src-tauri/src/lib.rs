@@ -60,6 +60,7 @@ pub(crate) mod main_chat_task_controls;
 pub(crate) mod main_chat_turn_pipeline;
 #[allow(dead_code)]
 pub mod main_chat_turn_runtime;
+pub(crate) mod mcp_audit_read_gateway;
 #[allow(dead_code)]
 pub(crate) mod memory_gateway;
 pub(crate) mod persistence_coordinator;
@@ -80,6 +81,9 @@ mod main_chat_acceptance_test_support;
 
 #[cfg(test)]
 mod main_chat_live_provider_tests;
+
+#[cfg(test)]
+mod mcp_audit_read_contract_test_support;
 
 #[cfg(test)]
 mod main_chat_command_surface_tests;
