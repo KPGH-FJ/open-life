@@ -4165,7 +4165,7 @@ async fn persist_openlife_turn_final_delivery_receipt(
             .list_for_session(task_session_id)
             .map_err(|error| format!("list canonical final actions failed: {error}"))?
     };
-    let (task_owner, task_owner_digest, transcript_owners) = {
+    let (task_owner, task_owner_receipt, transcript_owners) = {
         let sessions = state
             .main_chat_agent_session_store
             .as_ref()
@@ -4176,14 +4176,14 @@ async fn persist_openlife_turn_final_delivery_receipt(
             .load_session(task_session_id)
             .map_err(|error| format!("load canonical final task failed: {error}"))?
             .ok_or_else(|| "turn_final_task_owner_missing".to_string())?;
-        let task_digest = sessions
-            .canonical_owner_digest(task_session_id)
-            .map_err(|error| format!("digest canonical final task failed: {error}"))?
+        let task_receipt = sessions
+            .canonical_owner_receipt(task_session_id)
+            .map_err(|error| format!("receipt canonical final task failed: {error}"))?
             .ok_or_else(|| "turn_final_task_owner_missing".to_string())?;
         let transcript = sessions
             .list_transcript_entries(task_session_id)
             .map_err(|error| format!("list canonical final transcript failed: {error}"))?;
-        (task, task_digest, transcript)
+        (task, task_receipt, transcript)
     };
     let (run_owner, run_owner_revision) = {
         let runs = state
@@ -4352,7 +4352,14 @@ async fn persist_openlife_turn_final_delivery_receipt(
             "taskOwnerStatus",
             serde_json::json!(task_owner.status.as_str()),
         ),
-        ("taskOwnerDigest", serde_json::json!(task_owner_digest)),
+        (
+            "taskOwnerDigestVersion",
+            serde_json::json!(task_owner_receipt.version()),
+        ),
+        (
+            "taskOwnerDigest",
+            serde_json::json!(task_owner_receipt.digest()),
+        ),
         (
             "runOwnerStatus",
             serde_json::json!(run_owner.status.to_string()),
@@ -4430,6 +4437,28 @@ fn final_event_count(event: &MainChatAgentDurableEvent, field: &str) -> Result<u
         .and_then(Value::as_u64)
         .and_then(|value| usize::try_from(value).ok())
         .ok_or_else(|| format!("turn_operation_final_receipt_missing:{field}"))
+}
+
+fn final_payload_task_owner_digest<'a>(
+    payload: &'a Value,
+    supported_version: u64,
+) -> Result<&'a str, String> {
+    let Some(version_value) = payload.get("taskOwnerDigestVersion") else {
+        return Err("turn_operation_final_receipt_missing:taskOwnerDigestVersion".to_string());
+    };
+    let Some(version) = version_value.as_u64().filter(|version| *version > 0) else {
+        return Err("turn_operation_final_receipt_invalid:taskOwnerDigestVersion".to_string());
+    };
+    if version != supported_version {
+        return Err(format!(
+            "turn_operation_final_receipt_unsupported:taskOwnerDigestVersion:{version}"
+        ));
+    }
+    payload
+        .get("taskOwnerDigest")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "turn_operation_final_receipt_missing:taskOwnerDigest".to_string())
 }
 
 fn final_event_string_array(
@@ -4778,7 +4807,7 @@ async fn recover_openlife_turn_from_durable_final(
     let durable_change_rollback_states =
         final_event_string_array(&final_event, "durableChangeRollbackStates")?;
 
-    let (task, task_owner_digest) = {
+    let (task, task_owner_receipt) = {
         let sessions = state
             .main_chat_agent_session_store
             .as_ref()
@@ -4791,13 +4820,13 @@ async fn recover_openlife_turn_from_durable_final(
             .ok_or_else(|| {
                 "turn_operation_final_reconciliation_required:task_missing".to_string()
             })?;
-        let digest = sessions
-            .canonical_owner_digest(operation_id)
-            .map_err(|error| format!("digest operation-bound task for recovery failed: {error}"))?
+        let receipt = sessions
+            .canonical_owner_receipt(operation_id)
+            .map_err(|error| format!("receipt operation-bound task for recovery failed: {error}"))?
             .ok_or_else(|| {
                 "turn_operation_final_reconciliation_required:task_missing".to_string()
             })?;
-        (task, digest)
+        (task, receipt)
     };
     let (run, run_owner_revision) = {
         let runs = state
@@ -4826,9 +4855,11 @@ async fn recover_openlife_turn_from_durable_final(
     {
         return Err("turn_operation_final_reconciliation_required:owner_graph_mismatch".into());
     }
+    let recorded_task_owner_digest =
+        final_payload_task_owner_digest(&final_event.payload, task_owner_receipt.version())?;
     let run_owner_digest = canonical_final_owner_digest("agent_run", &run)?;
     if final_event_string(&final_event, "taskOwnerStatus")? != task.status.as_str()
-        || final_event_string(&final_event, "taskOwnerDigest")? != task_owner_digest
+        || recorded_task_owner_digest != task_owner_receipt.digest()
         || final_event_string(&final_event, "runOwnerStatus")? != run.status.to_string()
         || final_event_count(&final_event, "runOwnerRevision")? as u64 != run_owner_revision
         || final_event_string(&final_event, "runOwnerDigest")? != run_owner_digest
@@ -5720,6 +5751,55 @@ mod turn_admission_tests {
                 Some(std::sync::Arc::new(tokio::sync::Mutex::new(event)));
             std::sync::Arc::new(state)
         }
+    }
+
+    fn d050_task_owner_receipt_payload(version: Option<serde_json::Value>) -> serde_json::Value {
+        let mut payload = serde_json::json!({
+            "taskOwnerDigest": format!("sha256:{}", "a".repeat(64)),
+        });
+        if let Some(version) = version {
+            payload
+                .as_object_mut()
+                .unwrap()
+                .insert("taskOwnerDigestVersion".into(), version);
+        }
+        payload
+    }
+
+    #[test]
+    fn durable_final_recovery_accepts_current_task_owner_digest_version() {
+        let payload = d050_task_owner_receipt_payload(Some(serde_json::json!(1)));
+        assert_eq!(
+            super::final_payload_task_owner_digest(&payload, 1).unwrap(),
+            format!("sha256:{}", "a".repeat(64))
+        );
+    }
+
+    #[test]
+    fn durable_final_recovery_rejects_missing_task_owner_digest_version() {
+        let payload = d050_task_owner_receipt_payload(None);
+        assert_eq!(
+            super::final_payload_task_owner_digest(&payload, 1).unwrap_err(),
+            "turn_operation_final_receipt_missing:taskOwnerDigestVersion"
+        );
+    }
+
+    #[test]
+    fn durable_final_recovery_rejects_zero_task_owner_digest_version() {
+        let payload = d050_task_owner_receipt_payload(Some(serde_json::json!(0)));
+        assert_eq!(
+            super::final_payload_task_owner_digest(&payload, 1).unwrap_err(),
+            "turn_operation_final_receipt_invalid:taskOwnerDigestVersion"
+        );
+    }
+
+    #[test]
+    fn durable_final_recovery_rejects_unknown_task_owner_digest_version() {
+        let payload = d050_task_owner_receipt_payload(Some(serde_json::json!(2)));
+        assert_eq!(
+            super::final_payload_task_owner_digest(&payload, 1).unwrap_err(),
+            "turn_operation_final_receipt_unsupported:taskOwnerDigestVersion:2"
+        );
     }
 
     #[tokio::test]
@@ -6808,6 +6888,13 @@ mod turn_admission_tests {
                 .iter()
                 .find(|event| event.event_type == "final_delivery.created")
                 .expect("one durable final receipt");
+            assert_eq!(
+                final_event
+                    .payload
+                    .get("taskOwnerDigestVersion")
+                    .and_then(serde_json::Value::as_u64),
+                Some(1)
+            );
             assert!(final_event
                 .payload
                 .get("taskOwnerDigest")

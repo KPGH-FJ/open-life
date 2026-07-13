@@ -1063,31 +1063,82 @@ fn ordinary_final_delivery_has_one_durable_turn_runtime_owner() {
         .expect("read TurnRuntime final owner");
     let event_store = std::fs::read_to_string(root.join("main_chat_event_stream.rs"))
         .expect("read durable event projection");
-    let final_receipt_persistence = runtime
-        .split_once("async fn persist_openlife_turn_final_delivery_receipt(")
-        .expect("TurnRuntime final receipt persistence owner must exist")
-        .1
-        .split_once("fn canonical_final_owner_digest(")
-        .expect("TurnRuntime final receipt persistence boundary must exist")
+    let core =
+        std::fs::read_to_string(root.join("../../openlife-core/src/agent/main_chat_agent_v1.rs"))
+            .expect("read canonical Task owner store");
+    let runtime_product_source = runtime
+        .split_once("#[cfg(test)]\nmod turn_admission_tests")
+        .expect("TurnRuntime production/test boundary must exist")
         .0;
+    let final_receipt_persistence = extract_rust_function_body(
+        runtime_product_source,
+        "async fn persist_openlife_turn_final_delivery_receipt(",
+    );
+    let final_receipt_recovery = extract_rust_function_body(
+        runtime_product_source,
+        "async fn recover_openlife_turn_from_durable_final(",
+    );
+    const FINAL_OWNER_SOURCE: &str = "openlife_turn_runtime.final_delivery_owner";
+    assert_eq!(
+        runtime_product_source.matches(FINAL_OWNER_SOURCE).count(),
+        2,
+        "production TurnRuntime must contain exactly one final append owner and one recovery authentication use"
+    );
     assert_eq!(
         final_receipt_persistence
-            .matches("openlife_turn_runtime.final_delivery_owner")
+            .matches(FINAL_OWNER_SOURCE)
             .count(),
         1,
         "ordinary FinalDelivery must have exactly one durable TurnRuntime append owner"
     );
-    let final_receipt_recovery = runtime
-        .split_once("async fn recover_openlife_turn_from_durable_final(")
-        .expect("TurnRuntime final receipt recovery must exist")
-        .1
-        .split_once("fn emit_stream_send_message_result(")
-        .expect("TurnRuntime final receipt recovery boundary must exist")
-        .0;
-    assert!(
+    assert_eq!(
+        final_receipt_recovery.matches(FINAL_OWNER_SOURCE).count(),
+        1,
+        "durable FinalDelivery recovery must authenticate exactly one append owner"
+    );
+    const TASK_OWNER_RECEIPT_CALL: &str = ".canonical_owner_receipt(";
+    assert_eq!(
+        runtime_product_source
+            .matches(TASK_OWNER_RECEIPT_CALL)
+            .count(),
+        2,
+        "production TurnRuntime must obtain the versioned Task owner receipt once for persistence and once for recovery"
+    );
+    assert_eq!(
+        final_receipt_persistence
+            .matches(TASK_OWNER_RECEIPT_CALL)
+            .count(),
+        1
+    );
+    assert_eq!(
         final_receipt_recovery
-            .contains("final_event.source != \"openlife_turn_runtime.final_delivery_owner\""),
-        "durable FinalDelivery recovery must authenticate the one append owner"
+            .matches(TASK_OWNER_RECEIPT_CALL)
+            .count(),
+        1
+    );
+    assert_eq!(
+        final_receipt_persistence
+            .matches("\"taskOwnerDigestVersion\"")
+            .count(),
+        1,
+        "the one final append owner must persist the Task owner digest version"
+    );
+    assert_eq!(
+        final_receipt_recovery
+            .matches("final_payload_task_owner_digest(")
+            .count(),
+        1,
+        "final recovery must authenticate the Task owner digest version before comparing it"
+    );
+    assert_eq!(
+        core.matches("pub fn canonical_owner_receipt(").count(),
+        1,
+        "the Task store must expose exactly one versioned canonical owner receipt API"
+    );
+    assert_eq!(
+        core.matches("pub fn canonical_owner_digest(").count(),
+        0,
+        "the digest-only Task owner API must stay absent"
     );
     assert!(!runtime.contains("replay-final:"));
     assert!(!runtime.contains("openlife_turn_runtime.replay_aggregate"));
