@@ -8504,6 +8504,7 @@ pub(crate) async fn append_main_chat_agent_runtime_event_batch_with_provider_pro
         return Err("main_chat_agent_event_store_unavailable".into());
     };
     let store = store_arc.lock().await;
+    let inputs = omit_already_durable_tool_started_inputs(&store, task_session_id, run_id, inputs)?;
     store
         .append_batch_with_provider_proofs(
             runtime_event_drafts(task_session_id, run_id, inputs),
@@ -8833,6 +8834,65 @@ pub(crate) fn main_chat_tool_receipt_event_inputs(
     Ok(inputs)
 }
 
+fn omit_already_durable_tool_started_inputs(
+    store: &MainChatAgentEventStore,
+    task_session_id: &str,
+    run_id: &str,
+    inputs: Vec<MainChatAgentRuntimeEventInput>,
+) -> std::result::Result<Vec<MainChatAgentRuntimeEventInput>, String> {
+    const IMMUTABLE_START_FIELDS: [&str; 10] = [
+        "receiptId",
+        "requestId",
+        "sourceRunId",
+        "manifestId",
+        "requestDigest",
+        "actionEffect",
+        "idempotencyContract",
+        "dispatchKind",
+        "startedAt",
+        "dispatchedAt",
+    ];
+    let mut filtered = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        if input.event_type != "tool.started" {
+            filtered.push(input);
+            continue;
+        }
+        let existing = store
+            .get_immutable_event(task_session_id, "tool.started", &input.object_id)
+            .map_err(|error| error.to_string())?;
+        let Some(existing) = existing else {
+            filtered.push(input);
+            continue;
+        };
+        if existing.run_id != run_id
+            || IMMUTABLE_START_FIELDS
+                .iter()
+                .any(|field| existing.payload.get(field) != input.payload.get(field))
+        {
+            return Err(format!(
+                "durable_tool_started_identity_mismatch:{}",
+                input.object_id
+            ));
+        }
+        // MainChatToolLifecycleObserver owns the immutable adapter-edge start.
+        // A later terminal receipt may have a larger retry count and must not
+        // reconstruct or overwrite that earlier fact.
+    }
+    Ok(filtered)
+}
+
+fn append_main_chat_tool_receipt_event_batch_in_store(
+    store: &MainChatAgentEventStore,
+    task_session_id: &str,
+    run_id: &str,
+    inputs: Vec<MainChatAgentRuntimeEventInput>,
+) -> std::result::Result<Vec<MainChatAgentDurableEvent>, String> {
+    let inputs = omit_already_durable_tool_started_inputs(store, task_session_id, run_id, inputs)?;
+    append_main_chat_agent_runtime_event_batch_in_store(store, task_session_id, run_id, inputs)
+        .map_err(|error| error.to_string())
+}
+
 /// Persist live zero-attempt closures before any ActionQueue or product
 /// projection can observe a failed replay. Receipts without a prepared fence
 /// produce no event; there is nothing durable to resolve in that case.
@@ -8884,15 +8944,17 @@ pub(crate) async fn append_main_chat_tool_receipt_events(
     if inputs.is_empty() {
         return Ok(durable);
     }
-    durable.extend(
-        append_main_chat_agent_runtime_event_batch(
-            state,
-            task_session_id.to_string(),
-            run_id.to_string(),
-            inputs,
-        )
-        .await?,
-    );
+    let store_arc = state
+        .main_chat_agent_event_store
+        .as_ref()
+        .ok_or_else(|| "main_chat_agent_event_store_unavailable".to_string())?;
+    let store = store_arc.lock().await;
+    durable.extend(append_main_chat_tool_receipt_event_batch_in_store(
+        &store,
+        task_session_id,
+        run_id,
+        inputs,
+    )?);
     Ok(durable)
 }
 
@@ -10611,6 +10673,62 @@ mod tests {
         assert_eq!(inputs[1].event_type, "tool.completed");
         assert_eq!(inputs[0].payload["dispatchKind"], "local");
         assert_eq!(inputs[1].payload["status"], "completed");
+    }
+
+    #[test]
+    fn terminal_projection_keeps_the_first_durable_start_across_http_retries() {
+        let task_id = "task-tool-retry-start-owner";
+        let run_id = "run-tool-retry-start-owner";
+        let mut terminal =
+            openlife_core::tool_execution_receipt::ToolExecutionReceipt::test_observed_local_read(
+                Some(run_id.into()),
+                Some("web.search".into()),
+                "retry-start-owner".into(),
+                true,
+            );
+        terminal.dispatch_attempt_count = 2;
+
+        let mut first_start = terminal.clone();
+        first_start.dispatch_attempt_count = 1;
+        first_start.transport_status = ToolTransportStatus::Dispatched;
+        first_start.effect_status = ToolEffectStatus::NotAttempted;
+        first_start.execution_outcome = ToolExecutionOutcome::NotObserved;
+        first_start.response_observed_at = None;
+        first_start.finished_at = None;
+
+        let store = MainChatAgentEventStore::new_in_memory().unwrap();
+        append_main_chat_agent_runtime_event_batch_in_store(
+            &store,
+            task_id,
+            run_id,
+            vec![main_chat_tool_started_event_input(
+                run_id,
+                &first_start,
+                "openlife_turn_runtime.tool_started",
+            )
+            .unwrap()],
+        )
+        .unwrap();
+
+        let projected = main_chat_tool_receipt_event_inputs(
+            run_id,
+            std::slice::from_ref(&terminal),
+            "openlife_turn_runtime.regular_tool_receipt",
+        )
+        .unwrap();
+        assert_eq!(projected[0].event_type, "tool.started");
+        assert_eq!(projected[0].payload["dispatchAttemptCount"], 2);
+        let appended =
+            append_main_chat_tool_receipt_event_batch_in_store(&store, task_id, run_id, projected)
+                .unwrap();
+        assert_eq!(appended.len(), 1);
+        assert_eq!(appended[0].event_type, "tool.completed");
+        let events = store.list(task_id, 0, 10).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_type, "tool.started");
+        assert_eq!(events[0].payload["dispatchAttemptCount"], 1);
+        assert_eq!(events[1].event_type, "tool.completed");
+        assert_eq!(events[1].payload["dispatchAttemptCount"], 2);
     }
 
     #[test]
