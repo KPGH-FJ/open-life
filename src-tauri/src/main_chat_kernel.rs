@@ -3271,6 +3271,21 @@ impl SchedulerMainChatModelClient {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MainChatProviderFailureBoundary {
+    RequestPreparation,
+    PreDispatch,
+}
+
+impl MainChatProviderFailureBoundary {
+    fn blocker_code(self) -> &'static str {
+        match self {
+            Self::RequestPreparation => "provider_request_preparation_failed",
+            Self::PreDispatch => "provider_pre_dispatch_failed",
+        }
+    }
+}
+
 #[async_trait]
 impl MainChatModelClient for SchedulerMainChatModelClient {
     async fn generate_direct_answer(
@@ -3311,7 +3326,7 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
                 message: "Main Chat provider request is missing its current user subject".into(),
                 provider_receipt: None,
                 provider_started_emitted: false,
-                blocker_code: None,
+                blocker_code: Some("provider_current_user_subject_missing".into()),
                 proposal_ids: Vec::new(),
             })?;
         let policy_authorization = request
@@ -3327,7 +3342,7 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
                 message: error.to_string(),
                 provider_receipt: None,
                 provider_started_emitted: false,
-                blocker_code: None,
+                blocker_code: Some("provider_payload_authorization_failed".into()),
                 proposal_ids: Vec::new(),
             })?;
         let (mut prepared, privacy_map) = self
@@ -3376,12 +3391,19 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
                 },
             )
             .await
-            .map_err(|err| MainChatModelFailure {
-                message: err.to_string(),
-                provider_receipt: None,
-                provider_started_emitted: false,
-                blocker_code: None,
-                proposal_ids: Vec::new(),
+            .map_err(|err| {
+                let message = err.to_string();
+                MainChatModelFailure {
+                    blocker_code: Some(
+                        MainChatProviderFailureBoundary::RequestPreparation
+                            .blocker_code()
+                            .into(),
+                    ),
+                    message,
+                    provider_receipt: None,
+                    provider_started_emitted: false,
+                    proposal_ids: Vec::new(),
+                }
             })?;
 
         // Scripted generation is an in-process eval fixture and has no network
@@ -3564,13 +3586,20 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
                 provider_receipt: outcome.receipt,
                 provider_started_emitted,
             }),
-            Err(message) => Err(MainChatModelFailure {
-                message,
-                provider_receipt: outcome.receipt,
-                provider_started_emitted,
-                blocker_code: None,
-                proposal_ids: Vec::new(),
-            }),
+            Err(message) => {
+                let blocker_code = outcome.receipt.is_none().then(|| {
+                    MainChatProviderFailureBoundary::PreDispatch
+                        .blocker_code()
+                        .to_string()
+                });
+                Err(MainChatModelFailure {
+                    message,
+                    provider_receipt: outcome.receipt,
+                    provider_started_emitted,
+                    blocker_code,
+                    proposal_ids: Vec::new(),
+                })
+            }
         }
     }
 
@@ -9815,6 +9844,18 @@ mod tests {
     use openlife_core::agent::model_router::{ModelRouter, ProviderAvailability};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn provider_failure_blockers_report_only_the_observed_boundary() {
+        assert_eq!(
+            MainChatProviderFailureBoundary::RequestPreparation.blocker_code(),
+            "provider_request_preparation_failed"
+        );
+        assert_eq!(
+            MainChatProviderFailureBoundary::PreDispatch.blocker_code(),
+            "provider_pre_dispatch_failed"
+        );
+    }
 
     struct TestCanonicalWriteAdmission;
     struct TestCanonicalWritePermit;
