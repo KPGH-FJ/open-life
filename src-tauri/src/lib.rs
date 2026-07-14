@@ -67,6 +67,7 @@ pub(crate) mod product_agent_dto;
 pub(crate) mod provider_network_consent;
 pub(crate) mod provider_validation;
 pub(crate) mod read_models;
+pub(crate) mod resource_commands;
 pub mod runtime_build_info;
 pub mod scheduler_runner;
 pub(crate) mod secret_store;
@@ -525,6 +526,30 @@ async fn start_stream_message<R: tauri::Runtime>(
 }
 
 #[tauri::command]
+async fn pick_and_import_resources<R: tauri::Runtime>(
+    import_operation_id: String,
+    turn_operation_id: String,
+    app_handle: tauri::AppHandle<R>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<resource_commands::ResourceImportSelectionResult, String> {
+    resource_commands::pick_and_import_resources(
+        import_operation_id,
+        turn_operation_id,
+        app_handle,
+        state.inner(),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn cancel_resource_import(
+    operation_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<bool, String> {
+    resource_commands::cancel_resource_import(&operation_id, state.inner())
+}
+
+#[tauri::command]
 #[cfg(feature = "dev-extensions")]
 async fn execute_tool_call(
     name: String,
@@ -902,6 +927,8 @@ pub fn run() {
             rebuild_memory_materialized_view,
             send_message,
             start_stream_message,
+            pick_and_import_resources,
+            cancel_resource_import,
             list_main_chat_agent_events,
             get_main_chat_agent_state_snapshot,
             list_main_chat_agent_tasks,

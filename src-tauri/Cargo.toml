@@ -46,6 +46,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 open = "5.3"
 axum = "0.7"
 log = "0.4"
+libc = "0.2"
 openlife-core = { path = "../openlife-core" }
 
 [target.'cfg(target_os = "macos")'.dependencies]

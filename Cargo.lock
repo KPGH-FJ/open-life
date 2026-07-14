@@ -3396,6 +3396,7 @@ dependencies = [
  "dirs 5.0.1",
  "futures",
  "keyring",
+ "libc",
  "log",
  "open",
  "openlife-core",

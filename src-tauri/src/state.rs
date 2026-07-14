@@ -180,6 +180,7 @@ pub struct AppState {
     pub(crate) runtime_clock_source:
         Arc<tokio::sync::Mutex<crate::main_chat_runtime_facts::MainChatRuntimeClockSource>>,
     pub web_search_fixture_output: Arc<tokio::sync::Mutex<Option<String>>>,
+    pub(crate) resource_runtime: Option<Arc<crate::resource_commands::ResourceRuntime>>,
     pub shutdown_notify: Arc<tokio::sync::Notify>,
 }
 

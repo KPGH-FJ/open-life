@@ -166,6 +166,7 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
             crate::main_chat_runtime_facts::MainChatRuntimeClockSource::default(),
         )),
         web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
+        resource_runtime: None,
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
     });
 

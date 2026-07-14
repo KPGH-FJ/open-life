@@ -2527,6 +2527,34 @@ fn bootstrap_with_secret_store(
         }
     };
 
+    let resource_runtime = {
+        let store_path = data_dir.join("resources.db");
+        let runtime = openlife_core::resource::ResourceStore::new(&store_path).and_then(|store| {
+            let parser =
+                openlife_core::resource_gateway::ResourceParserProcess::for_current_executable()?;
+            Ok(crate::resource_commands::ResourceRuntime::new(
+                openlife_core::resource_gateway::ResourceGateway::new(store, parser),
+            ))
+        });
+        match runtime {
+            Ok(runtime) => {
+                persistence.register_read_write("ResourceStore");
+                Some(Arc::new(runtime))
+            }
+            Err(error) => {
+                persistence.register_unavailable(
+                    "ResourceStore",
+                    "resource_runtime_initialization_failed",
+                    &error.to_string(),
+                );
+                startup_warnings
+                    .borrow_mut()
+                    .push(format!("resources.db 初始化失败: {error}"));
+                None
+            }
+        }
+    };
+
     let app_state = Arc::new(AppState {
         persistence_coordinator: Arc::clone(&persistence),
         config: Arc::new(Mutex::new(config)),
@@ -2576,6 +2604,7 @@ fn bootstrap_with_secret_store(
             crate::main_chat_runtime_facts::MainChatRuntimeClockSource::default(),
         )),
         web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
+        resource_runtime,
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
     });
 
