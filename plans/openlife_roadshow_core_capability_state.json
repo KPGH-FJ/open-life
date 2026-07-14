@@ -1,7 +1,7 @@
 {
   "schema_version": "openlife-roadshow-core-capability-state-v1",
   "plan_id": "openlife-roadshow-core-capability-2026-07-14",
-  "status": "v4_artifact_slice_implementation_verified_external_live_product_trial_review_pending_roadshow_no_go",
+  "status": "cumulative_integration_in_progress_rc04_mechanically_verified_live_product_trial_review_pending_roadshow_no_go",
   "authority": {
     "kind": "time_bounded_execution_overlay",
     "subordinate_to": [
@@ -116,9 +116,10 @@
     },
     {
       "id": "CUMULATIVE_INTEGRATION",
-      "status": "not_started",
-      "completion_claim": "none",
-      "commit": null
+      "status": "in_progress_rc04_mechanically_verified_remaining_primary_combined_live_and_review_evidence_pending",
+      "completion_claim": "no_cumulative_completion_claim_rc04_local_mechanical_evidence_only",
+      "commit": "02fd7580a1078a57e6308921a5ed61f357e4e17d",
+      "evidence": "plans/openlife_roadshow_cumulative_integration_evidence.md"
     },
     {
       "id": "RELIABILITY_AND_TRIAL",
@@ -259,6 +260,22 @@
     "single_system": "failed_25_of_32_passed_same_7_preexisting_red",
     "roadshow_release": "no_go"
   },
+  "cumulative_integration_results": {
+    "rc04_exact_prompt": "passed_one_main_chat_operation_one_web_action_one_provider_request_with_resource_and_web_context_and_two_validated_source_classes",
+    "rc04_policy_authority": "passed_deterministic_current_user_public_web_evidence_route_with_webpage_design_counterexample",
+    "rc04_event_truth": "passed_strict_canonical_resource_and_web_context_refs_without_body_copy",
+    "rc04_governance": "passed_zero_proposals_zero_write_authority_from_quoted_file_or_web_content",
+    "rc04_receipt_minimization": "passed_raw_web_body_absent_from_product_ipc_and_execution_receipt",
+    "rc04_native_product_trial": "pending",
+    "rc04_external_live_provider_and_web": "pending",
+    "rc04_independent_review": "pending",
+    "rc08": "pending",
+    "cc01": "pending",
+    "cc02": "pending",
+    "cc03": "pending",
+    "cumulative_completion": "forbidden",
+    "roadshow_release": "no_go"
+  },
   "evidence_dimensions": [
     "implementation",
     "deterministic_contract",
@@ -267,5 +284,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-15T06:20:32+08:00"
+  "last_updated_at": "2026-07-15T07:43:50+08:00"
 }
