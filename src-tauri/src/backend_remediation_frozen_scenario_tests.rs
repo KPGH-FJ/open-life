@@ -1508,12 +1508,29 @@ async fn run_03_tool_gateway_allows_one_dispatch_and_one_counting_effect() {
             None,
         )
         .expect("RUN-03 AllowOnce grant");
+    let agent_run_store = Arc::new(
+        openlife_core::agent::AgentRunStore::new_in_memory()
+            .expect("RUN-03 canonical AgentRun store"),
+    );
+    let run_ids = (0..100)
+        .map(|_| uuid::Uuid::new_v4().to_string())
+        .collect::<Vec<_>>();
+    for run_id in &run_ids {
+        let mut run =
+            openlife_core::agent::AgentRun::new_tool_execution_run("frozen.run03.counting-effect");
+        run.id = run_id.clone();
+        agent_run_store
+            .create_run(&run)
+            .expect("RUN-03 canonical AgentRun owner");
+    }
     let effect_count = Arc::new(AtomicUsize::new(0));
     let dispatch_observer = Arc::new(FrozenCountingDispatchObserver::default());
     let barrier = Arc::new(tokio::sync::Barrier::new(100));
     let contenders = (0..100)
         .map(|index| {
             let permission_store = Arc::clone(&permission_store);
+            let agent_run_store = Arc::clone(&agent_run_store);
+            let run_id = run_ids[index].clone();
             let effect_count = Arc::clone(&effect_count);
             let dispatch_observer = Arc::clone(&dispatch_observer);
             let barrier = Arc::clone(&barrier);
@@ -1541,6 +1558,7 @@ async fn run_03_tool_gateway_allows_one_dispatch_and_one_counting_effect() {
                     &privacy_engine,
                     &safe_paths,
                 )
+                .with_agent_run_store(agent_run_store.as_ref())
                 .with_tool_dispatch_observer(dispatch_observer.as_ref());
                 barrier.wait().await;
                 ToolGateway::from_executor_config(ActionExecutorConfig::default())
@@ -1549,7 +1567,7 @@ async fn run_03_tool_gateway_allows_one_dispatch_and_one_counting_effect() {
                             action_type: "builtin_tool".into(),
                             target: "frozen.run03.counting-effect".into(),
                             input: serde_json::json!({}),
-                            source_run_id: Some(format!("frozen-run03-{index}")),
+                            source_run_id: Some(run_id),
                             step_index: 0,
                         },
                         &context,
