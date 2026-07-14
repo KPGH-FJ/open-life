@@ -29,6 +29,24 @@ Date: 2026-07-14
   binds explicit Memory durable-change projection to the canonical Memory
   owner and removes the obsolete fake ToolGateway evidence expectation.
 
+## Downstream frozen-mechanics closure
+
+The full frozen mechanics module exposed four downstream runtime/tool issues
+after the focused H2 gates were green. They were resolved without changing the
+frozen scenario file or rubric:
+
+- `ee99709` recognizes Chinese email action requests through a bounded semantic
+  combination while retaining history, draft-only, summary, and instruction
+  counterexamples.
+- `5388afe` records the local provider adapter-start edge before the HTTP future
+  can be cancelled, so an in-flight request is `remote_unknown` rather than
+  `not_attempted`; pre-dispatch rejection remains `not_attempted`.
+- `4ed3c05` binds RUN-03 to real UUIDv4 canonical AgentRun owners and the real
+  bound-content receipt issuer. It does not weaken ToolGateway receipt checks.
+- `115335f` corrects the RUN-04 evaluator to the frozen rubric: two repeated
+  turns have distinct task owners and transcripts, while each turn retains the
+  D050 one-operation/one-message/one-task/one-run recovery identity.
+
 ## Verified governance facts
 
 | Contract | Mechanical evidence | Result |
@@ -46,6 +64,7 @@ Date: 2026-07-14
 | ReviewWorkflow admission is atomic | ReviewWorkflow and ProposalStore focused tests | 7/7 and 16/16 |
 | broad ordinary Main Chat behavior remains intact | `cargo test -p openlife-tauri 'main_chat_kernel_' -- --nocapture --test-threads=1` | 53/53 |
 | single TurnRuntime/module authority remains intact | `cargo test -p openlife-tauri main_chat_runtime_module -- --nocapture --test-threads=1` | 29/29 |
+| full frozen mechanics module | `cargo test -p openlife-tauri backend_remediation_frozen_scenario_tests -- --nocapture --test-threads=1` | 15/15 |
 | Rust lint build completes | `cargo clippy -p openlife-tauri --lib --tests` | completed with existing warnings |
 
 The explicit Memory projection does not trust assistant text or the transient
@@ -57,22 +76,11 @@ as an applied Memory change.
 
 ## Frozen-suite boundary
 
-The latest complete frozen mechanics module is **11/15**, not globally green.
-The four remaining red tests are deliberately retained:
-
-1. `high_risk_exact_prompts_use_real_send_and_stop_before_any_effect` — TOOL-02
-   email intent is still misrouted as DirectAnswer instead of confirmation.
-2. `run_01_exact_prompt_cancels_with_remote_unknown_and_no_late_commit` — the
-   fixture observes `not_attempted` where the frozen expectation requires
-   `remote_unknown`.
-3. `run_03_tool_gateway_allows_one_dispatch_and_one_counting_effect` — the
-   fixture lacks a `BoundContentReceipt` issuer.
-4. `run_04_exact_prompt_uses_real_send_and_stream_with_independent_uuidv4_ids`
-   — durable event cardinality is 2 instead of the frozen 6.
-
-These failures belong to the remaining runtime/tool vertical work. They do not
-invalidate the focused H2 facts, and they prevent any roadshow or full-suite
-GREEN claim.
+The complete frozen mechanics module is now **15/15**. This closes the local
+mechanical failures previously observed in TOOL-02 and RUN-01/03/04. It does
+not add external-live, product-UI, soak, independent-review, or global BR4
+closure credit. In particular, a green frozen module is not a roadshow release
+decision.
 
 ## Independent review and non-claims
 
@@ -82,9 +90,10 @@ GREEN claim.
   UI behavior and proposal-fatigue dogfood are not yet product-trial evidence.
 - External live-provider and live-Web credit are not awarded by scripted
   provider responses or local fixtures.
-- The broad `openlife-core` Main Chat Agent v1 module remains 46/54 because of
-  eight pre-existing MCP, receipt-issuer, minimized-fixture, and legacy/runtime
-  eval failures. The focused Main Chat kernel gate is 53/53; these are different
-  denominators and are not conflated.
+- The last recorded broad `openlife-core` Main Chat Agent v1 module result is
+  46/54 because of eight pre-existing MCP, receipt-issuer, minimized-fixture,
+  and legacy/runtime eval failures. It was not rerun by the downstream frozen
+  mechanics closure. The focused Main Chat kernel gate is 53/53; these are
+  different denominators and are not conflated.
 - Clippy completed but reported existing warnings. This slice does not claim a
   warning-free repository.

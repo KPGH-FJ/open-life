@@ -1,7 +1,7 @@
 {
   "schema_version": "openlife-roadshow-core-capability-state-v1",
   "plan_id": "openlife-roadshow-core-capability-2026-07-14",
-  "status": "h2_backend_mechanical_green_review_and_product_trial_pending_roadshow_no_go",
+  "status": "v1_resource_preparation_in_progress_h1_h2_review_pending_roadshow_no_go",
   "authority": {
     "kind": "time_bounded_execution_overlay",
     "subordinate_to": [
@@ -23,7 +23,7 @@
     "verified_clean_before_plan_edit": true,
     "verified_at": "2026-07-14"
   },
-  "current_phase": "H2_GOVERNANCE",
+  "current_phase": "V1_RESOURCE",
   "schedule": {
     "p50_hours": "40-48 after H0 infrastructure blockers",
     "p80_hours": "56-72 after H0 infrastructure blockers",
@@ -87,7 +87,7 @@
     },
     {
       "id": "V1_RESOURCE",
-      "status": "not_started",
+      "status": "preparation_in_progress",
       "completion_claim": "none",
       "commit": null
     },
@@ -170,7 +170,13 @@
     "untrusted_memory_authorization": "passed_mem05_mem06_zero_proposals_zero_writes",
     "main_chat_kernel": "passed_53_of_53",
     "main_chat_runtime_module": "passed_29_of_29",
-    "frozen_mechanics_module": "failed_11_of_15_passed_4_downstream_red",
+    "frozen_mechanics_module": "passed_15_of_15_local_mechanical_credit_only",
+    "frozen_downstream_commits": [
+      "ee99709cc99365679c467f6386a727296c7094a2",
+      "5388afe1b8f2348f50044cf7be1af870a4fd240d",
+      "4ed3c0583b29f23272679de216ebc3dcd2353205",
+      "115335f24c13e796ede1f9b1d0f8b24a5b560715"
+    ],
     "broad_core_main_chat_agent_v1": "failed_46_of_54_passed_8_preexisting_red",
     "clippy": "completed_with_existing_warnings",
     "independent_read_only_review": "pending",
@@ -185,5 +191,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-14T20:27:55+08:00"
+  "last_updated_at": "2026-07-14T20:47:09+08:00"
 }
