@@ -376,7 +376,13 @@ impl<'a> ReviewWorkflow<'a> {
                     replacement.status = ProposalStatus::Pending;
                     replacement.resolved_at = None;
                     existing = replacement;
-                    self.proposal_store.update_proposal(&existing)?;
+                    if !self.proposal_store.update_active_review_proposal(
+                        &existing,
+                        existing_id,
+                        &request.idempotency_key,
+                    )? {
+                        anyhow::bail!("linked pending review proposal changed before update");
+                    }
                     return Ok(outcome(
                         request,
                         existing,
@@ -387,22 +393,23 @@ impl<'a> ReviewWorkflow<'a> {
             }
         }
 
-        if let Some(existing) = self.find_existing_pending(&request)? {
-            return Ok(outcome(
-                request,
-                existing,
-                DurableWriteDecisionKind::ReusePendingProposal,
-                "reused_existing_pending_proposal",
-            ));
-        }
-
         let proposal = request.proposal.clone();
-        self.proposal_store.create_proposal(&proposal)?;
+        let (proposal, created) = self
+            .proposal_store
+            .create_or_reuse_active_review_proposal(&proposal, &request.idempotency_key)?;
         Ok(outcome(
             request,
             proposal,
-            DurableWriteDecisionKind::CreatePendingProposal,
-            "created_pending_review_proposal",
+            if created {
+                DurableWriteDecisionKind::CreatePendingProposal
+            } else {
+                DurableWriteDecisionKind::ReusePendingProposal
+            },
+            if created {
+                "created_pending_review_proposal"
+            } else {
+                "reused_existing_active_review_proposal"
+            },
         ))
     }
 
@@ -509,18 +516,6 @@ impl<'a> ReviewWorkflow<'a> {
                 Err(error)
             }
         }
-    }
-
-    fn find_existing_pending(
-        &self,
-        request: &DurableWriteRequest,
-    ) -> Result<Option<AgentProposal>> {
-        let existing = self.proposal_store.list_all_proposals(10_000, 0)?;
-        Ok(existing.into_iter().find(|proposal| {
-            proposal.status == ProposalStatus::Pending
-                && default_idempotency_key(request.source, request.subject, proposal)
-                    == request.idempotency_key
-        }))
     }
 }
 
@@ -684,6 +679,96 @@ mod tests {
             reused.decision.kind,
             DurableWriteDecisionKind::ReusePendingProposal
         );
+        assert_eq!(store.pending_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn review_workflow_persists_custom_idempotency_across_restart() {
+        let path = std::env::temp_dir().join(format!(
+            "openlife-review-workflow-idempotency-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let key = "memory_fact_v1:sha256:stable-fact-key";
+        let created_id = {
+            let store = ProposalStore::new(&path).unwrap();
+            let mut first = proposal("memory.pending.chat");
+            first.source_detail = Some("main_chat_session:first".into());
+            first.after["candidateId"] = json!("candidate:first");
+            ReviewWorkflow::new(&store)
+                .submit(
+                    DurableWriteRequest::from_agent_proposal(
+                        DurableWriteSource::MainChat,
+                        DurableWriteSubject::Memory,
+                        first,
+                        "Memory proposal is ready for Review Center approval.",
+                    )
+                    .with_idempotency_key(key),
+                )
+                .unwrap()
+                .proposal
+                .id
+        };
+
+        let store = ProposalStore::new(&path).unwrap();
+        let mut second = proposal("memory.pending.chat");
+        second.source_detail = Some("main_chat_session:second".into());
+        second.after["candidateId"] = json!("candidate:second");
+        let reused = ReviewWorkflow::new(&store)
+            .submit(
+                DurableWriteRequest::from_agent_proposal(
+                    DurableWriteSource::MainChat,
+                    DurableWriteSubject::Memory,
+                    second,
+                    "Memory proposal is ready for Review Center approval.",
+                )
+                .with_idempotency_key(key),
+            )
+            .unwrap();
+
+        assert_eq!(reused.proposal.id, created_id);
+        assert_eq!(
+            reused.decision.kind,
+            DurableWriteDecisionKind::ReusePendingProposal
+        );
+        assert_eq!(store.pending_count().unwrap(), 1);
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn review_workflow_concurrent_custom_key_has_one_canonical_owner() {
+        let store = ProposalStore::new_in_memory().unwrap();
+        let workers = 12;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(workers));
+        let mut handles = Vec::new();
+        for index in 0..workers {
+            let store = store.clone();
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut candidate = proposal("memory.pending.concurrent");
+                candidate.after["candidateId"] = json!(format!("candidate:{index}"));
+                barrier.wait();
+                ReviewWorkflow::new(&store)
+                    .submit(
+                        DurableWriteRequest::from_agent_proposal(
+                            DurableWriteSource::MainChat,
+                            DurableWriteSubject::Memory,
+                            candidate,
+                            "Memory proposal is ready for Review Center approval.",
+                        )
+                        .with_idempotency_key("memory_fact_v1:sha256:concurrent-owner"),
+                    )
+                    .unwrap()
+                    .proposal
+                    .id
+            }));
+        }
+
+        let ids = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(ids.len(), 1);
         assert_eq!(store.pending_count().unwrap(), 1);
     }
 

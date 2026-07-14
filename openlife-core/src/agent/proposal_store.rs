@@ -73,7 +73,8 @@ impl ProposalStore {
                 dispatch_claimed_at TEXT,
                 dispatch_snapshot_digest TEXT,
                 dispatch_state TEXT NOT NULL DEFAULT 'unclaimed',
-                dispatch_error_code TEXT
+                dispatch_error_code TEXT,
+                review_idempotency_key TEXT
             )",
             [],
         )?;
@@ -88,6 +89,7 @@ impl ProposalStore {
             ("dispatch_snapshot_digest", "TEXT"),
             ("dispatch_state", "TEXT NOT NULL DEFAULT 'unclaimed'"),
             ("dispatch_error_code", "TEXT"),
+            ("review_idempotency_key", "TEXT"),
         ] {
             crate::sqlite_migration::ensure_column(&tx, "proposals", column, definition)?;
         }
@@ -104,7 +106,13 @@ impl ProposalStore {
              ON proposals(dispatch_state, dispatch_claimed_at, id)",
             [],
         )?;
-        crate::sqlite_migration::record_schema_version(&tx, "proposal_store", 5)?;
+        tx.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_proposals_active_review_idempotency
+             ON proposals(review_idempotency_key)
+             WHERE review_idempotency_key IS NOT NULL
+               AND status IN ('pending', 'postponed', 'edited');",
+        )?;
+        crate::sqlite_migration::record_schema_version(&tx, "proposal_store", 6)?;
         tx.commit()?;
         Ok(())
     }
@@ -137,6 +145,145 @@ impl ProposalStore {
             ],
         )?;
         Ok(())
+    }
+
+    /// Atomically create one active ReviewWorkflow proposal or return the
+    /// proposal that already owns the exact durable idempotency key.
+    ///
+    /// The key deliberately lives beside the canonical Proposal row. A
+    /// scan-before-insert in ReviewWorkflow cannot protect concurrent callers,
+    /// and reconstructing a caller-supplied key from Proposal payload after a
+    /// restart is impossible. The immediate transaction plus partial unique
+    /// index make this store the single admission authority.
+    pub(crate) fn create_or_reuse_active_review_proposal(
+        &self,
+        proposal: &AgentProposal,
+        review_idempotency_key: &str,
+    ) -> Result<(AgentProposal, bool)> {
+        let review_idempotency_key = review_idempotency_key.trim();
+        if review_idempotency_key.is_empty() {
+            anyhow::bail!("review workflow idempotency key is empty");
+        }
+        if review_idempotency_key.len() > 512 {
+            anyhow::bail!("review workflow idempotency key is too large");
+        }
+
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing = tx
+            .query_row(
+                "SELECT id, run_id, proposal_type, source, source_detail, base_hash,
+                        affected_path, before_json, after_json, reason, confidence,
+                        risk_level, status, created_at, resolved_at, expires_at
+                 FROM proposals
+                 WHERE review_idempotency_key = ?1
+                   AND status IN ('pending', 'postponed', 'edited')
+                 LIMIT 1",
+                [review_idempotency_key],
+                Self::row_to_proposal,
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            tx.commit()?;
+            return Ok((existing, false));
+        }
+
+        tx.execute(
+            "INSERT INTO proposals (
+                id, run_id, proposal_type, source, source_detail, base_hash,
+                affected_path, before_json, after_json, reason, confidence,
+                risk_level, status, created_at, resolved_at, expires_at,
+                review_idempotency_key
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                ?14, ?15, ?16, ?17
+             )",
+            params![
+                proposal.id,
+                proposal.run_id.as_ref(),
+                proposal.proposal_type.to_string(),
+                proposal.source,
+                proposal.source_detail.as_ref(),
+                proposal.base_hash.as_ref(),
+                proposal.affected_path,
+                proposal
+                    .before
+                    .as_ref()
+                    .map(|before| serde_json::to_string(before).unwrap_or_default()),
+                serde_json::to_string(&proposal.after).unwrap_or_default(),
+                proposal.reason,
+                proposal.confidence,
+                proposal.risk_level.to_string(),
+                proposal.status.to_string(),
+                proposal.created_at.to_rfc3339(),
+                proposal.resolved_at.map(|time| time.to_rfc3339()),
+                proposal.expires_at.map(|time| time.to_rfc3339()),
+                review_idempotency_key,
+            ],
+        )?;
+        tx.commit()?;
+        Ok((proposal.clone(), true))
+    }
+
+    pub(crate) fn update_active_review_proposal(
+        &self,
+        proposal: &AgentProposal,
+        expected_proposal_id: &str,
+        review_idempotency_key: &str,
+    ) -> Result<bool> {
+        let review_idempotency_key = review_idempotency_key.trim();
+        if review_idempotency_key.is_empty() || review_idempotency_key.len() > 512 {
+            anyhow::bail!("review workflow idempotency key is invalid");
+        }
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        Ok(conn.execute(
+            "UPDATE proposals SET
+                run_id = ?2,
+                proposal_type = ?3,
+                source = ?4,
+                source_detail = ?5,
+                base_hash = ?6,
+                affected_path = ?7,
+                before_json = ?8,
+                after_json = ?9,
+                reason = ?10,
+                confidence = ?11,
+                risk_level = ?12,
+                status = 'pending',
+                resolved_at = NULL,
+                expires_at = ?13,
+                review_idempotency_key = ?14
+             WHERE id = ?1
+               AND id = ?15
+               AND status = 'pending'
+               AND dispatch_state IN ('unclaimed', 'failed_before_effect')",
+            params![
+                proposal.id,
+                proposal.run_id.as_ref(),
+                proposal.proposal_type.to_string(),
+                proposal.source,
+                proposal.source_detail.as_ref(),
+                proposal.base_hash.as_ref(),
+                proposal.affected_path,
+                proposal
+                    .before
+                    .as_ref()
+                    .map(|before| serde_json::to_string(before).unwrap_or_default()),
+                serde_json::to_string(&proposal.after).unwrap_or_default(),
+                proposal.reason,
+                proposal.confidence,
+                proposal.risk_level.to_string(),
+                proposal.expires_at.map(|time| time.to_rfc3339()),
+                review_idempotency_key,
+                expected_proposal_id,
+            ],
+        )? == 1)
     }
 
     pub fn update_proposal(&self, proposal: &AgentProposal) -> Result<()> {

@@ -665,18 +665,7 @@
       "expected_file_count": 9
     }
   ],
-  "direct_proposal_write_surfaces": [
-    {
-      "id": "proposal_write_review_workflow",
-      "path": "openlife-core/src/agent/review_workflow.rs",
-      "phase": 4,
-      "disposition": "storage_only",
-      "phase4_classification": "review_workflow_target",
-      "reason": "ReviewWorkflow is the sole product governance entry allowed to call ProposalStore::create_proposal.",
-      "match": ".create_proposal(",
-      "expected_count": 1
-    }
-  ],
+  "direct_proposal_write_surfaces": [],
   "phase4_proposal_creation_source_map": [
     {
       "id": "phase4_review_workflow_entry",
