@@ -845,6 +845,19 @@ fn is_action_or_advice_request(lower: &str) -> bool {
             "advice only",
             "do not modify",
             "do not execute",
+            "rewrite",
+            "rephrase",
+            "polish",
+            "translate",
+            "summarize",
+            "把这句话",
+            "把这段话",
+            "改得更",
+            "改写",
+            "重写",
+            "润色",
+            "翻译",
+            "总结",
         ],
     )
 }
@@ -1204,6 +1217,25 @@ mod tests {
         assert!(result.life_event_candidate_ids.is_empty());
         assert!(result.memory_proposal_candidate_ids.is_empty());
         assert!(result.lifemodel_proposal_candidate_ids.is_empty());
+    }
+
+    #[test]
+    fn transformation_requests_do_not_turn_supplied_text_into_user_memory() {
+        for text in [
+            "把这句话改得更清楚：我们需要尽快把事情做好并且不要出问题。",
+            "请改写这段话：我通常需要在周五完成报告。",
+            "Translate this sentence: I usually work in UTC.",
+            "Summarize this text: The user normally needs short reports.",
+        ] {
+            let result = routed(text);
+            assert!(
+                result.candidates.is_empty(),
+                "transformation input is bounded conversation content, not Memory authority: {text}"
+            );
+            assert!(result.life_event_candidate_ids.is_empty());
+            assert!(result.memory_proposal_candidate_ids.is_empty());
+            assert!(result.lifemodel_proposal_candidate_ids.is_empty());
+        }
     }
 
     #[test]
