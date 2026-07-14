@@ -7407,6 +7407,13 @@ mod product_receipt_ipc_tests {
         run_id: &str,
     ) -> (ToolCallResult, openlife_core::agent::AgentRunStore) {
         let store = openlife_core::agent::AgentRunStore::new_in_memory().unwrap();
+        let mut run =
+            openlife_core::agent::AgentRun::new_chat_run("ipc-product-receipt-fixture", "");
+        run.id = run_id.to_string();
+        run.task_id = run_id.to_string();
+        store
+            .create_run(&run)
+            .expect("create IPC fixture AgentRun owner");
         let mut registry = openlife_core::mcp::McpRegistry::new();
         let mut manifest = openlife_core::tool_manifest::ToolManifest::new(
             "ipc_receipt_fixture",
