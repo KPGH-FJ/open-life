@@ -541,6 +541,24 @@ impl ResourceStore {
         .map_err(Into::into)
     }
 
+    pub fn get_import_receipt(&self, operation_id: &str) -> Result<Option<ResourceImportReceipt>> {
+        validate_uuid_v4("operation_id", operation_id)?;
+        let conn = self.lock_connection()?;
+        let receipt_json = conn
+            .query_row(
+                "SELECT receipt_json FROM resource_import_operations WHERE operation_id = ?1",
+                [operation_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        receipt_json
+            .map(|value| {
+                serde_json::from_str(&value)
+                    .context("decode canonical ResourceStore import status receipt")
+            })
+            .transpose()
+    }
+
     pub fn load_bytes(&self, resource_id: &str) -> Result<Option<Vec<u8>>> {
         validate_uuid_v4("resource_id", resource_id)?;
         let conn = self.lock_connection()?;
@@ -1119,6 +1137,14 @@ mod tests {
         let request = batch(operation_id.clone(), "message-1", vec![first.clone()]);
 
         let receipt = store.commit_import_batch(request).unwrap();
+        assert_eq!(
+            store.get_import_receipt(&operation_id).unwrap(),
+            Some(receipt.clone())
+        );
+        assert!(store
+            .get_import_receipt(&Uuid::new_v4().to_string())
+            .unwrap()
+            .is_none());
         let replay = store
             .commit_import_batch(batch(
                 operation_id,

@@ -29,6 +29,10 @@ import {
   saveConfig,
   sendMessageV2,
   executeToolCall,
+  pickAndImportResources,
+  cancelResourceImport,
+  getResourceImportStatus,
+  detachResourceFromTurn,
 } from "./tauri";
 import {
   checkControlledChatPilotEligibility,
@@ -263,6 +267,41 @@ describe("tauri command argument aliases", () => {
         target_dimension: "goals",
       })
     );
+  });
+
+  it("passes exact durable identities to the governed resource commands", async () => {
+    const importOperationId = "c7414f1e-35dc-4aec-b2f0-f704313003b1";
+    const turnOperationId = "c7414f1e-35dc-4aec-b2f0-f704313003b2";
+    const detachOperationId = "c7414f1e-35dc-4aec-b2f0-f704313003b3";
+    const resourceId = "c7414f1e-35dc-4aec-b2f0-f704313003b4";
+
+    await pickAndImportResources(importOperationId, turnOperationId);
+    await cancelResourceImport(importOperationId);
+    await getResourceImportStatus(importOperationId);
+    await detachResourceFromTurn(detachOperationId, turnOperationId, resourceId);
+
+    expect(invoke).toHaveBeenCalledWith("pick_and_import_resources", {
+      importOperationId,
+      import_operation_id: importOperationId,
+      turnOperationId,
+      turn_operation_id: turnOperationId,
+    });
+    expect(invoke).toHaveBeenCalledWith("cancel_resource_import", {
+      operationId: importOperationId,
+      operation_id: importOperationId,
+    });
+    expect(invoke).toHaveBeenCalledWith("get_resource_import_status", {
+      operationId: importOperationId,
+      operation_id: importOperationId,
+    });
+    expect(invoke).toHaveBeenCalledWith("detach_resource_from_turn", {
+      operationId: detachOperationId,
+      operation_id: detachOperationId,
+      turnOperationId,
+      turn_operation_id: turnOperationId,
+      resourceId,
+      resource_id: resourceId,
+    });
   });
 
   it("passes selected skill id aliases through chat command wrappers", async () => {

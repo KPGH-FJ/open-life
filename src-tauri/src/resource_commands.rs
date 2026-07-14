@@ -78,6 +78,34 @@ impl ResourceRuntime {
             Ok(false)
         }
     }
+
+    fn import_status(&self, operation_id: &str) -> Result<ResourceImportStatus, String> {
+        validate_uuid_v4("resource_import_operation_id", operation_id)?;
+        let active = self
+            .active_imports
+            .lock()
+            .map_err(|_| "resource_import_registry_poisoned".to_string())?
+            .contains_key(operation_id);
+        if active {
+            return Ok(ResourceImportStatus {
+                status: "active",
+                receipt: None,
+            });
+        }
+        let receipt = self
+            .gateway()
+            .store()
+            .get_import_receipt(operation_id)
+            .map_err(|error| error.to_string())?;
+        Ok(ResourceImportStatus {
+            status: if receipt.is_some() {
+                "committed"
+            } else {
+                "not_found"
+            },
+            receipt,
+        })
+    }
 }
 
 struct ActiveImport {
@@ -98,6 +126,13 @@ impl Drop for ActiveImport {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ResourceImportSelectionResult {
     cancelled: bool,
+    receipt: Option<ResourceImportReceipt>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ResourceImportStatus {
+    status: &'static str,
     receipt: Option<ResourceImportReceipt>,
 }
 
@@ -185,6 +220,18 @@ pub(crate) fn cancel_resource_import(
         return Ok(false);
     };
     runtime.cancel_import(operation_id)
+}
+
+pub(crate) fn get_resource_import_status(
+    operation_id: &str,
+    state: &Arc<AppState>,
+) -> Result<ResourceImportStatus, String> {
+    validate_uuid_v4("resource_import_operation_id", operation_id)?;
+    let runtime = state
+        .resource_runtime
+        .as_ref()
+        .ok_or_else(|| "resource_runtime_unavailable".to_string())?;
+    runtime.import_status(operation_id)
 }
 
 pub(crate) async fn detach_resource_from_turn(
@@ -323,10 +370,17 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(duplicate, "resource_import_operation_already_active");
+        let status = runtime.import_status(&operation_id).unwrap();
+        assert_eq!(status.status, "active");
+        assert!(status.receipt.is_none());
         assert!(runtime.cancel_import(&operation_id).unwrap());
         assert!(active.cancellation.is_cancelled());
         drop(active);
         assert!(!runtime.cancel_import(&operation_id).unwrap());
+        assert_eq!(
+            runtime.import_status(&operation_id).unwrap().status,
+            "not_found"
+        );
     }
 
     #[test]

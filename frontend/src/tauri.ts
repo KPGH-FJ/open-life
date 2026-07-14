@@ -576,6 +576,44 @@ export interface SendMessageResult {
   turn_terminal?: OpenLifeTurnTerminal;
 }
 
+export interface ImportedResourceReceipt {
+  resourceId: string;
+  bindingId: string;
+  filename: string;
+  digest: string;
+  byteCount: number;
+  chunkCount: number;
+  reusedExisting: boolean;
+  eventId?: string | null;
+}
+
+export interface ResourceImportReceipt {
+  operationId: string;
+  messageId: string;
+  resources: ImportedResourceReceipt[];
+  committedAt: string;
+}
+
+export interface ResourceImportSelectionResult {
+  cancelled: boolean;
+  receipt: ResourceImportReceipt | null;
+}
+
+export interface ResourceImportStatus {
+  status: "active" | "committed" | "not_found";
+  receipt: ResourceImportReceipt | null;
+}
+
+export interface ResourceDetachReceipt {
+  operationId: string;
+  messageId: string;
+  resourceId: string;
+  bindingRemoved: boolean;
+  resourceDeleted: boolean;
+  eventId: string;
+  committedAt: string;
+}
+
 export type ProviderInvocationStatus =
   | "not_attempted"
   | "started"
@@ -1547,6 +1585,47 @@ export async function startStreamMessage(
   return safeInvoke<StreamMessageDonePayload>("start_stream_message", {
     ...payload,
     args: payload,
+  });
+}
+
+export async function pickAndImportResources(
+  importOperationId: string,
+  turnOperationId: string
+): Promise<ResourceImportSelectionResult> {
+  return safeInvoke<ResourceImportSelectionResult>("pick_and_import_resources", {
+    importOperationId,
+    import_operation_id: importOperationId,
+    turnOperationId,
+    turn_operation_id: turnOperationId,
+  });
+}
+
+export async function cancelResourceImport(operationId: string): Promise<boolean> {
+  return safeInvoke<boolean>("cancel_resource_import", {
+    operationId,
+    operation_id: operationId,
+  });
+}
+
+export async function getResourceImportStatus(operationId: string): Promise<ResourceImportStatus> {
+  return safeInvoke<ResourceImportStatus>("get_resource_import_status", {
+    operationId,
+    operation_id: operationId,
+  });
+}
+
+export async function detachResourceFromTurn(
+  operationId: string,
+  turnOperationId: string,
+  resourceId: string
+): Promise<ResourceDetachReceipt> {
+  return safeInvoke<ResourceDetachReceipt>("detach_resource_from_turn", {
+    operationId,
+    operation_id: operationId,
+    turnOperationId,
+    turn_operation_id: turnOperationId,
+    resourceId,
+    resource_id: resourceId,
   });
 }
 

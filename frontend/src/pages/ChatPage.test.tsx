@@ -1767,6 +1767,284 @@ describe("ChatPage", () => {
     expect(saveCalls).toHaveLength(0);
   });
 
+  it("binds an imported file to the exact Main Chat turn and supports attachment-only send", async () => {
+    const resourceId = "c7414f1e-35dc-4aec-b2f0-f704313003c1";
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "pick_and_import_resources") {
+        return Promise.resolve({
+          cancelled: false,
+          receipt: {
+            operationId: args?.importOperationId,
+            messageId: args?.turnOperationId,
+            resources: [
+              {
+                resourceId,
+                bindingId: "c7414f1e-35dc-4aec-b2f0-f704313003c2",
+                filename: "roadshow.pdf",
+                digest: "sha256:roadshow",
+                byteCount: 2048,
+                chunkCount: 4,
+                reusedExisting: false,
+                eventId: "event-resource-import",
+              },
+            ],
+            committedAt: "2026-07-14T00:00:00.000Z",
+          },
+        });
+      }
+      if (cmd === "start_stream_message") {
+        return Promise.resolve({
+          session_id: args?.sessionId,
+          run_id: "run-resource-attachment",
+          reply: "附件总结。\n\n来源：roadshow.pdf",
+          reasoning_trace: null,
+          tool_calls: [],
+          execution_transcript: [],
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    await screen.findByText("聊天就绪");
+    fireEvent.click(screen.getByRole("button", { name: "添加文件" }));
+    expect(await screen.findByText("roadshow.pdf")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "发送消息" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+    expect(await screen.findByText(/附件总结/)).toBeInTheDocument();
+
+    const importCall = vi
+      .mocked(invoke)
+      .mock.calls.find(([cmd]) => cmd === "pick_and_import_resources");
+    const streamCall = vi.mocked(invoke).mock.calls.find(([cmd]) => cmd === "start_stream_message");
+    const importArgs = importCall?.[1] as Record<string, any> | undefined;
+    const streamArgs = streamCall?.[1] as Record<string, any> | undefined;
+    expect(importArgs?.turnOperationId).toBeTruthy();
+    expect(streamArgs?.operationId).toBe(importArgs?.turnOperationId);
+    expect(streamArgs?.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "user",
+          content: "请总结这些附件，并在结论后标注对应来源。",
+        }),
+      ])
+    );
+    expect(screen.queryByText("roadshow.pdf")).not.toBeInTheDocument();
+  });
+
+  it("keeps an attachment visible until the backend confirms exact detach truth", async () => {
+    const resourceId = "c7414f1e-35dc-4aec-b2f0-f704313003d1";
+    const detachOperationIds: string[] = [];
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "pick_and_import_resources") {
+        return Promise.resolve({
+          cancelled: false,
+          receipt: {
+            operationId: args?.importOperationId,
+            messageId: args?.turnOperationId,
+            resources: [
+              {
+                resourceId,
+                bindingId: "c7414f1e-35dc-4aec-b2f0-f704313003d2",
+                filename: "metrics.xlsx",
+                digest: "sha256:metrics",
+                byteCount: 4096,
+                chunkCount: 2,
+                reusedExisting: false,
+                eventId: "event-resource-import",
+              },
+            ],
+            committedAt: "2026-07-14T00:00:00.000Z",
+          },
+        });
+      }
+      if (cmd === "detach_resource_from_turn") {
+        detachOperationIds.push(args?.operationId);
+        if (detachOperationIds.length === 1) {
+          return Promise.reject(new Error("ipc_response_lost_after_detach"));
+        }
+        return Promise.resolve({
+          operationId: args?.operationId,
+          messageId: args?.turnOperationId,
+          resourceId: args?.resourceId,
+          bindingRemoved: true,
+          resourceDeleted: true,
+          eventId: "event-resource-detach",
+          committedAt: "2026-07-14T00:00:01.000Z",
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    await screen.findByText("聊天就绪");
+    fireEvent.click(screen.getByRole("button", { name: "添加文件" }));
+    expect(await screen.findByText("metrics.xlsx")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "移除附件 metrics.xlsx" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/移除结果无法确认/);
+    expect(screen.getByText("metrics.xlsx")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "移除附件 metrics.xlsx" }));
+
+    await waitFor(() => expect(screen.queryByText("metrics.xlsx")).not.toBeInTheDocument());
+    expect(screen.getByRole("status")).toHaveTextContent(/文件副本也已删除/);
+    expect(detachOperationIds).toHaveLength(2);
+    expect(detachOperationIds[1]).toBe(detachOperationIds[0]);
+    expect(invoke).toHaveBeenCalledWith(
+      "detach_resource_from_turn",
+      expect.objectContaining({
+        turnOperationId: expect.any(String),
+        resourceId,
+      })
+    );
+  });
+
+  it("fails closed when an import receipt does not match the requested turn", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "pick_and_import_resources") {
+        return Promise.resolve({
+          cancelled: false,
+          receipt: {
+            operationId: args?.importOperationId,
+            messageId: "different-turn",
+            resources: [
+              {
+                resourceId: "c7414f1e-35dc-4aec-b2f0-f704313003e1",
+                bindingId: "c7414f1e-35dc-4aec-b2f0-f704313003e2",
+                filename: "must-not-appear.pdf",
+                digest: "sha256:mismatch",
+                byteCount: 1024,
+                chunkCount: 1,
+                reusedExisting: false,
+              },
+            ],
+            committedAt: "2026-07-14T00:00:00.000Z",
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    await screen.findByText("聊天就绪");
+    fireEvent.click(screen.getByRole("button", { name: "添加文件" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(/文件导入结果无法确认/);
+    expect(screen.queryByText("must-not-appear.pdf")).not.toBeInTheDocument();
+  });
+
+  it("reconciles a lost import response from the canonical receipt", async () => {
+    let committedReceipt: Record<string, any> | null = null;
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "pick_and_import_resources") {
+        committedReceipt = {
+          operationId: args?.importOperationId,
+          messageId: args?.turnOperationId,
+          resources: [
+            {
+              resourceId: "c7414f1e-35dc-4aec-b2f0-f704313003f1",
+              bindingId: "c7414f1e-35dc-4aec-b2f0-f704313003f2",
+              filename: "reconciled.docx",
+              digest: "sha256:reconciled",
+              byteCount: 3072,
+              chunkCount: 3,
+              reusedExisting: false,
+            },
+          ],
+          committedAt: "2026-07-14T00:00:00.000Z",
+        };
+        return Promise.reject(new Error("ipc_response_lost_after_commit"));
+      }
+      if (cmd === "get_resource_import_status") {
+        return Promise.resolve({ status: "committed", receipt: committedReceipt });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    await screen.findByText("聊天就绪");
+    fireEvent.click(screen.getByRole("button", { name: "添加文件" }));
+
+    expect(await screen.findByText("reconciled.docx")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(/canonical receipt 已确认/);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("does not execute a slash-command side effect when files are bound to the turn", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "pick_and_import_resources") {
+        return Promise.resolve({
+          cancelled: false,
+          receipt: {
+            operationId: args?.importOperationId,
+            messageId: args?.turnOperationId,
+            resources: [
+              {
+                resourceId: "c7414f1e-35dc-4aec-b2f0-f70431300401",
+                bindingId: "c7414f1e-35dc-4aec-b2f0-f70431300402",
+                filename: "state-evidence.csv",
+                digest: "sha256:state-evidence",
+                byteCount: 1024,
+                chunkCount: 1,
+                reusedExisting: false,
+              },
+            ],
+            committedAt: "2026-07-14T00:00:00.000Z",
+          },
+        });
+      }
+      if (cmd === "start_stream_message") {
+        return Promise.resolve({
+          session_id: args?.sessionId,
+          run_id: "run-resource-slash-text",
+          reply: "我把 /state 当作附件分析文本，没有执行状态写入。",
+          reasoning_trace: null,
+          tool_calls: [],
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    await screen.findByText("聊天就绪");
+    fireEvent.click(screen.getByRole("button", { name: "添加文件" }));
+    await screen.findByText("state-evidence.csv");
+    fireEvent.change(screen.getByRole("textbox", { name: "消息输入" }), {
+      target: { value: "/state 专注度 8 分" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
+
+    expect(await screen.findByText(/没有执行状态写入/)).toBeInTheDocument();
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "record_state")).toBe(false);
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "start_stream_message")).toBe(true);
+  });
+
   it("fails closed and unlocks the composer when the native stream command returns malformed completion", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "start_stream_message") {

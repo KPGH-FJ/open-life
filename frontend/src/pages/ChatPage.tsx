@@ -128,6 +128,7 @@ import RuntimeDisclosureStrip from "../components/RuntimeDisclosureStrip";
 import { buildRuntimeDisclosure } from "../utils/runtimeDisclosure";
 import ChatSidebar from "./chat/ChatSidebar";
 import ChatInputArea from "./chat/ChatInputArea";
+import { useChatResources } from "./chat/useChatResources";
 
 function generateSessionId() {
   return "sess_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -1443,6 +1444,7 @@ export default function ChatPage({
     userContent: string;
     operationId: string;
   } | null>(null);
+  const activeTurnOperationRef = useRef<{ sessionId: string; operationId: string } | null>(null);
   const currentSessionIdRef = useRef<string>(currentSessionId);
   const taskAuthorityLoadGenerationRef = useRef(0);
   const projectionSurface = companionMode ? "companion" : "chat";
@@ -1454,6 +1456,21 @@ export default function ChatPage({
     () => buildCompanionInitialAssistantMessage(diagnostics, projectionPendingReviewCount),
     [diagnostics, projectionPendingReviewCount]
   );
+  const {
+    currentDraft: currentResourceDraft,
+    currentResources,
+    importBusy: resourceImportBusy,
+    currentError: currentResourceImportError,
+    currentNotice: currentResourceImportNotice,
+    removingResourceIds,
+    attachResources: handleAttachResources,
+    cancelImport: handleCancelResourceImport,
+    removeResource: handleRemoveResource,
+    completeTurn: completeResourceTurn,
+  } = useChatResources({
+    sessionId: currentSessionId,
+    interactionBlocked: sending || activeTurnOperationRef.current?.sessionId === currentSessionId,
+  });
 
   const applyMainChatAgentStateSnapshot = useCallback(
     (
@@ -2059,6 +2076,9 @@ export default function ChatPage({
             ]);
             setStreamingReply("");
             setSending(false);
+            if (activeTurnOperationRef.current?.sessionId === event.payload.session_id) {
+              activeTurnOperationRef.current = null;
+            }
             setReasoningTrace(event.payload.reasoning_trace ?? null);
             setCurrentRunId(event.payload.run_id);
             setToolCalls(
@@ -2101,6 +2121,17 @@ export default function ChatPage({
           });
           setStreamingReply("");
           setSending(false);
+          const completedTurnOperation =
+            activeTurnOperationRef.current?.sessionId === event.payload.session_id
+              ? activeTurnOperationRef.current.operationId
+              : null;
+          if (completedTurnOperation) {
+            activeTurnOperationRef.current = null;
+            if (pendingTurnOperationRef.current?.operationId === completedTurnOperation) {
+              pendingTurnOperationRef.current = null;
+            }
+            completeResourceTurn(event.payload.session_id, completedTurnOperation);
+          }
           setReasoningTrace(event.payload.reasoning_trace ?? null);
           setCurrentRunId(event.payload.run_id);
           setToolCalls(
@@ -2138,6 +2169,9 @@ export default function ChatPage({
             streamErrorHandledRef.current = true;
             setStreamingReply("");
             setSending(false);
+            if (activeTurnOperationRef.current?.sessionId === event.payload.session_id) {
+              activeTurnOperationRef.current = null;
+            }
             setStreamInterrupted(true);
             applyMainChatAgentStateSnapshot(null);
             emitCompanionStage("error");
@@ -2159,6 +2193,7 @@ export default function ChatPage({
     };
   }, [
     applyMainChatAgentStateSnapshot,
+    completeResourceTurn,
     currentSessionId,
     emitCompanionStage,
     handleMainChatAgentEvent,
@@ -2334,7 +2369,16 @@ export default function ChatPage({
   );
 
   const handleSend = useCallback(async () => {
-    if (!input.trim() || sending) return;
+    const resourceDraft = currentResourceDraft;
+    const resources = resourceDraft?.resources ?? [];
+    if (
+      (!input.trim() && resources.length === 0) ||
+      sending ||
+      resourceImportBusy ||
+      activeTurnOperationRef.current?.sessionId === currentSessionId
+    ) {
+      return;
+    }
     if (!currentSessionId || typeof currentSessionId !== "string") {
       emitCompanionStage("error");
       setMessages(prev => [
@@ -2343,16 +2387,16 @@ export default function ChatPage({
       ]);
       return;
     }
-    const text = input.trim();
+    const text = input.trim() || "请总结这些附件，并在结论后标注对应来源。";
     const userMsg: ChatMessage = { role: "user", content: text };
     const nextMessages = [...messages, userMsg];
     lastUserMessageRef.current = userMsg;
     setMessages(nextMessages);
     setInput("");
 
-    const isQuickCommand = /^\/(?:goal|state)(?:\s|$)/.test(text);
+    const isQuickCommand = resources.length === 0 && /^\/(?:goal|state)(?:\s|$)/.test(text);
     const hasPayloadBoundQuickEffect =
-      /^\/goal\s+add\s+/.test(text) || /^\/state(?:\s|$)/.test(text);
+      isQuickCommand && (/^\/goal\s+add\s+/.test(text) || /^\/state(?:\s|$)/.test(text));
     const quickCommandOperationKey = `${currentSessionId}\u0000${text}`;
     let quickCommandOperationIds = isQuickCommand
       ? quickCommandOperationIdsRef.current.get(quickCommandOperationKey)
@@ -2374,7 +2418,9 @@ export default function ChatPage({
     const quickEffectOperationId = quickCommandOperationIds?.effect ?? crypto.randomUUID();
     let quickReply: string | null;
     try {
-      quickReply = await tryHandleQuickCommand(text, quickEffectOperationId);
+      quickReply = isQuickCommand
+        ? await tryHandleQuickCommand(text, quickEffectOperationId)
+        : null;
     } catch (error) {
       console.error("快捷指令效果状态未知", error);
       setMessages([
@@ -2440,12 +2486,14 @@ export default function ChatPage({
     setAgentTaskControlError(null);
     emitCompanionStage("sorting");
 
+    let invokedTurnOperationId: string | null = null;
     try {
       const selectedSkillOption = selectedSkillId.trim() || undefined;
       const pendingTurnOperation = pendingTurnOperationRef.current;
-      const turnOperationId =
-        pendingTurnOperation?.sessionId === currentSessionId &&
-        pendingTurnOperation.userContent === text
+      const turnOperationId = resourceDraft?.turnOperationId
+        ? resourceDraft.turnOperationId
+        : pendingTurnOperation?.sessionId === currentSessionId &&
+            pendingTurnOperation.userContent === text
           ? pendingTurnOperation.operationId
           : crypto.randomUUID();
       pendingTurnOperationRef.current = {
@@ -2453,12 +2501,21 @@ export default function ChatPage({
         userContent: text,
         operationId: turnOperationId,
       };
+      invokedTurnOperationId = turnOperationId;
       // The streaming backend persists the user message before model execution.
       // Saving it here as well creates duplicate user rows in history and memory retrieval.
-      const browserE2eDone = await startStreamMessage(currentSessionId, nextMessages, {
+      let browserE2eDone: StreamMessageDonePayload;
+      activeTurnOperationRef.current = {
+        sessionId: currentSessionId,
+        operationId: turnOperationId,
+      };
+      browserE2eDone = await startStreamMessage(currentSessionId, nextMessages, {
         operationId: turnOperationId,
         selectedSkillId: selectedSkillOption,
       });
+      if (activeTurnOperationRef.current?.operationId === turnOperationId) {
+        activeTurnOperationRef.current = null;
+      }
       if (!isStreamDonePayload(browserE2eDone) || browserE2eDone.session_id !== currentSessionId) {
         flushStreaming();
         setMessages(prev => [
@@ -2546,6 +2603,9 @@ export default function ChatPage({
       setCurrentExecutionTranscript(browserE2eDone.execution_transcript ?? []);
       setStreamInterrupted(false);
       pendingTurnOperationRef.current = null;
+      if (resourceDraft?.turnOperationId === turnOperationId) {
+        completeResourceTurn(currentSessionId, turnOperationId);
+      }
       emitCompanionStage(nextStage);
       await loadMainChatTaskState(
         browserE2eDone.agent_ingress?.agentTaskSessionId,
@@ -2556,6 +2616,12 @@ export default function ChatPage({
       logAnalyticsEvent("send_message", currentSessionId, undefined).catch(() => {});
       await loadSessions();
     } catch (e) {
+      if (
+        invokedTurnOperationId &&
+        activeTurnOperationRef.current?.operationId === invokedTurnOperationId
+      ) {
+        activeTurnOperationRef.current = null;
+      }
       flushStreaming();
       if (!streamErrorHandledRef.current) {
         setMessages(prev => [
@@ -2574,6 +2640,9 @@ export default function ChatPage({
     messages,
     diagnostics,
     selectedSkillId,
+    currentResourceDraft,
+    resourceImportBusy,
+    completeResourceTurn,
     tryHandleQuickCommand,
     emitCompanionStage,
     applyMainChatAgentStateSnapshot,
@@ -2589,7 +2658,14 @@ export default function ChatPage({
   const handleContinueStream = useCallback(async () => {
     const lastUser =
       lastUserMessageRef.current ?? [...messages].reverse().find(m => m.role === "user") ?? null;
-    if (!lastUser || sending) return;
+    if (
+      !lastUser ||
+      sending ||
+      resourceImportBusy ||
+      activeTurnOperationRef.current?.sessionId === currentSessionId
+    ) {
+      return;
+    }
     const lastUserIndex = messages.map(m => m.role).lastIndexOf("user");
     const retryMessages = lastUserIndex >= 0 ? messages.slice(0, lastUserIndex + 1) : [lastUser];
     setStreamInterrupted(false);
@@ -2610,6 +2686,7 @@ export default function ChatPage({
     setCurrentProductRunEvidence(null);
     setAgentTaskControlError(null);
     emitCompanionStage("sorting");
+    let invokedTurnOperationId: string | null = null;
     try {
       const selectedSkillOption = selectedSkillId.trim() || undefined;
       const lastUserContent = lastUser.content;
@@ -2629,10 +2706,19 @@ export default function ChatPage({
         userContent: lastUserContent,
         operationId: turnOperationId,
       };
-      const retryDone = await startStreamMessage(currentSessionId, retryMessages, {
+      invokedTurnOperationId = turnOperationId;
+      let retryDone: StreamMessageDonePayload;
+      activeTurnOperationRef.current = {
+        sessionId: currentSessionId,
+        operationId: turnOperationId,
+      };
+      retryDone = await startStreamMessage(currentSessionId, retryMessages, {
         operationId: turnOperationId,
         selectedSkillId: selectedSkillOption,
       });
+      if (activeTurnOperationRef.current?.operationId === turnOperationId) {
+        activeTurnOperationRef.current = null;
+      }
       if (!isStreamDonePayload(retryDone) || retryDone.session_id !== currentSessionId) {
         flushStreaming();
         setMessages(prev => [
@@ -2718,6 +2804,7 @@ export default function ChatPage({
       setCurrentExecutionTranscript(retryDone.execution_transcript ?? []);
       setStreamInterrupted(false);
       pendingTurnOperationRef.current = null;
+      completeResourceTurn(currentSessionId, turnOperationId);
       emitCompanionStage(nextStage);
       await loadMainChatTaskState(
         retryDone.agent_ingress?.agentTaskSessionId,
@@ -2727,6 +2814,12 @@ export default function ChatPage({
       refreshAgentRuns(retryDone.session_id);
       await loadSessions();
     } catch (e) {
+      if (
+        invokedTurnOperationId &&
+        activeTurnOperationRef.current?.operationId === invokedTurnOperationId
+      ) {
+        activeTurnOperationRef.current = null;
+      }
       flushStreaming();
       if (!streamErrorHandledRef.current) {
         setMessages(prev => [
@@ -2744,6 +2837,8 @@ export default function ChatPage({
     messages,
     selectedSkillId,
     sending,
+    resourceImportBusy,
+    completeResourceTurn,
     emitCompanionStage,
     applyMainChatAgentStateSnapshot,
   ]);
@@ -5248,8 +5343,16 @@ export default function ChatPage({
           streamInterrupted={streamInterrupted}
           diagnostics={diagnostics}
           selectedSkillId={selectedSkillId}
+          attachments={currentResources}
+          resourceImportBusy={resourceImportBusy}
+          resourceImportError={currentResourceImportError}
+          resourceImportNotice={currentResourceImportNotice}
+          removingResourceIds={removingResourceIds}
           onInputChange={handleInputChange}
           onSelectedSkillIdChange={setSelectedSkillId}
+          onAttachResources={handleAttachResources}
+          onCancelResourceImport={handleCancelResourceImport}
+          onRemoveResource={handleRemoveResource}
           onComposerFocus={() => emitCompanionStage("listening")}
           onSend={handleSend}
           canCancel={canCancelCurrentMainChatTask}

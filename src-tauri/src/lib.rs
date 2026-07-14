@@ -550,6 +550,14 @@ async fn cancel_resource_import(
 }
 
 #[tauri::command]
+fn get_resource_import_status(
+    operation_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<resource_commands::ResourceImportStatus, String> {
+    resource_commands::get_resource_import_status(&operation_id, state.inner())
+}
+
+#[tauri::command]
 async fn detach_resource_from_turn(
     operation_id: String,
     turn_operation_id: String,
@@ -945,6 +953,7 @@ pub fn run() {
             start_stream_message,
             pick_and_import_resources,
             cancel_resource_import,
+            get_resource_import_status,
             detach_resource_from_turn,
             list_main_chat_agent_events,
             get_main_chat_agent_state_snapshot,
