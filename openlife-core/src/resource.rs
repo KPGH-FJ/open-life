@@ -166,6 +166,18 @@ pub struct ResourceImportReceipt {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ResourceDetachReceipt {
+    pub operation_id: String,
+    pub message_id: String,
+    pub resource_id: String,
+    pub binding_removed: bool,
+    pub resource_deleted: bool,
+    pub event_id: String,
+    pub committed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StoredResource {
     pub resource_id: String,
     pub filename: String,
@@ -280,6 +292,12 @@ impl ResourceStore {
                 payload_digest TEXT NOT NULL,
                 receipt_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS resource_detach_operations (
+                operation_id TEXT PRIMARY KEY,
+                payload_digest TEXT NOT NULL,
+                receipt_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
              );",
         )?;
         Ok(())
@@ -337,6 +355,58 @@ impl ResourceStore {
             )?;
             tx.rollback()?;
             return Ok(receipt);
+        }
+
+        let (existing_resource_count, existing_resource_bytes): (i64, i64) = tx.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(byte_count), 0)
+             FROM (
+                SELECT DISTINCT resources.resource_id, resources.byte_count
+                FROM resource_message_bindings bindings
+                JOIN imported_resources resources
+                  ON resources.resource_id = bindings.resource_id
+                WHERE bindings.message_id = ?1 AND resources.deleted_at IS NULL
+             )",
+            [&prepared.message_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        for candidate in &prepared.resources {
+            if let Some((resource_id, deleted, _)) =
+                load_resource_by_digest(&tx, &candidate.digest)?
+            {
+                if deleted {
+                    anyhow::bail!("resource_digest_tombstoned");
+                }
+                let already_bound: bool = tx.query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM resource_message_bindings
+                        WHERE message_id = ?1 AND resource_id = ?2
+                     )",
+                    params![prepared.message_id, resource_id],
+                    |row| row.get(0),
+                )?;
+                if already_bound {
+                    anyhow::bail!("resource_already_bound_to_message");
+                }
+            }
+        }
+        let resulting_count = existing_resource_count
+            .checked_add(prepared.resources.len() as i64)
+            .ok_or_else(|| anyhow::anyhow!("resource_turn_file_count_overflow"))?;
+        if resulting_count > MAX_RESOURCES_PER_IMPORT as i64 {
+            anyhow::bail!("resource_turn_file_count_exceeded");
+        }
+        let new_bytes = prepared
+            .resources
+            .iter()
+            .try_fold(0i64, |total, candidate| {
+                total.checked_add(candidate.bytes.len() as i64)
+            })
+            .ok_or_else(|| anyhow::anyhow!("resource_turn_bytes_overflow"))?;
+        let resulting_bytes = existing_resource_bytes
+            .checked_add(new_bytes)
+            .ok_or_else(|| anyhow::anyhow!("resource_turn_bytes_overflow"))?;
+        if resulting_bytes > MAX_IMPORT_BYTES as i64 {
+            anyhow::bail!("resource_turn_bytes_exceeded");
         }
 
         let now = Utc::now();
@@ -656,6 +726,118 @@ impl ResourceStore {
             [resource_id],
         )?;
         tx.execute("DELETE FROM resource_blobs WHERE digest = ?1", [digest])?;
+        tx.commit()?;
+        Ok(receipt)
+    }
+
+    pub fn detach_resource_from_message(
+        &self,
+        operation_id: &str,
+        message_id: &str,
+        resource_id: &str,
+    ) -> Result<ResourceDetachReceipt> {
+        validate_uuid_v4("operation_id", operation_id)?;
+        validate_uuid_v4("resource_id", resource_id)?;
+        if message_id.trim().is_empty() || message_id.len() > 256 {
+            anyhow::bail!("resource_detach_message_id_invalid");
+        }
+        let payload_digest =
+            content_digest(serde_json::to_string(&(message_id, resource_id))?.as_bytes());
+        let mut conn = self.lock_connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some((existing_digest, receipt_json)) = tx
+            .query_row(
+                "SELECT payload_digest, receipt_json FROM resource_detach_operations
+                 WHERE operation_id = ?1",
+                [operation_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+        {
+            if existing_digest != payload_digest {
+                anyhow::bail!("resource_detach_operation_payload_drift");
+            }
+            return serde_json::from_str(&receipt_json)
+                .context("decode canonical ResourceStore detach replay receipt");
+        }
+
+        let digest: Option<String> = tx
+            .query_row(
+                "SELECT resources.digest
+                 FROM resource_message_bindings bindings
+                 JOIN imported_resources resources
+                   ON resources.resource_id = bindings.resource_id
+                 WHERE bindings.message_id = ?1
+                   AND bindings.resource_id = ?2
+                   AND resources.deleted_at IS NULL
+                 LIMIT 1",
+                params![message_id, resource_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(digest) = digest else {
+            anyhow::bail!("resource_message_binding_not_found");
+        };
+        let binding_removed = tx.execute(
+            "DELETE FROM resource_message_bindings
+             WHERE message_id = ?1 AND resource_id = ?2",
+            params![message_id, resource_id],
+        )? > 0;
+        let remaining_bindings: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM resource_message_bindings WHERE resource_id = ?1",
+            [resource_id],
+            |row| row.get(0),
+        )?;
+        let now = Utc::now();
+        let (resource_deleted, event) = if remaining_bindings == 0 {
+            let event = crate::persistence_outbox::enqueue_tombstone(
+                &tx,
+                RESOURCE_AGGREGATE_KIND,
+                resource_id,
+                Some("user_removed_resource_from_turn"),
+                &[RESOURCE_PROJECTION_TARGET],
+            )?;
+            tx.execute(
+                "UPDATE imported_resources SET deleted_at = ?2 WHERE resource_id = ?1",
+                params![resource_id, now.to_rfc3339()],
+            )?;
+            tx.execute(
+                "DELETE FROM resource_chunks WHERE resource_id = ?1",
+                [resource_id],
+            )?;
+            tx.execute("DELETE FROM resource_blobs WHERE digest = ?1", [digest])?;
+            (true, event)
+        } else {
+            let event = crate::persistence_outbox::enqueue_mutation(
+                &tx,
+                RESOURCE_AGGREGATE_KIND,
+                resource_id,
+                "message_binding_detached",
+                &payload_digest,
+                &[RESOURCE_PROJECTION_TARGET],
+            )?;
+            (false, event)
+        };
+        let receipt = ResourceDetachReceipt {
+            operation_id: operation_id.to_string(),
+            message_id: message_id.to_string(),
+            resource_id: resource_id.to_string(),
+            binding_removed,
+            resource_deleted,
+            event_id: event.event_id,
+            committed_at: now,
+        };
+        tx.execute(
+            "INSERT INTO resource_detach_operations (
+                operation_id, payload_digest, receipt_json, created_at
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                operation_id,
+                payload_digest,
+                serde_json::to_string(&receipt)?,
+                now.to_rfc3339(),
+            ],
+        )?;
         tx.commit()?;
         Ok(receipt)
     }
@@ -1077,5 +1259,79 @@ mod tests {
             .unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn turn_file_cap_cannot_be_bypassed_with_multiple_import_operations() {
+        let store = ResourceStore::new_in_memory().unwrap();
+        let first_batch = (0..MAX_RESOURCES_PER_IMPORT)
+            .map(|index| text_candidate(format!("evidence-{index}").as_bytes()))
+            .collect();
+        store
+            .commit_import_batch(batch(
+                Uuid::new_v4().to_string(),
+                "bounded-turn",
+                first_batch,
+            ))
+            .unwrap();
+        let error = store
+            .commit_import_batch(batch(
+                Uuid::new_v4().to_string(),
+                "bounded-turn",
+                vec![text_candidate(b"sixth-resource")],
+            ))
+            .unwrap_err();
+        assert!(error.to_string().contains("turn_file_count_exceeded"));
+        assert_eq!(
+            store
+                .list_context_chunks_for_message("bounded-turn")
+                .unwrap()
+                .len(),
+            MAX_RESOURCES_PER_IMPORT
+        );
+    }
+
+    #[test]
+    fn detach_is_replay_safe_and_preserves_other_message_bindings() {
+        let store = ResourceStore::new_in_memory().unwrap();
+        let content = b"shared attachment evidence";
+        let first = store
+            .commit_import_batch(batch(
+                Uuid::new_v4().to_string(),
+                "message-one",
+                vec![text_candidate(content)],
+            ))
+            .unwrap();
+        let resource_id = first.resources[0].resource_id.clone();
+        let second = store
+            .commit_import_batch(batch(
+                Uuid::new_v4().to_string(),
+                "message-two",
+                vec![text_candidate(content)],
+            ))
+            .unwrap();
+        assert_eq!(second.resources[0].resource_id, resource_id);
+        assert!(second.resources[0].reused_existing);
+
+        let detach_two_operation = Uuid::new_v4().to_string();
+        let detach_two = store
+            .detach_resource_from_message(&detach_two_operation, "message-two", &resource_id)
+            .unwrap();
+        let detach_two_replay = store
+            .detach_resource_from_message(&detach_two_operation, "message-two", &resource_id)
+            .unwrap();
+        assert_eq!(detach_two, detach_two_replay);
+        assert!(detach_two.binding_removed);
+        assert!(!detach_two.resource_deleted);
+        assert!(store.has_context_for_message("message-one").unwrap());
+        assert!(!store.has_context_for_message("message-two").unwrap());
+        assert!(store.get_resource(&resource_id).unwrap().is_some());
+
+        let detach_one = store
+            .detach_resource_from_message(&Uuid::new_v4().to_string(), "message-one", &resource_id)
+            .unwrap();
+        assert!(detach_one.resource_deleted);
+        assert!(store.get_resource(&resource_id).unwrap().is_none());
+        assert!(store.list_chunks(&resource_id).unwrap().is_empty());
     }
 }

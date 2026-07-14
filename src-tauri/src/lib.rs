@@ -550,6 +550,22 @@ async fn cancel_resource_import(
 }
 
 #[tauri::command]
+async fn detach_resource_from_turn(
+    operation_id: String,
+    turn_operation_id: String,
+    resource_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<openlife_core::resource::ResourceDetachReceipt, String> {
+    resource_commands::detach_resource_from_turn(
+        operation_id,
+        turn_operation_id,
+        resource_id,
+        state.inner(),
+    )
+    .await
+}
+
+#[tauri::command]
 #[cfg(feature = "dev-extensions")]
 async fn execute_tool_call(
     name: String,
@@ -929,6 +945,7 @@ pub fn run() {
             start_stream_message,
             pick_and_import_resources,
             cancel_resource_import,
+            detach_resource_from_turn,
             list_main_chat_agent_events,
             get_main_chat_agent_state_snapshot,
             list_main_chat_agent_tasks,

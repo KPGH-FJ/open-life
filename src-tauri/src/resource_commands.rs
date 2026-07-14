@@ -5,7 +5,9 @@
 //! one ResourceGateway. Active imports are registered so cancellation targets
 //! the exact parser/commit token instead of an unrelated future operation.
 
-use openlife_core::resource::{ResourceImportReceipt, MAX_IMPORT_BYTES, MAX_RESOURCE_BYTES};
+use openlife_core::resource::{
+    ResourceDetachReceipt, ResourceImportReceipt, MAX_IMPORT_BYTES, MAX_RESOURCE_BYTES,
+};
 use openlife_core::resource_gateway::{
     ResourceGateway, ResourceImportCancellation, ResourceImportSource,
 };
@@ -183,6 +185,34 @@ pub(crate) fn cancel_resource_import(
         return Ok(false);
     };
     runtime.cancel_import(operation_id)
+}
+
+pub(crate) async fn detach_resource_from_turn(
+    operation_id: String,
+    turn_operation_id: String,
+    resource_id: String,
+    state: &Arc<AppState>,
+) -> Result<ResourceDetachReceipt, String> {
+    state
+        .persistence_coordinator
+        .require_effects_allowed()
+        .map_err(|error| error.to_string())?;
+    validate_uuid_v4("resource_detach_operation_id", &operation_id)?;
+    validate_uuid_v4("resource_turn_operation_id", &turn_operation_id)?;
+    validate_uuid_v4("resource_id", &resource_id)?;
+    let store = state
+        .resource_runtime
+        .as_ref()
+        .ok_or_else(|| "resource_runtime_unavailable".to_string())?
+        .gateway()
+        .store()
+        .clone();
+    tokio::task::spawn_blocking(move || {
+        store.detach_resource_from_message(&operation_id, &turn_operation_id, &resource_id)
+    })
+    .await
+    .map_err(|_| "resource_detach_task_failed".to_string())?
+    .map_err(|error| error.to_string())
 }
 
 fn read_selected_resources(paths: Vec<PathBuf>) -> Result<Vec<ResourceImportSource>, String> {
