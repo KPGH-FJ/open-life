@@ -878,7 +878,25 @@ fn canonicalize_execution_records(
                     action.error == stored_action.error
                 }
             } && observation.content == stored_observation.content;
-            if !bound_body_ref_unchanged {
+            let verified_raw_owner_replay = if bound_body_ref_unchanged {
+                false
+            } else {
+                observed_bound_content_body(action, observation, receipt.field())
+                    .ok()
+                    .zip(
+                        crate::agent::types::ContentReceiptBinding::from_action_graph(
+                            run_id,
+                            action,
+                            observation,
+                            receipt.field(),
+                        )
+                        .ok(),
+                    )
+                    .is_some_and(|(body, observed_binding)| {
+                        receipt.verify_observed_body(key, &observed_binding, body)
+                    })
+            };
+            if !bound_body_ref_unchanged && !verified_raw_owner_replay {
                 anyhow::bail!("bound_content_receipt_attached_body_ref_drift");
             }
             match receipt.field() {
@@ -9204,6 +9222,26 @@ mod tests {
         store
             .update_run(&replay)
             .expect("the owner may idempotently replay the same verified raw graph");
+
+        let before_forgery = store.get_run(&run.id).unwrap().unwrap();
+        let mut forged_raw_replay = replay;
+        forged_raw_replay.actions[0].output = Some(serde_json::json!({
+            "text": "forged replay body",
+        }));
+        forged_raw_replay.observations[0].content = "forged replay body".into();
+        let error = store
+            .update_run(&forged_raw_replay)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("bound_content_receipt_attached_body_ref_drift"),
+            "an attached receipt must not authorize a different raw body: {error}"
+        );
+        assert_eq!(
+            serde_json::to_value(store.get_run(&run.id).unwrap().unwrap()).unwrap(),
+            serde_json::to_value(before_forgery).unwrap(),
+            "a rejected raw replay must leave the canonical owner unchanged"
+        );
     }
 
     #[tokio::test]
