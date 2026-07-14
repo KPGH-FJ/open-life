@@ -16,6 +16,42 @@ use uuid::Uuid;
 pub const MAX_SELECTED_RESOURCE_BLOCKS: usize = 32;
 pub const MAX_SELECTED_RESOURCE_CHARS: usize = 262_144;
 pub const IMPORTED_RESOURCE_CONTEXT_CATEGORY: &str = "imported_resource_untrusted";
+const MAX_RESOURCE_CONTEXT_REF_CHARS: usize = 128;
+
+/// Validates the metadata-only reference persisted with provider lifecycle
+/// evidence. It binds one selected chunk to an issued citation without
+/// retaining the filename, document content, or query text.
+pub fn is_canonical_resource_context_ref(reference: &str) -> bool {
+    if reference.chars().count() > MAX_RESOURCE_CONTEXT_REF_CHARS {
+        return false;
+    }
+    let Some(path_and_citation) = reference.strip_prefix("resource://") else {
+        return false;
+    };
+    let Some((path, citation_id)) = path_and_citation.split_once("?citation=") else {
+        return false;
+    };
+    if path_and_citation.matches("?citation=").count() != 1 {
+        return false;
+    }
+    let Some((resource_id, ordinal)) = path.split_once("/chunk/") else {
+        return false;
+    };
+    if path.matches("/chunk/").count() != 1 {
+        return false;
+    }
+    let resource_id_is_canonical = Uuid::parse_str(resource_id)
+        .is_ok_and(|parsed| parsed.get_version_num() == 4 && parsed.to_string() == resource_id);
+    let ordinal_is_canonical = ordinal
+        .parse::<u32>()
+        .is_ok_and(|parsed| parsed.to_string() == ordinal);
+    let citation_is_canonical = citation_id.len() == 29
+        && citation_id.starts_with("cite_")
+        && citation_id[5..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    resource_id_is_canonical && ordinal_is_canonical && citation_is_canonical
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -652,6 +688,23 @@ mod tests {
         let unrelated_message = select(&store, "message-not-bound", "请总结附件");
         assert!(unrelated_message.context_blocks.is_empty());
         assert!(unrelated_message.citation_set.issued_ids().is_empty());
+    }
+
+    #[test]
+    fn resource_context_reference_accepts_only_canonical_metadata() {
+        let resource_id = Uuid::new_v4().to_string();
+        let canonical =
+            format!("resource://{resource_id}/chunk/0?citation=cite_0123456789abcdef01234567");
+        assert!(is_canonical_resource_context_ref(&canonical));
+        for invalid in [
+            format!("resource://{resource_id}/chunk/00?citation=cite_0123456789abcdef01234567"),
+            format!("resource://{resource_id}/chunk/0?citation=cite_0123456789ABCDEF01234567"),
+            format!("resource://{resource_id}/chunk/0?citation=cite_short"),
+            format!("resource://{resource_id}/chunk/0?citation=cite_0123456789abcdef01234567&filename=secret.md"),
+            "resource://not-a-uuid/chunk/0?citation=cite_0123456789abcdef01234567".into(),
+        ] {
+            assert!(!is_canonical_resource_context_ref(&invalid), "{invalid}");
+        }
     }
 
     #[test]

@@ -7744,6 +7744,9 @@ fn normalize_context_reference_array(value: &Value) -> Option<Value> {
             if raw.starts_with("websearch:") {
                 openlife_core::web_search::is_canonical_web_search_context_ref(raw)
                     .then(|| Value::String(raw.to_string()))
+            } else if raw.starts_with("resource:") {
+                openlife_core::resource_selection::is_canonical_resource_context_ref(raw)
+                    .then(|| Value::String(raw.to_string()))
             } else {
                 bounded_metadata_string(value)
             }
@@ -11736,7 +11739,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_selected_context_refs_accept_only_canonical_bounded_web_search_refs() {
+    fn provider_selected_context_refs_accept_only_canonical_bounded_source_refs() {
         let mut valid = provider_started_draft(
             "task-web-context-ref",
             "run-web-context-ref",
@@ -11745,7 +11748,8 @@ mod tests {
         )
         .payload;
         valid["selectedContextRefs"] = json!([
-            "websearch://550e8400-e29b-41d4-a716-446655440000/0?citation=webref_0123456789abcdef01234567"
+            "websearch://550e8400-e29b-41d4-a716-446655440000/0?citation=webref_0123456789abcdef01234567",
+            "resource://4b014569-cd91-4a9f-8bba-e4b605c9a412/chunk/0?citation=cite_c6857bb9f404f647ccae812c"
         ]);
         normalize_durable_event_payload(
             "provider.started",
@@ -11759,6 +11763,8 @@ mod tests {
             "websearch://550e8400-e29b-41d4-a716-446655440000/0",
             "websearch://550e8400-e29b-41d4-a716-446655440000/00?citation=webref_0123456789abcdef01234567",
             "websearch://550e8400-e29b-41d4-a716-446655440000/0?citation=webref_NOT_A_DIGEST____________",
+            "resource://4b014569-cd91-4a9f-8bba-e4b605c9a412/chunk/00?citation=cite_c6857bb9f404f647ccae812c",
+            "resource://4b014569-cd91-4a9f-8bba-e4b605c9a412/chunk/0?citation=cite_c6857bb9f404f647ccae812c&filename=secret.md",
             "https://example.com/path?private=user-derived-content",
         ] {
             let mut invalid = valid.clone();

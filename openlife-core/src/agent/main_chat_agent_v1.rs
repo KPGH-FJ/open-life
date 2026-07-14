@@ -15052,7 +15052,7 @@ fn infer_intent_time_range(
 }
 
 fn is_current_external_read_intent(lower: &str) -> bool {
-    contains_any(
+    let known_current_external_fact = contains_any(
         lower,
         &[
             "开放时间",
@@ -15079,7 +15079,27 @@ fn is_current_external_read_intent(lower: &str) -> bool {
             "today's",
             "now open",
         ],
-    ) && !is_pure_offline_planning_expression(lower)
+    ) && !is_pure_offline_planning_expression(lower);
+    let explicit_public_web_evidence = contains_any(
+        lower,
+        &[
+            "公开网页中",
+            "公开网页上",
+            "公开网络中",
+            "网上公开",
+            "public web",
+            "public webpage",
+            "public web page",
+            "online sources",
+        ],
+    ) && contains_any(
+        lower,
+        &[
+            "结合", "根据", "查", "搜索", "检索", "读取", "引用", "来源", "evidence", "search",
+            "read", "look up", "cite", "from",
+        ],
+    );
+    known_current_external_fact || explicit_public_web_evidence
 }
 
 fn is_governed_file_write_intent(lower: &str) -> bool {
@@ -15571,6 +15591,59 @@ mod generated_artifact_policy_tests {
         assert!(!decision
             .policy_decision
             .allows(AllowedCapability::FileWriteProposal));
+    }
+}
+
+#[cfg(test)]
+mod roadshow_external_read_policy_tests {
+    use super::*;
+
+    const RC04_PROMPT: &str =
+        "结合附件中的产品数据和今天公开网页中的相关信息，给出有来源的路演风险摘要。";
+
+    #[test]
+    fn exact_rc04_prompt_authorizes_one_read_only_web_route() {
+        let decision = AgentIngress::default().decide(
+            "roadshow-rc04-policy",
+            RC04_PROMPT,
+            None,
+            AgentTaskKind::Conversation,
+        );
+
+        assert!(decision.intent_frame.requires_external_read);
+        assert_eq!(decision.policy_route, PolicyRouteKind::ReadOnlyTool);
+        assert_eq!(
+            decision.selected_strategy,
+            MainChatAgentStrategy::ReActToolExecution
+        );
+        assert!(decision
+            .policy_decision
+            .allows(AllowedCapability::WebSearch));
+        assert_eq!(
+            decision.policy_decision.action_effect,
+            PolicyActionEffect::ReadOnly
+        );
+        assert!(!decision
+            .policy_decision
+            .allows(AllowedCapability::MemoryProposal));
+        assert!(!decision
+            .policy_decision
+            .allows(AllowedCapability::FileWriteProposal));
+    }
+
+    #[test]
+    fn webpage_design_request_does_not_gain_external_read_authority() {
+        let decision = AgentIngress::default().decide(
+            "roadshow-public-webpage-design",
+            "今天请帮我设计一个公开网页的信息架构。",
+            None,
+            AgentTaskKind::Conversation,
+        );
+
+        assert!(!decision.intent_frame.requires_external_read);
+        assert!(!decision
+            .policy_decision
+            .allows(AllowedCapability::WebSearch));
     }
 }
 

@@ -19,7 +19,8 @@ pub(crate) async fn configure_live_provider_eval_state_with_local_http_provider(
     state: &Arc<AppState>,
     reply: &'static str,
 ) {
-    let provider_base = fake_local_chat_provider_endpoint(reply, None, false).await;
+    let provider_base =
+        fake_local_chat_provider_endpoint(reply, None, LocalCitationEcho::None).await;
     configure_local_http_provider(state, provider_base).await;
 }
 
@@ -28,8 +29,12 @@ pub(crate) async fn configure_live_provider_eval_state_with_captured_local_http_
     reply: &'static str,
 ) -> Arc<std::sync::Mutex<Vec<String>>> {
     let captured_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let provider_base =
-        fake_local_chat_provider_endpoint(reply, Some(Arc::clone(&captured_requests)), false).await;
+    let provider_base = fake_local_chat_provider_endpoint(
+        reply,
+        Some(Arc::clone(&captured_requests)),
+        LocalCitationEcho::None,
+    )
+    .await;
     configure_local_http_provider(state, provider_base).await;
     captured_requests
 }
@@ -38,8 +43,26 @@ pub(crate) async fn configure_live_web_eval_state_with_citation_echo_local_http_
     state: &Arc<AppState>,
 ) -> Arc<std::sync::Mutex<Vec<String>>> {
     let captured_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let provider_base =
-        fake_local_chat_provider_endpoint("", Some(Arc::clone(&captured_requests)), true).await;
+    let provider_base = fake_local_chat_provider_endpoint(
+        "",
+        Some(Arc::clone(&captured_requests)),
+        LocalCitationEcho::Web,
+    )
+    .await;
+    configure_local_http_provider(state, provider_base).await;
+    captured_requests
+}
+
+pub(crate) async fn configure_live_resource_and_web_eval_state_with_citation_echo_local_http_provider(
+    state: &Arc<AppState>,
+) -> Arc<std::sync::Mutex<Vec<String>>> {
+    let captured_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider_base = fake_local_chat_provider_endpoint(
+        "",
+        Some(Arc::clone(&captured_requests)),
+        LocalCitationEcho::ResourceAndWeb,
+    )
+    .await;
     configure_local_http_provider(state, provider_base).await;
     captured_requests
 }
@@ -95,7 +118,7 @@ async fn configure_local_http_provider(state: &Arc<AppState>, provider_base: Str
 async fn fake_local_chat_provider_endpoint(
     reply: &'static str,
     captured_requests: Option<Arc<std::sync::Mutex<Vec<String>>>>,
-    echo_web_citation: bool,
+    citation_echo: LocalCitationEcho,
 ) -> String {
     let listener =
         std::net::TcpListener::bind("127.0.0.1:0").expect("bind local fake chat provider");
@@ -153,24 +176,7 @@ async fn fake_local_chat_provider_endpoint(
                             .expect("capture local provider request")
                             .push(request_text.clone());
                     }
-                    let response_content = if echo_web_citation {
-                        request_text
-                            .match_indices("webref_")
-                            .find_map(|(start, _)| {
-                                let candidate = request_text.get(start..start.checked_add(31)?)?;
-                                candidate[7..]
-                                    .bytes()
-                                    .all(|byte| byte.is_ascii_hexdigit())
-                                    .then(|| {
-                                        format!(
-                                            "The retrieved Web evidence is available [{candidate}]."
-                                        )
-                                    })
-                            })
-                            .unwrap_or_else(|| "No issued Web citation was observed.".into())
-                    } else {
-                        reply.to_string()
-                    };
+                    let response_content = citation_echo.response_content(&request_text, reply);
                     let body = serde_json::json!({
                         "id": "chatcmpl-main-chat-live-provider-local",
                         "object": "chat.completion",
@@ -199,6 +205,43 @@ async fn fake_local_chat_provider_endpoint(
         }
     });
     format!("http://{addr}/v1")
+}
+
+#[derive(Clone, Copy)]
+enum LocalCitationEcho {
+    None,
+    Web,
+    ResourceAndWeb,
+}
+
+impl LocalCitationEcho {
+    fn response_content(self, request_text: &str, reply: &str) -> String {
+        let issued_citation = |prefix: &str, length: usize| {
+            request_text.match_indices(prefix).find_map(|(start, _)| {
+                let candidate = request_text.get(start..start.checked_add(length)?)?;
+                candidate[prefix.len()..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+                    .then(|| candidate.to_string())
+            })
+        };
+        match self {
+            Self::None => reply.to_string(),
+            Self::Web => issued_citation("webref_", 31)
+                .map(|citation| format!("The retrieved Web evidence is available [{citation}]."))
+                .unwrap_or_else(|| "No issued Web citation was observed.".into()),
+            Self::ResourceAndWeb => {
+                let resource = issued_citation("cite_", 29);
+                let web = issued_citation("webref_", 31);
+                match (resource, web) {
+                    (Some(resource), Some(web)) => format!(
+                        "The attachment reports ROADSHOW_RESOURCE_SENTINEL [{resource}], while the retrieved Web evidence reports ROADSHOW_WEB_SENTINEL [{web}]."
+                    ),
+                    _ => "Both issued Resource and Web citations were not observed.".into(),
+                }
+            }
+        }
+    }
 }
 
 async fn fake_streaming_local_chat_provider_endpoint(
