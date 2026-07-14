@@ -1544,6 +1544,18 @@ pub(crate) fn validate_proposal_payload(
     }
 }
 
+fn validate_proposal_for_acceptance(proposal: &AgentProposal) -> Result<(), String> {
+    validate_proposal_payload(proposal.proposal_type, &proposal.after)?;
+    if proposal.proposal_type == ProposalType::MemoryWrite {
+        let content = memory_content(&proposal.after)?;
+        openlife_core::agent::MemoryLifecycleAcceptanceInput::from_memory_proposal(
+            proposal, content,
+        )
+        .map_err(|error| format!("MemoryWrite Proposal 审阅契约无效：{error}"))?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 struct ReviewedScheduledProviderRoute {
     provider: String,
@@ -2520,7 +2532,7 @@ async fn accept_proposal_with_state_and_confirmation(
         ));
     }
     ensure_pending_or_postponed(&proposal)?;
-    validate_proposal_payload(proposal.proposal_type, &proposal.after)?;
+    validate_proposal_for_acceptance(&proposal)?;
     if is_builder_lifemodel_patch_batch(&proposal) {
         let batch =
             serde_json::from_value::<openlife_core::life_model::patch::LifeModelPatchBatchV1>(
@@ -2576,7 +2588,7 @@ async fn accept_proposal_with_state_and_confirmation(
             );
         }
         proposal = claimed_proposal;
-        validate_proposal_payload(proposal.proposal_type, &proposal.after)?;
+        validate_proposal_for_acceptance(&proposal)?;
     }
     let review_acceptance_result = {
         let store = state
@@ -3445,7 +3457,7 @@ pub async fn accept_proposal(
         && proposal_may_dispatch_effect(state.inner(), &proposal).await?
     {
         ensure_pending_or_postponed(&proposal)?;
-        validate_proposal_payload(proposal.proposal_type, &proposal.after)?;
+        validate_proposal_for_acceptance(&proposal)?;
         let snapshot_digest = proposal_native_confirmation_digest(&proposal);
         let affected_path_digest = openlife_core::agent::metadata_safe::metadata_safe_value_digest(
             &serde_json::json!({ "affected_path": proposal.affected_path }),
@@ -3562,8 +3574,8 @@ mod tests {
         agent::{
             AgentProposal, AgentRun, AgentRunStatus, AgentRunStore, EvidenceDraft,
             EvidencePrivacyLevel, EvidenceQuery, EvidenceRecord, EvidenceSourceRef,
-            EvidenceSourceType, EvidenceType, ProposalSource, ProposalStore, ProposalType,
-            RiskLevel,
+            EvidenceSourceType, EvidenceType, MemoryCandidateKind, ProposalSource, ProposalStore,
+            ProposalType, RiskLevel,
         },
         builder::BuilderSessionStore,
         config::AppConfig,
@@ -3578,6 +3590,27 @@ mod tests {
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Mutex;
+
+    fn reviewed_memory_after(
+        session_id: &str,
+        content: &str,
+        candidate_kind: MemoryCandidateKind,
+        risk_level: &str,
+        sensitivity: &str,
+    ) -> Value {
+        serde_json::json!({
+            "session_id": session_id,
+            "content": content,
+            "scope": "global",
+            "category": openlife_core::agent::memory_lifecycle_category_for_candidate_kind(
+                candidate_kind
+            ),
+            "candidateKind": candidate_kind,
+            "riskLevel": risk_level,
+            "sensitivity": sensitivity,
+            "source": "review_center",
+        })
+    }
 
     fn test_app_state(temp_dir: &tempfile::TempDir) -> Arc<AppState> {
         let config = AppConfig::default();
@@ -4829,11 +4862,13 @@ mod tests {
         let food = AgentProposal::new(
             ProposalType::MemoryWrite,
             "memory.records",
-            serde_json::json!({
-                "session_id": "lane-food",
-                "content": "午餐吃了沙拉，下午精力不错",
-                "source": "review_center"
-            }),
+            reviewed_memory_after(
+                "lane-food",
+                "午餐吃了沙拉，下午精力不错",
+                MemoryCandidateKind::EpisodicLifeEvent,
+                "low",
+                "internal",
+            ),
             "User accepted diet event memory.",
             0.8,
             RiskLevel::Low,
@@ -4859,11 +4894,13 @@ mod tests {
         let preference = AgentProposal::new(
             ProposalType::MemoryWrite,
             "memory.records",
-            serde_json::json!({
-                "session_id": "lane-preference",
-                "content": "User prefers concise status updates.",
-                "source": "review_center"
-            }),
+            reviewed_memory_after(
+                "lane-preference",
+                "User prefers concise status updates.",
+                MemoryCandidateKind::Preference,
+                "low",
+                "internal",
+            ),
             "User accepted preference memory.",
             0.8,
             RiskLevel::Low,
@@ -4893,11 +4930,13 @@ mod tests {
         let future_rule = AgentProposal::new(
             ProposalType::MemoryWrite,
             "memory.rules.planning",
-            serde_json::json!({
-                "session_id": "lane-rule",
-                "content": "以后做计划时，先安排最难的任务。",
-                "source": "review_center"
-            }),
+            reviewed_memory_after(
+                "lane-rule",
+                "以后做计划时，先安排最难的任务。",
+                MemoryCandidateKind::ProceduralRule,
+                "medium",
+                "internal",
+            ),
             "User accepted future planning rule.",
             0.8,
             RiskLevel::Medium,
@@ -5079,11 +5118,13 @@ mod tests {
         let proposal = AgentProposal::new(
             ProposalType::MemoryWrite,
             "memory.records",
-            serde_json::json!({
-                "session_id": "proposal-session",
-                "content": "用户偏好早上做深度工作",
-                "source": "review_center"
-            }),
+            reviewed_memory_after(
+                "proposal-session",
+                "用户偏好早上做深度工作",
+                MemoryCandidateKind::Preference,
+                "low",
+                "internal",
+            ),
             "用户确认写入长期记忆",
             0.8,
             RiskLevel::Low,
@@ -5125,17 +5166,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accept_memory_write_proposal_returns_lifecycle_materialization_evidence() {
+    async fn malformed_memory_review_contract_fails_before_dispatch_claim() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
         let proposal = AgentProposal::new(
             ProposalType::MemoryWrite,
             "memory.records",
             serde_json::json!({
-                "session_id": "proposal-lifecycle-session",
-                "content": "用户偏好 execution-first agents",
-                "source": "review_center"
+                "content": "This payload was never reviewed with typed governance metadata."
             }),
+            "Malformed fixture must fail before dispatch.",
+            0.8,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        let error = accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("reviewed risk level is missing"),
+            "the original reviewed-contract boundary must remain observable: {error}"
+        );
+        let store = state.proposal_store.as_ref().unwrap().lock().await;
+        assert_eq!(
+            store.dispatch_state(&proposal_id).unwrap().as_deref(),
+            Some("unclaimed")
+        );
+        assert_eq!(
+            store.get_proposal(&proposal_id).unwrap().unwrap().status,
+            ProposalStatus::Pending
+        );
+    }
+
+    #[tokio::test]
+    async fn accept_memory_write_proposal_returns_lifecycle_materialization_evidence() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let proposal = AgentProposal::new(
+            ProposalType::MemoryWrite,
+            "memory.records",
+            reviewed_memory_after(
+                "proposal-lifecycle-session",
+                "用户偏好 execution-first agents",
+                MemoryCandidateKind::Preference,
+                "low",
+                "internal",
+            ),
             "用户确认写入长期记忆",
             0.8,
             RiskLevel::Low,
@@ -5183,11 +5269,13 @@ mod tests {
         let proposal = AgentProposal::new(
             ProposalType::MemoryWrite,
             "memory.records",
-            serde_json::json!({
-                "session_id": "proposal-rollback-session",
-                "content": "User prefers execution-first agents.",
-                "source": "review_center"
-            }),
+            reviewed_memory_after(
+                "proposal-rollback-session",
+                "User prefers execution-first agents.",
+                MemoryCandidateKind::Preference,
+                "low",
+                "internal",
+            ),
             "User confirmed a long-term memory.",
             0.8,
             RiskLevel::Low,
@@ -5259,11 +5347,13 @@ mod tests {
         let proposal = AgentProposal::new(
             ProposalType::MemoryWrite,
             "memory.records",
-            serde_json::json!({
-                "session_id": "proposal-sensitive-session",
-                "content": "身份证 11010519491231002X，邮箱 proposal-sensitive@example.com，最近健康诊断和负债压力",
-                "source": "review_center"
-            }),
+            reviewed_memory_after(
+                "proposal-sensitive-session",
+                "身份证 11010519491231002X，邮箱 proposal-sensitive@example.com，最近健康诊断和负债压力",
+                MemoryCandidateKind::SemanticUserFact,
+                "low",
+                "sensitive",
+            ),
             "用户确认写入长期记忆",
             0.8,
             RiskLevel::Low,

@@ -2130,7 +2130,7 @@ impl MemoryLifecycleAcceptanceInput {
         )?;
         Ok(Self {
             proposal_id: proposal.id.clone(),
-            source_task_session_id: proposal.source_detail.clone(),
+            source_task_session_id: source_task_session_id_from_proposal(proposal)?,
             source_run_id: proposal.run_id.clone(),
             fact,
             created_by: created_by_from_source(proposal.source).into(),
@@ -2146,6 +2146,61 @@ impl MemoryLifecycleAcceptanceInput {
             conflict_ids: conflict_ids_from_proposal(proposal),
         })
     }
+}
+
+fn source_task_session_id_from_proposal(proposal: &AgentProposal) -> Result<Option<String>> {
+    let reviewed_ids = [
+        "originatingTaskSessionId",
+        "originating_task_session_id",
+        "session_id",
+    ]
+    .into_iter()
+    .filter_map(|field| proposal.after.get(field).map(|value| (field, value)))
+    .map(|(field, value)| {
+        value
+            .as_str()
+            .with_context(|| format!("Memory proposal {field} must be a string"))
+            .and_then(|value| validated_task_session_id(field, value))
+    })
+    .collect::<Result<Vec<_>>>()?;
+    let reviewed_id = reviewed_ids.first().cloned();
+    if reviewed_ids
+        .iter()
+        .any(|candidate| Some(candidate) != reviewed_id.as_ref())
+    {
+        anyhow::bail!("Memory proposal reviewed task session ids disagree");
+    }
+
+    let marked_ids = proposal
+        .source_detail
+        .as_deref()
+        .into_iter()
+        .flat_map(|detail| detail.split(';'))
+        .filter_map(|segment| segment.trim().strip_prefix("main_chat_agent_task_session:"))
+        .map(|value| validated_task_session_id("source_detail task session", value))
+        .collect::<Result<Vec<_>>>()?;
+    let marked_id = marked_ids.first().cloned();
+    if marked_ids
+        .iter()
+        .any(|candidate| Some(candidate) != marked_id.as_ref())
+    {
+        anyhow::bail!("Memory proposal source task session markers disagree");
+    }
+    if reviewed_id.is_some() && marked_id.is_some() && reviewed_id != marked_id {
+        anyhow::bail!("Memory proposal reviewed task session disagrees with source marker");
+    }
+    Ok(reviewed_id.or(marked_id))
+}
+
+fn validated_task_session_id(field: &str, value: &str) -> Result<String> {
+    if value.is_empty()
+        || value.len() > 256
+        || value.trim() != value
+        || value.chars().any(|character| character.is_whitespace())
+    {
+        anyhow::bail!("Memory proposal {field} is not a bounded task session id");
+    }
+    Ok(value.to_string())
 }
 
 fn scope_from_proposal(proposal: &AgentProposal) -> Result<MemoryLifecycleScope> {
@@ -4069,6 +4124,89 @@ mod tests {
         assert!(content_error
             .to_string()
             .contains("differs from reviewed content"));
+    }
+
+    #[test]
+    fn proposal_admission_binds_one_reviewed_task_session_owner() {
+        let proposal = |after: serde_json::Value, source_detail: Option<&str>| {
+            let mut proposal = AgentProposal::new(
+                ProposalType::MemoryWrite,
+                "memory.records",
+                after,
+                "Task session ownership must remain exact.",
+                0.9,
+                RiskLevel::Medium,
+                ProposalSource::Manual,
+            );
+            proposal.source_detail = source_detail.map(str::to_string);
+            proposal
+        };
+        let valid_after = json!({
+            "content": "Task-bound reviewed fact",
+            "scope": "global",
+            "category": "fact",
+            "candidateKind": "semantic_user_fact",
+            "riskLevel": "medium",
+            "sensitivity": "internal",
+            "originatingTaskSessionId": "task-session-1"
+        });
+        let valid = proposal(
+            valid_after.clone(),
+            Some("main_chat_agent_task_session:task-session-1;candidate:candidate-1"),
+        );
+        let input = MemoryLifecycleAcceptanceInput::from_memory_proposal(
+            &valid,
+            "Task-bound reviewed fact".into(),
+        )
+        .unwrap();
+        assert_eq!(
+            input.source_task_session_id.as_deref(),
+            Some("task-session-1")
+        );
+
+        let drift = proposal(
+            valid_after.clone(),
+            Some("main_chat_agent_task_session:task-session-2;candidate:candidate-1"),
+        );
+        assert!(MemoryLifecycleAcceptanceInput::from_memory_proposal(
+            &drift,
+            "Task-bound reviewed fact".into(),
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("disagrees with source marker"));
+
+        let mut alias_drift = valid_after;
+        alias_drift["session_id"] = json!("task-session-2");
+        assert!(MemoryLifecycleAcceptanceInput::from_memory_proposal(
+            &proposal(alias_drift, None),
+            "Task-bound reviewed fact".into(),
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("reviewed task session ids disagree"));
+
+        let unbound = proposal(
+            json!({
+                "content": "Global reviewed fact",
+                "scope": "global",
+                "category": "fact",
+                "candidateKind": "semantic_user_fact",
+                "riskLevel": "medium",
+                "sensitivity": "internal"
+            }),
+            Some("maturation:preference.communication"),
+        );
+        assert_eq!(
+            MemoryLifecycleAcceptanceInput::from_memory_proposal(
+                &unbound,
+                "Global reviewed fact".into(),
+            )
+            .unwrap()
+            .source_task_session_id,
+            None,
+            "non-session source metadata must not become a MemoryStore session owner"
+        );
     }
 
     #[test]
