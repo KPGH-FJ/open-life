@@ -1,7 +1,7 @@
 {
   "schema_version": "openlife-roadshow-core-capability-state-v1",
   "plan_id": "openlife-roadshow-core-capability-2026-07-14",
-  "status": "v1_resource_implementation_verified_live_trial_pending_h1_h2_review_pending_roadshow_no_go",
+  "status": "v2_web_implementation_verified_live_search_passed_live_fetch_environment_blocked_external_provider_product_trial_review_pending_roadshow_no_go",
   "authority": {
     "kind": "time_bounded_execution_overlay",
     "subordinate_to": [
@@ -23,7 +23,7 @@
     "verified_clean_before_plan_edit": true,
     "verified_at": "2026-07-14"
   },
-  "current_phase": "V2_WEB",
+  "current_phase": "V3_STATESTORE",
   "schedule": {
     "p50_hours": "40-48 after H0 infrastructure blockers",
     "p80_hours": "56-72 after H0 infrastructure blockers",
@@ -35,7 +35,7 @@
     "BR4-D010": "roadshow_runtime_and_resource_dto_subset_verified_global_open",
     "BR4-D011": "roadshow_resource_tombstone_restart_subset_verified_global_open",
     "BR4-D020": "roadshow_foundation_verified_global_open_artifact_slice_pending",
-    "BR4-D050": "roadshow_runtime_restart_subset_verified_statestore_pending",
+    "BR4-D050": "roadshow_runtime_restart_and_web_replay_subset_verified_statestore_pending",
     "BR4-D051": "roadshow_governance_subset_mechanically_verified_global_open",
     "BR4-D052": "roadshow_posthoc_proposal_absence_mechanically_verified_global_open",
     "BR4-D053": "roadshow_governance_subset_mechanically_verified_global_open"
@@ -94,9 +94,10 @@
     },
     {
       "id": "V2_WEB",
-      "status": "not_started",
-      "completion_claim": "none",
-      "commit": null
+      "status": "implementation_verified_live_search_passed_live_fetch_environment_blocked_external_provider_product_trial_and_independent_review_pending",
+      "completion_claim": "scoped_mechanical_and_real_search_gates_green_remaining_live_and_product_evidence_explicit",
+      "commit": "a40605579cfed02b310cfaa0f7be2bbea82af596",
+      "evidence": "plans/openlife_roadshow_v2_web_evidence.md"
     },
     {
       "id": "V3_STATESTORE",
@@ -197,6 +198,26 @@
     "independent_read_only_review": "pending_coderabbit_cli_unavailable",
     "roadshow_release": "no_go"
   },
+  "v2_results": {
+    "typed_search_and_fetch_contract": "passed",
+    "challenge_false_success_removed": "passed_with_captcha_false_positive_counterexample",
+    "same_turn_provider_synthesis": "passed_existing_openlife_turn_runtime_and_prepared_provider_boundary",
+    "citation_truth": "passed_current_run_required_missing_forged_cross_run_rejected_backend_footer_owned",
+    "citation_claim_wording": "passed_binding_disclosed_external_content_not_endorsed",
+    "durable_context_minimization": "passed_metadata_only_web_refs_survive_restart_without_web_body_copy",
+    "provider_terminal_route_truth": "passed_empty_and_failed_attempts_keep_provider_model_request_and_terminal_state",
+    "operation_replay": "passed_no_tool_or_provider_redispatch",
+    "reasoning_strategy_canonicalization": "passed_direct_react_memory_governance_round_trip",
+    "real_duckduckgo_local_provider_chain": "passed_network_read_provider_adapter_receipt_durable_events_final_last",
+    "generic_live_fetch": "blocked_current_mac_fake_ip_proxy_environment_without_ssrf_policy_relaxation",
+    "external_live_cloud_provider": "pending_environment_unconfigured",
+    "native_product_trial": "pending",
+    "independent_read_only_review": "pending_coderabbit_cli_unavailable",
+    "main_chat_kernel": "failed_60_of_68_passed_same_8_preexisting_red",
+    "single_system": "failed_24_of_32_passed_same_8_preexisting_red",
+    "clippy": "failed_with_35_existing_errors_no_new_v2_web_error",
+    "roadshow_release": "no_go"
+  },
   "evidence_dimensions": [
     "implementation",
     "deterministic_contract",
@@ -205,5 +226,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-15T00:36:27+08:00"
+  "last_updated_at": "2026-07-15T02:59:46+08:00"
 }
