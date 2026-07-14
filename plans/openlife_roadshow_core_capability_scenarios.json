@@ -1,7 +1,9 @@
 {
   "schema_version": "openlife-roadshow-core-capability-scenarios-v1",
   "suite_id": "openlife-roadshow-core-capability-2026-07-14",
-  "status": "pre_frozen_pending_h0_fixture_digests",
+  "status": "frozen_h0_2026_07_14",
+  "fixture_root": "plans/fixtures/openlife_roadshow_core",
+  "fixture_generator": "scripts/generate-roadshow-core-fixtures.py",
   "change_policy": {
     "after_h0": "versioned_waiver_required",
     "implementation_may_change_expected_outcome": false,
@@ -35,7 +37,10 @@
       "hard_gate": true,
       "prompt": "比较这两份文件的核心主张、分歧和风险，并给出逐条引用。",
       "fixtures": ["roadshow_compare.pdf", "roadshow_compare.docx"],
-      "fixture_sha256": [null, null],
+      "fixture_sha256": [
+        "d3b3e0d87b437552f15e68a1fc70f74622e0526a42e54e8f1128d62ed7e51ed8",
+        "85b6cf632fb7d4656f7390b840ce03c3707f6c5db9589146a5774e33a362b8d7"
+      ],
       "expected": "bounded_multi_file_comparison_with_validated_citations",
       "proposal_expectation": "none",
       "positive": "citations_resolve_to_selected_pdf_pages_and_docx_sections",
@@ -50,7 +55,10 @@
       "hard_gate": true,
       "prompt": "分析这两份表格的趋势、异常和可能的数据质量问题，并引用对应工作表和单元格范围。",
       "fixtures": ["roadshow_metrics.csv", "roadshow_metrics.xlsx"],
-      "fixture_sha256": [null, null],
+      "fixture_sha256": [
+        "2b7342fbc7f2ebda556364226c9f4085def89847427dfb1959e7c3522c162085",
+        "bc78e0134cf3f1e4c630f3df0c40d4b70eaf5d5a99c08a0dd9fcd766846b023d"
+      ],
       "expected": "bounded_table_analysis_with_sheet_and_range_citations",
       "proposal_expectation": "none",
       "positive": "chinese_and_numeric_queries_select_relevant_rows_and_ranges",
@@ -65,7 +73,9 @@
       "hard_gate": true,
       "prompt": "结合附件中的产品数据和今天公开网页中的相关信息，给出有来源的路演风险摘要。",
       "fixtures": ["roadshow_web_context.md"],
-      "fixture_sha256": [null],
+      "fixture_sha256": [
+        "b2a5df7093ccf82456712df11f134464693811da8150b154ba22ee551d309cd1"
+      ],
       "expected": "file_and_live_web_answer_with_distinct_source_truth",
       "proposal_expectation": "none",
       "positive": "receipt_and_ui_distinguish_resource_and_live_http_sources",
@@ -119,7 +129,9 @@
       "hard_gate": true,
       "prompt": "分析附件并检索网页；在执行中取消，然后重试一次。",
       "fixtures": ["roadshow_cancel.md"],
-      "fixture_sha256": [null],
+      "fixture_sha256": [
+        "05f8255203af18d738ab8e88fb439171fef6f339dc6ae9b645f4c071b53af630"
+      ],
       "expected": "local_cancel_under_one_second_no_late_commit_then_one_retry_dispatch",
       "proposal_expectation": "none_for_reads",
       "positive": "retry_completes_once_with_truthful_terminal_state",
@@ -134,7 +146,9 @@
       "hard_gate": true,
       "prompt": "读取附件并查询公开网页，生成一份带引用的 Markdown 报告，等待我确认后保存。",
       "fixtures": ["roadshow_combined_report.pdf"],
-      "fixture_sha256": [null],
+      "fixture_sha256": [
+        "36cd2e66b5e7c60d862f96ea007a9864ae6d5bf9b728c23097e161efaa050d67"
+      ],
       "expected": "resource_web_governance_artifact_end_to_end",
       "proposal_expectation": "only_for_artifact_write",
       "dependencies": ["RC-02", "RC-04", "RC-06", "RC-07"]
@@ -145,7 +159,9 @@
       "hard_gate": true,
       "prompt": "从附件提取今天的准备事项，创建短期任务；如果要写文件，先等待我确认，然后继续。",
       "fixtures": ["roadshow_checklist.docx"],
-      "fixture_sha256": [null],
+      "fixture_sha256": [
+        "12f4ee94fe85e98e24b82efafb84b6e109772dca4460e72c45db9ff7429deb66"
+      ],
       "expected": "resource_to_transient_tasks_and_governed_optional_artifact",
       "proposal_expectation": "none_for_transient_tasks_required_for_file_write",
       "dependencies": ["RC-02", "RC-05", "RC-06"]

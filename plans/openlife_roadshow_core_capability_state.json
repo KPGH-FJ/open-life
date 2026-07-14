@@ -1,7 +1,7 @@
 {
   "schema_version": "openlife-roadshow-core-capability-state-v1",
   "plan_id": "openlife-roadshow-core-capability-2026-07-14",
-  "status": "h0_in_progress",
+  "status": "h0_completed_development_go_roadshow_no_go",
   "authority": {
     "kind": "time_bounded_execution_overlay",
     "subordinate_to": [
@@ -23,12 +23,12 @@
     "verified_clean_before_plan_edit": true,
     "verified_at": "2026-07-14"
   },
-  "current_phase": "H0_FACTS_AND_FREEZE",
+  "current_phase": "H1_RUNTIME_TRUTH",
   "schedule": {
-    "p50_hours": "34-36 conditional on H0 pass",
-    "p80_hours": "40-48 before H0",
+    "p50_hours": "40-48 after H0 infrastructure blockers",
+    "p80_hours": "56-72 after H0 infrastructure blockers",
     "under_24_hours_credible": false,
-    "last_reestimated_phase": null
+    "last_reestimated_phase": "H0_FACTS_AND_FREEZE"
   },
   "global_finding_boundaries": {
     "BR4-D008": "open_partial_roadshow_subset_required",
@@ -48,13 +48,13 @@
     },
     {
       "id": "H0_FACTS_AND_FREEZE",
-      "status": "in_progress",
-      "completion_claim": "none",
+      "status": "completed",
+      "completion_claim": "facts_frozen_development_go_roadshow_no_go",
       "commit": null
     },
     {
       "id": "H1_RUNTIME_TRUTH",
-      "status": "not_started",
+      "status": "in_progress",
       "completion_claim": "none",
       "commit": null
     },
@@ -101,21 +101,29 @@
       "commit": null
     }
   ],
-  "h0_unknowns": [
-    "external_live_provider_result",
-    "external_live_web_result",
-    "true_streaming_capture_result",
-    "vision_admission",
-    "pdf_parser_and_provenance",
-    "docx_parser_and_provenance",
-    "xlsx_parser_and_provenance",
-    "resource_store_dependency_map",
-    "statestore_dependency_map",
-    "artifact_materialization_live_result",
-    "scenario_fixture_digests",
-    "cargo_warmup_duration",
-    "current_capability_and_performance_baseline"
-  ],
+  "h0_decision": {
+    "development": "go",
+    "roadshow_release": "no_go",
+    "global_completion_claim": "forbidden",
+    "evidence": "plans/openlife_roadshow_h0_evidence.md"
+  },
+  "h0_results": {
+    "external_live_provider": "passed_direct_answer",
+    "external_live_web": "failed_not_provider_backed_and_challenge_false_success",
+    "true_streaming": "passed_exact_direct_answer_with_41_provider_bound_chunks",
+    "vision": "not_admitted",
+    "ocr": "not_admitted",
+    "pdf_output": "not_admitted",
+    "parser_stack": "viable_only_in_killable_bounded_worker",
+    "resource_store": "not_implemented",
+    "state_store": "not_implemented",
+    "artifact_materialization": "partial_acceptance_to_safe_atomic_file_write_passed",
+    "scenario_fixtures": "frozen_with_sha256",
+    "roadshow_quarantine": "failed_scheduler_vector_and_mcp_read_surfaces_remain",
+    "ordinary_baseline": "failed_at_ORD_03_on_baseline_and_roadshow_worktree",
+    "provider_secret_migration": "real_keychain_restart_smoke_pending"
+  },
+  "h0_unknowns": [],
   "evidence_dimensions": [
     "implementation",
     "deterministic_contract",
@@ -124,5 +132,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-14T16:55:40+08:00"
+  "last_updated_at": "2026-07-14T17:50:04+08:00"
 }
