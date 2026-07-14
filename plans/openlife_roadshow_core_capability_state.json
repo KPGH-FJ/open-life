@@ -1,7 +1,7 @@
 {
   "schema_version": "openlife-roadshow-core-capability-state-v1",
   "plan_id": "openlife-roadshow-core-capability-2026-07-14",
-  "status": "h0_completed_development_go_roadshow_no_go",
+  "status": "h1_mechanical_green_review_pending_development_go_roadshow_no_go",
   "authority": {
     "kind": "time_bounded_execution_overlay",
     "subordinate_to": [
@@ -23,7 +23,7 @@
     "verified_clean_before_plan_edit": true,
     "verified_at": "2026-07-14"
   },
-  "current_phase": "H1_RUNTIME_TRUTH",
+  "current_phase": "H2_GOVERNANCE",
   "schedule": {
     "p50_hours": "40-48 after H0 infrastructure blockers",
     "p80_hours": "56-72 after H0 infrastructure blockers",
@@ -32,12 +32,12 @@
   },
   "global_finding_boundaries": {
     "BR4-D008": "open_partial_roadshow_subset_required",
-    "BR4-D010": "open_partial_roadshow_subset_required",
+    "BR4-D010": "roadshow_runtime_subset_verified_global_open",
     "BR4-D011": "open_partial_roadshow_subset_required",
-    "BR4-D020": "open_p0_roadshow_subset_required",
-    "BR4-D050": "open_partial_statestore_not_started",
-    "BR4-D051": "open_partial",
-    "BR4-D053": "open_not_started"
+    "BR4-D020": "roadshow_foundation_verified_global_open_artifact_slice_pending",
+    "BR4-D050": "roadshow_runtime_restart_subset_verified_statestore_pending",
+    "BR4-D051": "roadshow_governance_subset_in_progress",
+    "BR4-D053": "roadshow_governance_subset_in_progress"
   },
   "phases": [
     {
@@ -54,13 +54,14 @@
     },
     {
       "id": "H1_RUNTIME_TRUTH",
-      "status": "in_progress",
-      "completion_claim": "none",
-      "commit": null
+      "status": "implementation_verified_review_pending",
+      "completion_claim": "mechanical_gates_green_independent_read_only_review_pending",
+      "commit": "ef6653d",
+      "evidence": "plans/openlife_roadshow_h1_evidence.md"
     },
     {
       "id": "H2_GOVERNANCE",
-      "status": "not_started",
+      "status": "in_progress",
       "completion_claim": "none",
       "commit": null
     },
@@ -124,6 +125,22 @@
     "provider_secret_migration": "real_keychain_restart_smoke_pending"
   },
   "h0_unknowns": [],
+  "h1_results": {
+    "turn_runtime": "passed_32_of_32",
+    "cancellation_and_late_commit": "passed_29_of_29",
+    "session_content_minimization": "passed_7_of_7",
+    "bound_content_receipt": "passed_17_of_17",
+    "provider_capture_and_lifecycle": "passed",
+    "external_live_direct_answer": "passed",
+    "external_live_streaming": "passed_37_provider_bound_chunks_final_last",
+    "proposal_store": "passed_16_of_16",
+    "proposal_command": "passed_63_of_63",
+    "memory_lifecycle": "passed_36_of_36",
+    "maturation_non_regression": "passed_42_of_42",
+    "product_projection": "passed_80_of_80_frontend_tests_and_typecheck",
+    "independent_read_only_review": "pending",
+    "roadshow_release": "no_go"
+  },
   "evidence_dimensions": [
     "implementation",
     "deterministic_contract",
@@ -132,5 +149,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-14T17:50:04+08:00"
+  "last_updated_at": "2026-07-14T18:45:34+08:00"
 }
