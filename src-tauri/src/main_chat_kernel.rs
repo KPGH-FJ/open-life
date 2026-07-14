@@ -12587,6 +12587,20 @@ mod tests {
 
     #[tokio::test]
     async fn main_chat_kernel_provider_route_metadata_is_bounded_without_live_gate() {
+        let user_text = "Route metadata please.";
+        let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
+            "session-1",
+            user_text,
+            None,
+            openlife_core::agent::AgentTaskKind::Conversation,
+        );
+        assert_eq!(
+            decision.selected_strategy,
+            MainChatAgentStrategy::DirectAnswer
+        );
+        let provider_authorization =
+            MainChatProviderAuthorization::from_ingress_decision(&decision)
+                .expect("provider authorization from the same ingress decision");
         let mut router = ModelRouter::new();
         router.providers.insert(
             "openai".into(),
@@ -12628,10 +12642,10 @@ mod tests {
             .run_turn(
                 MainChatTurnInput {
                     session_id: "session-1".into(),
-                    provider_authorization: policy_allowed_authorization("route-metadata"),
-                    messages: vec![user_message("Route metadata please.")],
+                    provider_authorization,
+                    messages: vec![user_message(user_text)],
                     selected_skill_id: None,
-                    policy_decision: test_policy_decision(MainChatAgentStrategy::DirectAnswer),
+                    policy_decision: decision.policy_decision,
                     model_supplied_tool_arguments: None,
                     runtime_fact_direct_answer: false,
                 },
@@ -12814,6 +12828,20 @@ mod tests {
     #[tokio::test]
     async fn main_chat_kernel_dangerous_shell_intent_hard_blocks_without_proposal() {
         let model = ScriptedModelClient::ok("model should not be called");
+        let user_text = "Run shell.destructive rm -rf to delete project files.";
+        let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
+            "session-1",
+            user_text,
+            None,
+            openlife_core::agent::AgentTaskKind::Conversation,
+        );
+        assert_eq!(
+            decision.selected_strategy,
+            MainChatAgentStrategy::BlockedConfirmation
+        );
+        let provider_authorization =
+            MainChatProviderAuthorization::from_ingress_decision(&decision)
+                .expect("provider authorization from the same ingress decision");
         let kernel = test_kernel(model.clone(), Vec::new());
         let mut events = BufferedMainChatEventSink::default();
 
@@ -12821,14 +12849,10 @@ mod tests {
             .run_turn(
                 MainChatTurnInput {
                     session_id: "session-1".into(),
-                    provider_authorization: policy_allowed_authorization("dangerous-shell"),
-                    messages: vec![user_message(
-                        "Run shell.destructive rm -rf to delete project files.",
-                    )],
+                    provider_authorization,
+                    messages: vec![user_message(user_text)],
                     selected_skill_id: None,
-                    policy_decision: test_policy_decision(
-                        MainChatAgentStrategy::BlockedConfirmation,
-                    ),
+                    policy_decision: decision.policy_decision,
                     model_supplied_tool_arguments: None,
                     runtime_fact_direct_answer: false,
                 },
@@ -12992,7 +13016,22 @@ mod tests {
         let life_model = sample_hs_life_model();
         let packet = hs_packet(false, true);
         let hs_context = build_kernel_hs_context(&life_model, true, Some(&packet), Vec::new());
-        let memory_user_text = "Remember this: I prefer morning deep work.";
+        let memory_user_text =
+            "Please remember this private health fact: coffee causes heart palpitations.";
+        let memory_decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default()
+            .decide(
+                "session-hs-learning",
+                memory_user_text,
+                None,
+                openlife_core::agent::AgentTaskKind::Conversation,
+            );
+        assert_eq!(
+            memory_decision.selected_strategy,
+            MainChatAgentStrategy::MemoryProposal
+        );
+        let memory_provider_authorization =
+            MainChatProviderAuthorization::from_ingress_decision(&memory_decision)
+                .expect("Memory provider authorization from the same ingress decision");
         let kernel = test_kernel_with_hs_and_authorized_memory_routing(
             model.clone(),
             hs_context.clone(),
@@ -13005,10 +13044,10 @@ mod tests {
             .run_turn(
                 MainChatTurnInput {
                     session_id: "session-hs-learning".into(),
-                    provider_authorization: policy_allowed_authorization("hs-learning"),
+                    provider_authorization: memory_provider_authorization,
                     messages: vec![user_message(memory_user_text)],
                     selected_skill_id: None,
-                    policy_decision: test_policy_decision(MainChatAgentStrategy::MemoryProposal),
+                    policy_decision: memory_decision.policy_decision,
                     model_supplied_tool_arguments: None,
                     runtime_fact_direct_answer: false,
                 },
@@ -13046,6 +13085,20 @@ mod tests {
 
         let life_model_user_text =
             "Update my life model: I am switching careers into design leadership.";
+        let life_model_decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default()
+            .decide(
+                "session-hs-lifemodel-learning",
+                life_model_user_text,
+                None,
+                openlife_core::agent::AgentTaskKind::Conversation,
+            );
+        assert_eq!(
+            life_model_decision.selected_strategy,
+            MainChatAgentStrategy::LifeModelProposal
+        );
+        let life_model_provider_authorization =
+            MainChatProviderAuthorization::from_ingress_decision(&life_model_decision)
+                .expect("LifeModel provider authorization from the same ingress decision");
         let life_model_kernel = test_kernel_with_hs_and_authorized_memory_routing(
             model.clone(),
             hs_context,
@@ -13057,10 +13110,10 @@ mod tests {
             .run_turn(
                 MainChatTurnInput {
                     session_id: "session-hs-lifemodel-learning".into(),
-                    provider_authorization: policy_allowed_authorization("hs-lifemodel-learning"),
+                    provider_authorization: life_model_provider_authorization,
                     messages: vec![user_message(life_model_user_text)],
                     selected_skill_id: None,
-                    policy_decision: test_policy_decision(MainChatAgentStrategy::LifeModelProposal),
+                    policy_decision: life_model_decision.policy_decision,
                     model_supplied_tool_arguments: None,
                     runtime_fact_direct_answer: false,
                 },
@@ -13262,7 +13315,16 @@ mod tests {
     #[tokio::test]
     async fn main_chat_kernel_goal_6_command_surface_missing_hs_does_not_materialize_default_yaml()
     {
-        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let missing_life_model_root = std::env::temp_dir().join(format!(
+            "openlife-main-chat-missing-hs-{}",
+            uuid::Uuid::new_v4()
+        ));
+        Arc::get_mut(&mut state)
+            .expect("isolated state must have one owner before evaluation")
+            .life_model_manager = Arc::new(tokio::sync::Mutex::new(
+            openlife_core::life_model::LifeModelManager::new(missing_life_model_root),
+        ));
         {
             let manager = state.life_model_manager.lock().await;
             assert!(manager.load_existing().unwrap().is_none());
