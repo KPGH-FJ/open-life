@@ -1,7 +1,7 @@
 {
   "schema_version": "openlife-roadshow-core-capability-state-v1",
   "plan_id": "openlife-roadshow-core-capability-2026-07-14",
-  "status": "v2_web_implementation_verified_live_search_passed_live_fetch_environment_blocked_external_provider_product_trial_review_pending_roadshow_no_go",
+  "status": "v3_daily_task_slice_implementation_verified_migration_product_trial_review_pending_roadshow_no_go",
   "authority": {
     "kind": "time_bounded_execution_overlay",
     "subordinate_to": [
@@ -23,7 +23,7 @@
     "verified_clean_before_plan_edit": true,
     "verified_at": "2026-07-14"
   },
-  "current_phase": "V3_STATESTORE",
+  "current_phase": "V4_ARTIFACT",
   "schedule": {
     "p50_hours": "40-48 after H0 infrastructure blockers",
     "p80_hours": "56-72 after H0 infrastructure blockers",
@@ -35,7 +35,7 @@
     "BR4-D010": "roadshow_runtime_and_resource_dto_subset_verified_global_open",
     "BR4-D011": "roadshow_resource_tombstone_restart_subset_verified_global_open",
     "BR4-D020": "roadshow_foundation_verified_global_open_artifact_slice_pending",
-    "BR4-D050": "roadshow_runtime_restart_and_web_replay_subset_verified_statestore_pending",
+    "BR4-D050": "roadshow_runtime_restart_web_replay_and_statestore_daily_task_subset_verified_global_open",
     "BR4-D051": "roadshow_governance_subset_mechanically_verified_global_open",
     "BR4-D052": "roadshow_posthoc_proposal_absence_mechanically_verified_global_open",
     "BR4-D053": "roadshow_governance_subset_mechanically_verified_global_open"
@@ -101,9 +101,10 @@
     },
     {
       "id": "V3_STATESTORE",
-      "status": "not_started",
-      "completion_claim": "none",
-      "commit": null
+      "status": "daily_task_slice_implementation_verified_migration_product_trial_and_independent_review_pending",
+      "completion_claim": "scoped_mechanical_gates_green_typed_state_observation_cutover_and_product_evidence_explicitly_pending",
+      "commit": "65a0017a7c2bf1ecba5ecdeb7484ad77f5e29793",
+      "evidence": "plans/openlife_roadshow_v3_statestore_evidence.md"
     },
     {
       "id": "V4_ARTIFACT",
@@ -218,6 +219,26 @@
     "clippy": "failed_with_35_existing_errors_no_new_v2_web_error",
     "roadshow_release": "no_go"
   },
+  "v3_results": {
+    "canonical_state_store": "passed_sqlite_asset_version_operation_receipt_and_outbox_owner",
+    "policy_authority": "passed_current_user_low_risk_explicit_nonserializable_grant",
+    "daily_task_loop": "passed_create_list_complete_undo_expiry_and_restart",
+    "operation_replay": "passed_create_complete_and_undo_after_clock_version_and_tombstone_changes",
+    "operation_drift": "passed_semantic_request_and_resolved_payload_mismatch_fail_closed",
+    "transaction_atomicity": "passed_fault_injection_zero_partial_rows",
+    "concurrency": "passed_same_operation_single_winner_version_cas_and_projection_no_lost_update",
+    "cancellation": "passed_precommit_admission_failure_zero_effect_and_committed_receipt_read_only_recovery",
+    "projection_truth": "passed_outbox_driven_yaml_compatibility_cas_and_degraded_receipt",
+    "event_minimization": "passed_no_task_body_in_durable_turn_events",
+    "frontend_authority_deletion": "passed_no_chat_quick_write_or_shipped_goal_mutation_commands",
+    "frontend_projection": "passed_116_of_116_focused_tests_typecheck_and_format",
+    "typed_state_observation": "pending_fail_closed_backend_blocker",
+    "legacy_import_parity_and_rollback": "pending",
+    "native_product_trial": "pending",
+    "independent_read_only_review": "pending_coderabbit_cli_unavailable",
+    "single_system": "failed_25_of_32_passed_7_preexisting_red",
+    "roadshow_release": "no_go"
+  },
   "evidence_dimensions": [
     "implementation",
     "deterministic_contract",
@@ -226,5 +247,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-15T02:59:46+08:00"
+  "last_updated_at": "2026-07-15T04:45:59+08:00"
 }
