@@ -4,6 +4,11 @@ use serde_json::Value;
 use super::helpers::ToolCallInternalResult;
 use crate::agent::review_workflow::{DurableWriteRequest, DurableWriteSource, DurableWriteSubject};
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
+use crate::agent::{
+    memory_lifecycle_category_for_candidate_kind, CanonicalMemoryFactDescriptor,
+    MemoryCandidateKind, MemoryLifecycleRiskLevel, MemoryLifecycleScope,
+    MemoryLifecycleSensitivity,
+};
 use crate::tool_execution_receipt::ToolExecutionReceiptTracker;
 use crate::tool_manifest::ToolManifest;
 
@@ -228,16 +233,18 @@ impl super::ActionExecutor {
                         RiskLevel::High,
                     )?
                     .to_string(),
-                "memory.propose_write" => self
-                    .create_core_os_proposal(
+                "memory.propose_write" => {
+                    let (reviewed_payload, risk) = validated_memory_write_proposal(args)?;
+                    self.create_core_os_proposal(
                         ctx,
                         ProposalType::MemoryWrite,
                         "memory.candidates",
-                        args.clone(),
+                        reviewed_payload,
                         "Agent proposed a MemoryWrite via Core OS tool.",
-                        RiskLevel::Medium,
+                        risk,
                     )?
-                    .to_string(),
+                    .to_string()
+                }
                 "memory.propose_archive" => self
                     .create_core_os_proposal(
                         ctx,
@@ -387,6 +394,142 @@ impl super::ActionExecutor {
             "proposal_type": outcome.proposal.proposal_type.to_string(),
             "affected_path": outcome.proposal.affected_path,
         }))
+    }
+}
+
+fn validated_memory_write_proposal(args: &Value) -> anyhow::Result<(Value, RiskLevel)> {
+    const MAX_MEMORY_PROPOSAL_CONTENT_BYTES: usize = 64 * 1024;
+
+    let object = args
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("memory.propose_write requires an object payload"))?;
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "content" | "scope" | "category" | "candidateKind" | "candidate_kind"
+        )
+    }) {
+        anyhow::bail!("memory.propose_write contains an unsupported field");
+    }
+    let content = object
+        .get("content")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|content| !content.is_empty() && content.len() <= MAX_MEMORY_PROPOSAL_CONTENT_BYTES)
+        .ok_or_else(|| {
+            anyhow::anyhow!("memory.propose_write content must contain 1..=65536 bytes")
+        })?;
+    let reviewed_category = object.get("category").and_then(Value::as_str);
+    let candidate_kind = object
+        .get("candidateKind")
+        .or_else(|| object.get("candidate_kind"))
+        .and_then(Value::as_str)
+        .map(parse_memory_candidate_kind)
+        .transpose()?
+        .or_else(|| reviewed_category.and_then(candidate_kind_for_category))
+        .unwrap_or(MemoryCandidateKind::SemanticUserFact);
+    let expected_category = memory_lifecycle_category_for_candidate_kind(candidate_kind);
+    if reviewed_category.is_some_and(|category| category != expected_category.as_str()) {
+        anyhow::bail!("memory.propose_write candidate kind and category disagree");
+    }
+    let scope = match object.get("scope").and_then(Value::as_str) {
+        None | Some("global") => MemoryLifecycleScope::Global,
+        Some("workspace") => MemoryLifecycleScope::Workspace,
+        Some("conversation") => MemoryLifecycleScope::Conversation,
+        Some("project") => MemoryLifecycleScope::Project,
+        Some(other) => anyhow::bail!("memory.propose_write has unknown scope: {other}"),
+    };
+    let (proposal_risk, lifecycle_risk) = if candidate_kind == MemoryCandidateKind::IdentityOrRole {
+        (RiskLevel::High, MemoryLifecycleRiskLevel::IdentityValue)
+    } else {
+        (RiskLevel::Medium, MemoryLifecycleRiskLevel::Medium)
+    };
+    // Tool-generated candidates cannot prove that arbitrary model-supplied
+    // content is non-sensitive. Conservatively keep them local until review.
+    let fact = CanonicalMemoryFactDescriptor::from_candidate(
+        content,
+        candidate_kind,
+        scope,
+        lifecycle_risk,
+        MemoryLifecycleSensitivity::Sensitive,
+    )?;
+    Ok((
+        serde_json::json!({
+            "content": fact.canonical_body,
+            "scope": fact.scope,
+            "category": fact.category,
+            "candidateKind": candidate_kind,
+            "riskLevel": fact.risk_level,
+            "sensitivity": fact.sensitivity,
+            "source": "core_os_tool",
+        }),
+        proposal_risk,
+    ))
+}
+
+fn parse_memory_candidate_kind(value: &str) -> anyhow::Result<MemoryCandidateKind> {
+    match value {
+        "episodic_life_event" => Ok(MemoryCandidateKind::EpisodicLifeEvent),
+        "semantic_user_fact" => Ok(MemoryCandidateKind::SemanticUserFact),
+        "procedural_rule" => Ok(MemoryCandidateKind::ProceduralRule),
+        "preference" => Ok(MemoryCandidateKind::Preference),
+        "identity_or_role" => Ok(MemoryCandidateKind::IdentityOrRole),
+        other => anyhow::bail!("memory.propose_write has unknown candidate kind: {other}"),
+    }
+}
+
+fn candidate_kind_for_category(value: &str) -> Option<MemoryCandidateKind> {
+    match value {
+        "fact" => Some(MemoryCandidateKind::SemanticUserFact),
+        "workflow" => Some(MemoryCandidateKind::ProceduralRule),
+        "preference" => Some(MemoryCandidateKind::Preference),
+        "boundary" => Some(MemoryCandidateKind::IdentityOrRole),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod memory_write_contract_tests {
+    use super::validated_memory_write_proposal;
+    use crate::agent::types::RiskLevel;
+
+    #[test]
+    fn write_proposal_builds_one_conservative_reviewed_memory_contract() {
+        let (preference, risk) = validated_memory_write_proposal(&serde_json::json!({
+            "content": "User prefers concise updates.",
+            "category": "preference",
+            "scope": "project"
+        }))
+        .unwrap();
+        assert_eq!(risk, RiskLevel::Medium);
+        assert_eq!(preference["candidateKind"], "preference");
+        assert_eq!(preference["category"], "preference");
+        assert_eq!(preference["riskLevel"], "medium");
+        assert_eq!(preference["sensitivity"], "sensitive");
+        assert_eq!(preference["scope"], "project");
+
+        let (identity, risk) = validated_memory_write_proposal(&serde_json::json!({
+            "content": "User identifies as a founder.",
+            "candidateKind": "identity_or_role",
+            "category": "boundary"
+        }))
+        .unwrap();
+        assert_eq!(risk, RiskLevel::High);
+        assert_eq!(identity["riskLevel"], "identity_value");
+        assert_eq!(identity["sensitivity"], "sensitive");
+
+        for invalid in [
+            serde_json::json!({"content": "", "category": "fact"}),
+            serde_json::json!({
+                "content": "mismatch",
+                "candidateKind": "preference",
+                "category": "fact"
+            }),
+            serde_json::json!({"content": "unknown", "category": "unknown"}),
+            serde_json::json!({"content": "extra", "unreviewed": true}),
+        ] {
+            assert!(validated_memory_write_proposal(&invalid).is_err());
+        }
     }
 }
 

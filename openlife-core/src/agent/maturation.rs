@@ -8,8 +8,13 @@ use crate::agent::evidence_store::{
 };
 use crate::agent::governor::{GovernanceDecision, GovernanceDecisionKind, LifeModelGovernor};
 use crate::agent::hs_selector::RuntimeHSPacket;
+use crate::agent::main_chat_memory_candidate::MemoryCandidateKind;
 use crate::agent::maturation_domain::{
     classify_supported_maturation_domain, high_risk_maturation_text, SupportedMaturationDomain,
+};
+use crate::agent::memory_lifecycle::{
+    CanonicalMemoryFactDescriptor, MemoryLifecycleRiskLevel, MemoryLifecycleScope,
+    MemoryLifecycleSensitivity,
 };
 use crate::agent::policy_store::{
     ModelRoutePolicy, PolicyTopic, BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING,
@@ -2293,11 +2298,31 @@ fn candidate_from_draft(
 
     if contains_any(&combined, &["memory", "remember", "记忆", "记住"]) {
         let risk_level = risk_for_memory(&combined);
+        let lifecycle_risk = match risk_level {
+            RiskLevel::Low => MemoryLifecycleRiskLevel::Low,
+            RiskLevel::Medium => MemoryLifecycleRiskLevel::Medium,
+            RiskLevel::High => MemoryLifecycleRiskLevel::High,
+            RiskLevel::Critical => MemoryLifecycleRiskLevel::IdentityValue,
+        };
+        let candidate_kind = MemoryCandidateKind::SemanticUserFact;
+        let fact = CanonicalMemoryFactDescriptor::from_candidate(
+            summary,
+            candidate_kind,
+            MemoryLifecycleScope::Global,
+            lifecycle_risk,
+            MemoryLifecycleSensitivity::Sensitive,
+        )
+        .ok()?;
         return Some(candidate(
             ProposalType::MemoryWrite,
             "memory.candidates",
             json!({
-                "content": summary,
+                "content": fact.canonical_body,
+                "scope": fact.scope,
+                "category": fact.category,
+                "candidateKind": candidate_kind,
+                "riskLevel": fact.risk_level,
+                "sensitivity": fact.sensitivity,
                 "source": "maturation_life_event",
                 "event_type": event_type,
                 "confidence": confidence,

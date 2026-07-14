@@ -1272,6 +1272,13 @@ async fn test_memory_propose_write_creates_proposal() {
         "expected proposal_id in output: {}",
         output
     );
+    let proposals = prop_store.list_pending_proposals(10).unwrap();
+    assert_eq!(proposals.len(), 1);
+    let reviewed = &proposals[0];
+    assert_eq!(reviewed.after["candidateKind"], "preference");
+    assert_eq!(reviewed.after["category"], "preference");
+    assert_eq!(reviewed.after["riskLevel"], "medium");
+    assert_eq!(reviewed.after["sensitivity"], "sensitive");
 }
 
 #[test]
