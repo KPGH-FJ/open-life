@@ -1503,10 +1503,12 @@ impl MainChatAgentEventStore {
             .context("single event append returned no durable event")
     }
 
-    /// Close an exact prepared fence from the same process-local, sealed
-    /// ToolGateway receipt that observed zero adapter attempts. Generic event
-    /// inputs cannot construct this admission. The event and its ActionQueue
-    /// outbox row commit in the same EventStore transaction.
+    /// Persist a zero-attempt terminal from the same process-local, sealed
+    /// ToolGateway receipt. If a prepared dispatch fence exists, the terminal
+    /// closes it and enqueues the ActionQueue reconciliation in the same
+    /// transaction. A contract or policy rejection may have no prepared fence;
+    /// its live receipt still owns a standalone `tool.not_dispatched` fact.
+    /// Generic event inputs cannot construct either admission.
     fn append_live_not_dispatched_tool_receipt(
         &self,
         task_session_id: &str,
@@ -1532,23 +1534,19 @@ impl MainChatAgentEventStore {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         validate_task_sequence_domain(&tx, task_session_id)?;
         validate_task_run_binding(&tx, task_session_id)?;
-        let Some(prepared) = select_event_by_immutable_identity(
+        let prepared = select_event_by_immutable_identity(
             &tx,
             task_session_id,
             "tool.dispatch_prepared",
             &receipt.receipt_id,
-        )?
-        else {
-            tx.commit()?;
-            return Ok(None);
-        };
+        )?;
         bind_task_run(&tx, task_session_id, run_id)?;
         if event_scope_hidden(&tx, "task", task_session_id)?
             || event_scope_hidden(&tx, "run", run_id)?
         {
             anyhow::bail!("main_chat_event_canonical_source_tombstoned");
         }
-        let payload = json!({
+        let mut payload = json!({
             "receiptId": receipt.receipt_id,
             "requestId": receipt.receipt_id,
             "sourceRunId": run_id,
@@ -1568,8 +1566,10 @@ impl MainChatAgentEventStore {
             "responseObservedAt": Value::Null,
             "finishedAt": finished_at,
             "reconciledAfterProcessRestart": false,
-            "preparedEventId": prepared.event_id,
         });
+        if let (Some(object), Some(prepared)) = (payload.as_object_mut(), prepared.as_ref()) {
+            object.insert("preparedEventId".into(), json!(prepared.event_id.clone()));
+        }
         let resolution = append_event_in_transaction_with_tool_admission(
             &tx,
             MainChatAgentEventDraft {
@@ -1586,14 +1586,16 @@ impl MainChatAgentEventStore {
             &self.digest_key,
             ToolLifecycleAdmission::LiveNotDispatched(receipt),
         )?;
-        enqueue_tool_queue_reconciliation_projection(
-            &tx,
-            &prepared,
-            &resolution,
-            MainChatToolQueueReconciliationDisposition::EffectNotAttempted,
-            finished_at,
-            &self.digest_key,
-        )?;
+        if let Some(prepared) = prepared.as_ref() {
+            enqueue_tool_queue_reconciliation_projection(
+                &tx,
+                prepared,
+                &resolution,
+                MainChatToolQueueReconciliationDisposition::EffectNotAttempted,
+                finished_at,
+                &self.digest_key,
+            )?;
+        }
         tx.commit()?;
         Ok(Some(resolution))
     }
@@ -4877,37 +4879,41 @@ fn validate_tool_lifecycle_transition(
             &draft.task_session_id,
             "tool.dispatch_prepared",
             &draft.object_id,
-        )?
-        .ok_or_else(|| MainChatAgentEventStoreFault::ToolLifecycleConflict {
-            reason: format!("not_dispatched_without_prepared:{}", draft.object_id),
-        })?;
-        for key in [
-            "receiptId",
-            "sourceRunId",
-            "manifestId",
-            "requestDigest",
-            "actionEffect",
-            "idempotencyContract",
-        ] {
-            if prepared.payload.get(key) != draft.payload.get(key) {
+        )?;
+        if let Some(prepared) = prepared.as_ref() {
+            for key in [
+                "receiptId",
+                "sourceRunId",
+                "manifestId",
+                "requestDigest",
+                "actionEffect",
+                "idempotencyContract",
+            ] {
+                if prepared.payload.get(key) != draft.payload.get(key) {
+                    return Err(MainChatAgentEventStoreFault::ToolLifecycleConflict {
+                        reason: format!(
+                            "prepared_not_dispatched_identity_conflict:{}:{key}",
+                            draft.object_id
+                        ),
+                    }
+                    .into());
+                }
+            }
+            if draft.payload.get("preparedEventId").and_then(Value::as_str)
+                != Some(prepared.event_id.as_str())
+                || draft.created_at < prepared.created_at
+            {
                 return Err(MainChatAgentEventStoreFault::ToolLifecycleConflict {
                     reason: format!(
-                        "prepared_not_dispatched_identity_conflict:{}:{key}",
+                        "not_dispatched_prepared_binding_invalid:{}",
                         draft.object_id
                     ),
                 }
                 .into());
             }
-        }
-        if draft.payload.get("preparedEventId").and_then(Value::as_str)
-            != Some(prepared.event_id.as_str())
-            || draft.created_at < prepared.created_at
-        {
+        } else if draft.payload.get("preparedEventId").is_some() {
             return Err(MainChatAgentEventStoreFault::ToolLifecycleConflict {
-                reason: format!(
-                    "not_dispatched_prepared_binding_invalid:{}",
-                    draft.object_id
-                ),
+                reason: format!("not_dispatched_unexpected_prepared_ref:{}", draft.object_id),
             }
             .into());
         }
@@ -11062,6 +11068,39 @@ mod tests {
             outbox.items[0].disposition,
             MainChatToolQueueReconciliationDisposition::EffectNotAttempted
         );
+
+        let standalone_store = MainChatAgentEventStore::new_in_memory().unwrap();
+        let standalone_task_id = "task-live-gateway-rejection";
+        let standalone_run_id = "run-live-gateway-rejection";
+        let standalone_registration = openlife_core::tool_execution_receipt::ToolExecutionReceiptRegistration::test_never_dispatched_read(
+            Some(standalone_run_id.into()),
+            Some("mcp:gateway-rejection".into()),
+            "request-live-gateway-rejection".into(),
+        );
+        let standalone_receipt = standalone_registration.settle_after_runtime_failure();
+        let standalone = standalone_store
+            .append_live_not_dispatched_tool_receipt(
+                standalone_task_id,
+                standalone_run_id,
+                &standalone_receipt,
+                "openlife_turn_runtime.tool_not_dispatched",
+            )
+            .unwrap()
+            .expect("a sealed ToolGateway rejection is a standalone zero-dispatch terminal");
+        assert_eq!(standalone.event_type, "tool.not_dispatched");
+        assert!(standalone.payload.get("preparedEventId").is_none());
+        assert_eq!(
+            standalone_store
+                .list(standalone_task_id, 0, 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(standalone_store
+            .pending_tool_queue_reconciliation_projections(10)
+            .unwrap()
+            .items
+            .is_empty());
 
         let restored: ToolExecutionReceipt =
             serde_json::from_value(serde_json::to_value(&receipt).unwrap()).unwrap();

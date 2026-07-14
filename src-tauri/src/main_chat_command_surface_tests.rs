@@ -436,13 +436,6 @@ fn assert_verified_product_tool_not_dispatched(call: &serde_json::Value) {
     assert_eq!(call["executionReceipt"]["outcome"], "not_observed");
 }
 
-fn assert_unverified_product_tool_evidence(call: &serde_json::Value) {
-    assert_eq!(call["toolRef"]["id"], "unknown_tool");
-    assert_eq!(call["status"], "unknown");
-    assert_eq!(call["failureCode"], "tool_evidence_unverified");
-    assert!(call.get("executionReceipt").is_none());
-}
-
 fn assert_verified_product_tool_succeeded(call: &serde_json::Value) {
     assert_eq!(call["toolRef"]["id"], "unknown_tool");
     assert_eq!(call["status"], "success");
@@ -2135,9 +2128,9 @@ async fn main_chat_kernel_goal_3_path_traversal_send_stream_blocks_filesystem_re
     assert_eq!(send_response["legacy_fallback_used"], false);
     assert_eq!(
         send_response["tool_calls"].as_array().map(Vec::len),
-        Some(1)
+        Some(0),
+        "a path-policy rejection is an ActionQueue blocker, not ToolGateway execution credit"
     );
-    assert_unverified_product_tool_evidence(&send_response["tool_calls"][0]);
     let send_task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
         .as_str()
         .expect("send traversal task session id");
@@ -2178,9 +2171,9 @@ async fn main_chat_kernel_goal_3_path_traversal_send_stream_blocks_filesystem_re
     .await;
     assert_eq!(
         stream_response["tool_calls"].as_array().map(Vec::len),
-        Some(1)
+        Some(0),
+        "stream path-policy rejection must not mint fake tool execution credit"
     );
-    assert_unverified_product_tool_evidence(&stream_response["tool_calls"][0]);
     let stream_task_session_id = task_session_id_from_response(&stream_response);
     let stream_session = load_command_surface_session(&stream_state, &stream_task_session_id).await;
     assert_eq!(
@@ -4230,9 +4223,9 @@ async fn main_chat_kernel_goal_3_unknown_tool_send_stream_blocks_without_fallbac
     );
     assert_eq!(
         send_response["tool_calls"].as_array().map(Vec::len),
-        Some(1)
+        Some(0),
+        "a disallowed tool name is a policy blocker, not a tool execution"
     );
-    assert_unverified_product_tool_evidence(&send_response["tool_calls"][0]);
     let send_task_session_id = send_response["agent_ingress"]["agentTaskSessionId"]
         .as_str()
         .expect("send unknown task session id");
@@ -4268,9 +4261,9 @@ async fn main_chat_kernel_goal_3_unknown_tool_send_stream_blocks_without_fallbac
     );
     assert_eq!(
         stream_response["tool_calls"].as_array().map(Vec::len),
-        Some(1)
+        Some(0),
+        "stream policy rejection must not mint fake tool execution credit"
     );
-    assert_unverified_product_tool_evidence(&stream_response["tool_calls"][0]);
     let stream_task_session_id = task_session_id_from_response(&stream_response);
     let stream_session = load_command_surface_session(&stream_state, &stream_task_session_id).await;
     assert_eq!(

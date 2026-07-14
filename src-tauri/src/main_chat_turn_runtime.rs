@@ -1765,9 +1765,20 @@ impl<'a> OpenLifeTurnRuntime<'a> {
                     )
                 }
             };
-        let already_projected_tool_receipt_ids = durable_events
+        let already_projected_tool_terminal_receipt_ids = durable_events
             .iter()
-            .filter(|event| event.object_type == "tool_execution_receipt")
+            .filter(|event| {
+                event.object_type == "tool_execution_receipt"
+                    && matches!(
+                        event.event_type.as_str(),
+                        "tool.completed"
+                            | "tool.failed"
+                            | "tool.effect_unknown"
+                            | "tool.local_aborted"
+                            | "tool.remote_unknown"
+                            | "tool.not_dispatched"
+                    )
+            })
             .map(|event| event.object_id.clone())
             .collect::<std::collections::HashSet<_>>();
         let regular_tool_receipts = result
@@ -1784,7 +1795,9 @@ impl<'a> OpenLifeTurnRuntime<'a> {
                     != openlife_core::tool_execution_receipt::ToolTransportStatus::NotAttempted
                     || receipt.proves_not_dispatched()
             })
-            .filter(|receipt| !already_projected_tool_receipt_ids.contains(&receipt.receipt_id))
+            .filter(|receipt| {
+                !already_projected_tool_terminal_receipt_ids.contains(&receipt.receipt_id)
+            })
             .collect::<Vec<_>>();
         if !regular_tool_receipts.is_empty() {
             let appended_tool_events =

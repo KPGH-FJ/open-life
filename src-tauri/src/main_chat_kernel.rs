@@ -6924,7 +6924,7 @@ async fn build_blocked_kernel_command_surface_result(
         .context_metadata
         .as_ref()
         .and_then(|metadata| metadata.hs_context.clone());
-    let reasoning_trace = ReasoningTrace {
+    let mut reasoning_trace = ReasoningTrace {
         generation_result: Some(serde_json::json!({
             "text": reply,
             "mainChatAgentV1": true,
@@ -6987,6 +6987,20 @@ async fn build_blocked_kernel_command_surface_result(
         &mut execution_transcript,
     )
     .await?;
+    agent_run.tool_call_count = tool_calls.len() as u32;
+    agent_run.step_count = if read_tool_loop_used { 1 } else { 0 };
+    if let Some(generation) = reasoning_trace
+        .generation_result
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        generation.insert("toolCallCount".into(), serde_json::json!(tool_calls.len()));
+        generation.insert(
+            "toolCalled".into(),
+            serde_json::json!(!tool_calls.is_empty()),
+        );
+    }
+    agent_run.reasoning_trace = Some(reasoning_trace.clone());
     {
         let store_arc = state
             .agent_run_store
@@ -7215,10 +7229,29 @@ async fn record_kernel_tool_call_evidence(
         let (receipt, execution_status, projection_error) = match call.execution_receipt.clone() {
             Some(receipt) => {
                 if let Some(object) = metadata.as_object_mut() {
-                    object.insert(
-                        "toolExecutionReceipt".into(),
-                        serde_json::json!(receipt.clone()),
-                    );
+                    if call.product_projection.is_some() {
+                        object.insert(
+                            "toolExecutionReceipt".into(),
+                            serde_json::json!(receipt.clone()),
+                        );
+                    } else {
+                        // A resolver or policy blocker that stopped before the
+                        // ToolGateway boundary is a domain fact, not tool
+                        // execution credit. Keep the ActionQueue blocker but
+                        // do not let recovery reinterpret a caller-shaped
+                        // receipt as a durable ToolGateway terminal.
+                        object.remove("toolExecutionReceipt");
+                        object.insert("toolExecutionCredit".into(), serde_json::json!(false));
+                        object.insert(
+                            "preDispatchBlockerReceiptDigest".into(),
+                            serde_json::json!(
+                                openlife_core::agent::metadata_safe::metadata_safe_value_digest(
+                                    &serde_json::json!(receipt.clone())
+                                )
+                                .1
+                            ),
+                        );
+                    }
                 }
                 let terminal_error = matches!(
                     declared_execution_status,
@@ -7238,10 +7271,8 @@ async fn record_kernel_tool_call_evidence(
                         openlife_core::tool_manifest::ToolIdempotencyContract::Unspecified,
                     );
                 if let Some(object) = metadata.as_object_mut() {
-                    object.insert(
-                        "toolExecutionReceipt".into(),
-                        serde_json::json!(receipt.clone()),
-                    );
+                    object.remove("toolExecutionReceipt");
+                    object.insert("toolExecutionCredit".into(), serde_json::json!(false));
                     object.insert(
                         "receiptInvariantViolation".into(),
                         serde_json::json!("kernel_tool_execution_receipt_missing_or_invalid"),
@@ -7339,6 +7370,9 @@ async fn record_kernel_tool_call_evidence(
             .as_ref()
             .map(|projection| projection.bound_action_id().to_string())
             .unwrap_or_else(|| queued.id.clone());
+        if call.product_projection.is_none() {
+            continue;
+        }
         tool_calls.push(ToolCallResult {
             name: call.name.clone(),
             arguments: call.governed_input.clone(),
