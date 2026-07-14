@@ -4545,22 +4545,78 @@ async fn recover_canonical_tool_facts(
             "turn_operation_final_reconciliation_required:action_owner_digest_drift".into(),
         );
     }
-    if actions.len() != tool_receipt_refs.len() {
-        return Err(
-            "turn_operation_final_reconciliation_required:tool_receipt_owner_count_mismatch".into(),
-        );
-    }
-
-    let mut tool_calls = Vec::with_capacity(actions.len());
-    let mut completed_actions = Vec::new();
-    let mut observations_used = Vec::new();
-    for (index, (action, expected_receipt_ref)) in actions.iter().zip(tool_receipt_refs).enumerate()
-    {
+    for action in &actions {
         if action.session_id != operation_id {
             return Err(
                 "turn_operation_final_reconciliation_required:action_session_mismatch".into(),
             );
         }
+        if matches!(
+            action.status,
+            openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Planned
+                | openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Executing
+                | openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Observed
+                | openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Retrying
+        ) {
+            return Err(
+                "turn_operation_final_reconciliation_required:nonterminal_action_owner".into(),
+            );
+        }
+    }
+    let observed_tool_receipt_refs = actions
+        .iter()
+        .filter_map(|action| {
+            action
+                .observation_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("toolExecutionReceipt"))
+        })
+        .map(|value| {
+            serde_json::from_value::<openlife_core::tool_execution_receipt::ToolExecutionReceipt>(
+                value.clone(),
+            )
+            .map(|receipt| receipt.receipt_id)
+            .map_err(|_| {
+                "turn_operation_final_reconciliation_required:tool_receipt_owner_invalid"
+                    .to_string()
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if observed_tool_receipt_refs != tool_receipt_refs
+        || observed_tool_receipt_refs
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != observed_tool_receipt_refs.len()
+    {
+        return Err(
+            "turn_operation_final_reconciliation_required:tool_receipt_owner_refs_mismatch".into(),
+        );
+    }
+
+    let mut tool_calls = Vec::with_capacity(tool_receipt_refs.len());
+    let mut completed_actions = Vec::new();
+    let mut observations_used = Vec::new();
+    for (index, expected_receipt_ref) in tool_receipt_refs.iter().enumerate() {
+        let matching_actions = actions
+            .iter()
+            .filter(|action| {
+                action
+                    .observation_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("toolExecutionReceipt"))
+                    .and_then(|receipt| receipt.get("receiptId"))
+                    .and_then(Value::as_str)
+                    == Some(expected_receipt_ref.as_str())
+            })
+            .collect::<Vec<_>>();
+        if matching_actions.len() != 1 {
+            return Err(
+                "turn_operation_final_reconciliation_required:tool_receipt_action_binding_ambiguous"
+                    .into(),
+            );
+        }
+        let action = matching_actions[0];
         let metadata = action.observation_metadata.as_ref().ok_or_else(|| {
             "turn_operation_final_reconciliation_required:observation_owner_missing".to_string()
         })?;
@@ -4973,7 +5029,7 @@ async fn recover_openlife_turn_from_durable_final(
         || observation_count != observation_refs.len()
         || pending_user_action_count != pending_user_action_refs.len()
         || tool_call_count != tool_receipt_refs.len()
-        || tool_call_count != action_queue_owner_digests.len()
+        || action_queue_refs.len() != action_queue_owner_digests.len()
         || tool_call_count != tool_terminal_event_refs.len()
         || tool_call_count != tool_terminal_event_digests.len()
         || transcript_count != transcript_refs.len()
@@ -6282,6 +6338,113 @@ mod turn_admission_tests {
                 .filter(|message| message.role == "assistant")
                 .count(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn domain_action_without_tool_receipt_recovers_without_duplicate_memory_commit() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let session_id = "d053-memory-domain-action-recovery";
+        let body = "Remember this: I prefer short summaries.";
+        fail_main_chat_once_after_durable_final_for_test(&operation_id);
+
+        let first_error = crate::main_chat_send::send_message_with_operation_state(
+            operation_id.clone(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: body.into(),
+            }],
+            None,
+            &state,
+        )
+        .await
+        .expect_err("lose live delivery after the Memory domain action is durable");
+        assert_eq!(
+            first_error,
+            "injected_turn_failure_after_durable_final_before_live_delivery"
+        );
+        let active_before_retry = state
+            .memory_lifecycle_store
+            .as_ref()
+            .expect("MemoryLifecycleStore")
+            .lock()
+            .await
+            .list_active_records(None, 200)
+            .expect("active Memory records before retry");
+        assert_eq!(active_before_retry.len(), 1);
+        let actions_before_retry = state
+            .main_chat_action_queue_store
+            .as_ref()
+            .expect("ActionQueueStore")
+            .lock()
+            .await
+            .list_for_session(&operation_id)
+            .expect("Memory domain actions before retry");
+        assert_eq!(actions_before_retry.len(), 1);
+        assert_eq!(
+            actions_before_retry[0].action.action_type,
+            "memory.explicit_write"
+        );
+        assert!(actions_before_retry[0]
+            .observation_metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.get("receiptId").is_some()));
+        assert!(actions_before_retry[0]
+            .observation_metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.get("toolExecutionReceipt").is_none()));
+
+        *state.main_chat_runtime_state.lock().await = crate::state::MainChatRuntimeState::default();
+        let retry = crate::main_chat_send::send_message_with_operation_state(
+            operation_id.clone(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: body.into(),
+            }],
+            None,
+            &state,
+        )
+        .await
+        .expect("recover domain action from the canonical final receipt");
+
+        assert!(retry.tool_calls.is_empty());
+        assert_eq!(
+            retry
+                .turn_terminal
+                .as_ref()
+                .expect("recovered Memory terminal")
+                .final_delivery
+                .tool_call_count,
+            0
+        );
+        assert_eq!(
+            state
+                .memory_lifecycle_store
+                .as_ref()
+                .expect("MemoryLifecycleStore")
+                .lock()
+                .await
+                .list_active_records(None, 200)
+                .expect("active Memory records after retry")
+                .len(),
+            1,
+            "recovery must not commit the Memory fact twice"
+        );
+        assert_eq!(
+            state
+                .main_chat_action_queue_store
+                .as_ref()
+                .expect("ActionQueueStore")
+                .lock()
+                .await
+                .list_for_session(&operation_id)
+                .expect("Memory domain actions after retry")
+                .len(),
+            1,
+            "recovery must not enqueue a second domain action"
         );
     }
 

@@ -2633,10 +2633,16 @@ async fn quoted_remote_instructions_cannot_authorize_explicit_memory_writes() {
 }
 
 #[tokio::test]
-async fn main_chat_kernel_chinese_life_event_capture_send_stream() {
+async fn main_chat_kernel_chinese_life_event_is_not_silently_captured_send_stream() {
     let user_text = "今天午饭吃了牛肉面，下午犯困";
 
     let send_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    set_command_surface_scripted_generation_response(
+        &send_state,
+        "k4-life-event-no-silent-write",
+        serde_json::json!("午饭后犯困很常见，可以先补水并短暂走动。"),
+    )
+    .await;
     let memory_records_before = active_memory_record_count(&send_state).await;
     let send_response = invoke_send_message_for_kernel_goal_3(
         send_state.clone(),
@@ -2650,7 +2656,8 @@ async fn main_chat_kernel_chinese_life_event_capture_send_stream() {
         "direct_answer"
     );
     let generation = &send_response["reasoning_trace"]["generation_result"];
-    assert_eq!(generation["kernelBackedMemoryGovernance"], true);
+    assert_eq!(generation["kernelBackedMemoryGovernance"], false);
+    assert_eq!(generation["memoryGovernanceDisposition"], "not_planned");
     assert_eq!(
         generation["memoryGovernance"]["directWritesExecuted"],
         false
@@ -2660,7 +2667,7 @@ async fn main_chat_kernel_chinese_life_event_capture_send_stream() {
             .as_array()
             .expect("life event ids")
             .len(),
-        1
+        0
     );
     assert!(generation["memoryGovernance"]["memoryProposalIds"]
         .as_array()
@@ -2670,7 +2677,9 @@ async fn main_chat_kernel_chinese_life_event_capture_send_stream() {
         .as_array()
         .expect("lifemodel proposal ids")
         .is_empty());
-    assert_eq!(list_command_surface_life_events(&send_state).await.len(), 1);
+    assert!(list_command_surface_life_events(&send_state)
+        .await
+        .is_empty());
     assert!(list_command_surface_proposals(&send_state).await.is_empty());
     assert_eq!(
         active_memory_record_count(&send_state).await,
@@ -2686,6 +2695,12 @@ async fn main_chat_kernel_chinese_life_event_capture_send_stream() {
     );
 
     let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    set_command_surface_scripted_generation_response(
+        &stream_state,
+        "k4-life-event-no-silent-write",
+        serde_json::json!("午饭后犯困很常见，可以先补水并短暂走动。"),
+    )
+    .await;
     let stream_response = invoke_start_stream_message_for_kernel_goal_3(
         stream_state.clone(),
         "k4-stream-chinese-life-event",
@@ -2698,12 +2713,11 @@ async fn main_chat_kernel_chinese_life_event_capture_send_stream() {
             .as_array()
             .expect("stream life event ids")
             .len(),
-        1
+        0
     );
-    assert_eq!(
-        list_command_surface_life_events(&stream_state).await.len(),
-        1
-    );
+    assert!(list_command_surface_life_events(&stream_state)
+        .await
+        .is_empty());
 }
 
 #[tokio::test]
@@ -2870,7 +2884,7 @@ async fn main_chat_kernel_chinese_mixed_memory_governance_creates_multiple_artif
     assert_eq!(memory_governance["directMemoryWrite"], false);
     assert_eq!(memory_governance["directLifeModelWrite"], false);
     assert_eq!(memory_governance["acceptedDurableTruthWritten"], false);
-    assert!(memory_governance["localLifeEventCaptureExecuted"]
+    assert!(!memory_governance["localLifeEventCaptureExecuted"]
         .as_bool()
         .unwrap_or(false));
     assert_eq!(
@@ -2878,7 +2892,7 @@ async fn main_chat_kernel_chinese_mixed_memory_governance_creates_multiple_artif
             .as_array()
             .expect("life event ids")
             .len(),
-        1
+        0
     );
     assert_eq!(
         memory_governance["memoryProposalIds"]
@@ -2937,22 +2951,9 @@ async fn main_chat_kernel_chinese_mixed_memory_governance_creates_multiple_artif
             .and_then(serde_json::Value::as_bool),
         Some(false)
     );
-    let life_events = list_command_surface_life_events(&send_state).await;
-    assert_eq!(life_events.len(), 1);
-    assert_eq!(
-        memory_governance["lifeEventIds"]
-            .as_array()
-            .and_then(|ids| ids.first())
-            .and_then(serde_json::Value::as_str),
-        Some(life_events[0].id.as_str())
-    );
-    assert_eq!(life_events[0].metadata["localOnly"], true);
-    assert_eq!(life_events[0].metadata["proposalRequired"], false);
-    assert_eq!(life_events[0].metadata["directLifeModelWrite"], false);
-    assert_eq!(
-        life_events[0].metadata["acceptedDurableTruthWritten"],
-        false
-    );
+    assert!(list_command_surface_life_events(&send_state)
+        .await
+        .is_empty());
     assert_eq!(
         active_memory_record_count(&send_state).await,
         memory_records_before
@@ -2969,11 +2970,9 @@ async fn main_chat_kernel_chinese_mixed_memory_governance_creates_multiple_artif
                 .and_then(serde_json::Value::as_str)
                 == Some(memory_proposal.id.as_str())
     }));
-    assert!(send_actions.iter().any(|action| {
-        action.action.action_type == "life_event.create"
-            && action.status
-                == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Completed
-    }));
+    assert!(send_actions
+        .iter()
+        .all(|action| action.action.action_type != "life_event.create"));
 
     let stream_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let stream_memory_records_before = active_memory_record_count(&stream_state).await;
@@ -2996,7 +2995,7 @@ async fn main_chat_kernel_chinese_mixed_memory_governance_creates_multiple_artif
             .as_array()
             .expect("stream life event ids")
             .len(),
-        1
+        0
     );
     assert_eq!(
         stream_generation["memoryGovernance"]["memoryProposalIds"]
@@ -3044,10 +3043,9 @@ async fn main_chat_kernel_chinese_mixed_memory_governance_creates_multiple_artif
         active_memory_record_count(&stream_state).await,
         stream_memory_records_before
     );
-    assert_eq!(
-        list_command_surface_life_events(&stream_state).await.len(),
-        1
-    );
+    assert!(list_command_surface_life_events(&stream_state)
+        .await
+        .is_empty());
 }
 
 #[tokio::test]
@@ -3520,7 +3518,12 @@ async fn main_chat_kernel_goal_4_ordinary_auto_checkin_does_not_materialize_trut
     );
     assert_eq!(
         response["reasoning_trace"]["generation_result"]["kernelBackedMemoryGovernance"],
-        true
+        false,
+        "a goal-progress assertion stays conversation-only and must not claim a governance artifact"
+    );
+    assert_eq!(
+        response["reasoning_trace"]["generation_result"]["memoryGovernanceDisposition"],
+        "not_planned"
     );
     let implicit_life_event_ids = response["reasoning_trace"]["generation_result"]
         ["memoryGovernance"]["lifeEventIds"]
@@ -3556,6 +3559,70 @@ async fn main_chat_kernel_goal_4_ordinary_auto_checkin_does_not_materialize_trut
             .is_empty(),
         "the canonical LifeEvent store must remain unchanged"
     );
+}
+
+#[tokio::test]
+async fn inferred_memory_review_preserves_direct_answer_and_truthful_proposal_reason() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let reply = "Central European Time noted for this answer; start with one focused block.";
+    set_command_surface_scripted_generation_response(
+        &state,
+        "h2-inferred-memory-direct-answer",
+        serde_json::json!(reply),
+    )
+    .await;
+    let memory_records_before = active_memory_record_count(&state).await;
+
+    let response = invoke_send_message_for_kernel_goal_3(
+        state.clone(),
+        "h2-inferred-memory-overlay",
+        "My work timezone is Central European Time.",
+    )
+    .await;
+
+    assert_eq!(
+        response["agent_ingress"]["selectedStrategy"],
+        "direct_answer"
+    );
+    assert_eq!(response["reply"], reply);
+    let generation = &response["reasoning_trace"]["generation_result"];
+    assert_eq!(generation["kernelBackedDirectAnswer"], true);
+    assert_eq!(generation["kernelBackedMemoryGovernance"], true);
+    assert_eq!(
+        generation["memoryGovernanceDisposition"],
+        "deferred_review_overlay"
+    );
+    assert_eq!(
+        generation["providerGenerationPath"],
+        "main_chat_direct_answer_scheduler"
+    );
+    assert_eq!(
+        generation["memoryGovernance"]["memoryProposalIds"]
+            .as_array()
+            .expect("inferred Memory proposal ids")
+            .len(),
+        1
+    );
+
+    let proposals = list_command_surface_proposals(&state).await;
+    assert_eq!(proposals.len(), 1);
+    assert!(proposals[0]
+        .reason
+        .contains("inferred a possible Memory candidate"));
+    assert!(!proposals[0].reason.contains("User requested"));
+    assert!(!proposals[0].reason.contains("explicitly requested"));
+    assert_eq!(
+        active_memory_record_count(&state).await,
+        memory_records_before,
+        "deferred review must not mutate canonical Memory before acceptance"
+    );
+    let task_session_id = task_session_id_from_response(&response);
+    let session = load_command_surface_session(&state, &task_session_id).await;
+    assert_eq!(
+        session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
+    );
+    assert!(session.pending_blockers.is_empty());
 }
 
 #[tokio::test]

@@ -1726,7 +1726,7 @@ fn build_policy_decision(
     };
 
     let mut authorized_memory_candidate_ids =
-        policy_authorized_memory_candidate_ids(route_kind, intent);
+        policy_authorized_memory_candidate_ids(route_kind, intent, &governance_plan);
     authorized_memory_candidate_ids.sort();
     authorized_memory_candidate_ids.dedup();
 
@@ -2105,18 +2105,9 @@ fn build_policy_governance_plan(
                 );
             }
             PolicyGovernanceDisposition::InferredStableFact => {
-                let mode = if candidate.sensitivity == "sensitive" {
-                    PolicyGovernanceReviewMode::Blocking
-                } else {
-                    PolicyGovernanceReviewMode::Deferred
-                };
                 push_policy_governance_review_candidate(
-                    if mode == PolicyGovernanceReviewMode::Blocking {
-                        &mut blocking_review_groups
-                    } else {
-                        &mut deferred_review_groups
-                    },
-                    mode,
+                    &mut deferred_review_groups,
+                    PolicyGovernanceReviewMode::Deferred,
                     PolicyGovernanceReviewDomain::Memory,
                     &candidate.candidate_id,
                 );
@@ -2218,8 +2209,9 @@ fn push_policy_governance_review_candidate(
 fn policy_authorized_memory_candidate_ids(
     route_kind: PolicyRouteKind,
     intent: &IntentFrame,
+    governance_plan: &PolicyGovernancePlan,
 ) -> Vec<String> {
-    match route_kind {
+    let mut candidate_ids = match route_kind {
         PolicyRouteKind::ReversibleMemoryCommit => {
             policy_authorized_explicit_memory_candidate_ids(intent)
         }
@@ -2231,7 +2223,23 @@ fn policy_authorized_memory_candidate_ids(
             intent.memory_routing.memory_proposal_candidate_ids.clone()
         }
         _ => Vec::new(),
+    };
+    for group in governance_plan
+        .blocking_review_groups
+        .iter()
+        .chain(governance_plan.deferred_review_groups.iter())
+        .filter(|group| {
+            matches!(
+                group.domain,
+                PolicyGovernanceReviewDomain::Memory | PolicyGovernanceReviewDomain::LifeModel
+            )
+        })
+    {
+        candidate_ids.extend(group.candidate_ids.iter().cloned());
     }
+    candidate_ids.sort();
+    candidate_ids.dedup();
+    candidate_ids
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

@@ -631,6 +631,57 @@ fn policy_governance_plan_preserves_mixed_episode_memory_and_lifemodel_lanes() {
 }
 
 #[test]
+fn inferred_stable_memory_fact_keeps_direct_answer_and_authorizes_only_deferred_review() {
+    let decision = AgentIngress::default().decide(
+        "policy-governance-inferred-memory",
+        "My work timezone is Central European Time.",
+        None,
+        AgentTaskKind::Conversation,
+    );
+    decision
+        .validate_policy_projection()
+        .expect("inferred Memory policy projection");
+
+    assert_eq!(decision.policy_route, PolicyRouteKind::DirectAnswer);
+    assert_eq!(
+        decision.selected_strategy,
+        MainChatAgentStrategy::DirectAnswer
+    );
+    assert!(!decision.intent_frame.requests_durable_write);
+    assert!(!decision.intent_frame.requests_memory_change);
+    assert!(decision
+        .policy_decision
+        .allows(AllowedCapability::ProviderGeneration));
+    assert!(decision
+        .policy_decision
+        .allows(AllowedCapability::MemoryProposal));
+    assert_eq!(
+        decision
+            .policy_decision
+            .authorized_memory_candidate_ids
+            .len(),
+        1
+    );
+    let plan = decision
+        .policy_decision
+        .governance_plan()
+        .expect("live inferred Memory governance plan");
+    assert!(plan.blocking_review_groups.is_empty());
+    assert_eq!(plan.deferred_review_groups.len(), 1);
+    assert_eq!(
+        plan.deferred_review_groups[0].domain,
+        PolicyGovernanceReviewDomain::Memory
+    );
+    assert_eq!(plan.deferred_review_groups[0].candidate_ids.len(), 1);
+    let authorized = decision
+        .policy_decision
+        .authorized_memory_routing(&decision.intent_frame.memory_routing);
+    assert_eq!(authorized.memory_proposal_candidate_ids.len(), 1);
+    assert!(authorized.lifemodel_proposal_candidate_ids.is_empty());
+    assert!(authorized.life_event_candidate_ids.is_empty());
+}
+
+#[test]
 fn policy_governance_plan_gives_quoted_remote_sources_zero_authorization() {
     for (session_id, prompt) in [
         (

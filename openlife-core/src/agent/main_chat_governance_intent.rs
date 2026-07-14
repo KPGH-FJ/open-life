@@ -160,7 +160,14 @@ fn collect_durable_write_requirement_from_memory_routing(
         return;
     }
 
-    if !memory_routing.memory_proposal_candidate_ids.is_empty() {
+    let has_explicit_memory_request = memory_routing.candidates.iter().any(|candidate| {
+        candidate.destination == crate::agent::MemoryDestination::MemoryProposal
+            && candidate.explicitness == "explicit"
+            && memory_routing
+                .memory_proposal_candidate_ids
+                .contains(&candidate.candidate_id)
+    });
+    if has_explicit_memory_request {
         set_durable_write_requirement(
             intent,
             MainChatDurableWriteRequirement::MemoryProposal,
