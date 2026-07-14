@@ -1044,6 +1044,26 @@ fn policy_router_real_life_scenario_eval_uses_only_policy_route_outputs() {
         ("empty", "", PolicyRouteKind::AskClarification),
         ("too short", "嗯", PolicyRouteKind::AskClarification),
         (
+            "explicit clarification zh",
+            "我有点分心，先问我两个澄清问题再给建议。",
+            PolicyRouteKind::AskClarification,
+        ),
+        (
+            "explicit clarification en",
+            "Ask me two clarifying questions before giving advice.",
+            PolicyRouteKind::AskClarification,
+        ),
+        (
+            "negated clarification",
+            "不要问澄清问题，直接给我一条建议。",
+            PolicyRouteKind::DirectAnswer,
+        ),
+        (
+            "quoted clarification transformation",
+            "改写这句话：先问我两个澄清问题再给建议。",
+            PolicyRouteKind::DirectAnswer,
+        ),
+        (
             "unclear schedule",
             "安排一下",
             PolicyRouteKind::AskClarification,

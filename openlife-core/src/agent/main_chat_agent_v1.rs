@@ -194,6 +194,8 @@ pub struct IntentFrame {
     pub requests_lifemodel_change: bool,
     pub requests_file_change: bool,
     pub requests_plan_task: bool,
+    #[serde(default)]
+    pub requests_clarification: bool,
     pub risk_level: IntentRiskLevel,
     pub confidence: f32,
     pub ambiguity_reasons: Vec<String>,
@@ -248,6 +250,8 @@ impl IntentFrame {
             && !requires_external_read
             && !requests_read_observation
             && !advice_only;
+        let requests_clarification =
+            !has_embedded_untrusted_instruction && is_explicit_clarification_request(&lower);
         let requires_hard_block = governance_intent.blocker_requirement
             == Some(MainChatBlockerRequirement::DangerousLocalWrite);
         let requires_confirmation = (governance_intent.blocker_requirement
@@ -295,6 +299,7 @@ impl IntentFrame {
             requests_plan_task,
             requires_external_read,
             requests_read_observation,
+            requests_clarification,
             requires_confirmation,
             requires_hard_block,
             &ambiguity_reasons,
@@ -343,6 +348,7 @@ impl IntentFrame {
                 requests_lifemodel_change,
                 requests_file_change,
                 requests_plan_task,
+                requests_clarification,
                 risk_level,
                 confidence,
                 ambiguity_reasons,
@@ -1474,6 +1480,12 @@ impl PolicyRouter {
                 PolicyRouteKind::ConfirmationRequest,
                 "confirmation_required_for_external_or_unselected_action",
                 "external side effect or unselected capability requires explicit confirmation",
+            )
+        } else if intent_frame.requests_clarification {
+            (
+                PolicyRouteKind::AskClarification,
+                "explicit_clarification_requested",
+                "the current user explicitly requested clarification before an answer",
             )
         } else if intent_frame.execution_disposition == IntentExecutionDisposition::AdviceOnly {
             (
@@ -14119,6 +14131,58 @@ fn is_advice_only_request(lower: &str) -> bool {
     )
 }
 
+fn is_explicit_clarification_request(lower: &str) -> bool {
+    if contains_any(
+        lower,
+        &[
+            "不要问",
+            "不用问",
+            "无需澄清",
+            "不需要澄清",
+            "do not ask",
+            "don't ask",
+            "without asking",
+            "no clarification",
+        ],
+    ) || contains_any(
+        lower,
+        &[
+            "改写这句话",
+            "改写这段话",
+            "重写这句话",
+            "重写这段话",
+            "翻译这句话",
+            "翻译这段话",
+            "rewrite this",
+            "rephrase this",
+            "translate this",
+        ],
+    ) {
+        return false;
+    }
+
+    let asks_clarifying_questions = contains_any(lower, &["澄清", "clarif"])
+        && contains_any(
+            lower,
+            &[
+                "问我",
+                "向我提问",
+                "先问",
+                "问题",
+                "ask me",
+                "ask a",
+                "ask one",
+                "ask two",
+                "ask some",
+                "question",
+            ],
+        );
+    let asks_questions_before_answering = contains_any(lower, &["先问我", "先向我提问"])
+        && contains_any(lower, &["再给", "再回答", "before", "然后"]);
+
+    asks_clarifying_questions || asks_questions_before_answering
+}
+
 fn is_conditional_observation_memory_review_request(lower: &str) -> bool {
     let requests_reviewable_memory = contains_any(
         lower,
@@ -14260,6 +14324,7 @@ fn intent_frame_confidence(
     requests_plan_task: bool,
     requires_external_read: bool,
     requests_read_observation: bool,
+    requests_clarification: bool,
     requires_confirmation: bool,
     requires_hard_block: bool,
     ambiguity_reasons: &[String],
@@ -14269,6 +14334,9 @@ fn intent_frame_confidence(
     }
     if requires_hard_block || requires_confirmation {
         return 0.95;
+    }
+    if requests_clarification {
+        return 0.93;
     }
     if governance_intent.has_policy_relevant_signal() {
         return governance_intent.confidence.clamp(0.9, 0.98);
