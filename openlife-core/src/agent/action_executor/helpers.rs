@@ -450,6 +450,7 @@ async fn search_duckduckgo_async(
     );
     match crate::network_client::NetworkClient::new(crate::network_client::NetworkClientPolicy {
         require_https: true,
+        allow_system_proxy_for_official_fake_ip_endpoint: true,
         ..Default::default()
     })
     .get_text_with_headers_and_start_observer(url.as_str(), network_policy, headers, {
@@ -677,6 +678,7 @@ async fn search_brave_async(
     let response =
         crate::network_client::NetworkClient::new(crate::network_client::NetworkClientPolicy {
             require_https: true,
+            allow_system_proxy_for_official_fake_ip_endpoint: true,
             ..Default::default()
         })
         .get_text_with_headers_and_start_observer(url.as_str(), network_policy, headers, {

@@ -1614,7 +1614,10 @@ fn response_body_digest(body: &str) -> String {
     response_bytes_digest(body.as_bytes())
 }
 
-fn provider_network_client(url: &str) -> Result<crate::network_client::NetworkClient> {
+fn provider_network_client(
+    provider: &str,
+    url: &str,
+) -> Result<crate::network_client::NetworkClient> {
     let parsed = reqwest::Url::parse(url).context("provider endpoint is not a valid URL")?;
     let host = parsed
         .host_str()
@@ -1623,6 +1626,7 @@ fn provider_network_client(url: &str) -> Result<crate::network_client::NetworkCl
         || host
             .parse::<IpAddr>()
             .is_ok_and(|address| address.is_loopback());
+    let official_endpoint = provider_endpoint_allows_system_fake_ip_proxy(provider, &parsed);
 
     Ok(crate::network_client::NetworkClient::new(
         crate::network_client::NetworkClientPolicy {
@@ -1631,6 +1635,7 @@ fn provider_network_client(url: &str) -> Result<crate::network_client::NetworkCl
             // providers and the repository's capture-adapter evidence.
             require_https: !explicitly_loopback,
             allow_loopback: explicitly_loopback,
+            allow_system_proxy_for_official_fake_ip_endpoint: official_endpoint,
             max_redirects: 0,
             max_body_bytes: PROVIDER_MAX_RESPONSE_BYTES,
             connect_timeout: Duration::from_secs(STREAM_CONNECT_TIMEOUT_SECS),
@@ -1638,6 +1643,16 @@ fn provider_network_client(url: &str) -> Result<crate::network_client::NetworkCl
             ..Default::default()
         },
     ))
+}
+
+fn provider_endpoint_allows_system_fake_ip_proxy(provider: &str, endpoint: &reqwest::Url) -> bool {
+    endpoint.scheme() == "https"
+        && reqwest::Url::parse(&chat_completions_url(
+            provider,
+            default_base_for_provider(provider),
+        ))
+        .ok()
+        .is_some_and(|expected| expected == *endpoint)
 }
 
 fn provider_http_error(label: &str, status: reqwest::StatusCode, body: &str) -> anyhow::Error {
@@ -1737,7 +1752,7 @@ where
     let url = endpoint.to_string();
 
     let mut on_started = Some(on_started);
-    let res = provider_network_client(&url)?
+    let res = provider_network_client(provider, &url)?
         .post_json_text_with_decision_and_start_observer(
             &url,
             network_policy,
@@ -1861,7 +1876,7 @@ where
     let url = endpoint.to_string();
 
     let mut on_started = Some(on_started);
-    let res = provider_network_client(&url)?
+    let res = provider_network_client(provider, &url)?
         .post_json_stream_with_decision_and_start_observer(
             &url,
             network_policy,
@@ -2013,7 +2028,8 @@ mod tests {
     use super::{
         chat_completions_url, default_base_for_provider, effective_api_key_for_endpoint,
         extract_chat_content, extract_stream_content, has_reasoning_content,
-        provider_credential_identity, provider_label, resolve_provider_chat_model,
+        provider_credential_identity, provider_endpoint_allows_system_fake_ip_proxy,
+        provider_label, resolve_provider_chat_model,
     };
     use futures::StreamExt;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -2150,6 +2166,32 @@ mod tests {
             default_base_for_provider("deepseek"),
             "https://api.deepseek.com"
         );
+    }
+
+    #[test]
+    fn system_fake_ip_proxy_is_limited_to_official_https_provider_endpoints() {
+        let official_deepseek = reqwest::Url::parse(&chat_completions_url(
+            "deepseek",
+            default_base_for_provider("deepseek"),
+        ))
+        .unwrap();
+        assert!(provider_endpoint_allows_system_fake_ip_proxy(
+            "deepseek",
+            &official_deepseek
+        ));
+
+        let custom = reqwest::Url::parse("https://provider.example/v1/chat/completions").unwrap();
+        assert!(!provider_endpoint_allows_system_fake_ip_proxy(
+            "custom", &custom
+        ));
+        assert!(!provider_endpoint_allows_system_fake_ip_proxy(
+            "deepseek", &custom
+        ));
+
+        let plaintext = reqwest::Url::parse("http://api.deepseek.com/chat/completions").unwrap();
+        assert!(!provider_endpoint_allows_system_fake_ip_proxy(
+            "deepseek", &plaintext
+        ));
     }
 
     #[test]
