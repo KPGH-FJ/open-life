@@ -280,9 +280,24 @@ impl ResourceStore {
     }
 
     pub fn commit_import_batch(&self, batch: ResourceImportBatch) -> Result<ResourceImportReceipt> {
+        self.commit_import_batch_guarded(batch, || Result::<()>::Ok(()))
+    }
+
+    /// Commit a complete import while holding a caller-provided linearization
+    /// guard only across the final durable commit. Expensive parsing and SQL
+    /// preparation must happen before that guard so cancellation remains fast.
+    pub fn commit_import_batch_guarded<G, F>(
+        &self,
+        batch: ResourceImportBatch,
+        acquire_commit_guard: F,
+    ) -> Result<ResourceImportReceipt>
+    where
+        F: FnOnce() -> Result<G>,
+    {
         let prepared = PreparedImportBatch::validate(batch)?;
         let mut conn = self.lock_connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut acquire_commit_guard = Some(acquire_commit_guard);
 
         if let Some((existing_digest, receipt_json)) = tx
             .query_row(
@@ -310,6 +325,10 @@ impl ResourceStore {
                     anyhow::bail!("resource_import_replay_tombstoned");
                 }
             }
+            let _commit_guard = acquire_commit_guard
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("resource_import_commit_guard_missing"))?(
+            )?;
             tx.rollback()?;
             return Ok(receipt);
         }
@@ -422,6 +441,10 @@ impl ResourceStore {
                 serde_json::to_string(&receipt)?,
                 now.to_rfc3339(),
             ],
+        )?;
+        let _commit_guard = acquire_commit_guard
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("resource_import_commit_guard_missing"))?(
         )?;
         tx.commit()?;
         Ok(receipt)
