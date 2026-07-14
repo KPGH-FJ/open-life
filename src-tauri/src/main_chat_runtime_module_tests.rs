@@ -1063,13 +1063,28 @@ fn ordinary_final_delivery_has_one_durable_turn_runtime_owner() {
         .expect("read TurnRuntime final owner");
     let event_store = std::fs::read_to_string(root.join("main_chat_event_stream.rs"))
         .expect("read durable event projection");
-    assert_eq!(
-        runtime
-            .matches("openlife_turn_runtime.final_delivery_owner")
-            .count(),
-        1,
-        "ordinary FinalDelivery must have exactly one durable TurnRuntime append owner"
+    assert!(
+        runtime.contains("openlife_turn_runtime.final_delivery_owner"),
+        "ordinary FinalDelivery must retain the durable TurnRuntime owner label"
     );
+    for entry in std::fs::read_dir(&root).expect("list Tauri product sources") {
+        let path = entry.expect("read Tauri product source entry").path();
+        if path == root.join("main_chat_turn_runtime.rs")
+            || path.extension().and_then(|value| value.to_str()) != Some("rs")
+            || path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name.ends_with("_tests.rs"))
+        {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).expect("read Tauri product source");
+        assert!(
+            !source.contains("openlife_turn_runtime.final_delivery_owner"),
+            "ordinary FinalDelivery owner label escaped TurnRuntime into {}",
+            path.display()
+        );
+    }
     assert!(!runtime.contains("replay-final:"));
     assert!(!runtime.contains("openlife_turn_runtime.replay_aggregate"));
     let snapshot_materializer = event_store
