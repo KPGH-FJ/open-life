@@ -44,13 +44,13 @@
       "id": "P0_PLAN_PACKAGE",
       "status": "completed",
       "completion_claim": "plan_contract_json_and_diff_validated",
-      "commit": null
+      "commit": "a4a0a49347f9d8fcac98e7f874550aa499cfe900"
     },
     {
       "id": "H0_FACTS_AND_FREEZE",
       "status": "completed",
       "completion_claim": "facts_frozen_development_go_roadshow_no_go",
-      "commit": null
+      "commit": "ccf9de51857338731511c35b8806c8b364508e96"
     },
     {
       "id": "H1_RUNTIME_TRUTH",
