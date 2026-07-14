@@ -138,6 +138,46 @@ pub struct ReviewItem {
     pub task_resume_relation: Option<ReviewItemTaskResumeRelation>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewBatchDomain {
+    Memory,
+    LifeModel,
+    ToolPermission,
+    ExternalAction,
+    Other,
+}
+
+impl ReviewBatchDomain {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::LifeModel => "life_model",
+            Self::ToolPermission => "tool_permission",
+            Self::ExternalAction => "external_action",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// A presentation-only grouping of independently authoritative ReviewItems.
+///
+/// A batch has no approve/reject action and cannot authorize effects. Each
+/// child Proposal retains its own decision, dispatch claim and materialization
+/// receipt; this projection only prevents one Main Chat session from appearing
+/// as an unstructured wall of cards.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewBatch {
+    pub id: String,
+    pub domain: ReviewBatchDomain,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub item_ids: Vec<String>,
+    pub action_required_count: usize,
+    pub highest_risk: ProductRiskLevel,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewCenterSummary {
@@ -155,6 +195,8 @@ pub struct ReviewCenterSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewCenterViewModel {
+    #[serde(default)]
+    pub batches: Vec<ReviewBatch>,
     pub items: Vec<ReviewItem>,
     pub summary: ReviewCenterSummary,
 }
@@ -192,7 +234,112 @@ pub fn build_review_center_view_model(input: ReviewCenterBuildInput) -> ReviewCe
         items.push(item);
     }
 
-    ReviewCenterViewModel { items, summary }
+    let batches = build_review_batches(&input.proposals, &items);
+    ReviewCenterViewModel {
+        batches,
+        items,
+        summary,
+    }
+}
+
+fn build_review_batches(proposals: &[AgentProposal], items: &[ReviewItem]) -> Vec<ReviewBatch> {
+    let mut groups: BTreeMap<(ReviewBatchDomain, String), ReviewBatch> = BTreeMap::new();
+    for (proposal, item) in proposals.iter().zip(items) {
+        let domain = review_batch_domain(proposal.proposal_type);
+        let session_id = review_batch_session_id(proposal);
+        let grouping_owner = session_id
+            .clone()
+            .unwrap_or_else(|| format!("proposal:{}", proposal.id));
+        let (_, owner_digest) = crate::agent::metadata_safe::metadata_safe_text_digest(&format!(
+            "{}:{}",
+            domain.as_str(),
+            grouping_owner
+        ));
+        let key = (domain, grouping_owner);
+        let batch = groups.entry(key).or_insert_with(|| ReviewBatch {
+            id: format!("review_batch:{}:{owner_digest}", domain.as_str()),
+            domain,
+            session_id,
+            item_ids: Vec::new(),
+            action_required_count: 0,
+            highest_risk: item.risk,
+        });
+        batch.item_ids.push(item.id.clone());
+        if item.allowed_actions.iter().any(is_enabled_decision_action) {
+            batch.action_required_count += 1;
+        }
+        if product_risk_rank(item.risk) > product_risk_rank(batch.highest_risk) {
+            batch.highest_risk = item.risk;
+        }
+    }
+    groups.into_values().collect()
+}
+
+fn review_batch_domain(proposal_type: ProposalType) -> ReviewBatchDomain {
+    match proposal_type {
+        ProposalType::MemoryWrite | ProposalType::MemoryArchive => ReviewBatchDomain::Memory,
+        ProposalType::GoalUpdate
+        | ProposalType::StateUpdate
+        | ProposalType::PreferenceUpdate
+        | ProposalType::CapabilityUpdate
+        | ProposalType::ModelPolicyChange
+        | ProposalType::LifeModelUpdate => ReviewBatchDomain::LifeModel,
+        ProposalType::ToolPermission | ProposalType::PluginPermission => {
+            ReviewBatchDomain::ToolPermission
+        }
+        ProposalType::ScheduledTask
+        | ProposalType::ExternalWriteAction
+        | ProposalType::DataExport
+        | ProposalType::ScheduleCheckin => ReviewBatchDomain::ExternalAction,
+        ProposalType::Unsupported => ReviewBatchDomain::Other,
+    }
+}
+
+fn review_batch_session_id(proposal: &AgentProposal) -> Option<String> {
+    for field in [
+        "originatingTaskSessionId",
+        "sourceTaskSessionId",
+        "taskSessionId",
+        "session_id",
+    ] {
+        if let Some(value) = proposal
+            .after
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(value.to_string());
+        }
+    }
+    let source_detail = proposal.source_detail.as_deref()?.trim();
+    if source_detail.is_empty() {
+        return None;
+    }
+    if let Some(value) = source_detail.strip_prefix("main_chat_agent_task_session:") {
+        return value
+            .split(';')
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+    }
+    matches!(
+        proposal.source,
+        ProposalSource::ChatConversation | ProposalSource::MemoryGovernance
+    )
+    .then(|| source_detail.to_string())
+}
+
+fn product_risk_rank(risk: ProductRiskLevel) -> u8 {
+    match risk {
+        ProductRiskLevel::None => 0,
+        ProductRiskLevel::Low => 1,
+        ProductRiskLevel::Medium => 2,
+        ProductRiskLevel::High => 3,
+        ProductRiskLevel::Critical => 4,
+        ProductRiskLevel::Unknown => 5,
+    }
 }
 
 pub fn build_review_item(proposal: &AgentProposal, input: &ReviewCenterBuildInput) -> ReviewItem {
@@ -866,6 +1013,49 @@ mod tests {
         assert_eq!(
             item.materialization_status,
             ReviewItemMaterializationStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn review_batches_group_same_session_by_domain_without_batch_authorization() {
+        let mut memory_one = proposal(ProposalType::MemoryWrite);
+        memory_one.source = ProposalSource::MemoryGovernance;
+        memory_one.source_detail =
+            Some("main_chat_agent_task_session:task-1;candidate:first".into());
+        memory_one.risk_level = RiskLevel::Medium;
+        let mut memory_two = proposal(ProposalType::MemoryWrite);
+        memory_two.source = ProposalSource::MemoryGovernance;
+        memory_two.source_detail =
+            Some("main_chat_agent_task_session:task-1;candidate:second".into());
+        memory_two.risk_level = RiskLevel::High;
+        let mut life_model = proposal(ProposalType::LifeModelUpdate);
+        life_model.source = ProposalSource::MemoryGovernance;
+        life_model.after = json!({ "originatingTaskSessionId": "task-1" });
+
+        let memory_ids = vec![memory_one.id.clone(), memory_two.id.clone()];
+        let model = build_review_center_view_model(ReviewCenterBuildInput {
+            proposals: vec![memory_one, memory_two, life_model],
+            ..Default::default()
+        });
+
+        assert_eq!(model.items.len(), 3);
+        assert_eq!(model.batches.len(), 2);
+        let memory_batch = model
+            .batches
+            .iter()
+            .find(|batch| batch.domain == ReviewBatchDomain::Memory)
+            .expect("Memory batch");
+        assert_eq!(memory_batch.session_id.as_deref(), Some("task-1"));
+        assert_eq!(memory_batch.item_ids, memory_ids);
+        assert_eq!(memory_batch.action_required_count, 2);
+        assert_eq!(memory_batch.highest_risk, ProductRiskLevel::High);
+        assert!(memory_batch.id.starts_with("review_batch:memory:sha256:"));
+        assert!(
+            serde_json::to_value(memory_batch)
+                .unwrap()
+                .get("allowedActions")
+                .is_none(),
+            "ReviewBatch must not become a second authorization surface"
         );
     }
 }

@@ -2141,7 +2141,24 @@ export type ReviewCenterSummary = {
   byMaterializationStatus: Record<string, number>;
 };
 
+export type ReviewBatchDomain =
+  | "memory"
+  | "life_model"
+  | "tool_permission"
+  | "external_action"
+  | "other";
+
+export type ReviewBatch = {
+  id: string;
+  domain: ReviewBatchDomain;
+  sessionId?: string;
+  itemIds: string[];
+  actionRequiredCount: number;
+  highestRisk: ProductRiskLevel;
+};
+
 export type ReviewCenterViewModel = {
+  batches: ReviewBatch[];
   items: ReviewItem[];
   summary: ReviewCenterSummary;
 };

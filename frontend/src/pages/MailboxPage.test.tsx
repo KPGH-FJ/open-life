@@ -349,6 +349,7 @@ function buildReviewCenterViewModel(
 ): ReviewCenterViewModel {
   const items = proposals.map(proposal => reviewItemFromProposal(proposal, safeMode));
   return {
+    batches: [],
     items,
     summary: {
       total: items.length,
