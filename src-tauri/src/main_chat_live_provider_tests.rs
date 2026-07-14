@@ -486,7 +486,7 @@ async fn main_chat_live_provider_eval_harness_preserves_raw_model_identity_for_f
     }
 
     let report = run_main_chat_live_provider_eval_harness(
-        state,
+        state.clone(),
         MainChatLiveProviderEvalHarnessInput {
             scenario: MainChatLiveProviderEvalHarnessScenario::DirectAnswer,
             session_id: "local-http-provider-harness-raw-model".into(),
@@ -569,31 +569,10 @@ async fn main_chat_live_provider_eval_harness_preserves_raw_provider_identity_fo
 #[ignore = "requires OPENLIFE_MAIN_CHAT_LIVE_PROVIDER_EVAL=1, network, and a real provider API key"]
 async fn main_chat_live_provider_eval_harness_invokes_external_direct_answer_when_opted_in() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-    {
-        let mut config = state.config.lock().await;
-        config.llm.provider = std::env::var("OPENLIFE_LIVE_EVAL_PROVIDER").unwrap_or_default();
-        config.llm.openai_base = std::env::var("OPENLIFE_LIVE_EVAL_BASE").unwrap_or_default();
-        config.llm.chat_model = std::env::var("OPENLIFE_LIVE_EVAL_MODEL").unwrap_or_default();
-        config.llm.openai_key = std::env::var("OPENLIFE_LIVE_EVAL_API_KEY").unwrap_or_default();
-        config.system.network_policy.enabled = true;
-    }
-    {
-        let config = state.config.lock().await.clone();
-        let mut scheduler = state.scheduler.lock().await;
-        *scheduler = openlife_core::scheduler::InferenceScheduler::new(
-            config.local_model.clone(),
-            false,
-            config.llm.provider.clone(),
-            config.llm.openai_base.clone(),
-            config.llm.openai_key.clone(),
-            config.llm.chat_model.clone(),
-            config.llm.embedding_model.clone(),
-            false,
-        );
-    }
+    configure_live_provider_eval_state(&state).await;
 
     let report = run_main_chat_live_provider_eval_harness(
-        state,
+        state.clone(),
         MainChatLiveProviderEvalHarnessInput {
             scenario: MainChatLiveProviderEvalHarnessScenario::DirectAnswer,
             session_id: "live-provider-eval-direct-answer".into(),
@@ -605,6 +584,50 @@ async fn main_chat_live_provider_eval_harness_invokes_external_direct_answer_whe
     .await
     .expect("live provider harness report");
 
+    if !report.ready {
+        let safe_events = if let Some(task_session_id) = report.task_session_id.as_deref() {
+            crate::main_chat_event_stream::list_main_chat_agent_events_with_state(
+                &state,
+                task_session_id.to_string(),
+                Some(0),
+                Some(250),
+            )
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|event| {
+                serde_json::json!({
+                    "sequence": event.sequence,
+                    "eventType": event.event_type,
+                    "objectType": event.object_type,
+                    "status": event.payload.get("status"),
+                    "provider": event.payload.get("provider"),
+                    "model": event.payload.get("model"),
+                    "reasonCode": event.payload.get("reasonCode"),
+                    "errorDigest": event.payload.get("errorDigest"),
+                })
+            })
+            .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        eprintln!(
+            "live provider direct-answer safe summary: {}",
+            serde_json::json!({
+                "status": report.status,
+                "provider": report.provider,
+                "providerModel": report.provider_model,
+                "providerEndpointKind": report.provider_endpoint_kind,
+                "blockers": report.blockers,
+                "modelInvoked": report.model_invoked,
+                "mainChatInvoked": report.main_chat_invoked,
+                "runIdPresent": report.run_id.is_some(),
+                "taskSessionIdPresent": report.task_session_id.is_some(),
+                "responsePreview": report.response_preview,
+                "events": safe_events,
+            })
+        );
+    }
     assert!(
         report.ready,
         "live provider harness blocked: {:?}",
@@ -630,6 +653,150 @@ async fn main_chat_live_provider_eval_harness_invokes_external_direct_answer_whe
     assert!(!evidence.web_mcp_agent_loop_eval_executed);
     assert!(!evidence.proposal_permission_eval_executed);
     assert!(evidence.no_silent_writes);
+}
+
+#[tokio::test]
+#[ignore = "requires OPENLIFE_MAIN_CHAT_LIVE_PROVIDER_EVAL=1, network, and a real provider API key"]
+async fn main_chat_live_provider_stream_command_surface_emits_external_provider_tokens_when_opted_in(
+) {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    configure_live_provider_eval_state(&state).await;
+
+    let events = std::sync::Arc::new(std::sync::Mutex::new(
+        Vec::<(String, serde_json::Value)>::new(),
+    ));
+    let captured_events = events.clone();
+    let started = std::time::Instant::now();
+    let stream_result = tokio::time::timeout(
+        std::time::Duration::from_secs(240),
+        crate::main_chat_streaming::start_stream_message_with_state(
+            "live-provider-stream-direct-answer".into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: "Answer in one short sentence: what is this live provider eval proving?"
+                    .into(),
+            }],
+            None,
+            &state,
+            move |event, payload| {
+                captured_events
+                    .lock()
+                    .expect("capture stream event")
+                    .push((event.to_string(), payload));
+            },
+        ),
+    )
+    .await;
+    let elapsed_ms = started.elapsed().as_millis();
+    let captured = events.lock().expect("read stream events").clone();
+    let event_names = captured
+        .iter()
+        .map(|(event, _)| event.as_str())
+        .collect::<Vec<_>>();
+    eprintln!(
+        "live provider direct stream safe summary: {}",
+        serde_json::json!({
+            "elapsedMs": elapsed_ms,
+            "eventNames": event_names,
+            "providerTokenChunkCount": captured.iter().filter(|(event, payload)| {
+                event == "stream-message-chunk"
+                    && payload.get("request_id").and_then(serde_json::Value::as_str)
+                        .is_some_and(|value| !value.trim().is_empty())
+            }).count(),
+            "kernelEventTypes": captured.iter().filter_map(|(event, payload)| {
+                (event == "main-chat-kernel-event")
+                    .then(|| payload.get("type").and_then(serde_json::Value::as_str))
+                    .flatten()
+            }).collect::<Vec<_>>(),
+            "durableEventTypes": captured.iter().filter_map(|(event, payload)| {
+                (event == "main-chat-agent-event")
+                    .then(|| payload.get("event_type").and_then(serde_json::Value::as_str))
+                    .flatten()
+            }).collect::<Vec<_>>(),
+            "doneStatus": captured.iter().find(|(event, _)| event == "stream-message-done")
+                .and_then(|(_, payload)| payload.get("status")) ,
+            "doneModelInvoked": captured.iter().find(|(event, _)| event == "stream-message-done")
+                .and_then(|(_, payload)| payload.get("model_invoked")),
+            "doneBlockers": captured.iter().find(|(event, _)| event == "stream-message-done")
+                .and_then(|(_, payload)| payload.get("blockers")),
+        })
+    );
+
+    stream_result
+        .unwrap_or_else(|_| {
+            panic!(
+                "external direct stream timed out after {elapsed_ms}ms with events {:?}",
+                event_names
+            )
+        })
+        .unwrap_or_else(|error| {
+            panic!(
+                "external direct stream failed after {elapsed_ms}ms: {error}; events {:?}",
+                event_names
+            )
+        });
+
+    let provider_chunks = captured
+        .iter()
+        .filter(|(event, payload)| {
+            event == "stream-message-chunk"
+                && payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty())
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !provider_chunks.is_empty(),
+        "a final-reply compatibility chunk without request_id is not provider-token evidence"
+    );
+    assert!(provider_chunks.iter().all(|(_, payload)| {
+        payload
+            .get("chunk")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|chunk| !chunk.is_empty())
+    }));
+
+    let done_index = captured
+        .iter()
+        .position(|(event, _)| event == "stream-message-done")
+        .expect("stream-message-done event");
+    assert_eq!(
+        done_index,
+        captured.len() - 1,
+        "stream-message-done must be the final emitted event"
+    );
+    let done_payload = &captured[done_index].1;
+    assert_eq!(
+        done_payload
+            .get("status")
+            .and_then(serde_json::Value::as_str),
+        Some("completed")
+    );
+    let task_session_id = done_payload
+        .get("task_session_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .expect("done payload task session id");
+    let durable = crate::main_chat_event_stream::list_main_chat_agent_events_with_state(
+        &state,
+        task_session_id.to_string(),
+        Some(0),
+        Some(250),
+    )
+    .await
+    .expect("list durable provider events");
+    let started_sequence = durable
+        .iter()
+        .find(|event| event.event_type == "provider.started")
+        .map(|event| event.sequence)
+        .expect("durable provider.started");
+    let completed_sequence = durable
+        .iter()
+        .find(|event| event.event_type == "provider.completed")
+        .map(|event| event.sequence)
+        .expect("durable provider.completed");
+    assert!(started_sequence < completed_sequence);
 }
 
 #[tokio::test]

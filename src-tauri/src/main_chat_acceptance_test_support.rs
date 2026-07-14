@@ -11,6 +11,7 @@ pub(crate) async fn configure_live_provider_eval_state(state: &Arc<AppState>) {
     config.llm.openai_key = std::env::var("OPENLIFE_LIVE_EVAL_API_KEY").unwrap_or_default();
     config.prefer_local_model = false;
     config.system.network_policy.enabled = true;
+    config.system.network_policy.default_decision = "allow".into();
     let _provider_generation = state.replace_provider_runtime_config(config).await;
 }
 
