@@ -3499,15 +3499,17 @@ mod tests {
             .expect_err("corrupt lifecycle archive truth must fail closed");
 
         for error in [list_error, count_error] {
-            assert!(
-                error.to_string().contains("memory_retrieval_degraded"),
-                "{error}"
-            );
+            match error {
+                AppError::Database {
+                    hint: Some(hint), ..
+                } => assert_eq!(hint, "memory_retrieval_degraded"),
+                other => panic!("expected structured retrieval degradation: {other:?}"),
+            }
         }
     }
 
     #[tokio::test]
-    async fn stale_archive_delivery_compensates_to_restore_head() {
+    async fn pending_archive_is_superseded_before_restore_head_is_applied() {
         let state = crate::test_utils::test_app_state();
         let (_input, owner) = seed_canonical_retrieval_owner(&state, "STALE_ARCHIVE_HEAD").await;
         let archived = state
@@ -3536,7 +3538,7 @@ mod tests {
         reconcile_blocking_canonical_outbox_event_with_state(
             &state,
             CanonicalOutboxOwner::MemoryStore,
-            &archived_event,
+            &restored_event,
         )
         .await
         .unwrap();
@@ -3544,7 +3546,7 @@ mod tests {
         let store = state.memory_store.lock().await;
         assert_eq!(
             store.projection_summary(&archived_event).unwrap().state(),
-            ProjectionDeliveryState::Compensated
+            ProjectionDeliveryState::Superseded
         );
         assert_eq!(
             store.projection_summary(&restored_event).unwrap().state(),
