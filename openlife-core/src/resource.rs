@@ -581,6 +581,7 @@ impl PreparedImportBatch {
         }
 
         let mut ids = std::collections::BTreeSet::new();
+        let mut digests = std::collections::BTreeSet::new();
         let mut resources = Vec::with_capacity(batch.resources.len());
         for candidate in batch.resources {
             validate_uuid_v4("resource_id", &candidate.resource_id)?;
@@ -612,13 +613,17 @@ impl PreparedImportBatch {
                 }
                 chunk.provenance.validate_for(candidate.format)?;
             }
+            let digest = content_digest(&candidate.bytes);
+            if !digests.insert(digest.clone()) {
+                anyhow::bail!("resource_import_duplicate_content");
+            }
             resources.push(PreparedImportCandidate {
                 resource_id: candidate.resource_id,
                 filename: filename.to_string(),
                 declared_mime: candidate.declared_mime,
                 detected_mime: candidate.detected_mime,
                 format: candidate.format,
-                digest: content_digest(&candidate.bytes),
+                digest,
                 bytes: candidate.bytes,
                 chunks: candidate.chunks,
             });
@@ -735,7 +740,6 @@ fn operation_payload_digest(
         .iter()
         .map(|resource| {
             serde_json::json!({
-                "resourceId": resource.resource_id,
                 "filename": resource.filename,
                 "declaredMime": resource.declared_mime,
                 "detectedMime": resource.detected_mime,
@@ -803,8 +807,17 @@ mod tests {
         let first_resource_id = first.resource_id.clone();
         let request = batch(operation_id.clone(), "message-1", vec![first.clone()]);
 
-        let receipt = store.commit_import_batch(request.clone()).unwrap();
-        let replay = store.commit_import_batch(request).unwrap();
+        let receipt = store.commit_import_batch(request).unwrap();
+        let replay = store
+            .commit_import_batch(batch(
+                operation_id,
+                "message-1",
+                vec![ResourceImportCandidate {
+                    resource_id: Uuid::new_v4().to_string(),
+                    ..first
+                }],
+            ))
+            .unwrap();
         assert_eq!(receipt, replay);
         assert_eq!(receipt.resources[0].resource_id, first_resource_id);
         assert!(!receipt.resources[0].reused_existing);
