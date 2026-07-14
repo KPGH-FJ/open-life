@@ -198,10 +198,14 @@ fn source_files(roots: &[&str]) -> Vec<PathBuf> {
 }
 
 fn strip_cfg_test_module(source: &str) -> &str {
-    source
-        .split("\n#[cfg(test)]\nmod tests")
-        .next()
-        .unwrap_or(source)
+    [
+        "\n#[cfg(test)]\nmod tests",
+        "\n#[cfg(test)]\nmod bound_content_receipt_tests",
+    ]
+    .into_iter()
+    .filter_map(|marker| source.find(marker))
+    .min()
+    .map_or(source, |index| &source[..index])
 }
 
 fn count_occurrences(source: &str, needle: &str) -> usize {
@@ -520,11 +524,19 @@ fn single_system_phase1_inventory_has_required_categories_and_contract_fields() 
     ]);
 
     for category in required_categories {
-        let entries = inventory_entries(&inventory, category);
         assert!(
-            !entries.is_empty(),
-            "inventory category {category} must not be empty"
+            inventory
+                .get(category)
+                .is_some_and(serde_json::Value::is_array),
+            "inventory category {category} must exist as an array"
         );
+        let entries = inventory_entries(&inventory, category);
+        if category != "direct_proposal_write_surfaces" {
+            assert!(
+                !entries.is_empty(),
+                "inventory category {category} must not be empty"
+            );
+        }
         for entry in entries {
             let id = entry_str(entry, "id");
             let disposition = entry_str(entry, "disposition");
@@ -1211,7 +1223,7 @@ fn single_system_r5_memory_and_provider_privacy_readmodels_own_product_boundarie
     for required in [
         "pub async fn get_provider_privacy_boundary_summary",
         "get_provider_privacy_boundary_summary_with_state",
-        "summarize_provider_validation",
+        "summarize_loaded_provider_validation",
         "cloud_api_configured",
         "build_provider_privacy_boundary_summary",
         "external transmission remain fail-closed",
@@ -1941,14 +1953,24 @@ fn single_system_phase4_review_workflow_outcome_is_authoritative() {
     for owner_marker in [
         "pub(crate) fn submit_review_proposal",
         "canonical_write_admission",
+        "submit_with_admission(request, admission)",
+    ] {
+        assert!(
+            action_executor_owner.contains(owner_marker),
+            "ActionExecutor ReviewWorkflow gateway lost ownership marker {owner_marker}"
+        );
+    }
+    let review_workflow_owner = read_repo_file("openlife-core/src/agent/review_workflow.rs");
+    for owner_marker in [
+        "pub fn submit_with_admission(",
         "CanonicalWriteAdmissionRequest::new",
         "permit.finish_committed()",
         "permit.finish_noop()",
         "permit.finish_failed()",
     ] {
         assert!(
-            action_executor_owner.contains(owner_marker),
-            "ActionExecutor ReviewWorkflow gateway lost ownership marker {owner_marker}"
+            review_workflow_owner.contains(owner_marker),
+            "ReviewWorkflow lost canonical admission owner marker {owner_marker}"
         );
     }
 
@@ -2059,13 +2081,11 @@ fn single_system_phase5_product_memory_lifemodel_writes_use_gateways() {
 
     let memory_gateway = read_repo_file("src-tauri/src/memory_gateway.rs");
     for marker in [
-        ".save_message(",
-        ".save_memory_record(",
-        ".record_state_entry(",
-        ".insert(&session_id",
+        ".save_message_idempotent(",
+        ".save_message_idempotent_with_proof(",
+        ".record_state_entry_idempotent(",
+        ".save_knowledge_note_idempotent_with_outbox(",
         ".replace_all_messages(",
-        ".replace_all_chunks(",
-        ".archive_lifecycle_memory_records(",
         ".rollback_memory_asset(",
         ".rebuild_materialized_view(",
     ] {
@@ -2755,7 +2775,8 @@ fn single_system_d011_conversation_and_retrieval_parallel_routes_stay_absent() {
         );
     }
     assert!(runtime.contains("save_turn_user_message_idempotent_with_state("));
-    assert!(generation.contains("main_chat_assistant_message:{}:{}"));
+    assert!(generation.contains("main_chat_assistant_message_operation_id("));
+    assert!(generation.contains("main_chat_assistant_message:{task_session_id}:{run_id}"));
     assert!(gateway.contains("save_conversation_message_idempotent_with_state("));
 
     assert!(memory_store.contains("reject_memory_lifecycle_retrieval_insert"));

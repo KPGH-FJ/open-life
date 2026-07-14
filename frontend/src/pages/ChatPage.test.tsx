@@ -504,6 +504,15 @@ describe("ChatPage", () => {
     ).toBe("trace_gap");
     expect(viewFor({ pendingProposalCount: 1 })?.status).toBe("trace_gap");
     expect(viewFor({ pendingPermissionCount: 1 })?.status).toBe("trace_gap");
+    expect(
+      viewFor(
+        {},
+        {
+          reasoningTrace: null,
+          pendingProposals: [{ status: "pending", title: "raw proposal only" } as any],
+        }
+      )
+    ).toBeNull();
   });
 
   it("keeps backend task truth and controls when raw completion, proposal, and blocker facts conflict", () => {

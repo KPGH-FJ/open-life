@@ -822,9 +822,7 @@ export function buildMainChatAgentStatusView({
   sending: boolean;
   canCancel: boolean;
 }): MainChatAgentStatusView | null {
-  const hasDiagnostics = Boolean(
-    reasoningTrace || taskState?.session || agentState || pendingProposals.length > 0 || sending
-  );
+  const hasDiagnostics = Boolean(reasoningTrace || taskState?.session || agentState || sending);
   const unverifiedTaskSessionId = taskViewItem?.taskSessionId;
   const evidenceVerified = hasVerifiedTaskRunEvidence(taskViewItem, runEvidence);
   if (!evidenceVerified) {
