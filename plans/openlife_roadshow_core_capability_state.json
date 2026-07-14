@@ -1,7 +1,7 @@
 {
   "schema_version": "openlife-roadshow-core-capability-state-v1",
   "plan_id": "openlife-roadshow-core-capability-2026-07-14",
-  "status": "v1_resource_preparation_in_progress_h1_h2_review_pending_roadshow_no_go",
+  "status": "v1_resource_implementation_verified_live_trial_pending_h1_h2_review_pending_roadshow_no_go",
   "authority": {
     "kind": "time_bounded_execution_overlay",
     "subordinate_to": [
@@ -23,7 +23,7 @@
     "verified_clean_before_plan_edit": true,
     "verified_at": "2026-07-14"
   },
-  "current_phase": "V1_RESOURCE",
+  "current_phase": "V2_WEB",
   "schedule": {
     "p50_hours": "40-48 after H0 infrastructure blockers",
     "p80_hours": "56-72 after H0 infrastructure blockers",
@@ -31,9 +31,9 @@
     "last_reestimated_phase": "H0_FACTS_AND_FREEZE"
   },
   "global_finding_boundaries": {
-    "BR4-D008": "open_partial_roadshow_subset_required",
-    "BR4-D010": "roadshow_runtime_subset_verified_global_open",
-    "BR4-D011": "open_partial_roadshow_subset_required",
+    "BR4-D008": "roadshow_resource_subset_verified_statestore_artifact_pending_global_open",
+    "BR4-D010": "roadshow_runtime_and_resource_dto_subset_verified_global_open",
+    "BR4-D011": "roadshow_resource_tombstone_restart_subset_verified_global_open",
     "BR4-D020": "roadshow_foundation_verified_global_open_artifact_slice_pending",
     "BR4-D050": "roadshow_runtime_restart_subset_verified_statestore_pending",
     "BR4-D051": "roadshow_governance_subset_mechanically_verified_global_open",
@@ -87,9 +87,10 @@
     },
     {
       "id": "V1_RESOURCE",
-      "status": "preparation_in_progress",
-      "completion_claim": "none",
-      "commit": null
+      "status": "implementation_verified_live_trial_and_independent_review_pending",
+      "completion_claim": "mechanical_gates_green_external_live_and_native_product_trial_pending",
+      "commit": "25080680b8a458ca7fdd9229098f9c012650bed7",
+      "evidence": "plans/openlife_roadshow_v1_resource_evidence.md"
     },
     {
       "id": "V2_WEB",
@@ -183,6 +184,19 @@
     "review_batch_product_ui_trial": "pending",
     "roadshow_release": "no_go"
   },
+  "v1_results": {
+    "canonical_resource_store": "passed_atomic_import_replay_dedup_detach_tombstone_restart",
+    "bounded_parser_worker": "passed_pdf_docx_csv_xlsx_provenance_timeout_cancel_hostile_inputs",
+    "deterministic_selection": "passed_bounded_multifile_and_table_selection_without_vector_or_model_route",
+    "citation_truth": "passed_missing_forged_and_valid_local_http_capture_cases",
+    "turn_runtime_binding": "passed_existing_turn_operation_id_and_prepared_provider_request_boundary",
+    "frontend_attachment_flow": "passed_114_of_114_focused_tests_and_typecheck",
+    "lost_response_reconciliation": "passed_import_status_receipt_and_same_id_detach_retry",
+    "native_product_trial": "pending",
+    "external_live_provider_attachment": "pending",
+    "independent_read_only_review": "pending_coderabbit_cli_unavailable",
+    "roadshow_release": "no_go"
+  },
   "evidence_dimensions": [
     "implementation",
     "deterministic_contract",
@@ -191,5 +205,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-14T20:47:09+08:00"
+  "last_updated_at": "2026-07-15T00:36:27+08:00"
 }
