@@ -5120,10 +5120,7 @@ async fn send_message_direct_answer_records_main_chat_run_and_completes_task() {
             .expect("direct answer run exists")
     };
     assert_eq!(run.status, openlife_core::agent::AgentRunStatus::Completed);
-    assert!(run.reasoning_strategy.as_deref().is_some_and(|strategy| {
-        strategy.starts_with("reasoning_strategy:bytes=32:hmac-sha256:")
-            && strategy.len() == "reasoning_strategy:bytes=32:hmac-sha256:".len() + 64
-    }));
+    assert_eq!(run.reasoning_strategy.as_deref(), Some("direct"));
     assert_eq!(
         run.model_route
             .as_ref()
@@ -5290,10 +5287,7 @@ async fn send_message_l2_scripted_answer_does_not_claim_live_provider_generation
         "model:bytes=7:hmac-sha256:".len() + 64
     );
     assert_eq!(model_route.route_type, "unknown");
-    assert!(run.reasoning_strategy.as_deref().is_some_and(|strategy| {
-        strategy.starts_with("reasoning_strategy:bytes=32:hmac-sha256:")
-            && strategy.len() == "reasoning_strategy:bytes=32:hmac-sha256:".len() + 64
-    }));
+    assert_eq!(run.reasoning_strategy.as_deref(), Some("direct"));
 }
 
 #[tokio::test]
@@ -5501,10 +5495,7 @@ async fn start_stream_message_direct_answer_records_main_chat_run_and_completes_
             .expect("stream direct answer run exists")
     };
     assert_eq!(run.status, openlife_core::agent::AgentRunStatus::Completed);
-    assert!(run.reasoning_strategy.as_deref().is_some_and(|strategy| {
-        strategy.starts_with("reasoning_strategy:bytes=32:hmac-sha256:")
-            && strategy.len() == "reasoning_strategy:bytes=32:hmac-sha256:".len() + 64
-    }));
+    assert_eq!(run.reasoning_strategy.as_deref(), Some("direct"));
     assert_eq!(
         run.model_route
             .as_ref()
@@ -5619,10 +5610,7 @@ async fn start_stream_message_l2_direct_answer_records_scheduler_provider_genera
             .expect("stream scripted direct answer run exists")
     };
     assert_eq!(run.status, openlife_core::agent::AgentRunStatus::Completed);
-    assert!(run.reasoning_strategy.as_deref().is_some_and(|strategy| {
-        strategy.starts_with("reasoning_strategy:bytes=32:hmac-sha256:")
-            && strategy.len() == "reasoning_strategy:bytes=32:hmac-sha256:".len() + 64
-    }));
+    assert_eq!(run.reasoning_strategy.as_deref(), Some("direct"));
     let model_route = run
         .model_route
         .as_ref()
