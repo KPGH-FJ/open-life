@@ -595,6 +595,27 @@ impl ResourceStore {
             .map_err(Into::into)
     }
 
+    pub fn has_context_for_message(&self, message_id: &str) -> Result<bool> {
+        if message_id.trim().is_empty() || message_id.len() > 256 {
+            anyhow::bail!("resource_context_message_id_invalid");
+        }
+        let conn = self.lock_connection()?;
+        conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM resource_message_bindings bindings
+                JOIN imported_resources resources
+                  ON resources.resource_id = bindings.resource_id
+                JOIN resource_chunks chunks
+                  ON chunks.resource_id = resources.resource_id
+                WHERE bindings.message_id = ?1 AND resources.deleted_at IS NULL
+             )",
+            [message_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
+    }
+
     pub fn delete_resource(
         &self,
         resource_id: &str,
@@ -693,7 +714,11 @@ impl PreparedImportBatch {
                 anyhow::bail!("resource_import_duplicate_resource_id");
             }
             let filename = candidate.filename.trim();
-            if filename.is_empty() || filename.len() > 255 || filename.contains(['/', '\\', '\0']) {
+            if filename.is_empty()
+                || filename.len() > 255
+                || filename.contains(['/', '\\', '\0'])
+                || filename.chars().any(char::is_control)
+            {
                 anyhow::bail!("resource_filename_invalid");
             }
             if candidate.declared_mime.trim().is_empty()

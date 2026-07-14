@@ -70,6 +70,38 @@ impl ResourceCitationSet {
         }
         Ok(resolved)
     }
+
+    /// Validate every citation-shaped token and append a canonical source list.
+    /// Provider prose cannot invent filenames or provenance because the footer
+    /// is rendered exclusively from this request-scoped authority.
+    pub fn validate_and_render_model_output(
+        &self,
+        request_id: &str,
+        model_output: &str,
+    ) -> Result<String> {
+        if request_id != self.request_id {
+            anyhow::bail!("resource_citation_request_mismatch");
+        }
+        if self.entries.is_empty() {
+            return Ok(model_output.to_string());
+        }
+        let citation_ids = extract_model_citation_ids(model_output)?;
+        if citation_ids.is_empty() {
+            anyhow::bail!("resource_citation_required");
+        }
+        let resolved = self.validate_model_citation_ids(request_id, &citation_ids)?;
+        let mut rendered = model_output.trim_end().to_string();
+        rendered.push_str("\n\n来源（OpenLife 已核验）");
+        for citation in resolved {
+            rendered.push_str(&format!(
+                "\n- `{}` — {} — {}",
+                citation.citation_id,
+                escape_markdown(&citation.filename),
+                provenance_label(&citation.provenance)
+            ));
+        }
+        Ok(rendered)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,7 +122,31 @@ impl DeterministicResourceSelector {
         privacy_decision_id: &str,
         message_id: &str,
         query: &str,
+        declared_payload_categories: Vec<ProviderPayloadCategory>,
+    ) -> Result<SelectedResourceContext> {
+        self.select_for_message_with_budget(
+            store,
+            request_id,
+            privacy_decision_id,
+            message_id,
+            query,
+            declared_payload_categories,
+            MAX_SELECTED_RESOURCE_BLOCKS,
+            MAX_SELECTED_RESOURCE_CHARS,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn select_for_message_with_budget(
+        &self,
+        store: &ResourceStore,
+        request_id: &str,
+        privacy_decision_id: &str,
+        message_id: &str,
+        query: &str,
         mut declared_payload_categories: Vec<ProviderPayloadCategory>,
+        max_blocks: usize,
+        max_content_chars: usize,
     ) -> Result<SelectedResourceContext> {
         validate_uuid_v4("resource_selection_request_id", request_id)?;
         if privacy_decision_id.trim().is_empty() || privacy_decision_id.len() > 256 {
@@ -98,6 +154,13 @@ impl DeterministicResourceSelector {
         }
         if query.trim().is_empty() || query.chars().count() > MAX_SELECTED_RESOURCE_CHARS {
             anyhow::bail!("resource_selection_query_invalid");
+        }
+        if max_blocks == 0
+            || max_blocks > MAX_SELECTED_RESOURCE_BLOCKS
+            || max_content_chars == 0
+            || max_content_chars > MAX_SELECTED_RESOURCE_CHARS
+        {
+            anyhow::bail!("resource_selection_budget_invalid");
         }
         declared_payload_categories.sort();
         declared_payload_categories.dedup();
@@ -147,7 +210,7 @@ impl DeterministicResourceSelector {
         let mut context_blocks = Vec::new();
         let mut citations = BTreeMap::new();
         for (_, candidate) in primary {
-            if context_blocks.len() >= MAX_SELECTED_RESOURCE_BLOCKS {
+            if context_blocks.len() >= max_blocks {
                 break;
             }
             let citation_id = citation_id(
@@ -166,7 +229,7 @@ impl DeterministicResourceSelector {
                 candidate.resource.filename, candidate.chunk.content
             );
             let block_chars = content.chars().count();
-            if block_chars > MAX_SELECTED_RESOURCE_CHARS.saturating_sub(selected_chars) {
+            if block_chars > max_content_chars.saturating_sub(selected_chars) {
                 continue;
             }
             context_blocks.push(BoundedContextBlock {
@@ -239,6 +302,57 @@ fn citation_id(request_id: &str, resource_id: &str, ordinal: u32, content_digest
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     format!("cite_{compact}")
+}
+
+fn extract_model_citation_ids(model_output: &str) -> Result<Vec<String>> {
+    let mut citation_ids = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (start, _) in model_output.match_indices("cite_") {
+        let candidate = model_output[start..].chars().take(29).collect::<String>();
+        let valid = candidate.len() == 29
+            && candidate.starts_with("cite_")
+            && candidate[5..].bytes().all(|byte| byte.is_ascii_hexdigit());
+        let trailing = model_output[start + candidate.len()..].chars().next();
+        if !valid
+            || trailing.is_some_and(|character| character.is_alphanumeric() || character == '_')
+        {
+            anyhow::bail!("resource_citation_malformed");
+        }
+        if seen.insert(candidate.clone()) {
+            citation_ids.push(candidate);
+        }
+    }
+    Ok(citation_ids)
+}
+
+fn escape_markdown(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|character| {
+            if matches!(
+                character,
+                '\\' | '`'
+                    | '*'
+                    | '_'
+                    | '{'
+                    | '}'
+                    | '['
+                    | ']'
+                    | '('
+                    | ')'
+                    | '#'
+                    | '+'
+                    | '-'
+                    | '.'
+                    | '!'
+                    | '|'
+            ) {
+                vec!['\\', character]
+            } else {
+                vec![character]
+            }
+        })
+        .collect()
 }
 
 fn relevance_score(
@@ -493,6 +607,36 @@ mod tests {
         assert!(selected
             .citation_set
             .validate_model_citation_ids(&Uuid::new_v4().to_string(), &issued)
+            .is_err());
+        let rendered = selected
+            .citation_set
+            .validate_and_render_model_output(
+                selected.citation_set.request_id(),
+                &format!("结论基于附件证据 [{}]。", issued[0]),
+            )
+            .unwrap();
+        assert!(rendered.contains("来源（OpenLife 已核验）"));
+        assert!(rendered.contains("roadshow\\_compare"));
+        assert!(selected
+            .citation_set
+            .validate_and_render_model_output(
+                selected.citation_set.request_id(),
+                "结论没有任何引用。",
+            )
+            .is_err());
+        assert!(selected
+            .citation_set
+            .validate_and_render_model_output(
+                selected.citation_set.request_id(),
+                "伪造引用 cite_000000000000000000000000。",
+            )
+            .is_err());
+        assert!(selected
+            .citation_set
+            .validate_and_render_model_output(
+                selected.citation_set.request_id(),
+                "格式错误 cite_short。",
+            )
             .is_err());
 
         let summary = select(&store, "message-compare", "请总结附件");

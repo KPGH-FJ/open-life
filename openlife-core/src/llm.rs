@@ -26,8 +26,8 @@ pub struct ChatMessage {
 }
 
 const MAX_PREPARED_MESSAGES: usize = 128;
-const MAX_PREPARED_CONTEXT_BLOCKS: usize = 32;
-const MAX_PREPARED_CONTENT_CHARS: usize = 262_144;
+pub const MAX_PREPARED_CONTEXT_BLOCKS: usize = 32;
+pub const MAX_PREPARED_CONTENT_CHARS: usize = 262_144;
 
 /// A minimal, auditable description of the context selected before a provider call.
 ///

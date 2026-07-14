@@ -66,7 +66,11 @@ pub fn extract_resource(request: ResourceExtractionRequest) -> Result<ResourceEx
 
 fn validate_request_shape(request: &ResourceExtractionRequest) -> Result<()> {
     let filename = request.filename.trim();
-    if filename.is_empty() || filename.len() > 255 || filename.contains(['/', '\\', '\0']) {
+    if filename.is_empty()
+        || filename.len() > 255
+        || filename.contains(['/', '\\', '\0'])
+        || filename.chars().any(char::is_control)
+    {
         anyhow::bail!("resource_filename_invalid");
     }
     if request.declared_mime.trim().is_empty() || request.declared_mime.len() > 128 {
@@ -778,6 +782,14 @@ mod tests {
         })
         .unwrap_err();
         assert!(wrong_mime.to_string().contains("declared_mime_mismatch"));
+
+        let unsafe_filename = extract_resource(ResourceExtractionRequest {
+            filename: "unsafe\nname.md".to_string(),
+            declared_mime: "text/markdown".to_string(),
+            bytes: b"safe bytes".to_vec(),
+        })
+        .unwrap_err();
+        assert!(unsafe_filename.to_string().contains("filename_invalid"));
 
         let corrupt = extract_resource(ResourceExtractionRequest {
             filename: "roadshow_compare.docx".to_string(),

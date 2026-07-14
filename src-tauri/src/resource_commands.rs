@@ -311,6 +311,23 @@ mod tests {
         assert_eq!(sources[0].bytes, b"# Roadshow\nEvidence");
     }
 
+    #[test]
+    fn resource_selector_has_no_parallel_semantic_index_or_model_route() {
+        let source = include_str!("../../openlife-core/src/resource_selection.rs");
+        for forbidden in [
+            ["Vector", "Store"].concat(),
+            ["vector", "_store"].concat(),
+            ["embed", "ding"].concat(),
+            ["Inference", "Scheduler"].concat(),
+            ["prepare", "_chat_request"].concat(),
+        ] {
+            assert!(
+                !source.contains(&forbidden),
+                "deterministic Resource selector must not depend on {forbidden}"
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn selected_file_reader_rejects_symlinks() {
