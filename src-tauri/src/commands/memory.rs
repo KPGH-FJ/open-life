@@ -1007,20 +1007,11 @@ mod tests {
     #[tokio::test]
     async fn undo_explicit_memory_command_archives_the_canonical_memory_once() {
         let state = crate::test_utils::test_app_state();
-        let source_user_message = "我早餐喜欢咖啡和面包";
-        let fact = openlife_core::agent::CanonicalMemoryFactDescriptor::new(
-            source_user_message,
-            openlife_core::agent::MemoryLifecycleScope::Global,
-            openlife_core::agent::MemoryLifecycleCategory::Fact,
-            openlife_core::agent::MemoryLifecycleRiskLevel::Low,
-            openlife_core::agent::MemoryLifecycleSensitivity::Internal,
-        )
-        .unwrap();
-        let (_policy, candidate, proof) =
+        let source_user_message = "请记住：我早餐喜欢咖啡和面包";
+        let (_policy, candidate, fact, proof) =
             crate::main_chat_kernel::test_policy_memory_admission_context(
                 "message-1",
                 source_user_message,
-                &fact,
             );
         let registry = {
             state

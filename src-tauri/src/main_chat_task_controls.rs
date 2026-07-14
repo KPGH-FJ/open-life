@@ -2337,7 +2337,14 @@ async fn tool_unavailable_detected(
         let target = action.observation_metadata.as_ref().and_then(|metadata| {
             string_from_metadata(
                 metadata,
-                &["toolName", "tool_name", "target", "resolvedTarget"],
+                &[
+                    "manifestId",
+                    "manifestName",
+                    "resolvedTarget",
+                    "tool_name",
+                    "toolName",
+                    "target",
+                ],
             )
         });
         if let Some(target) = target {

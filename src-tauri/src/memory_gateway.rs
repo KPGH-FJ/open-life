@@ -3958,12 +3958,11 @@ mod tests {
         source_message_id: &str,
         fact: CanonicalMemoryFactDescriptor,
     ) -> Result<ExplicitMemoryWriteReceipt, String> {
-        let source_user_message = fact.canonical_body.clone();
-        let (_policy, candidate, proof) =
+        let source_user_message = format!("Please remember: {}", fact.canonical_body);
+        let (_policy, candidate, fact, proof) =
             crate::main_chat_kernel::test_policy_memory_admission_context(
                 source_message_id,
                 &source_user_message,
-                &fact,
             );
         let registry = {
             state
@@ -4078,13 +4077,11 @@ mod tests {
                 .clone()
         };
         let registration = registry.register(task_session_id);
-        let fact = test_explicit_fact("Remember this proof-bound fact.");
-        let source_user_message = fact.canonical_body.clone();
-        let (_policy, candidate, proof) =
+        let source_user_message = "Remember this proof-bound fact.".to_string();
+        let (_policy, candidate, fact, proof) =
             crate::main_chat_kernel::test_policy_memory_admission_context(
                 "message-policy-authorized",
                 &source_user_message,
-                &fact,
             );
 
         let error = commit_explicit_user_memory_for_turn_with_state(
@@ -4127,13 +4124,11 @@ mod tests {
         };
         let registration = registry.register(task_session_id);
         registry.request_cancel(task_session_id);
-        let fact = test_explicit_fact("Remember this only if the canonical commit wins.");
-        let source_user_message = fact.canonical_body.clone();
-        let (_policy, candidate, proof) =
+        let source_user_message = "Remember this only if the canonical commit wins.".to_string();
+        let (_policy, candidate, fact, proof) =
             crate::main_chat_kernel::test_policy_memory_admission_context(
                 "message-memory-cancel",
                 &source_user_message,
-                &fact,
             );
 
         let error = commit_explicit_user_memory_for_turn_with_state(
@@ -4182,13 +4177,12 @@ mod tests {
                 .clone()
         };
         let registration = registry.register(task_session_id);
-        let fact = test_explicit_fact("Remember that canonical commit won before cancellation.");
-        let source_user_message = fact.canonical_body.clone();
-        let (_policy, candidate, proof) =
+        let source_user_message =
+            "Remember that canonical commit won before cancellation.".to_string();
+        let (_policy, candidate, fact, proof) =
             crate::main_chat_kernel::test_policy_memory_admission_context(
                 "message-memory-commit",
                 &source_user_message,
-                &fact,
             );
         let receipt = commit_explicit_user_memory_for_turn_with_state(
             &state,

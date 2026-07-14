@@ -15083,7 +15083,7 @@ fn is_current_external_read_intent(lower: &str) -> bool {
 }
 
 fn is_governed_file_write_intent(lower: &str) -> bool {
-    let write_action = contains_any(
+    let explicit_write_phrase = contains_any(
         lower,
         &[
             "file.write",
@@ -15102,6 +15102,11 @@ fn is_governed_file_write_intent(lower: &str) -> bool {
             "修改文件",
         ],
     );
+    let named_file_write =
+        contains_any(lower, &["write", "save", "create", "写入", "保存", "创建"])
+            && (lower.contains(" to file")
+                || lower.contains("到文件")
+                || lower.contains("到工作区"));
     let generated_artifact_save = contains_any(lower, &["保存", "save"])
         && contains_any(
             lower,
@@ -15127,7 +15132,7 @@ fn is_governed_file_write_intent(lower: &str) -> bool {
                 "final summary",
             ],
         );
-    (write_action || generated_artifact_save)
+    (explicit_write_phrase || named_file_write || generated_artifact_save)
         && !contains_any(
             lower,
             &[

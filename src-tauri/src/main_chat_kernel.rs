@@ -16,8 +16,8 @@ use openlife_core::agent::main_chat_agent_v1::{
 };
 #[cfg(test)]
 use openlife_core::agent::main_chat_agent_v1::{
-    IntentExecutionDisposition, IntentFrame, IntentRiskLevel, PolicyConsentDisposition,
-    PolicyMemoryAdmissionProof, PolicyRouter,
+    IntentFrame, IntentRiskLevel, PolicyConsentDisposition, PolicyMemoryAdmissionProof,
+    PolicyRouter,
 };
 use openlife_core::agent::main_chat_runtime_contract::MainChatAgentStateSnapshot;
 use openlife_core::agent::{
@@ -70,8 +70,8 @@ use crate::main_chat_react_runtime::{
 };
 use crate::main_chat_react_tool_selection::{
     build_main_chat_react_action_plan, main_chat_manifest_has_write_like_surface,
-    main_chat_manifest_is_governed_read_candidate, MainChatReactActionPlan,
-    MainChatReactToolCandidate,
+    main_chat_manifest_is_governed_read_candidate, normalize_main_chat_mcp_read_arguments,
+    MainChatReactActionPlan, MainChatReactToolCandidate,
 };
 use crate::main_chat_replay_contract::{
     DurableMainChatReplayExecutionEnvelope, DurableMainChatReplayExecutionInput,
@@ -1114,15 +1114,7 @@ fn kernel_mcp_candidate_from_manifest(
     selection_rank: usize,
     match_reason: &str,
 ) -> KernelMcpReadCandidate {
-    let arguments = if manifest.name == "builtin_echo"
-        && supplied_arguments
-            .as_object()
-            .is_some_and(serde_json::Map::is_empty)
-    {
-        serde_json::json!({ "text": "kernel registered MCP read" })
-    } else {
-        supplied_arguments
-    };
+    let arguments = normalize_main_chat_mcp_read_arguments(&manifest, supplied_arguments);
     let mut capabilities = manifest.capabilities.clone();
     if manifest.action_type.eq_ignore_ascii_case("read")
         && !capabilities
@@ -7107,66 +7099,49 @@ struct MainChatMemoryGovernanceMaterialization {
 pub(crate) fn test_policy_memory_admission_context(
     source_message_id: &str,
     source_user_message: &str,
-    fact: &CanonicalMemoryFactDescriptor,
 ) -> (
     PolicyDecision,
     MainChatMemoryCandidate,
+    CanonicalMemoryFactDescriptor,
     PolicyMemoryAdmissionProof,
 ) {
-    let candidate = MainChatMemoryCandidate {
-        candidate_id: format!("candidate:test:{source_message_id}"),
-        source_span_id: format!("span:test:{source_message_id}"),
-        kind: MemoryCandidateKind::SemanticUserFact,
-        destination: MemoryDestination::MemoryProposal,
-        evidence_text: source_user_message.to_string(),
-        source_preview: "test current user message".into(),
-        normalized_claim: fact.canonical_body.clone(),
-        sensitivity: fact.sensitivity.as_str().into(),
-        stability: "stable".into(),
-        explicitness: "explicit".into(),
-        future_actionability: "retrieval_fact".into(),
-        confidence: 1.0,
-        reason_codes: vec!["test_explicit_memory_request".into()],
-    };
     let mut intent = IntentFrame::from_user_message(source_user_message);
-    // Keep this helper deterministic: the exact source message remains bound
-    // by id/digest/candidate, while privacy classification is exercised by its
-    // own production tests instead of incidental words in a unit-test fact.
-    intent.user_goal = "explicit reversible Memory unit-test authorization".into();
     intent.current_user_message_id = Some(source_message_id.to_string());
-    intent.current_user_message_digest =
-        openlife_core::agent::metadata_safe::metadata_safe_text_digest(source_user_message).1;
-    intent.execution_disposition = IntentExecutionDisposition::ActionRequested;
-    intent.untrusted_instruction_spans.clear();
-    intent.requests_durable_write = true;
-    intent.requests_memory_change = true;
-    intent.requests_lifemodel_change = false;
-    intent.requests_file_change = false;
-    intent.risk_level = match fact.risk_level {
-        MemoryLifecycleRiskLevel::Low => IntentRiskLevel::Low,
-        MemoryLifecycleRiskLevel::Medium => IntentRiskLevel::Medium,
-        MemoryLifecycleRiskLevel::High => IntentRiskLevel::High,
-        MemoryLifecycleRiskLevel::IdentityValue => IntentRiskLevel::Critical,
-    };
-    intent.requires_confirmation = false;
-    intent.requires_hard_block = false;
-    intent.memory_routing = MainChatMemoryRoutingResult {
-        candidates: vec![candidate.clone()],
-        memory_proposal_candidate_ids: vec![candidate.candidate_id.clone()],
-        ..MainChatMemoryRoutingResult::default()
-    };
     let route = PolicyRouter.route(intent);
     assert_eq!(route.route_kind, PolicyRouteKind::ReversibleMemoryCommit);
     let policy = route.policy_decision;
+    let candidate = route
+        .intent_frame
+        .memory_routing
+        .candidates
+        .iter()
+        .find(|candidate| {
+            candidate.kind == MemoryCandidateKind::SemanticUserFact
+                && candidate.destination == MemoryDestination::MemoryProposal
+                && policy.allows_memory_candidate(&candidate.candidate_id)
+        })
+        .cloned()
+        .expect("production explicit Memory candidate");
+    let fact = CanonicalMemoryFactDescriptor::from_candidate(
+        candidate.normalized_claim.clone(),
+        candidate.kind,
+        MemoryLifecycleScope::Global,
+        MemoryLifecycleRiskLevel::from_intent_risk(policy.risk),
+        MemoryLifecycleSensitivity::from_policy_and_candidate(
+            policy.sensitivity,
+            &candidate.sensitivity,
+        ),
+    )
+    .expect("production explicit Memory fact descriptor");
     let proof = policy
         .authorize_explicit_memory_admission(
             IntentSourceKind::CurrentAuthenticatedUserMessage,
             source_user_message,
             &candidate,
-            fact,
+            &fact,
         )
         .expect("test Policy Memory admission proof");
-    (policy, candidate, proof)
+    (policy, candidate, fact, proof)
 }
 
 async fn materialize_kernel_memory_governance(
@@ -12769,21 +12744,18 @@ mod tests {
             task.id.clone(),
             task.chat_session_id.clone(),
         );
+        let action_plan = build_main_chat_react_action_plan(&task.chat_session_id, &task.user_goal)
+            .expect("build exact MCP action plan");
         let execution = executor
             .execute_read_tool(
                 MainChatKernelReadToolDecision {
                     tool_name: "mcp.read_only".into(),
-                    queue_action_type: "mcp.read_only".into(),
-                    executor_action_type: "mcp_tool".into(),
-                    requested_target: "mcp.call_tool".into(),
-                    target: "mcp.call_tool".into(),
-                    governed_input: serde_json::json!({
-                        "tool_name": "builtin_echo",
-                        "arguments": {"text": "real kernel permission path"},
-                        "selection_query": "builtin_echo",
-                        "governedInputSource": "real_kernel_permission_test",
-                    }),
-                    reason: "Exercise the real Kernel to ToolGateway permission path.".into(),
+                    queue_action_type: action_plan.queue_action_type.clone(),
+                    executor_action_type: action_plan.executor_action_type.clone(),
+                    requested_target: action_plan.target.clone(),
+                    target: action_plan.target.clone(),
+                    governed_input: action_plan.arguments.clone(),
+                    reason: action_plan.description.clone(),
                     model_arguments_ignored: true,
                     fixture_backed_read: false,
                     selection_metadata: None,
@@ -12831,11 +12803,6 @@ mod tests {
             projected_calls[0].status,
             ToolCallStatus::NeedsConfirmation
         ));
-        let action_id = projected_calls[0]
-            .action_id
-            .as_deref()
-            .expect("queued action id")
-            .to_string();
         let queued = {
             let queue = state
                 .main_chat_action_queue_store
@@ -12843,11 +12810,13 @@ mod tests {
                 .expect("action queue")
                 .lock()
                 .await;
-            queue
-                .load(&action_id)
-                .expect("load queued action")
-                .expect("queued action exists")
+            let actions = queue
+                .list_for_session(&task.id)
+                .expect("list queued actions");
+            assert_eq!(actions.len(), 1);
+            actions.into_iter().next().expect("queued action exists")
         };
+        let action_id = queued.id.clone();
         assert_eq!(queued.status, ExecutionQueueStatus::PendingPermission);
         let envelope = DurableMainChatReplayExecutionEnvelope::from_action_metadata(
             queued
@@ -12861,6 +12830,37 @@ mod tests {
         assert_eq!(envelope.queue_action_id, action_id);
         assert_eq!(envelope.manifest_id, "builtin_echo");
         assert_eq!(envelope.manifest_name, "builtin_echo");
+        let replay_plan =
+            build_main_chat_react_action_plan(&task.chat_session_id, &task.user_goal).unwrap();
+        let (replay_resolution, replay_manifest) = {
+            let registry = state.mcp_registry.lock().await;
+            let resolution =
+                crate::main_chat_react_tool_selection::resolve_main_chat_mcp_read_target(
+                    &registry,
+                    &replay_plan,
+                );
+            let manifest = registry
+                .list_manifests()
+                .into_iter()
+                .find(|manifest| manifest.id == envelope.manifest_id)
+                .expect("replay manifest");
+            (resolution, manifest)
+        };
+        let expected_replay_envelope =
+            DurableMainChatReplayExecutionEnvelope::new(DurableMainChatReplayExecutionInput {
+                task_session_id: &task.id,
+                run_id: &run_id,
+                queue_action_id: &action_id,
+                executor_action_id: &envelope.executor_action_id,
+                queue_action_type: &replay_plan.queue_action_type,
+                executor_action_type: &replay_plan.executor_action_type,
+                requested_target: &replay_plan.target,
+                resolved_target: &replay_resolution.target,
+                manifest: &replay_manifest,
+                input: &replay_resolution.arguments,
+            })
+            .unwrap();
+        assert_eq!(envelope, expected_replay_envelope);
 
         let proposal_id = queued
             .observation_metadata
@@ -12923,6 +12923,26 @@ mod tests {
             store
                 .mark_waiting_permission(&task.id)
                 .expect("mark task waiting permission");
+        }
+        {
+            // This focused test invokes the evidence recorder below the full
+            // Kernel finalizer. Mirror the canonical AgentRun transition that
+            // the production finalizer performs before any resume is legal.
+            let store = state
+                .agent_run_store
+                .as_ref()
+                .expect("agent run store")
+                .lock()
+                .await;
+            let mut run = store
+                .get_run(&run_id)
+                .expect("load canonical AgentRun")
+                .expect("canonical AgentRun exists");
+            run.status = AgentRunStatus::WaitingPermission;
+            run.finished_at = None;
+            store
+                .update_run(&run)
+                .expect("mark canonical AgentRun waiting permission");
         }
         crate::commands::proposal::accept_proposal_with_state(proposal_id.clone(), &state)
             .await
@@ -13259,11 +13279,7 @@ mod tests {
         )
         .await
         .expect("project successful typed receipt");
-        assert!(projected_calls[0].success);
-        assert!(matches!(
-            &projected_calls[0].status,
-            ToolCallStatus::Success
-        ));
+        assert!(projected_calls.is_empty());
         let success_action = {
             let queue = state
                 .main_chat_action_queue_store
@@ -13271,10 +13287,11 @@ mod tests {
                 .expect("action queue")
                 .lock()
                 .await;
-            queue
-                .load(projected_calls[0].action_id.as_deref().expect("action id"))
-                .expect("load projected action")
-                .expect("projected action exists")
+            let actions = queue
+                .list_for_session(&task.id)
+                .expect("list projected actions");
+            assert_eq!(actions.len(), 1);
+            actions.into_iter().next().expect("projected action exists")
         };
         assert_eq!(success_action.status, ExecutionQueueStatus::Completed);
         assert_eq!(
@@ -13306,11 +13323,7 @@ mod tests {
         )
         .await
         .expect("missing receipt projects a fail-closed queue fact");
-        assert!(!projected_missing[0].success);
-        assert!(matches!(
-            &projected_missing[0].status,
-            ToolCallStatus::Error
-        ));
+        assert!(projected_missing.is_empty());
         let missing_action = {
             let queue = state
                 .main_chat_action_queue_store
@@ -13318,14 +13331,13 @@ mod tests {
                 .expect("action queue")
                 .lock()
                 .await;
-            queue
-                .load(
-                    projected_missing[0]
-                        .action_id
-                        .as_deref()
-                        .expect("missing receipt action id"),
-                )
-                .expect("load missing receipt action")
+            let actions = queue
+                .list_for_session(&task.id)
+                .expect("list missing-receipt actions");
+            assert_eq!(actions.len(), 2);
+            actions
+                .into_iter()
+                .last()
                 .expect("missing receipt action exists")
         };
         assert_eq!(missing_action.status, ExecutionQueueStatus::Failed);
@@ -13395,6 +13407,13 @@ mod tests {
         let memory_store = openlife_core::memory::MemoryStore::new_in_memory().unwrap();
         let lifecycle_store = openlife_core::agent::MemoryLifecycleStore::new_in_memory().unwrap();
         let lifecycle_reader = lifecycle_store.retrieval_reader();
+        let agent_run_store = state
+            .agent_run_store
+            .as_ref()
+            .expect("agent run store")
+            .lock()
+            .await
+            .clone();
         let action_context = ActionExecutionContext::new(
             &registry,
             &permission_store,
@@ -13403,7 +13422,8 @@ mod tests {
             &[],
         )
         .with_memory_store(&memory_store)
-        .with_memory_lifecycle_retrieval_reader(&lifecycle_reader);
+        .with_memory_lifecycle_retrieval_reader(&lifecycle_reader)
+        .with_agent_run_store(&agent_run_store);
         let gateway = ToolGateway::from_executor_config(ActionExecutorConfig::default());
         let succeeded_gateway_result = gateway
             .execute(
@@ -13575,24 +13595,22 @@ mod tests {
             projected_calls[1].execution_receipt.as_ref(),
             Some(&failed_receipt)
         );
-        for (projected, expected_executor_action_id) in projected_calls
+        let queued_actions = state
+            .main_chat_action_queue_store
+            .as_ref()
+            .expect("action queue")
+            .lock()
+            .await
+            .list_for_session(&task.id)
+            .expect("list projected queue actions");
+        assert_eq!(queued_actions.len(), 2);
+        for (queued, expected_executor_action_id) in queued_actions
             .iter()
             .zip([succeeded_action_id.as_str(), failed_action_id.as_str()])
         {
-            let queued = state
-                .main_chat_action_queue_store
-                .as_ref()
-                .expect("action queue")
-                .lock()
-                .await
-                .load(
-                    projected
-                        .action_id
-                        .as_deref()
-                        .expect("projected queue action id"),
-                )
-                .unwrap()
-                .expect("projected queue action");
+            assert!(projected_calls.iter().any(|projected| {
+                projected.action_id.as_deref() == Some(expected_executor_action_id)
+            }));
             assert_eq!(
                 queued
                     .observation_metadata
@@ -13821,15 +13839,19 @@ mod tests {
             projected_calls[0].execution_receipt.as_ref(),
             Some(&gateway_receipt)
         );
-        let queued = state
-            .main_chat_action_queue_store
-            .as_ref()
-            .expect("action queue")
-            .lock()
-            .await
-            .load(projected_calls[0].action_id.as_deref().unwrap())
-            .unwrap()
-            .unwrap();
+        let queued = {
+            let queue = state
+                .main_chat_action_queue_store
+                .as_ref()
+                .expect("action queue")
+                .lock()
+                .await;
+            let actions = queue
+                .list_for_session(&task.id)
+                .expect("list pending actions");
+            assert_eq!(actions.len(), 1);
+            actions.into_iter().next().expect("queued action")
+        };
         assert_eq!(queued.status, ExecutionQueueStatus::PendingPermission);
         assert!(transcript
             .iter()
@@ -16176,16 +16198,8 @@ mod tests {
     fn policy_memory_admission_proof_rejects_forged_policy_candidate_message_and_fact() {
         let source_message_id = "message-proof-binding";
         let source_user_message = "Remember this exact policy-bound fact.";
-        let fact = CanonicalMemoryFactDescriptor::from_candidate(
-            "Remember this exact policy-bound fact.",
-            MemoryCandidateKind::SemanticUserFact,
-            MemoryLifecycleScope::Global,
-            MemoryLifecycleRiskLevel::Low,
-            MemoryLifecycleSensitivity::Internal,
-        )
-        .unwrap();
-        let (policy, candidate, _proof) =
-            test_policy_memory_admission_context(source_message_id, source_user_message, &fact);
+        let (policy, candidate, fact, _proof) =
+            test_policy_memory_admission_context(source_message_id, source_user_message);
         policy
             .authorize_explicit_memory_admission(
                 IntentSourceKind::CurrentAuthenticatedUserMessage,
@@ -16266,20 +16280,9 @@ mod tests {
     #[test]
     fn policy_memory_admission_proof_rejects_identity_even_if_low_and_internal() {
         let source_message_id = "message-proof-identity";
-        let source_user_message = "Remember that I am the finance administrator.";
-        let semantic_fact = CanonicalMemoryFactDescriptor::from_candidate(
-            source_user_message,
-            MemoryCandidateKind::SemanticUserFact,
-            MemoryLifecycleScope::Global,
-            MemoryLifecycleRiskLevel::Low,
-            MemoryLifecycleSensitivity::Internal,
-        )
-        .unwrap();
-        let (policy, mut candidate, _) = test_policy_memory_admission_context(
-            source_message_id,
-            source_user_message,
-            &semantic_fact,
-        );
+        let source_user_message = "Remember this exact policy-bound fact.";
+        let (policy, mut candidate, _semantic_fact, _) =
+            test_policy_memory_admission_context(source_message_id, source_user_message);
         candidate.kind = MemoryCandidateKind::IdentityOrRole;
         let identity_fact = CanonicalMemoryFactDescriptor::from_candidate(
             candidate.normalized_claim.clone(),

@@ -1193,15 +1193,36 @@ pub(crate) fn resolve_main_chat_mcp_read_target(
         };
     }
 
+    let supplied_arguments = plan
+        .arguments
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    let arguments = normalize_main_chat_mcp_read_arguments(&manifest, supplied_arguments);
     MainChatMcpReadResolution {
         target: manifest.name,
-        arguments: plan
-            .arguments
-            .get("arguments")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({})),
+        arguments,
         resolved: true,
         blocker_reason: None,
+    }
+}
+
+/// Produce the exact governed input used for both initial Kernel dispatch and
+/// permission replay. Replay intentionally reconstructs and hashes this input
+/// instead of persisting a second copy of arbitrary tool arguments, so every
+/// deterministic built-in default must have one owner.
+pub(crate) fn normalize_main_chat_mcp_read_arguments(
+    manifest: &openlife_core::tool_manifest::ToolManifest,
+    supplied_arguments: serde_json::Value,
+) -> serde_json::Value {
+    if manifest.name == "builtin_echo"
+        && supplied_arguments
+            .as_object()
+            .is_some_and(serde_json::Map::is_empty)
+    {
+        serde_json::json!({ "text": "kernel registered MCP read" })
+    } else {
+        supplied_arguments
     }
 }
 
