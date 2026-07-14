@@ -391,6 +391,14 @@ impl CanonicalMemoryFactDescriptor {
             sensitivity,
         )
     }
+
+    /// Stable semantic identity shared by proposal de-duplication and the
+    /// canonical Memory owner. Source, confidence, evidence and run metadata
+    /// are intentionally excluded by the lifecycle identity contract.
+    pub fn fact_key(&self) -> Result<String> {
+        canonical_memory_fact_identity(self.scope, self.category, &self.canonical_body)
+            .map(|(_, fact_key)| fact_key)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1811,6 +1819,32 @@ impl MemoryLifecycleStore {
         )?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    pub fn get_active_record_for_fact(
+        &self,
+        fact: &CanonicalMemoryFactDescriptor,
+    ) -> Result<Option<MemoryLifecycleRecord>> {
+        let fact_key = fact.fact_key()?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        conn.query_row(
+            record_select_sql!(
+                "WHERE fact_key = ?1
+                   AND runtime_context_excluded_at IS NULL
+                   AND status IN (
+                        'accepted', 'pending_materialization', 'materialized',
+                        'materialization_failed'
+                   )
+                 LIMIT 1"
+            ),
+            [fact_key],
+            row_to_record,
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     pub fn count_archived_memory_retrieval_states(&self) -> Result<usize> {
@@ -3902,6 +3936,29 @@ mod tests {
         assert!(project.newly_committed);
         assert_ne!(global.canonical_fact_key, project.canonical_fact_key);
         assert_ne!(global.record.memory_id, project.record.memory_id);
+    }
+
+    #[test]
+    fn public_fact_identity_finds_the_existing_active_canonical_owner() {
+        let store = MemoryLifecycleStore::new_in_memory().unwrap();
+        let accepted = store
+            .accept_memory_proposal(acceptance_input(
+                "proposal-active-fact-lookup",
+                "I prefer quiet focus time.",
+            ))
+            .unwrap();
+        let equivalent = fact_descriptor(
+            "  I   prefer quiet focus time.  ",
+            MemoryLifecycleRiskLevel::Medium,
+            MemoryLifecycleSensitivity::Sensitive,
+        );
+
+        assert_eq!(equivalent.fact_key().unwrap(), accepted.canonical_fact_key);
+        let existing = store
+            .get_active_record_for_fact(&equivalent)
+            .unwrap()
+            .expect("active canonical owner");
+        assert_eq!(existing.memory_id, accepted.record.memory_id);
     }
 
     #[test]

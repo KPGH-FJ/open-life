@@ -5613,6 +5613,26 @@ async fn stage_conditional_observation_memory_review(
     Ok(None)
 }
 
+#[derive(Debug)]
+enum KernelWriteProposalAdmission {
+    Pending(openlife_core::agent::AgentProposal),
+    AlreadyCanonical { memory_id: String, fact_key: String },
+}
+
+async fn active_canonical_memory_owner(
+    state: &Arc<AppState>,
+    fact: &CanonicalMemoryFactDescriptor,
+) -> Result<Option<openlife_core::agent::MemoryLifecycleRecord>, String> {
+    let store_arc = state
+        .memory_lifecycle_store
+        .as_ref()
+        .ok_or_else(|| "Memory lifecycle store not available".to_string())?;
+    let store = store_arc.lock().await;
+    store
+        .get_active_record_for_fact(fact)
+        .map_err(|error| format!("canonical Memory fact lookup failed: {error}"))
+}
+
 async fn create_kernel_write_proposal(
     state: &Arc<AppState>,
     task_session_id: &str,
@@ -5621,10 +5641,11 @@ async fn create_kernel_write_proposal(
     user_text: &str,
     policy_decision: &PolicyDecision,
     execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
-) -> Result<openlife_core::agent::AgentProposal, String> {
+) -> Result<KernelWriteProposalAdmission, String> {
     use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 
-    let (proposal_type, affected_path, reason, risk_level, after) = match outcome.kind {
+    let (proposal_type, affected_path, reason, risk_level, after, memory_fact) = match outcome.kind
+    {
         MainChatKernelWriteOutcomeKind::MemoryProposal => {
             let (lifecycle_risk, proposal_risk) =
                 conservative_memory_proposal_risk(policy_decision);
@@ -5663,7 +5684,7 @@ async fn create_kernel_write_proposal(
                     .to_string(),
                 proposal_risk,
                 serde_json::json!({
-                    "content": fact.canonical_body,
+                    "content": fact.canonical_body.clone(),
                     "scope": fact.scope,
                     "category": fact.category,
                     "riskLevel": fact.risk_level,
@@ -5674,6 +5695,7 @@ async fn create_kernel_write_proposal(
                     "sourceRunId": run_id,
                     "reviewPath": "mailbox",
                 }),
+                Some(fact),
             )
         }
         MainChatKernelWriteOutcomeKind::LifeModelProposal => {
@@ -5720,6 +5742,7 @@ async fn create_kernel_write_proposal(
                 "User requested a proposal-first LifeModel update from MainChatKernel.".to_string(),
                 RiskLevel::High,
                 after,
+                None,
             )
         }
         MainChatKernelWriteOutcomeKind::FileWriteProposal => {
@@ -5753,12 +5776,28 @@ async fn create_kernel_write_proposal(
                     "externalWritesExecuted": false,
                     "directWritesExecuted": false,
                 }),
+                None,
             )
         }
         MainChatKernelWriteOutcomeKind::ExternalConfirmationBlocker
         | MainChatKernelWriteOutcomeKind::DangerousHardBlock => {
             return Err("kernel blocker outcome cannot create proposal".into());
         }
+    };
+
+    let memory_review_idempotency_key = if let Some(fact) = memory_fact.as_ref() {
+        let fact_key = fact
+            .fact_key()
+            .map_err(|error| format!("Memory proposal fact identity rejected: {error}"))?;
+        if let Some(existing) = active_canonical_memory_owner(state, fact).await? {
+            return Ok(KernelWriteProposalAdmission::AlreadyCanonical {
+                memory_id: existing.memory_id,
+                fact_key,
+            });
+        }
+        Some(format!("memory_review:{fact_key}"))
+    } else {
+        None
     };
 
     let mut proposal = AgentProposal::new(
@@ -5783,20 +5822,19 @@ async fn create_kernel_write_proposal(
         .as_ref()
         .ok_or_else(|| "Proposal store not available".to_string())?;
     let store = store_arc.lock().await;
+    let mut request = openlife_core::agent::DurableWriteRequest::from_agent_proposal(
+        openlife_core::agent::DurableWriteSource::MainChat,
+        openlife_core::agent::DurableWriteSubject::from_proposal_type(proposal.proposal_type),
+        proposal.clone(),
+        "Main Chat kernel proposal is pending Review Center approval.",
+    )
+    .with_evidence_refs(vec![format!("main_chat_task_session:{task_session_id}")]);
+    if let Some(idempotency_key) = memory_review_idempotency_key {
+        request = request.with_idempotency_key(idempotency_key);
+    }
     openlife_core::agent::ReviewWorkflow::new(&store)
-        .submit_with_admission(
-            openlife_core::agent::DurableWriteRequest::from_agent_proposal(
-                openlife_core::agent::DurableWriteSource::MainChat,
-                openlife_core::agent::DurableWriteSubject::from_proposal_type(
-                    proposal.proposal_type,
-                ),
-                proposal.clone(),
-                "Main Chat kernel proposal is pending Review Center approval.",
-            )
-            .with_evidence_refs(vec![format!("main_chat_task_session:{task_session_id}")]),
-            execution_epoch,
-        )
-        .map(|outcome| outcome.proposal)
+        .submit_with_admission(request, execution_epoch)
+        .map(|outcome| KernelWriteProposalAdmission::Pending(outcome.proposal))
         .map_err(|err| format!("create kernel write proposal failed: {err}"))
 }
 
@@ -5887,6 +5925,7 @@ async fn materialize_kernel_memory_governance(
     let mut memory_proposal_ids = Vec::new();
     let mut lifemodel_proposal_ids = Vec::new();
     let mut explicit_memory_receipts = Vec::new();
+    let mut canonical_memory_noop_ids = Vec::new();
     let mut pending_proposal_ids = Vec::new();
     let mut blockers = routing.blockers.clone();
 
@@ -6059,7 +6098,7 @@ async fn materialize_kernel_memory_governance(
         .await?;
         transition_main_chat_action(state, &queued.id, ExecutionQueueStatus::Executing, None)
             .await?;
-        let proposal = create_kernel_memory_governance_proposal(
+        let proposal_admission = create_kernel_memory_governance_proposal(
             state,
             task_session_id,
             run_id,
@@ -6068,6 +6107,52 @@ async fn materialize_kernel_memory_governance(
             execution_epoch,
         )
         .await?;
+        let proposal = match proposal_admission {
+            KernelMemoryGovernanceProposalAdmission::Pending(proposal) => proposal,
+            KernelMemoryGovernanceProposalAdmission::AlreadyCanonical {
+                memory_id,
+                fact_key,
+            } => {
+                canonical_memory_noop_ids.push(memory_id.clone());
+                let no_op_metadata = serde_json::json!({
+                    "memoryGovernanceArtifact": true,
+                    "artifactType": "canonical_memory_noop",
+                    "candidateId": candidate.candidate_id,
+                    "candidateKind": candidate.kind,
+                    "memoryId": memory_id,
+                    "factKey": fact_key,
+                    "canonicalOwnerAlreadyActive": true,
+                    "reviewStaged": false,
+                    "directWritesExecuted": false,
+                    "acceptedDurableTruthWritten": false,
+                });
+                transition_main_chat_action(
+                    state,
+                    &queued.id,
+                    ExecutionQueueStatus::Observed,
+                    Some(no_op_metadata.clone()),
+                )
+                .await?;
+                transition_main_chat_action(
+                    state,
+                    &queued.id,
+                    ExecutionQueueStatus::Completed,
+                    Some(no_op_metadata.clone()),
+                )
+                .await?;
+                execution_transcript.extend(
+                    append_main_chat_agent_transcript(
+                        state,
+                        Some(task_session_id),
+                        ExecutionTranscriptEntryKind::Observation,
+                        "The Memory candidate already has an active canonical owner; no duplicate review item was staged.",
+                        no_op_metadata,
+                    )
+                    .await,
+                );
+                continue;
+            }
+        };
         let is_lifemodel = candidate.destination == MemoryDestination::LifeModelProposal;
         if is_lifemodel {
             lifemodel_proposal_ids.push(proposal.id.clone());
@@ -6126,6 +6211,7 @@ async fn materialize_kernel_memory_governance(
         &memory_proposal_ids,
         &lifemodel_proposal_ids,
         &explicit_memory_receipts,
+        &canonical_memory_noop_ids,
         &blockers,
     );
 
@@ -6135,6 +6221,12 @@ async fn materialize_kernel_memory_governance(
     })
 }
 
+#[derive(Debug)]
+enum KernelMemoryGovernanceProposalAdmission {
+    Pending(openlife_core::agent::AgentProposal),
+    AlreadyCanonical { memory_id: String, fact_key: String },
+}
+
 async fn create_kernel_memory_governance_proposal(
     state: &Arc<AppState>,
     task_session_id: &str,
@@ -6142,10 +6234,12 @@ async fn create_kernel_memory_governance_proposal(
     candidate: &MainChatMemoryCandidate,
     policy_decision: &PolicyDecision,
     execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
-) -> Result<openlife_core::agent::AgentProposal, String> {
+) -> Result<KernelMemoryGovernanceProposalAdmission, String> {
     use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType};
 
-    let (proposal_type, affected_path, reason, risk_level, after) = match candidate.destination {
+    let (proposal_type, affected_path, reason, risk_level, after, memory_fact) = match candidate
+        .destination
+    {
         MemoryDestination::MemoryProposal => {
             let (lifecycle_risk, proposal_risk) =
                 conservative_memory_proposal_risk(policy_decision);
@@ -6179,7 +6273,7 @@ async fn create_kernel_memory_governance_proposal(
                 },
                 proposal_risk,
                 serde_json::json!({
-                    "content": fact.canonical_body,
+                    "content": fact.canonical_body.clone(),
                     "scope": fact.scope,
                     "category": fact.category,
                     "riskLevel": fact.risk_level,
@@ -6195,6 +6289,7 @@ async fn create_kernel_memory_governance_proposal(
                     "acceptedDurableTruthWritten": false,
                     "directWritesExecuted": false,
                 }),
+                Some(fact),
             )
         }
         MemoryDestination::LifeModelProposal => (
@@ -6221,8 +6316,24 @@ async fn create_kernel_memory_governance_proposal(
                 "acceptedDurableTruthWritten": false,
                 "directWritesExecuted": false,
             }),
+            None,
         ),
         _ => return Err("candidate destination cannot create proposal".into()),
+    };
+
+    let memory_review_idempotency_key = if let Some(fact) = memory_fact.as_ref() {
+        let fact_key = fact
+            .fact_key()
+            .map_err(|error| format!("Memory proposal fact identity rejected: {error}"))?;
+        if let Some(existing) = active_canonical_memory_owner(state, fact).await? {
+            return Ok(KernelMemoryGovernanceProposalAdmission::AlreadyCanonical {
+                memory_id: existing.memory_id,
+                fact_key,
+            });
+        }
+        Some(format!("memory_review:{fact_key}"))
+    } else {
+        None
     };
 
     let mut proposal = AgentProposal::new(
@@ -6250,23 +6361,22 @@ async fn create_kernel_memory_governance_proposal(
         .as_ref()
         .ok_or_else(|| "Proposal store not available".to_string())?;
     let store = store_arc.lock().await;
+    let mut request = openlife_core::agent::DurableWriteRequest::from_agent_proposal(
+        openlife_core::agent::DurableWriteSource::MainChat,
+        openlife_core::agent::DurableWriteSubject::from_proposal_type(proposal.proposal_type),
+        proposal.clone(),
+        "Main Chat memory governance proposal is pending Review Center approval.",
+    )
+    .with_evidence_refs(vec![
+        format!("main_chat_task_session:{task_session_id}"),
+        format!("memory_candidate:{}", candidate.candidate_id),
+    ]);
+    if let Some(idempotency_key) = memory_review_idempotency_key {
+        request = request.with_idempotency_key(idempotency_key);
+    }
     openlife_core::agent::ReviewWorkflow::new(&store)
-        .submit_with_admission(
-            openlife_core::agent::DurableWriteRequest::from_agent_proposal(
-                openlife_core::agent::DurableWriteSource::MainChat,
-                openlife_core::agent::DurableWriteSubject::from_proposal_type(
-                    proposal.proposal_type,
-                ),
-                proposal.clone(),
-                "Main Chat memory governance proposal is pending Review Center approval.",
-            )
-            .with_evidence_refs(vec![
-                format!("main_chat_task_session:{task_session_id}"),
-                format!("memory_candidate:{}", candidate.candidate_id),
-            ]),
-            execution_epoch,
-        )
-        .map(|outcome| outcome.proposal)
+        .submit_with_admission(request, execution_epoch)
+        .map(|outcome| KernelMemoryGovernanceProposalAdmission::Pending(outcome.proposal))
         .map_err(|err| format!("create memory governance proposal failed: {err}"))
 }
 
@@ -6276,6 +6386,7 @@ fn memory_governance_metadata(
     memory_proposal_ids: &[String],
     lifemodel_proposal_ids: &[String],
     explicit_memory_receipts: &[serde_json::Value],
+    canonical_memory_noop_ids: &[String],
     blockers: &[String],
 ) -> serde_json::Value {
     let direct_memory_write = explicit_memory_receipts.iter().any(|receipt| {
@@ -6291,6 +6402,7 @@ fn memory_governance_metadata(
         "memoryProposalIds": memory_proposal_ids,
         "lifeModelProposalIds": lifemodel_proposal_ids,
         "explicitMemoryReceipts": explicit_memory_receipts,
+        "canonicalMemoryNoOpIds": canonical_memory_noop_ids,
         "sessionOnlyCandidateIds": routing.session_only_candidate_ids,
         "noOpCandidateIds": routing.no_op_candidate_ids,
         "blockers": blockers,
@@ -6310,6 +6422,7 @@ fn empty_memory_governance_metadata() -> serde_json::Value {
         "memoryProposalIds": [],
         "lifeModelProposalIds": [],
         "explicitMemoryReceipts": [],
+        "canonicalMemoryNoOpIds": [],
         "sessionOnlyCandidateIds": [],
         "noOpCandidateIds": [],
         "blockers": [],
@@ -6379,6 +6492,11 @@ fn synthesize_memory_governance_reply(memory_governance: &serde_json::Value) -> 
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or(&[]);
+    let canonical_memory_noop_count = memory_governance
+        .get("canonicalMemoryNoOpIds")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
     let explicit_memory_write_count = explicit_memory_receipts
         .iter()
         .filter(|receipt| {
@@ -6425,6 +6543,11 @@ fn synthesize_memory_governance_reply(memory_governance: &serde_json::Value) -> 
     if alias_link_count > 0 {
         lines.push(format!(
             "当前明确指令已关联到既有 Memory owner，不重复写入事实：{alias_link_count} 条。"
+        ));
+    }
+    if canonical_memory_noop_count > 0 {
+        lines.push(format!(
+            "该事实已有 active canonical Memory owner，未重复创建审核项或写入：{canonical_memory_noop_count} 条。"
         ));
     }
     if lines.is_empty() {
@@ -6506,7 +6629,7 @@ async fn build_kernel_write_outcome_command_surface_result(
     if is_kernel_proposal_outcome(outcome.kind) {
         transition_main_chat_action(state, &queued.id, ExecutionQueueStatus::Executing, None)
             .await?;
-        let proposal = create_kernel_write_proposal(
+        let proposal_admission = create_kernel_write_proposal(
             state,
             task_session_id,
             &agent_run.id,
@@ -6516,51 +6639,98 @@ async fn build_kernel_write_outcome_command_surface_result(
             execution_epoch,
         )
         .await?;
-        generated_proposals.push(proposal.id.clone());
-        agent_run.add_generated_proposal(&proposal.id);
-        pending_blockers.push(format!("proposal:{}", proposal.id));
-        let proposal_metadata = serde_json::json!({
-            "kernelBackedProposalOnlyWrite": true,
-            "writeOutcomeKind": outcome.kind.as_str(),
-            "actionId": queued.id,
-            "proposalId": proposal.id,
-            "proposalType": proposal.proposal_type,
-            "affectedPath": proposal.affected_path,
-            "sourceRunId": agent_run.id,
-            "sourceTaskSessionId": task_session_id,
-            "payloadSummary": outcome.payload_summary,
-            "reviewStatus": proposal.status,
-            "blockedWriteActionType": kernel_blocked_write_action_type(outcome.kind),
-            "directWritesExecuted": false,
-            "acceptedDurableTruthWritten": false,
-            "fileWritten": false,
-            "externalWritesExecuted": false,
-        });
-        transition_main_chat_action(
-            state,
-            &queued.id,
-            ExecutionQueueStatus::Observed,
-            Some(proposal_metadata.clone()),
-        )
-        .await?;
-        transition_main_chat_action(
-            state,
-            &queued.id,
-            ExecutionQueueStatus::Completed,
-            Some(proposal_metadata.clone()),
-        )
-        .await?;
-        execution_transcript.extend(
-            append_main_chat_agent_transcript(
-                state,
-                Some(task_session_id),
-                ExecutionTranscriptEntryKind::ProposalRequest,
-                "MainChatKernel created a proposal-only write outcome.",
-                proposal_metadata.clone(),
-            )
-            .await,
-        );
-        reply = format!("{} Proposal id: {}.", reply, proposal.id);
+        match proposal_admission {
+            KernelWriteProposalAdmission::Pending(proposal) => {
+                generated_proposals.push(proposal.id.clone());
+                agent_run.add_generated_proposal(&proposal.id);
+                pending_blockers.push(format!("proposal:{}", proposal.id));
+                let proposal_metadata = serde_json::json!({
+                    "kernelBackedProposalOnlyWrite": true,
+                    "writeOutcomeKind": outcome.kind.as_str(),
+                    "actionId": queued.id,
+                    "proposalId": proposal.id,
+                    "proposalType": proposal.proposal_type,
+                    "affectedPath": proposal.affected_path,
+                    "sourceRunId": agent_run.id,
+                    "sourceTaskSessionId": task_session_id,
+                    "payloadSummary": outcome.payload_summary,
+                    "reviewStatus": proposal.status,
+                    "blockedWriteActionType": kernel_blocked_write_action_type(outcome.kind),
+                    "directWritesExecuted": false,
+                    "acceptedDurableTruthWritten": false,
+                    "fileWritten": false,
+                    "externalWritesExecuted": false,
+                });
+                transition_main_chat_action(
+                    state,
+                    &queued.id,
+                    ExecutionQueueStatus::Observed,
+                    Some(proposal_metadata.clone()),
+                )
+                .await?;
+                transition_main_chat_action(
+                    state,
+                    &queued.id,
+                    ExecutionQueueStatus::Completed,
+                    Some(proposal_metadata.clone()),
+                )
+                .await?;
+                execution_transcript.extend(
+                    append_main_chat_agent_transcript(
+                        state,
+                        Some(task_session_id),
+                        ExecutionTranscriptEntryKind::ProposalRequest,
+                        "MainChatKernel created or reused a pending proposal-only write outcome.",
+                        proposal_metadata,
+                    )
+                    .await,
+                );
+                reply = format!("{} Proposal id: {}.", reply, proposal.id);
+            }
+            KernelWriteProposalAdmission::AlreadyCanonical {
+                memory_id,
+                fact_key,
+            } => {
+                let no_op_metadata = serde_json::json!({
+                    "kernelBackedProposalOnlyWrite": true,
+                    "writeOutcomeKind": outcome.kind.as_str(),
+                    "actionId": queued.id,
+                    "reviewStaged": false,
+                    "canonicalOwnerAlreadyActive": true,
+                    "memoryId": memory_id,
+                    "factKey": fact_key,
+                    "sourceRunId": agent_run.id,
+                    "sourceTaskSessionId": task_session_id,
+                    "directWritesExecuted": false,
+                    "acceptedDurableTruthWritten": false,
+                });
+                transition_main_chat_action(
+                    state,
+                    &queued.id,
+                    ExecutionQueueStatus::Observed,
+                    Some(no_op_metadata.clone()),
+                )
+                .await?;
+                transition_main_chat_action(
+                    state,
+                    &queued.id,
+                    ExecutionQueueStatus::Completed,
+                    Some(no_op_metadata.clone()),
+                )
+                .await?;
+                execution_transcript.extend(
+                    append_main_chat_agent_transcript(
+                        state,
+                        Some(task_session_id),
+                        ExecutionTranscriptEntryKind::Observation,
+                        "The exact Memory fact already has an active canonical owner; no duplicate review item or durable write was created.",
+                        no_op_metadata,
+                    )
+                    .await,
+                );
+                reply = "That Memory fact is already active. I did not create a duplicate review item or perform another durable write.".into();
+            }
+        }
     } else if outcome.kind == MainChatKernelWriteOutcomeKind::ExternalConfirmationBlocker {
         let blocker = outcome
             .blocker_code
@@ -6629,7 +6799,14 @@ async fn build_kernel_write_outcome_command_surface_result(
         );
     }
 
-    if let Some(ref store_arc) = state.main_chat_agent_session_store {
+    if pending_blockers.is_empty() {
+        complete_main_chat_agent_turn_session(
+            state,
+            main_chat_agent_turn,
+            "MainChatKernel completed without a new pending write or duplicate durable effect.",
+        )
+        .await?;
+    } else if let Some(ref store_arc) = state.main_chat_agent_session_store {
         let store = store_arc.lock().await;
         if let Err(err) = store.set_pending_blockers(task_session_id, pending_blockers.clone()) {
             log::warn!("[MainChatKernel] set write blockers failed: {}", err);
@@ -10025,13 +10202,25 @@ mod tests {
     fn explicit_memory_proposal_outcome_for_test(
         user_text: &str,
     ) -> (PolicyDecision, MainChatKernelWriteOutcome) {
-        let policy = test_policy_decision(MainChatAgentStrategy::MemoryProposal);
+        let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
+            "explicit-memory-proposal-test",
+            user_text,
+            None,
+            openlife_core::agent::AgentTaskKind::Conversation,
+        );
+        assert_eq!(
+            decision.selected_strategy,
+            MainChatAgentStrategy::MemoryProposal,
+            "the exact fixture input must require Memory review"
+        );
+        let provider_authorization =
+            MainChatProviderAuthorization::from_ingress_decision(&decision)
+                .expect("provider authorization from the same ingress decision");
+        let policy = decision.policy_decision;
         let input = MainChatTurnInput {
             session_id: "explicit-memory-proposal-test".into(),
             messages: vec![user_message(user_text)],
-            provider_authorization: policy_allowed_authorization(
-                "explicit-memory-proposal-outcome",
-            ),
+            provider_authorization,
             selected_skill_id: None,
             policy_decision: policy.clone(),
             model_supplied_tool_arguments: None,
@@ -13557,10 +13746,11 @@ mod tests {
                 .clone()
         };
         let registration = registry.register(task_session_id);
-        let user_text = "Remember that I prefer concise technical explanations.";
+        let user_text =
+            "Please remember this private health fact: coffee causes heart palpitations.";
         let (policy, outcome) = explicit_memory_proposal_outcome_for_test(user_text);
 
-        let proposal = create_kernel_write_proposal(
+        let proposal = match create_kernel_write_proposal(
             &state,
             task_session_id,
             "run-proposal-typed-fact",
@@ -13570,11 +13760,17 @@ mod tests {
             &registration.execution_epoch(),
         )
         .await
-        .expect("typed Memory proposal");
+        .expect("typed Memory proposal")
+        {
+            KernelWriteProposalAdmission::Pending(proposal) => proposal,
+            KernelWriteProposalAdmission::AlreadyCanonical { .. } => {
+                panic!("fresh test fact must stage a pending proposal")
+            }
+        };
 
         assert_eq!(proposal.after["scope"], serde_json::json!("global"));
         assert_eq!(proposal.after["category"], serde_json::json!("fact"));
-        assert_eq!(proposal.after["riskLevel"], serde_json::json!("medium"));
+        assert_eq!(proposal.after["riskLevel"], serde_json::json!("high"));
         assert_eq!(
             proposal.after["sensitivity"],
             serde_json::json!("sensitive")
@@ -13600,6 +13796,158 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kernel_memory_review_reuses_one_pending_proposal_by_canonical_fact_key() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let registry = {
+            state
+                .main_chat_runtime_state
+                .lock()
+                .await
+                .cancellation_registry
+                .clone()
+        };
+        let first_registration = registry.register("proposal-fact-dedup-first");
+        let second_registration = registry.register("proposal-fact-dedup-second");
+        let user_text =
+            "Please remember this private health fact: coffee causes heart palpitations.";
+        let (policy, outcome) = explicit_memory_proposal_outcome_for_test(user_text);
+
+        let first = create_kernel_write_proposal(
+            &state,
+            "proposal-fact-dedup-first",
+            "run-proposal-fact-dedup-first",
+            &outcome,
+            user_text,
+            &policy,
+            &first_registration.execution_epoch(),
+        )
+        .await
+        .unwrap();
+        let second = create_kernel_write_proposal(
+            &state,
+            "proposal-fact-dedup-second",
+            "run-proposal-fact-dedup-second",
+            &outcome,
+            user_text,
+            &policy,
+            &second_registration.execution_epoch(),
+        )
+        .await
+        .unwrap();
+
+        let first = match first {
+            KernelWriteProposalAdmission::Pending(proposal) => proposal,
+            KernelWriteProposalAdmission::AlreadyCanonical { .. } => {
+                panic!("first fact must stage review")
+            }
+        };
+        let second = match second {
+            KernelWriteProposalAdmission::Pending(proposal) => proposal,
+            KernelWriteProposalAdmission::AlreadyCanonical { .. } => {
+                panic!("pending fact is not accepted canonical truth")
+            }
+        };
+        assert_eq!(first.id, second.id);
+        assert_eq!(
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .pending_count()
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn kernel_memory_review_suppresses_fact_with_active_canonical_owner() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let registry = {
+            state
+                .main_chat_runtime_state
+                .lock()
+                .await
+                .cancellation_registry
+                .clone()
+        };
+        let first_registration = registry.register("proposal-active-fact-first");
+        let second_registration = registry.register("proposal-active-fact-second");
+        let user_text =
+            "Please remember this private health fact: coffee causes heart palpitations.";
+        let (policy, outcome) = explicit_memory_proposal_outcome_for_test(user_text);
+        let first = match create_kernel_write_proposal(
+            &state,
+            "proposal-active-fact-first",
+            "run-proposal-active-fact-first",
+            &outcome,
+            user_text,
+            &policy,
+            &first_registration.execution_epoch(),
+        )
+        .await
+        .unwrap()
+        {
+            KernelWriteProposalAdmission::Pending(proposal) => proposal,
+            KernelWriteProposalAdmission::AlreadyCanonical { .. } => {
+                panic!("first fact must stage review")
+            }
+        };
+        let acceptance =
+            openlife_core::agent::MemoryLifecycleAcceptanceInput::from_memory_proposal(
+                &first,
+                first.after["content"].as_str().unwrap().to_string(),
+            )
+            .unwrap();
+        let accepted = state
+            .memory_lifecycle_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .accept_memory_proposal(acceptance)
+            .unwrap();
+
+        let second = create_kernel_write_proposal(
+            &state,
+            "proposal-active-fact-second",
+            "run-proposal-active-fact-second",
+            &outcome,
+            user_text,
+            &policy,
+            &second_registration.execution_epoch(),
+        )
+        .await
+        .unwrap();
+
+        match second {
+            KernelWriteProposalAdmission::AlreadyCanonical {
+                memory_id,
+                fact_key,
+            } => {
+                assert_eq!(memory_id, accepted.record.memory_id);
+                assert_eq!(fact_key, accepted.canonical_fact_key);
+            }
+            KernelWriteProposalAdmission::Pending(_) => {
+                panic!("active canonical fact must suppress duplicate review")
+            }
+        }
+        assert_eq!(
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .pending_count()
+                .unwrap(),
+            1,
+            "the original fixture proposal remains pending here; no second proposal may be added"
+        );
+    }
+
+    #[tokio::test]
     async fn kernel_memory_proposal_conservatively_inherits_policy_risk_and_sensitivity() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let task_session_id = "proposal-conservative-governance";
@@ -13612,13 +13960,14 @@ mod tests {
                 .clone()
         };
         let registration = registry.register(task_session_id);
-        let user_text = "Remember this reviewed high-risk fact.";
+        let user_text =
+            "Please remember this private health fact: coffee causes heart palpitations.";
         let (mut policy, mut outcome) = explicit_memory_proposal_outcome_for_test(user_text);
         outcome.governed_input["sensitivity"] = serde_json::json!("internal");
         policy.risk = IntentRiskLevel::High;
         policy.sensitivity = openlife_core::agent::main_chat_agent_v1::PolicySensitivity::Internal;
 
-        let proposal = create_kernel_write_proposal(
+        let proposal = match create_kernel_write_proposal(
             &state,
             task_session_id,
             "run-proposal-conservative-governance",
@@ -13628,7 +13977,13 @@ mod tests {
             &registration.execution_epoch(),
         )
         .await
-        .unwrap();
+        .unwrap()
+        {
+            KernelWriteProposalAdmission::Pending(proposal) => proposal,
+            KernelWriteProposalAdmission::AlreadyCanonical { .. } => {
+                panic!("fresh test fact must stage a pending proposal")
+            }
+        };
 
         assert_eq!(proposal.risk_level, RiskLevel::High);
         assert_eq!(proposal.after["riskLevel"], serde_json::json!("high"));
@@ -13652,7 +14007,8 @@ mod tests {
         };
         let registration = registry.register(task_session_id);
         registry.request_cancel(task_session_id);
-        let user_text = "Remember that I prefer concise technical explanations.";
+        let user_text =
+            "Please remember this private health fact: coffee causes heart palpitations.";
         let (policy, outcome) = explicit_memory_proposal_outcome_for_test(user_text);
 
         let error = create_kernel_write_proposal(
@@ -13666,7 +14022,10 @@ mod tests {
         )
         .await
         .expect_err("cancel-winning epoch must reject Proposal commit");
-        assert!(error.contains("create kernel proposal rejected"));
+        assert!(
+            error.contains("canonical_write_admission_rejected:cancel_requested"),
+            "unexpected cancellation error: {error}"
+        );
         let proposals = state
             .proposal_store
             .as_ref()

@@ -2587,6 +2587,41 @@ async fn main_chat_kernel_sensitive_memory_stays_in_review_until_acceptance() {
         stored.status,
         openlife_core::agent::ProposalStatus::Accepted
     );
+
+    let replay_response = invoke_send_message_for_kernel_goal_3(
+        state.clone(),
+        "stage6c-active-memory-fact-no-duplicate",
+        user_text,
+    )
+    .await;
+    let replay_governance =
+        &replay_response["reasoning_trace"]["generation_result"]["memoryGovernance"];
+    assert!(replay_governance["memoryProposalIds"]
+        .as_array()
+        .expect("replay Memory proposal ids")
+        .is_empty());
+    assert_eq!(
+        replay_governance["canonicalMemoryNoOpIds"]
+            .as_array()
+            .expect("canonical Memory no-op ids")
+            .len(),
+        1
+    );
+    assert!(replay_response["reply"]
+        .as_str()
+        .is_some_and(|reply| reply.contains("active canonical Memory owner")));
+    assert_eq!(
+        list_command_surface_proposals(&state).await.len(),
+        1,
+        "an accepted canonical fact must not produce another ReviewWorkflow item"
+    );
+    let replay_task_session_id = task_session_id_from_response(&replay_response);
+    let replay_session = load_command_surface_session(&state, &replay_task_session_id).await;
+    assert_eq!(
+        replay_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
+    );
+    assert!(replay_session.pending_blockers.is_empty());
 }
 
 #[tokio::test]
@@ -3616,6 +3651,36 @@ async fn inferred_memory_review_preserves_direct_answer_and_truthful_proposal_re
         openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
     );
     assert!(session.pending_blockers.is_empty());
+
+    let repeated = invoke_send_message_for_kernel_goal_3(
+        state.clone(),
+        "h2-inferred-memory-overlay-repeat",
+        "My work timezone is Central European Time.",
+    )
+    .await;
+    assert_eq!(repeated["reply"], reply);
+    let repeated_ids = repeated["reasoning_trace"]["generation_result"]["memoryGovernance"]
+        ["memoryProposalIds"]
+        .as_array()
+        .expect("repeated inferred Memory proposal ids");
+    assert_eq!(repeated_ids.len(), 1);
+    assert_eq!(
+        repeated_ids[0].as_str(),
+        Some(proposals[0].id.as_str()),
+        "the canonical fact key must reuse the existing pending ReviewWorkflow item"
+    );
+    assert_eq!(
+        list_command_surface_proposals(&state).await.len(),
+        1,
+        "repeating the same inferred fact must not increase proposal fatigue"
+    );
+    let repeated_task_id = task_session_id_from_response(&repeated);
+    let repeated_session = load_command_surface_session(&state, &repeated_task_id).await;
+    assert_eq!(
+        repeated_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
+    );
+    assert!(repeated_session.pending_blockers.is_empty());
 }
 
 #[tokio::test]
