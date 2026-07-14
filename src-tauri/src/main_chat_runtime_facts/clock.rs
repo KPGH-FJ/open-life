@@ -17,7 +17,7 @@ pub enum MainChatRuntimeClockSource {
 }
 
 impl MainChatRuntimeClockSource {
-    fn now(&self) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    pub(crate) fn now(&self) -> Option<chrono::DateTime<chrono::FixedOffset>> {
         match self {
             Self::LocalSystem => {
                 let now = chrono::Local::now();

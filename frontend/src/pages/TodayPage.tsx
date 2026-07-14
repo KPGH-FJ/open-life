@@ -136,6 +136,12 @@ function choosePrimaryGoal(cards: TodayGoalCardView[]): DailyGoal | null {
 }
 
 function formatTimeBlock(goal: DailyGoal | null): string {
+  if (goal?.due_at) {
+    const due = new Date(goal.due_at);
+    if (!Number.isNaN(due.getTime())) {
+      return `截止 ${due.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+    }
+  }
   if (!goal?.time_block) return "未设置时间";
   return `${goal.time_block.start}-${goal.time_block.end}`;
 }

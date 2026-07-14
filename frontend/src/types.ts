@@ -64,6 +64,7 @@ export interface GoalItem {
 export interface DailyGoal {
   name: string;
   done: boolean;
+  due_at?: string;
   time_block?: {
     start: string;
     end: string;

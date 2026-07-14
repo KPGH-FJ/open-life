@@ -71,6 +71,7 @@ impl MainChatAgentProductStrategyRoute {
             MainChatAgentStrategy::PlanExecute | MainChatAgentStrategy::ReviewMaturation => {
                 Self::PlanExecute
             }
+            MainChatAgentStrategy::TransientStateCommand => Self::TaskControl,
             MainChatAgentStrategy::ReversibleMemoryCommit => Self::MemoryCommit,
             MainChatAgentStrategy::MemoryProposal
             | MainChatAgentStrategy::LifeModelProposal

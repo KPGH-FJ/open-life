@@ -3538,44 +3538,6 @@ export async function getDailyGoals(): Promise<DailyGoal[]> {
   return safeInvoke<DailyGoal[]>("get_daily_goals");
 }
 
-export async function addDailyGoal(
-  operationId: string,
-  name: string,
-  timeBlock?: { start: string; end: string }
-): Promise<{
-  operationId: string;
-  operationDigest: string;
-  replayed: boolean;
-  canonicalCommitted: boolean;
-}> {
-  return safeInvoke("add_daily_goal", {
-    operationId,
-    operation_id: operationId,
-    name,
-    ...optionalDualArg("timeBlock", "time_block", timeBlock),
-  });
-}
-
-export async function updateDailyGoal(
-  index: number,
-  name: string,
-  timeBlock?: { start: string; end: string }
-): Promise<void> {
-  return safeInvoke("update_daily_goal", {
-    index,
-    name,
-    ...optionalDualArg("timeBlock", "time_block", timeBlock),
-  });
-}
-
-export async function deleteDailyGoal(index: number): Promise<void> {
-  return safeInvoke("delete_daily_goal", { index });
-}
-
-export async function toggleDailyGoal(index: number): Promise<boolean> {
-  return safeInvoke<boolean>("toggle_daily_goal", { index });
-}
-
 // ── Milestone D: Hot Memory Cache ──
 export interface HotMemoryCache {
   identity_summary: string;

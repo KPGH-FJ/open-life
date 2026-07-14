@@ -1548,7 +1548,7 @@ describe("ChatPage", () => {
     expect((textarea as HTMLTextAreaElement).value).toContain("请帮我拆解一个当前目标");
   });
 
-  it("does not call model stream when chat is not ready but keeps slash commands usable", async () => {
+  it("lets TurnRuntime decide local versus provider capability when diagnostics report chat not ready", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_system_diagnostics") {
         return Promise.resolve({
@@ -1623,17 +1623,22 @@ describe("ChatPage", () => {
     fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
 
     await waitFor(() => {
-      expect(screen.getByText(/普通对话暂不可用/)).toBeInTheDocument();
+      const turnCalls = vi
+        .mocked(invoke)
+        .mock.calls.filter(([cmd]) => cmd === "start_stream_message");
+      expect(turnCalls).toHaveLength(1);
     });
-    expect(invoke).not.toHaveBeenCalledWith("start_stream_message", expect.anything());
 
     fireEvent.change(textarea, { target: { value: "/goal" } });
     fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
 
     await waitFor(() => {
-      const saveCalls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "save_chat_message");
-      expect(saveCalls.length).toBeGreaterThanOrEqual(2);
+      const turnCalls = vi
+        .mocked(invoke)
+        .mock.calls.filter(([cmd]) => cmd === "start_stream_message");
+      expect(turnCalls).toHaveLength(2);
     });
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "save_chat_message")).toBe(false);
   });
 
   it("shows DeepSeek API key guidance when cloud stream fails", async () => {
@@ -5556,7 +5561,7 @@ describe("ChatPage", () => {
     });
   });
 
-  it("persists slash command messages to chat history", async () => {
+  it("routes slash commands through the single TurnRuntime owner", async () => {
     render(
       <BrowserRouter>
         <ChatPage />
@@ -5568,35 +5573,23 @@ describe("ChatPage", () => {
     fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
 
     await waitFor(() => {
-      const saveCalls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "save_chat_message");
-      expect(saveCalls).toHaveLength(2);
+      expect(invoke).toHaveBeenCalledWith(
+        "start_stream_message",
+        expect.objectContaining({
+          sessionId: "session-1",
+          messages: expect.arrayContaining([{ role: "user", content: "/goal" }]),
+          operationId: expect.stringMatching(
+            /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+          ),
+        })
+      );
     });
-
-    const saveCalls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "save_chat_message");
-    expect(saveCalls[0][1]).toMatchObject({
-      sessionId: "session-1",
-      session_id: "session-1",
-      message: { role: "user", content: "/goal" },
-    });
-    expect(saveCalls[1][1]).toMatchObject({
-      sessionId: "session-1",
-      session_id: "session-1",
-      message: { role: "assistant" },
-    });
-    const operationIds = saveCalls.map(
-      call => (call[1] as Record<string, unknown> | undefined)?.operationId
-    );
-    expect(operationIds).toHaveLength(2);
-    expect(operationIds[0]).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
-    );
-    expect(operationIds[1]).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
-    );
-    expect(operationIds[0]).not.toBe(operationIds[1]);
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "save_chat_message")).toBe(false);
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "add_daily_goal")).toBe(false);
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "toggle_daily_goal")).toBe(false);
   });
 
-  it("supports adding a daily goal from slash command", async () => {
+  it("routes goal creation text to TurnRuntime without a page-owned write", async () => {
     render(
       <BrowserRouter>
         <ChatPage />
@@ -5609,40 +5602,26 @@ describe("ChatPage", () => {
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith(
-        "add_daily_goal",
+        "start_stream_message",
         expect.objectContaining({
-          operationId: expect.stringMatching(
-            /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
-          ),
-          name: "阅读30分钟",
+          messages: expect.arrayContaining([{ role: "user", content: "/goal add 阅读30分钟" }]),
         })
       );
     });
-    expect(await screen.findByText(/已添加今日目标：阅读30分钟/)).toBeInTheDocument();
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "add_daily_goal")).toBe(false);
   });
 
-  it("reuses one effect and message identity when the effect succeeded but message persistence failed", async () => {
-    const effectOperationIds: string[] = [];
-    const messageAttempts: Array<{ role: string; operationId: string }> = [];
-    let failFirstAssistantSave = true;
+  it("reuses the TurnRuntime operation identity after a lost response", async () => {
+    const turnOperationIds: string[] = [];
+    let loseFirstResponse = true;
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
-      if (cmd === "add_daily_goal") {
-        effectOperationIds.push(String(args?.operationId));
-        return Promise.resolve({
-          operationId: args?.operationId,
-          operationDigest: "sha256:test",
-          replayed: effectOperationIds.length > 1,
-          canonicalCommitted: true,
-        });
-      }
-      if (cmd === "save_chat_message") {
-        const role = String(args?.message?.role);
-        messageAttempts.push({ role, operationId: String(args?.operationId) });
-        if (role === "assistant" && failFirstAssistantSave) {
-          failFirstAssistantSave = false;
-          return Promise.reject(new Error("assistant message response lost"));
+      if (cmd === "start_stream_message") {
+        turnOperationIds.push(String(args?.operationId));
+        if (loseFirstResponse) {
+          loseFirstResponse = false;
+          return Promise.reject(new Error("turn response lost after canonical commit"));
         }
-        return Promise.resolve({ replayed: messageAttempts.length > 2 });
+        return mockInvoke(cmd, args);
       }
       return mockInvoke(cmd, args);
     });
@@ -5656,41 +5635,20 @@ describe("ChatPage", () => {
     const textarea = await screen.findByPlaceholderText(/输入消息/);
     fireEvent.change(textarea, { target: { value: "/goal add 重试不重复" } });
     fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
-    await waitFor(() => expect(messageAttempts).toHaveLength(2));
+    await waitFor(() => expect(turnOperationIds).toHaveLength(1));
 
     fireEvent.change(textarea, { target: { value: "/goal add 重试不重复" } });
     fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
-    await waitFor(() => expect(effectOperationIds).toHaveLength(2));
-    await waitFor(() => expect(messageAttempts).toHaveLength(4));
+    await waitFor(() => expect(turnOperationIds).toHaveLength(2));
 
-    expect(effectOperationIds[0]).toBe(effectOperationIds[1]);
-    expect(effectOperationIds[0]).toMatch(
+    expect(turnOperationIds[0]).toBe(turnOperationIds[1]);
+    expect(turnOperationIds[0]).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
     );
-    expect(messageAttempts[0]).toEqual(messageAttempts[2]);
-    expect(messageAttempts[1]).toEqual(messageAttempts[3]);
-  });
-
-  it("blocks governance blocker text from slash goal add without saving it", async () => {
-    render(
-      <BrowserRouter>
-        <ChatPage />
-      </BrowserRouter>
-    );
-
-    const textarea = await screen.findByPlaceholderText(/输入消息/);
-    fireEvent.change(textarea, {
-      target: { value: "/goal add blocked by governance: model_selected_disallowed_tool" },
-    });
-    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
-
-    expect(
-      await screen.findByText(/没有添加今日目标：这看起来像系统或治理阻断说明/)
-    ).toBeInTheDocument();
     expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "add_daily_goal")).toBe(false);
   });
 
-  it("does not save assistant governance blocker explanations as a daily goal", async () => {
+  it("does not expose the deleted assistant-to-goal direct-write action", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_chat_history") {
         return Promise.resolve([
@@ -5708,19 +5666,13 @@ describe("ChatPage", () => {
         <ChatPage />
       </BrowserRouter>
     );
-
     expect(await screen.findByText(/本轮选择了未允许的工具或目标/)).toBeInTheDocument();
     expect(screen.queryByText(/model_selected_disallowed_tool/)).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "设为今日目标" }));
-
-    expect(
-      await screen.findByText(/没有保存为今日目标：这看起来像系统反馈文本/)
-    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "设为今日目标" })).not.toBeInTheDocument();
     expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "add_daily_goal")).toBe(false);
   });
 
-  it("supports completing a daily goal from slash command", async () => {
+  it("routes goal completion through TurnRuntime without index-based toggling", async () => {
     render(
       <BrowserRouter>
         <ChatPage />
@@ -5732,9 +5684,14 @@ describe("ChatPage", () => {
     fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
 
     await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith("toggle_daily_goal", { index: 0 });
+      expect(invoke).toHaveBeenCalledWith(
+        "start_stream_message",
+        expect.objectContaining({
+          messages: expect.arrayContaining([{ role: "user", content: "/goal done 早起" }]),
+        })
+      );
     });
-    expect(await screen.findByText(/已完成今日目标：早起/)).toBeInTheDocument();
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "toggle_daily_goal")).toBe(false);
   });
 
   it("never direct-indexes assistant content and only drafts a governed memory proposal prompt", async () => {

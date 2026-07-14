@@ -167,6 +167,9 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
         )),
         web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
         resource_runtime: None,
+        state_store: Some(Arc::new(
+            openlife_core::state_store::StateStore::new_in_memory().unwrap(),
+        )),
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
     });
 

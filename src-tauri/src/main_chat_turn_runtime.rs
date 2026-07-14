@@ -4090,6 +4090,10 @@ pub(crate) fn decide_main_chat_turn_route_from_disposition(
                 MainChatExecutionPath::ReadOnlyTool,
                 "openlife_runtime_read_only_tool",
             ),
+            PolicyRouteKind::TransientStateCommand => (
+                MainChatExecutionPath::WriteOutcome,
+                "openlife_runtime_transient_state_command",
+            ),
             PolicyRouteKind::PlanDraft => (
                 MainChatExecutionPath::PlanExecute,
                 "openlife_runtime_plan_execute",
@@ -5865,6 +5869,244 @@ mod turn_admission_tests {
                 .insert("taskOwnerDigestVersion".into(), version);
         }
         payload
+    }
+
+    #[tokio::test]
+    async fn transient_state_commands_use_one_runtime_and_emit_minimal_committed_facts() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let local_test_clock =
+            format!("{}T09:00:00+08:00", chrono::Local::now().format("%Y-%m-%d"));
+        *state.runtime_clock_source.lock().await =
+            crate::main_chat_runtime_facts::MainChatRuntimeClockSource::Fixed(
+                chrono::DateTime::parse_from_rfc3339(&local_test_clock).unwrap(),
+            );
+        let session_id = "roadshow-transient-state-loop";
+
+        let create_operation = uuid::Uuid::new_v4().to_string();
+        let created = crate::main_chat_send::send_message_with_operation_state(
+            create_operation.clone(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: "今天下午三点前提醒我完成路演设备检查，完成后我还要能撤销。".into(),
+            }],
+            None,
+            &state,
+        )
+        .await
+        .expect("create transient state through TurnRuntime");
+        assert_eq!(created.status, "completed");
+        assert!(!created.model_invoked);
+        assert!(!created.tool_invoked);
+        assert_eq!(
+            created.agent_ingress.as_ref().unwrap().selected_strategy,
+            openlife_core::agent::main_chat_agent_v1::MainChatAgentStrategy::TransientStateCommand
+        );
+        assert!(created.reply.contains("canonical 状态"));
+
+        let replayed_after_response_loss =
+            crate::main_chat_send::send_message_with_operation_state(
+                create_operation.clone(),
+                session_id.into(),
+                vec![openlife_core::llm::ChatMessage {
+                    role: "user".into(),
+                    content: "今天下午三点前提醒我完成路演设备检查，完成后我还要能撤销。".into(),
+                }],
+                None,
+                &state,
+            )
+            .await
+            .expect("retry lost response through the same TurnRuntime operation");
+        assert_eq!(replayed_after_response_loss.status, "completed");
+        assert_eq!(replayed_after_response_loss.run_id, created.run_id);
+        assert_eq!(
+            state
+                .state_store
+                .as_ref()
+                .unwrap()
+                .list_daily_tasks(false)
+                .unwrap()
+                .len(),
+            1,
+            "same-operation response recovery must not duplicate the canonical task"
+        );
+
+        let list = crate::main_chat_send::send_message_with_operation_state(
+            uuid::Uuid::new_v4().to_string(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: "/goal list".into(),
+            }],
+            None,
+            &state,
+        )
+        .await
+        .expect("read transient state through TurnRuntime");
+        assert!(list.reply.contains("完成路演设备检查"));
+        assert!(!list.model_invoked);
+
+        let completed = crate::main_chat_send::send_message_with_operation_state(
+            uuid::Uuid::new_v4().to_string(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: "/goal done 完成路演设备检查".into(),
+            }],
+            None,
+            &state,
+        )
+        .await
+        .expect("complete transient state through TurnRuntime");
+        assert!(completed.reply.contains("标记为完成"));
+
+        let undone = crate::main_chat_send::send_message_with_operation_state(
+            uuid::Uuid::new_v4().to_string(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: "/goal undo 完成路演设备检查".into(),
+            }],
+            None,
+            &state,
+        )
+        .await
+        .expect("undo transient state through TurnRuntime");
+        assert!(undone.reply.contains("tombstone"));
+
+        let assets = state
+            .state_store
+            .as_ref()
+            .unwrap()
+            .list_daily_tasks(true)
+            .unwrap();
+        assert_eq!(assets.len(), 1);
+        assert_eq!(
+            assets[0].status,
+            openlife_core::state_store::DailyTaskStatus::Tombstoned
+        );
+        let event_store = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await;
+        let events = event_store.list(&create_operation, 0, 200).unwrap();
+        let effect = events
+            .iter()
+            .find(|event| event.event_type == "effect_committed")
+            .expect("canonical state effect event");
+        let final_delivery = events
+            .iter()
+            .find(|event| event.event_type == "final_delivery.created")
+            .expect("final delivery event");
+        assert!(effect.sequence < final_delivery.sequence);
+        assert!(
+            !serde_json::to_string(&events)
+                .unwrap()
+                .contains("完成路演设备检查"),
+            "TurnEventStore must retain state refs and digests without copying the task body"
+        );
+        assert_eq!(effect.payload["status"], "committed");
+        assert_eq!(effect.payload["projectionStatus"], "applied");
+        drop(event_store);
+        let projected = state.life_model_manager.lock().await.load().unwrap();
+        assert!(projected.goals.daily.is_empty());
+        assert!(crate::commands::state::get_daily_goals_with_state(&state)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn transient_state_command_fails_closed_when_canonical_state_store_is_unavailable() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let mut state = std::sync::Arc::try_unwrap(state)
+            .unwrap_or_else(|_| panic!("isolated state must have exactly one owner"));
+        state.state_store = None;
+        let state = std::sync::Arc::new(state);
+        let operation_id = uuid::Uuid::new_v4().to_string();
+
+        let error = crate::main_chat_send::send_message_with_operation_state(
+            operation_id.clone(),
+            "roadshow-state-store-degraded".into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: "/goal add 不能静默写进临时库".into(),
+            }],
+            None,
+            &state,
+        )
+        .await
+        .expect_err("missing canonical StateStore must fail closed");
+
+        assert!(error.contains("state_store_unavailable_degraded"));
+        let events = state
+            .main_chat_agent_event_store
+            .as_ref()
+            .expect("durable event store")
+            .lock()
+            .await
+            .list(&operation_id, 0, 200)
+            .expect("list failed turn facts");
+        assert!(events.iter().any(|event| event.event_type == "failed"));
+        assert!(events.iter().all(|event| {
+            !matches!(
+                event.event_type.as_str(),
+                "provider.started" | "tool.started" | "effect_committed"
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn concurrent_transient_state_commits_do_not_lose_yaml_projection_updates() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let first = crate::main_chat_send::send_message_with_operation_state(
+            uuid::Uuid::new_v4().to_string(),
+            "state-projection-race-a".into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: "/goal add 并发投影任务甲".into(),
+            }],
+            None,
+            &state,
+        );
+        let second = crate::main_chat_send::send_message_with_operation_state(
+            uuid::Uuid::new_v4().to_string(),
+            "state-projection-race-b".into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: "/goal add 并发投影任务乙".into(),
+            }],
+            None,
+            &state,
+        );
+
+        let (first, second) = tokio::join!(first, second);
+        assert_eq!(first.unwrap().status, "completed");
+        assert_eq!(second.unwrap().status, "completed");
+        assert_eq!(
+            state
+                .state_store
+                .as_ref()
+                .unwrap()
+                .list_daily_tasks(false)
+                .unwrap()
+                .len(),
+            2
+        );
+        let projected = state.life_model_manager.lock().await.load().unwrap();
+        let names = projected
+            .goals
+            .daily
+            .iter()
+            .filter(|goal| crate::state_projection::is_state_store_projected_daily_goal(goal))
+            .map(|goal| goal.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            names,
+            std::collections::BTreeSet::from(["并发投影任务乙", "并发投影任务甲"])
+        );
     }
 
     #[test]

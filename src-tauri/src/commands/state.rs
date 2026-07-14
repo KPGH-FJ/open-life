@@ -5,9 +5,7 @@ use crate::life_model_materializer_guard::{
 };
 use crate::memory_gateway;
 use crate::{persist_life_model, AppState};
-use openlife_core::life_model::{
-    AlertLevel, CustomStateDimension, DailyGoal, StateAlert, TimeBlock,
-};
+use openlife_core::life_model::{AlertLevel, CustomStateDimension, DailyGoal, StateAlert};
 use openlife_core::memory::StateHistoryEntry;
 use std::sync::Arc;
 use tauri::State;
@@ -203,145 +201,32 @@ pub async fn get_state_alerts(
 pub(crate) async fn get_daily_goals_with_state(
     state: &Arc<AppState>,
 ) -> Result<Vec<DailyGoal>, AppError> {
+    let store = state.state_store.as_ref().ok_or_else(|| {
+        AppError::db_with_hint(
+            "StateStore is unavailable; daily task truth is degraded and no temporary fallback is allowed.",
+            "restart_after_repairing_state_db",
+        )
+    })?;
+    let canonical = store.list_daily_tasks(false).map_err(AppError::from)?;
     let manager = state.life_model_manager.lock().await;
     let model = manager.load().map_err(AppError::from)?;
-    Ok(model.goals.daily)
+    let mut goals = model
+        .goals
+        .daily
+        .into_iter()
+        .filter(|goal| !crate::state_projection::is_state_store_projected_daily_goal(goal))
+        .collect::<Vec<_>>();
+    goals.extend(
+        canonical
+            .iter()
+            .map(crate::state_projection::projected_daily_goal),
+    );
+    Ok(goals)
 }
 
 #[tauri::command]
 pub async fn get_daily_goals(state: State<'_, Arc<AppState>>) -> Result<Vec<DailyGoal>, AppError> {
     get_daily_goals_with_state(&state.inner().clone()).await
-}
-
-#[tauri::command]
-pub(crate) async fn add_daily_goal(
-    operation_id: String,
-    name: String,
-    time_block: Option<TimeBlock>,
-    state: State<'_, Arc<AppState>>,
-) -> Result<crate::life_model_write_gateway::DailyGoalEffectReceipt, AppError> {
-    add_daily_goal_with_state(operation_id, name, time_block, state.inner()).await
-}
-
-pub(crate) async fn add_daily_goal_with_state(
-    operation_id: String,
-    name: String,
-    time_block: Option<TimeBlock>,
-    state: &Arc<AppState>,
-) -> Result<crate::life_model_write_gateway::DailyGoalEffectReceipt, AppError> {
-    crate::life_model_write_gateway::add_daily_goal_idempotent_with_gateway(
-        state,
-        &operation_id,
-        name,
-        time_block,
-        LifeModelMaterializerCallerContext::new(
-            "state_add_daily_goal_source_data",
-            LifeModelMaterializerCallerKind::SourceDataCompatibilityMaterialization,
-            LifeModelMaterializerCallerPurpose::SourceDataCompatibilityNotAcceptedTruth,
-        ),
-    )
-    .await
-    .map_err(|error| {
-        if error.contains("operation id") || error.contains("name must not be empty") {
-            AppError::permission(error)
-        } else {
-            AppError::from(error)
-        }
-    })
-}
-
-#[tauri::command]
-pub async fn update_daily_goal(
-    index: usize,
-    name: String,
-    time_block: Option<TimeBlock>,
-    state: State<'_, Arc<AppState>>,
-) -> Result<(), AppError> {
-    let manager = state.life_model_manager.lock().await;
-    let mut model = manager.load().map_err(AppError::from)?;
-    if let Some(goal) = model.goals.daily.get_mut(index) {
-        goal.name = name;
-        goal.time_block = time_block;
-        drop(manager);
-        persist_life_model(
-            &state.inner().clone(),
-            model,
-            true,
-            LifeModelMaterializerCallerContext::new(
-                "state_update_daily_goal_source_data",
-                LifeModelMaterializerCallerKind::SourceDataCompatibilityMaterialization,
-                LifeModelMaterializerCallerPurpose::SourceDataCompatibilityNotAcceptedTruth,
-            ),
-        )
-        .await
-        .map_err(AppError::from)
-        .map(|_| ())
-    } else {
-        Err(AppError::not_found("invalid index"))
-    }
-}
-
-#[tauri::command]
-pub async fn delete_daily_goal(
-    index: usize,
-    state: State<'_, Arc<AppState>>,
-) -> Result<(), AppError> {
-    let manager = state.life_model_manager.lock().await;
-    let mut model = manager.load().map_err(AppError::from)?;
-    if index < model.goals.daily.len() {
-        model.goals.daily.remove(index);
-        drop(manager);
-        persist_life_model(
-            &state.inner().clone(),
-            model,
-            true,
-            LifeModelMaterializerCallerContext::new(
-                "state_delete_daily_goal_source_data",
-                LifeModelMaterializerCallerKind::SourceDataCompatibilityMaterialization,
-                LifeModelMaterializerCallerPurpose::SourceDataCompatibilityNotAcceptedTruth,
-            ),
-        )
-        .await
-        .map_err(AppError::from)
-        .map(|_| ())
-    } else {
-        Err(AppError::not_found("invalid index"))
-    }
-}
-
-pub(crate) async fn toggle_daily_goal_with_state(
-    index: usize,
-    state: &Arc<AppState>,
-) -> Result<bool, AppError> {
-    let manager = state.life_model_manager.lock().await;
-    let mut model = manager.load().map_err(AppError::from)?;
-    if index >= model.goals.daily.len() {
-        return Err(AppError::not_found("invalid index"));
-    }
-    model.goals.daily[index].done = !model.goals.daily[index].done;
-    let completed = model.goals.daily[index].done;
-    drop(manager);
-    persist_life_model(
-        &state.clone(),
-        model,
-        true,
-        LifeModelMaterializerCallerContext::new(
-            "state_toggle_daily_goal_source_data",
-            LifeModelMaterializerCallerKind::SourceDataCompatibilityMaterialization,
-            LifeModelMaterializerCallerPurpose::SourceDataCompatibilityNotAcceptedTruth,
-        ),
-    )
-    .await
-    .map_err(AppError::from)?;
-    Ok(completed)
-}
-
-#[tauri::command]
-pub async fn toggle_daily_goal(
-    index: usize,
-    state: State<'_, Arc<AppState>>,
-) -> Result<bool, AppError> {
-    toggle_daily_goal_with_state(index, &state.inner().clone()).await
 }
 
 #[cfg(test)]
@@ -468,12 +353,15 @@ mod tests {
             )),
             web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
             resource_runtime: None,
+            state_store: Some(Arc::new(
+                openlife_core::state_store::StateStore::new_in_memory().unwrap(),
+            )),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         })
     }
 
     #[tokio::test]
-    async fn add_and_get_daily_goal() {
+    async fn legacy_yaml_daily_goal_remains_read_only_during_statestore_migration() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
 
@@ -485,6 +373,7 @@ mod tests {
                 name: "Exercise".to_string(),
                 done: false,
                 time_block: None,
+                due_at: None,
                 operation_id: None,
                 operation_digest: None,
             });
@@ -496,69 +385,6 @@ mod tests {
         assert_eq!(goals.len(), 1);
         assert_eq!(goals[0].name, "Exercise");
         assert!(!goals[0].done);
-    }
-
-    #[tokio::test]
-    async fn toggle_daily_goal_changes_state() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let state = test_app_state(&temp_dir);
-
-        // Add a goal directly
-        {
-            let manager = state.life_model_manager.lock().await;
-            let mut model = manager.load().unwrap_or_default();
-            model.goals.daily.push(DailyGoal {
-                name: "Read".to_string(),
-                done: false,
-                time_block: None,
-                operation_id: None,
-                operation_digest: None,
-            });
-            manager.save(&model).unwrap();
-        }
-
-        // Toggle it
-        let completed = toggle_daily_goal_with_state(0, &state).await.unwrap();
-        assert!(completed);
-
-        // Verify
-        let goals = get_daily_goals_with_state(&state).await.unwrap();
-        assert!(goals[0].done);
-
-        // Toggle back
-        let completed = toggle_daily_goal_with_state(0, &state).await.unwrap();
-        assert!(!completed);
-    }
-
-    #[tokio::test]
-    async fn daily_goal_effect_reuses_uuid_and_rejects_payload_drift() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let state = test_app_state(&temp_dir);
-        let operation_id = uuid::Uuid::new_v4().to_string();
-
-        let first = add_daily_goal_with_state(operation_id.clone(), "Read".into(), None, &state)
-            .await
-            .unwrap();
-        let replay = add_daily_goal_with_state(operation_id.clone(), "Read".into(), None, &state)
-            .await
-            .unwrap();
-
-        assert!(!first.replayed);
-        assert!(replay.replayed);
-        assert_eq!(first.operation_digest, replay.operation_digest);
-        let goals = get_daily_goals_with_state(&state).await.unwrap();
-        assert_eq!(goals.len(), 1);
-        assert_eq!(
-            goals[0].operation_id.as_deref(),
-            Some(operation_id.as_str())
-        );
-        assert!(
-            add_daily_goal_with_state(operation_id, "Write".into(), None, &state)
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("different payload")
-        );
     }
 
     #[tokio::test]

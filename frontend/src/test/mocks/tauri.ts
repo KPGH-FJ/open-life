@@ -3304,13 +3304,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         run_id: "run-1",
         warnings: [],
       } as T);
-    case "add_daily_goal":
-      return Promise.resolve(undefined as T);
-    case "toggle_daily_goal":
-      return Promise.resolve(true as T);
-    case "delete_daily_goal":
-    case "update_daily_goal":
-      return Promise.resolve(undefined as T);
     case "record_state":
       return Promise.resolve(undefined as T);
     case "search_memory":

@@ -181,6 +181,9 @@ pub struct AppState {
         Arc<tokio::sync::Mutex<crate::main_chat_runtime_facts::MainChatRuntimeClockSource>>,
     pub web_search_fixture_output: Arc<tokio::sync::Mutex<Option<String>>>,
     pub(crate) resource_runtime: Option<Arc<crate::resource_commands::ResourceRuntime>>,
+    /// Canonical ADR 0015 owner. Absence is an explicit degraded state; release
+    /// bootstrap never replaces it with a temporary or in-memory product store.
+    pub(crate) state_store: Option<Arc<openlife_core::state_store::StateStore>>,
     pub shutdown_notify: Arc<tokio::sync::Notify>,
 }
 

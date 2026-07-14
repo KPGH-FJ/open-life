@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import {
-  addDailyGoal,
   acceptProposal,
   builderStart,
   applyCalibration,
@@ -373,11 +372,9 @@ describe("tauri command argument aliases", () => {
     );
   });
 
-  it("normalizes optional state and daily-goal arguments before invoke", async () => {
+  it("normalizes optional state arguments before invoke", async () => {
     const stateOperationId = crypto.randomUUID();
-    const goalOperationId = crypto.randomUUID();
     await recordState(stateOperationId, "睡眠", 7.5, "小时", "昨晚", 6, 9, 2);
-    await addDailyGoal(goalOperationId, "阅读30分钟");
 
     expect(invoke).toHaveBeenCalledWith(
       "record_state",
@@ -394,11 +391,6 @@ describe("tauri command argument aliases", () => {
         alert_days: 2,
       })
     );
-    expect(invoke).toHaveBeenCalledWith("add_daily_goal", {
-      operationId: goalOperationId,
-      operation_id: goalOperationId,
-      name: "阅读30分钟",
-    });
   });
 
   it("sends governed restore and import request envelopes", async () => {

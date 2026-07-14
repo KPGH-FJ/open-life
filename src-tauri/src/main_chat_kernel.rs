@@ -5,6 +5,7 @@ use crate::main_chat_runtime_facts::{
     RUNTIME_FACT_PROVIDER_GENERATION_PATH, RUNTIME_FACT_PROVIDER_ROUTE_GENERATION_PATH,
 };
 use async_trait::async_trait;
+use chrono::TimeZone;
 use futures::StreamExt;
 use openlife_core::agent::main_chat_agent_v1::{
     AgentIngressDecision, AllowedCapability, CompiledContext, ContextCompiler,
@@ -53,8 +54,8 @@ use crate::main_chat_context_loader::{
     sanitize_main_chat_selected_skill_id,
 };
 use crate::main_chat_event_stream::{
-    append_main_chat_provider_receipt_events, materialize_optional_main_chat_agent_events,
-    MainChatAgentDurableEvent,
+    append_main_chat_agent_runtime_event, append_main_chat_provider_receipt_events,
+    materialize_optional_main_chat_agent_events, MainChatAgentDurableEvent,
 };
 use crate::main_chat_generation_support::{
     finalize_chat_agent_run, main_chat_provider_endpoint_kind, preview_text,
@@ -1878,9 +1879,6 @@ where
             "Main Chat kernel rejected a user message that did not match its PolicyDecision".into(),
         );
     }
-    let provider_authorization =
-        MainChatProviderAuthorization::from_ingress_decision(&main_chat_agent_turn.decision)
-            .map_err(|error| format!("Main Chat provider policy authorization failed: {error}"))?;
     let sanitized_selected_skill_id =
         sanitize_main_chat_selected_skill_id(selected_skill_id.as_deref());
     let mut execution_transcript = main_chat_agent_turn.transcript_entries.clone();
@@ -1951,6 +1949,23 @@ where
                 .await,
             );
         }
+        MainChatAgentStrategy::TransientStateCommand => {
+            execution_transcript.extend(
+                append_main_chat_agent_transcript(
+                    state,
+                    Some(&task_session_id),
+                    ExecutionTranscriptEntryKind::Action,
+                    "MainChatKernel admitted a deterministic transient-state command.",
+                    serde_json::json!({
+                        "policyRoute": main_chat_agent_turn.decision.policy_decision.route_kind.as_str(),
+                        "providerDispatchAllowed": false,
+                        "canonicalOwner": "state_store",
+                        "silentWritesAllowed": false,
+                    }),
+                )
+                .await,
+            );
+        }
         MainChatAgentStrategy::MemoryProposal
         | MainChatAgentStrategy::LifeModelProposal
         | MainChatAgentStrategy::FileWriteProposal
@@ -1975,6 +1990,27 @@ where
             );
         }
     }
+
+    if main_chat_agent_turn.decision.selected_strategy
+        == MainChatAgentStrategy::TransientStateCommand
+    {
+        return build_kernel_transient_state_command_surface_result(
+            session_id,
+            canonical_run_id,
+            execution_epoch,
+            state,
+            main_chat_agent_turn,
+            execution_transcript,
+            provider_runtime,
+            event_sink,
+            event_sink_label,
+        )
+        .await;
+    }
+
+    let provider_authorization =
+        MainChatProviderAuthorization::from_ingress_decision(&main_chat_agent_turn.decision)
+            .map_err(|error| format!("Main Chat provider policy authorization failed: {error}"))?;
 
     if !provider_runtime.coherent {
         return Err("provider_runtime_generation_incoherent".into());
@@ -2305,6 +2341,366 @@ where
     .await
 }
 
+fn transient_state_projection_status_label(
+    status: openlife_core::state_store::StateProjectionStatus,
+) -> &'static str {
+    match status {
+        openlife_core::state_store::StateProjectionStatus::Pending => "pending",
+        openlife_core::state_store::StateProjectionStatus::Degraded => "degraded",
+        openlife_core::state_store::StateProjectionStatus::Applied => "applied",
+    }
+}
+
+fn resolve_transient_state_execution_context(
+    clock_source: &crate::main_chat_runtime_facts::MainChatRuntimeClockSource,
+    task_created_at: chrono::DateTime<chrono::Utc>,
+    intent: &openlife_core::agent::main_chat_agent_v1::TransientStateIntent,
+) -> Result<openlife_core::state_store::StateGatewayExecutionContext, String> {
+    let local_now = clock_source.now();
+    let occurred_at = local_now
+        .map(|value| value.with_timezone(&chrono::Utc))
+        .unwrap_or_else(chrono::Utc::now);
+    let resolved_due_at = match intent.due_hint {
+        None => None,
+        Some(hint) => {
+            let local_now = local_now.ok_or_else(|| {
+                "transient_state_local_clock_unavailable_for_due_time".to_string()
+            })?;
+            let offset = *local_now.offset();
+            // The canonical task creation date, not the retry wall clock,
+            // binds relative words such as "today". This keeps a resumed
+            // operation on the original semantic date.
+            let local_date = task_created_at.with_timezone(&offset).date_naive();
+            let naive_due = local_date
+                .and_hms_opt(u32::from(hint.local_hour), u32::from(hint.local_minute), 0)
+                .ok_or_else(|| "transient_state_due_hint_invalid".to_string())?;
+            let local_due = offset
+                .from_local_datetime(&naive_due)
+                .single()
+                .ok_or_else(|| "transient_state_due_time_resolution_failed".to_string())?;
+            Some(local_due.with_timezone(&chrono::Utc))
+        }
+    };
+    Ok(openlife_core::state_store::StateGatewayExecutionContext {
+        occurred_at,
+        resolved_due_at,
+    })
+}
+
+fn synthesize_transient_state_reply(
+    outcome: &openlife_core::state_store::StateCommandOutcome,
+) -> String {
+    use openlife_core::agent::main_chat_agent_v1::TransientStateCommandKind;
+    use openlife_core::state_store::DailyTaskStatus;
+
+    match outcome.command_kind {
+        TransientStateCommandKind::ListDailyTasks => {
+            if outcome.tasks.is_empty() {
+                return "今天还没有待办任务。你可以直接说“今天提醒我……”来创建一个可撤销的今日任务。".into();
+            }
+            let lines = outcome
+                .tasks
+                .iter()
+                .map(|task| {
+                    let marker = match task.status {
+                        DailyTaskStatus::Pending => "待完成",
+                        DailyTaskStatus::Completed => "已完成",
+                        DailyTaskStatus::Tombstoned => "已撤销",
+                    };
+                    format!("- [{marker}] {}", task.title)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("当前今日任务：\n{lines}")
+        }
+        TransientStateCommandKind::CreateDailyTask => {
+            let projection = outcome
+                .receipt
+                .as_ref()
+                .map(|receipt| transient_state_projection_status_label(receipt.projection_status))
+                .unwrap_or("unknown");
+            if projection == "applied" {
+                "已创建今日任务。它已写入本地 canonical 状态，并且兼容视图已同步；你之后可以完成或撤销它。".into()
+            } else {
+                "已创建今日任务。它已写入本地 canonical 状态；兼容视图仍在同步，但不影响通过今日任务列表继续使用或撤销。".into()
+            }
+        }
+        TransientStateCommandKind::CompleteDailyTask => {
+            "已将该今日任务标记为完成。本地 canonical 状态已经提交，之后仍可撤销。".into()
+        }
+        TransientStateCommandKind::UndoDailyTask => {
+            "已撤销该今日任务。本地 canonical 状态保留了可审计的 tombstone，没有把撤销伪装成物理删除。".into()
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_kernel_transient_state_command_surface_result<S>(
+    session_id: &str,
+    canonical_run_id: &str,
+    execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
+    state: &Arc<AppState>,
+    main_chat_agent_turn: &MainChatAgentTurn,
+    mut execution_transcript: Vec<ExecutionTranscriptEntry>,
+    provider_runtime: &crate::state::ProviderRuntimeSnapshot,
+    event_sink: &mut S,
+    event_sink_label: &'static str,
+) -> Result<MainChatKernelCommandSurfaceResult, String>
+where
+    S: MainChatEventSink + ?Sized,
+{
+    let task_session_id = main_chat_agent_turn
+        .decision
+        .agent_task_session_id
+        .as_deref()
+        .ok_or_else(|| "Main Chat kernel task session missing".to_string())?;
+    let intent = main_chat_agent_turn
+        .decision
+        .intent_frame
+        .transient_state_intent
+        .as_ref()
+        .ok_or_else(|| "transient_state_intent_missing".to_string())?;
+    let grant = main_chat_agent_turn
+        .decision
+        .policy_decision
+        .authorize_transient_state_command(canonical_run_id, intent)
+        .map_err(|error| format!("transient_state_policy_authorization_failed:{error}"))?;
+    let task_created_at = {
+        let store = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .ok_or_else(|| "main_chat_agent_session_store_unavailable".to_string())?;
+        let store = store.lock().await;
+        store
+            .load_session(task_session_id)
+            .map_err(|error| format!("load transient-state task session failed: {error}"))?
+            .ok_or_else(|| "transient_state_task_session_missing".to_string())?
+            .created_at
+    };
+    let clock_source = state.runtime_clock_source.lock().await.clone();
+    let execution_context =
+        resolve_transient_state_execution_context(&clock_source, task_created_at, intent)?;
+    let state_store = state
+        .state_store
+        .as_ref()
+        .ok_or_else(|| "state_store_unavailable_degraded".to_string())?;
+    let mut outcome = openlife_core::state_store::StateGateway::new((**state_store).clone())
+        .execute_with_admission(grant, execution_context, execution_epoch)
+        .map_err(|error| format!("transient_state_gateway_failed:{error}"))?;
+    if let Some(receipt) = outcome.receipt.as_ref() {
+        if let Err(error) =
+            crate::state_projection::reconcile_state_store_lifemodel_projection(state).await
+        {
+            log::warn!("[StateProjection] {error}");
+            state_store
+                .mark_projection_degraded(
+                    &receipt.outbox_event_id,
+                    "state_projection_reconciliation_failed",
+                )
+                .map_err(|mark_error| {
+                    format!("mark transient state projection degraded failed: {mark_error}")
+                })?;
+        }
+        outcome.receipt = state_store
+            .receipt_for_operation(canonical_run_id, receipt.replayed)
+            .map_err(|error| format!("reload transient state receipt failed: {error}"))?;
+    }
+
+    let mut durable_events = Vec::new();
+    if let Some(receipt) = outcome.receipt.as_ref() {
+        durable_events.push(
+            append_main_chat_agent_runtime_event(
+                state,
+                task_session_id,
+                canonical_run_id,
+                "effect_committed",
+                "state_effect",
+                &receipt.receipt_id,
+                "state_gateway",
+                serde_json::json!({
+                    "status": "committed",
+                    "receiptId": receipt.receipt_id,
+                    "operationId": receipt.operation_id,
+                    "assetId": receipt.asset_id,
+                    "assetVersion": receipt.asset_version,
+                    "mutationKind": receipt.mutation_kind,
+                    "payloadDigest": receipt.payload_digest,
+                    "outboxEventId": receipt.outbox_event_id,
+                    "projectionStatus": transient_state_projection_status_label(receipt.projection_status),
+                    "replayed": receipt.replayed,
+                }),
+            )
+            .await
+            .map_err(|error| format!("persist transient state effect event failed: {error}"))?,
+        );
+    }
+
+    let reply = synthesize_transient_state_reply(&outcome);
+    event_sink.emit(MainChatKernelEvent::FinalAnswer {
+        content_preview: bounded_label(&reply, MAX_ASSISTANT_PREVIEW_CHARS),
+        content_chars: reply.chars().count(),
+    });
+    let kernel_events = event_sink.events().to_vec();
+    let receipt = outcome.receipt.as_ref();
+    let generation_metadata = serde_json::json!({
+        "text": reply,
+        "mainChatAgentV1": true,
+        "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
+        "policyRoute": main_chat_agent_turn.decision.policy_decision.route_kind.as_str(),
+        "legacyFallbackUsed": false,
+        "directWritesExecuted": receipt.is_some(),
+        "canonicalWriteCommitted": receipt.is_some(),
+        "canonicalOwner": "state_store",
+        "stateCommandKind": outcome.command_kind,
+        "stateReceiptId": receipt.map(|value| value.receipt_id.as_str()),
+        "stateAssetId": receipt.map(|value| value.asset_id.as_str()),
+        "stateAssetVersion": receipt.map(|value| value.asset_version),
+        "statePayloadDigest": receipt.map(|value| value.payload_digest.as_str()),
+        "stateOutboxEventId": receipt.map(|value| value.outbox_event_id.as_str()),
+        "stateProjectionStatus": receipt.map(|value| transient_state_projection_status_label(value.projection_status)),
+        "stateOperationReplayed": receipt.is_some_and(|value| value.replayed),
+        "taskCount": outcome.tasks.len(),
+        "kernelEventSink": event_sink_label,
+        "kernelEventCount": kernel_events.len(),
+        "modelGenerated": false,
+        "schedulerGenerationCalled": false,
+        "turnProviderRuntimeGeneration": provider_runtime.scheduler.provider_config_generation(),
+        "providerGenerationPath": "main_chat_kernel_transient_state_gateway",
+        "provider": "none",
+        "model": "deterministic_state_gateway",
+        "routeType": "direct",
+        "routeReason": "policy_authorized_transient_state_command",
+        "providerReceiptStatus": "not_attempted",
+        "liveProviderInvoked": false,
+        "toolCalled": false,
+        "toolCallCount": 0,
+    });
+    execution_transcript.extend(
+        append_main_chat_agent_transcript(
+            state,
+            Some(task_session_id),
+            ExecutionTranscriptEntryKind::Observation,
+            if receipt.is_some() {
+                "StateGateway committed a canonical transient-state effect."
+            } else {
+                "StateGateway read canonical transient-state assets without mutation."
+            },
+            serde_json::json!({
+                "commandKind": outcome.command_kind,
+                "receiptId": receipt.map(|value| value.receipt_id.as_str()),
+                "assetId": receipt.map(|value| value.asset_id.as_str()),
+                "assetVersion": receipt.map(|value| value.asset_version),
+                "payloadDigest": receipt.map(|value| value.payload_digest.as_str()),
+                "projectionStatus": receipt.map(|value| transient_state_projection_status_label(value.projection_status)),
+                "replayed": receipt.is_some_and(|value| value.replayed),
+                "taskCount": outcome.tasks.len(),
+                "rawTaskBodiesStored": false,
+            }),
+        )
+        .await,
+    );
+
+    let mut agent_run = load_existing_canonical_main_chat_agent_run(
+        state,
+        canonical_run_id,
+        task_session_id,
+        session_id,
+    )
+    .await?;
+    agent_run.reasoning_strategy = Some("main_chat_agent_v1_transient_state_gateway".into());
+    agent_run.tool_call_count = 0;
+    agent_run.step_count = 1;
+    agent_run.complete(
+        &preview_text(&reply, 200),
+        ModelRouteTrace {
+            provider: "none".into(),
+            model: "deterministic_state_gateway".into(),
+            route_type: "direct".into(),
+            prefer_local: true,
+            local_model: String::new(),
+            reason: "policy_authorized_transient_state_command".into(),
+            privacy_level: RedactionLevel::LocalOnly,
+            latency_ms: None,
+            retry_count: 0,
+            fallback_reason: None,
+            provider_health_is_estimated: Some(false),
+        },
+        ContextSummary {
+            life_model_empty: true,
+            included_life_model_sections: Vec::new(),
+            memory_hit_count: 0,
+            memory_sources: Vec::new(),
+            used_tools_prompt: false,
+            redaction_applied: false,
+            redaction_level: RedactionLevel::LocalOnly,
+        },
+    );
+    let assistant_message = ChatMessage {
+        role: "assistant".into(),
+        content: reply.clone(),
+    };
+    let mut reasoning_trace = ReasoningTrace {
+        generation_result: Some(generation_metadata),
+        ..Default::default()
+    };
+    finalize_chat_agent_run(
+        session_id,
+        &assistant_message,
+        &reply,
+        &mut reasoning_trace,
+        &mut agent_run,
+        state,
+    )
+    .await?;
+    complete_main_chat_agent_turn_session(
+        state,
+        main_chat_agent_turn,
+        if receipt.is_some() {
+            "StateGateway committed the policy-authorized transient-state command."
+        } else {
+            "StateGateway completed the canonical transient-state read."
+        },
+    )
+    .await?;
+    execution_transcript.extend(
+        append_main_chat_agent_transcript(
+            state,
+            Some(task_session_id),
+            ExecutionTranscriptEntryKind::FinalResult,
+            "MainChatKernel delivered the canonical transient-state result.",
+            serde_json::json!({
+                "runId": agent_run.id,
+                "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
+                "legacyFallbackUsed": false,
+                "providerInvoked": false,
+                "toolInvoked": false,
+                "canonicalWriteCommitted": receipt.is_some(),
+                "receiptId": receipt.map(|value| value.receipt_id.as_str()),
+                "projectionStatus": receipt.map(|value| transient_state_projection_status_label(value.projection_status)),
+            }),
+        )
+        .await,
+    );
+    let agent_state =
+        assemble_main_chat_agent_state_for_turn(state, Some(task_session_id), Some(&agent_run.id))
+            .await;
+    durable_events
+        .extend(materialize_optional_main_chat_agent_events(state, agent_state.as_ref()).await?);
+
+    Ok(MainChatKernelCommandSurfaceResult {
+        reply,
+        reasoning_trace,
+        tool_calls: Vec::new(),
+        run_id: Some(agent_run.id),
+        agent_ingress: Some(main_chat_agent_turn.decision.clone()),
+        agent_state,
+        execution_transcript,
+        legacy_fallback_used: false,
+        durable_events,
+        kernel_events,
+    })
+}
+
 pub(crate) fn main_chat_kernel_supports_turn(
     selected_strategy: &MainChatAgentStrategy,
     messages: &[ChatMessage],
@@ -2428,7 +2824,8 @@ pub(crate) fn main_chat_kernel_support_disposition(
         MainChatAgentStrategy::DirectAnswer
         | MainChatAgentStrategy::ReActToolExecution
         | MainChatAgentStrategy::PlanExecute
-        | MainChatAgentStrategy::ReversibleMemoryCommit => {
+        | MainChatAgentStrategy::ReversibleMemoryCommit
+        | MainChatAgentStrategy::TransientStateCommand => {
             MainChatKernelSupportDisposition::KernelSupported
         }
         MainChatAgentStrategy::MemoryProposal
@@ -11050,6 +11447,7 @@ mod tests {
             }
             MainChatAgentStrategy::PlanExecute => "Draft a weekly plan.",
             MainChatAgentStrategy::ReversibleMemoryCommit => "记住：我不吃香菜。",
+            MainChatAgentStrategy::TransientStateCommand => "/goal add 完成路演设备检查",
             MainChatAgentStrategy::MemoryProposal => {
                 "Please remember this private health fact: coffee causes heart palpitations."
             }

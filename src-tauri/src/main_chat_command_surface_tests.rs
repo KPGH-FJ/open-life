@@ -3527,6 +3527,7 @@ async fn main_chat_kernel_goal_4_ordinary_auto_checkin_does_not_materialize_trut
                 name: "写周报".into(),
                 done: false,
                 time_block: None,
+                due_at: None,
                 operation_id: None,
                 operation_digest: None,
             });

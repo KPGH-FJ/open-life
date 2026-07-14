@@ -19,6 +19,7 @@ fn main_chat_runtime_module_tests_are_not_concentrated_in_lib_rs() {
         "obsolete_ordinary_chat_legacy_only_guard_wording_is_retired",
         "ordinary_chat_entrypoints_avoid_retired_agent_loop_helpers_and_direct_executor_construction",
         "chat_page_does_not_call_default_adapter_migration_preview_or_review_commands",
+        "transient_state_chat_authority_has_no_frontend_or_shipped_command_write_bypass",
         "default_chat_entrypoints_do_not_call_w19_w60_command_surfaces_or_w73_readiness_report_or_w74_invocation",
         "default_chat_entrypoints_do_not_call_w19_w60_command_surfaces",
     ] {
@@ -433,6 +434,95 @@ fn chat_page_does_not_call_default_adapter_migration_preview_or_review_commands(
             );
         }
     }
+}
+
+#[test]
+fn transient_state_chat_authority_has_no_frontend_or_shipped_command_write_bypass() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repo root");
+    let chat_page = std::fs::read_to_string(repo_root.join("frontend/src/pages/ChatPage.tsx"))
+        .expect("read ChatPage.tsx");
+    let frontend_bridge = std::fs::read_to_string(repo_root.join("frontend/src/tauri.ts"))
+        .expect("read frontend Tauri bridge");
+    let shipped_handlers = std::fs::read_to_string(repo_root.join("src-tauri/src/lib.rs"))
+        .expect("read shipped Tauri handlers");
+    let state_commands = std::fs::read_to_string(repo_root.join("src-tauri/src/commands/state.rs"))
+        .expect("read state commands");
+    let runtime = std::fs::read_to_string(repo_root.join("src-tauri/src/main_chat_kernel.rs"))
+        .expect("read Main Chat kernel");
+    let policy =
+        std::fs::read_to_string(repo_root.join("openlife-core/src/agent/main_chat_agent_v1.rs"))
+            .expect("read Main Chat policy");
+
+    for forbidden in [
+        "tryHandleQuickCommand",
+        "addDailyGoal(",
+        "toggleDailyGoal(",
+        "updateDailyGoal(",
+        "deleteDailyGoal(",
+        "recordState(",
+        "saveChatMessage(",
+        "handleSaveAsDailyGoal",
+    ] {
+        assert!(
+            !chat_page.contains(forbidden),
+            "ChatPage must not bypass TurnRuntime through {forbidden}"
+        );
+    }
+
+    for retired_bridge in [
+        "export async function addDailyGoal",
+        "export async function toggleDailyGoal",
+        "export async function updateDailyGoal",
+        "export async function deleteDailyGoal",
+        "invoke(\"add_daily_goal\"",
+        "invoke(\"toggle_daily_goal\"",
+        "invoke(\"update_daily_goal\"",
+        "invoke(\"delete_daily_goal\"",
+    ] {
+        assert!(
+            !frontend_bridge.contains(retired_bridge),
+            "frontend bridge must not retain retired state mutation route {retired_bridge}"
+        );
+    }
+
+    for retired_command in [
+        "commands::state::add_daily_goal",
+        "commands::state::toggle_daily_goal",
+        "commands::state::update_daily_goal",
+        "commands::state::delete_daily_goal",
+    ] {
+        assert!(
+            !shipped_handlers.contains(retired_command),
+            "shipped handler surface must not retain {retired_command}"
+        );
+    }
+
+    for retired_implementation in [
+        "pub async fn add_daily_goal",
+        "pub async fn toggle_daily_goal",
+        "pub async fn update_daily_goal",
+        "pub async fn delete_daily_goal",
+    ] {
+        assert!(
+            !state_commands.contains(retired_implementation),
+            "state command module must not retain {retired_implementation}"
+        );
+    }
+
+    assert!(
+        chat_page.contains("startStreamMessage("),
+        "ChatPage transient-state requests must enter the shared TurnRuntime stream"
+    );
+    assert!(
+        policy.contains("TransientStateCommand"),
+        "PolicyRouter must own the typed transient-state route"
+    );
+    assert!(
+        runtime.contains("StateGateway::new("),
+        "Main Chat runtime must commit authorized transient-state effects through StateGateway"
+    );
 }
 
 fn extract_rust_function_body(source: &str, signature: &str) -> String {

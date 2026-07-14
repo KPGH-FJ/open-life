@@ -34,6 +34,7 @@ pub enum MainChatAgentStrategy {
     DirectAnswer,
     ReActToolExecution,
     PlanExecute,
+    TransientStateCommand,
     ReversibleMemoryCommit,
     MemoryProposal,
     LifeModelProposal,
@@ -48,6 +49,7 @@ impl MainChatAgentStrategy {
             Self::DirectAnswer => "direct_answer",
             Self::ReActToolExecution => "react_tool_execution",
             Self::PlanExecute => "plan_execute",
+            Self::TransientStateCommand => "transient_state_command",
             Self::ReversibleMemoryCommit => "reversible_memory_commit",
             Self::MemoryProposal => "memory_proposal",
             Self::LifeModelProposal => "life_model_proposal",
@@ -65,6 +67,7 @@ impl MainChatAgentStrategy {
         match value {
             "react_tool_execution" => Self::ReActToolExecution,
             "plan_execute" => Self::PlanExecute,
+            "transient_state_command" => Self::TransientStateCommand,
             "reversible_memory_commit" => Self::ReversibleMemoryCommit,
             "memory_proposal" => Self::MemoryProposal,
             "life_model_proposal" => Self::LifeModelProposal,
@@ -175,6 +178,65 @@ enum IntentMemoryRoutingAuthority {
     Unavailable,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+enum IntentTransientStateAuthority {
+    DeterministicExtraction {
+        contract_digest: String,
+    },
+    #[default]
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransientStateCommandKind {
+    ListDailyTasks,
+    CreateDailyTask,
+    CompleteDailyTask,
+    UndoDailyTask,
+}
+
+impl TransientStateCommandKind {
+    pub fn is_mutation(self) -> bool {
+        !matches!(self, Self::ListDailyTasks)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ListDailyTasks => "list_daily_tasks",
+            Self::CreateDailyTask => "create_daily_task",
+            Self::CompleteDailyTask => "complete_daily_task",
+            Self::UndoDailyTask => "undo_daily_task",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransientStateIntentDisposition {
+    Direct,
+    ClarificationRequired,
+    ReviewRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransientStateDueHint {
+    pub local_hour: u8,
+    pub local_minute: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransientStateIntent {
+    pub command_kind: TransientStateCommandKind,
+    pub target: String,
+    pub due_hint: Option<TransientStateDueHint>,
+    pub expiry_days: u8,
+    pub disposition: TransientStateIntentDisposition,
+    pub reason_code: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IntentFrame {
@@ -195,6 +257,8 @@ pub struct IntentFrame {
     pub requests_file_change: bool,
     pub requests_plan_task: bool,
     #[serde(default)]
+    pub transient_state_intent: Option<TransientStateIntent>,
+    #[serde(default)]
     pub requests_clarification: bool,
     pub risk_level: IntentRiskLevel,
     pub confidence: f32,
@@ -211,6 +275,8 @@ pub struct IntentFrame {
     pub memory_routing: crate::agent::MainChatMemoryRoutingResult,
     #[serde(skip)]
     memory_routing_authority: IntentMemoryRoutingAuthority,
+    #[serde(skip)]
+    transient_state_authority: IntentTransientStateAuthority,
 }
 
 impl IntentFrame {
@@ -223,6 +289,12 @@ impl IntentFrame {
         let untrusted_instruction_spans = extract_untrusted_instruction_spans(user_message);
         let has_embedded_untrusted_instruction = !untrusted_instruction_spans.is_empty();
         let advice_only = is_advice_only_request(&lower);
+        let transient_state_intent = extract_transient_state_intent(
+            &user_goal,
+            &lower,
+            has_embedded_untrusted_instruction,
+            advice_only,
+        );
 
         let requests_memory_change = governance_intent.durable_write_requirement
             == Some(MainChatDurableWriteRequirement::MemoryProposal)
@@ -245,7 +317,8 @@ impl IntentFrame {
         let requests_conditional_observation_memory_review = requests_read_observation
             && !advice_only
             && is_conditional_observation_memory_review_request(&lower);
-        let requests_plan_task = is_plan_execute_intent(&lower)
+        let requests_plan_task = transient_state_intent.is_none()
+            && is_plan_execute_intent(&lower)
             && !is_habitual_preference_statement_without_plan_request(&lower)
             && !requests_durable_write
             && !requires_external_read
@@ -315,6 +388,7 @@ impl IntentFrame {
             || requires_external_read
             || requests_read_observation
             || requests_plan_task
+            || transient_state_intent.is_some()
             || requires_confirmation
             || requires_hard_block
         {
@@ -350,6 +424,7 @@ impl IntentFrame {
                 requests_lifemodel_change,
                 requests_file_change,
                 requests_plan_task,
+                transient_state_intent,
                 requests_clarification,
                 risk_level,
                 confidence,
@@ -364,9 +439,13 @@ impl IntentFrame {
                     governance_intent.memory_routing
                 },
                 memory_routing_authority: IntentMemoryRoutingAuthority::Unavailable,
+                transient_state_authority: IntentTransientStateAuthority::Unavailable,
             };
         frame.memory_routing_authority = IntentMemoryRoutingAuthority::DeterministicExtraction {
             contract_digest: frame.memory_routing_contract_digest(),
+        };
+        frame.transient_state_authority = IntentTransientStateAuthority::DeterministicExtraction {
+            contract_digest: frame.transient_state_contract_digest(),
         };
         frame
     }
@@ -391,6 +470,38 @@ impl IntentFrame {
         }))
         .1
     }
+
+    fn has_valid_transient_state_authority(&self) -> bool {
+        matches!(
+            &self.transient_state_authority,
+            IntentTransientStateAuthority::DeterministicExtraction { contract_digest }
+                if contract_digest == &self.transient_state_contract_digest()
+        )
+    }
+
+    fn transient_state_contract_digest(&self) -> String {
+        crate::agent::metadata_safe::metadata_safe_value_digest(&serde_json::json!({
+            "currentUserMessageDigest": self.current_user_message_digest,
+            "sourceKind": self.source_kind,
+            "executionDisposition": self.execution_disposition,
+            "untrustedInstructionSpans": self.untrusted_instruction_spans,
+            "transientStateIntent": self.transient_state_intent,
+        }))
+        .1
+    }
+
+    fn authorized_transient_state_digest(&self) -> Option<String> {
+        if !self.has_valid_transient_state_authority() {
+            return None;
+        }
+        self.transient_state_intent.as_ref().map(|intent| {
+            crate::agent::metadata_safe::metadata_safe_value_digest(&serde_json::json!({
+                "currentUserMessageDigest": self.current_user_message_digest,
+                "intent": intent,
+            }))
+            .1
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -398,6 +509,7 @@ impl IntentFrame {
 pub enum PolicyRouteKind {
     DirectAnswer,
     ReadOnlyTool,
+    TransientStateCommand,
     ReversibleMemoryCommit,
     ProposalOnlyWrite,
     PlanDraft,
@@ -412,6 +524,7 @@ pub enum PolicyActionEffect {
     NoSideEffect,
     ReadOnly,
     PlanDraft,
+    TransientStateCommit,
     ReversibleMemoryCommit,
     ProposalOnly,
     Blocked,
@@ -423,6 +536,7 @@ impl PolicyActionEffect {
             Self::NoSideEffect => "no_side_effect",
             Self::ReadOnly => "read_only",
             Self::PlanDraft => "plan_draft",
+            Self::TransientStateCommit => "transient_state_commit",
             Self::ReversibleMemoryCommit => "reversible_memory_commit",
             Self::ProposalOnly => "proposal_only",
             Self::Blocked => "blocked",
@@ -474,6 +588,8 @@ pub enum AllowedCapability {
     ProviderGeneration,
     Clarification,
     PlanDraft,
+    TransientStateRead,
+    TransientStateCommit,
     MemoryRead,
     SessionRead,
     WorkspaceFileRead,
@@ -497,6 +613,8 @@ impl AllowedCapability {
             Self::ProviderGeneration => "provider_generation",
             Self::Clarification => "clarification",
             Self::PlanDraft => "plan_draft",
+            Self::TransientStateRead => "state.transient_read",
+            Self::TransientStateCommit => "state.transient_commit",
             Self::MemoryRead => "memory.read",
             Self::SessionRead => "session.read",
             Self::WorkspaceFileRead => "workspace_file.read",
@@ -735,6 +853,8 @@ pub struct PolicyDecision {
     #[serde(default)]
     pub authorized_memory_candidate_ids: Vec<String>,
     #[serde(default)]
+    pub authorized_transient_state_digest: Option<String>,
+    #[serde(default)]
     governance_plan: PolicyGovernancePlan,
     pub reason_code: String,
     pub policy_version: String,
@@ -759,6 +879,7 @@ impl Default for PolicyDecision {
             data_route: ProviderDataRoute::LocalOnly,
             allowed_capabilities: Vec::new(),
             authorized_memory_candidate_ids: Vec::new(),
+            authorized_transient_state_digest: None,
             governance_plan: PolicyGovernancePlan::default(),
             reason_code: "missing_policy_decision_fail_closed".into(),
             policy_version: "main_chat_policy_v2".into(),
@@ -783,6 +904,56 @@ pub struct PolicyConditionalObservationReviewGrant {
     candidate_digest: String,
     policy_grant_id: String,
     policy_contract_digest: String,
+}
+
+/// Ephemeral authority for one exact ADR 0015 command. Serialized
+/// PolicyDecision evidence cannot recreate this value.
+pub struct PolicyTransientStateGrant {
+    operation_id: String,
+    source_user_message_id: String,
+    source_user_message_digest: String,
+    intent: TransientStateIntent,
+    intent_digest: String,
+    policy_contract_digest: String,
+}
+
+impl std::fmt::Debug for PolicyTransientStateGrant {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PolicyTransientStateGrant")
+            .field("operation_id", &self.operation_id)
+            .field("source_user_message_id", &self.source_user_message_id)
+            .field("command_kind", &self.intent.command_kind)
+            .field("intent_digest", &self.intent_digest)
+            .field("authority", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl PolicyTransientStateGrant {
+    pub(crate) fn operation_id(&self) -> &str {
+        &self.operation_id
+    }
+
+    pub(crate) fn source_user_message_id(&self) -> &str {
+        &self.source_user_message_id
+    }
+
+    pub(crate) fn source_user_message_digest(&self) -> &str {
+        &self.source_user_message_digest
+    }
+
+    pub(crate) fn intent(&self) -> &TransientStateIntent {
+        &self.intent
+    }
+
+    pub(crate) fn intent_digest(&self) -> &str {
+        &self.intent_digest
+    }
+
+    pub(crate) fn policy_contract_digest(&self) -> &str {
+        &self.policy_contract_digest
+    }
 }
 
 impl std::fmt::Debug for PolicyConditionalObservationReviewGrant {
@@ -862,6 +1033,69 @@ impl PolicyDecision {
                 .any(|authorized| authorized == candidate_id)
     }
 
+    pub fn authorize_transient_state_command(
+        &self,
+        operation_id: &str,
+        intent: &TransientStateIntent,
+    ) -> Result<PolicyTransientStateGrant> {
+        if !self.has_valid_policy_router_authority()
+            || self.route_kind != PolicyRouteKind::TransientStateCommand
+            || self.authorized_user_message_id.trim().is_empty()
+            || self.authorized_user_message_digest.trim().is_empty()
+            || intent.disposition != TransientStateIntentDisposition::Direct
+        {
+            anyhow::bail!("transient_state_policy_authority_unavailable");
+        }
+        let operation_uuid = uuid::Uuid::parse_str(operation_id)
+            .context("transient state operation id must be UUIDv4")?;
+        if operation_uuid.get_version() != Some(uuid::Version::Random)
+            || operation_uuid.hyphenated().to_string() != operation_id
+        {
+            anyhow::bail!("transient_state_operation_id_must_be_canonical_uuid_v4");
+        }
+        let intent_digest =
+            crate::agent::metadata_safe::metadata_safe_value_digest(&serde_json::json!({
+                "currentUserMessageDigest": self.authorized_user_message_digest,
+                "intent": intent,
+            }))
+            .1;
+        if self.authorized_transient_state_digest.as_deref() != Some(intent_digest.as_str()) {
+            anyhow::bail!("transient_state_intent_not_authorized");
+        }
+        let expected_capability = if intent.command_kind.is_mutation() {
+            AllowedCapability::TransientStateCommit
+        } else {
+            AllowedCapability::TransientStateRead
+        };
+        let expected_effect = if intent.command_kind.is_mutation() {
+            PolicyActionEffect::TransientStateCommit
+        } else {
+            PolicyActionEffect::ReadOnly
+        };
+        let expected_consent = if intent.command_kind.is_mutation() {
+            PolicyConsentDisposition::ExplicitUserAuthorization
+        } else {
+            PolicyConsentDisposition::NotRequired
+        };
+        if !self.allows(expected_capability)
+            || self.action_effect != expected_effect
+            || self.consent_disposition != expected_consent
+            || matches!(self.risk, IntentRiskLevel::High | IntentRiskLevel::Critical)
+            || self.sensitivity != PolicySensitivity::Internal
+            || self.data_route != ProviderDataRoute::LocalOnly
+        {
+            anyhow::bail!("transient_state_policy_contract_mismatch");
+        }
+        Ok(PolicyTransientStateGrant {
+            operation_id: operation_id.to_string(),
+            source_user_message_id: self.authorized_user_message_id.clone(),
+            source_user_message_digest: self.authorized_user_message_digest.clone(),
+            intent: intent.clone(),
+            intent_digest,
+            policy_contract_digest: self.contract_digest(),
+        })
+    }
+
     /// Return the typed multi-lane plan only while the surrounding
     /// PolicyDecision still carries its live, digest-bound PolicyRouter seal.
     /// A serde round trip keeps plan evidence but cannot recover this access.
@@ -900,6 +1134,7 @@ impl PolicyDecision {
             "dataRoute": self.data_route,
             "allowedCapabilities": self.allowed_capabilities,
             "authorizedMemoryCandidateIds": self.authorized_memory_candidate_ids,
+            "authorizedTransientStateDigest": self.authorized_transient_state_digest,
             "governancePlan": self.governance_plan,
             "reasonCode": self.reason_code,
             "policyVersion": self.policy_version,
@@ -1114,6 +1349,7 @@ impl PolicyDecision {
                 MainChatAgentStrategy::DirectAnswer
             }
             PolicyRouteKind::ReadOnlyTool => MainChatAgentStrategy::ReActToolExecution,
+            PolicyRouteKind::TransientStateCommand => MainChatAgentStrategy::TransientStateCommand,
             PolicyRouteKind::PlanDraft => MainChatAgentStrategy::PlanExecute,
             PolicyRouteKind::ReversibleMemoryCommit => {
                 MainChatAgentStrategy::ReversibleMemoryCommit
@@ -1339,6 +1575,7 @@ impl PolicyRouteKind {
         match self {
             Self::DirectAnswer => "direct_answer",
             Self::ReadOnlyTool => "read_only_tool",
+            Self::TransientStateCommand => "transient_state_command",
             Self::ReversibleMemoryCommit => "reversible_memory_commit",
             Self::ProposalOnlyWrite => "proposal_only_write",
             Self::PlanDraft => "plan_draft",
@@ -1464,6 +1701,14 @@ impl PolicyRouter {
             intent_frame.reason_codes.sort();
             intent_frame.reason_codes.dedup();
         }
+        if !intent_frame.has_valid_transient_state_authority() {
+            intent_frame.transient_state_intent = None;
+            intent_frame
+                .reason_codes
+                .push("transient_state_authority_unavailable".into());
+            intent_frame.reason_codes.sort();
+            intent_frame.reason_codes.dedup();
+        }
         let privacy_risk = main_chat_privacy_risk_from_intent(&intent_frame);
         let direct_memory_candidate_ids =
             policy_authorized_explicit_memory_candidate_ids(&intent_frame);
@@ -1471,6 +1716,17 @@ impl PolicyRouter {
             &intent_frame,
             &direct_memory_candidate_ids,
         );
+        let transient_state_disposition = intent_frame
+            .transient_state_intent
+            .as_ref()
+            .map(|intent| intent.disposition);
+        let direct_transient_state_authorized = transient_state_disposition
+            == Some(TransientStateIntentDisposition::Direct)
+            && intent_frame.source_kind == IntentSourceKind::CurrentAuthenticatedUserMessage
+            && intent_frame.untrusted_instruction_spans.is_empty()
+            && intent_frame.execution_disposition == IntentExecutionDisposition::ActionRequested
+            && intent_frame.risk_level == IntentRiskLevel::Low
+            && !privacy_risk.local_only_required;
         let (route_kind, reason_code, reason_summary) = if intent_frame.requires_hard_block {
             (
                 PolicyRouteKind::GovernedBlocker,
@@ -1494,6 +1750,28 @@ impl PolicyRouter {
                 PolicyRouteKind::DirectAnswer,
                 "advice_only_no_effect",
                 "the current user explicitly requested advice without execution or mutation",
+            )
+        } else if direct_transient_state_authorized {
+            (
+                PolicyRouteKind::TransientStateCommand,
+                "explicit_transient_state_command_authorized",
+                "the current user explicitly authorized one bounded transient-state command",
+            )
+        } else if transient_state_disposition
+            == Some(TransientStateIntentDisposition::ClarificationRequired)
+        {
+            (
+                PolicyRouteKind::AskClarification,
+                "transient_state_target_requires_clarification",
+                "the transient-state target is incomplete or ambiguous",
+            )
+        } else if transient_state_disposition
+            == Some(TransientStateIntentDisposition::ReviewRequired)
+        {
+            (
+                PolicyRouteKind::GovernedBlocker,
+                "transient_state_not_eligible_for_direct_lane",
+                "long-term, sensitive, or unsupported state changes require reviewed governance",
             )
         } else if direct_memory_authorized {
             (
@@ -1701,6 +1979,17 @@ fn build_policy_decision(
             PolicyActionEffect::NoSideEffect
         }
         PolicyRouteKind::ReadOnlyTool => PolicyActionEffect::ReadOnly,
+        PolicyRouteKind::TransientStateCommand => {
+            if intent
+                .transient_state_intent
+                .as_ref()
+                .is_some_and(|state_intent| state_intent.command_kind.is_mutation())
+            {
+                PolicyActionEffect::TransientStateCommit
+            } else {
+                PolicyActionEffect::ReadOnly
+            }
+        }
         PolicyRouteKind::PlanDraft => PolicyActionEffect::PlanDraft,
         PolicyRouteKind::ReversibleMemoryCommit => PolicyActionEffect::ReversibleMemoryCommit,
         PolicyRouteKind::ProposalOnlyWrite => PolicyActionEffect::ProposalOnly,
@@ -1709,6 +1998,14 @@ fn build_policy_decision(
         }
     };
     let consent_disposition = match route_kind {
+        PolicyRouteKind::TransientStateCommand
+            if intent
+                .transient_state_intent
+                .as_ref()
+                .is_some_and(|state_intent| state_intent.command_kind.is_mutation()) =>
+        {
+            PolicyConsentDisposition::ExplicitUserAuthorization
+        }
         PolicyRouteKind::ReversibleMemoryCommit => {
             PolicyConsentDisposition::ExplicitUserAuthorization
         }
@@ -1720,8 +2017,10 @@ fn build_policy_decision(
         _ => PolicyConsentDisposition::NotRequired,
     };
     let data_route = if privacy_risk.local_only_required
-        || route_kind == PolicyRouteKind::ReversibleMemoryCommit
-    {
+        || matches!(
+            route_kind,
+            PolicyRouteKind::ReversibleMemoryCommit | PolicyRouteKind::TransientStateCommand
+        ) {
         ProviderDataRoute::LocalOnly
     } else {
         ProviderDataRoute::PolicyAllowed
@@ -1747,6 +2046,9 @@ fn build_policy_decision(
         data_route,
         allowed_capabilities: policy_allowed_capabilities(route_kind, intent, &governance_plan),
         authorized_memory_candidate_ids,
+        authorized_transient_state_digest: (route_kind == PolicyRouteKind::TransientStateCommand)
+            .then(|| intent.authorized_transient_state_digest())
+            .flatten(),
         governance_plan,
         reason_code: reason_code.into(),
         policy_version: "main_chat_policy_v2".into(),
@@ -1770,6 +2072,17 @@ fn policy_allowed_capabilities(
             AllowedCapability::PlanDraft,
             AllowedCapability::ProviderGeneration,
         ],
+        PolicyRouteKind::TransientStateCommand => {
+            if intent
+                .transient_state_intent
+                .as_ref()
+                .is_some_and(|state_intent| state_intent.command_kind.is_mutation())
+            {
+                vec![AllowedCapability::TransientStateCommit]
+            } else {
+                vec![AllowedCapability::TransientStateRead]
+            }
+        }
         PolicyRouteKind::ReversibleMemoryCommit => {
             vec![AllowedCapability::ReversibleMemoryCommit]
         }
@@ -2328,8 +2641,10 @@ impl AgentIngressDecision {
             return Err("policy_authorized_message_digest_mismatch");
         }
         let expected_data_route = if self.privacy_risk.local_only_required
-            || self.policy_route == PolicyRouteKind::ReversibleMemoryCommit
-        {
+            || matches!(
+                self.policy_route,
+                PolicyRouteKind::ReversibleMemoryCommit | PolicyRouteKind::TransientStateCommand
+            ) {
             ProviderDataRoute::LocalOnly
         } else {
             ProviderDataRoute::PolicyAllowed
@@ -11626,6 +11941,7 @@ fn run_one_main_chat_runtime_eval_case(
         }
         MainChatAgentStrategy::ReActToolExecution
         | MainChatAgentStrategy::PlanExecute
+        | MainChatAgentStrategy::TransientStateCommand
         | MainChatAgentStrategy::ReversibleMemoryCommit
         | MainChatAgentStrategy::ReviewMaturation
         | MainChatAgentStrategy::BlockedConfirmation => {
@@ -13259,6 +13575,10 @@ fn runtime_eval_actions_for_strategy(
             "plan_execute.create_session",
             "Runtime eval PlanExecute draft",
         )],
+        MainChatAgentStrategy::TransientStateCommand => vec![ExecutionAction::new(
+            "state.transient",
+            "Runtime eval transient-state command",
+        )],
         MainChatAgentStrategy::ReversibleMemoryCommit => vec![ExecutionAction::new(
             "memory.explicit_write",
             "Runtime eval explicit reversible Memory commit",
@@ -14318,6 +14638,236 @@ fn is_conditional_observation_memory_review_request(lower: &str) -> bool {
         ],
     );
     requests_reviewable_memory && condition_is_observation_usefulness
+}
+
+fn extract_transient_state_intent(
+    user_goal: &str,
+    lower: &str,
+    has_embedded_untrusted_instruction: bool,
+    advice_only: bool,
+) -> Option<TransientStateIntent> {
+    if has_embedded_untrusted_instruction || advice_only {
+        return None;
+    }
+    let long_term = contains_any(
+        lower,
+        &[
+            "长期",
+            "永久",
+            "每周",
+            "每月",
+            "每天",
+            "以后都",
+            "long-term",
+            "long term",
+            "every day",
+            "every week",
+            "always",
+        ],
+    );
+    let sensitive = contains_any(
+        lower,
+        &[
+            "密码",
+            "验证码",
+            "身份证",
+            "银行卡",
+            "病历",
+            "password",
+            "verification code",
+            "credit card",
+            "medical record",
+        ],
+    );
+    let reviewed_disposition = if long_term || sensitive {
+        TransientStateIntentDisposition::ReviewRequired
+    } else {
+        TransientStateIntentDisposition::Direct
+    };
+
+    let trimmed = user_goal.trim();
+    let trimmed_lower = lower.trim();
+    if trimmed_lower == "/goal" || trimmed_lower == "/goal list" {
+        return Some(TransientStateIntent {
+            command_kind: TransientStateCommandKind::ListDailyTasks,
+            target: String::new(),
+            due_hint: None,
+            expiry_days: 1,
+            disposition: TransientStateIntentDisposition::Direct,
+            reason_code: "explicit_daily_task_list".into(),
+        });
+    }
+    if trimmed_lower == "/goal help" {
+        return Some(TransientStateIntent {
+            command_kind: TransientStateCommandKind::ListDailyTasks,
+            target: String::new(),
+            due_hint: None,
+            expiry_days: 1,
+            disposition: TransientStateIntentDisposition::Direct,
+            reason_code: "explicit_daily_task_help".into(),
+        });
+    }
+    for (prefix, command_kind) in [
+        ("/goal add ", TransientStateCommandKind::CreateDailyTask),
+        ("/goal done ", TransientStateCommandKind::CompleteDailyTask),
+        (
+            "/goal finish ",
+            TransientStateCommandKind::CompleteDailyTask,
+        ),
+        ("/goal undo ", TransientStateCommandKind::UndoDailyTask),
+    ] {
+        if trimmed_lower.starts_with(prefix) {
+            let target = trimmed
+                .chars()
+                .skip(prefix.chars().count())
+                .collect::<String>()
+                .trim()
+                .to_string();
+            let disposition = if target.is_empty() {
+                TransientStateIntentDisposition::ClarificationRequired
+            } else {
+                reviewed_disposition
+            };
+            return Some(TransientStateIntent {
+                command_kind,
+                target,
+                due_hint: parse_transient_state_due_hint(lower),
+                expiry_days: 1,
+                disposition,
+                reason_code: if disposition
+                    == TransientStateIntentDisposition::ClarificationRequired
+                {
+                    "daily_task_target_missing".into()
+                } else if disposition == TransientStateIntentDisposition::ReviewRequired {
+                    "daily_task_long_term_or_sensitive_requires_review".into()
+                } else {
+                    "explicit_daily_task_slash_command".into()
+                },
+            });
+        }
+    }
+
+    if trimmed_lower == "/state" || trimmed_lower.starts_with("/state ") {
+        return Some(TransientStateIntent {
+            command_kind: TransientStateCommandKind::CreateDailyTask,
+            target: String::new(),
+            due_hint: None,
+            expiry_days: 1,
+            disposition: TransientStateIntentDisposition::ReviewRequired,
+            reason_code: "state_observation_requires_typed_statestore_slice".into(),
+        });
+    }
+
+    if contains_any(lower, &["提醒我", "remind me"])
+        && contains_any(lower, &["今天", "今日", "今晚", "today", "tonight"])
+    {
+        let target = extract_reminder_target(trimmed);
+        let disposition = if target.is_empty() {
+            TransientStateIntentDisposition::ClarificationRequired
+        } else {
+            reviewed_disposition
+        };
+        return Some(TransientStateIntent {
+            command_kind: TransientStateCommandKind::CreateDailyTask,
+            target,
+            due_hint: parse_transient_state_due_hint(lower),
+            expiry_days: 1,
+            disposition,
+            reason_code: if disposition == TransientStateIntentDisposition::Direct {
+                "explicit_today_reminder".into()
+            } else if disposition == TransientStateIntentDisposition::ClarificationRequired {
+                "daily_task_target_missing".into()
+            } else {
+                "daily_task_long_term_or_sensitive_requires_review".into()
+            },
+        });
+    }
+
+    for (marker, command_kind) in [
+        ("完成今日任务", TransientStateCommandKind::CompleteDailyTask),
+        ("完成任务", TransientStateCommandKind::CompleteDailyTask),
+        ("撤销今日任务", TransientStateCommandKind::UndoDailyTask),
+        ("撤销任务", TransientStateCommandKind::UndoDailyTask),
+    ] {
+        if let Some((_, tail)) = trimmed.split_once(marker) {
+            let target = trim_state_target(tail);
+            return Some(TransientStateIntent {
+                command_kind,
+                target: target.clone(),
+                due_hint: None,
+                expiry_days: 1,
+                disposition: if target.is_empty() {
+                    TransientStateIntentDisposition::ClarificationRequired
+                } else {
+                    reviewed_disposition
+                },
+                reason_code: if target.is_empty() {
+                    "daily_task_target_missing".into()
+                } else {
+                    "explicit_daily_task_transition".into()
+                },
+            });
+        }
+    }
+    None
+}
+
+fn extract_reminder_target(user_goal: &str) -> String {
+    let tail = user_goal
+        .split_once("提醒我")
+        .map(|(_, tail)| tail)
+        .or_else(|| {
+            let lower = user_goal.to_ascii_lowercase();
+            lower
+                .find("remind me")
+                .map(|index| &user_goal[index + "remind me".len()..])
+        })
+        .unwrap_or_default();
+    let bounded = [
+        "，完成后",
+        ", after",
+        "；完成后",
+        "; after",
+        "，然后",
+        ", then",
+    ]
+    .into_iter()
+    .filter_map(|marker| tail.find(marker))
+    .min()
+    .map(|index| &tail[..index])
+    .unwrap_or(tail);
+    trim_state_target(bounded)
+}
+
+fn trim_state_target(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches(|character: char| {
+            character.is_whitespace()
+                || matches!(character, '：' | ':' | '。' | '.' | '，' | ',' | '；' | ';')
+        })
+        .chars()
+        .take(512)
+        .collect()
+}
+
+fn parse_transient_state_due_hint(lower: &str) -> Option<TransientStateDueHint> {
+    let (local_hour, local_minute) = if contains_any(
+        lower,
+        &["下午三点", "下午3点", "下午 3 点", "15:00", "15：00"],
+    ) {
+        (15, 0)
+    } else if contains_any(lower, &["下午两点", "下午2点", "14:00", "14：00"]) {
+        (14, 0)
+    } else if contains_any(lower, &["上午十点", "上午10点", "10:00", "10：00"]) {
+        (10, 0)
+    } else {
+        return None;
+    };
+    Some(TransientStateDueHint {
+        local_hour,
+        local_minute,
+    })
 }
 
 fn extract_untrusted_instruction_spans(user_message: &str) -> Vec<UntrustedInstructionSpan> {

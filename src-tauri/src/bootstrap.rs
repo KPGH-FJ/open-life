@@ -2555,6 +2555,27 @@ fn bootstrap_with_secret_store(
         }
     };
 
+    let state_store = {
+        let store_path = data_dir.join("state.db");
+        match openlife_core::state_store::StateStore::new(&store_path) {
+            Ok(store) => {
+                persistence.register_read_write("StateStore");
+                Some(Arc::new(store))
+            }
+            Err(error) => {
+                persistence.register_unavailable(
+                    "StateStore",
+                    "state_store_initialization_failed",
+                    &error.to_string(),
+                );
+                startup_warnings.borrow_mut().push(format!(
+                    "state.db 初始化失败；transient-state 写入已禁用且不会降级到临时存储：{error}"
+                ));
+                None
+            }
+        }
+    };
+
     let app_state = Arc::new(AppState {
         persistence_coordinator: Arc::clone(&persistence),
         config: Arc::new(Mutex::new(config)),
@@ -2605,6 +2626,7 @@ fn bootstrap_with_secret_store(
         )),
         web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
         resource_runtime,
+        state_store,
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
     });
 

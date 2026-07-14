@@ -2439,6 +2439,10 @@ impl BuilderEngine {
                                         }),
                                         None => None,
                                     },
+                                    due_at: v
+                                        .get("due_at")
+                                        .and_then(serde_json::Value::as_str)
+                                        .map(str::to_string),
                                     operation_id: None,
                                     operation_digest: None,
                                 })

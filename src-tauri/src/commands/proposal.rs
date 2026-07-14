@@ -3711,6 +3711,7 @@ mod tests {
             )),
             web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
             resource_runtime: None,
+            state_store: None,
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         })
     }

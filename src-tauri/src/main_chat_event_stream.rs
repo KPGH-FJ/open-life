@@ -6785,6 +6785,18 @@ const MEMORY_ROLLED_BACK_FIELDS: &[PayloadFieldSchema] = &[
         PayloadValueSchema::MetadataStringOrNull,
     ),
 ];
+const EFFECT_COMMITTED_FIELDS: &[PayloadFieldSchema] = &[
+    PayloadFieldSchema::required("status", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::required("receiptId", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::required("operationId", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::required("assetId", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::required("assetVersion", PayloadValueSchema::Count),
+    PayloadFieldSchema::required("mutationKind", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::required("payloadDigest", PayloadValueSchema::OpaqueDigest),
+    PayloadFieldSchema::required("outboxEventId", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::required("projectionStatus", PayloadValueSchema::MetadataString),
+    PayloadFieldSchema::required("replayed", PayloadValueSchema::Bool),
+];
 const FINAL_DELIVERY_FIELDS: &[PayloadFieldSchema] = &[
     PayloadFieldSchema::optional("deliveryId", PayloadValueSchema::MetadataString),
     PayloadFieldSchema::optional("taskSessionId", PayloadValueSchema::MetadataString),
@@ -7149,6 +7161,12 @@ fn durable_event_payload_schema(
             fields: MEMORY_ROLLED_BACK_FIELDS,
             reject_unknown_fields: false,
             expected_status: None,
+        },
+        "effect_committed" => DurableEventPayloadSchema {
+            object_type: "state_effect",
+            fields: EFFECT_COMMITTED_FIELDS,
+            reject_unknown_fields: true,
+            expected_status: Some("committed"),
         },
         "final_delivery.created" => DurableEventPayloadSchema {
             object_type: "final_delivery",
@@ -9782,7 +9800,7 @@ fn bounded_label(value: &str, max_chars: usize) -> String {
 /// Production registry shared by append-time schema lookup and coverage tests.
 /// Adding an event requires one authority update; a test-only source map cannot
 /// silently drift from the executable decoder.
-const DURABLE_EVENT_REGISTRY: [(&str, &str); 48] = [
+const DURABLE_EVENT_REGISTRY: [(&str, &str); 49] = [
     ("turn_started", "turn"),
     ("cancel_requested", "turn"),
     ("local_aborted", "turn"),
@@ -9828,6 +9846,7 @@ const DURABLE_EVENT_REGISTRY: [(&str, &str); 48] = [
     ("proposal.updated", "proposal"),
     ("memory.materialized", "memory"),
     ("memory.rolled_back", "memory"),
+    ("effect_committed", "state_effect"),
     ("final_delivery.created", "final_delivery"),
     ("diagnostic.created", "diagnostic"),
     ("task.updated", "task"),

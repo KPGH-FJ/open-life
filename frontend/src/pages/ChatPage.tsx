@@ -38,17 +38,12 @@ import {
   getSchedulerConfig,
   setSchedulerConfig,
   saveFeedback,
-  saveChatMessage,
   logAnalyticsEvent,
   getLifeModel,
   listChatSessions,
   createChatSession,
   renameChatSession,
   deleteChatSession,
-  getDailyGoals,
-  addDailyGoal,
-  toggleDailyGoal,
-  recordState,
   listAgentRunsForSession,
   getAgentRun,
   getPendingProposals,
@@ -115,7 +110,6 @@ import {
   type CapabilityTone,
   type CapabilityStatusViewModel,
 } from "../utils/capabilityStatus";
-import { inspectDailyGoalName } from "../utils/dailyGoalDisplayGuard";
 import { reviewRequiredCountFromProjection } from "../utils/lifeStateProjection";
 import { listen } from "@tauri-apps/api/event";
 import ReasoningTracePanel from "../components/ReasoningTracePanel";
@@ -1436,9 +1430,6 @@ export default function ChatPage({
   const currentAgentTaskSessionIdRef = useRef<string | null>(null);
   const currentKernelEventSessionRef = useRef<string | null>(null);
   const lastUserMessageRef = useRef<ChatMessage | null>(null);
-  const quickCommandOperationIdsRef = useRef<
-    Map<string, { effect: string; user: string; assistant: string }>
-  >(new Map());
   const pendingTurnOperationRef = useRef<{
     sessionId: string;
     userContent: string;
@@ -2256,118 +2247,6 @@ export default function ChatPage({
     }
   }, [editingId, editingTitle]);
 
-  // ARCHITECTURE_RESIDUAL(D050): mutating slash commands still bypass the
-  // TurnRuntime-owned StateStore/outbox authority. UUID/payload-bound receipts
-  // below are migration safety only; they do not close or legitimize this
-  // frontend-owned mutation route, which ADR 0015 requires deleting.
-  const tryHandleQuickCommand = useCallback(
-    async (text: string, effectOperationId: string): Promise<string | null> => {
-      const t = text.trim();
-      if (t === "/goal" || t.startsWith("/goal ")) {
-        let mutationAttempted = false;
-        try {
-          const goals = await getDailyGoals();
-          const renderGoals = (items: typeof goals) => {
-            const completed = items.filter(g => g.done).length;
-            const list =
-              items.map((g, i) => `${i + 1}. ${g.done ? "[x]" : "[ ]"} ${g.name}`).join("\n") ||
-              "暂无今日目标。";
-            return `📋 今日目标 (${completed}/${items.length} 完成)：\n\n${list}`;
-          };
-          const findGoalIndex = (query: string) => {
-            const normalized = query.trim().toLowerCase();
-            return goals.findIndex(goal => {
-              const name = goal.name.toLowerCase();
-              return name === normalized || name.includes(normalized) || normalized.includes(name);
-            });
-          };
-          const command = t.replace("/goal", "").trim();
-          if (!command) {
-            return renderGoals(goals);
-          }
-          if (command === "help") {
-            return [
-              "📌 /goal 用法：",
-              "/goal",
-              "/goal add 目标名",
-              "/goal done 目标名",
-              "/goal undo 目标名",
-            ].join("\n");
-          }
-          if (command.startsWith("add ")) {
-            const goalName = command.slice(4).trim();
-            if (!goalName) return "请在 /goal add 后面补充目标名称。";
-            const guard = inspectDailyGoalName(goalName);
-            if (!guard.valid) {
-              return `没有添加今日目标：${guard.reason}\n${guard.recoveryAction ?? "请改成一个可执行目标。"}`;
-            }
-            mutationAttempted = true;
-            await addDailyGoal(effectOperationId, goalName);
-            return `✅ 已添加今日目标：${goalName}`;
-          }
-          // Goal done/undo still enter through the slash-command bridge. Their current
-          // state-check avoids simple inversion on retry, but this is not the
-          // payload-bound effect receipt implemented for goal add/state record.
-          if (command.startsWith("done ") || command.startsWith("finish ")) {
-            const query = command.replace(/^done\s+|^finish\s+/, "").trim();
-            const idx = findGoalIndex(query);
-            if (idx < 0) return `没有找到名为“${query}”的今日目标。`;
-            if (!goals[idx].done) {
-              mutationAttempted = true;
-              await toggleDailyGoal(idx);
-            }
-            const refreshed = await getDailyGoals();
-            return `✅ 已完成今日目标：${refreshed[idx]?.name ?? query}\n\n${renderGoals(refreshed)}`;
-          }
-          if (command.startsWith("undo ")) {
-            const query = command.slice(5).trim();
-            const idx = findGoalIndex(query);
-            if (idx < 0) return `没有找到名为“${query}”的今日目标。`;
-            if (goals[idx].done) {
-              mutationAttempted = true;
-              await toggleDailyGoal(idx);
-            }
-            const refreshed = await getDailyGoals();
-            return `↩️ 已恢复今日目标：${refreshed[idx]?.name ?? query}\n\n${renderGoals(refreshed)}`;
-          }
-          return "无法识别 /goal 子命令。输入 `/goal help` 查看可用操作。";
-        } catch (error) {
-          if (mutationAttempted) throw error;
-          return "获取今日目标失败。";
-        }
-      }
-      if (t === "/state" || t.startsWith("/state ")) {
-        const rest = t.replace("/state", "").trim();
-        if (!rest) {
-          return "📝 用法：/state 维度名 数值 单位\n示例：/state 专注度 7.5 分";
-        }
-        const parts = rest.split(/\s+/);
-        if (parts.length < 2) {
-          return "格式不正确。用法：/state 维度名 数值 单位";
-        }
-        const name = parts[0];
-        const val = parseFloat(parts[1]);
-        if (Number.isNaN(val)) {
-          return "数值无法解析，请检查输入。";
-        }
-        const unit = parts[2] || "单位";
-        await recordState(
-          effectOperationId,
-          name,
-          val,
-          unit,
-          undefined,
-          undefined,
-          undefined,
-          undefined
-        );
-        return `✅ 已记录状态：${name} = ${val} ${unit}`;
-      }
-      return null;
-    },
-    []
-  );
-
   const handleSend = useCallback(async () => {
     const resourceDraft = currentResourceDraft;
     const resources = resourceDraft?.resources ?? [];
@@ -2393,79 +2272,6 @@ export default function ChatPage({
     lastUserMessageRef.current = userMsg;
     setMessages(nextMessages);
     setInput("");
-
-    const isQuickCommand = resources.length === 0 && /^\/(?:goal|state)(?:\s|$)/.test(text);
-    const hasPayloadBoundQuickEffect =
-      isQuickCommand && (/^\/goal\s+add\s+/.test(text) || /^\/state(?:\s|$)/.test(text));
-    const quickCommandOperationKey = `${currentSessionId}\u0000${text}`;
-    let quickCommandOperationIds = isQuickCommand
-      ? quickCommandOperationIdsRef.current.get(quickCommandOperationKey)
-      : undefined;
-    if (isQuickCommand && !quickCommandOperationIds) {
-      quickCommandOperationIds = {
-        effect: crypto.randomUUID(),
-        user: crypto.randomUUID(),
-        assistant: crypto.randomUUID(),
-      };
-      if (quickCommandOperationIdsRef.current.size >= 64) {
-        const oldestKey = quickCommandOperationIdsRef.current.keys().next().value;
-        if (typeof oldestKey === "string") quickCommandOperationIdsRef.current.delete(oldestKey);
-      }
-      // The effect UUID is durable retry identity, so it must exist before the
-      // first backend side effect rather than being derived from its reply.
-      quickCommandOperationIdsRef.current.set(quickCommandOperationKey, quickCommandOperationIds);
-    }
-    const quickEffectOperationId = quickCommandOperationIds?.effect ?? crypto.randomUUID();
-    let quickReply: string | null;
-    try {
-      quickReply = isQuickCommand
-        ? await tryHandleQuickCommand(text, quickEffectOperationId)
-        : null;
-    } catch (error) {
-      console.error("快捷指令效果状态未知", error);
-      setMessages([
-        ...nextMessages,
-        {
-          role: "assistant",
-          content: hasPayloadBoundQuickEffect
-            ? "快捷操作结果暂时无法确认。请使用同一条命令重试；OpenLife 会复用同一个操作 ID，并核对已提交的 payload digest。"
-            : "快捷操作结果暂时无法确认。这个旧入口尚未迁入 TurnRuntime，请先核对当前目标状态，再决定是否重试。",
-        },
-      ]);
-      return;
-    }
-    if (quickReply) {
-      const assistantMsg: ChatMessage = { role: "assistant", content: quickReply };
-      const operationIds = quickCommandOperationIds ?? {
-        effect: quickEffectOperationId,
-        user: crypto.randomUUID(),
-        assistant: crypto.randomUUID(),
-      };
-      quickCommandOperationIdsRef.current.set(quickCommandOperationKey, operationIds);
-      try {
-        await saveChatMessage(currentSessionId, userMsg, operationIds.user);
-        await saveChatMessage(currentSessionId, assistantMsg, operationIds.assistant);
-        quickCommandOperationIdsRef.current.delete(quickCommandOperationKey);
-        await loadSessions();
-      } catch (e) {
-        console.error("保存快捷指令消息失败", e);
-      }
-      setMessages([...nextMessages, assistantMsg]);
-      return;
-    }
-    if (isQuickCommand) {
-      quickCommandOperationIdsRef.current.delete(quickCommandOperationKey);
-    }
-
-    if (diagnostics && !diagnostics.chat_ready) {
-      emitCompanionStage("error");
-      const assistantMsg: ChatMessage = {
-        role: "assistant",
-        content: formatChatRuntimeError("chat not ready", diagnostics),
-      };
-      setMessages([...nextMessages, assistantMsg]);
-      return;
-    }
 
     setSending(true);
     streamErrorHandledRef.current = false;
@@ -2643,7 +2449,6 @@ export default function ChatPage({
     currentResourceDraft,
     resourceImportBusy,
     completeResourceTurn,
-    tryHandleQuickCommand,
     emitCompanionStage,
     applyMainChatAgentStateSnapshot,
   ]);
@@ -3797,30 +3602,6 @@ export default function ChatPage({
     { key: "free", label: "自由聊天", icon: <MessageSquare size={14} />, prompt: "" },
   ];
 
-  const handleSaveAsDailyGoal = useCallback(async (content: string) => {
-    const name = content
-      .split(/[。！？\n]/)[0]
-      .slice(0, 30)
-      .trim();
-    if (!name) return;
-    const guard = inspectDailyGoalName(name);
-    if (!guard.valid) {
-      setMessages(prev => [
-        ...prev,
-        {
-          role: "assistant",
-          content: `没有保存为今日目标：${guard.reason}\n${guard.recoveryAction ?? "请改成一个可执行目标。"}`,
-        },
-      ]);
-      return;
-    }
-    try {
-      await addDailyGoal(crypto.randomUUID(), name);
-    } catch (e) {
-      console.error("保存今日目标失败", e);
-    }
-  }, []);
-
   const handleInputChange = useCallback(
     (value: string) => {
       setInput(value);
@@ -4421,13 +4202,6 @@ export default function ChatPage({
                         </button>
                         {!companionMode && (
                           <>
-                            <button
-                              onClick={() => handleSaveAsDailyGoal(displayContent)}
-                              className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
-                              title="将回复首句保存为今日目标"
-                            >
-                              <CheckCircle2 size={12} /> 设为今日目标
-                            </button>
                             <button
                               onClick={() =>
                                 fillPrompt(

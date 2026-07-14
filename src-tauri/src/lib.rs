@@ -72,6 +72,7 @@ pub mod runtime_build_info;
 pub mod scheduler_runner;
 pub(crate) mod secret_store;
 pub mod state;
+pub(crate) mod state_projection;
 pub mod storage;
 pub(crate) mod tool_gateway_resources;
 pub(crate) mod workspace_file_resolver;
@@ -203,10 +204,7 @@ use commands::settings::{
     get_danger_action_preflight, get_last_model_error, get_privacy_policy, import_all_data,
     rotate_mcp_audit_key, save_config, set_privacy_policy, test_llm_connection,
 };
-use commands::state::{
-    add_daily_goal, delete_daily_goal, get_daily_goals, get_state_alerts, get_state_history,
-    record_state, toggle_daily_goal, update_daily_goal,
-};
+use commands::state::{get_daily_goals, get_state_alerts, get_state_history, record_state};
 use commands::version::{create_snapshot, diff_snapshots, list_snapshots, restore_snapshot};
 use life_state_projection::get_life_state_projection;
 use main_chat_event_stream::{get_main_chat_agent_state_snapshot, list_main_chat_agent_events};
@@ -825,6 +823,23 @@ pub fn run() {
                 .require_effects_allowed()
                 .is_ok()
             {
+                if let Err(error) = tauri::async_runtime::block_on(
+                    state_projection::reconcile_state_store_lifemodel_projection(
+                        &app_state_for_setup,
+                    ),
+                ) {
+                    // StateStore remains the canonical product read owner. A
+                    // failed YAML compatibility projection is explicitly
+                    // degraded and retryable; it must not trigger a temp-store
+                    // fallback or misreport the canonical effect as failed.
+                    log::warn!("[setup] StateStore compatibility projection degraded: {error}");
+                }
+            }
+            if app_state_for_setup
+                .persistence_coordinator
+                .require_effects_allowed()
+                .is_ok()
+            {
                 memory_gateway::start_canonical_outbox_background_worker(Arc::clone(
                     &app_state_for_setup,
                 ));
@@ -1039,10 +1054,6 @@ pub fn run() {
             get_state_history,
             get_state_alerts,
             get_daily_goals,
-            add_daily_goal,
-            update_daily_goal,
-            delete_daily_goal,
-            toggle_daily_goal,
             run_micro_evolution,
             generate_calibration_report,
             generate_micro_evolution_changes,

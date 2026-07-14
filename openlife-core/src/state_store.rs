@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 use uuid::{Uuid, Version};
 
-const STATE_STORE_SCHEMA_VERSION: i64 = 1;
+const STATE_STORE_SCHEMA_VERSION: i64 = 2;
 const STATE_ASSET_AGGREGATE_KIND: &str = "transient_state_asset";
 pub const LIFEMODEL_YAML_PROJECTION_TARGET: &str = "lifemodel_yaml_compat_v1";
 const PROJECTION_TARGETS: &[&str] = &[LIFEMODEL_YAML_PROJECTION_TARGET];
@@ -174,6 +174,10 @@ pub struct StateExecutionReceipt {
 #[derive(Debug, Clone)]
 pub struct CreateDailyTaskCommand {
     pub operation_id: String,
+    /// Sealed user-request identity. Gateway callers provide the policy-bound
+    /// digest; lower-level storage callers fall back to the canonical payload
+    /// digest for backwards-compatible idempotency.
+    pub request_digest: Option<String>,
     pub source_message_ref: String,
     pub title: String,
     pub due_at: Option<DateTime<Utc>>,
@@ -189,11 +193,213 @@ pub struct CreateDailyTaskCommand {
 #[derive(Debug, Clone)]
 pub struct TransitionDailyTaskCommand {
     pub operation_id: String,
+    pub request_digest: Option<String>,
     pub source_message_ref: String,
     pub asset_id: String,
     pub expected_version: u64,
     pub mutation_kind: StateMutationKind,
     pub occurred_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StateGatewayExecutionContext {
+    pub occurred_at: DateTime<Utc>,
+    /// Time-zone resolution is owned by the application boundary. The gateway
+    /// accepts it only when the sealed intent carried a corresponding due hint.
+    pub resolved_due_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StateCommandOutcome {
+    pub command_kind: crate::agent::main_chat_agent_v1::TransientStateCommandKind,
+    pub receipt: Option<StateExecutionReceipt>,
+    pub tasks: Vec<StateAsset>,
+    pub source_message_ref: String,
+    pub source_message_digest: String,
+    pub policy_contract_digest: String,
+}
+
+#[derive(Clone)]
+pub struct StateGateway {
+    store: StateStore,
+}
+
+impl StateGateway {
+    pub fn new(store: StateStore) -> Self {
+        Self { store }
+    }
+
+    pub fn store(&self) -> &StateStore {
+        &self.store
+    }
+
+    pub fn execute(
+        &self,
+        grant: crate::agent::main_chat_agent_v1::PolicyTransientStateGrant,
+        context: StateGatewayExecutionContext,
+    ) -> Result<StateCommandOutcome> {
+        self.execute_guarded(grant, context, || Result::<()>::Ok(()))
+    }
+
+    pub fn execute_with_admission(
+        &self,
+        grant: crate::agent::main_chat_agent_v1::PolicyTransientStateGrant,
+        context: StateGatewayExecutionContext,
+        admission: &dyn crate::agent::CanonicalWriteAdmission,
+    ) -> Result<StateCommandOutcome> {
+        if !grant.intent().command_kind.is_mutation() {
+            return self.execute(grant, context);
+        }
+        let object_ref = grant.operation_id().to_string();
+        let mut permit: Option<Box<dyn crate::agent::CanonicalWritePermit>> = None;
+        let outcome = self.execute_guarded(grant, context, || {
+            permit = Some(
+                admission
+                    .acquire(crate::agent::CanonicalWriteAdmissionRequest::new(
+                        "state_store.transient",
+                        object_ref,
+                    ))
+                    .map_err(anyhow::Error::from)?,
+            );
+            Ok(())
+        });
+        match outcome {
+            Ok(outcome) => {
+                if outcome
+                    .receipt
+                    .as_ref()
+                    .is_some_and(|receipt| receipt.replayed)
+                    && permit.is_none()
+                {
+                    // A committed operation can be recovered without opening
+                    // a second write-admission window. The durable receipt is
+                    // read-only truth, even if cancellation arrived after the
+                    // original commit.
+                    return Ok(outcome);
+                }
+                let permit = permit.context("state_gateway_commit_permit_missing")?;
+                if outcome
+                    .receipt
+                    .as_ref()
+                    .is_some_and(|receipt| receipt.replayed)
+                {
+                    permit.finish_noop();
+                } else {
+                    permit.finish_committed();
+                }
+                Ok(outcome)
+            }
+            Err(error) => {
+                if let Some(permit) = permit {
+                    permit.finish_failed();
+                }
+                Err(error)
+            }
+        }
+    }
+
+    pub fn execute_guarded<F>(
+        &self,
+        grant: crate::agent::main_chat_agent_v1::PolicyTransientStateGrant,
+        context: StateGatewayExecutionContext,
+        before_commit: F,
+    ) -> Result<StateCommandOutcome>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        use crate::agent::main_chat_agent_v1::TransientStateCommandKind;
+
+        let operation_id = grant.operation_id().to_string();
+        let source_message_ref = grant.source_user_message_id().to_string();
+        let source_message_digest = grant.source_user_message_digest().to_string();
+        let policy_contract_digest = grant.policy_contract_digest().to_string();
+        let request_digest = grant.intent_digest().to_string();
+        if grant.intent_digest().trim().is_empty()
+            || !is_sha256_digest(&source_message_digest)
+            || !is_sha256_digest(&policy_contract_digest)
+        {
+            anyhow::bail!("state_gateway_policy_grant_invalid");
+        }
+        let intent = grant.intent().clone();
+        if intent.expiry_days == 0 || intent.expiry_days > 7 {
+            anyhow::bail!("state_gateway_expiry_days_invalid");
+        }
+        if intent.due_hint.is_some() != context.resolved_due_at.is_some() {
+            anyhow::bail!("state_gateway_due_resolution_mismatch");
+        }
+        if intent.command_kind.is_mutation() {
+            if let Some(receipt) = self.store.replay_request(&operation_id, &request_digest)? {
+                return Ok(StateCommandOutcome {
+                    command_kind: intent.command_kind,
+                    receipt: Some(receipt),
+                    tasks: self.store.list_daily_tasks(false)?,
+                    source_message_ref,
+                    source_message_digest,
+                    policy_contract_digest,
+                });
+            }
+        }
+        let receipt = match intent.command_kind {
+            TransientStateCommandKind::ListDailyTasks => {
+                if intent.command_kind.is_mutation() {
+                    anyhow::bail!("state_gateway_list_contract_invalid");
+                }
+                before_commit()?;
+                None
+            }
+            TransientStateCommandKind::CreateDailyTask => {
+                Some(self.store.create_daily_task_guarded(
+                    CreateDailyTaskCommand {
+                        operation_id,
+                        request_digest: Some(request_digest),
+                        source_message_ref: source_message_ref.clone(),
+                        title: intent.target,
+                        due_at: context.resolved_due_at,
+                        created_at: context.occurred_at,
+                        expires_at: context.occurred_at
+                            + Duration::days(i64::from(intent.expiry_days)),
+                        risk: StateRisk::Low,
+                        sensitivity: StateSensitivity::Internal,
+                        source_kind: StateSourceKind::CurrentAuthenticatedUserMessage,
+                        confidence: 1.0,
+                        privacy_class: StatePrivacyClass::Private,
+                    },
+                    before_commit,
+                )?)
+            }
+            TransientStateCommandKind::CompleteDailyTask
+            | TransientStateCommandKind::UndoDailyTask => {
+                let asset = resolve_active_task_target(&self.store, &intent.target)?;
+                let mutation_kind =
+                    if intent.command_kind == TransientStateCommandKind::CompleteDailyTask {
+                        StateMutationKind::Complete
+                    } else {
+                        StateMutationKind::Undo
+                    };
+                Some(self.store.transition_daily_task_guarded(
+                    TransitionDailyTaskCommand {
+                        operation_id,
+                        request_digest: Some(request_digest),
+                        source_message_ref: source_message_ref.clone(),
+                        asset_id: asset.asset_id,
+                        expected_version: asset.version,
+                        mutation_kind,
+                        occurred_at: context.occurred_at,
+                    },
+                    before_commit,
+                )?)
+            }
+        };
+        Ok(StateCommandOutcome {
+            command_kind: intent.command_kind,
+            receipt,
+            tasks: self.store.list_daily_tasks(false)?,
+            source_message_ref,
+            source_message_digest,
+            policy_contract_digest,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -286,6 +492,7 @@ impl StateStore {
              ) WITHOUT ROWID;
              CREATE TABLE IF NOT EXISTS state_operations (
                 operation_id TEXT PRIMARY KEY,
+                request_digest TEXT NOT NULL,
                 payload_digest TEXT NOT NULL,
                 receipt_id TEXT NOT NULL UNIQUE,
                 asset_id TEXT NOT NULL,
@@ -311,7 +518,18 @@ impl StateStore {
                     [STATE_STORE_SCHEMA_VERSION.to_string()],
                 )?;
             }
-            Some("1") => {}
+            Some("1") => {
+                tx.execute_batch(
+                    "ALTER TABLE state_operations ADD COLUMN request_digest TEXT;
+                     UPDATE state_operations
+                     SET request_digest = payload_digest
+                     WHERE request_digest IS NULL;
+                     UPDATE state_store_metadata
+                     SET value = '2'
+                     WHERE key = 'schema_version';",
+                )?;
+            }
+            Some("2") => {}
             Some(other) => anyhow::bail!("state_store_schema_version_unsupported:{other}"),
         }
         tx.commit()?;
@@ -334,14 +552,19 @@ impl StateStore {
         F: FnOnce() -> Result<()>,
     {
         let prepared = PreparedCreate::validate(command)?;
+        let mut before_commit = Some(before_commit);
         let mut conn = self.lock_connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(receipt) =
             replay_operation(&tx, &prepared.operation_id, &prepared.payload_digest)?
         {
+            let _commit_guard = before_commit
+                .take()
+                .context("state_create_commit_guard_missing")?()?;
             tx.rollback()?;
             return Ok(receipt);
         }
+        prepared.validate_new_effect_timing()?;
 
         let asset_id = Uuid::new_v4().hyphenated().to_string();
         let receipt_id = format!("state_receipt:{}", Uuid::new_v4());
@@ -396,6 +619,7 @@ impl StateStore {
         insert_operation(
             &tx,
             &prepared.operation_id,
+            &prepared.request_digest,
             &prepared.payload_digest,
             &receipt_id,
             &asset_id,
@@ -404,7 +628,9 @@ impl StateStore {
             &outbox.event_id,
             prepared.created_at,
         )?;
-        before_commit()?;
+        let _commit_guard = before_commit
+            .take()
+            .context("state_create_commit_guard_missing")?()?;
         tx.commit()?;
         drop(conn);
         self.receipt_for_operation(&prepared.operation_id, false)?
@@ -472,6 +698,7 @@ impl StateStore {
             let prepared = PreparedTransition::validate(
                 TransitionDailyTaskCommand {
                     operation_id: Uuid::new_v4().hyphenated().to_string(),
+                    request_digest: None,
                     source_message_ref: format!("system_expiry:{asset_id}"),
                     asset_id,
                     expected_version: u64::try_from(version)
@@ -498,11 +725,16 @@ impl StateStore {
     where
         F: FnOnce() -> Result<()>,
     {
+        let mut before_commit = Some(before_commit);
         let mut conn = self.lock_connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(receipt) =
             replay_operation(&tx, &prepared.operation_id, &prepared.payload_digest)?
         {
+            let _commit_guard = before_commit
+                .take()
+                .context("state_transition_commit_guard_missing")?(
+            )?;
             tx.rollback()?;
             return Ok(receipt);
         }
@@ -603,6 +835,7 @@ impl StateStore {
         insert_operation(
             &tx,
             &prepared.operation_id,
+            &prepared.request_digest,
             &prepared.payload_digest,
             &receipt_id,
             &prepared.asset_id,
@@ -611,7 +844,9 @@ impl StateStore {
             &outbox.event_id,
             prepared.occurred_at,
         )?;
-        before_commit()?;
+        let _commit_guard = before_commit
+            .take()
+            .context("state_transition_commit_guard_missing")?()?;
         tx.commit()?;
         drop(conn);
         self.receipt_for_operation(&prepared.operation_id, false)?
@@ -657,6 +892,19 @@ impl StateStore {
         operation_receipt(&conn, operation_id, replayed)
     }
 
+    fn replay_request(
+        &self,
+        operation_id: &str,
+        request_digest: &str,
+    ) -> Result<Option<StateExecutionReceipt>> {
+        validate_uuid_v4("state_operation_id", operation_id)?;
+        if !is_sha256_digest(request_digest) {
+            anyhow::bail!("state_operation_request_digest_invalid");
+        }
+        let conn = self.lock_connection()?;
+        replay_operation_request(&conn, operation_id, request_digest)
+    }
+
     pub fn list_replayable_projection_deliveries(
         &self,
         limit: usize,
@@ -693,6 +941,7 @@ impl StateStore {
 
 struct PreparedCreate {
     operation_id: String,
+    request_digest: String,
     source_message_ref: String,
     title: String,
     due_at: Option<DateTime<Utc>>,
@@ -724,12 +973,6 @@ impl PreparedCreate {
         if ttl < Duration::hours(24) || ttl > Duration::days(7) {
             anyhow::bail!("state_asset_ttl_out_of_range");
         }
-        if command
-            .due_at
-            .is_some_and(|due_at| due_at < command.created_at || due_at > command.expires_at)
-        {
-            anyhow::bail!("state_daily_task_due_at_out_of_range");
-        }
         if !command.confidence.is_finite() || !(0.0..=1.0).contains(&command.confidence) {
             anyhow::bail!("state_asset_confidence_invalid");
         }
@@ -739,16 +982,25 @@ impl PreparedCreate {
             "sourceMessageRef": command.source_message_ref,
             "title": title,
             "dueAt": command.due_at.map(|value| value.to_rfc3339()),
-            "createdAt": command.created_at.to_rfc3339(),
-            "expiresAt": command.expires_at.to_rfc3339(),
+            // Wall-clock observation is server-owned execution metadata, not
+            // user payload. Bind the requested TTL instead so an exact retry
+            // cannot drift merely because it resumed later.
+            "ttlSeconds": ttl.num_seconds(),
             "risk": command.risk,
             "sensitivity": command.sensitivity,
             "sourceKind": command.source_kind,
             "confidence": command.confidence,
             "privacyClass": command.privacy_class,
         }))?;
+        let request_digest = command
+            .request_digest
+            .unwrap_or_else(|| payload_digest.clone());
+        if !is_sha256_digest(&request_digest) {
+            anyhow::bail!("state_operation_request_digest_invalid");
+        }
         Ok(Self {
             operation_id: command.operation_id,
+            request_digest,
             source_message_ref: command.source_message_ref,
             title,
             due_at: command.due_at,
@@ -762,10 +1014,21 @@ impl PreparedCreate {
             payload_digest,
         })
     }
+
+    fn validate_new_effect_timing(&self) -> Result<()> {
+        if self
+            .due_at
+            .is_some_and(|due_at| due_at < self.created_at || due_at > self.expires_at)
+        {
+            anyhow::bail!("state_daily_task_due_at_out_of_range");
+        }
+        Ok(())
+    }
 }
 
 struct PreparedTransition {
     operation_id: String,
+    request_digest: String,
     source_message_ref: String,
     asset_id: String,
     expected_version: u64,
@@ -796,11 +1059,19 @@ impl PreparedTransition {
             "assetId": command.asset_id,
             "expectedVersion": command.expected_version,
             "mutationKind": command.mutation_kind,
-            "occurredAt": command.occurred_at.to_rfc3339(),
+            // occurredAt records when the winning commit happened. It must
+            // not turn an otherwise exact operation replay into payload drift.
             "sourceKind": source_kind,
         }))?;
+        let request_digest = command
+            .request_digest
+            .unwrap_or_else(|| payload_digest.clone());
+        if !is_sha256_digest(&request_digest) {
+            anyhow::bail!("state_operation_request_digest_invalid");
+        }
         Ok(Self {
             operation_id: command.operation_id,
+            request_digest,
             source_message_ref: command.source_message_ref,
             asset_id: command.asset_id,
             expected_version: command.expected_version,
@@ -816,6 +1087,7 @@ impl PreparedTransition {
 fn insert_operation(
     tx: &Transaction<'_>,
     operation_id: &str,
+    request_digest: &str,
     payload_digest: &str,
     receipt_id: &str,
     asset_id: &str,
@@ -826,11 +1098,12 @@ fn insert_operation(
 ) -> Result<()> {
     tx.execute(
         "INSERT INTO state_operations (
-            operation_id, payload_digest, receipt_id, asset_id, asset_version,
+            operation_id, request_digest, payload_digest, receipt_id, asset_id, asset_version,
             mutation_kind, outbox_event_id, committed_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             operation_id,
+            request_digest,
             payload_digest,
             receipt_id,
             asset_id,
@@ -841,6 +1114,27 @@ fn insert_operation(
         ],
     )?;
     Ok(())
+}
+
+fn replay_operation_request(
+    conn: &Connection,
+    operation_id: &str,
+    request_digest: &str,
+) -> Result<Option<StateExecutionReceipt>> {
+    let existing_digest = conn
+        .query_row(
+            "SELECT request_digest FROM state_operations WHERE operation_id = ?1",
+            [operation_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(existing_digest) = existing_digest else {
+        return Ok(None);
+    };
+    if existing_digest != request_digest {
+        anyhow::bail!("state_operation_request_drift");
+    }
+    operation_receipt(conn, operation_id, true)
 }
 
 fn replay_operation(
@@ -993,6 +1287,48 @@ fn configure_connection(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn resolve_active_task_target(store: &StateStore, target: &str) -> Result<StateAsset> {
+    let normalized = target.trim().to_lowercase();
+    if normalized.is_empty() {
+        anyhow::bail!("state_gateway_task_target_missing");
+    }
+    let tasks = store.list_daily_tasks(false)?;
+    let mut exact = tasks
+        .iter()
+        .filter(|task| task.title.trim().to_lowercase() == normalized)
+        .cloned()
+        .collect::<Vec<_>>();
+    if exact.len() == 1 {
+        return Ok(exact.remove(0));
+    }
+    if exact.len() > 1 {
+        anyhow::bail!("state_gateway_task_target_ambiguous");
+    }
+    let mut partial = tasks
+        .into_iter()
+        .filter(|task| {
+            let title = task.title.trim().to_lowercase();
+            title.contains(&normalized) || normalized.contains(&title)
+        })
+        .collect::<Vec<_>>();
+    if partial.len() == 1 {
+        return Ok(partial.remove(0));
+    }
+    if partial.is_empty() {
+        anyhow::bail!("state_gateway_task_target_not_found");
+    }
+    anyhow::bail!("state_gateway_task_target_ambiguous")
+}
+
+fn is_sha256_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
+}
+
 fn validate_uuid_v4(label: &str, value: &str) -> Result<()> {
     let parsed = Uuid::parse_str(value).with_context(|| format!("{label}_invalid_uuid"))?;
     if parsed.get_version() != Some(Version::Random) || parsed.hyphenated().to_string() != value {
@@ -1116,6 +1452,8 @@ fn parse_privacy_sql(value: &str) -> rusqlite::Result<StatePrivacyClass> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::main_chat_agent_v1::{IntentFrame, PolicyRouter};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier};
     use std::thread;
 
@@ -1128,6 +1466,7 @@ mod tests {
     fn create_command(operation_id: String, title: &str) -> CreateDailyTaskCommand {
         CreateDailyTaskCommand {
             operation_id,
+            request_digest: None,
             source_message_ref: Uuid::new_v4().hyphenated().to_string(),
             title: title.into(),
             due_at: Some(at(15)),
@@ -1148,11 +1487,50 @@ mod tests {
     ) -> TransitionDailyTaskCommand {
         TransitionDailyTaskCommand {
             operation_id: Uuid::new_v4().hyphenated().to_string(),
+            request_digest: None,
             source_message_ref: Uuid::new_v4().hyphenated().to_string(),
             asset_id: asset.asset_id.clone(),
             expected_version: asset.version,
             mutation_kind,
             occurred_at,
+        }
+    }
+
+    fn state_grant(
+        operation_id: &str,
+        prompt: &str,
+    ) -> crate::agent::main_chat_agent_v1::PolicyTransientStateGrant {
+        let mut intent = IntentFrame::from_user_message(prompt);
+        intent.current_user_message_id =
+            Some(format!("conversation://state-tests/message/{operation_id}"));
+        let route = PolicyRouter.route(intent);
+        let state_intent = route
+            .intent_frame
+            .transient_state_intent
+            .as_ref()
+            .expect("transient state intent");
+        route
+            .policy_decision
+            .authorize_transient_state_command(operation_id, state_intent)
+            .expect("transient state grant")
+    }
+
+    struct RejectingWriteAdmission {
+        calls: AtomicUsize,
+    }
+
+    impl crate::agent::CanonicalWriteAdmission for RejectingWriteAdmission {
+        fn acquire(
+            &self,
+            _request: crate::agent::CanonicalWriteAdmissionRequest,
+        ) -> std::result::Result<
+            Box<dyn crate::agent::CanonicalWritePermit>,
+            crate::agent::CanonicalWriteAdmissionRejection,
+        > {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(crate::agent::CanonicalWriteAdmissionRejection::new(
+                "cancelled_after_original_commit",
+            ))
         }
     }
 
@@ -1198,6 +1576,60 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("state_operation_payload_drift"));
         assert_eq!(store.list_daily_tasks(true).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn exact_create_replay_ignores_server_clock_drift_but_keeps_semantic_binding() {
+        let store = StateStore::new_in_memory().unwrap();
+        let operation_id = Uuid::new_v4().hyphenated().to_string();
+        let source_message_ref = Uuid::new_v4().hyphenated().to_string();
+        let mut first_command = create_command(operation_id.clone(), "时间漂移重试");
+        first_command.source_message_ref = source_message_ref.clone();
+        first_command.due_at = None;
+        let first = store.create_daily_task(first_command).unwrap();
+
+        let mut retry_command = create_command(operation_id, "时间漂移重试");
+        retry_command.source_message_ref = source_message_ref;
+        retry_command.due_at = None;
+        retry_command.created_at = at(10);
+        retry_command.expires_at = at(10) + Duration::days(1);
+        let retry = store.create_daily_task(retry_command).unwrap();
+
+        assert!(retry.replayed);
+        assert_eq!(first.asset_id, retry.asset_id);
+        assert_eq!(first.committed_at, retry.committed_at);
+        assert_eq!(store.list_daily_tasks(false).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn exact_transition_replay_ignores_server_clock_drift() {
+        let store = StateStore::new_in_memory().unwrap();
+        let created = store
+            .create_daily_task(create_command(
+                Uuid::new_v4().hyphenated().to_string(),
+                "完成时间漂移重试",
+            ))
+            .unwrap();
+        let asset = store.get_asset(&created.asset_id).unwrap().unwrap();
+        let operation_id = Uuid::new_v4().hyphenated().to_string();
+        let source_message_ref = Uuid::new_v4().hyphenated().to_string();
+        let mut first_command = transition(&asset, StateMutationKind::Complete, at(16));
+        first_command.operation_id = operation_id.clone();
+        first_command.source_message_ref = source_message_ref.clone();
+        let first = store.complete_daily_task(first_command).unwrap();
+
+        let mut retry_command = transition(&asset, StateMutationKind::Complete, at(17));
+        retry_command.operation_id = operation_id;
+        retry_command.source_message_ref = source_message_ref;
+        let retry = store.complete_daily_task(retry_command).unwrap();
+
+        assert!(retry.replayed);
+        assert_eq!(first.asset_version, retry.asset_version);
+        assert_eq!(first.committed_at, retry.committed_at);
+        assert_eq!(
+            store.get_asset(&asset.asset_id).unwrap().unwrap().version,
+            2
+        );
     }
 
     #[test]
@@ -1391,5 +1823,226 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("state_create_source_not_current_user"));
+    }
+
+    #[test]
+    fn state_gateway_consumes_policy_grant_and_reuses_same_operation_receipt() {
+        let store = StateStore::new_in_memory().unwrap();
+        let gateway = StateGateway::new(store.clone());
+        let operation_id = Uuid::new_v4().hyphenated().to_string();
+        let prompt = "今天下午三点前提醒我完成路演设备检查，完成后我还要能撤销。";
+        let context = StateGatewayExecutionContext {
+            occurred_at: at(9),
+            resolved_due_at: Some(at(15)),
+        };
+        let first = gateway
+            .execute(state_grant(&operation_id, prompt), context.clone())
+            .unwrap();
+        let replay = gateway
+            .execute(
+                state_grant(&operation_id, prompt),
+                StateGatewayExecutionContext {
+                    occurred_at: at(16),
+                    resolved_due_at: context.resolved_due_at,
+                },
+            )
+            .unwrap();
+        assert_eq!(first.tasks.len(), 1);
+        assert_eq!(first.tasks[0].title, "完成路演设备检查");
+        assert!(!first.receipt.as_ref().unwrap().replayed);
+        assert!(replay.receipt.as_ref().unwrap().replayed);
+        assert_eq!(
+            first.receipt.as_ref().unwrap().asset_id,
+            replay.receipt.as_ref().unwrap().asset_id
+        );
+
+        let late_error = gateway
+            .execute(
+                state_grant(&Uuid::new_v4().hyphenated().to_string(), prompt),
+                StateGatewayExecutionContext {
+                    occurred_at: at(16),
+                    resolved_due_at: Some(at(15)),
+                },
+            )
+            .unwrap_err();
+        assert!(late_error
+            .to_string()
+            .contains("state_daily_task_due_at_out_of_range"));
+    }
+
+    #[test]
+    fn state_gateway_replays_complete_and_undo_after_current_state_changes() {
+        let store = StateStore::new_in_memory().unwrap();
+        let gateway = StateGateway::new(store.clone());
+        store
+            .create_daily_task(create_command(
+                Uuid::new_v4().hyphenated().to_string(),
+                "完成路演设备检查",
+            ))
+            .unwrap();
+        let context = StateGatewayExecutionContext {
+            occurred_at: at(16),
+            resolved_due_at: None,
+        };
+
+        let complete_operation = Uuid::new_v4().hyphenated().to_string();
+        let complete_prompt = "/goal done 完成路演设备检查";
+        let completed = gateway
+            .execute(
+                state_grant(&complete_operation, complete_prompt),
+                context.clone(),
+            )
+            .unwrap();
+        let completed_replay = gateway
+            .execute(
+                state_grant(&complete_operation, complete_prompt),
+                StateGatewayExecutionContext {
+                    occurred_at: at(17),
+                    resolved_due_at: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(completed.receipt.as_ref().unwrap().asset_version, 2);
+        assert!(completed_replay.receipt.as_ref().unwrap().replayed);
+        assert_eq!(
+            completed.receipt.as_ref().unwrap().receipt_id,
+            completed_replay.receipt.as_ref().unwrap().receipt_id
+        );
+
+        let undo_operation = Uuid::new_v4().hyphenated().to_string();
+        let undo_prompt = "/goal undo 完成路演设备检查";
+        let undone = gateway
+            .execute(state_grant(&undo_operation, undo_prompt), context.clone())
+            .unwrap();
+        assert!(store.list_daily_tasks(false).unwrap().is_empty());
+        let undone_replay = gateway
+            .execute(
+                state_grant(&undo_operation, undo_prompt),
+                StateGatewayExecutionContext {
+                    occurred_at: at(18),
+                    resolved_due_at: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(undone.receipt.as_ref().unwrap().asset_version, 3);
+        assert!(undone_replay.receipt.as_ref().unwrap().replayed);
+        assert_eq!(
+            undone.receipt.as_ref().unwrap().receipt_id,
+            undone_replay.receipt.as_ref().unwrap().receipt_id
+        );
+
+        let drift = gateway
+            .execute(
+                state_grant(&undo_operation, "/goal undo 另一项任务"),
+                context,
+            )
+            .unwrap_err();
+        assert!(drift.to_string().contains("state_operation_request_drift"));
+    }
+
+    #[test]
+    fn committed_receipt_recovery_opens_no_second_write_admission_window() {
+        let store = StateStore::new_in_memory().unwrap();
+        let gateway = StateGateway::new(store);
+        let operation_id = Uuid::new_v4().hyphenated().to_string();
+        let prompt = "/goal add 已经提交的任务";
+        let context = StateGatewayExecutionContext {
+            occurred_at: at(9),
+            resolved_due_at: None,
+        };
+        let committed = gateway
+            .execute(state_grant(&operation_id, prompt), context.clone())
+            .unwrap();
+        let rejecting_admission = RejectingWriteAdmission {
+            calls: AtomicUsize::new(0),
+        };
+
+        let recovered = gateway
+            .execute_with_admission(
+                state_grant(&operation_id, prompt),
+                context,
+                &rejecting_admission,
+            )
+            .unwrap();
+        assert!(recovered.receipt.as_ref().unwrap().replayed);
+        assert_eq!(
+            recovered.receipt.as_ref().unwrap().receipt_id,
+            committed.receipt.as_ref().unwrap().receipt_id
+        );
+        assert_eq!(rejecting_admission.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn schema_v1_migrates_request_digest_without_losing_operation_truth() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state-v1.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE state_store_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                 ) WITHOUT ROWID;
+                 INSERT INTO state_store_metadata (key, value)
+                 VALUES ('schema_version', '1');
+                 CREATE TABLE state_operations (
+                    operation_id TEXT PRIMARY KEY,
+                    payload_digest TEXT NOT NULL,
+                    receipt_id TEXT NOT NULL UNIQUE,
+                    asset_id TEXT NOT NULL,
+                    asset_version INTEGER NOT NULL,
+                    mutation_kind TEXT NOT NULL,
+                    outbox_event_id TEXT NOT NULL UNIQUE,
+                    committed_at TEXT NOT NULL
+                 ) WITHOUT ROWID;",
+            )
+            .unwrap();
+        }
+
+        let store = StateStore::new(&path).unwrap();
+        let conn = store.lock_connection().unwrap();
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM state_store_metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let request_digest_column_exists = conn
+            .prepare("PRAGMA table_info(state_operations)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+            .iter()
+            .any(|column| column == "request_digest");
+        assert_eq!(version, "2");
+        assert!(request_digest_column_exists);
+    }
+
+    #[test]
+    fn state_gateway_commit_guard_failure_leaves_no_canonical_effect() {
+        let store = StateStore::new_in_memory().unwrap();
+        let gateway = StateGateway::new(store.clone());
+        let operation_id = Uuid::new_v4().hyphenated().to_string();
+        let error = gateway
+            .execute_guarded(
+                state_grant(&operation_id, "/goal add 不应提交"),
+                StateGatewayExecutionContext {
+                    occurred_at: at(9),
+                    resolved_due_at: None,
+                },
+                || anyhow::bail!("state_gateway_cancelled_before_commit"),
+            )
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("state_gateway_cancelled_before_commit"));
+        assert!(store.list_daily_tasks(true).unwrap().is_empty());
+        assert!(store
+            .receipt_for_operation(&operation_id, false)
+            .unwrap()
+            .is_none());
     }
 }

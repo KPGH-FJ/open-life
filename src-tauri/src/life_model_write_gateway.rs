@@ -8,7 +8,7 @@ use openlife_core::agent::AgentProposal;
 use openlife_core::life_model::patch::{
     ConflictResolution, ConflictType, LifeModelPatch, PatchApplyResult, PatchConflict,
 };
-use openlife_core::life_model::{DailyGoal, LifeModel, TimeBlock};
+use openlife_core::life_model::LifeModel;
 use openlife_core::life_model_write_gateway::{
     LifeModelWriteGateway, LifeModelWriteGatewayRequest, LifeModelWriteIntentKind,
 };
@@ -321,111 +321,6 @@ pub(crate) async fn persist_life_model_with_gateway(
         None,
     )
     .await
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct DailyGoalEffectReceipt {
-    pub operation_id: String,
-    pub operation_digest: String,
-    pub replayed: bool,
-    pub canonical_committed: bool,
-}
-
-pub(crate) async fn add_daily_goal_idempotent_with_gateway(
-    state: &Arc<AppState>,
-    operation_id: &str,
-    name: String,
-    time_block: Option<TimeBlock>,
-    caller_context: LifeModelMaterializerCallerContext,
-) -> Result<DailyGoalEffectReceipt, String> {
-    require_persistence_write(state)?;
-    ensure_lifemodel_materializer_caller_restriction(&caller_context, "add_daily_goal")?;
-    let parsed = uuid::Uuid::parse_str(operation_id)
-        .map_err(|_| "daily goal operation id must be a UUIDv4".to_string())?;
-    if parsed.get_version() != Some(uuid::Version::Random)
-        || parsed.hyphenated().to_string() != operation_id
-    {
-        return Err("daily goal operation id must be a canonical lowercase UUIDv4".into());
-    }
-    if name.trim().is_empty() {
-        return Err("daily goal name must not be empty".into());
-    }
-    let operation_digest = openlife_core::persistence_outbox::metadata_digest(&format!(
-        "daily_goal_effect:{operation_id}:{}",
-        serde_json::to_string(&serde_json::json!({
-            "name": &name,
-            "done": false,
-            "timeBlock": &time_block,
-        }))
-        .map_err(|error| error.to_string())?
-    ));
-
-    let _coordinator = state.life_model_write_coordinator.lock().await;
-    ensure_no_lifemodel_file_backlog_unlocked(state).await?;
-    let previous_model = {
-        let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(|error| error.to_string())?
-    };
-    if let Some(existing) = previous_model
-        .goals
-        .daily
-        .iter()
-        .find(|goal| goal.operation_id.as_deref() == Some(operation_id))
-    {
-        // Name, completion and time block are mutable after creation. The
-        // UUID-salted creation digest is immutable and therefore remains the
-        // payload binding even after a legitimate later edit.
-        if existing.operation_digest.as_deref() != Some(operation_digest.as_str()) {
-            return Err("daily goal operation id was reused with a different payload".into());
-        }
-        return Ok(DailyGoalEffectReceipt {
-            operation_id: operation_id.to_string(),
-            operation_digest,
-            replayed: true,
-            canonical_committed: true,
-        });
-    }
-
-    let mut next_model = previous_model.clone();
-    next_model.goals.daily.push(DailyGoal {
-        name,
-        done: false,
-        time_block,
-        operation_id: Some(operation_id.to_string()),
-        operation_digest: Some(operation_digest.clone()),
-    });
-    let request = gateway_request_for_caller(&caller_context, Some(&previous_model), &next_model)
-        .map_err(|error| error.to_string())?;
-    let decision = LifeModelWriteGateway::decide(request);
-    if !decision.allowed {
-        return Err(format!(
-            "LifeModelWriteGateway blocked add_daily_goal: {}",
-            decision.reason_code
-        ));
-    }
-    write_life_model(state, &previous_model, next_model, true).await?;
-    record_lifemodel_gateway_audit(
-        state,
-        "lifemodel_gateway_add_daily_goal",
-        None,
-        None,
-        None,
-        &decision.reason_code,
-        None,
-        decision.base_hash.as_deref(),
-        decision.current_hash.as_deref(),
-        decision.before_hash.as_deref(),
-        decision.after_hash.as_deref(),
-        &decision.lane,
-    )
-    .await;
-    Ok(DailyGoalEffectReceipt {
-        operation_id: operation_id.to_string(),
-        operation_digest,
-        replayed: false,
-        canonical_committed: true,
-    })
 }
 
 pub(crate) async fn persist_life_model_with_gateway_expected(
