@@ -3444,6 +3444,58 @@ async fn roadshow_generated_artifacts_require_review_then_materialize_once_with_
 }
 
 #[tokio::test]
+async fn roadshow_rc06_exact_prompt_waits_for_review_then_saves_one_summary() {
+    const SUMMARY: &str = "# 最终摘要\n\nOpenLife 路演准备已经收敛到可验证的核心闭环。";
+    let workspace = tempfile::tempdir().expect("RC06 artifact workspace");
+    let safe_workspace = workspace.path().canonicalize().unwrap();
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    state.config.lock().await.system.safe_paths = vec![safe_workspace.display().to_string()];
+    let provider_fixture = configure_command_surface_sequenced_local_http_provider(
+        &state,
+        vec![
+            "unused ranking response".into(),
+            serde_json::json!({"markdown": SUMMARY}).to_string(),
+        ],
+    )
+    .await;
+
+    let response = invoke_send_message_for_kernel_goal_3(
+        state.clone(),
+        "roadshow-rc06-exact",
+        "把最终摘要保存到工作区的 roadshow-summary.md。",
+    )
+    .await;
+    assert_eq!(
+        provider_fixture
+            .request_count
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    let task_session_id = task_session_id_from_response(&response);
+    let proposals = list_command_surface_proposals(&state)
+        .await
+        .into_iter()
+        .filter(|proposal| proposal.source_detail.as_deref() == Some(&task_session_id))
+        .collect::<Vec<_>>();
+    assert_eq!(proposals.len(), 1);
+    let summary_path = safe_workspace.join("roadshow-summary.md");
+    assert!(!summary_path.exists(), "Proposal is not file completion");
+
+    let accepted =
+        crate::commands::proposal::accept_proposal_with_state(proposals[0].id.clone(), &state)
+            .await
+            .expect("accept RC06 summary");
+    assert_eq!(accepted["artifactMaterialization"]["status"], "confirmed");
+    assert_eq!(std::fs::read_to_string(summary_path).unwrap(), SUMMARY);
+    assert_eq!(
+        load_command_surface_session(&state, &task_session_id)
+            .await
+            .status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
+    );
+}
+
+#[tokio::test]
 async fn generated_artifact_without_safe_workspace_returns_structured_blocker_not_ipc_failure() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let provider_fixture = configure_command_surface_sequenced_local_http_provider(
