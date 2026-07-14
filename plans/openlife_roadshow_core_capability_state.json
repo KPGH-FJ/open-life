@@ -1,7 +1,7 @@
 {
   "schema_version": "openlife-roadshow-core-capability-state-v1",
   "plan_id": "openlife-roadshow-core-capability-2026-07-14",
-  "status": "h2_partial_implementation_development_go_roadshow_no_go",
+  "status": "h2_backend_mechanical_green_review_and_product_trial_pending_roadshow_no_go",
   "authority": {
     "kind": "time_bounded_execution_overlay",
     "subordinate_to": [
@@ -36,8 +36,9 @@
     "BR4-D011": "open_partial_roadshow_subset_required",
     "BR4-D020": "roadshow_foundation_verified_global_open_artifact_slice_pending",
     "BR4-D050": "roadshow_runtime_restart_subset_verified_statestore_pending",
-    "BR4-D051": "roadshow_governance_subset_in_progress",
-    "BR4-D053": "roadshow_governance_subset_in_progress"
+    "BR4-D051": "roadshow_governance_subset_mechanically_verified_global_open",
+    "BR4-D052": "roadshow_posthoc_proposal_absence_mechanically_verified_global_open",
+    "BR4-D053": "roadshow_governance_subset_mechanically_verified_global_open"
   },
   "phases": [
     {
@@ -61,20 +62,27 @@
     },
     {
       "id": "H2_GOVERNANCE",
-      "status": "in_progress",
-      "completion_claim": "none",
-      "commit": "38acc7e",
+      "status": "implementation_verified_review_and_product_trial_pending",
+      "completion_claim": "backend_mechanical_gates_green_independent_review_and_product_trial_pending",
+      "commit": "10e40ccf4aba15709016aff0a060708eb261702b",
+      "evidence": "plans/openlife_roadshow_h2_evidence.md",
       "verified_subsets": [
         "inferred_memory_preserves_direct_answer",
         "proposal_reason_matches_explicitness",
         "governance_domain_actions_are_not_tool_calls",
-        "domain_action_recovery_does_not_duplicate_memory_commit"
+        "domain_action_recovery_does_not_duplicate_memory_commit",
+        "atomic_review_admission",
+        "canonical_fact_key_dedup_before_review_staging",
+        "active_canonical_fact_suppresses_duplicate_review",
+        "typed_deferred_review_batch",
+        "ordinary_eight_prompt_zero_proposal_baseline",
+        "mem04_ten_repetition_one_proposal_one_batch_baseline",
+        "quoted_untrusted_content_zero_memory_authorization",
+        "explicit_memory_canonical_durable_change_projection"
       ],
       "remaining_subsets": [
-        "typed_deferred_review_batch",
-        "canonical_fact_key_dedup_before_review_staging",
-        "proposal_fatigue_baseline",
-        "independent_read_only_review"
+        "independent_read_only_review",
+        "review_batch_product_ui_trial"
       ]
     },
     {
@@ -153,6 +161,22 @@
     "independent_read_only_review": "pending",
     "roadshow_release": "no_go"
   },
+  "h2_results": {
+    "ordinary_unexpected_proposals": "passed_0_across_8_exact_frozen_prompts",
+    "explicit_memory": "passed_3_exact_frozen_prompts_with_canonical_undo_receipt_and_zero_fake_tool_calls",
+    "inferred_memory": "passed_mem04_direct_answer_with_deferred_review",
+    "proposal_fatigue": "passed_10_repetitions_1_pending_proposal_1_memory_review_batch",
+    "canonical_memory_before_review": "passed_zero_row_delta",
+    "untrusted_memory_authorization": "passed_mem05_mem06_zero_proposals_zero_writes",
+    "main_chat_kernel": "passed_53_of_53",
+    "main_chat_runtime_module": "passed_29_of_29",
+    "frozen_mechanics_module": "failed_11_of_15_passed_4_downstream_red",
+    "broad_core_main_chat_agent_v1": "failed_46_of_54_passed_8_preexisting_red",
+    "clippy": "completed_with_existing_warnings",
+    "independent_read_only_review": "pending",
+    "review_batch_product_ui_trial": "pending",
+    "roadshow_release": "no_go"
+  },
   "evidence_dimensions": [
     "implementation",
     "deterministic_contract",
@@ -161,5 +185,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-14T20:35:00+08:00"
+  "last_updated_at": "2026-07-14T20:27:55+08:00"
 }

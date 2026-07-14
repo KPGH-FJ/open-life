@@ -289,8 +289,122 @@
     ,{"id":"BR4-D049","current_severity":"P2","triage_state":"root_cause_confirmed","implementation_state":"implemented","verification_state":"partial","closure_state":"open","evidence":{"reproduction":["source_trace:main_chat_conversation_updates-zero-product-callers","counterexample:existence-test-was-only-consumer"],"failing_test":[],"positive":["gate:openlife-tauri-main_chat_runtime_module-28-of-28-2026-07-12","static:inventory-json-valid"],"counterfactual":["test_defined:main_chat_kernel_goal_4_ordinary_auto_checkin_does_not_materialize_truth"],"deletion_or_absence":["source_scan:retired-conversation-update-symbols-absent","inventory:main_chat_conversation_updates_module-expected-absent","deletion-manifest:dormant-keyword-write-and-inference-route"],"capability_non_regression":["gate:ordinary-main-chat-runtime-module-28-of-28"],"live_boundary":["exact-auto-checkin-zero-LifeEvent-behavior-gate-pending","single-system-inventory-gate-pending"]},"independent_review":{"reviewer":"d049_postfix_review","decision":"original-D049-static-green-behavior-gates-pending","evidence_refs":["source-audit:three-original-conversation-update-helpers-absent"]}}
     ,{"id":"BR4-D050","current_severity":"P1","triage_state":"root_cause_confirmed","implementation_state":"in_progress","verification_state":"partial","closure_state":"open","evidence":{"reproduction":["independent-review:quick-command-effect-precedes-message-operation-identity","source_trace:add-daily-goal-unkeyed-push","source_trace:record-state-unkeyed-history-append","source_trace:PolicyRouter-and-random-TaskSession-precede-canonical-user-message","source_trace:IntentFrame-current-user-message-id-is-synthetic-request-id","source_trace:ChatPage-save-as-daily-goal-is-second-direct-write-route","source_trace:ADR0015-StateStore-TTL-source-privacy-expiry-undo-outbox-contract-absent"],"failing_test":["counterexample:attached-receipt-bound-trace-drift-must-not-mutate-owner","counterexample:stream-recovery-must-replace-partial-output-without-redispatch"],"positive":["source-proof:D050-A-canonical-user-message-and-stable-operation-identity-precede-policy","gate:D050-B-admission-15-of-15","gate:D050-B-event-store-81-of-81","gate:D050-B-runtime-module-29-of-29","gate:D050-B-task-replay-48-of-48","test:concurrent-buffered-and-stream-retries-share-one-durable-final-without-redispatch","test:attached-v2-receipt-rejects-bound-trace-drift-without-mutating-owner-row"],"counterfactual":["test:recovered-stream-uses-recovered-replace-and-zero-live-chunks","test:attached-semantic-drift-leaves-owner-and-ledger-unchanged"],"deletion_or_absence":[],"capability_non_regression":["test:run-level-unbound-update-remains-available","test:buffered-and-streaming-recovery-retain-one-provider-dispatch"],"live_boundary":["backend-effect-idempotency-is-migration-guard-not-root-closure","D050-A-stable-turn-identity-and-canonical-message-before-policy-implemented-scoped","D050-B-terminal-recovery-independent-review-fixes-in-progress","D050-C-StateStore-and-quick-command-cutover-not-started","frontend-TurnRuntime-bypass-deletion-open","end-to-end-lost-response-retry-and-full-store-migration-open"]},"independent_review":{"reviewer":"d050_turn_operation_architecture-and-d050_b_independent_review","decision":"request-changes-partially-addressed-D050-B-rereview-open-D050-C-not-started","evidence_refs":["source-proof:operation-and-canonical-message-order-converged","review:P1-attached-receipt-sibling-update-fixed","review:P1-owner-digest-binding-in-progress","review:P1-stream-recovery-replace-semantics-fixed","source-audit:StateStore-and-StateAsset-contract-do-not-exist"]}}
     ,{"id":"BR4-D051","current_severity":"P1","triage_state":"root_cause_confirmed","implementation_state":"in_progress","verification_state":"partial","closure_state":"open","evidence":{"reproduction":["source_trace:PolicyRouter-authorizes-read-only-while-Kernel-keyword-branch-creates-Memory-Proposal","source_trace:conditional-proposal-precedes-canonical-tool-evidence","red_test:useful-UTC-observation-was-rejected-by-implementation-token-whitelist","counterexample:if-useful-always-proposes-and-body-comes-from-user-request"],"failing_test":["red_test:d051-useful-UTC-observation-produced-zero-candidate-before-semantic-classifier-fix","review:test-fixture-was-shaped-to-usually-makes-me-token-whitelist-and-green-credit-rejected"],"positive":["test:inferred-stable-user-fact-semantic-matrix-1-of-1-2026-07-13","test:main-chat-kernel-d051-2-of-2-2026-07-13","source-proof:conditional-observation-review-grant-binds-canonical-message-action-observation-and-receipt"],"counterfactual":["test:build-and-file-UTC-facts-do-not-become-user-Memory","test:past-and-hypothetical-UTC-facts-do-not-become-user-Memory","test:not-useful-read-has-zero-proposal-authority"],"deletion_or_absence":["source-scan:old-request-keyword-proposal-branch-absent"],"capability_non_regression":["test:stable-UTC-English-Chinese-schedule-and-causal-facts-remain-supported"],"live_boundary":["D051-command-surface-focused-gates-pending","persisted-evidence-link-restart-proof-pending","cancel-and-send-stream-parity-open","post-fix-independent-rereview-pending","D053-nonblocking-deduplicated-ReviewBatch-remains-separate"]},"independent_review":{"reviewer":"d010-usefulness-contract-review","decision":"request-changes-fixture-shaping-addressed-post-fix-rereview-pending","evidence_refs":["contract:timezone-is-stable-actionable-user-fact","source-audit:old-stability-token-whitelist-was-not-product-spec","test:semantic-positive-negative-matrix-added-with-original-UTC-positive"]}}
-    ,{"id":"BR4-D052","current_severity":"P1","triage_state":"root_cause_confirmed","implementation_state":"in_progress","verification_state":"partial","closure_state":"open","evidence":{"reproduction":["baseline-source:AppState-proposal_engine-product-field","baseline-source:bootstrap-registers-ProposalEngine-generators","baseline-source:ordinary-main-chat-finalizer-calls-generate_from_run","baseline-source:shipped-agent-replay-calls-generate_from_run","independent-review:active-docs-incorrectly-claim-zero-consumer"],"failing_test":[],"positive":["source_map:baseline-state-bootstrap-main-chat-finalizer-and-replay-consumers-recorded","active_docs:ProposalEngine-history-corrected-to-product-wired-PolicyRouter-bypass","test_defined:ordinary-chat-finalization-never-creates-post-hoc-proposals"],"counterfactual":["counterexample:D30-is-open-D051-and-cannot-be-replacement-credit"],"deletion_or_absence":["inventory:core-posthoc-engine-and-seven-former-consumers-expected-absent","source_scan:current-product-ProposalEngine-and-generator-symbols-absent","test_defined:production-wide-ProposalEngine-consumer-absence-guard"],"capability_non_regression":[],"live_boundary":["new-single-system-absence-guard-cargo-pending","ordinary-zero-posthoc-runtime-evidence-pending","explicit-low-risk-and-sensitive-review-runtime-evidence-pending","inferred-memory-nonregression-is-tracked-by-open-D053","post-fix-independent-rereview-pending"]},"independent_review":{"reviewer":"d049_postfix_review","decision":"request-changes-addressed-in-docs-and-inventory-rereview-pending","evidence_refs":["source-audit:ProposalEngine-had-shipped-consumers","source-audit:capability-non-regression-empty"]}}
-    ,{"id":"BR4-D053","current_severity":"P1","triage_state":"root_cause_confirmed","implementation_state":"in_progress","verification_state":"partial","closure_state":"open","evidence":{"reproduction":["source_trace:run_memory_governance_turn-short-circuits-normal-answer","source_trace:materialize-kernel-memory-governance-submits-one-proposal-per-candidate","source_trace:implicit-proposal-reason-claims-user-requested","source_trace:no-canonical-fact-key-dedup-before-staging"],"failing_test":["broad_gate:main-chat-kernel-43-of-53-ten-existing-red-paths-remain-classified"],"positive":["commit:38acc7e-inferred-memory-preserves-provider-answer","test:inferred-memory-review-preserves-direct-answer-and-truthful-proposal-reason","gate:policy-governance-6-of-6","gate:memory-candidate-18-of-18","gate:main-chat-runtime-module-29-of-29","gate:goal4-governance-7-of-7","test:domain-action-without-tool-receipt-recovers-without-duplicate-memory-commit"],"counterfactual":["test:ordinary-auto-checkin-creates-zero-governance-artifact","test:ordinary-life-event-text-creates-zero-silent-LifeEvent","test:inferred-review-leaves-canonical-Memory-unchanged-and-task-completed"],"deletion_or_absence":["source_scan:kernel-write-tool-call-fake-adapter-absent","source_proof:PlanExecute-and-ReviewWorkflow-domain-actions-have-zero-tool-receipts"],"capability_non_regression":["test:explicit-low-risk-memory-commit-with-undo","test:sensitive-memory-remains-review-first","test:Chinese-explicit-memory-proposal-send-stream"],"live_boundary":["typed-deferred-ReviewBatch-not-implemented","canonical-fact-key-dedup-before-review-staging-not-implemented","proposal-fatigue-baseline-rerun-required","ten-broad-main-chat-kernel-red-paths-remain-open","post-fix-independent-rereview-pending"]},"independent_review":{"reviewer":null,"decision":"pending","evidence_refs":[]}}
+    ,{
+      "id": "BR4-D052",
+      "current_severity": "P1",
+      "triage_state": "root_cause_confirmed",
+      "implementation_state": "in_progress",
+      "verification_state": "partial",
+      "closure_state": "open",
+      "evidence": {
+        "reproduction": [
+          "baseline-source:AppState-proposal_engine-product-field",
+          "baseline-source:bootstrap-registers-ProposalEngine-generators",
+          "baseline-source:ordinary-main-chat-finalizer-calls-generate_from_run",
+          "baseline-source:shipped-agent-replay-calls-generate_from_run",
+          "independent-review:active-docs-incorrectly-claim-zero-consumer"
+        ],
+        "failing_test": [],
+        "positive": [
+          "source_map:baseline-state-bootstrap-main-chat-finalizer-and-replay-consumers-recorded",
+          "active_docs:ProposalEngine-history-corrected-to-product-wired-PolicyRouter-bypass",
+          "test:ordinary-eight-exact-frozen-prompts-create-zero-proposals",
+          "test:explicit-low-risk-memory-exact-prompts-create-zero-proposals",
+          "test:sensitive-memory-remains-review-first",
+          "test:inferred-memory-nonregression-is-tracked-by-open-D053"
+        ],
+        "counterfactual": [
+          "counterexample:D30-is-open-D051-and-cannot-be-replacement-credit",
+          "test:quoted-web-and-tool-prompts-cannot-trigger-posthoc-memory-proposals"
+        ],
+        "deletion_or_absence": [
+          "inventory:core-posthoc-engine-and-seven-former-consumers-expected-absent",
+          "source_scan:current-product-ProposalEngine-and-generator-symbols-absent",
+          "test_defined:production-wide-ProposalEngine-consumer-absence-guard"
+        ],
+        "capability_non_regression": [
+          "test:explicit-low-risk-memory-retains-canonical-undo-receipt",
+          "test:inferred-memory-retains-nonblocking-deduplicated-review",
+          "test:sensitive-memory-retains-proposal-first-governance"
+        ],
+        "live_boundary": [
+          "new-single-system-absence-guard-cargo-pending",
+          "post-fix-independent-rereview-pending"
+        ]
+      },
+      "independent_review": {
+        "reviewer": "d049_postfix_review",
+        "decision": "request-changes-addressed-in-docs-and-inventory-rereview-pending",
+        "evidence_refs": [
+          "source-audit:ProposalEngine-had-shipped-consumers",
+          "post-fix-capability-nonregression-mechanical-evidence-added"
+        ]
+      }
+    }
+    ,{
+      "id": "BR4-D053",
+      "current_severity": "P1",
+      "triage_state": "root_cause_confirmed",
+      "implementation_state": "implemented",
+      "verification_state": "partial",
+      "closure_state": "open",
+      "evidence": {
+        "reproduction": [
+          "source_trace:run_memory_governance_turn-short-circuits-normal-answer",
+          "source_trace:materialize-kernel-memory-governance-submits-one-proposal-per-candidate",
+          "source_trace:implicit-proposal-reason-claims-user-requested",
+          "source_trace:no-canonical-fact-key-dedup-before-staging",
+          "red_test:frozen-MEM04-habit-statement-misrouted-to-PlanExecute"
+        ],
+        "failing_test": [
+          "red_test:frozen-MEM04-had-no-deferred-review-before-habit-plan-disambiguation"
+        ],
+        "positive": [
+          "commit:38acc7e-inferred-memory-preserves-provider-answer",
+          "commit:e6fd50f-atomic-review-admission",
+          "commit:6f24f32-canonical-memory-fact-dedup",
+          "commit:d1e20a9-typed-domain-session-review-batch",
+          "commit:10e40cc-frozen-MEM04-and-explicit-memory-truth-projection",
+          "test:inferred-memory-review-preserves-direct-answer-and-truthful-proposal-reason",
+          "test:frozen-MEM04-ten-repetitions-one-pending-proposal-one-memory-review-batch",
+          "test:frozen-MEM04-canonical-memory-row-delta-zero",
+          "gate:main-chat-kernel-53-of-53",
+          "gate:main-chat-runtime-module-29-of-29",
+          "gate:review-workflow-7-of-7",
+          "gate:proposal-store-16-of-16",
+          "gate:review-item-10-of-10"
+        ],
+        "counterfactual": [
+          "test:ordinary-eight-frozen-prompts-create-zero-proposals",
+          "test:quoted-web-and-tool-frozen-prompts-create-zero-memory-authorization",
+          "test:ordinary-auto-checkin-creates-zero-governance-artifact",
+          "test:ordinary-life-event-text-creates-zero-silent-LifeEvent",
+          "test:inferred-review-leaves-canonical-Memory-unchanged-and-task-completed",
+          "test:accepted-canonical-fact-suppresses-duplicate-review"
+        ],
+        "deletion_or_absence": [
+          "source_scan:kernel-write-tool-call-fake-adapter-absent",
+          "source_proof:PlanExecute-and-ReviewWorkflow-domain-actions-have-zero-tool-receipts",
+          "source_proof:ReviewBatch-has-no-decision-or-dispatch-authority"
+        ],
+        "capability_non_regression": [
+          "test:explicit-low-risk-memory-commit-with-canonical-undo-receipt",
+          "test:sensitive-memory-remains-review-first",
+          "test:Chinese-explicit-memory-proposal-send-stream",
+          "test:explicit-plan-request-remains-PlanExecute-after-habit-disambiguation"
+        ],
+        "live_boundary": [
+          "review-batch-product-UI-trial-pending",
+          "proposal-fatigue-desktop-dogfood-pending",
+          "post-fix-independent-rereview-pending"
+        ]
+      },
+      "independent_review": {
+        "reviewer": null,
+        "decision": "pending",
+        "evidence_refs": []
+      }
+    }
   ],
   "supplemental_scenarios": [
     {
