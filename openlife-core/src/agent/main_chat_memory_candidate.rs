@@ -315,6 +315,7 @@ pub fn extract_main_chat_memory_candidates(user_text: &str) -> Vec<MainChatMemor
             && !future_rule
             && !identity_or_preference
             && !is_life_event_expression(&lower)
+            && !hypothetical_only
             && !is_quoted_or_structured_content(&compact)
             && is_supported_stable_user_fact_expression(&lower)
         {
