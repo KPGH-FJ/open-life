@@ -27,6 +27,7 @@ pub mod privacy;
 pub mod proactive;
 pub mod reflex_engine;
 pub mod resource;
+pub mod resource_parser;
 pub mod scheduler;
 pub mod skills;
 pub mod sqlite_migration;
