@@ -1641,29 +1641,80 @@ async fn run_04_exact_prompt_uses_real_send_and_stream_with_independent_uuidv4_i
     let send = send.expect("RUN-04 send joins").expect("RUN-04 send");
     let stream = stream.expect("RUN-04 stream joins").expect("RUN-04 stream");
     let send_ingress = send.agent_ingress.expect("RUN-04 send ingress");
-    let ids = [
-        send_ingress.request_id,
-        send_ingress
-            .agent_task_session_id
-            .expect("RUN-04 send task id"),
-        send.run_id.expect("RUN-04 send run id"),
-        stream["agent_ingress"]["requestId"]
-            .as_str()
-            .expect("RUN-04 stream request id")
-            .to_string(),
-        stream["agent_ingress"]["agentTaskSessionId"]
-            .as_str()
-            .expect("RUN-04 stream task id")
-            .to_string(),
-        stream["run_id"]
-            .as_str()
-            .expect("RUN-04 stream run id")
-            .to_string(),
-    ];
-    assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), ids.len());
-    for id in ids {
-        let parsed = uuid::Uuid::parse_str(&id).expect("RUN-04 UUID");
+    let send_operation_id = send_ingress.request_id;
+    let send_task_id = send_ingress
+        .agent_task_session_id
+        .expect("RUN-04 send task id");
+    let send_run_id = send.run_id.expect("RUN-04 send run id");
+    let stream_operation_id = stream["agent_ingress"]["requestId"]
+        .as_str()
+        .expect("RUN-04 stream request id")
+        .to_string();
+    let stream_task_id = stream["agent_ingress"]["agentTaskSessionId"]
+        .as_str()
+        .expect("RUN-04 stream task id")
+        .to_string();
+    let stream_run_id = stream["run_id"]
+        .as_str()
+        .expect("RUN-04 stream run id")
+        .to_string();
+
+    assert_eq!(send_operation_id, send_task_id);
+    assert_eq!(send_operation_id, send_run_id);
+    assert_eq!(stream_operation_id, stream_task_id);
+    assert_eq!(stream_operation_id, stream_run_id);
+    assert_ne!(send_operation_id, stream_operation_id);
+    for id in [&send_operation_id, &stream_operation_id] {
+        let parsed = uuid::Uuid::parse_str(id).expect("RUN-04 UUID");
         assert_eq!(parsed.get_version_num(), 4, "RUN-04 id is not UUIDv4: {id}");
+    }
+
+    let session_store = state
+        .main_chat_agent_session_store
+        .as_ref()
+        .expect("RUN-04 task session store")
+        .lock()
+        .await;
+    let task_ids = session_store
+        .list_sessions(None, 10, 0)
+        .expect("RUN-04 task sessions")
+        .into_iter()
+        .filter(|session| session.chat_session_id == "frozen-run04-shared-chat-session")
+        .map(|session| session.id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        task_ids,
+        BTreeSet::from([send_operation_id.clone(), stream_operation_id.clone()])
+    );
+    let send_transcript = session_store
+        .list_transcript_entries(&send_operation_id)
+        .expect("RUN-04 send transcript");
+    let stream_transcript = session_store
+        .list_transcript_entries(&stream_operation_id)
+        .expect("RUN-04 stream transcript");
+    assert!(!send_transcript.is_empty());
+    assert!(!stream_transcript.is_empty());
+    assert!(send_transcript
+        .iter()
+        .all(|entry| entry.session_id == send_operation_id));
+    assert!(stream_transcript
+        .iter()
+        .all(|entry| entry.session_id == stream_operation_id));
+    let send_transcript_ids = send_transcript
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(stream_transcript
+        .iter()
+        .all(|entry| !send_transcript_ids.contains(entry.id.as_str())));
+    drop(session_store);
+
+    for request in captured
+        .lock()
+        .expect("RUN-04 captured provider requests")
+        .iter()
+    {
+        assert!(request.contains("x-openlife-request-id:"));
     }
     assert_eq!(
         captured
