@@ -666,22 +666,36 @@ async fn run_exact_prompt_through_send(
     assert_eq!(execution.executor, FrozenExecutor::MainChatSendMechanics);
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     configure_frozen_command_seed(&state, execution).await;
-    let result = crate::main_chat_send::send_message_with_state(
+    let result = send_exact_prompt_through_state(
+        scenario_id,
+        &state,
         format!(
             "frozen-{}-{}",
             scenario_id.to_ascii_lowercase(),
             uuid::Uuid::new_v4()
         ),
+    )
+    .await;
+    (state, result)
+}
+
+async fn send_exact_prompt_through_state(
+    scenario_id: &str,
+    state: &Arc<crate::AppState>,
+    task_session_id: String,
+) -> crate::SendMessageResult {
+    let result = crate::main_chat_send::send_message_with_state(
+        task_session_id,
         vec![ChatMessage {
             role: "user".into(),
             content: frozen_prompt(scenario_id),
         }],
         None,
-        &state,
+        state,
     )
     .await
     .unwrap_or_else(|error| panic!("{scenario_id} real send entry failed: {error}"));
-    (state, result)
+    result
 }
 
 #[test]
@@ -953,20 +967,52 @@ async fn explicit_memory_exact_prompts_commit_once_with_typed_policy_and_undo_re
             "{scenario_id}: {evidence:#}"
         );
         assert_eq!(pending_proposal_count(&state).await, 0, "{scenario_id}");
-        assert_eq!(result.tool_calls.len(), 1, "{scenario_id}: {evidence:#}");
-        let call = &result.tool_calls[0];
-        assert_eq!(call.name, "memory.explicit_write", "{scenario_id}");
-        assert!(call.success, "{scenario_id}: {evidence:#}");
-        assert_eq!(call.arguments["undoAvailable"], true, "{scenario_id}");
+        assert!(
+            result.tool_calls.is_empty(),
+            "a domain Memory commit must not mint fake ToolGateway credit: {evidence:#}"
+        );
+        let receipt = &result
+            .reasoning_trace
+            .generation_result
+            .as_ref()
+            .expect("explicit Memory generation evidence")["memoryGovernance"]
+            ["explicitMemoryReceipts"][0];
+        assert_eq!(receipt["undoAvailable"], true, "{scenario_id}");
         assert_eq!(
-            call.arguments["sourceMessageId"], ingress.policy_decision.authorized_user_message_id,
+            receipt["sourceMessageId"], ingress.policy_decision.authorized_user_message_id,
             "{scenario_id} receipt authority must equal PolicyDecision authority"
         );
         assert_eq!(
-            call.arguments["authorizedCandidateId"],
+            receipt["authorizedCandidateId"],
             ingress.policy_decision.authorized_memory_candidate_ids[0],
             "{scenario_id} receipt candidate must equal the exact typed grant"
         );
+        assert_eq!(
+            terminal.final_delivery.durable_changes.len(),
+            1,
+            "explicit Memory durable change projection missing: {evidence:#}"
+        );
+        let terminal_change = &terminal.final_delivery.durable_changes[0];
+        assert!(matches!(
+            terminal_change.change_type.as_str(),
+            "memory.materialized" | "memory.accepted"
+        ));
+        assert_eq!(
+            terminal_change.target,
+            receipt["memoryId"].as_str().expect("receipt memory id")
+        );
+        assert!(terminal_change.rollback_available);
+        let product_change = &result
+            .agent_state
+            .as_ref()
+            .expect("explicit Memory AgentState")
+            .final_delivery
+            .as_ref()
+            .expect("explicit Memory FinalDelivery")
+            .durable_changes[0];
+        assert_eq!(product_change.target, terminal_change.target);
+        assert_eq!(product_change.change_type, terminal_change.change_type);
+        assert!(product_change.rollback_available);
         assert!(result.reply.contains("写入可撤销 Memory"), "{scenario_id}");
     }
 }
@@ -990,9 +1036,144 @@ async fn explicit_memory_commit_failure_cannot_return_a_successful_confirmation_
     .await
     .expect_err("missing canonical Memory store must fail the turn");
 
-    assert!(
-        error.contains("explicit Memory write failed"),
-        "unexpected fail-closed error: {error}"
+    assert!(error.contains("lifecycle_store_unavailable"));
+    assert!(!error.contains("写入可撤销 Memory"));
+}
+
+#[tokio::test]
+async fn inferred_memory_exact_prompt_has_one_non_blocking_review_batch_under_repetition() {
+    let scenario_id = "MEM-04";
+    let execution = execution_for(scenario_id);
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    configure_frozen_command_seed(&state, execution).await;
+    let canonical_memory_before = state
+        .memory_lifecycle_store
+        .as_ref()
+        .expect("MEM-04 canonical Memory store")
+        .lock()
+        .await
+        .list_records(None, None, 200, 0)
+        .expect("list canonical Memory before MEM-04")
+        .len();
+
+    let mut canonical_proposal_id = None;
+    for repetition in 0..10 {
+        let result = send_exact_prompt_through_state(
+            scenario_id,
+            &state,
+            format!("frozen-mem-04-repetition-{repetition}"),
+        )
+        .await;
+        let evidence = serde_json::to_value(&result)
+            .expect("serialize inferred Memory frozen scenario evidence");
+        let ingress = result
+            .agent_ingress
+            .as_ref()
+            .expect("MEM-04 typed PolicyDecision");
+        let terminal = result
+            .turn_terminal
+            .as_ref()
+            .expect("MEM-04 canonical terminal");
+        let generation = result
+            .reasoning_trace
+            .generation_result
+            .as_ref()
+            .expect("MEM-04 generation evidence");
+        let proposal_ids = generation["memoryGovernance"]["memoryProposalIds"]
+            .as_array()
+            .unwrap_or_else(|| panic!("MEM-04 inferred Memory proposal ids: {evidence:#}"));
+
+        assert_eq!(
+            ingress.selected_strategy.as_str(),
+            "direct_answer",
+            "MEM-04 must preserve the answer path: {evidence:#}"
+        );
+        assert_eq!(
+            generation["memoryGovernanceDisposition"], "deferred_review_overlay",
+            "MEM-04 review must remain non-blocking: {evidence:#}"
+        );
+        assert!(
+            !result.reply.trim().is_empty(),
+            "MEM-04 must preserve a useful candidate answer"
+        );
+        assert_eq!(
+            result.status, "completed_with_pending_items",
+            "the answer is complete while deferred review remains truthfully pending: {evidence:#}"
+        );
+        assert!(result.blockers.is_empty(), "MEM-04: {evidence:#}");
+        assert_eq!(proposal_ids.len(), 1, "MEM-04: {evidence:#}");
+        let proposal_id = proposal_ids[0]
+            .as_str()
+            .expect("MEM-04 proposal id")
+            .to_string();
+        match canonical_proposal_id.as_ref() {
+            Some(existing) => assert_eq!(
+                &proposal_id, existing,
+                "canonical fact-key dedup must reuse one pending Proposal"
+            ),
+            None => canonical_proposal_id = Some(proposal_id),
+        }
+        assert!(
+            !terminal.direct_writes_executed,
+            "MEM-04 cannot commit canonical Memory before review"
+        );
+        assert!(
+            terminal.final_delivery.durable_changes.is_empty(),
+            "a Proposal is not a completed durable Memory change"
+        );
+
+        let session = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .expect("MEM-04 task store")
+            .lock()
+            .await
+            .load_session(
+                ingress
+                    .agent_task_session_id
+                    .as_deref()
+                    .expect("MEM-04 task session id"),
+            )
+            .expect("load MEM-04 task")
+            .expect("MEM-04 task exists");
+        assert_eq!(
+            session.status,
+            openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
+        );
+        assert!(session.pending_blockers.is_empty());
+    }
+
+    assert_eq!(
+        pending_proposal_count(&state).await,
+        1,
+        "ten repetitions of one inferred fact must produce one pending Proposal"
+    );
+    let review_center =
+        crate::read_models::review_center::get_review_center_view_model_with_state(&state)
+            .await
+            .expect("load MEM-04 ReviewCenter projection");
+    let model = review_center.data.expect("MEM-04 ReviewCenter data");
+    assert_eq!(model.items.len(), 1);
+    assert_eq!(model.batches.len(), 1);
+    let batch = &model.batches[0];
+    assert_eq!(
+        batch.domain,
+        openlife_core::agent::ReviewBatchDomain::Memory
+    );
+    assert_eq!(batch.item_ids, vec![canonical_proposal_id.unwrap()]);
+    assert_eq!(batch.action_required_count, 1);
+    assert_eq!(
+        state
+            .memory_lifecycle_store
+            .as_ref()
+            .expect("MEM-04 canonical Memory store")
+            .lock()
+            .await
+            .list_records(None, None, 200, 0)
+            .expect("list canonical Memory after MEM-04")
+            .len(),
+        canonical_memory_before,
+        "deferred review must not mutate canonical Memory"
     );
 }
 

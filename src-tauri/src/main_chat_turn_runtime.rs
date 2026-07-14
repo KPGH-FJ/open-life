@@ -5454,8 +5454,7 @@ fn canonical_final_delivery_from_result(
     let blocker_summaries = canonical_blockers(blockers, result);
     let pending_user_actions =
         canonical_pending_user_actions(proposals, result, &blocker_summaries);
-    let durable_changes =
-        canonical_durable_changes(result.reasoning_trace.generation_result.as_ref());
+    let durable_changes = canonical_durable_changes(result);
 
     CanonicalFinalDeliveryView {
         delivery_id: format!("delivery:{run_id}:{task_id}"),
@@ -5483,7 +5482,40 @@ fn canonical_final_delivery_from_result(
     }
 }
 
-fn canonical_durable_changes(generation: Option<&Value>) -> Vec<CanonicalDurableChangeSummary> {
+fn canonical_durable_changes(result: &SendMessageResult) -> Vec<CanonicalDurableChangeSummary> {
+    let mut changes = result
+        .agent_state
+        .as_ref()
+        .and_then(|state| state.final_delivery.as_ref())
+        .map(|delivery| {
+            delivery
+                .durable_changes
+                .iter()
+                .map(|change| CanonicalDurableChangeSummary {
+                    change_type: change.change_type.clone(),
+                    target: change.target.clone(),
+                    provenance: change.provenance_id.clone(),
+                    timestamp: None,
+                    rollback_available: change.rollback_available,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for committed in
+        canonical_durable_changes_from_generation(result.reasoning_trace.generation_result.as_ref())
+    {
+        if !changes.iter().any(|change| {
+            change.change_type == committed.change_type && change.target == committed.target
+        }) {
+            changes.push(committed);
+        }
+    }
+    changes
+}
+
+fn canonical_durable_changes_from_generation(
+    generation: Option<&Value>,
+) -> Vec<CanonicalDurableChangeSummary> {
     let Some(generation) = generation else {
         return Vec::new();
     };
@@ -7868,7 +7900,7 @@ mod product_receipt_ipc_tests {
 #[cfg(test)]
 mod cancellation_projection_tests {
     use super::{
-        canonical_durable_changes, persist_main_chat_cancellation_events,
+        canonical_durable_changes_from_generation, persist_main_chat_cancellation_events,
         terminalize_main_chat_kernel_failure, MainChatCancellationEventBatch,
         MainChatKernelFailureObservation, MainChatProviderDurabilityScope,
     };
@@ -8298,7 +8330,7 @@ mod cancellation_projection_tests {
             ]
         });
 
-        let changes = canonical_durable_changes(Some(&generation));
+        let changes = canonical_durable_changes_from_generation(Some(&generation));
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].change_type, "memory");
         assert_eq!(changes[0].target, "memory:item-committed");

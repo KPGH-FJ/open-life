@@ -246,6 +246,7 @@ impl IntentFrame {
             && !advice_only
             && is_conditional_observation_memory_review_request(&lower);
         let requests_plan_task = is_plan_execute_intent(&lower)
+            && !is_habitual_preference_statement_without_plan_request(&lower)
             && !requests_durable_write
             && !requires_external_read
             && !requests_read_observation
@@ -268,6 +269,7 @@ impl IntentFrame {
         }
         if contains_any(&lower, &["安排", "plan", "schedule"])
             && !requests_plan_task
+            && !is_habitual_preference_statement_without_plan_request(&lower)
             && !requests_durable_write
             && !requires_external_read
             && !advice_only
@@ -14702,6 +14704,39 @@ fn is_plan_execute_intent(lower: &str) -> bool {
         ],
     ) || is_current_work_arrangement_intent(lower)
         || is_conditional_arrangement_plan_intent(lower)
+}
+
+fn is_habitual_preference_statement_without_plan_request(lower: &str) -> bool {
+    let describes_habit = contains_any(
+        lower,
+        &[
+            "我通常",
+            "我一般",
+            "我往往",
+            "我的习惯",
+            "i usually",
+            "i generally",
+            "i typically",
+        ],
+    );
+    let explicitly_requests_plan = contains_any(
+        lower,
+        &[
+            "帮我",
+            "请",
+            "给我",
+            "制定",
+            "创建",
+            "做一个",
+            "安排一下",
+            "help me",
+            "please",
+            "draft ",
+            "create ",
+            "make me",
+        ],
+    );
+    describes_habit && !explicitly_requests_plan
 }
 
 fn is_current_work_arrangement_intent(lower: &str) -> bool {

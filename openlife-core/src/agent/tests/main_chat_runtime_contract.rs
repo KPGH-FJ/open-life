@@ -819,6 +819,9 @@ fn main_chat_runtime_contract_final_delivery_lists_durable_memory_changes() {
     let mut context_only_memory = memory.clone();
     context_only_memory.memory_id = "memory:stage4-context-only".into();
     context_only_memory.proposal_id = "proposal-not-in-snapshot".into();
+    let mut explicit_memory = memory.clone();
+    explicit_memory.memory_id = "memory:stage4-explicit".into();
+    explicit_memory.proposal_id = "explicit_memory:sha256:test-explicit-admission".into();
 
     let snapshot = assemble_main_chat_agent_state(MainChatAgentStateAssemblerInput {
         session,
@@ -833,7 +836,7 @@ fn main_chat_runtime_contract_final_delivery_lists_durable_memory_changes() {
             .unwrap_or_default(),
         actions: Vec::new(),
         proposals: vec![proposal],
-        memory_lifecycle_records: vec![memory, context_only_memory],
+        memory_lifecycle_records: vec![memory, context_only_memory, explicit_memory],
     })
     .expect("snapshot");
 
@@ -856,6 +859,12 @@ fn main_chat_runtime_contract_final_delivery_lists_durable_memory_changes() {
         "context-only lifecycle memory must not be reported as a new durable delivery change: {:?}",
         delivery.durable_changes
     );
+    assert!(delivery.durable_changes.iter().any(|change| {
+        change.change_type == "memory.materialized"
+            && change.target == "memory:stage4-explicit"
+            && change.provenance_id == "explicit_memory:sha256:test-explicit-admission"
+            && change.rollback_available
+    }));
     assert!(snapshot.proposals.iter().any(|proposal| {
         proposal.status == MainChatAgentProductProposalStatus::Accepted
             && proposal.memory_lifecycle.is_some()

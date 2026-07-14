@@ -175,6 +175,45 @@ fn intent_frame_extracts_real_life_semantics_without_routing() {
 }
 
 #[test]
+fn habitual_work_preference_is_not_misclassified_as_a_plan_command() {
+    let preference = IntentFrame::from_user_message("我通常周五下午不安排高强度工作。");
+    assert!(!preference.requests_plan_task);
+    assert_eq!(
+        preference.execution_disposition,
+        IntentExecutionDisposition::Unspecified
+    );
+
+    let decision = AgentIngress::default().decide(
+        "habitual-work-preference",
+        "我通常周五下午不安排高强度工作。",
+        None,
+        AgentTaskKind::Conversation,
+    );
+    assert_eq!(decision.policy_route, PolicyRouteKind::DirectAnswer);
+    assert_eq!(
+        decision.selected_strategy,
+        MainChatAgentStrategy::DirectAnswer
+    );
+    let governance = decision
+        .policy_decision
+        .governance_plan()
+        .expect("habitual preference governance plan");
+    assert_eq!(governance.deferred_review_groups.len(), 1);
+    assert_eq!(
+        governance.deferred_review_groups[0].domain,
+        PolicyGovernanceReviewDomain::Memory
+    );
+
+    let explicit_plan = IntentFrame::from_user_message(
+        "我通常周五下午不安排高强度工作。另外，请帮我安排今天下午工作。",
+    );
+    assert!(
+        explicit_plan.requests_plan_task,
+        "an explicit planning request must still reach PlanExecute"
+    );
+}
+
+#[test]
 fn policy_router_owns_file_write_routing_before_the_kernel() {
     let decision = AgentIngress::default().decide(
         "policy-file-write",

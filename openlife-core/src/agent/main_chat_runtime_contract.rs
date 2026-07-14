@@ -2424,7 +2424,10 @@ fn durable_changes_from_memory_lifecycle(
 
     records
         .iter()
-        .filter(|record| proposal_backed_memory_ids.contains(record.proposal_id.as_str()))
+        .filter(|record| {
+            proposal_backed_memory_ids.contains(record.proposal_id.as_str())
+                || record.proposal_id.starts_with("explicit_memory:")
+        })
         .filter_map(|record| {
             if record.status == MemoryLifecycleStatus::Materialized
                 && record.materialization_status == MemoryMaterializationStatus::Materialized
@@ -2432,6 +2435,17 @@ fn durable_changes_from_memory_lifecycle(
             {
                 return Some(DurableChangeSummary {
                     change_type: "memory.materialized".into(),
+                    target: record.memory_id.clone(),
+                    provenance_id: record.proposal_id.clone(),
+                    rollback_available: true,
+                });
+            }
+            if matches!(
+                record.status,
+                MemoryLifecycleStatus::Accepted | MemoryLifecycleStatus::PendingMaterialization
+            ) {
+                return Some(DurableChangeSummary {
+                    change_type: "memory.accepted".into(),
                     target: record.memory_id.clone(),
                     provenance_id: record.proposal_id.clone(),
                     rollback_available: true,
