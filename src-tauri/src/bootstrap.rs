@@ -762,7 +762,9 @@ pub(crate) async fn reconcile_startup_proposal_projections(
             STARTUP_PROPOSAL_RECONCILIATION_BATCH,
         )
         .await?;
-        let backlog = report.projection_backlog_may_remain || report.agent_run_backlog_may_remain;
+        let backlog = report.artifact_backlog_may_remain
+            || report.projection_backlog_may_remain
+            || report.agent_run_backlog_may_remain;
         if !backlog {
             return Ok(false);
         }
@@ -780,7 +782,8 @@ pub(crate) async fn drain_startup_proposal_projection_backlog(state: Arc<AppStat
         .await
         {
             Ok(report)
-                if !report.projection_backlog_may_remain
+                if !report.artifact_backlog_may_remain
+                    && !report.projection_backlog_may_remain
                     && !report.agent_run_backlog_may_remain =>
             {
                 return;

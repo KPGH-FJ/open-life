@@ -227,7 +227,7 @@ pub use proposal_outcome::{
     evaluate_maturation_proposal_outcome_evidence, record_maturation_proposal_outcome_evidence,
     MaturationProposalOutcome, MaturationProposalOutcomeEvidenceReport,
 };
-pub use proposal_store::ProposalStore;
+pub use proposal_store::{ArtifactEffectRecord, ArtifactEffectState, ProposalStore};
 pub use provider_privacy_boundary::{
     build_provider_privacy_boundary_summary, ProviderPrivacyBoundaryBuildInput,
 };

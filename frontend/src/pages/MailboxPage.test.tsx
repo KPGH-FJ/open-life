@@ -131,6 +131,23 @@ const editedMemoryProposal: AgentProposal = {
   reason: "用户编辑了记忆候选内容，等待最终同意或不同意。",
 };
 
+const artifactProposal: AgentProposal = {
+  ...lowRiskProposal,
+  id: "proposal-artifact-1",
+  runId: "run-artifact-1",
+  proposalType: "external_write_action",
+  source: "chat_conversation",
+  sourceDetail: "mainchat-task-artifact",
+  affectedPath: "filesystem./tmp/openlife-test/roadshow-summary.md",
+  before: null,
+  after: {
+    path: "/tmp/openlife-test/roadshow-summary.md",
+    content: "# Roadshow",
+  },
+  riskLevel: "high",
+  reason: "用户要求确认后保存路演摘要。",
+};
+
 function buildLifeStateProjection(proposals: AgentProposal[], safeMode = false) {
   const pendingProposalCount = proposals.filter(p => p.status === "pending").length;
   const editedProposalCount = proposals.filter(p => p.status === "edited").length;
@@ -798,6 +815,46 @@ describe("MailboxPage", () => {
       await screen.findByText(
         "Memory 已写入 canonical store，但派生视图仍为 degraded；Mailbox 保持等待状态。"
       )
+    ).toBeInTheDocument();
+  });
+
+  it("shows backend artifact receipt truth after a reviewed file is materialized", async () => {
+    mockMutableProposals([artifactProposal], false, {
+      success: true,
+      effectStatus: "confirmed",
+      proposalProjectionStatus: "confirmed",
+      warnings: [],
+      artifactMaterialization: {
+        artifactId: "artifact:proposal-artifact-1",
+        proposalId: "proposal-artifact-1",
+        targetReference: "/tmp/openlife-test/roadshow-summary.md",
+        targetReferenceDigest: "sha256:target",
+        contentDigest: "sha256:content",
+        observedContentDigest: "sha256:content",
+        byteSize: 10,
+        mediaType: "text/markdown; charset=utf-8",
+        status: "confirmed",
+      },
+    });
+
+    renderMailboxPage();
+    fireEvent.click(await screen.findByRole("button", { name: "同意" }));
+
+    expect(
+      await screen.findByText(
+        "文件已确认保存：/tmp/openlife-test/roadshow-summary.md（10 bytes，sha256:content）。"
+      )
+    ).toBeInTheDocument();
+  });
+
+  it("keeps artifact completion unknown when the backend omits its receipt", async () => {
+    mockMutableProposals([artifactProposal]);
+
+    renderMailboxPage();
+    fireEvent.click(await screen.findByRole("button", { name: "同意" }));
+
+    expect(
+      await screen.findByText("文件审批已处理，但后端未提供落盘 Receipt；文件完成状态保持未知。")
     ).toBeInTheDocument();
   });
 

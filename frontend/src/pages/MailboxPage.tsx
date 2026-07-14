@@ -359,6 +359,16 @@ export default function MailboxPage() {
             "副作用已确认，但审阅状态仍在后端对账；系统不会重复执行，Mailbox 保持等待状态。"
           );
         } else if (
+          proposal.proposalType === "external_write_action" &&
+          !acceptance?.artifactMaterialization
+        ) {
+          setNotice("文件审批已处理，但后端未提供落盘 Receipt；文件完成状态保持未知。");
+        } else if (acceptance?.artifactMaterialization) {
+          const receipt = acceptance.artifactMaterialization;
+          setNotice(
+            `文件已确认保存：${receipt.targetReference}（${receipt.byteSize} bytes，${receipt.contentDigest}）。`
+          );
+        } else if (
           linkedMainChatTaskId &&
           relation?.taskSessionId === linkedMainChatTaskId &&
           relation.canRequestResume

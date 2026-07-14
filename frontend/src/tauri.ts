@@ -4297,6 +4297,18 @@ export interface PatchApplyResult {
   error?: string;
 }
 
+export interface ArtifactMaterializationReceipt {
+  artifactId: string;
+  proposalId: string;
+  targetReference: string;
+  targetReferenceDigest: string;
+  contentDigest: string;
+  observedContentDigest: string;
+  byteSize: number;
+  mediaType: string;
+  status: "confirmed";
+}
+
 export interface AcceptProposalResult {
   success: boolean;
   patchResult: PatchApplyResult;
@@ -4316,6 +4328,7 @@ export interface AcceptProposalResult {
     reasonCode?: string;
     errorDigest?: string;
   };
+  artifactMaterialization?: ArtifactMaterializationReceipt;
   blockedAction?: unknown;
   canContinue?: boolean;
 }

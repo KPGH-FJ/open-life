@@ -10,6 +10,7 @@ use crate::life_model_materializer_guard::LifeModelMaterializerCallerContext;
 
 pub mod a2a_server;
 pub mod a2a_sidecar;
+pub(crate) mod artifact_materializer;
 pub mod bootstrap;
 pub mod commands;
 pub(crate) mod danger_action_confirmation;

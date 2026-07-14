@@ -267,6 +267,7 @@ pub enum ProviderLocalOnlyReason {
 #[serde(rename_all = "snake_case")]
 pub enum ProviderPayloadPurpose {
     MainChatDirectAnswer,
+    MainChatArtifactDraft,
     MainChatReactRanking,
     AgentLoopStep,
     AgentRuntimeGeneration,
@@ -279,6 +280,7 @@ impl ProviderPayloadPurpose {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::MainChatDirectAnswer => "main_chat_direct_answer",
+            Self::MainChatArtifactDraft => "main_chat_artifact_draft",
             Self::MainChatReactRanking => "main_chat_react_ranking",
             Self::AgentLoopStep => "agent_loop_step",
             Self::AgentRuntimeGeneration => "agent_runtime_generation",

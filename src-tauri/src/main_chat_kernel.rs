@@ -96,6 +96,7 @@ const MAX_SYSTEM_PROMPT_CHARS: usize = 4_000;
 const MAX_ASSISTANT_PREVIEW_CHARS: usize = 180;
 const MAX_TOOL_OBSERVATION_PREVIEW_CHARS: usize = 700;
 const MAX_TOOL_QUERY_CHARS: usize = 180;
+const GENERATED_ARTIFACT_MAX_SIZE: usize = 100 * 1024;
 const KERNEL_MCP_CANDIDATE_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -458,6 +459,7 @@ pub enum MainChatKernelEvent {
         action_type: String,
         target: String,
         reason: String,
+        model_arguments_ignored: bool,
         requires_confirmation: bool,
         hard_blocked: bool,
     },
@@ -2293,6 +2295,8 @@ where
             execution_transcript,
             kernel_result,
             scheduler,
+            provider_durability_scope,
+            Vec::new(),
             life_model,
             event_sink_label,
             kernel_events,
@@ -3145,6 +3149,7 @@ pub struct MainChatModelRequest {
     pub raw_life_model_included: bool,
     pub raw_unbounded_memory_included: bool,
     pub selected_skill_id: Option<String>,
+    pub payload_purpose: ProviderPayloadPurpose,
     pub stream_provider_tokens: bool,
 }
 
@@ -3745,6 +3750,7 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
         emit_progress: &mut (dyn FnMut(MainChatModelProgress) + Send),
     ) -> Result<MainChatModelGeneration, MainChatModelFailure> {
         let requested_stream_provider_tokens = request.stream_provider_tokens;
+        let payload_purpose = request.payload_purpose;
         let task_session_id = request.provider_authorization.task_session_id.clone();
         let current_user_text = request
             .messages
@@ -3865,7 +3871,7 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
             .provider_authorization
             .policy_authorization
             .authorize_derived_payload(
-                ProviderPayloadPurpose::MainChatDirectAnswer,
+                payload_purpose,
                 current_user_text,
                 &request.messages,
                 &context_blocks,
@@ -4504,6 +4510,26 @@ where
         }
 
         if let Some(outcome) = write_outcome.clone().filter(|outcome| {
+            outcome.kind == MainChatKernelWriteOutcomeKind::FileWriteProposal
+                && outcome
+                    .governed_input
+                    .get("generatedContentRequired")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+        }) {
+            return self
+                .run_generated_artifact_write_turn(
+                    input,
+                    system_prompt,
+                    context_metadata,
+                    route_metadata,
+                    outcome,
+                    event_sink,
+                )
+                .await;
+        }
+
+        if let Some(outcome) = write_outcome.clone().filter(|outcome| {
             !memory_governance_has_artifacts(memory_governance.as_ref())
                 || !matches!(
                     outcome.kind,
@@ -4571,6 +4597,7 @@ where
                 .as_ref()
                 .is_some_and(|context| context.raw_unbounded_memory_included),
             selected_skill_id,
+            payload_purpose: ProviderPayloadPurpose::MainChatDirectAnswer,
             stream_provider_tokens: self.context_config.stream_provider_tokens,
         };
 
@@ -4976,6 +5003,7 @@ where
                 selected_skill_id: sanitize_main_chat_selected_skill_id(
                     input.selected_skill_id.as_deref(),
                 ),
+                payload_purpose: ProviderPayloadPurpose::MainChatDirectAnswer,
                 // Citation validation must precede product-visible token
                 // emission. The ordinary direct-answer path still streams.
                 stream_provider_tokens: false,
@@ -5188,6 +5216,243 @@ where
         }
     }
 
+    async fn run_generated_artifact_write_turn<S>(
+        &self,
+        input: MainChatTurnInput,
+        mut system_prompt: String,
+        context_metadata: MainChatKernelContextMetadata,
+        mut route_metadata: MainChatRouteMetadata,
+        mut outcome: MainChatKernelWriteOutcome,
+        event_sink: &mut S,
+    ) -> MainChatTurnResult
+    where
+        S: MainChatEventSink + ?Sized,
+    {
+        if !input
+            .policy_decision
+            .allows(AllowedCapability::ProviderGeneration)
+        {
+            return self.governed_blocker(
+                "artifact_generation_policy_blocked",
+                context_metadata,
+                route_metadata,
+                event_sink,
+            );
+        }
+        let Some(specs) = outcome
+            .governed_input
+            .get("artifactSpecs")
+            .and_then(Value::as_array)
+            .filter(|specs| !specs.is_empty() && specs.len() <= 2)
+            .cloned()
+        else {
+            return self.governed_blocker(
+                "artifact_generation_spec_invalid",
+                context_metadata,
+                route_metadata,
+                event_sink,
+            );
+        };
+        let instruction = generated_artifact_provider_instruction(&specs);
+        let base_limit = MAX_SYSTEM_PROMPT_CHARS.saturating_sub(instruction.chars().count() + 2);
+        system_prompt = format!(
+            "{}\n\n{}",
+            bounded_text(&system_prompt, base_limit),
+            instruction
+        );
+        let request = MainChatModelRequest {
+            session_id: input.session_id.clone(),
+            messages: input.messages,
+            provider_authorization: input.provider_authorization,
+            system_prompt,
+            supplemental_context_blocks: Vec::new(),
+            context_snapshot_ref: context_metadata.context_snapshot_ref.clone(),
+            selected_context_refs: context_metadata.selected_source_ids.clone(),
+            raw_life_model_included: context_metadata.raw_life_model_yaml_included,
+            raw_unbounded_memory_included: context_metadata
+                .hs_context
+                .as_ref()
+                .is_some_and(|context| context.raw_unbounded_memory_included),
+            selected_skill_id: sanitize_main_chat_selected_skill_id(
+                input.selected_skill_id.as_deref(),
+            ),
+            payload_purpose: ProviderPayloadPurpose::MainChatArtifactDraft,
+            // Provider JSON is validated before any user-visible projection.
+            stream_provider_tokens: false,
+        };
+        let progress_session_id = request.session_id.clone();
+        let generation_result = {
+            let mut emit_progress = |progress| match progress {
+                MainChatModelProgress::Started {
+                    request_id,
+                    provider,
+                    model,
+                    started_at,
+                    policy_evidence,
+                } => emit_provider_started_with_policy(
+                    request_id,
+                    provider,
+                    model,
+                    started_at,
+                    policy_evidence,
+                    event_sink,
+                ),
+                MainChatModelProgress::Token { request_id, chunk } => {
+                    event_sink.emit(MainChatKernelEvent::ProviderToken {
+                        session_id: progress_session_id.clone(),
+                        request_id,
+                        chunk,
+                    })
+                }
+                MainChatModelProgress::Completed {
+                    request_id,
+                    provider,
+                    model,
+                    finished_at,
+                } => event_sink.emit(MainChatKernelEvent::ProviderCompleted {
+                    request_id,
+                    provider,
+                    model,
+                    finished_at,
+                }),
+                MainChatModelProgress::Failed {
+                    request_id,
+                    provider,
+                    model,
+                    finished_at,
+                    error_digest,
+                } => event_sink.emit(MainChatKernelEvent::ProviderFailed {
+                    request_id,
+                    provider,
+                    model,
+                    finished_at,
+                    error_digest,
+                }),
+                MainChatModelProgress::RemoteUnknown {
+                    request_id,
+                    provider,
+                    model,
+                    finished_at,
+                    reason_digest,
+                } => event_sink.emit(MainChatKernelEvent::ProviderRemoteUnknown {
+                    request_id,
+                    provider,
+                    model,
+                    finished_at,
+                    reason_digest,
+                }),
+            };
+            self.model_client
+                .generate_direct_answer(request, &mut emit_progress)
+                .await
+        };
+        match generation_result {
+            Ok(generation) if !generation.content.trim().is_empty() => {
+                if let Some(receipt) = generation.provider_receipt.as_ref() {
+                    route_metadata = route_metadata_from_provider_receipt(route_metadata, receipt);
+                    emit_provider_receipt(receipt, generation.provider_started_emitted, event_sink);
+                }
+                let artifacts = match parse_generated_artifact_envelope(&generation.content, &specs)
+                {
+                    Ok(artifacts) => artifacts,
+                    Err(code) => {
+                        event_sink.emit(MainChatKernelEvent::Blocker { code: code.clone() });
+                        return MainChatTurnResult {
+                            assistant_message: None,
+                            blockers: vec![code],
+                            proposals: Vec::new(),
+                            tool_calls: Vec::new(),
+                            write_outcome: None,
+                            memory_governance: None,
+                            route_metadata: Some(route_metadata),
+                            context_metadata: Some(context_metadata),
+                            direct_writes_executed: false,
+                            legacy_fallback_used: false,
+                            canonical_tool_graphs: Vec::new(),
+                            canonical_supplemental_observations: Vec::new(),
+                        };
+                    }
+                };
+                if let Some(object) = outcome.governed_input.as_object_mut() {
+                    object.insert("artifacts".into(), Value::Array(artifacts.clone()));
+                    object.insert("generatedContentRequired".into(), Value::Bool(false));
+                    object.insert("providerGeneratedDraft".into(), Value::Bool(true));
+                    object.insert("providerMaySelectPath".into(), Value::Bool(false));
+                }
+                event_sink.emit(MainChatKernelEvent::WriteIntentDecision {
+                    outcome_kind: outcome.kind,
+                    action_type: outcome.action_type.clone(),
+                    target: outcome.target.clone(),
+                    reason: outcome.reason.clone(),
+                    model_arguments_ignored: true,
+                    requires_confirmation: outcome.requires_confirmation,
+                    hard_blocked: outcome.hard_blocked,
+                });
+                let reply = format!(
+                    "已生成 {} 份文件草稿并送入 Review Center；当前尚未写入文件，只有你确认后才会分别落盘。",
+                    artifacts.len()
+                );
+                event_sink.emit(MainChatKernelEvent::FinalAnswer {
+                    content_preview: bounded_label(&reply, MAX_ASSISTANT_PREVIEW_CHARS),
+                    content_chars: reply.chars().count(),
+                });
+                MainChatTurnResult {
+                    assistant_message: Some(ChatMessage {
+                        role: "assistant".into(),
+                        content: reply,
+                    }),
+                    blockers: Vec::new(),
+                    proposals: Vec::new(),
+                    tool_calls: Vec::new(),
+                    write_outcome: Some(outcome),
+                    memory_governance: None,
+                    route_metadata: Some(route_metadata),
+                    context_metadata: Some(context_metadata),
+                    direct_writes_executed: false,
+                    legacy_fallback_used: false,
+                    canonical_tool_graphs: Vec::new(),
+                    canonical_supplemental_observations: Vec::new(),
+                }
+            }
+            Ok(generation) => {
+                if let Some(receipt) = generation.provider_receipt.as_ref() {
+                    route_metadata = route_metadata_from_provider_receipt(route_metadata, receipt);
+                    emit_provider_receipt(receipt, generation.provider_started_emitted, event_sink);
+                }
+                self.governed_blocker(
+                    "artifact_generation_empty",
+                    context_metadata,
+                    route_metadata,
+                    event_sink,
+                )
+            }
+            Err(failure) => {
+                if let Some(receipt) = failure.provider_receipt.as_ref() {
+                    route_metadata = route_metadata_from_provider_receipt(route_metadata, receipt);
+                    emit_provider_receipt(receipt, failure.provider_started_emitted, event_sink);
+                }
+                let code = failure
+                    .blocker_code
+                    .unwrap_or_else(|| "artifact_generation_failed".into());
+                event_sink.emit(MainChatKernelEvent::Blocker { code: code.clone() });
+                MainChatTurnResult {
+                    assistant_message: None,
+                    blockers: vec![code],
+                    proposals: failure.proposal_ids,
+                    tool_calls: Vec::new(),
+                    write_outcome: None,
+                    memory_governance: None,
+                    route_metadata: Some(route_metadata),
+                    context_metadata: Some(context_metadata),
+                    direct_writes_executed: false,
+                    legacy_fallback_used: false,
+                    canonical_tool_graphs: Vec::new(),
+                    canonical_supplemental_observations: Vec::new(),
+                }
+            }
+        }
+    }
+
     fn run_write_outcome_turn<S>(
         &self,
         context_metadata: MainChatKernelContextMetadata,
@@ -5203,6 +5468,7 @@ where
             action_type: outcome.action_type.clone(),
             target: outcome.target.clone(),
             reason: outcome.reason.clone(),
+            model_arguments_ignored: true,
             requires_confirmation: outcome.requires_confirmation,
             hard_blocked: outcome.hard_blocked,
         });
@@ -6499,6 +6765,100 @@ enum KernelWriteProposalAdmission {
     AlreadyCanonical { memory_id: String, fact_key: String },
 }
 
+async fn expand_generated_artifact_outcomes(
+    state: &Arc<AppState>,
+    outcome: &MainChatKernelWriteOutcome,
+) -> Result<Vec<MainChatKernelWriteOutcome>, String> {
+    let Some(artifacts) = outcome
+        .governed_input
+        .get("artifacts")
+        .and_then(Value::as_array)
+    else {
+        return Ok(vec![outcome.clone()]);
+    };
+    if artifacts.is_empty() || artifacts.len() > 2 {
+        return Err("artifact_bundle_cardinality_invalid".into());
+    }
+    let safe_paths = { state.config.lock().await.system.safe_paths.clone() };
+    let safe_root = safe_paths
+        .iter()
+        .filter_map(|path| {
+            let path = std::path::Path::new(path);
+            if path
+                .symlink_metadata()
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                return None;
+            }
+            path.canonicalize().ok()
+        })
+        .next()
+        .ok_or_else(|| "artifact_safe_path_unavailable".to_string())?;
+    let bundle_digest = openlife_core::agent::metadata_safe_value_digest(&outcome.governed_input).1;
+    let mut expanded = Vec::with_capacity(artifacts.len());
+    let mut seen_names = std::collections::HashSet::new();
+    for artifact in artifacts {
+        let kind = artifact
+            .get("kind")
+            .and_then(Value::as_str)
+            .filter(|kind| matches!(*kind, "markdown" | "csv"))
+            .ok_or_else(|| "artifact_kind_invalid".to_string())?;
+        let file_name = artifact
+            .get("fileName")
+            .and_then(Value::as_str)
+            .filter(|name| {
+                !name.is_empty() && name.len() <= 128 && !name.contains('/') && !name.contains('\\')
+            })
+            .ok_or_else(|| "artifact_filename_invalid".to_string())?;
+        if !seen_names.insert(file_name.to_ascii_lowercase()) {
+            return Err("artifact_filenames_not_unique".into());
+        }
+        if (kind == "markdown"
+            && !matches!(
+                std::path::Path::new(file_name)
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .map(str::to_ascii_lowercase)
+                    .as_deref(),
+                Some("md" | "markdown")
+            ))
+            || (kind == "csv"
+                && std::path::Path::new(file_name)
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .map(str::to_ascii_lowercase)
+                    .as_deref()
+                    != Some("csv"))
+        {
+            return Err("artifact_filename_extension_mismatch".into());
+        }
+        let content = artifact
+            .get("content")
+            .and_then(Value::as_str)
+            .filter(|content| !content.is_empty() && content.len() <= GENERATED_ARTIFACT_MAX_SIZE)
+            .ok_or_else(|| "artifact_content_invalid".to_string())?;
+        let path = safe_root.join(file_name);
+        let mut expanded_outcome = outcome.clone();
+        expanded_outcome.target = path.to_string_lossy().into_owned();
+        expanded_outcome.governed_input = serde_json::json!({
+            "path": path,
+            "content": content,
+            "content_hash": openlife_core::agent::metadata_safe_text_digest(content).1,
+            "encoding": "utf-8",
+            "operation": "propose_write",
+            "artifactKind": kind,
+            "artifactBundleDigest": bundle_digest,
+            "generatedByProvider": true,
+            "providerMaySelectPath": false,
+            "governedInputSource": "kernel_generated_artifact_proposal",
+            "directFileWrite": false,
+            "directWritesExecuted": false,
+        });
+        expanded.push(expanded_outcome);
+    }
+    Ok(expanded)
+}
+
 async fn active_canonical_memory_owner(
     state: &Arc<AppState>,
     fact: &CanonicalMemoryFactDescriptor,
@@ -6636,6 +6996,7 @@ async fn create_kernel_write_proposal(
                 .get("content")
                 .and_then(Value::as_str)
                 .unwrap_or("");
+            let content_digest = openlife_core::agent::metadata_safe_text_digest(content).1;
             (
                 ProposalType::ExternalWriteAction,
                 format!("filesystem.{path}"),
@@ -6644,9 +7005,13 @@ async fn create_kernel_write_proposal(
                 serde_json::json!({
                     "path": path,
                     "content": content,
-                    "content_preview": bounded_text(content, MAX_TOOL_QUERY_CHARS),
+                    "contentDigest": content_digest,
                     "encoding": "utf-8",
                     "operation": "propose_write",
+                    "artifactKind": outcome.governed_input.get("artifactKind").cloned(),
+                    "artifactBundleDigest": outcome.governed_input.get("artifactBundleDigest").cloned(),
+                    "generatedByProvider": outcome.governed_input.get("generatedByProvider").and_then(Value::as_bool).unwrap_or(false),
+                    "providerMaySelectPath": false,
                     "source": "main_chat_kernel",
                     "originatingTaskSessionId": task_session_id,
                     "sourceRunId": run_id,
@@ -6665,7 +7030,7 @@ async fn create_kernel_write_proposal(
         }
     };
 
-    let memory_review_idempotency_key = if let Some(fact) = memory_fact.as_ref() {
+    let review_idempotency_key = if let Some(fact) = memory_fact.as_ref() {
         let fact_key = fact
             .fact_key()
             .map_err(|error| format!("Memory proposal fact identity rejected: {error}"))?;
@@ -6676,6 +7041,20 @@ async fn create_kernel_write_proposal(
             });
         }
         Some(format!("memory_review:{fact_key}"))
+    } else if proposal_type == ProposalType::ExternalWriteAction {
+        let content_digest = after
+            .get("content")
+            .and_then(Value::as_str)
+            .map(|content| openlife_core::agent::metadata_safe_text_digest(content).1)
+            .unwrap_or_else(|| "sha256:missing".into());
+        let binding = format!(
+            "{}\0{}\0{}",
+            policy_decision.authorized_user_message_digest, affected_path, content_digest
+        );
+        Some(format!(
+            "artifact_review:{}",
+            openlife_core::agent::metadata_safe_text_digest(&binding).1
+        ))
     } else {
         None
     };
@@ -6709,7 +7088,7 @@ async fn create_kernel_write_proposal(
         "Main Chat kernel proposal is pending Review Center approval.",
     )
     .with_evidence_refs(vec![format!("main_chat_task_session:{task_session_id}")]);
-    if let Some(idempotency_key) = memory_review_idempotency_key {
+    if let Some(idempotency_key) = review_idempotency_key {
         request = request.with_idempotency_key(idempotency_key);
     }
     openlife_core::agent::ReviewWorkflow::new(&store)
@@ -7456,8 +7835,12 @@ async fn build_kernel_write_outcome_command_surface_result(
     state: &Arc<AppState>,
     main_chat_agent_turn: &MainChatAgentTurn,
     mut execution_transcript: Vec<ExecutionTranscriptEntry>,
-    kernel_result: MainChatTurnResult,
+    mut kernel_result: MainChatTurnResult,
     scheduler: InferenceScheduler,
+    provider_durability_scope: &crate::main_chat_turn_runtime::MainChatProviderDurabilityScope,
+    supplied_provider_durability_proofs: Vec<
+        openlife_core::scheduler::ProviderInvocationDurabilityProof,
+    >,
     life_model: LifeModel,
     event_sink_label: &'static str,
     kernel_events: Vec<MainChatKernelEvent>,
@@ -7467,6 +7850,35 @@ async fn build_kernel_write_outcome_command_surface_result(
         .agent_task_session_id
         .as_deref()
         .ok_or_else(|| "Main Chat kernel task session missing".to_string())?;
+    let outcome = kernel_result
+        .write_outcome
+        .clone()
+        .ok_or_else(|| "Main Chat kernel write outcome missing".to_string())?;
+    let expanded_outcomes = match expand_generated_artifact_outcomes(state, &outcome).await {
+        Ok(outcomes) => outcomes,
+        Err(blocker) => {
+            kernel_result.write_outcome = None;
+            kernel_result.assistant_message = None;
+            kernel_result.blockers = vec![blocker];
+            kernel_result.proposals.clear();
+            return build_blocked_kernel_command_surface_result(
+                session_id,
+                task_session_id,
+                canonical_run_id,
+                execution_epoch,
+                state,
+                main_chat_agent_turn,
+                execution_transcript,
+                kernel_result,
+                scheduler,
+                provider_durability_scope,
+                supplied_provider_durability_proofs,
+                event_sink_label,
+                kernel_events,
+            )
+            .await;
+        }
+    };
     let mut agent_run = load_existing_canonical_main_chat_agent_run(
         state,
         canonical_run_id,
@@ -7474,14 +7886,55 @@ async fn build_kernel_write_outcome_command_surface_result(
         session_id,
     )
     .await?;
-    let outcome = kernel_result
-        .write_outcome
-        .clone()
-        .ok_or_else(|| "Main Chat kernel write outcome missing".to_string())?;
+    let provider_receipts = provider_receipts_from_kernel_events(&kernel_events)?;
+    validate_provider_receipts_for_runtime_generation(
+        &provider_receipts,
+        scheduler.provider_config_generation(),
+    )?;
+    let provider_durability_proofs = resolve_provider_durability_proofs(
+        &scheduler,
+        &provider_receipts,
+        supplied_provider_durability_proofs,
+    )?;
+    let mut provider_durable_events = append_main_chat_provider_receipt_events(
+        state,
+        task_session_id,
+        &agent_run.id,
+        provider_durability_scope,
+        &provider_receipts,
+        &provider_durability_proofs,
+    )
+    .await?;
     let route_metadata = kernel_result
         .route_metadata
         .clone()
         .ok_or_else(|| "Main Chat kernel write outcome missing route metadata".to_string())?;
+    let selected_provider_receipt = match route_metadata.provider_request_id.as_deref() {
+        Some(request_id) => Some(
+            provider_receipts
+                .iter()
+                .find(|receipt| {
+                    receipt.request_id == request_id
+                        && receipt.status == ProviderInvocationStatus::Completed
+                })
+                .ok_or_else(|| {
+                    format!("provider_response_receipt_missing_or_not_completed:{request_id}")
+                })?,
+        ),
+        None if provider_receipts.is_empty() => None,
+        None => return Err("provider_response_request_identity_missing".into()),
+    };
+    let provider_generated_draft = outcome
+        .governed_input
+        .get("providerGeneratedDraft")
+        .and_then(Value::as_bool)
+        == Some(true);
+    if provider_generated_draft != selected_provider_receipt.is_some() {
+        return Err("generated_artifact_provider_receipt_mismatch".into());
+    }
+    let provider_generated = selected_provider_receipt.is_some();
+    let provider_live_invoked = selected_provider_receipt.is_some_and(|receipt| !receipt.simulated)
+        && !route_metadata.scripted_response_configured;
     let model_route = model_route_from_kernel_route(&route_metadata);
     let context_summary = context_summary_from_kernel_result(&kernel_result, &life_model);
     let mut reply = kernel_result
@@ -7494,121 +7947,131 @@ async fn build_kernel_write_outcome_command_surface_result(
         outcome.kind.as_str()
     ));
 
-    let queued = enqueue_main_chat_agent_action(
-        state,
-        task_session_id,
-        &outcome.action_type,
-        &kernel_write_action_description(&outcome),
-        &mut execution_transcript,
-    )
-    .await?;
+    let mut queued_actions = Vec::with_capacity(expanded_outcomes.len());
+    for expanded_outcome in &expanded_outcomes {
+        queued_actions.push(
+            enqueue_main_chat_agent_action(
+                state,
+                task_session_id,
+                &expanded_outcome.action_type,
+                &kernel_write_action_description(expanded_outcome),
+                &mut execution_transcript,
+            )
+            .await?,
+        );
+    }
+    let queued = queued_actions
+        .first()
+        .ok_or_else(|| "Main Chat kernel write outcome expansion was empty".to_string())?;
     let mut pending_blockers = Vec::new();
     let tool_calls = Vec::new();
     let mut generated_proposals = Vec::new();
 
     if is_kernel_proposal_outcome(outcome.kind) {
-        transition_main_chat_action(state, &queued.id, ExecutionQueueStatus::Executing, None)
+        for (expanded_outcome, queued) in expanded_outcomes.iter().zip(&queued_actions) {
+            transition_main_chat_action(state, &queued.id, ExecutionQueueStatus::Executing, None)
+                .await?;
+            let proposal_admission = create_kernel_write_proposal(
+                state,
+                task_session_id,
+                &agent_run.id,
+                expanded_outcome,
+                user_text,
+                &main_chat_agent_turn.decision.policy_decision,
+                execution_epoch,
+            )
             .await?;
-        let proposal_admission = create_kernel_write_proposal(
-            state,
-            task_session_id,
-            &agent_run.id,
-            &outcome,
-            user_text,
-            &main_chat_agent_turn.decision.policy_decision,
-            execution_epoch,
-        )
-        .await?;
-        match proposal_admission {
-            KernelWriteProposalAdmission::Pending(proposal) => {
-                generated_proposals.push(proposal.id.clone());
-                agent_run.add_generated_proposal(&proposal.id);
-                pending_blockers.push(format!("proposal:{}", proposal.id));
-                let proposal_metadata = serde_json::json!({
-                    "kernelBackedProposalOnlyWrite": true,
-                    "writeOutcomeKind": outcome.kind.as_str(),
-                    "actionId": queued.id,
-                    "proposalId": proposal.id,
-                    "proposalType": proposal.proposal_type,
-                    "affectedPath": proposal.affected_path,
-                    "sourceRunId": agent_run.id,
-                    "sourceTaskSessionId": task_session_id,
-                    "payloadSummary": outcome.payload_summary,
-                    "reviewStatus": proposal.status,
-                    "blockedWriteActionType": kernel_blocked_write_action_type(outcome.kind),
-                    "directWritesExecuted": false,
-                    "acceptedDurableTruthWritten": false,
-                    "fileWritten": false,
-                    "externalWritesExecuted": false,
-                });
-                transition_main_chat_action(
-                    state,
-                    &queued.id,
-                    ExecutionQueueStatus::Observed,
-                    Some(proposal_metadata.clone()),
-                )
-                .await?;
-                transition_main_chat_action(
-                    state,
-                    &queued.id,
-                    ExecutionQueueStatus::Completed,
-                    Some(proposal_metadata.clone()),
-                )
-                .await?;
-                execution_transcript.extend(
-                    append_main_chat_agent_transcript(
+            match proposal_admission {
+                KernelWriteProposalAdmission::Pending(proposal) => {
+                    generated_proposals.push(proposal.id.clone());
+                    agent_run.add_generated_proposal(&proposal.id);
+                    pending_blockers.push(format!("proposal:{}", proposal.id));
+                    let proposal_metadata = serde_json::json!({
+                        "kernelBackedProposalOnlyWrite": true,
+                        "writeOutcomeKind": expanded_outcome.kind.as_str(),
+                        "actionId": queued.id,
+                        "proposalId": proposal.id,
+                        "proposalType": proposal.proposal_type,
+                        "affectedPath": proposal.affected_path,
+                        "sourceRunId": agent_run.id,
+                        "sourceTaskSessionId": task_session_id,
+                        "payloadSummary": expanded_outcome.payload_summary,
+                        "reviewStatus": proposal.status,
+                        "blockedWriteActionType": kernel_blocked_write_action_type(expanded_outcome.kind),
+                        "directWritesExecuted": false,
+                        "acceptedDurableTruthWritten": false,
+                        "fileWritten": false,
+                        "externalWritesExecuted": false,
+                    });
+                    transition_main_chat_action(
                         state,
-                        Some(task_session_id),
-                        ExecutionTranscriptEntryKind::ProposalRequest,
-                        "MainChatKernel created or reused a pending proposal-only write outcome.",
-                        proposal_metadata,
+                        &queued.id,
+                        ExecutionQueueStatus::Observed,
+                        Some(proposal_metadata.clone()),
                     )
-                    .await,
-                );
-                reply = format!("{} Proposal id: {}.", reply, proposal.id);
-            }
-            KernelWriteProposalAdmission::AlreadyCanonical {
-                memory_id,
-                fact_key,
-            } => {
-                let no_op_metadata = serde_json::json!({
-                    "kernelBackedProposalOnlyWrite": true,
-                    "writeOutcomeKind": outcome.kind.as_str(),
-                    "actionId": queued.id,
-                    "reviewStaged": false,
-                    "canonicalOwnerAlreadyActive": true,
-                    "memoryId": memory_id,
-                    "factKey": fact_key,
-                    "sourceRunId": agent_run.id,
-                    "sourceTaskSessionId": task_session_id,
-                    "directWritesExecuted": false,
-                    "acceptedDurableTruthWritten": false,
-                });
-                transition_main_chat_action(
-                    state,
-                    &queued.id,
-                    ExecutionQueueStatus::Observed,
-                    Some(no_op_metadata.clone()),
-                )
-                .await?;
-                transition_main_chat_action(
-                    state,
-                    &queued.id,
-                    ExecutionQueueStatus::Completed,
-                    Some(no_op_metadata.clone()),
-                )
-                .await?;
-                execution_transcript.extend(
-                    append_main_chat_agent_transcript(
+                    .await?;
+                    transition_main_chat_action(
                         state,
-                        Some(task_session_id),
-                        ExecutionTranscriptEntryKind::Observation,
-                        "The exact Memory fact already has an active canonical owner; no duplicate review item or durable write was created.",
-                        no_op_metadata,
+                        &queued.id,
+                        ExecutionQueueStatus::Completed,
+                        Some(proposal_metadata.clone()),
                     )
-                    .await,
-                );
-                reply = "That Memory fact is already active. I did not create a duplicate review item or perform another durable write.".into();
+                    .await?;
+                    execution_transcript.extend(
+                        append_main_chat_agent_transcript(
+                            state,
+                            Some(task_session_id),
+                            ExecutionTranscriptEntryKind::ProposalRequest,
+                            "MainChatKernel created or reused a pending proposal-only write outcome.",
+                            proposal_metadata,
+                        )
+                        .await,
+                    );
+                    reply = format!("{} Proposal id: {}.", reply, proposal.id);
+                }
+                KernelWriteProposalAdmission::AlreadyCanonical {
+                    memory_id,
+                    fact_key,
+                } => {
+                    let no_op_metadata = serde_json::json!({
+                        "kernelBackedProposalOnlyWrite": true,
+                        "writeOutcomeKind": expanded_outcome.kind.as_str(),
+                        "actionId": queued.id,
+                        "reviewStaged": false,
+                        "canonicalOwnerAlreadyActive": true,
+                        "memoryId": memory_id,
+                        "factKey": fact_key,
+                        "sourceRunId": agent_run.id,
+                        "sourceTaskSessionId": task_session_id,
+                        "directWritesExecuted": false,
+                        "acceptedDurableTruthWritten": false,
+                    });
+                    transition_main_chat_action(
+                        state,
+                        &queued.id,
+                        ExecutionQueueStatus::Observed,
+                        Some(no_op_metadata.clone()),
+                    )
+                    .await?;
+                    transition_main_chat_action(
+                        state,
+                        &queued.id,
+                        ExecutionQueueStatus::Completed,
+                        Some(no_op_metadata.clone()),
+                    )
+                    .await?;
+                    execution_transcript.extend(
+                        append_main_chat_agent_transcript(
+                            state,
+                            Some(task_session_id),
+                            ExecutionTranscriptEntryKind::Observation,
+                            "The exact Memory fact already has an active canonical owner; no duplicate review item or durable write was created.",
+                            no_op_metadata,
+                        )
+                        .await,
+                    );
+                    reply = "That Memory fact is already active. I did not create a duplicate review item or perform another durable write.".into();
+                }
             }
         }
     } else if outcome.kind == MainChatKernelWriteOutcomeKind::ExternalConfirmationBlocker {
@@ -7743,16 +8206,20 @@ async fn build_kernel_write_outcome_command_surface_result(
         "pendingBlockerCount": pending_blockers.len(),
         "kernelEventSink": event_sink_label,
         "kernelEventCount": kernel_events.len(),
-        "modelGenerated": false,
-        "schedulerGenerationCalled": false,
+        "modelGenerated": provider_generated,
+        "schedulerGenerationCalled": provider_generated,
         "turnProviderRuntimeGeneration": scheduler.provider_config_generation(),
         "providerGenerationPath": "main_chat_kernel_proposal_only_write",
         "provider": route_metadata.provider,
         "model": route_metadata.model,
+        "providerPayloadPurpose": selected_provider_receipt
+            .and_then(|receipt| receipt.policy_evidence.as_ref())
+            .and_then(|evidence| evidence.payload_purpose)
+            .map(ProviderPayloadPurpose::as_str),
         "routeType": route_metadata.route_type,
         "routeReason": route_metadata.reason,
         "scriptedProviderResponse": route_metadata.scripted_response_configured,
-        "liveProviderInvoked": false,
+        "liveProviderInvoked": provider_live_invoked,
         "providerEndpointKind": main_chat_provider_endpoint_kind(&scheduler, route_metadata.scripted_response_configured),
     });
     agent_run.tool_call_count = tool_calls.len() as u32;
@@ -7798,8 +8265,9 @@ async fn build_kernel_write_outcome_command_surface_result(
     let agent_state =
         assemble_main_chat_agent_state_for_turn(state, Some(task_session_id), Some(&agent_run.id))
             .await;
-    let durable_events =
-        materialize_optional_main_chat_agent_events(state, agent_state.as_ref()).await?;
+    provider_durable_events
+        .extend(materialize_optional_main_chat_agent_events(state, agent_state.as_ref()).await?);
+    let durable_events = provider_durable_events;
 
     Ok(MainChatKernelCommandSurfaceResult {
         reply,
@@ -9814,6 +10282,29 @@ fn plan_kernel_write_outcome(
         .policy_decision
         .allows(AllowedCapability::FileWriteProposal)
     {
+        if let Some(artifact_specs) = generated_artifact_specs(user_text) {
+            return Some(MainChatKernelWriteOutcome {
+                kind: MainChatKernelWriteOutcomeKind::FileWriteProposal,
+                action_type: "proposal.create".into(),
+                target: "artifact_bundle.pending_review".into(),
+                reason: "generated artifact drafts require governed file proposals".into(),
+                payload_summary: payload_summary.clone(),
+                governed_input: serde_json::json!({
+                    "artifactSpecs": artifact_specs,
+                    "generatedContentRequired": true,
+                    "governedInputSource": "kernel_generated_artifact_proposal",
+                    "providerMaySelectPath": false,
+                    "directFileWrite": false,
+                    "directWritesExecuted": false,
+                    "modelArgumentsIgnored": model_arguments_ignored,
+                }),
+                proposal_type: Some("external_write_action".into()),
+                blocker_code: Some("proposal_review_required".into()),
+                requires_confirmation: false,
+                hard_blocked: false,
+                replayable: true,
+            });
+        }
         let path = extract_backtick_value(user_text).unwrap_or("workspace.pending_file_write");
         let content = extract_second_backtick_value(user_text).unwrap_or("");
         return Some(MainChatKernelWriteOutcome {
@@ -9969,6 +10460,167 @@ fn extract_second_backtick_value(value: &str) -> Option<&str> {
         .nth(3)
         .map(str::trim)
         .filter(|part| !part.is_empty())
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GeneratedArtifactProviderEnvelope {
+    #[serde(default)]
+    markdown: Option<String>,
+    #[serde(default)]
+    csv: Option<String>,
+}
+
+fn extract_artifact_filename(user_text: &str, extension: &str) -> Option<String> {
+    user_text
+        .split(|ch: char| {
+            ch.is_whitespace()
+                || matches!(
+                    ch,
+                    '`' | '"' | '\'' | '。' | '，' | '；' | '：' | '！' | '？' | '(' | ')'
+                )
+        })
+        .map(|token| token.trim_matches(|ch: char| matches!(ch, '.' | ',' | ';' | ':')))
+        .find(|token| {
+            token.to_ascii_lowercase().ends_with(extension)
+                && !token.contains('/')
+                && !token.contains('\\')
+                && token.len() <= 128
+        })
+        .map(ToOwned::to_owned)
+}
+
+fn generated_artifact_specs(user_text: &str) -> Option<Vec<Value>> {
+    if extract_second_backtick_value(user_text).is_some() {
+        return None;
+    }
+    let lower = user_text.to_ascii_lowercase();
+    let requests_markdown = lower.contains("markdown")
+        || lower.contains(".md")
+        || lower.contains("路演摘要")
+        || lower.contains("最终摘要");
+    let requests_csv = lower.contains("csv") || lower.contains("风险清单");
+    if !requests_markdown && !requests_csv {
+        return None;
+    }
+    let mut specs = Vec::new();
+    if requests_markdown {
+        specs.push(serde_json::json!({
+            "kind": "markdown",
+            "fileName": extract_artifact_filename(user_text, ".md")
+                .unwrap_or_else(|| "roadshow-summary.md".into()),
+        }));
+    }
+    if requests_csv {
+        specs.push(serde_json::json!({
+            "kind": "csv",
+            "fileName": extract_artifact_filename(user_text, ".csv")
+                .unwrap_or_else(|| "roadshow-risks.csv".into()),
+        }));
+    }
+    Some(specs)
+}
+
+fn generated_artifact_provider_instruction(specs: &[Value]) -> String {
+    let markdown = specs
+        .iter()
+        .any(|spec| spec.get("kind").and_then(Value::as_str) == Some("markdown"));
+    let csv = specs
+        .iter()
+        .any(|spec| spec.get("kind").and_then(Value::as_str) == Some("csv"));
+    format!(
+        "You are drafting bounded artifact content before a separate user review. Return only one JSON object with exactly these nullable-free string fields: {}. Do not include paths, commands, authorization, tool calls, or markdown fences around the JSON. Markdown must be useful and structured. CSV must contain a header row and at least one data row with consistent columns. The backend, never the model, chooses paths and requires ReviewWorkflow approval before writing.",
+        match (markdown, csv) {
+            (true, true) => "markdown and csv",
+            (true, false) => "markdown",
+            (false, true) => "csv",
+            (false, false) => "no fields",
+        }
+    )
+}
+
+fn parse_generated_artifact_envelope(
+    provider_output: &str,
+    specs: &[Value],
+) -> Result<Vec<Value>, String> {
+    let trimmed = provider_output.trim();
+    let json = if trimmed.starts_with("```json") && trimmed.ends_with("```") {
+        trimmed
+            .strip_prefix("```json")
+            .and_then(|value| value.strip_suffix("```"))
+            .map(str::trim)
+            .ok_or_else(|| "artifact_generation_contract_invalid".to_string())?
+    } else {
+        trimmed
+    };
+    let envelope: GeneratedArtifactProviderEnvelope = serde_json::from_str(json)
+        .map_err(|_| "artifact_generation_contract_invalid".to_string())?;
+    let expects_markdown = specs
+        .iter()
+        .any(|spec| spec.get("kind").and_then(Value::as_str) == Some("markdown"));
+    let expects_csv = specs
+        .iter()
+        .any(|spec| spec.get("kind").and_then(Value::as_str) == Some("csv"));
+    if envelope.markdown.is_some() != expects_markdown || envelope.csv.is_some() != expects_csv {
+        return Err("artifact_generation_field_set_mismatch".into());
+    }
+    let mut artifacts = Vec::new();
+    for spec in specs {
+        let kind = spec
+            .get("kind")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "artifact_generation_spec_invalid".to_string())?;
+        let file_name = spec
+            .get("fileName")
+            .and_then(Value::as_str)
+            .filter(|name| {
+                !name.is_empty() && name.len() <= 128 && !name.contains('/') && !name.contains('\\')
+            })
+            .ok_or_else(|| "artifact_generation_filename_invalid".to_string())?;
+        let content = match kind {
+            "markdown" => envelope.markdown.as_deref(),
+            "csv" => envelope.csv.as_deref(),
+            _ => None,
+        }
+        .map(str::trim)
+        .filter(|content| !content.is_empty() && content.len() <= GENERATED_ARTIFACT_MAX_SIZE)
+        .ok_or_else(|| "artifact_generation_content_invalid".to_string())?;
+        if kind == "csv" {
+            let mut reader = csv::ReaderBuilder::new()
+                .has_headers(true)
+                .flexible(false)
+                .from_reader(content.as_bytes());
+            let header_count = reader
+                .headers()
+                .map_err(|_| "artifact_generation_csv_invalid".to_string())?
+                .len();
+            if header_count < 2 {
+                return Err("artifact_generation_csv_invalid".into());
+            }
+            let mut row_count = 0usize;
+            for record in reader.records() {
+                let record = record.map_err(|_| "artifact_generation_csv_invalid".to_string())?;
+                if record.len() != header_count {
+                    return Err("artifact_generation_csv_invalid".into());
+                }
+                row_count += 1;
+            }
+            if row_count == 0 {
+                return Err("artifact_generation_csv_invalid".into());
+            }
+        }
+        artifacts.push(serde_json::json!({
+            "kind": kind,
+            "fileName": file_name,
+            "content": content,
+            "mediaType": if kind == "csv" {
+                "text/csv; charset=utf-8"
+            } else {
+                "text/markdown; charset=utf-8"
+            },
+        }));
+    }
+    Ok(artifacts)
 }
 
 fn latest_user_text(messages: &[ChatMessage]) -> Option<&str> {
@@ -10946,6 +11598,7 @@ mod tests {
             raw_life_model_included: false,
             raw_unbounded_memory_included: false,
             selected_skill_id: None,
+            payload_purpose: ProviderPayloadPurpose::MainChatDirectAnswer,
             stream_provider_tokens: true,
         };
 
@@ -11086,6 +11739,7 @@ mod tests {
             raw_life_model_included: false,
             raw_unbounded_memory_included: false,
             selected_skill_id: None,
+            payload_purpose: ProviderPayloadPurpose::MainChatDirectAnswer,
             stream_provider_tokens: true,
         };
 
@@ -11894,6 +12548,7 @@ mod tests {
             raw_life_model_included: false,
             raw_unbounded_memory_included: false,
             selected_skill_id: None,
+            payload_purpose: ProviderPayloadPurpose::MainChatDirectAnswer,
             stream_provider_tokens: false,
         };
         let mut no_progress = |_progress: MainChatModelProgress| {};
@@ -12002,6 +12657,7 @@ mod tests {
             raw_life_model_included: false,
             raw_unbounded_memory_included: false,
             selected_skill_id: None,
+            payload_purpose: ProviderPayloadPurpose::MainChatDirectAnswer,
             stream_provider_tokens: false,
         };
 
@@ -14384,6 +15040,127 @@ mod tests {
             Some("external_write_action")
         );
         assert_eq!(outcome.target, "notes.txt");
+        assert!(!result.direct_writes_executed);
+    }
+
+    fn generated_artifact_turn_input(session_id: &str, prompt: &str) -> MainChatTurnInput {
+        let ingress = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
+            session_id,
+            prompt,
+            None,
+            openlife_core::agent::AgentTaskKind::Conversation,
+        );
+        assert_eq!(
+            ingress.selected_strategy,
+            MainChatAgentStrategy::FileWriteProposal
+        );
+        let provider_authorization = MainChatProviderAuthorization::from_ingress_decision(&ingress)
+            .expect("provider authorization from artifact ingress");
+        MainChatTurnInput {
+            session_id: session_id.into(),
+            provider_authorization,
+            messages: vec![user_message(prompt)],
+            selected_skill_id: None,
+            policy_decision: ingress.policy_decision,
+            model_supplied_tool_arguments: None,
+            runtime_fact_direct_answer: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn generated_artifact_bundle_uses_provider_for_content_but_not_paths_or_effects() {
+        let prompt = "生成一份 Markdown 路演摘要和一份 CSV 风险清单，并在我确认后保存。";
+        let model = ScriptedModelClient::ok(
+            r##"{"markdown":"# 路演摘要\n\nOpenLife 提供可靠的个人智能助理能力。","csv":"risk,severity,mitigation\nprovider outage,high,fail closed\ndisk full,medium,show degraded state"}"##,
+        );
+        let kernel = test_kernel(model.clone(), Vec::new());
+        let mut events = BufferedMainChatEventSink::default();
+
+        let result = kernel
+            .run_turn(
+                generated_artifact_turn_input("generated-artifact-bundle", prompt),
+                &mut events,
+            )
+            .await;
+
+        assert_eq!(model.call_count(), 1);
+        assert!(result.blockers.is_empty());
+        assert!(result.proposals.is_empty());
+        assert!(!result.direct_writes_executed);
+        let outcome = result.write_outcome.expect("generated artifact outcome");
+        assert_eq!(
+            outcome.kind,
+            MainChatKernelWriteOutcomeKind::FileWriteProposal
+        );
+        assert_eq!(outcome.target, "artifact_bundle.pending_review");
+        assert_eq!(
+            outcome.governed_input["providerMaySelectPath"],
+            Value::Bool(false)
+        );
+        let artifacts = outcome.governed_input["artifacts"]
+            .as_array()
+            .expect("bounded artifact drafts");
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(artifacts[0]["fileName"], "roadshow-summary.md");
+        assert_eq!(artifacts[1]["fileName"], "roadshow-risks.csv");
+        assert!(model.observed_prompts()[0].contains("backend, never the model, chooses paths"));
+        assert!(events.events().iter().any(|event| matches!(
+            event,
+            MainChatKernelEvent::WriteIntentDecision {
+                model_arguments_ignored: true,
+                requires_confirmation: false,
+                hard_blocked: false,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn generated_artifact_provider_path_injection_is_blocked_before_proposal() {
+        let prompt = "生成一份 Markdown 路演摘要，并在我确认后保存。";
+        let model = ScriptedModelClient::ok(
+            r##"{"markdown":"# 摘要\n\n有效内容。","path":"/tmp/provider-chosen.md"}"##,
+        );
+        let kernel = test_kernel(model.clone(), Vec::new());
+        let mut events = BufferedMainChatEventSink::default();
+
+        let result = kernel
+            .run_turn(
+                generated_artifact_turn_input("generated-artifact-path-injection", prompt),
+                &mut events,
+            )
+            .await;
+
+        assert_eq!(model.call_count(), 1);
+        assert_eq!(
+            result.blockers,
+            vec!["artifact_generation_contract_invalid"]
+        );
+        assert!(result.write_outcome.is_none());
+        assert!(result.proposals.is_empty());
+        assert!(!result.direct_writes_executed);
+    }
+
+    #[tokio::test]
+    async fn generated_artifact_invalid_late_csv_row_is_blocked_before_proposal() {
+        let prompt = "生成一份 CSV 风险清单，并在我确认后保存。";
+        let model = ScriptedModelClient::ok(
+            r##"{"csv":"risk,severity,mitigation\nprovider outage,high,fail closed\nbroken,row"}"##,
+        );
+        let kernel = test_kernel(model.clone(), Vec::new());
+        let mut events = BufferedMainChatEventSink::default();
+
+        let result = kernel
+            .run_turn(
+                generated_artifact_turn_input("generated-artifact-invalid-csv", prompt),
+                &mut events,
+            )
+            .await;
+
+        assert_eq!(model.call_count(), 1);
+        assert_eq!(result.blockers, vec!["artifact_generation_csv_invalid"]);
+        assert!(result.write_outcome.is_none());
+        assert!(result.proposals.is_empty());
         assert!(!result.direct_writes_executed);
     }
 

@@ -3298,6 +3298,190 @@ async fn main_chat_kernel_goal_4_file_write_send_stream_creates_proposal_without
 }
 
 #[tokio::test]
+async fn roadshow_generated_artifacts_require_review_then_materialize_once_with_receipts() {
+    const MARKDOWN: &str = "# OpenLife 路演摘要\n\n可靠的个人智能助理，先生成草稿，确认后执行。";
+    const CSV: &str = "risk,severity,mitigation\nprovider outage,high,fail closed\ndisk full,medium,show degraded state";
+    let workspace = tempfile::tempdir().expect("artifact workspace");
+    let safe_workspace = workspace
+        .path()
+        .canonicalize()
+        .expect("canonical artifact workspace");
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    {
+        let mut config = state.config.lock().await;
+        config.system.safe_paths = vec![safe_workspace.display().to_string()];
+    }
+    let provider_response = serde_json::json!({"markdown": MARKDOWN, "csv": CSV}).to_string();
+    let provider_fixture = configure_command_surface_sequenced_local_http_provider(
+        &state,
+        vec!["unused ranking response".into(), provider_response],
+    )
+    .await;
+
+    let response = invoke_send_message_for_kernel_goal_3(
+        state.clone(),
+        "roadshow-generated-artifacts",
+        "生成一份 Markdown 路演摘要和一份 CSV 风险清单，并在我确认后保存。",
+    )
+    .await;
+    assert_eq!(response["legacy_fallback_used"], false);
+    assert_eq!(
+        response["reasoning_trace"]["generation_result"]["modelGenerated"],
+        true
+    );
+    assert_eq!(
+        response["reasoning_trace"]["generation_result"]["liveProviderInvoked"],
+        true
+    );
+    assert_eq!(
+        response["reasoning_trace"]["generation_result"]["providerPayloadPurpose"],
+        "main_chat_artifact_draft"
+    );
+    assert_eq!(
+        provider_fixture
+            .request_count
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert_eq!(
+        response["reasoning_trace"]["generation_result"]["writeOutcomeKind"],
+        "file_write_proposal"
+    );
+    assert_eq!(
+        response["reasoning_trace"]["generation_result"]["proposalIds"]
+            .as_array()
+            .expect("two artifact proposal ids")
+            .len(),
+        2
+    );
+    assert!(!serde_json::to_string(&response)
+        .expect("serialize product response")
+        .contains("provider outage"));
+
+    let task_session_id = task_session_id_from_response(&response);
+    let mut proposals = list_command_surface_proposals(&state)
+        .await
+        .into_iter()
+        .filter(|proposal| {
+            proposal.proposal_type == openlife_core::agent::ProposalType::ExternalWriteAction
+                && proposal.source_detail.as_deref() == Some(task_session_id.as_str())
+        })
+        .collect::<Vec<_>>();
+    proposals.sort_by(|left, right| left.affected_path.cmp(&right.affected_path));
+    assert_eq!(proposals.len(), 2);
+    let summary_path = safe_workspace.join("roadshow-summary.md");
+    let risks_path = safe_workspace.join("roadshow-risks.csv");
+    assert!(!summary_path.exists());
+    assert!(!risks_path.exists());
+    for proposal in &proposals {
+        assert_eq!(
+            proposal.status,
+            openlife_core::agent::ProposalStatus::Pending
+        );
+        assert_eq!(proposal.after["providerMaySelectPath"], false);
+        assert_eq!(proposal.after["generatedByProvider"], true);
+        assert!(proposal.after["contentDigest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")));
+    }
+
+    let mut first_receipt = None;
+    for proposal in &proposals {
+        let accepted =
+            crate::commands::proposal::accept_proposal_with_state(proposal.id.clone(), &state)
+                .await
+                .expect("accept generated artifact proposal");
+        assert_eq!(accepted["effect_status"], "confirmed");
+        assert_eq!(accepted["artifactMaterialization"]["status"], "confirmed");
+        assert_eq!(
+            accepted["artifactMaterialization"]["contentDigest"],
+            accepted["artifactMaterialization"]["observedContentDigest"]
+        );
+        if first_receipt.is_none() {
+            first_receipt = Some(accepted["artifactMaterialization"].clone());
+        }
+    }
+    assert_eq!(std::fs::read_to_string(&summary_path).unwrap(), MARKDOWN);
+    assert_eq!(std::fs::read_to_string(&risks_path).unwrap(), CSV);
+    assert_eq!(
+        load_command_surface_session(&state, &task_session_id)
+            .await
+            .status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
+    );
+
+    let retry =
+        crate::commands::proposal::accept_proposal_with_state(proposals[0].id.clone(), &state)
+            .await
+            .expect("idempotent accepted artifact retry");
+    assert_eq!(
+        retry["artifactMaterialization"],
+        first_receipt.expect("first artifact receipt")
+    );
+    let materialized_entries = std::fs::read_dir(&safe_workspace)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(
+        materialized_entries.len(),
+        2,
+        "retry must not leave stage copies"
+    );
+
+    let run_id = response["run_id"].as_str().expect("artifact run id");
+    let stored_run = state
+        .agent_run_store
+        .as_ref()
+        .expect("agent run store")
+        .lock()
+        .await
+        .get_run(run_id)
+        .expect("load artifact run")
+        .expect("artifact run exists");
+    let encoded_run = serde_json::to_string(&stored_run).expect("encode artifact AgentRun");
+    assert!(!encoded_run.contains("provider outage"));
+    assert!(!encoded_run.contains("可靠的个人智能助理"));
+}
+
+#[tokio::test]
+async fn generated_artifact_without_safe_workspace_returns_structured_blocker_not_ipc_failure() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let provider_fixture = configure_command_surface_sequenced_local_http_provider(
+        &state,
+        vec![
+            "unused ranking response".into(),
+            serde_json::json!({
+                "markdown": "# 路演摘要\n\n生成完成，但没有获准的落盘目录。"
+            })
+            .to_string(),
+        ],
+    )
+    .await;
+
+    let response = invoke_send_message_for_kernel_goal_3(
+        state.clone(),
+        "roadshow-artifact-no-safe-root",
+        "生成一份 Markdown 路演摘要，并在我确认后保存。",
+    )
+    .await;
+
+    assert_eq!(
+        provider_fixture
+            .request_count
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert_eq!(response["legacy_fallback_used"], false);
+    assert_eq!(response["model_invoked"], true);
+    assert!(response["blockers"]
+        .as_array()
+        .is_some_and(|blockers| blockers
+            .iter()
+            .any(|blocker| { blocker.as_str() == Some("artifact_safe_path_unavailable") })));
+    assert!(list_command_surface_proposals(&state).await.is_empty());
+}
+
+#[tokio::test]
 async fn main_chat_kernel_goal_4_external_write_send_stream_requires_confirmation_only() {
     let user_text = "Send email to my coworker with this private update.";
 
