@@ -33,6 +33,7 @@ pub mod resource_selection;
 pub mod scheduler;
 pub mod skills;
 pub mod sqlite_migration;
+pub mod state_store;
 pub mod tasks;
 pub mod tool_execution_receipt;
 pub mod tool_manifest;
