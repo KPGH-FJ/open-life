@@ -5432,7 +5432,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hanging_provider_without_response_headers_does_not_invent_started_truth() {
+    async fn hanging_provider_records_local_adapter_start_without_inventing_terminal_truth() {
         use tokio::io::AsyncReadExt;
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -5496,22 +5496,29 @@ mod tests {
             .await
             .expect("server observes the HTTP attempt")
             .expect("request observation channel remains open");
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(100),
-                progress_rx.recv()
-            )
-            .await
-            .is_err(),
-            "an accepted request without response headers is only an ambiguous attempt, not provider.started"
-        );
+        let progress =
+            tokio::time::timeout(std::time::Duration::from_millis(100), progress_rx.recv())
+                .await
+                .expect("local adapter start is observable before response headers")
+                .expect("provider progress channel remains open");
+        assert!(matches!(
+            progress,
+            ProviderInvocationProgress::Started {
+                request_id,
+                provider,
+                model,
+                ..
+            } if request_id == "hanging-provider-request"
+                && provider == "openai"
+                && model == "hanging-model"
+        ));
         assert!(!execution.is_finished());
 
         execution.abort();
         let _ = execution.await;
         assert!(
             progress_rx.try_recv().is_err(),
-            "no terminal receipt is invented"
+            "dropping the local future must not invent a provider terminal receipt"
         );
         release_provider.notify_one();
         let _ = server.await;

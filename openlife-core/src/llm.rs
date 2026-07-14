@@ -1752,6 +1752,11 @@ where
     let url = endpoint.to_string();
 
     let mut on_started = Some(on_started);
+    // `Attempting` is the local adapter-start edge: URL/policy/DNS and request
+    // construction have succeeded and the non-idempotent HTTP send is about to
+    // begin. It does not claim that the remote provider accepted the request;
+    // cancellation before a terminal observation must therefore remain
+    // `remote_unknown`.
     let res = provider_network_client(provider, &url)?
         .post_json_text_with_decision_and_start_observer(
             &url,
@@ -1760,13 +1765,12 @@ where
             headers,
             &body,
             move |phase| {
-                let result = if phase
-                    == crate::network_client::NetworkDispatchAttemptPhase::ResponseHeadersObserved
-                {
-                    on_started.take().map_or(Ok(()), |observer| observer())
-                } else {
-                    Ok(())
-                };
+                let result =
+                    if phase == crate::network_client::NetworkDispatchAttemptPhase::Attempting {
+                        on_started.take().map_or(Ok(()), |observer| observer())
+                    } else {
+                        Ok(())
+                    };
                 std::future::ready(result)
             },
         )
@@ -1876,6 +1880,9 @@ where
     let url = endpoint.to_string();
 
     let mut on_started = Some(on_started);
+    // Keep streaming and buffered provider truth on the same local adapter
+    // edge. Waiting for response headers would lose an in-flight request when
+    // cancellation drops the HTTP future after the body may have left.
     let res = provider_network_client(provider, &url)?
         .post_json_stream_with_decision_and_start_observer(
             &url,
@@ -1884,13 +1891,12 @@ where
             headers,
             &body,
             move |phase| {
-                let result = if phase
-                    == crate::network_client::NetworkDispatchAttemptPhase::ResponseHeadersObserved
-                {
-                    on_started.take().map_or(Ok(()), |observer| observer())
-                } else {
-                    Ok(())
-                };
+                let result =
+                    if phase == crate::network_client::NetworkDispatchAttemptPhase::Attempting {
+                        on_started.take().map_or(Ok(()), |observer| observer())
+                    } else {
+                        Ok(())
+                    };
                 std::future::ready(result)
             },
         )
