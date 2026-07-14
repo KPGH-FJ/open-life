@@ -295,7 +295,7 @@ fn policy_router_mints_minimal_typed_capabilities_for_each_requested_target() {
 }
 
 #[test]
-fn policy_router_authorizes_exact_live_weather_prompts_as_web_search_only() {
+fn policy_router_authorizes_exact_live_weather_prompts_for_search_and_synthesis() {
     let ingress = AgentIngress::default();
     for (session_id, user_text) in [
         (
@@ -319,7 +319,10 @@ fn policy_router_authorizes_exact_live_weather_prompts_as_web_search_only() {
         assert_eq!(decision.policy_route, PolicyRouteKind::ReadOnlyTool);
         assert_eq!(
             decision.policy_decision.allowed_capabilities,
-            vec![AllowedCapability::WebSearch],
+            vec![
+                AllowedCapability::ProviderGeneration,
+                AllowedCapability::WebSearch,
+            ],
             "{user_text}"
         );
     }
@@ -363,7 +366,10 @@ fn workspace_file_read_detection_keeps_path_tokens_without_reclassifying_tool_na
     );
     assert_eq!(
         weather.policy_decision.allowed_capabilities,
-        vec![AllowedCapability::WebSearch]
+        vec![
+            AllowedCapability::ProviderGeneration,
+            AllowedCapability::WebSearch,
+        ]
     );
 }
 

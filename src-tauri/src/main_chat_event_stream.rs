@@ -6214,6 +6214,7 @@ enum PayloadValueSchema {
     Bool,
     Count,
     MetadataStringArray,
+    ContextReferenceArray,
     OpaqueDigestArray,
     MetadataStringArrayOrRedacted,
     ReadExecutionOrNull,
@@ -6326,7 +6327,7 @@ const PROVIDER_STARTED_FIELDS: &[PayloadFieldSchema] = &[
     ),
     PayloadFieldSchema::required(
         "selectedContextRefs",
-        PayloadValueSchema::MetadataStringArray,
+        PayloadValueSchema::ContextReferenceArray,
     ),
     PayloadFieldSchema::required(
         "includedContextCategories",
@@ -6382,7 +6383,7 @@ const PROVIDER_COMPLETED_FIELDS: &[PayloadFieldSchema] = &[
     ),
     PayloadFieldSchema::required(
         "selectedContextRefs",
-        PayloadValueSchema::MetadataStringArray,
+        PayloadValueSchema::ContextReferenceArray,
     ),
     PayloadFieldSchema::required(
         "includedContextCategories",
@@ -6438,7 +6439,7 @@ const PROVIDER_REMOTE_UNKNOWN_FIELDS: &[PayloadFieldSchema] = &[
     ),
     PayloadFieldSchema::required(
         "selectedContextRefs",
-        PayloadValueSchema::MetadataStringArray,
+        PayloadValueSchema::ContextReferenceArray,
     ),
     PayloadFieldSchema::required(
         "includedContextCategories",
@@ -7576,6 +7577,9 @@ fn normalize_schema_field_value(
             .map(|_| value.clone())
             .ok_or_else(invalid),
         Schema::MetadataStringArray => normalize_metadata_string_array(value).ok_or_else(invalid),
+        Schema::ContextReferenceArray => {
+            normalize_context_reference_array(value).ok_or_else(invalid)
+        }
         Schema::OpaqueDigestArray => {
             let values = value.as_array().ok_or_else(invalid)?;
             if values.len() > MAX_METADATA_ARRAY_ITEMS {
@@ -7706,6 +7710,26 @@ fn normalize_metadata_string_array(value: &Value) -> Option<Value> {
     values
         .iter()
         .map(bounded_metadata_string)
+        .collect::<Option<Vec<_>>>()
+        .map(Value::Array)
+}
+
+fn normalize_context_reference_array(value: &Value) -> Option<Value> {
+    let values = value.as_array()?;
+    if values.len() > MAX_METADATA_ARRAY_ITEMS {
+        return None;
+    }
+    values
+        .iter()
+        .map(|value| {
+            let raw = value.as_str()?;
+            if raw.starts_with("websearch:") {
+                openlife_core::web_search::is_canonical_web_search_context_ref(raw)
+                    .then(|| Value::String(raw.to_string()))
+            } else {
+                bounded_metadata_string(value)
+            }
+        })
         .collect::<Option<Vec<_>>>()
         .map(Value::Array)
 }
@@ -11690,6 +11714,109 @@ mod tests {
             .to_string()
             .contains("main_chat_agent_event_payload_schema_conflict:provider.completed"));
         assert_eq!(store.list("task-1", 0, 100).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn provider_selected_context_refs_accept_only_canonical_bounded_web_search_refs() {
+        let mut valid = provider_started_draft(
+            "task-web-context-ref",
+            "run-web-context-ref",
+            "request-web-context-ref",
+            "provider-a",
+        )
+        .payload;
+        valid["selectedContextRefs"] = json!([
+            "websearch://550e8400-e29b-41d4-a716-446655440000/0?citation=webref_0123456789abcdef01234567"
+        ]);
+        normalize_durable_event_payload(
+            "provider.started",
+            "provider_request",
+            &valid,
+            PayloadNormalizationOrigin::New,
+        )
+        .expect("a canonical current-run Web reference is bounded provider evidence");
+
+        for invalid_ref in [
+            "websearch://550e8400-e29b-41d4-a716-446655440000/0",
+            "websearch://550e8400-e29b-41d4-a716-446655440000/00?citation=webref_0123456789abcdef01234567",
+            "websearch://550e8400-e29b-41d4-a716-446655440000/0?citation=webref_NOT_A_DIGEST____________",
+            "https://example.com/path?private=user-derived-content",
+        ] {
+            let mut invalid = valid.clone();
+            invalid["selectedContextRefs"] = json!([invalid_ref]);
+            let error = normalize_durable_event_payload(
+                "provider.started",
+                "provider_request",
+                &invalid,
+                PayloadNormalizationOrigin::New,
+            )
+            .expect_err("untyped, malformed, or raw Web references must fail closed");
+            assert!(
+                error
+                    .to_string()
+                    .contains("invalid_field_type_or_bound:selectedContextRefs"),
+                "{invalid_ref}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_web_context_reference_survives_restart_without_copying_web_content() {
+        const WEB_CONTEXT_REF: &str =
+            "websearch://550e8400-e29b-41d4-a716-446655440000/0?citation=webref_0123456789abcdef01234567";
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("web-provider-events.sqlite");
+        let task_id = "task-web-provider-restart";
+        let run_id = "run-web-provider-restart";
+        let request_id = "request-web-provider-restart";
+        let mut evidence =
+            synthetic_provider_policy_evidence_for_test(request_id, "test-provider-generation");
+        evidence.selected_context_refs = vec![WEB_CONTEXT_REF.into()];
+        evidence.included_context_categories = vec!["web_search_untrusted".into()];
+        let started_at = Utc::now();
+        let receipt = ProviderInvocationReceipt {
+            request_id: request_id.into(),
+            provider: "provider-a".into(),
+            model: "model-1".into(),
+            status: ProviderInvocationStatus::Completed,
+            started_at,
+            finished_at: started_at + chrono::Duration::milliseconds(5),
+            error_digest: None,
+            simulated: false,
+            policy_evidence: Some(evidence),
+        };
+        let proof = ProviderInvocationDurabilityProof::synthetic_for_test(receipt.clone()).unwrap();
+        let drafts = provider_event_drafts(task_id, run_id, &[receipt]).unwrap();
+        let scope = crate::main_chat_turn_runtime::MainChatProviderDurabilityScope::test_fixture(
+            task_id, run_id,
+        );
+
+        {
+            let store = MainChatAgentEventStore::new(&path).unwrap();
+            store
+                .append_provider_lifecycle_for_test(drafts, &scope, &[proof])
+                .unwrap();
+        }
+
+        let reopened = MainChatAgentEventStore::new(&path).unwrap();
+        let events = reopened.list(task_id, 0, 10).unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(
+            events.iter().all(|event| {
+                event
+                    .payload
+                    .get("selectedContextRefs")
+                    .and_then(Value::as_array)
+                    .is_some_and(|refs| refs == &vec![json!(WEB_CONTEXT_REF)])
+            }),
+            "{events:#?}"
+        );
+        for event in &events {
+            let payload = event.payload.as_object().unwrap();
+            for forbidden_field in ["messages", "content", "body", "snippet", "query", "url"] {
+                assert!(!payload.contains_key(forbidden_field), "{forbidden_field}");
+            }
+        }
     }
 
     #[test]

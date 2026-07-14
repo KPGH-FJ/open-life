@@ -1913,6 +1913,17 @@ fn requested_read_capabilities(intent: &IntentFrame) -> Vec<AllowedCapability> {
     if capabilities.is_empty() {
         capabilities.push(AllowedCapability::MemoryRead);
     }
+    // A Web read produces untrusted evidence, not a user-facing answer. The
+    // same PolicyDecision must explicitly authorize the provider synthesis
+    // step; ToolGateway success alone cannot be promoted to completion prose.
+    if capabilities.iter().any(|capability| {
+        matches!(
+            capability,
+            AllowedCapability::WebSearch | AllowedCapability::WebFetch
+        )
+    }) {
+        capabilities.push(AllowedCapability::ProviderGeneration);
+    }
     capabilities
 }
 

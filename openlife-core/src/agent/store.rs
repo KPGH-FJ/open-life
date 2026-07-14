@@ -4599,7 +4599,14 @@ impl AgentRunStore {
                 metadata_safe_enum_or_receipt(
                     "reasoning_strategy",
                     value,
-                    &["layered", "direct", "react", "plan_execute", "unknown"],
+                    &[
+                        "layered",
+                        "direct",
+                        "react",
+                        "plan_execute",
+                        "memory_governance",
+                        "unknown",
+                    ],
                     legacy_origin,
                 )
             });
@@ -5256,7 +5263,14 @@ impl AgentRunStore {
             metadata_safe_enum_or_receipt(
                 "reasoning_strategy",
                 value,
-                &["layered", "direct", "react", "plan_execute", "unknown"],
+                &[
+                    "layered",
+                    "direct",
+                    "react",
+                    "plan_execute",
+                    "memory_governance",
+                    "unknown",
+                ],
                 ReceiptOrigin::NewInput(receipt_key),
             )
         });
@@ -5530,7 +5544,14 @@ impl AgentRunStore {
             metadata_safe_enum_or_receipt(
                 "reasoning_strategy",
                 value,
-                &["layered", "direct", "react", "plan_execute", "unknown"],
+                &[
+                    "layered",
+                    "direct",
+                    "react",
+                    "plan_execute",
+                    "memory_governance",
+                    "unknown",
+                ],
                 reasoning_strategy_origin,
             )
         });
@@ -6021,7 +6042,14 @@ impl AgentRunStore {
             metadata_safe_enum_or_receipt(
                 "reasoning_strategy",
                 strategy,
-                &["layered", "direct", "react", "plan_execute", "unknown"],
+                &[
+                    "layered",
+                    "direct",
+                    "react",
+                    "plan_execute",
+                    "memory_governance",
+                    "unknown",
+                ],
                 ReceiptOrigin::StoredCanonical(receipt_key),
             ) != strategy
         }) {
@@ -7358,6 +7386,21 @@ mod tests {
         assert!(fetched.model_route.is_some());
         assert!(fetched.context_summary.is_some());
         assert!(fetched.finished_at.is_some());
+    }
+
+    #[test]
+    fn canonical_runtime_reasoning_strategies_remain_typed_after_round_trip() {
+        for strategy in ["direct", "react", "memory_governance"] {
+            let store = AgentRunStore::new_in_memory().unwrap();
+            let mut run = create_test_run();
+            run.id = format!("run-{strategy}");
+            run.task_id = format!("task-{strategy}");
+            run.reasoning_strategy = Some(strategy.into());
+            store.create_run(&run).unwrap();
+
+            let fetched = store.get_run(&run.id).unwrap().unwrap();
+            assert_eq!(fetched.reasoning_strategy.as_deref(), Some(strategy));
+        }
     }
 
     #[test]

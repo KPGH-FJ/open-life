@@ -19,7 +19,7 @@ pub(crate) async fn configure_live_provider_eval_state_with_local_http_provider(
     state: &Arc<AppState>,
     reply: &'static str,
 ) {
-    let provider_base = fake_local_chat_provider_endpoint(reply, None).await;
+    let provider_base = fake_local_chat_provider_endpoint(reply, None, false).await;
     configure_local_http_provider(state, provider_base).await;
 }
 
@@ -29,7 +29,17 @@ pub(crate) async fn configure_live_provider_eval_state_with_captured_local_http_
 ) -> Arc<std::sync::Mutex<Vec<String>>> {
     let captured_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
     let provider_base =
-        fake_local_chat_provider_endpoint(reply, Some(Arc::clone(&captured_requests))).await;
+        fake_local_chat_provider_endpoint(reply, Some(Arc::clone(&captured_requests)), false).await;
+    configure_local_http_provider(state, provider_base).await;
+    captured_requests
+}
+
+pub(crate) async fn configure_live_web_eval_state_with_citation_echo_local_http_provider(
+    state: &Arc<AppState>,
+) -> Arc<std::sync::Mutex<Vec<String>>> {
+    let captured_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider_base =
+        fake_local_chat_provider_endpoint("", Some(Arc::clone(&captured_requests)), true).await;
     configure_local_http_provider(state, provider_base).await;
     captured_requests
 }
@@ -85,6 +95,7 @@ async fn configure_local_http_provider(state: &Arc<AppState>, provider_base: Str
 async fn fake_local_chat_provider_endpoint(
     reply: &'static str,
     captured_requests: Option<Arc<std::sync::Mutex<Vec<String>>>>,
+    echo_web_citation: bool,
 ) -> String {
     let listener =
         std::net::TcpListener::bind("127.0.0.1:0").expect("bind local fake chat provider");
@@ -135,12 +146,31 @@ async fn fake_local_chat_provider_endpoint(
                             Err(_) => break,
                         }
                     }
+                    let request_text = String::from_utf8_lossy(&request_bytes).into_owned();
                     if let Some(captured_requests) = captured_requests.as_ref() {
                         captured_requests
                             .lock()
                             .expect("capture local provider request")
-                            .push(String::from_utf8_lossy(&request_bytes).into_owned());
+                            .push(request_text.clone());
                     }
+                    let response_content = if echo_web_citation {
+                        request_text
+                            .match_indices("webref_")
+                            .find_map(|(start, _)| {
+                                let candidate = request_text.get(start..start.checked_add(31)?)?;
+                                candidate[7..]
+                                    .bytes()
+                                    .all(|byte| byte.is_ascii_hexdigit())
+                                    .then(|| {
+                                        format!(
+                                            "The retrieved Web evidence is available [{candidate}]."
+                                        )
+                                    })
+                            })
+                            .unwrap_or_else(|| "No issued Web citation was observed.".into())
+                    } else {
+                        reply.to_string()
+                    };
                     let body = serde_json::json!({
                         "id": "chatcmpl-main-chat-live-provider-local",
                         "object": "chat.completion",
@@ -148,7 +178,7 @@ async fn fake_local_chat_provider_endpoint(
                             "index": 0,
                             "message": {
                                 "role": "assistant",
-                                "content": reply
+                                "content": response_content
                             },
                             "finish_reason": "stop"
                         }]

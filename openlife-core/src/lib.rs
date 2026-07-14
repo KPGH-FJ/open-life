@@ -39,6 +39,7 @@ pub mod tool_manifest;
 pub mod tool_permissions;
 pub mod vectors;
 pub mod versioning;
+pub mod web_search;
 
 #[cfg(test)]
 pub(crate) static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
