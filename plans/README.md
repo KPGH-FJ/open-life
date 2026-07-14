@@ -14,6 +14,10 @@ planning documents from steering new work.
 4. `plans/openlife_single_system_development_preparation.md`
 5. `plans/openlife_backend_remediation_v4.md` for the currently approved backend
    remediation work package, always subordinate to items 1-4.
+6. `plans/openlife_roadshow_core_capability_execution.md` for the time-bounded
+   roadshow execution order only. It is subordinate to items 1-5 and cannot
+   close a Phase7 or backend-remediation finding without that finding's own
+   required evidence.
 
 All older Goal, Stage, Beta, dogfood, eval, adapter, and route-transition
 documents are historical reference only unless a future user task explicitly
@@ -48,6 +52,10 @@ The shipped product must have:
 - `plans/openlife_backend_remediation_v4_phase0_evidence.md`
 - `plans/adr/0014-explicit-user-memory-write-lane.md`
 - `plans/adr/0015-transient-state-command-lane.md`
+- `plans/openlife_roadshow_core_capability_execution.md`
+- `plans/openlife_roadshow_core_capability_scenarios.json`
+- `plans/openlife_roadshow_core_capability_state.json`
+- `plans/openlife_roadshow_core_capability_waivers.json`
 
 These documents define the current cleanup scope, deletion manifest, and
 acceptance gates. The backend remediation work package implements the Phase7

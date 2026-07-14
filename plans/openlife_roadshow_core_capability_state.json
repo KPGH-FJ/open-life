@@ -1,0 +1,128 @@
+{
+  "schema_version": "openlife-roadshow-core-capability-state-v1",
+  "plan_id": "openlife-roadshow-core-capability-2026-07-14",
+  "status": "h0_in_progress",
+  "authority": {
+    "kind": "time_bounded_execution_overlay",
+    "subordinate_to": [
+      "AGENTS.md",
+      "plans/README.md",
+      "plans/openlife_single_system_deletion_manifest.md",
+      "plans/openlife_single_system_development_preparation.md",
+      "plans/openlife_backend_remediation_v4.md",
+      "plans/adr/0013-lifemodel-hs-source-of-truth-governance.md",
+      "plans/adr/0014-explicit-user-memory-write-lane.md",
+      "plans/adr/0015-transient-state-command-lane.md"
+    ],
+    "global_completion_claim_allowed": false
+  },
+  "baseline": {
+    "commit": "6704d6d1d56c26600b47f1bff68fe4ac743dbd96",
+    "branch": "codex/roadshow-core-recovery",
+    "worktree": "/Users/tw/Desktop/open-life-roadshow",
+    "verified_clean_before_plan_edit": true,
+    "verified_at": "2026-07-14"
+  },
+  "current_phase": "H0_FACTS_AND_FREEZE",
+  "schedule": {
+    "p50_hours": "34-36 conditional on H0 pass",
+    "p80_hours": "40-48 before H0",
+    "under_24_hours_credible": false,
+    "last_reestimated_phase": null
+  },
+  "global_finding_boundaries": {
+    "BR4-D008": "open_partial_roadshow_subset_required",
+    "BR4-D010": "open_partial_roadshow_subset_required",
+    "BR4-D011": "open_partial_roadshow_subset_required",
+    "BR4-D020": "open_p0_roadshow_subset_required",
+    "BR4-D050": "open_partial_statestore_not_started",
+    "BR4-D051": "open_partial",
+    "BR4-D053": "open_not_started"
+  },
+  "phases": [
+    {
+      "id": "P0_PLAN_PACKAGE",
+      "status": "completed",
+      "completion_claim": "plan_contract_json_and_diff_validated",
+      "commit": null
+    },
+    {
+      "id": "H0_FACTS_AND_FREEZE",
+      "status": "in_progress",
+      "completion_claim": "none",
+      "commit": null
+    },
+    {
+      "id": "H1_RUNTIME_TRUTH",
+      "status": "not_started",
+      "completion_claim": "none",
+      "commit": null
+    },
+    {
+      "id": "H2_GOVERNANCE",
+      "status": "not_started",
+      "completion_claim": "none",
+      "commit": null
+    },
+    {
+      "id": "V1_RESOURCE",
+      "status": "not_started",
+      "completion_claim": "none",
+      "commit": null
+    },
+    {
+      "id": "V2_WEB",
+      "status": "not_started",
+      "completion_claim": "none",
+      "commit": null
+    },
+    {
+      "id": "V3_STATESTORE",
+      "status": "not_started",
+      "completion_claim": "none",
+      "commit": null
+    },
+    {
+      "id": "V4_ARTIFACT",
+      "status": "not_started",
+      "completion_claim": "none",
+      "commit": null
+    },
+    {
+      "id": "CUMULATIVE_INTEGRATION",
+      "status": "not_started",
+      "completion_claim": "none",
+      "commit": null
+    },
+    {
+      "id": "RELIABILITY_AND_TRIAL",
+      "status": "not_started",
+      "completion_claim": "none",
+      "commit": null
+    }
+  ],
+  "h0_unknowns": [
+    "external_live_provider_result",
+    "external_live_web_result",
+    "true_streaming_capture_result",
+    "vision_admission",
+    "pdf_parser_and_provenance",
+    "docx_parser_and_provenance",
+    "xlsx_parser_and_provenance",
+    "resource_store_dependency_map",
+    "statestore_dependency_map",
+    "artifact_materialization_live_result",
+    "scenario_fixture_digests",
+    "cargo_warmup_duration",
+    "current_capability_and_performance_baseline"
+  ],
+  "evidence_dimensions": [
+    "implementation",
+    "deterministic_contract",
+    "fault_injection",
+    "external_live",
+    "product_trial",
+    "independent_review"
+  ],
+  "last_updated_at": "2026-07-14T16:55:40+08:00"
+}

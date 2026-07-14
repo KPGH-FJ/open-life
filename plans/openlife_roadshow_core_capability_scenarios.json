@@ -1,0 +1,187 @@
+{
+  "schema_version": "openlife-roadshow-core-capability-scenarios-v1",
+  "suite_id": "openlife-roadshow-core-capability-2026-07-14",
+  "status": "pre_frozen_pending_h0_fixture_digests",
+  "change_policy": {
+    "after_h0": "versioned_waiver_required",
+    "implementation_may_change_expected_outcome": false,
+    "old_result_must_be_retained": true
+  },
+  "evidence_dimensions": [
+    "implementation",
+    "deterministic_contract",
+    "fault_injection",
+    "external_live",
+    "product_trial",
+    "independent_review"
+  ],
+  "journeys": [
+    {
+      "id": "RC-01",
+      "title": "ordinary_chat_writing_and_plan",
+      "hard_gate": true,
+      "prompt": "把下面这段产品介绍改写成适合路演开场的三段话，然后给出一个五步执行计划：OpenLife 是一个由私人 LifeModel 引导的本地优先个人 Agent。",
+      "expected": "helpful_streamed_answer_with_writing_and_plan",
+      "proposal_expectation": "none",
+      "positive": "answer_is_nonempty_structured_and_final_is_last",
+      "negative": "quoted_or_historical_text_does_not_authorize_write",
+      "recovery": "provider_failure_is_failed_or_retryable_not_success_text",
+      "lifecycle": "conversation_reload_preserves_one_final_without_redispatch",
+      "dependencies": ["TurnRuntime", "ProviderRouter", "Receipt", "ConversationGateway"]
+    },
+    {
+      "id": "RC-02",
+      "title": "pdf_docx_compare",
+      "hard_gate": true,
+      "prompt": "比较这两份文件的核心主张、分歧和风险，并给出逐条引用。",
+      "fixtures": ["roadshow_compare.pdf", "roadshow_compare.docx"],
+      "fixture_sha256": [null, null],
+      "expected": "bounded_multi_file_comparison_with_validated_citations",
+      "proposal_expectation": "none",
+      "positive": "citations_resolve_to_selected_pdf_pages_and_docx_sections",
+      "negative": "corrupt_mime_expansion_and_unselected_citations_fail_closed",
+      "recovery": "parser_timeout_or_failure_does_not_dispatch_provider_with_partial_unmarked_context",
+      "lifecycle": "delete_tombstone_restart_prevents_resource_resurrection",
+      "dependencies": ["ResourceGateway", "ResourceStore", "Extractor", "ContextManifest", "CitationProjection"]
+    },
+    {
+      "id": "RC-03",
+      "title": "csv_xlsx_analysis",
+      "hard_gate": true,
+      "prompt": "分析这两份表格的趋势、异常和可能的数据质量问题，并引用对应工作表和单元格范围。",
+      "fixtures": ["roadshow_metrics.csv", "roadshow_metrics.xlsx"],
+      "fixture_sha256": [null, null],
+      "expected": "bounded_table_analysis_with_sheet_and_range_citations",
+      "proposal_expectation": "none",
+      "positive": "chinese_and_numeric_queries_select_relevant_rows_and_ranges",
+      "negative": "formula_or_xml_content_cannot_authorize_actions_or_escape_limits",
+      "recovery": "over_limit_sheet_or_cell_count_returns_typed_reduction_request",
+      "lifecycle": "restart_retains_digest_chunks_and_provenance_without_duplicate_content",
+      "dependencies": ["ResourceGateway", "SpreadsheetExtractor", "DeterministicSelector", "CitationProjection"]
+    },
+    {
+      "id": "RC-04",
+      "title": "file_plus_live_web",
+      "hard_gate": true,
+      "prompt": "结合附件中的产品数据和今天公开网页中的相关信息，给出有来源的路演风险摘要。",
+      "fixtures": ["roadshow_web_context.md"],
+      "fixture_sha256": [null],
+      "expected": "file_and_live_web_answer_with_distinct_source_truth",
+      "proposal_expectation": "none",
+      "positive": "receipt_and_ui_distinguish_resource_and_live_http_sources",
+      "negative": "web_or_file_prompt_injection_cannot_authorize_memory_or_tool_write",
+      "recovery": "web_timeout_preserves_file_answer_boundary_and_reports_missing_live_credit",
+      "lifecycle": "reload_preserves_source_refs_without_copying_page_or_file_bodies_into_receipt",
+      "dependencies": ["ResourceGateway", "WebTool", "NetworkPolicy", "ContextManifest", "Receipt"]
+    },
+    {
+      "id": "RC-05",
+      "title": "transient_daily_task",
+      "hard_gate": true,
+      "prompt": "今天下午三点前提醒我完成路演设备检查，完成后我还要能撤销。",
+      "expected": "transient_state_asset_committed_with_expiry_receipt_and_undo",
+      "proposal_expectation": "none_for_explicit_low_risk_transient_state",
+      "positive": "one_canonical_task_and_backend_projected_completion",
+      "negative": "long_term_sensitive_or_ambiguous_goal_routes_to_review_or_block",
+      "recovery": "lost_response_retry_reuses_receipt_and_does_not_duplicate_task",
+      "lifecycle": "restart_undo_and_expiry_preserve_tombstone_and_projection_truth",
+      "dependencies": ["StateStore", "PolicyRouter", "Outbox", "TaskProjection", "Undo"]
+    },
+    {
+      "id": "RC-06",
+      "title": "permission_wait_and_resume",
+      "hard_gate": true,
+      "prompt": "把最终摘要保存到工作区的 roadshow-summary.md。",
+      "expected": "proposal_or_permission_wait_then_single_resume_dispatch",
+      "proposal_expectation": "required_before_file_effect",
+      "positive": "accepted_request_materializes_once_and_receipt_matches_digest",
+      "negative": "assistant_prose_random_token_or_stale_grant_cannot_authorize_write",
+      "recovery": "restart_during_wait_or_dispatch_resumes_or_reconciles_without_duplicate",
+      "lifecycle": "denied_expired_and_accepted_states_project_truthfully",
+      "dependencies": ["ReviewWorkflow", "ToolGateway", "DispatchClaim", "Receipt", "ArtifactProjection"]
+    },
+    {
+      "id": "RC-07",
+      "title": "markdown_csv_artifact",
+      "hard_gate": true,
+      "prompt": "生成一份 Markdown 路演摘要和一份 CSV 风险清单，并在我确认后保存。",
+      "expected": "two_governed_artifacts_materialized_after_acceptance",
+      "proposal_expectation": "required",
+      "positive": "proposal_effect_filesystem_digest_receipt_and_ui_agree",
+      "negative": "proposal_creation_is_never_presented_as_file_completion",
+      "recovery": "crash_between_stage_rename_and_receipt_reconciles_without_blind_rewrite",
+      "lifecycle": "restart_can_inspect_confirmed_failed_or_unknown_artifact_state",
+      "dependencies": ["file.write_proposal", "ReviewWorkflow", "ArtifactMaterializer", "Reconciler"]
+    },
+    {
+      "id": "RC-08",
+      "title": "cancel_fail_retry_restart",
+      "hard_gate": true,
+      "prompt": "分析附件并检索网页；在执行中取消，然后重试一次。",
+      "fixtures": ["roadshow_cancel.md"],
+      "fixture_sha256": [null],
+      "expected": "local_cancel_under_one_second_no_late_commit_then_one_retry_dispatch",
+      "proposal_expectation": "none_for_reads",
+      "positive": "retry_completes_once_with_truthful_terminal_state",
+      "negative": "local_abort_does_not_claim_remote_cancel_confirmation",
+      "recovery": "restart_reconciles_interrupted_or_remote_unknown_state",
+      "lifecycle": "event_receipt_projection_and_ui_retain_one_canonical_terminal",
+      "dependencies": ["CancellationRegistry", "TurnRuntime", "Receipt", "ReplayCAS", "Reconciler"]
+    },
+    {
+      "id": "CC-01",
+      "title": "file_web_report",
+      "hard_gate": true,
+      "prompt": "读取附件并查询公开网页，生成一份带引用的 Markdown 报告，等待我确认后保存。",
+      "fixtures": ["roadshow_combined_report.pdf"],
+      "fixture_sha256": [null],
+      "expected": "resource_web_governance_artifact_end_to_end",
+      "proposal_expectation": "only_for_artifact_write",
+      "dependencies": ["RC-02", "RC-04", "RC-06", "RC-07"]
+    },
+    {
+      "id": "CC-02",
+      "title": "file_task_permission_resume",
+      "hard_gate": true,
+      "prompt": "从附件提取今天的准备事项，创建短期任务；如果要写文件，先等待我确认，然后继续。",
+      "fixtures": ["roadshow_checklist.docx"],
+      "fixture_sha256": [null],
+      "expected": "resource_to_transient_tasks_and_governed_optional_artifact",
+      "proposal_expectation": "none_for_transient_tasks_required_for_file_write",
+      "dependencies": ["RC-02", "RC-05", "RC-06"]
+    },
+    {
+      "id": "CC-03",
+      "title": "explicit_memory_undo_restart",
+      "hard_gate": true,
+      "prompt": "请记住：我的路演回答偏好是先给一句结论，再给三点证据。随后撤销这条记忆并重启检查。",
+      "expected": "explicit_reversible_memory_commit_undo_and_restart_truth",
+      "proposal_expectation": "none_for_exact_low_medium_risk_reversible_memory",
+      "positive": "receipt_and_memory_store_show_one_commit_then_undo",
+      "negative": "same_text_from_file_web_tool_quote_or_assistant_cannot_authorize_memory",
+      "recovery": "response_loss_retry_does_not_duplicate_memory",
+      "lifecycle": "restart_preserves_undo_and_no_canonical_hs_mutation",
+      "dependencies": ["ADR0014MemoryLane", "MemoryGateway", "Receipt", "Undo"]
+    }
+  ],
+  "conditional_journeys": [
+    {
+      "id": "COND-IMAGE-01",
+      "title": "image_understanding",
+      "status": "pending_h0_live_probe",
+      "admission_requires": ["typed_multimodal_contract", "live_provider_support", "privacy_capture", "product_trial"]
+    },
+    {
+      "id": "COND-OCR-01",
+      "title": "scanned_pdf_ocr",
+      "status": "pending_h0_parser_probe",
+      "admission_requires": ["bounded_local_ocr", "page_provenance", "timeout_memory_limits", "product_trial"]
+    },
+    {
+      "id": "COND-PDF-OUTPUT-01",
+      "title": "pdf_output",
+      "status": "pending_h0_artifact_probe",
+      "admission_requires": ["governed_materializer", "render_verification", "receipt_digest_truth"]
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "schema_version": "openlife-roadshow-core-capability-waivers-v1",
+  "suite_id": "openlife-roadshow-core-capability-2026-07-14",
+  "policy": {
+    "human_reason_required": true,
+    "old_version_and_result_retained": true,
+    "implementation_convenience_is_valid_reason": false,
+    "waiver_cannot_override_mechanical_failure": true
+  },
+  "waivers": []
+}
