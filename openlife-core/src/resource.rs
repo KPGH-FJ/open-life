@@ -188,6 +188,12 @@ pub struct StoredResourceChunk {
     pub provenance: ResourceProvenance,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceContextChunk {
+    pub resource: StoredResource,
+    pub chunk: StoredResourceChunk,
+}
+
 #[derive(Clone)]
 pub struct ResourceStore {
     db_path: Option<PathBuf>,
@@ -512,6 +518,81 @@ impl ResourceStore {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(anyhow::Error::from)?;
         Ok(chunks)
+    }
+
+    pub fn list_context_chunks_for_message(
+        &self,
+        message_id: &str,
+    ) -> Result<Vec<ResourceContextChunk>> {
+        if message_id.trim().is_empty() || message_id.len() > 256 {
+            anyhow::bail!("resource_context_message_id_invalid");
+        }
+        let conn = self.lock_connection()?;
+        let mut statement = conn.prepare(
+            "SELECT resources.resource_id, resources.filename,
+                    resources.declared_mime, resources.detected_mime,
+                    resources.format, resources.digest, resources.byte_count,
+                    resources.chunk_count, resources.created_at,
+                    chunks.ordinal, chunks.content, chunks.content_digest,
+                    chunks.provenance_json
+             FROM resource_message_bindings bindings
+             JOIN imported_resources resources
+               ON resources.resource_id = bindings.resource_id
+             JOIN resource_chunks chunks
+               ON chunks.resource_id = resources.resource_id
+             WHERE bindings.message_id = ?1 AND resources.deleted_at IS NULL
+             GROUP BY resources.resource_id, chunks.ordinal
+             ORDER BY resources.resource_id ASC, chunks.ordinal ASC",
+        )?;
+        let rows = statement.query_map([message_id], |row| {
+            let format_text: String = row.get(4)?;
+            let created_at_text: String = row.get(8)?;
+            let resource = StoredResource {
+                resource_id: row.get(0)?,
+                filename: row.get(1)?,
+                declared_mime: row.get(2)?,
+                detected_mime: row.get(3)?,
+                format: parse_format(&format_text).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        format_text.len(),
+                        rusqlite::types::Type::Text,
+                        error.into(),
+                    )
+                })?,
+                digest: row.get(5)?,
+                byte_count: row.get::<_, i64>(6)? as u64,
+                chunk_count: row.get::<_, i64>(7)? as u32,
+                created_at: DateTime::parse_from_rfc3339(&created_at_text)
+                    .map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            created_at_text.len(),
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?
+                    .with_timezone(&Utc),
+            };
+            let provenance_json: String = row.get(12)?;
+            let provenance = serde_json::from_str(&provenance_json).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    provenance_json.len(),
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?;
+            Ok(ResourceContextChunk {
+                chunk: StoredResourceChunk {
+                    resource_id: resource.resource_id.clone(),
+                    ordinal: row.get::<_, i64>(9)? as u32,
+                    content: row.get(10)?,
+                    content_digest: row.get(11)?,
+                    provenance,
+                },
+                resource,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub fn delete_resource(

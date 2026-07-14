@@ -29,6 +29,7 @@ pub mod reflex_engine;
 pub mod resource;
 pub mod resource_gateway;
 pub mod resource_parser;
+pub mod resource_selection;
 pub mod scheduler;
 pub mod skills;
 pub mod sqlite_migration;
