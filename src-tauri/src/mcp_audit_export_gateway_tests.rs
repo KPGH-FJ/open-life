@@ -66,6 +66,9 @@ async fn assert_d065_exact_one_row_export(state: &Arc<crate::AppState>, expected
         .expect("independently trusted D065 audit export");
     assert_eq!(export.days, 30);
     assert_eq!(export.entry_count, 1);
+    assert!(export.complete);
+    assert!(!export.truncated);
+    assert_eq!(export.incomplete_reason, None);
     assert_eq!(export.entries.len(), 1);
     assert_eq!(export.entries[0].tool_name, expected_tool_name);
     assert!(export.entries[0].success);
@@ -87,10 +90,54 @@ async fn d065_assert_unavailable_export_gate(store_name: &'static str) {
         .expect_err("audit export must fail at composite trust before confirmation")
         .to_string();
 
+    let expected_reason = match store_name {
+        D065_AUDIT_KEY_REFERENCE_STORE => "key_reference_store_unavailable",
+        D065_AUDIT_STORE => "audit_store_unavailable",
+        other => panic!("unexpected D065 audit owner {other}"),
+    };
+
     assert!(
-        error.contains("persistence_store_unavailable") || error.contains(store_name),
-        "export returned the wrong failure authority for {store_name}: {error}"
+        error.contains("persistence_store_unavailable"),
+        "export must preserve the outer persistence authority marker for {store_name}: {error}"
     );
+    assert!(
+        error.contains(store_name)
+            && error.contains("mode=Unavailable")
+            && error.contains(expected_reason),
+        "export must retain typed owner, mode and reason evidence for {store_name}: {error}"
+    );
+}
+
+#[tokio::test]
+async fn d065_export_window_rejects_unbounded_input_before_gateway_or_database_read() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("mcp_audit.db");
+    let state = d065_export_state(&database_path);
+    d065_insert_export_row(&state).await;
+    let before = sqlite_family_snapshot(&database_path);
+
+    for invalid in [i64::MIN, -1, 0, 3_651, i64::MAX] {
+        let error = export_mcp_audit_logs_with_state(invalid, &state)
+            .await
+            .expect_err("unbounded export window must fail before canonical read");
+        let crate::errors::AppError::Config { message, hint } = error else {
+            panic!("invalid export window must be a typed config error");
+        };
+        assert_eq!(message, "mcp_audit_export_days_out_of_range");
+        assert_eq!(hint.as_deref(), Some("days must be between 1 and 3650"));
+    }
+    assert_eq!(state.mcp_audit_read_gateway.call_counts().export, 0);
+    assert_eq!(sqlite_family_snapshot(&database_path), before);
+
+    let control = export_mcp_audit_logs_with_state(30, &state)
+        .await
+        .expect("30-day export window is valid");
+    assert_eq!(control.days, 30);
+    assert_eq!(control.entry_count, 1);
+    assert!(control.complete);
+    assert!(!control.truncated);
+    assert_eq!(control.incomplete_reason, None);
+    assert_eq!(state.mcp_audit_read_gateway.call_counts().export, 1);
 }
 
 #[tokio::test]
@@ -236,6 +283,9 @@ async fn d065_trusted_empty_and_nonempty_export_is_exact_and_uses_concrete_gatew
         .expect("trusted empty audit export");
     assert_eq!(empty.days, 30);
     assert_eq!(empty.entry_count, 0);
+    assert!(empty.complete);
+    assert!(!empty.truncated);
+    assert_eq!(empty.incomplete_reason, None);
     assert!(empty.entries.is_empty());
     assert_eq!(sqlite_family_snapshot(&database_path), empty_before);
 
@@ -246,6 +296,9 @@ async fn d065_trusted_empty_and_nonempty_export_is_exact_and_uses_concrete_gatew
         .expect("trusted nonempty audit export");
     assert_eq!(nonempty.days, 30);
     assert_eq!(nonempty.entry_count, 1);
+    assert!(nonempty.complete);
+    assert!(!nonempty.truncated);
+    assert_eq!(nonempty.incomplete_reason, None);
     assert_eq!(nonempty.entries.len(), 1);
     assert_eq!(nonempty.entries[0].tool_name, "d065_export_fixture_tool");
     assert!(nonempty.entries[0].success);
@@ -308,6 +361,9 @@ async fn d065_verified_canonical_read_only_store_retains_exact_export_capability
         .await
         .expect("verified canonical read-only audit export");
     assert_eq!(export.entry_count, 1);
+    assert!(export.complete);
+    assert!(!export.truncated);
+    assert_eq!(export.incomplete_reason, None);
     assert_eq!(export.entries.len(), 1);
     assert_eq!(export.entries[0].tool_name, "d065_read_only_export_fixture");
     assert_eq!(sqlite_family_snapshot(&database_path), before);

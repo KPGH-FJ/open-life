@@ -101,9 +101,27 @@ describe("PrivacyTab", () => {
           {...baseProps}
           diagnostics={
             {
-              mcp_audit_read_status: status,
-              mcp_recent_audit_count: auditCount,
-              mcp_recent_pii_count: piiCount,
+              mcp_audit_read:
+                status === "available"
+                  ? {
+                      status,
+                      recentAuditCount: auditCount,
+                      recentPiiCount: piiCount,
+                    }
+                  : status === "degraded"
+                    ? {
+                        status,
+                        reasonCode: "audit_store_read_only",
+                        recentAuditCount: auditCount,
+                        recentPiiCount: piiCount,
+                      }
+                    : {
+                        status,
+                        reasonCode:
+                          status === "unavailable"
+                            ? "audit_store_unavailable"
+                            : "audit_read_failed",
+                      },
             } as any
           }
         />
@@ -118,8 +136,33 @@ describe("PrivacyTab", () => {
         expect(screen.getByText(`近期审计：${auditCount}`)).toBeInTheDocument();
         expect(screen.getByText(`PII 命中：${piiCount}`)).toBeInTheDocument();
       }
+
+      const exportButton = screen.getByRole("button", { name: "导出审计" });
+      const cleanupButton = screen.getByRole("button", { name: "清理旧日志" });
+      const rotateButton = screen.getByRole("button", { name: "轮换密钥" });
+      if (status === "available") {
+        expect(exportButton).toBeEnabled();
+        expect(cleanupButton).toBeEnabled();
+        expect(rotateButton).toBeEnabled();
+      } else if (status === "degraded") {
+        expect(exportButton).toBeEnabled();
+        expect(cleanupButton).toBeDisabled();
+        expect(rotateButton).toBeDisabled();
+      } else {
+        expect(exportButton).toBeDisabled();
+        expect(cleanupButton).toBeDisabled();
+        expect(rotateButton).toBeDisabled();
+      }
     }
   );
+
+  it("disables every audit action when the projection is missing", async () => {
+    render(<PrivacyTab {...baseProps} diagnostics={null} />);
+    await screen.findByText(/旧 run 可能未接入/);
+    expect(screen.getByRole("button", { name: "导出审计" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "清理旧日志" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "轮换密钥" })).toBeDisabled();
+  });
 
   it("does not render tool permissions in the privacy tab", async () => {
     render(<PrivacyTab {...baseProps} />);
@@ -210,6 +253,15 @@ describe("PrivacyTab", () => {
     render(
       <PrivacyTab
         {...baseProps}
+        diagnostics={
+          {
+            mcp_audit_read: {
+              status: "available",
+              recentAuditCount: 1,
+              recentPiiCount: 0,
+            },
+          } as any
+        }
         handleExportAudit={handleExportAudit}
         handleCleanupAudit={handleCleanupAudit}
         handleRotateAuditKey={handleRotateAuditKey}

@@ -61,6 +61,10 @@ pub(crate) mod main_chat_turn_pipeline;
 #[allow(dead_code)]
 pub mod main_chat_turn_runtime;
 pub(crate) mod mcp_audit_read_gateway;
+pub use mcp_audit_read_gateway::{
+    McpAuditDiagnosticFacts, McpAuditLogListFacts, McpAuditReadProjection, McpAuditReadReasonCode,
+    McpAuditReadStatus,
+};
 #[allow(dead_code)]
 pub(crate) mod memory_gateway;
 pub(crate) mod persistence_coordinator;
@@ -393,8 +397,7 @@ pub struct SystemDiagnostics {
     pub policy_router: crate::commands::diagnostics::PolicyRouterStatus,
     pub mcp_server_count: usize,
     pub mcp_tool_count: usize,
-    pub mcp_recent_audit_count: usize,
-    pub mcp_recent_pii_count: usize,
+    pub mcp_audit_read: McpAuditReadProjection<McpAuditDiagnosticFacts>,
     pub memory_chunk_count: usize,
     pub vector_corrupt_embedding_count: usize,
     pub vector_unknown_profile_count: usize,

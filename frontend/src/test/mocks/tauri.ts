@@ -2150,19 +2150,32 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         },
       ] as T);
     case "list_mcp_audit_logs":
-      return Promise.resolve([
-        {
-          id: 1,
-          tool_name: "write_file",
-          arguments: '{"path":"/tmp/demo.txt","content":"hello"}',
-          result: "工具执行成功",
-          success: true,
-          pii_found: true,
-          created_at: new Date(Date.now() - 60000).toISOString(),
-        },
-      ] as T);
-    case "clear_mcp_audit_logs":
-      return Promise.resolve(3 as T);
+      return Promise.resolve({
+        status: "available",
+        entries: [
+          {
+            id: 1,
+            tool_name: "write_file",
+            arguments: JSON.stringify({
+              kind: "arguments",
+              payloadStored: false,
+              valueType: "object",
+              bytes: 42,
+              digest: "sha256:AT5/r7IBtLhordHw+cHDRUBlUanhoUXBpj8SXOOfjGs",
+            }),
+            result: JSON.stringify({
+              kind: "result",
+              payloadStored: false,
+              valueType: "string",
+              bytes: 18,
+              digest: "sha256:jCW4voE7OX1fsd3cEkYh4wDHjOVUw90Ga7TB0dnFGwU",
+            }),
+            success: true,
+            pii_found: true,
+            created_at: new Date(Date.now() - 60000).toISOString(),
+          },
+        ],
+      } as T);
     case "list_mcp_tools":
       return Promise.resolve([
         { name: "read_file", description: "读取文件内容" },
@@ -3102,8 +3115,11 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         },
         mcp_server_count: 1,
         mcp_tool_count: 2,
-        mcp_recent_audit_count: 1,
-        mcp_recent_pii_count: 1,
+        mcp_audit_read: {
+          status: "available",
+          recentAuditCount: 1,
+          recentPiiCount: 1,
+        },
         memory_chunk_count: 42,
         vector_corrupt_embedding_count: 0,
         unfinished_builder_sessions: 0,
@@ -3547,6 +3563,9 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         exported_at: new Date().toISOString(),
         entry_count: 0,
         days: _args?.days ?? 7,
+        complete: true,
+        truncated: false,
+        incomplete_reason: null,
         entries: [],
       } as T);
     case "cleanup_mcp_audit_logs":

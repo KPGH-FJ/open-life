@@ -9,7 +9,10 @@ use crate::mcp_audit_read_contract_test_support::{
 use crate::persistence_coordinator::{
     PersistenceCoordinator, PersistenceStoreMode, EXPECTED_BOOTSTRAP_STORES,
 };
-use openlife_core::mcp_audit::{AuditKeyConfig, AuditKeyMaterial, KeyMode, McpAuditStore};
+use openlife_core::mcp_audit::{
+    AuditKeyConfig, AuditKeyMaterial, KeyMode, McpAuditExportDays, McpAuditStore,
+};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -74,7 +77,10 @@ fn d065_command_context() -> tauri::Context<tauri::test::MockRuntime> {
     context
 }
 
-fn d065_list_audit_logs_command(state: Arc<crate::AppState>) -> Result<serde_json::Value, String> {
+fn d065_list_audit_logs_command_with_limit(
+    state: Arc<crate::AppState>,
+    limit: usize,
+) -> Result<serde_json::Value, String> {
     let app = tauri::test::mock_builder()
         .manage(state)
         .invoke_handler(tauri::generate_handler![list_mcp_audit_logs])
@@ -90,7 +96,7 @@ fn d065_list_audit_logs_command(state: Arc<crate::AppState>) -> Result<serde_jso
             callback: tauri::ipc::CallbackFn(0),
             error: tauri::ipc::CallbackFn(1),
             url: "http://tauri.localhost".parse().unwrap(),
-            body: tauri::ipc::InvokeBody::Json(serde_json::json!({"limit": 50})),
+            body: tauri::ipc::InvokeBody::Json(serde_json::json!({"limit": limit})),
             headers: Default::default(),
             invoke_key: tauri::test::INVOKE_KEY.to_string(),
         },
@@ -99,6 +105,10 @@ fn d065_list_audit_logs_command(state: Arc<crate::AppState>) -> Result<serde_jso
     response
         .deserialize::<serde_json::Value>()
         .map_err(|error| error.to_string())
+}
+
+fn d065_list_audit_logs_command(state: Arc<crate::AppState>) -> Result<serde_json::Value, String> {
+    d065_list_audit_logs_command_with_limit(state, 50)
 }
 
 async fn d065_diagnostics(state: &Arc<crate::AppState>) -> serde_json::Value {
@@ -111,30 +121,51 @@ async fn d065_diagnostics(state: &Arc<crate::AppState>) -> serde_json::Value {
 }
 
 fn assert_d065_untrusted(diagnostics: &serde_json::Value, expected_status: &str) {
+    let projection = &diagnostics["mcp_audit_read"];
     assert_eq!(
-        diagnostics["mcp_audit_read_status"], expected_status,
+        projection["status"], expected_status,
         "audit-read availability must distinguish unavailable substrate from an unknown read result"
     );
     assert!(
-        diagnostics["mcp_recent_audit_count"].is_null(),
-        "unknown audit count must not be projected as zero or stale data: {diagnostics:#}"
+        projection.get("recentAuditCount").is_none(),
+        "failed audit projection must not contain a count, zero, or stale data: {diagnostics:#}"
     );
     assert!(
-        diagnostics["mcp_recent_pii_count"].is_null(),
-        "unknown PII count must not be projected as zero or stale data: {diagnostics:#}"
+        projection.get("recentPiiCount").is_none(),
+        "failed audit projection must not contain a PII count, zero, or stale data: {diagnostics:#}"
+    );
+    assert!(projection["reasonCode"].is_string());
+}
+
+fn assert_d065_failed_list_projection(
+    projection: &serde_json::Value,
+    expected_status: &str,
+    expected_reason: &str,
+) {
+    assert_eq!(projection["status"], expected_status);
+    assert_eq!(projection["reasonCode"], expected_reason);
+    assert!(
+        projection.get("entries").is_none(),
+        "failed list projection must make entries structurally unavailable: {projection:#}"
     );
 }
 
 async fn assert_d065_exact_one_row_read_surfaces(
     state: &Arc<crate::AppState>,
     expected_status: &str,
+    expected_reason: Option<&str>,
     expected_tool_name: &str,
 ) {
     let list = d065_list_audit_logs_command(Arc::clone(state))
         .expect("independently trusted D065 audit-list command");
-    let rows = list
+    assert_eq!(list["status"], expected_status);
+    match expected_reason {
+        Some(reason) => assert_eq!(list["reasonCode"], reason),
+        None => assert!(list.get("reasonCode").is_none()),
+    }
+    let rows = list["entries"]
         .as_array()
-        .expect("D065 audit-list command returns a JSON array");
+        .expect("D065 successful audit-list projection carries entries");
     assert_eq!(rows.len(), 1, "audit list must retain the exact row");
     assert_eq!(
         rows[0]["tool_name"], expected_tool_name,
@@ -142,12 +173,17 @@ async fn assert_d065_exact_one_row_read_surfaces(
     );
 
     let diagnostics = d065_diagnostics(state).await;
+    let projection = &diagnostics["mcp_audit_read"];
     assert_eq!(
-        diagnostics["mcp_audit_read_status"], expected_status,
+        projection["status"], expected_status,
         "audit status must be derived only from the two composite audit owners"
     );
-    assert_eq!(diagnostics["mcp_recent_audit_count"], 1);
-    assert_eq!(diagnostics["mcp_recent_pii_count"], 1);
+    match expected_reason {
+        Some(reason) => assert_eq!(projection["reasonCode"], reason),
+        None => assert!(projection.get("reasonCode").is_none()),
+    }
+    assert_eq!(projection["recentAuditCount"], 1);
+    assert_eq!(projection["recentPiiCount"], 1);
 }
 
 #[tokio::test]
@@ -172,7 +208,7 @@ async fn d065_unrelated_read_only_store_does_not_degrade_exact_audit_reads() {
         PersistenceStoreMode::ReadOnlyCanonical,
     );
     assert_d065_effects_blocked_independently(&state.persistence_coordinator);
-    assert_d065_exact_one_row_read_surfaces(&state, "available", "d065_fixture_tool").await;
+    assert_d065_exact_one_row_read_surfaces(&state, "available", None, "d065_fixture_tool").await;
 }
 
 #[tokio::test]
@@ -197,7 +233,7 @@ async fn d065_unrelated_unavailable_store_does_not_hide_exact_audit_reads() {
         PersistenceStoreMode::Unavailable,
     );
     assert_d065_effects_blocked_independently(&state.persistence_coordinator);
-    assert_d065_exact_one_row_read_surfaces(&state, "available", "d065_fixture_tool").await;
+    assert_d065_exact_one_row_read_surfaces(&state, "available", None, "d065_fixture_tool").await;
 }
 
 #[tokio::test]
@@ -217,7 +253,13 @@ async fn d065_read_only_key_reference_with_writable_audit_store_is_degraded_but_
         PersistenceStoreMode::ReadWriteCanonical,
     );
     assert_d065_effects_blocked_independently(&state.persistence_coordinator);
-    assert_d065_exact_one_row_read_surfaces(&state, "degraded", "d065_fixture_tool").await;
+    assert_d065_exact_one_row_read_surfaces(
+        &state,
+        "degraded",
+        Some("key_reference_store_read_only"),
+        "d065_fixture_tool",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -269,6 +311,7 @@ async fn d065_read_only_audit_store_with_writable_key_reference_is_degraded_but_
     assert_d065_exact_one_row_read_surfaces(
         &state,
         "degraded",
+        Some("audit_store_read_only"),
         "d065_audit_only_read_only_fixture",
     )
     .await;
@@ -281,15 +324,15 @@ async fn d065_trusted_empty_and_nonempty_diagnostics_are_available_and_exact() {
     let state = d065_state(&directory.path().join("mcp_audit.db"));
 
     let empty = d065_diagnostics(&state).await;
-    assert_eq!(empty["mcp_audit_read_status"], "available");
-    assert_eq!(empty["mcp_recent_audit_count"], 0);
-    assert_eq!(empty["mcp_recent_pii_count"], 0);
+    assert_eq!(empty["mcp_audit_read"]["status"], "available");
+    assert_eq!(empty["mcp_audit_read"]["recentAuditCount"], 0);
+    assert_eq!(empty["mcp_audit_read"]["recentPiiCount"], 0);
 
     d065_insert_audit_row(&state).await;
     let nonempty = d065_diagnostics(&state).await;
-    assert_eq!(nonempty["mcp_audit_read_status"], "available");
-    assert_eq!(nonempty["mcp_recent_audit_count"], 1);
-    assert_eq!(nonempty["mcp_recent_pii_count"], 1);
+    assert_eq!(nonempty["mcp_audit_read"]["status"], "available");
+    assert_eq!(nonempty["mcp_audit_read"]["recentAuditCount"], 1);
+    assert_eq!(nonempty["mcp_audit_read"]["recentPiiCount"], 1);
 }
 
 #[tokio::test]
@@ -300,7 +343,8 @@ async fn d065_trusted_empty_and_nonempty_list_command_remains_exact() {
     assert_eq!(
         d065_list_audit_logs_command(state.clone())
             .expect("trusted empty audit list")
-            .as_array()
+            .get("entries")
+            .and_then(serde_json::Value::as_array)
             .unwrap()
             .len(),
         0
@@ -309,11 +353,207 @@ async fn d065_trusted_empty_and_nonempty_list_command_remains_exact() {
     assert_eq!(
         d065_list_audit_logs_command(state)
             .expect("trusted nonempty audit list")
-            .as_array()
+            .get("entries")
+            .and_then(serde_json::Value::as_array)
             .unwrap()
             .len(),
         1
     );
+}
+
+#[tokio::test]
+async fn d065_webview_list_limit_rejects_zero_and_over_ceiling_without_reading() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = d065_state(&directory.path().join("mcp_audit.db"));
+    let gateway = Arc::clone(&state.mcp_audit_read_gateway);
+
+    for limit in [0, 201] {
+        let error = d065_list_audit_logs_command_with_limit(Arc::clone(&state), limit)
+            .expect_err("invalid list limit must fail before the gateway reads audit rows");
+        assert!(
+            error.contains("mcp_audit_list_limit_out_of_range"),
+            "invalid limit {limit} must preserve the typed reason: {error}"
+        );
+    }
+    assert_eq!(gateway.call_counts().list, 0);
+}
+
+#[tokio::test]
+async fn d065_blocking_worker_join_error_fails_closed_without_poisoning_runtime_or_store() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = d065_state(&directory.path().join("mcp_audit.db"));
+    d065_insert_audit_row(&state).await;
+
+    let projection = state
+        .mcp_audit_read_gateway
+        .worker_panic_projection_for_test(&state)
+        .await;
+    assert!(matches!(
+        projection,
+        crate::McpAuditReadProjection::Unknown {
+            reason_code: crate::McpAuditReadReasonCode::AuditReadFailed
+        }
+    ));
+
+    tokio::task::yield_now().await;
+    let control = d065_list_audit_logs_command(state)
+        .expect("runtime and canonical store remain readable after worker JoinError");
+    assert_eq!(control["status"], "available");
+    assert_eq!(control["entries"].as_array().map(Vec::len), Some(1));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn d065_concurrent_reads_queue_before_spawn_and_keep_async_runtime_live() {
+    const READS: usize = 12;
+    let directory = tempfile::tempdir().unwrap();
+    let state = d065_state(&directory.path().join("mcp_audit.db"));
+    d065_insert_audit_row(&state).await;
+
+    let heartbeat_done = Arc::new(AtomicBool::new(false));
+    let heartbeat_ticks = Arc::new(AtomicUsize::new(0));
+    let heartbeat = {
+        let heartbeat_done = Arc::clone(&heartbeat_done);
+        let heartbeat_ticks = Arc::clone(&heartbeat_ticks);
+        tokio::spawn(async move {
+            while !heartbeat_done.load(Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                heartbeat_ticks.fetch_add(1, Ordering::SeqCst);
+            }
+        })
+    };
+
+    let mut reads = tokio::task::JoinSet::new();
+    for _ in 0..READS {
+        let state = Arc::clone(&state);
+        reads.spawn(async move {
+            state
+                .mcp_audit_read_gateway
+                .projection_with_operation_for_test(&state, |audit| {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    audit.list_logs(1)
+                })
+                .await
+        });
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(result) = reads.join_next().await {
+            assert!(matches!(
+                result.expect("bounded audit read task"),
+                crate::McpAuditReadProjection::Available { .. }
+            ));
+        }
+    })
+    .await
+    .expect("bounded audit reads must complete without deadlock");
+
+    heartbeat_done.store(true, Ordering::SeqCst);
+    heartbeat.await.expect("async heartbeat task");
+    assert!(
+        heartbeat_ticks.load(Ordering::SeqCst) >= 5,
+        "blocking SQLite/decrypt work must not stall the async runtime"
+    );
+    let stats = state.mcp_audit_read_gateway.blocking_worker_stats();
+    assert_eq!(stats.started, READS);
+    assert_eq!(stats.peak, 1, "only one blocking worker may enter at once");
+    assert_eq!(stats.active, 0);
+    assert_eq!(stats.available_permits, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn d065_cancelled_caller_cannot_release_an_inflight_worker_permit_early() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = d065_state(&directory.path().join("mcp_audit.db"));
+    d065_insert_audit_row(&state).await;
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+
+    let first = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            state
+                .mcp_audit_read_gateway
+                .projection_with_operation_for_test(&state, move |audit| {
+                    let _ = started_tx.send(());
+                    release_rx
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .map_err(|_| anyhow::anyhow!("d065_controlled_worker_release_dropped"))?;
+                    audit.list_logs(1)
+                })
+                .await
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
+        .await
+        .expect("first blocking worker must start")
+        .expect("first blocking worker start signal");
+    first.abort();
+    assert!(first
+        .await
+        .expect_err("caller task is cancelled")
+        .is_cancelled());
+
+    let occupied = state.mcp_audit_read_gateway.blocking_worker_stats();
+    assert_eq!(occupied.active, 1);
+    assert_eq!(occupied.started, 1);
+    assert_eq!(occupied.available_permits, 0);
+
+    let second = {
+        let state = Arc::clone(&state);
+        tokio::spawn(async move {
+            state
+                .mcp_audit_read_gateway
+                .projection_with_operation_for_test(&state, |audit| {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    audit.list_logs(1)
+                })
+                .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert_eq!(
+        state.mcp_audit_read_gateway.blocking_worker_stats().started,
+        1,
+        "the cancelled caller must not let a second worker enter while its detached worker runs"
+    );
+
+    release_tx
+        .send(())
+        .expect("release detached blocking worker");
+    let second_projection = tokio::time::timeout(std::time::Duration::from_secs(2), second)
+        .await
+        .expect("queued read completes after the detached worker exits")
+        .expect("queued read task");
+    assert!(matches!(
+        second_projection,
+        crate::McpAuditReadProjection::Available { .. }
+    ));
+    let settled = state.mcp_audit_read_gateway.blocking_worker_stats();
+    assert_eq!(settled.started, 2);
+    assert_eq!(settled.peak, 1);
+    assert_eq!(settled.active, 0);
+    assert_eq!(settled.available_permits, 1);
+}
+
+#[tokio::test]
+async fn d065_closed_blocking_worker_gate_projects_unknown_without_starting_a_worker() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = d065_state(&directory.path().join("mcp_audit.db"));
+    d065_insert_audit_row(&state).await;
+    state
+        .mcp_audit_read_gateway
+        .close_blocking_worker_gate_for_test();
+
+    let projection = state.mcp_audit_read_gateway.diagnostic_counts(&state).await;
+    assert!(matches!(
+        projection,
+        crate::McpAuditReadProjection::Unknown {
+            reason_code: crate::McpAuditReadReasonCode::AuditReadFailed
+        }
+    ));
+    let stats = state.mcp_audit_read_gateway.blocking_worker_stats();
+    assert_eq!(stats.started, 0);
+    assert_eq!(stats.active, 0);
+    assert_eq!(stats.available_permits, 1);
 }
 
 #[tokio::test]
@@ -325,7 +565,10 @@ async fn d065_all_audit_read_paths_share_one_concrete_gateway_instance() {
     let _ = d065_diagnostics(&state).await;
     let _ = d065_list_audit_logs_command(Arc::clone(&state)).expect("trusted list command");
     let _ = gateway
-        .export_logs(&state, 30)
+        .export_logs(
+            &state,
+            McpAuditExportDays::try_from(30).expect("valid D065 export window"),
+        )
         .await
         .expect("trusted export gateway path");
 
@@ -360,9 +603,12 @@ async fn d065_key_reference_unavailable_list_command_fails_closed() {
         "key reference unavailable",
     );
 
-    assert!(
-        d065_list_audit_logs_command(state).is_err(),
-        "the shipped list command must not bypass composite key-reference trust"
+    let projection = d065_list_audit_logs_command(state)
+        .expect("typed unavailable projection is a successful IPC response");
+    assert_d065_failed_list_projection(
+        &projection,
+        "unavailable",
+        "key_reference_store_unavailable",
     );
 }
 
@@ -389,10 +635,9 @@ async fn d065_audit_store_unavailable_fails_list_command() {
         "audit store unavailable",
     );
 
-    assert!(
-        d065_list_audit_logs_command(state).is_err(),
-        "an unavailable audit store must fail the shipped list command"
-    );
+    let projection = d065_list_audit_logs_command(state)
+        .expect("typed unavailable projection is a successful IPC response");
+    assert_d065_failed_list_projection(&projection, "unavailable", "audit_store_unavailable");
 }
 
 async fn d065_assert_corrupt_ciphertext_projects_unknown_without_mutation(
@@ -434,11 +679,9 @@ async fn d065_assert_corrupt_ciphertext_list_fails_without_mutation(column: Ciph
     corrupt_ciphertext(&database_path, column);
     let before = sqlite_family_snapshot(&database_path);
 
-    assert!(
-        d065_list_audit_logs_command(state).is_err(),
-        "corrupt {} must not be returned as a successful placeholder row",
-        column.label()
-    );
+    let projection = d065_list_audit_logs_command(state)
+        .expect("typed unknown projection is a successful IPC response");
+    assert_d065_failed_list_projection(&projection, "unknown", "audit_read_failed");
     assert_eq!(
         sqlite_family_snapshot(&database_path),
         before,
@@ -455,6 +698,62 @@ async fn d065_corrupt_arguments_ciphertext_list_fails_without_mutation() {
 #[tokio::test]
 async fn d065_corrupt_result_ciphertext_list_fails_without_mutation() {
     d065_assert_corrupt_ciphertext_list_fails_without_mutation(CiphertextColumn::Result).await;
+}
+
+async fn d065_assert_uncovered_persisted_key_epoch_fails_closed_without_mutation(
+    persisted_key_epoch: i64,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("mcp_audit.db");
+    let state = d065_state(&database_path);
+    d065_insert_audit_row(&state).await;
+
+    let valid_control = d065_list_audit_logs_command(Arc::clone(&state))
+        .expect("current-key ciphertext must be readable before key_epoch tampering");
+    assert_eq!(valid_control["status"], "available");
+    assert_eq!(valid_control["entries"].as_array().unwrap().len(), 1);
+
+    let connection = rusqlite::Connection::open(&database_path).unwrap();
+    assert_eq!(
+        connection
+            .execute("UPDATE mcp_log SET key_epoch = ?1", [persisted_key_epoch],)
+            .unwrap(),
+        1,
+        "the counterfactual must mutate exactly one real SQLite row"
+    );
+    drop(connection);
+    let before = sqlite_family_snapshot(&database_path);
+
+    let list = d065_list_audit_logs_command(Arc::clone(&state))
+        .expect("an uncovered persisted key epoch must use the typed unknown projection");
+    assert_d065_failed_list_projection(&list, "unknown", "audit_read_failed");
+    assert_d065_untrusted(&d065_diagnostics(&state).await, "unknown");
+    assert!(
+        state
+            .mcp_audit_read_gateway
+            .export_logs(
+                &state,
+                McpAuditExportDays::try_from(30).expect("valid D065 export window"),
+            )
+            .await
+            .is_err(),
+        "export must share the exact persisted-epoch failure semantics"
+    );
+    assert_eq!(
+        sqlite_family_snapshot(&database_path),
+        before,
+        "list, diagnostics, and export must not rewrite an uncovered persisted epoch"
+    );
+}
+
+#[tokio::test]
+async fn d065_positive_missing_persisted_key_epoch_fails_closed_without_mutation() {
+    d065_assert_uncovered_persisted_key_epoch_fails_closed_without_mutation(999_999).await;
+}
+
+#[tokio::test]
+async fn d065_negative_persisted_key_epoch_fails_closed_without_mutation() {
+    d065_assert_uncovered_persisted_key_epoch_fails_closed_without_mutation(-1).await;
 }
 
 #[tokio::test]
@@ -485,10 +784,9 @@ async fn d065_sqlite_query_failure_fails_list_without_mutation() {
     drop(connection);
     let before = sqlite_family_snapshot(&database_path);
 
-    assert!(
-        d065_list_audit_logs_command(state).is_err(),
-        "a real SQLite query failure must fail the shipped list command"
-    );
+    let projection = d065_list_audit_logs_command(state)
+        .expect("typed unknown projection is a successful IPC response");
+    assert_d065_failed_list_projection(&projection, "unknown", "audit_read_failed");
     assert_eq!(sqlite_family_snapshot(&database_path), before);
 }
 
@@ -539,9 +837,13 @@ async fn d065_verified_canonical_read_only_mode_projects_degraded_counts() {
 
     let diagnostics = d065_diagnostics(&state).await;
     assert_eq!(sqlite_family_snapshot(&database_path), before);
-    assert_eq!(diagnostics["mcp_audit_read_status"], "degraded");
-    assert_eq!(diagnostics["mcp_recent_audit_count"], 1);
-    assert_eq!(diagnostics["mcp_recent_pii_count"], 1);
+    assert_eq!(diagnostics["mcp_audit_read"]["status"], "degraded");
+    assert_eq!(
+        diagnostics["mcp_audit_read"]["reasonCode"],
+        "both_owners_read_only"
+    );
+    assert_eq!(diagnostics["mcp_audit_read"]["recentAuditCount"], 1);
+    assert_eq!(diagnostics["mcp_audit_read"]["recentPiiCount"], 1);
 }
 
 #[tokio::test]
@@ -592,7 +894,8 @@ async fn d065_verified_canonical_read_only_store_retains_list_capability() {
     assert_eq!(
         d065_list_audit_logs_command(state)
             .expect("verified canonical read-only audit list")
-            .as_array()
+            .get("entries")
+            .and_then(serde_json::Value::as_array)
             .unwrap()
             .len(),
         1
@@ -629,7 +932,11 @@ fn d065_shipped_audit_read_graph_has_one_concrete_gateway_owner() {
             && gateway_source.contains("async fn export_logs"),
         "one concrete gateway type must own all three MCP audit read projections"
     );
-    assert_eq!(gateway_source.matches(".list_logs(").count(), 2);
+    assert_eq!(
+        gateway_source.matches(".list_logs(").count(),
+        1,
+        "the gateway must own exactly one raw audit-store list read shared by list and diagnostics"
+    );
     assert_eq!(gateway_source.matches(".export_logs(").count(), 1);
     let settings_source =
         std::fs::read_to_string(manifest.join("src/commands/settings.rs")).unwrap();
@@ -711,14 +1018,26 @@ fn d065_product_contract_can_distinguish_unknown_from_zero() {
         .expect("SystemDiagnostics frontend contract end")
         .0;
 
+    assert!(diagnostics_contract
+        .contains("mcp_audit_read: McpAuditReadProjection<McpAuditDiagnosticFacts>"));
+    assert!(!diagnostics_contract.contains("mcp_recent_audit_count"));
+    assert!(!diagnostics_contract.contains("mcp_recent_pii_count"));
+    assert!(!diagnostics_contract.contains("mcp_audit_read_status"));
+
+    let projection_contract = bridge
+        .split_once("export type McpAuditReadProjection<T>")
+        .expect("shared frontend audit-read projection")
+        .1
+        .split_once("export interface McpAuditDiagnosticFacts")
+        .expect("shared frontend audit-read projection end")
+        .0;
     assert!(
-        diagnostics_contract.contains("mcp_recent_audit_count: number | null")
-            && diagnostics_contract.contains("mcp_recent_pii_count: number | null")
-            && diagnostics_contract.contains("mcp_audit_read_status")
-            && ["available", "unavailable", "degraded", "unknown"]
-                .iter()
-                .all(|status| diagnostics_contract.contains(status)),
-        "the frontend diagnostics contract must preserve all four typed audit-read states and nullable unknown counts"
+        ["available", "degraded", "unavailable", "unknown"]
+            .iter()
+            .all(|status| projection_contract.contains(status))
+            && projection_contract.contains("reasonCode")
+            && !projection_contract.contains("entries"),
+        "one shared discriminated projection must own status and failure reason without lending entries to failed variants"
     );
 }
 

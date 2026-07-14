@@ -1803,8 +1803,7 @@ export interface SystemDiagnostics {
   policy_router: PolicyRouterStatus;
   mcp_server_count: number;
   mcp_tool_count: number;
-  mcp_recent_audit_count: number;
-  mcp_recent_pii_count: number;
+  mcp_audit_read: McpAuditReadProjection<McpAuditDiagnosticFacts>;
   memory_chunk_count: number;
   vector_corrupt_embedding_count?: number;
   vector_unknown_profile_count?: number;
@@ -1848,6 +1847,28 @@ export interface SystemDiagnostics {
   proposal_store_status: string;
   runtime_build_info?: RuntimeBuildInfo;
   runtime_route_evidence?: RuntimeRouteEvidence | null;
+}
+
+export type McpAuditReadReasonCode =
+  | "key_reference_store_unavailable"
+  | "audit_store_unavailable"
+  | "key_reference_store_ephemeral"
+  | "audit_store_ephemeral"
+  | "key_reference_store_read_only"
+  | "audit_store_read_only"
+  | "both_owners_read_only"
+  | "composite_authority_changed"
+  | "audit_read_failed";
+
+export type McpAuditReadProjection<T> =
+  | ({ status: "available" } & T)
+  | ({ status: "degraded"; reasonCode: McpAuditReadReasonCode } & T)
+  | { status: "unavailable"; reasonCode: McpAuditReadReasonCode }
+  | { status: "unknown"; reasonCode: McpAuditReadReasonCode };
+
+export interface McpAuditDiagnosticFacts {
+  recentAuditCount: number;
+  recentPiiCount: number;
 }
 
 export async function getSystemDiagnostics(): Promise<SystemDiagnostics> {
@@ -2553,16 +2574,313 @@ export interface McpAuditLogEntry {
   created_at: string;
 }
 
+export type McpAuditLogListProjection = McpAuditReadProjection<{
+  entries: McpAuditLogEntry[];
+}>;
+
+const MCP_AUDIT_DEGRADED_REASON_CODES = new Set<McpAuditReadReasonCode>([
+  "key_reference_store_read_only",
+  "audit_store_read_only",
+  "both_owners_read_only",
+]);
+
+const MCP_AUDIT_UNAVAILABLE_REASON_CODES = new Set<McpAuditReadReasonCode>([
+  "key_reference_store_unavailable",
+  "audit_store_unavailable",
+  "key_reference_store_ephemeral",
+  "audit_store_ephemeral",
+]);
+
+const MCP_AUDIT_UNKNOWN_REASON_CODES = new Set<McpAuditReadReasonCode>([
+  "composite_authority_changed",
+  "audit_read_failed",
+]);
+
+const MCP_AUDIT_LIST_LIMIT_MIN = 1;
+const MCP_AUDIT_LIST_LIMIT_MAX = 200;
+const MCP_AUDIT_EXPORT_DAYS_MIN = 1;
+const MCP_AUDIT_EXPORT_DAYS_MAX = 3650;
+const MCP_AUDIT_EXPORT_MAX_ENTRIES = 10_000;
+const MCP_AUDIT_TOOL_NAME_MAX_BYTES = 512;
+const MCP_AUDIT_RECEIPT_MAX_BYTES = 1024;
+const MCP_AUDIT_CREATED_AT_MAX_BYTES = 64;
+const MCP_AUDIT_ARGUMENT_VALUE_TYPES = new Set([
+  "null",
+  "bool",
+  "number",
+  "string",
+  "array",
+  "object",
+]);
+const MCP_AUDIT_CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/u;
+const MCP_AUDIT_SHA256_BASE64_STANDARD_NO_PAD = /^sha256:[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]$/u;
+const MCP_AUDIT_RFC3339 =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/u;
+const MCP_AUDIT_UTF8_ENCODER = new TextEncoder();
+
+function invalidMcpAuditLogProjection(reason: string): never {
+  throw new Error(`invalid_mcp_audit_log_projection:${reason}`);
+}
+
+function isPlainMcpAuditRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactMcpAuditKeys(value: Record<string, unknown>, expected: string[]): boolean {
+  const actual = Object.keys(value);
+  return (
+    actual.length === expected.length &&
+    expected.every(key => Object.prototype.hasOwnProperty.call(value, key))
+  );
+}
+
+function hasBoundedMcpAuditUtf8Bytes(value: string, maximum: number): boolean {
+  // Every UTF-16 code unit contributes at least one UTF-8 byte. Rejecting by
+  // code-unit length first prevents an untrusted projection from forcing an
+  // unbounded temporary allocation merely to prove that it is oversized.
+  return value.length <= maximum && MCP_AUDIT_UTF8_ENCODER.encode(value).byteLength <= maximum;
+}
+
+function isMcpAuditLeapYear(year: number): boolean {
+  return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+}
+
+function isStrictMcpAuditRfc3339(value: string): boolean {
+  if (!hasBoundedMcpAuditUtf8Bytes(value, MCP_AUDIT_CREATED_AT_MAX_BYTES)) return false;
+  const match = MCP_AUDIT_RFC3339.exec(value);
+  if (!match) return false;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const offsetHour = match[7] === undefined ? 0 : Number(match[7]);
+  const offsetMinute = match[8] === undefined ? 0 : Number(match[8]);
+  const daysByMonth = [
+    31,
+    isMcpAuditLeapYear(year) ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31,
+  ];
+
+  return (
+    year >= 1 &&
+    month >= 1 &&
+    month <= 12 &&
+    day >= 1 &&
+    day <= daysByMonth[month - 1] &&
+    hour <= 23 &&
+    minute <= 59 &&
+    second <= 59 &&
+    offsetHour <= 23 &&
+    offsetMinute <= 59
+  );
+}
+
+function decodeMcpAuditPayloadReceipt(
+  value: string,
+  expectedKind: "arguments" | "result",
+  entryIndex: number
+): void {
+  if (!hasBoundedMcpAuditUtf8Bytes(value, MCP_AUDIT_RECEIPT_MAX_BYTES)) {
+    return invalidMcpAuditLogProjection(`entry_${entryIndex}_${expectedKind}_bytes`);
+  }
+
+  let receipt: unknown;
+  try {
+    receipt = JSON.parse(value);
+  } catch {
+    return invalidMcpAuditLogProjection(`entry_${entryIndex}_${expectedKind}_receipt_json`);
+  }
+  if (
+    !isPlainMcpAuditRecord(receipt) ||
+    !hasExactMcpAuditKeys(receipt, ["kind", "payloadStored", "valueType", "bytes", "digest"])
+  ) {
+    return invalidMcpAuditLogProjection(`entry_${entryIndex}_${expectedKind}_receipt_fields`);
+  }
+  if (receipt.kind !== expectedKind || receipt.payloadStored !== false) {
+    return invalidMcpAuditLogProjection(`entry_${entryIndex}_${expectedKind}_receipt_role`);
+  }
+  if (
+    typeof receipt.valueType !== "string" ||
+    (expectedKind === "arguments"
+      ? !MCP_AUDIT_ARGUMENT_VALUE_TYPES.has(receipt.valueType)
+      : receipt.valueType !== "string")
+  ) {
+    return invalidMcpAuditLogProjection(`entry_${entryIndex}_${expectedKind}_receipt_value_type`);
+  }
+  if (!Number.isSafeInteger(receipt.bytes) || (receipt.bytes as number) < 0) {
+    return invalidMcpAuditLogProjection(
+      `entry_${entryIndex}_${expectedKind}_receipt_payload_bytes`
+    );
+  }
+  if (
+    typeof receipt.digest !== "string" ||
+    !MCP_AUDIT_SHA256_BASE64_STANDARD_NO_PAD.test(receipt.digest)
+  ) {
+    return invalidMcpAuditLogProjection(`entry_${entryIndex}_${expectedKind}_receipt_digest`);
+  }
+}
+
+function decodeMcpAuditLogEntry(value: unknown, index: number): McpAuditLogEntry {
+  if (!isPlainMcpAuditRecord(value)) {
+    return invalidMcpAuditLogProjection(`entry_${index}_not_object`);
+  }
+  if (
+    !hasExactMcpAuditKeys(value, [
+      "id",
+      "tool_name",
+      "arguments",
+      "result",
+      "success",
+      "pii_found",
+      "created_at",
+    ])
+  ) {
+    return invalidMcpAuditLogProjection(`entry_${index}_fields`);
+  }
+  if (!Number.isSafeInteger(value.id) || (value.id as number) <= 0) {
+    return invalidMcpAuditLogProjection(`entry_${index}_id`);
+  }
+  if (
+    typeof value.tool_name !== "string" ||
+    value.tool_name.length === 0 ||
+    MCP_AUDIT_CONTROL_CHARACTER.test(value.tool_name) ||
+    !hasBoundedMcpAuditUtf8Bytes(value.tool_name, MCP_AUDIT_TOOL_NAME_MAX_BYTES)
+  ) {
+    return invalidMcpAuditLogProjection(`entry_${index}_tool_name`);
+  }
+  if (typeof value.arguments !== "string") {
+    return invalidMcpAuditLogProjection(`entry_${index}_arguments`);
+  }
+  decodeMcpAuditPayloadReceipt(value.arguments, "arguments", index);
+  if (typeof value.result !== "string") {
+    return invalidMcpAuditLogProjection(`entry_${index}_result`);
+  }
+  decodeMcpAuditPayloadReceipt(value.result, "result", index);
+  if (typeof value.success !== "boolean") {
+    return invalidMcpAuditLogProjection(`entry_${index}_success`);
+  }
+  if (typeof value.pii_found !== "boolean") {
+    return invalidMcpAuditLogProjection(`entry_${index}_pii_found`);
+  }
+  if (typeof value.created_at !== "string" || !isStrictMcpAuditRfc3339(value.created_at)) {
+    return invalidMcpAuditLogProjection(`entry_${index}_created_at`);
+  }
+
+  return {
+    id: value.id as number,
+    tool_name: value.tool_name,
+    arguments: value.arguments,
+    result: value.result,
+    success: value.success,
+    pii_found: value.pii_found,
+    created_at: value.created_at,
+  };
+}
+
+function decodeMcpAuditEntries(value: unknown, maximumEntries: number): McpAuditLogEntry[] {
+  if (!Array.isArray(value)) {
+    return invalidMcpAuditLogProjection("entries_not_array");
+  }
+  if (value.length > maximumEntries) {
+    return invalidMcpAuditLogProjection("entries_limit");
+  }
+  return value.map((entry, index) => decodeMcpAuditLogEntry(entry, index));
+}
+
+function decodeMcpAuditLogListProjection(
+  value: unknown,
+  requestedLimit: number
+): McpAuditLogListProjection {
+  if (!isPlainMcpAuditRecord(value)) {
+    return invalidMcpAuditLogProjection("not_object");
+  }
+
+  switch (value.status) {
+    case "available":
+      if (!hasExactMcpAuditKeys(value, ["status", "entries"])) {
+        return invalidMcpAuditLogProjection("available_fields");
+      }
+      return {
+        status: "available",
+        entries: decodeMcpAuditEntries(
+          value.entries,
+          Math.min(requestedLimit, MCP_AUDIT_LIST_LIMIT_MAX)
+        ),
+      };
+    case "degraded":
+      if (!hasExactMcpAuditKeys(value, ["status", "reasonCode", "entries"])) {
+        return invalidMcpAuditLogProjection("degraded_fields");
+      }
+      if (
+        typeof value.reasonCode !== "string" ||
+        !MCP_AUDIT_DEGRADED_REASON_CODES.has(value.reasonCode as McpAuditReadReasonCode)
+      ) {
+        return invalidMcpAuditLogProjection("degraded_reason");
+      }
+      return {
+        status: "degraded",
+        reasonCode: value.reasonCode as McpAuditReadReasonCode,
+        entries: decodeMcpAuditEntries(
+          value.entries,
+          Math.min(requestedLimit, MCP_AUDIT_LIST_LIMIT_MAX)
+        ),
+      };
+    case "unavailable":
+      if (!hasExactMcpAuditKeys(value, ["status", "reasonCode"])) {
+        return invalidMcpAuditLogProjection("unavailable_fields");
+      }
+      if (
+        typeof value.reasonCode !== "string" ||
+        !MCP_AUDIT_UNAVAILABLE_REASON_CODES.has(value.reasonCode as McpAuditReadReasonCode)
+      ) {
+        return invalidMcpAuditLogProjection("unavailable_reason");
+      }
+      return {
+        status: "unavailable",
+        reasonCode: value.reasonCode as McpAuditReadReasonCode,
+      };
+    case "unknown":
+      if (!hasExactMcpAuditKeys(value, ["status", "reasonCode"])) {
+        return invalidMcpAuditLogProjection("unknown_fields");
+      }
+      if (
+        typeof value.reasonCode !== "string" ||
+        !MCP_AUDIT_UNKNOWN_REASON_CODES.has(value.reasonCode as McpAuditReadReasonCode)
+      ) {
+        return invalidMcpAuditLogProjection("unknown_reason");
+      }
+      return { status: "unknown", reasonCode: value.reasonCode as McpAuditReadReasonCode };
+    default:
+      return invalidMcpAuditLogProjection("status");
+  }
+}
+
 export async function listMcpServers(): Promise<McpServerInfo[]> {
   return safeInvoke<McpServerInfo[]>("list_mcp_servers");
 }
 
-export async function listMcpAuditLogs(limit = 20): Promise<McpAuditLogEntry[]> {
-  return safeInvoke<McpAuditLogEntry[]>("list_mcp_audit_logs", { limit });
-}
-
-export async function clearMcpAuditLogs(days: number): Promise<number> {
-  return safeInvoke<number>("clear_mcp_audit_logs", { days });
+export async function listMcpAuditLogs(limit = 20): Promise<McpAuditLogListProjection> {
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit < MCP_AUDIT_LIST_LIMIT_MIN ||
+    limit > MCP_AUDIT_LIST_LIMIT_MAX
+  ) {
+    throw new Error("invalid_mcp_audit_log_limit");
+  }
+  const value = await safeInvoke<unknown>("list_mcp_audit_logs", { limit });
+  return decodeMcpAuditLogListProjection(value, limit);
 }
 
 export async function listMcpTools(): Promise<any[]> {
@@ -3555,25 +3873,88 @@ export async function getMemoryTierStats(): Promise<TierStats> {
 }
 
 // ── Milestone D: MCP Audit Export / Cleanup ──
-export interface ExportedAuditEntry {
-  id: number;
-  tool_name: string;
-  arguments: string;
-  result: string;
-  success: boolean;
-  created_at: string;
-  pii_found: boolean;
-}
+export type ExportedAuditEntry = McpAuditLogEntry;
 
 export interface AuditExport {
   exported_at: string;
   entry_count: number;
   days: number;
+  complete: boolean;
+  truncated: boolean;
+  incomplete_reason: "scan_limit" | "entry_limit" | "scan_and_entry_limit" | null;
   entries: ExportedAuditEntry[];
 }
 
+function decodeMcpAuditExport(value: unknown, requestedDays: number): AuditExport {
+  if (
+    !isPlainMcpAuditRecord(value) ||
+    !hasExactMcpAuditKeys(value, [
+      "exported_at",
+      "entry_count",
+      "days",
+      "complete",
+      "truncated",
+      "incomplete_reason",
+      "entries",
+    ])
+  ) {
+    return invalidMcpAuditLogProjection("export_fields");
+  }
+  if (typeof value.exported_at !== "string" || !isStrictMcpAuditRfc3339(value.exported_at)) {
+    return invalidMcpAuditLogProjection("exported_at");
+  }
+  if (!Number.isSafeInteger(value.days) || value.days !== requestedDays) {
+    return invalidMcpAuditLogProjection("export_days");
+  }
+  const entries = decodeMcpAuditEntries(value.entries, MCP_AUDIT_EXPORT_MAX_ENTRIES);
+  if (
+    !Number.isSafeInteger(value.entry_count) ||
+    (value.entry_count as number) < 0 ||
+    (value.entry_count as number) > MCP_AUDIT_EXPORT_MAX_ENTRIES ||
+    value.entry_count !== entries.length
+  ) {
+    return invalidMcpAuditLogProjection("export_entry_count");
+  }
+  if (
+    typeof value.complete !== "boolean" ||
+    typeof value.truncated !== "boolean" ||
+    value.complete === value.truncated
+  ) {
+    return invalidMcpAuditLogProjection("export_completeness");
+  }
+  const incompleteReason = value.incomplete_reason;
+  if (
+    (value.complete && incompleteReason !== null) ||
+    (value.truncated &&
+      incompleteReason !== "scan_limit" &&
+      incompleteReason !== "entry_limit" &&
+      incompleteReason !== "scan_and_entry_limit") ||
+    ((incompleteReason === "entry_limit" || incompleteReason === "scan_and_entry_limit") &&
+      entries.length !== MCP_AUDIT_EXPORT_MAX_ENTRIES)
+  ) {
+    return invalidMcpAuditLogProjection("export_incomplete_reason");
+  }
+  return {
+    exported_at: value.exported_at,
+    entry_count: value.entry_count as number,
+    days: value.days as number,
+    complete: value.complete,
+    truncated: value.truncated,
+    incomplete_reason: incompleteReason as AuditExport["incomplete_reason"],
+    entries,
+  };
+}
+
 export async function exportMcpAuditLogs(days: number): Promise<AuditExport> {
-  return safeInvoke<AuditExport>("export_mcp_audit_logs", { days });
+  if (
+    !Number.isSafeInteger(days) ||
+    days < MCP_AUDIT_EXPORT_DAYS_MIN ||
+    days > MCP_AUDIT_EXPORT_DAYS_MAX
+  ) {
+    throw new Error("invalid_mcp_audit_export_days");
+  }
+  const value = await safeInvoke<unknown>("export_mcp_audit_logs", { days });
+  return decodeMcpAuditExport(value, days);
 }
 
 export async function cleanupMcpAuditLogs(

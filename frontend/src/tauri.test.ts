@@ -29,6 +29,8 @@ import {
   saveConfig,
   sendMessageV2,
   executeToolCall,
+  exportMcpAuditLogs,
+  listMcpAuditLogs,
 } from "./tauri";
 import {
   checkControlledChatPilotEligibility,
@@ -80,6 +82,447 @@ vi.mock("@tauri-apps/api/core", () => ({
 describe("tauri command argument aliases", () => {
   beforeEach(() => {
     vi.mocked(invoke).mockResolvedValue(undefined);
+  });
+
+  describe("MCP audit list projection decoder", () => {
+    const argumentsReceipt = JSON.stringify({
+      kind: "arguments",
+      payloadStored: false,
+      valueType: "object",
+      bytes: 42,
+      digest: "sha256:AT5/r7IBtLhordHw+cHDRUBlUanhoUXBpj8SXOOfjGs",
+    });
+    const resultReceipt = JSON.stringify({
+      kind: "result",
+      payloadStored: false,
+      valueType: "string",
+      bytes: 18,
+      digest: "sha256:jCW4voE7OX1fsd3cEkYh4wDHjOVUw90Ga7TB0dnFGwU",
+    });
+    const validEntry = {
+      id: 65,
+      tool_name: "filesystem.read",
+      arguments: argumentsReceipt,
+      result: resultReceipt,
+      success: true,
+      pii_found: false,
+      created_at: "2026-07-14T00:00:00Z",
+    };
+
+    it.each([
+      { status: "available", entries: [] },
+      { status: "available", entries: [validEntry] },
+      {
+        status: "degraded",
+        reasonCode: "key_reference_store_read_only",
+        entries: [validEntry],
+      },
+      {
+        status: "degraded",
+        reasonCode: "audit_store_read_only",
+        entries: [validEntry],
+      },
+      {
+        status: "degraded",
+        reasonCode: "both_owners_read_only",
+        entries: [validEntry],
+      },
+      { status: "unavailable", reasonCode: "key_reference_store_unavailable" },
+      { status: "unavailable", reasonCode: "audit_store_unavailable" },
+      { status: "unavailable", reasonCode: "key_reference_store_ephemeral" },
+      { status: "unavailable", reasonCode: "audit_store_ephemeral" },
+      { status: "unknown", reasonCode: "composite_authority_changed" },
+      { status: "unknown", reasonCode: "audit_read_failed" },
+    ])("accepts a structurally valid $status projection", async projection => {
+      vi.mocked(invoke).mockResolvedValueOnce(projection);
+
+      await expect(listMcpAuditLogs(20)).resolves.toEqual(projection);
+      expect(invoke).toHaveBeenLastCalledWith("list_mcp_audit_logs", { limit: 20 });
+    });
+
+    it.each([
+      ["legacy bare array", []],
+      ["null", null],
+      ["unknown discriminant", { status: "future", entries: [] }],
+      ["available without entries", { status: "available" }],
+      [
+        "available with a contradictory reason",
+        { status: "available", reasonCode: "audit_read_failed", entries: [] },
+      ],
+      ["degraded without a reason", { status: "degraded", entries: [] }],
+      [
+        "degraded with an unavailable-only reason",
+        { status: "degraded", reasonCode: "audit_store_unavailable", entries: [] },
+      ],
+      [
+        "unavailable with successful entries",
+        { status: "unavailable", reasonCode: "audit_store_unavailable", entries: [] },
+      ],
+      ["unknown without a reason", { status: "unknown" }],
+      [
+        "unknown with a degraded-only reason",
+        { status: "unknown", reasonCode: "audit_store_read_only" },
+      ],
+      [
+        "unknown with an unrecognized reason",
+        { status: "unknown", reasonCode: "future_unknown_reason" },
+      ],
+      [
+        "entry missing a required field",
+        {
+          status: "available",
+          entries: [{ ...validEntry, created_at: undefined }],
+        },
+      ],
+      [
+        "entry with a malformed field",
+        {
+          status: "available",
+          entries: [{ ...validEntry, success: "true" }],
+        },
+      ],
+      [
+        "entry with an unexpected field",
+        {
+          status: "available",
+          entries: [{ ...validEntry, raw_payload: "must-not-be-trusted" }],
+        },
+      ],
+    ] as const)("rejects %s instead of trusting it as audit truth", async (_name, projection) => {
+      vi.mocked(invoke).mockResolvedValueOnce(projection);
+
+      await expect(listMcpAuditLogs(20)).rejects.toThrow("invalid_mcp_audit_log_projection");
+    });
+
+    it.each([0, -1, 201, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+      "rejects invalid request limit %s before IPC",
+      async limit => {
+        const callsBefore = vi.mocked(invoke).mock.calls.length;
+
+        await expect(listMcpAuditLogs(limit)).rejects.toThrow("invalid_mcp_audit_log_limit");
+        expect(vi.mocked(invoke).mock.calls).toHaveLength(callsBefore);
+      }
+    );
+
+    it("rejects more entries than the validated request bound", async () => {
+      vi.mocked(invoke).mockResolvedValueOnce({
+        status: "available",
+        entries: [validEntry, { ...validEntry, id: 66 }],
+      });
+
+      await expect(listMcpAuditLogs(1)).rejects.toThrow(
+        "invalid_mcp_audit_log_projection:entries_limit"
+      );
+    });
+
+    it("accepts canonical STANDARD_NO_PAD digests containing plus and slash", async () => {
+      expect(argumentsReceipt).toContain("+");
+      expect(argumentsReceipt).toContain("/");
+      const projection = { status: "available", entries: [validEntry] } as const;
+      vi.mocked(invoke).mockResolvedValueOnce(projection);
+
+      await expect(listMcpAuditLogs(20)).resolves.toEqual(projection);
+    });
+
+    it.each([
+      ["empty", ""],
+      ["control character", "filesystem.\u0000read"],
+      ["over 512 UTF-8 bytes", "界".repeat(171)],
+    ])("rejects a %s tool name", async (_name, toolName) => {
+      vi.mocked(invoke).mockResolvedValueOnce({
+        status: "available",
+        entries: [{ ...validEntry, tool_name: toolName }],
+      });
+
+      await expect(listMcpAuditLogs(20)).rejects.toThrow(
+        "invalid_mcp_audit_log_projection:entry_0_tool_name"
+      );
+    });
+
+    it("accepts a non-empty whitespace tool name because the canonical backend has not forbidden it", async () => {
+      const projection = {
+        status: "available",
+        entries: [{ ...validEntry, tool_name: " " }],
+      } as const;
+      vi.mocked(invoke).mockResolvedValueOnce(projection);
+
+      await expect(listMcpAuditLogs(20)).resolves.toEqual(projection);
+    });
+
+    it("rejects the impossible SQLite AUTOINCREMENT id zero", async () => {
+      vi.mocked(invoke).mockResolvedValueOnce({
+        status: "available",
+        entries: [{ ...validEntry, id: 0 }],
+      });
+
+      await expect(listMcpAuditLogs(20)).rejects.toThrow(
+        "invalid_mcp_audit_log_projection:entry_0_id"
+      );
+    });
+
+    it.each([
+      ["impossible calendar date", "2026-02-29T00:00:00Z"],
+      ["missing timezone", "2026-07-14T00:00:00"],
+      ["non-canonical lowercase separator", "2026-07-14t00:00:00z"],
+      ["invalid offset", "2026-07-14T00:00:00+24:00"],
+      ["over 64 UTF-8 bytes", `2026-07-14T00:00:00.${"1".repeat(50)}Z`],
+    ])("rejects a %s created_at", async (_name, createdAt) => {
+      vi.mocked(invoke).mockResolvedValueOnce({
+        status: "available",
+        entries: [{ ...validEntry, created_at: createdAt }],
+      });
+
+      await expect(listMcpAuditLogs(20)).rejects.toThrow(
+        "invalid_mcp_audit_log_projection:entry_0_created_at"
+      );
+    });
+
+    it.each([
+      "2024-02-29T23:59:59.123456789Z",
+      "2026-07-14T08:30:00+08:00",
+      "2026-07-13T16:30:00-07:30",
+    ])("accepts strict RFC3339 timestamp %s", async createdAt => {
+      const projection = {
+        status: "available",
+        entries: [{ ...validEntry, created_at: createdAt }],
+      } as const;
+      vi.mocked(invoke).mockResolvedValueOnce(projection);
+
+      await expect(listMcpAuditLogs(20)).resolves.toEqual(projection);
+    });
+
+    it.each([
+      ["arguments outer byte bound", "arguments", `${" ".repeat(1025)}${argumentsReceipt}`],
+      ["result outer byte bound", "result", `${" ".repeat(1025)}${resultReceipt}`],
+      [
+        "multibyte receipt outer byte bound",
+        "arguments",
+        JSON.stringify({ ...JSON.parse(argumentsReceipt), digest: "界".repeat(342) }),
+      ],
+      ["malformed JSON", "arguments", "not-json"],
+      [
+        "unexpected receipt key",
+        "arguments",
+        JSON.stringify({ ...JSON.parse(argumentsReceipt), raw: "forbidden" }),
+      ],
+      [
+        "wrong receipt role",
+        "arguments",
+        JSON.stringify({ ...JSON.parse(argumentsReceipt), kind: "result" }),
+      ],
+      [
+        "stored payload claim",
+        "arguments",
+        JSON.stringify({ ...JSON.parse(argumentsReceipt), payloadStored: true }),
+      ],
+      [
+        "invalid arguments value type",
+        "arguments",
+        JSON.stringify({ ...JSON.parse(argumentsReceipt), valueType: "map" }),
+      ],
+      [
+        "non-string result value type",
+        "result",
+        JSON.stringify({ ...JSON.parse(resultReceipt), valueType: "object" }),
+      ],
+      [
+        "negative payload byte count",
+        "result",
+        JSON.stringify({ ...JSON.parse(resultReceipt), bytes: -1 }),
+      ],
+      [
+        "URL-safe digest alphabet that the canonical codec never emits",
+        "arguments",
+        JSON.stringify({
+          ...JSON.parse(argumentsReceipt),
+          digest: "sha256:AT5_r7IBtLhordHw-cHDRUBlUanhoUXBpj8SXOOfjGs",
+        }),
+      ],
+      [
+        "padded digest",
+        "result",
+        JSON.stringify({
+          ...JSON.parse(resultReceipt),
+          digest: `${JSON.parse(resultReceipt).digest}=`,
+        }),
+      ],
+      [
+        "non-canonical standard-Base64 tail bits",
+        "result",
+        JSON.stringify({
+          ...JSON.parse(resultReceipt),
+          digest: "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB",
+        }),
+      ],
+    ] as const)("rejects %s", async (_name, field, receipt) => {
+      vi.mocked(invoke).mockResolvedValueOnce({
+        status: "available",
+        entries: [{ ...validEntry, [field]: receipt }],
+      });
+
+      await expect(listMcpAuditLogs(20)).rejects.toThrow("invalid_mcp_audit_log_projection");
+    });
+
+    it.each(["null", "bool", "number", "string", "array", "object"])(
+      "accepts the canonical arguments valueType %s",
+      async valueType => {
+        const projection = {
+          status: "available",
+          entries: [
+            {
+              ...validEntry,
+              arguments: JSON.stringify({ ...JSON.parse(argumentsReceipt), valueType }),
+            },
+          ],
+        };
+        vi.mocked(invoke).mockResolvedValueOnce(projection);
+
+        await expect(listMcpAuditLogs(20)).resolves.toEqual(projection);
+      }
+    );
+
+    describe("MCP audit export decoder", () => {
+      const validExport = {
+        exported_at: "2026-07-14T08:30:00+08:00",
+        entry_count: 1,
+        days: 30,
+        complete: true,
+        truncated: false,
+        incomplete_reason: null,
+        entries: [validEntry],
+      };
+
+      it("accepts an exact bounded export and preserves requested-days parity", async () => {
+        vi.mocked(invoke).mockResolvedValueOnce(validExport);
+
+        await expect(exportMcpAuditLogs(30)).resolves.toEqual(validExport);
+        expect(invoke).toHaveBeenLastCalledWith("export_mcp_audit_logs", { days: 30 });
+      });
+
+      it("accepts 201 valid export entries without borrowing the list ceiling", async () => {
+        const entries = Array.from({ length: 201 }, (_, index) => ({
+          ...validEntry,
+          id: index + 1,
+        }));
+        const projection = {
+          ...validExport,
+          entry_count: entries.length,
+          entries,
+        };
+        vi.mocked(invoke).mockResolvedValueOnce(projection);
+
+        await expect(exportMcpAuditLogs(30)).resolves.toEqual(projection);
+      });
+
+      it("accepts an explicitly truncated export only at the 10000-entry ceiling", async () => {
+        const entries = Array.from({ length: 10_000 }, (_, index) => ({
+          ...validEntry,
+          id: index + 1,
+        }));
+        const projection = {
+          ...validExport,
+          entry_count: entries.length,
+          complete: false,
+          truncated: true,
+          incomplete_reason: "entry_limit",
+          entries,
+        };
+        vi.mocked(invoke).mockResolvedValueOnce(projection);
+
+        await expect(exportMcpAuditLogs(30)).resolves.toEqual(projection);
+      });
+
+      it("accepts a scan-limited incomplete export below the entry ceiling", async () => {
+        const projection = {
+          ...validExport,
+          complete: false,
+          truncated: true,
+          incomplete_reason: "scan_limit",
+        };
+        vi.mocked(invoke).mockResolvedValueOnce(projection);
+
+        await expect(exportMcpAuditLogs(30)).resolves.toEqual(projection);
+      });
+
+      it.each([0, -1, 3651, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER])(
+        "rejects invalid export window %s before IPC",
+        async days => {
+          const callsBefore = vi.mocked(invoke).mock.calls.length;
+
+          await expect(exportMcpAuditLogs(days)).rejects.toThrow("invalid_mcp_audit_export_days");
+          expect(vi.mocked(invoke).mock.calls).toHaveLength(callsBefore);
+        }
+      );
+
+      it.each([
+        ["extra top-level field", { ...validExport, raw_payload: "forbidden" }],
+        ["requested-days mismatch", { ...validExport, days: 29 }],
+        ["entry-count mismatch", { ...validExport, entry_count: 0 }],
+        ["complete and truncated both true", { ...validExport, truncated: true }],
+        ["complete and truncated both false", { ...validExport, complete: false }],
+        ["truncated export without a reason", { ...validExport, complete: false, truncated: true }],
+        [
+          "entry-limited export below the exact ceiling",
+          {
+            ...validExport,
+            complete: false,
+            truncated: true,
+            incomplete_reason: "entry_limit",
+          },
+        ],
+        [
+          "unknown incomplete reason",
+          {
+            ...validExport,
+            complete: false,
+            truncated: true,
+            incomplete_reason: "unknown_limit",
+          },
+        ],
+        ["invalid export timestamp", { ...validExport, exported_at: "2026-02-29T00:00:00Z" }],
+        [
+          "raw arguments payload",
+          {
+            ...validExport,
+            entries: [{ ...validEntry, arguments: '{"path":"/private/raw"}' }],
+          },
+        ],
+        [
+          "unexpected entry field",
+          {
+            ...validExport,
+            entries: [{ ...validEntry, raw_payload: "forbidden" }],
+          },
+        ],
+        [
+          "invalid minimized receipt",
+          {
+            ...validExport,
+            entries: [
+              {
+                ...validEntry,
+                result: JSON.stringify({ ...JSON.parse(resultReceipt), payloadStored: true }),
+              },
+            ],
+          },
+        ],
+        [
+          "over 10000 entries",
+          {
+            ...validExport,
+            entry_count: 10_001,
+            complete: false,
+            truncated: true,
+            incomplete_reason: "scan_and_entry_limit",
+            entries: Array.from({ length: 10_001 }, () => validEntry),
+          },
+        ],
+      ] as const)("rejects %s instead of trusting export IPC", async (_name, projection) => {
+        vi.mocked(invoke).mockResolvedValueOnce(projection);
+
+        await expect(exportMcpAuditLogs(30)).rejects.toThrow("invalid_mcp_audit_log_projection");
+      });
+    });
   });
 
   function redactedLogForLastInvoke(): string {

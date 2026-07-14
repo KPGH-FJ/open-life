@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection};
+use chrono::Datelike;
+use rusqlite::{params, Connection, StatementStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -19,6 +20,100 @@ const MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION: i64 = 1;
 /// cleanup path does not enforce this yet; D063 keeps that behavior RED until
 /// `McpAuditRetentionDays` becomes the domain mutation boundary.
 pub const MCP_AUDIT_RETENTION_MAX_DAYS: i64 = 3_650;
+pub const MCP_AUDIT_EXPORT_MAX_ENTRIES: usize = 10_000;
+const MCP_AUDIT_EXPORT_CANDIDATE_LIMIT: usize = MCP_AUDIT_EXPORT_MAX_ENTRIES + 1;
+
+fn strict_mcp_audit_rfc3339(value: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+    let bytes = value.as_bytes();
+    if !value.is_ascii() || !(20..=64).contains(&bytes.len()) {
+        anyhow::bail!("mcp_audit_created_at_invalid");
+    }
+    for index in [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18] {
+        if !bytes[index].is_ascii_digit() {
+            anyhow::bail!("mcp_audit_created_at_invalid");
+        }
+    }
+    if bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
+        anyhow::bail!("mcp_audit_created_at_invalid");
+    }
+
+    let suffix_start = if bytes[19] == b'.' {
+        let suffix_start = bytes[20..]
+            .iter()
+            .position(|byte| matches!(byte, b'Z' | b'+' | b'-'))
+            .map(|offset| offset + 20)
+            .ok_or_else(|| anyhow::anyhow!("mcp_audit_created_at_invalid"))?;
+        if suffix_start == 20 || !bytes[20..suffix_start].iter().all(u8::is_ascii_digit) {
+            anyhow::bail!("mcp_audit_created_at_invalid");
+        }
+        suffix_start
+    } else {
+        19
+    };
+    let suffix = &bytes[suffix_start..];
+    let suffix_valid = suffix == b"Z"
+        || (suffix.len() == 6
+            && matches!(suffix[0], b'+' | b'-')
+            && suffix[1].is_ascii_digit()
+            && suffix[2].is_ascii_digit()
+            && suffix[3] == b':'
+            && suffix[4].is_ascii_digit()
+            && suffix[5].is_ascii_digit());
+    if !suffix_valid {
+        anyhow::bail!("mcp_audit_created_at_invalid");
+    }
+    let seconds = u32::from(bytes[17] - b'0') * 10 + u32::from(bytes[18] - b'0');
+    if seconds > 59 {
+        anyhow::bail!("mcp_audit_created_at_invalid");
+    }
+
+    let timestamp = chrono::DateTime::parse_from_rfc3339(value)
+        .map_err(|_| anyhow::anyhow!("mcp_audit_created_at_invalid"))?;
+    if timestamp.year() < 1 {
+        anyhow::bail!("mcp_audit_created_at_invalid");
+    }
+    Ok(timestamp.with_timezone(&chrono::Utc))
+}
+
+/// Validated product window for a bounded MCP audit export. Keeping the raw
+/// `i64` outside the store prevents extreme WebView input from reaching
+/// `chrono::Duration::days`, whose arithmetic is not an input validator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct McpAuditExportDays(i64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct McpAuditExportDaysOutOfRange;
+
+impl std::fmt::Display for McpAuditExportDaysOutOfRange {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("MCP audit export days must be between 1 and 3650")
+    }
+}
+
+impl std::error::Error for McpAuditExportDaysOutOfRange {}
+
+impl TryFrom<i64> for McpAuditExportDays {
+    type Error = McpAuditExportDaysOutOfRange;
+
+    fn try_from(value: i64) -> std::result::Result<Self, Self::Error> {
+        if (1..=MCP_AUDIT_RETENTION_MAX_DAYS).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(McpAuditExportDaysOutOfRange)
+        }
+    }
+}
+
+impl McpAuditExportDays {
+    pub fn get(self) -> i64 {
+        self.0
+    }
+}
 
 fn audit_payload_receipt(kind: &str, value_type: &str, bytes: &[u8]) -> String {
     let digest = ring::digest::digest(&SHA256, bytes);
@@ -97,11 +192,27 @@ impl Default for AuditKeyConfig {
 }
 
 /// Export payload for audit logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditExportIncompleteReason {
+    ScanLimit,
+    EntryLimit,
+    ScanAndEntryLimit,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditExport {
     pub exported_at: String,
     pub entry_count: usize,
     pub days: i64,
+    /// True only when every row in the requested time window is represented
+    /// in `entries`. A bounded export must never imply completeness merely
+    /// because it reached the product ceiling.
+    pub complete: bool,
+    /// Explicit inverse of `complete` for consumers that need to surface a
+    /// partial-export warning without inferring it from `entry_count`.
+    pub truncated: bool,
+    pub incomplete_reason: Option<AuditExportIncompleteReason>,
     pub entries: Vec<ExportedAuditEntry>,
 }
 
@@ -126,6 +237,71 @@ pub struct McpLogEntry {
     pub success: bool,
     pub pii_found: bool,
     pub created_at: String,
+}
+
+struct PersistedMcpLogRow {
+    id: i64,
+    tool_name: String,
+    arguments_encrypted: String,
+    result_encrypted: String,
+    success: bool,
+    pii_found: bool,
+    created_at: String,
+    key_epoch: i64,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct AuditSqlStatementStats {
+    fullscan_steps: i32,
+    sort_operations: i32,
+    vm_steps: i32,
+}
+
+impl AuditSqlStatementStats {
+    fn capture(statement: &rusqlite::Statement<'_>) -> Self {
+        Self {
+            fullscan_steps: statement.get_status(StatementStatus::FullscanStep),
+            sort_operations: statement.get_status(StatementStatus::Sort),
+            vm_steps: statement.get_status(StatementStatus::VmStep),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AuditExportQueryStats {
+    snapshot_max: AuditSqlStatementStats,
+    candidate_scan: AuditSqlStatementStats,
+    unscanned_probe: AuditSqlStatementStats,
+    post_scan_max: AuditSqlStatementStats,
+    candidate_rows: usize,
+    snapshot_max_id: i64,
+    post_scan_max_id: i64,
+}
+
+impl AuditExportQueryStats {
+    #[cfg(test)]
+    fn total_fullscan_steps(self) -> i32 {
+        self.snapshot_max.fullscan_steps
+            + self.candidate_scan.fullscan_steps
+            + self.unscanned_probe.fullscan_steps
+            + self.post_scan_max.fullscan_steps
+    }
+
+    #[cfg(test)]
+    fn total_sort_operations(self) -> i32 {
+        self.snapshot_max.sort_operations
+            + self.candidate_scan.sort_operations
+            + self.unscanned_probe.sort_operations
+            + self.post_scan_max.sort_operations
+    }
+
+    #[cfg(test)]
+    fn total_vm_steps(self) -> i32 {
+        self.snapshot_max.vm_steps
+            + self.candidate_scan.vm_steps
+            + self.unscanned_probe.vm_steps
+            + self.post_scan_max.vm_steps
+    }
 }
 
 #[derive(Clone)]
@@ -441,32 +617,151 @@ impl McpAuditStore {
     }
 
     /// Export decrypted audit logs for the given time range.
-    pub fn export_logs(&self, days: i64) -> Result<AuditExport> {
-        let entries = self.list_logs(10000)?;
-        let cutoff = chrono::Utc::now() - chrono::Duration::days(days);
-        let filtered: Vec<_> = entries
-            .into_iter()
-            .filter(|e| {
-                chrono::DateTime::parse_from_rfc3339(&e.created_at)
-                    .map(|dt| dt.with_timezone(&chrono::Utc) >= cutoff)
-                    .unwrap_or(true)
-            })
-            .map(|e| ExportedAuditEntry {
-                id: e.id,
-                tool_name: e.tool_name,
-                arguments: e.arguments,
-                result: e.result,
-                success: e.success,
-                pii_found: e.pii_found,
-                created_at: e.created_at,
-            })
-            .collect();
-        Ok(AuditExport {
-            exported_at: chrono::Utc::now().to_rfc3339(),
-            entry_count: filtered.len(),
-            days,
-            entries: filtered,
-        })
+    pub fn export_logs(&self, window: McpAuditExportDays) -> Result<AuditExport> {
+        self.export_logs_with_query_stats(window)
+            .map(|(export, _stats)| export)
+    }
+
+    fn export_logs_with_query_stats(
+        &self,
+        window: McpAuditExportDays,
+    ) -> Result<(AuditExport, AuditExportQueryStats)> {
+        self.export_logs_with_query_stats_and_hook(window, None, || {})
+    }
+
+    #[cfg(test)]
+    fn export_logs_at_with_query_stats(
+        &self,
+        window: McpAuditExportDays,
+        exported_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(AuditExport, AuditExportQueryStats)> {
+        self.export_logs_with_query_stats_and_hook(window, Some(exported_at), || {})
+    }
+
+    fn export_logs_with_query_stats_and_hook<AfterScan>(
+        &self,
+        window: McpAuditExportDays,
+        exported_at_override: Option<chrono::DateTime<chrono::Utc>>,
+        after_scan: AfterScan,
+    ) -> Result<(AuditExport, AuditExportQueryStats)>
+    where
+        AfterScan: FnOnce(),
+    {
+        let days = window.get();
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction()?;
+        // MAX(id) is the first read in the transaction and therefore anchors
+        // the SQLite snapshot. `exported_at` is recorded immediately after
+        // that snapshot exists, before any candidate rows are materialized.
+        let mut snapshot_statement =
+            transaction.prepare("SELECT COALESCE(MAX(id), 0) FROM mcp_log")?;
+        let snapshot_max_id = snapshot_statement.query_row([], |row| row.get::<_, i64>(0))?;
+        let snapshot_max_stats = AuditSqlStatementStats::capture(&snapshot_statement);
+        drop(snapshot_statement);
+        let exported_at = exported_at_override.unwrap_or_else(chrono::Utc::now);
+        let cutoff = exported_at
+            .checked_sub_signed(chrono::Duration::days(days))
+            .ok_or_else(|| anyhow::anyhow!("mcp_audit_export_cutoff_out_of_range"))?;
+        let mut statement = transaction.prepare(
+            "SELECT id, tool_name, arguments_encrypted, result_encrypted, success, pii_found,
+                    created_at, key_epoch
+             FROM mcp_log
+             WHERE id <= ?1
+             ORDER BY id DESC
+             LIMIT ?2",
+        )?;
+        let mut rows = statement.query_map(
+            params![snapshot_max_id, MCP_AUDIT_EXPORT_CANDIDATE_LIMIT as i64],
+            Self::persisted_log_row,
+        )?;
+        let mut scanned_rows = Vec::with_capacity(MCP_AUDIT_EXPORT_CANDIDATE_LIMIT);
+        for row in &mut rows {
+            scanned_rows.push(row?);
+        }
+        drop(rows);
+        let query_stats = AuditExportQueryStats {
+            snapshot_max: snapshot_max_stats,
+            candidate_scan: AuditSqlStatementStats::capture(&statement),
+            unscanned_probe: AuditSqlStatementStats::default(),
+            post_scan_max: AuditSqlStatementStats::default(),
+            candidate_rows: scanned_rows.len(),
+            snapshot_max_id,
+            post_scan_max_id: snapshot_max_id,
+        };
+        drop(statement);
+        after_scan();
+        let (has_unscanned_rows, unscanned_probe_stats) =
+            if scanned_rows.len() == MCP_AUDIT_EXPORT_CANDIDATE_LIMIT {
+                let last_scanned_id = scanned_rows.last().expect("candidate limit is non-zero").id;
+                let mut unscanned_statement = transaction
+                    .prepare("SELECT EXISTS(SELECT 1 FROM mcp_log WHERE id < ?1 LIMIT 1)")?;
+                let has_unscanned_rows = unscanned_statement
+                    .query_row([last_scanned_id], |row| row.get::<_, bool>(0))?;
+                let stats = AuditSqlStatementStats::capture(&unscanned_statement);
+                drop(unscanned_statement);
+                (has_unscanned_rows, stats)
+            } else {
+                (false, AuditSqlStatementStats::default())
+            };
+        let mut post_scan_statement =
+            transaction.prepare("SELECT COALESCE(MAX(id), 0) FROM mcp_log")?;
+        let post_scan_max_id = post_scan_statement.query_row([], |row| row.get::<_, i64>(0))?;
+        let post_scan_max_stats = AuditSqlStatementStats::capture(&post_scan_statement);
+        drop(post_scan_statement);
+        if post_scan_max_id != snapshot_max_id {
+            anyhow::bail!("mcp_audit_export_snapshot_changed");
+        }
+        let query_stats = AuditExportQueryStats {
+            unscanned_probe: unscanned_probe_stats,
+            post_scan_max: post_scan_max_stats,
+            post_scan_max_id,
+            ..query_stats
+        };
+        transaction.commit()?;
+
+        let mut eligible_rows = Vec::with_capacity(scanned_rows.len());
+        for row in scanned_rows {
+            let created_at = strict_mcp_audit_rfc3339(&row.created_at)
+                .with_context(|| format!("validate MCP audit created_at for row {}", row.id))?;
+            if created_at >= cutoff {
+                eligible_rows.push(row);
+            }
+        }
+        let entry_limited = eligible_rows.len() > MCP_AUDIT_EXPORT_MAX_ENTRIES;
+        eligible_rows.truncate(MCP_AUDIT_EXPORT_MAX_ENTRIES);
+        let mut entries = Vec::with_capacity(eligible_rows.len());
+        for row in eligible_rows {
+            let entry = self.decrypt_persisted_log_row(row)?;
+            entries.push(ExportedAuditEntry {
+                id: entry.id,
+                tool_name: entry.tool_name,
+                arguments: entry.arguments,
+                result: entry.result,
+                success: entry.success,
+                pii_found: entry.pii_found,
+                created_at: entry.created_at,
+            });
+        }
+        let incomplete_reason = match (has_unscanned_rows, entry_limited) {
+            (false, false) => None,
+            (true, false) => Some(AuditExportIncompleteReason::ScanLimit),
+            (false, true) => Some(AuditExportIncompleteReason::EntryLimit),
+            (true, true) => Some(AuditExportIncompleteReason::ScanAndEntryLimit),
+        };
+        let truncated = incomplete_reason.is_some();
+
+        Ok((
+            AuditExport {
+                exported_at: exported_at.to_rfc3339(),
+                entry_count: entries.len(),
+                days,
+                complete: !truncated,
+                truncated,
+                incomplete_reason,
+                entries,
+            },
+            query_stats,
+        ))
     }
 
     /// Cleanup strategy: remove logs older than retention_days and return count removed.
@@ -571,6 +866,23 @@ impl McpAuditStore {
             return self.decrypt_with_key(combined_b64, key);
         }
         self.decrypt(combined_b64)
+    }
+
+    /// Decrypt a canonical persisted row only with the key explicitly named by
+    /// that row. Unlike the legacy migration helper above, this read path must
+    /// never reinterpret a missing or malformed epoch as the active key.
+    fn decrypt_for_persisted_epoch(
+        &self,
+        combined_b64: &str,
+        persisted_key_epoch: i64,
+    ) -> Result<String> {
+        let key_epoch = u64::try_from(persisted_key_epoch).with_context(|| {
+            format!("MCP audit row has negative key epoch {persisted_key_epoch}")
+        })?;
+        let key = self.keyring.get(&key_epoch).ok_or_else(|| {
+            anyhow::anyhow!("MCP audit row key epoch {key_epoch} is not covered by the keyring")
+        })?;
+        self.decrypt_with_key(combined_b64, key)
     }
 
     fn decrypt_with_key(&self, combined_b64: &str, key: &[u8; 32]) -> Result<String> {
@@ -733,6 +1045,47 @@ impl McpAuditStore {
         Ok(())
     }
 
+    fn persisted_log_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersistedMcpLogRow> {
+        Ok(PersistedMcpLogRow {
+            id: row.get(0)?,
+            tool_name: row.get(1)?,
+            arguments_encrypted: row.get(2)?,
+            result_encrypted: row.get(3)?,
+            success: row.get::<_, i32>(4)? != 0,
+            pii_found: row.get::<_, i32>(5)? != 0,
+            created_at: row.get(6)?,
+            key_epoch: row.get(7)?,
+        })
+    }
+
+    fn decrypt_persisted_log_row(&self, row: PersistedMcpLogRow) -> Result<McpLogEntry> {
+        let arguments = self
+            .decrypt_for_persisted_epoch(&row.arguments_encrypted, row.key_epoch)
+            .with_context(|| {
+                format!(
+                    "decrypt MCP audit arguments for row {} at key epoch {}",
+                    row.id, row.key_epoch
+                )
+            })?;
+        let result = self
+            .decrypt_for_persisted_epoch(&row.result_encrypted, row.key_epoch)
+            .with_context(|| {
+                format!(
+                    "decrypt MCP audit result for row {} at key epoch {}",
+                    row.id, row.key_epoch
+                )
+            })?;
+        Ok(McpLogEntry {
+            id: row.id,
+            tool_name: row.tool_name,
+            arguments,
+            result,
+            success: row.success,
+            pii_found: row.pii_found,
+            created_at: row.created_at,
+        })
+    }
+
     pub fn list_logs(&self, limit: usize) -> Result<Vec<McpLogEntry>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
@@ -741,45 +1094,11 @@ impl McpAuditStore {
              ORDER BY id DESC
              LIMIT ?1"
         )?;
-        let rows = stmt.query_map([limit], |row| {
-            let id: i64 = row.get(0)?;
-            let tool_name: String = row.get(1)?;
-            let args_enc: String = row.get(2)?;
-            let res_enc: String = row.get(3)?;
-            let success: i32 = row.get(4)?;
-            let pii_found: i32 = row.get(5)?;
-            let created_at: String = row.get(6)?;
-            let key_epoch: i64 = row.get(7)?;
-            Ok((
-                id,
-                tool_name,
-                args_enc,
-                res_enc,
-                success != 0,
-                pii_found != 0,
-                created_at,
-                key_epoch as u64,
-            ))
-        })?;
+        let rows = stmt.query_map([limit], Self::persisted_log_row)?;
 
         let mut out = Vec::new();
-        for r in rows {
-            let (id, tool_name, args_enc, res_enc, success, pii_found, created_at, key_epoch) = r?;
-            let arguments = self
-                .decrypt_for_epoch(&args_enc, key_epoch)
-                .unwrap_or_else(|_| "[decrypt failed]".into());
-            let result = self
-                .decrypt_for_epoch(&res_enc, key_epoch)
-                .unwrap_or_else(|_| "[decrypt failed]".into());
-            out.push(McpLogEntry {
-                id,
-                tool_name,
-                arguments,
-                result,
-                success,
-                pii_found,
-                created_at,
-            });
+        for row in rows {
+            out.push(self.decrypt_persisted_log_row(row?)?);
         }
         Ok(out)
     }
@@ -832,6 +1151,73 @@ fn openlife_default_data_dir() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn insert_receipt_rows(store: &McpAuditStore, prefix: &str, count: usize, created_at: &str) {
+        let arguments_encrypted = store
+            .encrypt(&audit_arguments_receipt(&serde_json::json!({"bounded": true})).unwrap())
+            .unwrap();
+        let result_encrypted = store
+            .encrypt(&audit_result_receipt("bounded-result"))
+            .unwrap();
+        let key_epoch = store.key_config().epoch as i64;
+        let mut connection = store.conn().unwrap();
+        let transaction = connection.transaction().unwrap();
+        {
+            let mut insert = transaction
+                .prepare(
+                    "INSERT INTO mcp_log (
+                        tool_name, arguments_encrypted, result_encrypted, success, pii_found,
+                        created_at, key_epoch, payload_minimized_version
+                     ) VALUES (?1, ?2, ?3, 1, 0, ?4, ?5, ?6)",
+                )
+                .unwrap();
+            for index in 0..count {
+                insert
+                    .execute(params![
+                        format!("{prefix}-{index}"),
+                        &arguments_encrypted,
+                        &result_encrypted,
+                        created_at,
+                        key_epoch,
+                        MCP_AUDIT_PAYLOAD_MINIMIZED_VERSION,
+                    ])
+                    .unwrap();
+            }
+        }
+        transaction.commit().unwrap();
+    }
+
+    fn set_created_at(store: &McpAuditStore, tool_name: &str, created_at: &str) {
+        store
+            .conn()
+            .unwrap()
+            .execute(
+                "UPDATE mcp_log SET created_at = ?1 WHERE tool_name = ?2",
+                params![created_at, tool_name],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn minimized_receipt_digest_is_canonical_sha256_standard_base64_without_padding() {
+        let receipt: Value = serde_json::from_str(&audit_result_receipt("canonical-digest-probe"))
+            .expect("parse minimized audit receipt");
+        let digest = receipt["digest"]
+            .as_str()
+            .expect("receipt digest is a string");
+        let encoded = digest
+            .strip_prefix("sha256:")
+            .expect("receipt digest algorithm prefix");
+        let decoded = general_purpose::STANDARD_NO_PAD
+            .decode(encoded)
+            .expect("receipt digest is unpadded standard Base64");
+
+        assert_eq!(decoded.len(), 32);
+        assert_eq!(general_purpose::STANDARD_NO_PAD.encode(&decoded), encoded);
+        assert!(!encoded
+            .chars()
+            .any(|value| matches!(value, '-' | '_' | '=')));
+    }
 
     #[test]
     fn legacy_key_material_cannot_become_the_active_product_write_epoch() {
@@ -919,8 +1305,13 @@ mod tests {
             )
             .unwrap();
 
-        let export = store.export_logs(30).unwrap();
+        let export = store
+            .export_logs(McpAuditExportDays::try_from(30).unwrap())
+            .unwrap();
         assert_eq!(export.entry_count, 1);
+        assert!(export.complete);
+        assert!(!export.truncated);
+        assert_eq!(export.incomplete_reason, None);
         assert_eq!(export.entries[0].tool_name, "tool_a");
 
         let cleaned = store
@@ -933,6 +1324,346 @@ mod tests {
         assert_eq!(cleaned, 1);
         let logs = store.list_logs(10).unwrap();
         assert!(logs.is_empty());
+    }
+
+    #[test]
+    fn audit_export_reports_exact_completeness_at_and_above_the_entry_ceiling() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("audit.db");
+        let store = McpAuditStore::new(&path);
+        let created_at = chrono::Utc::now().to_rfc3339();
+        insert_receipt_rows(
+            &store,
+            "bounded-export",
+            MCP_AUDIT_EXPORT_MAX_ENTRIES,
+            &created_at,
+        );
+
+        let exact = store
+            .export_logs(McpAuditExportDays::try_from(30).unwrap())
+            .unwrap();
+        assert_eq!(exact.entry_count, MCP_AUDIT_EXPORT_MAX_ENTRIES);
+        assert_eq!(exact.entries.len(), MCP_AUDIT_EXPORT_MAX_ENTRIES);
+        assert!(exact.complete);
+        assert!(!exact.truncated);
+        assert_eq!(exact.incomplete_reason, None);
+        assert_eq!(exact.entries[0].tool_name, "bounded-export-9999");
+        assert_eq!(exact.entries[9_999].tool_name, "bounded-export-0");
+
+        store
+            .insert_log(
+                "bounded-export-overflow",
+                &serde_json::json!({"bounded": true}),
+                "bounded-result",
+                true,
+                false,
+            )
+            .unwrap();
+        let overflow = store
+            .export_logs(McpAuditExportDays::try_from(30).unwrap())
+            .unwrap();
+        assert_eq!(overflow.entry_count, MCP_AUDIT_EXPORT_MAX_ENTRIES);
+        assert_eq!(overflow.entries.len(), MCP_AUDIT_EXPORT_MAX_ENTRIES);
+        assert!(!overflow.complete);
+        assert!(overflow.truncated);
+        assert_eq!(
+            overflow.incomplete_reason,
+            Some(AuditExportIncompleteReason::EntryLimit)
+        );
+        assert_eq!(overflow.entries[0].tool_name, "bounded-export-overflow");
+        assert_eq!(overflow.entries[9_999].tool_name, "bounded-export-1");
+        assert!(
+            overflow
+                .entries
+                .iter()
+                .all(|entry| entry.tool_name != "bounded-export-0"),
+            "the 10001st candidate must be omitted only with explicit truncation truth"
+        );
+    }
+
+    #[test]
+    fn audit_timestamp_parser_preserves_submicrosecond_precision_and_extreme_years() {
+        let before = strict_mcp_audit_rfc3339("2026-07-13T00:00:00.0000001Z").unwrap();
+        let after = strict_mcp_audit_rfc3339("2026-07-13T00:00:00.0000009Z").unwrap();
+        assert!(
+            before < after,
+            "sub-microsecond ordering must not be truncated"
+        );
+
+        assert!(strict_mcp_audit_rfc3339("0001-01-01T00:00:00Z").is_ok());
+        assert!(strict_mcp_audit_rfc3339("9999-12-31T23:59:59.999999999Z").is_ok());
+        for invalid in [
+            "2026-02-29T00:00:00Z",
+            "2026-07-14T00:00:00",
+            "2026-07-14t00:00:00z",
+            "2026-07-14T00:00:60Z",
+            "2026-07-14T00:00:00+24:00",
+        ] {
+            assert!(
+                strict_mcp_audit_rfc3339(invalid).is_err(),
+                "invalid timestamp must fail closed: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn audit_export_filters_offsets_and_submicroseconds_against_the_exact_cutoff() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = McpAuditStore::new(directory.path().join("audit.db"));
+        let exported_at = chrono::DateTime::parse_from_rfc3339("2026-07-14T00:00:00.000000500Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        insert_receipt_rows(
+            &store,
+            "before-submicrosecond-cutoff",
+            1,
+            "2026-07-13T00:00:00.0000001Z",
+        );
+        insert_receipt_rows(
+            &store,
+            "after-submicrosecond-cutoff",
+            1,
+            "2026-07-13T00:00:00.0000009Z",
+        );
+        insert_receipt_rows(
+            &store,
+            "equal-cutoff-with-offset",
+            1,
+            "2026-07-12T19:00:00.000000500-05:00",
+        );
+        insert_receipt_rows(
+            &store,
+            "before-cutoff-with-offset",
+            1,
+            "2026-07-12T18:59:59.999999999-05:00",
+        );
+
+        let (export, _stats) = store
+            .export_logs_at_with_query_stats(McpAuditExportDays::try_from(1).unwrap(), exported_at)
+            .unwrap();
+        let names = export
+            .entries
+            .iter()
+            .map(|entry| entry.tool_name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            vec![
+                "equal-cutoff-with-offset-0",
+                "after-submicrosecond-cutoff-0"
+            ]
+        );
+        assert!(export.complete);
+        assert!(!export.truncated);
+        assert_eq!(export.incomplete_reason, None);
+    }
+
+    #[test]
+    fn malformed_timestamp_in_the_bounded_scan_fails_export_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = McpAuditStore::new(directory.path().join("audit.db"));
+        store
+            .insert_log(
+                "malformed-created-at",
+                &serde_json::json!({}),
+                "result",
+                true,
+                false,
+            )
+            .unwrap();
+        set_created_at(&store, "malformed-created-at", "2026-02-29T00:00:00Z");
+
+        let error = store
+            .export_logs(McpAuditExportDays::try_from(30).unwrap())
+            .expect_err("malformed canonical timestamps must never become silent exclusions")
+            .to_string();
+
+        assert!(error.contains("validate MCP audit created_at for row"));
+    }
+
+    #[test]
+    fn audit_export_bounds_the_scan_and_never_hides_eligible_rows_as_complete() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = McpAuditStore::new(directory.path().join("audit.db"));
+        let exported_at = chrono::DateTime::parse_from_rfc3339("2026-07-14T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let window = McpAuditExportDays::try_from(30).unwrap();
+
+        insert_receipt_rows(
+            &store,
+            "hidden-eligible",
+            MCP_AUDIT_EXPORT_CANDIDATE_LIMIT,
+            "2026-07-13T00:00:00Z",
+        );
+        let (entry_limited, baseline_stats) = store
+            .export_logs_at_with_query_stats(window, exported_at)
+            .unwrap();
+        assert_eq!(entry_limited.entry_count, MCP_AUDIT_EXPORT_MAX_ENTRIES);
+        assert_eq!(
+            entry_limited.incomplete_reason,
+            Some(AuditExportIncompleteReason::EntryLimit)
+        );
+        assert_eq!(
+            baseline_stats.candidate_rows,
+            MCP_AUDIT_EXPORT_CANDIDATE_LIMIT
+        );
+        assert_eq!(baseline_stats.total_sort_operations(), 0);
+        assert!(baseline_stats.snapshot_max.vm_steps > 0);
+        assert!(baseline_stats.candidate_scan.vm_steps > 0);
+        assert!(baseline_stats.unscanned_probe.vm_steps > 0);
+        assert!(baseline_stats.post_scan_max.vm_steps > 0);
+
+        insert_receipt_rows(
+            &store,
+            "newer-outside-window",
+            20_000,
+            "2020-01-01T00:00:00Z",
+        );
+        let (scan_limited, expanded_stats) = store
+            .export_logs_at_with_query_stats(window, exported_at)
+            .unwrap();
+
+        assert_eq!(scan_limited.entry_count, 0);
+        assert!(scan_limited.entries.is_empty());
+        assert!(!scan_limited.complete);
+        assert!(scan_limited.truncated);
+        assert_eq!(
+            scan_limited.incomplete_reason,
+            Some(AuditExportIncompleteReason::ScanLimit)
+        );
+        assert_eq!(
+            expanded_stats.candidate_rows,
+            MCP_AUDIT_EXPORT_CANDIDATE_LIMIT
+        );
+        assert_eq!(expanded_stats.total_sort_operations(), 0);
+        assert_eq!(
+            expanded_stats.candidate_scan,
+            baseline_stats.candidate_scan,
+            "the bounded candidate statement must do identical work after 20000 unscanned rows are added"
+        );
+        assert_eq!(
+            expanded_stats.total_fullscan_steps(),
+            baseline_stats.total_fullscan_steps(),
+            "the complete selector path must not add linear fullscan work beyond the fixed ceiling"
+        );
+        assert!(
+            expanded_stats.total_vm_steps() <= baseline_stats.total_vm_steps() + 16,
+            "snapshot, candidate, completeness and post-snapshot VM work must remain constant/bounded: baseline={baseline_stats:?}, expanded={expanded_stats:?}"
+        );
+    }
+
+    #[test]
+    fn audit_export_completeness_uses_one_wal_snapshot_during_a_concurrent_insert() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = McpAuditStore::new(directory.path().join("audit.db"));
+        let journal_mode = store
+            .conn()
+            .unwrap()
+            .query_row("PRAGMA journal_mode = WAL", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap();
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        insert_receipt_rows(
+            &store,
+            "snapshot-old",
+            MCP_AUDIT_EXPORT_MAX_ENTRIES,
+            "2020-01-01T00:00:00Z",
+        );
+        insert_receipt_rows(
+            &store,
+            "snapshot-visible",
+            1,
+            &chrono::Utc::now().to_rfc3339(),
+        );
+
+        let (scanned_tx, scanned_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let export_store = store.clone();
+        let before_export = chrono::Utc::now();
+        let export_thread = std::thread::spawn(move || {
+            export_store.export_logs_with_query_stats_and_hook(
+                McpAuditExportDays::try_from(30).unwrap(),
+                None,
+                || {
+                    scanned_tx.send(()).unwrap();
+                    release_rx
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .expect("release snapshot export after concurrent insert");
+                },
+            )
+        });
+
+        scanned_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("export reached the post-scan snapshot barrier");
+        let after_scan = chrono::Utc::now();
+        store
+            .insert_log(
+                "snapshot-concurrent-insert",
+                &serde_json::json!({}),
+                "result",
+                true,
+                false,
+            )
+            .expect("WAL writer commits while the export read snapshot remains open");
+        release_tx.send(()).unwrap();
+
+        let (export, stats) = export_thread.join().unwrap().unwrap();
+        let recorded_exported_at = strict_mcp_audit_rfc3339(&export.exported_at).unwrap();
+        assert!(recorded_exported_at >= before_export);
+        assert!(recorded_exported_at <= after_scan);
+        assert_eq!(stats.snapshot_max_id, stats.post_scan_max_id);
+        assert!(export.complete);
+        assert!(!export.truncated);
+        assert_eq!(export.incomplete_reason, None);
+        assert_eq!(export.entry_count, 1);
+        assert_eq!(export.entries[0].tool_name, "snapshot-visible-0");
+        assert!(export
+            .entries
+            .iter()
+            .all(|entry| entry.tool_name != "snapshot-concurrent-insert"));
+        assert_eq!(
+            store.list_logs(1).unwrap()[0].tool_name,
+            "snapshot-concurrent-insert",
+            "the control proves the concurrent row committed outside the export snapshot"
+        );
+    }
+
+    #[test]
+    fn d063_rfc3339_text_cleanup_predicate_has_a_timezone_offset_counterexample() {
+        let cutoff = "2026-07-14T00:00:00+00:00";
+        let chronologically_newer = "2026-07-13T20:00:00-05:00";
+        assert!(
+            strict_mcp_audit_rfc3339(chronologically_newer).unwrap()
+                > strict_mcp_audit_rfc3339(cutoff).unwrap(),
+            "control: the candidate row is one hour newer than the cutoff"
+        );
+        assert!(
+            chronologically_newer < cutoff,
+            "the same RFC3339 values sort in the opposite order as TEXT"
+        );
+
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute("CREATE TABLE audit(created_at TEXT NOT NULL)", [])
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO audit(created_at) VALUES (?1)",
+                [chronologically_newer],
+            )
+            .unwrap();
+        let wrongly_removed = connection
+            .execute("DELETE FROM audit WHERE created_at < ?1", [cutoff])
+            .unwrap();
+        assert_eq!(
+            wrongly_removed, 1,
+            "D063 remains open: SQLite TEXT ordering can delete a chronologically newer offset timestamp"
+        );
     }
 
     #[test]

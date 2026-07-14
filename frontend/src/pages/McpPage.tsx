@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   Wrench,
   Plus,
@@ -29,21 +30,32 @@ import {
   listMcpTemplates,
   recommendMcpManifests,
   listMcpAuditLogs,
-  clearMcpAuditLogs,
   getPrivacyPolicy,
   getRuntimeBuildInfo,
   type McpServerInfo,
   type McpTemplate,
   type ToolManifest,
-  type McpAuditLogEntry,
+  type McpAuditLogListProjection,
   type PrivacyRule,
   type RuntimeBuildInfo,
 } from "../tauri";
 import EmptyState from "../components/EmptyState";
 import ErrorBanner from "../components/ErrorBanner";
-import ConfirmDangerDialog from "../components/ConfirmDangerDialog";
+import {
+  decideMcpPageSettlementAdmission,
+  settleMcpPageRead,
+  type McpPageSettlementAdmissionState,
+} from "./mcpPageSettlementAdmission";
 
 type WizardStep = "select" | "preview" | "done";
+type AuditPageState =
+  | { status: "checking" }
+  | McpAuditLogListProjection
+  | { status: "unknown"; reasonCode: "audit_command_transport_failed" };
+type RecommendationPageState =
+  | { status: "checking" }
+  | { status: "available"; entries: ToolManifest[] }
+  | { status: "unknown"; reasonCode: "recommendation_command_transport_failed" };
 
 function resolvePlaceholders(arr: string[], inputs: Record<string, string>): string[] {
   return arr.map(s => s.replace(/\{\{(\w+)\}\}/g, (_, key) => inputs[key] ?? `{{${key}}}`));
@@ -113,16 +125,21 @@ export default function McpPage() {
   const [registering, setRegistering] = useState(false);
 
   const [templates, setTemplates] = useState<McpTemplate[]>([]);
-  const [recommended, setRecommended] = useState<ToolManifest[]>([]);
+  const [recommendationRead, setRecommendationRead] = useState<RecommendationPageState>({
+    status: "checking",
+  });
   const [wizardOpen, setWizardOpen] = useState(false);
   const [wizardStep, setWizardStep] = useState<WizardStep>("select");
   const [selectedTemplate, setSelectedTemplate] = useState<McpTemplate | null>(null);
   const [templateInputs, setTemplateInputs] = useState<Record<string, string>>({});
   const [wizardRegistering, setWizardRegistering] = useState(false);
-  const [auditLogs, setAuditLogs] = useState<McpAuditLogEntry[]>([]);
+  const [auditRead, setAuditRead] = useState<AuditPageState>({ status: "checking" });
   const [privacyRules, setPrivacyRules] = useState<PrivacyRule[]>([]);
   const [expandedLog, setExpandedLog] = useState<number | null>(null);
-  const [confirmAuditCleanup, setConfirmAuditCleanup] = useState(false);
+  const settlementAdmissionRef = useRef<McpPageSettlementAdmissionState>({
+    lifecycle: "active",
+    currentGeneration: 0,
+  });
   const arbitraryRegistrationEnabled =
     runtimeBuildInfo?.devExtensionsEnabled === true &&
     runtimeBuildInfo.arbitraryMcpRegistrationEnabled === true;
@@ -134,29 +151,64 @@ export default function McpPage() {
         ? "disabled_by_build"
         : "unavailable";
   const typedTemplates = templates.filter(template => (template.manifests?.length ?? 0) > 0);
+  const isLifecycleActive = () => settlementAdmissionRef.current.lifecycle === "active";
 
   const load = async () => {
+    // `load` is also a post-mutation continuation. An inactive component must
+    // not mutate React state or start a fresh IPC fan-out.
+    if (!isLifecycleActive()) return;
+    const generation = ++settlementAdmissionRef.current.currentGeneration;
+    const isCurrent = () =>
+      decideMcpPageSettlementAdmission(settlementAdmissionRef.current, generation).admitted;
     setLoading(true);
     setPageError("");
+    setAuditRead({ status: "checking" });
+    setRecommendationRead({ status: "checking" });
+
+    void settleMcpPageRead(
+      listMcpAuditLogs(20),
+      () => settlementAdmissionRef.current,
+      generation,
+      projection => {
+        setAuditRead(projection);
+      },
+      () => {
+        setAuditRead({ status: "unknown", reasonCode: "audit_command_transport_failed" });
+      }
+    );
+
+    void settleMcpPageRead(
+      recommendMcpManifests(5),
+      () => settlementAdmissionRef.current,
+      generation,
+      recommendations => {
+        setRecommendationRead({ status: "available", entries: recommendations });
+      },
+      () => {
+        setRecommendationRead({
+          status: "unknown",
+          reasonCode: "recommendation_command_transport_failed",
+        });
+      }
+    );
+
     try {
-      const [s, t, tpls, logs, policy] = await Promise.all([
+      const [s, t, tpls, policy] = await Promise.all([
         listMcpServers(),
         listMcpTools(),
         listMcpTemplates(),
-        listMcpAuditLogs(20),
         getPrivacyPolicy(),
       ]);
-      setServers(s);
-      setTools(t);
-      setTemplates(tpls);
-      setAuditLogs(logs);
-      setPrivacyRules(policy.rules);
-      const rec = await recommendMcpManifests(5);
-      setRecommended(rec);
-    } catch (e) {
-      setPageError("加载失败: " + String(e));
+      if (isCurrent()) {
+        setServers(s);
+        setTools(t);
+        setTemplates(tpls);
+        setPrivacyRules(policy.rules);
+      }
+    } catch (error) {
+      if (isCurrent()) setPageError("加载失败: " + String(error));
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   };
 
@@ -164,17 +216,27 @@ export default function McpPage() {
     setExpandedLog(prev => (prev === logId ? null : logId));
   };
 
+  const auditLogs =
+    auditRead.status === "available" || auditRead.status === "degraded" ? auditRead.entries : [];
+
   // Calculate audit stats
-  const auditStats = {
-    total: auditLogs.length,
-    success: auditLogs.filter(l => l.success).length,
-    failed: auditLogs.filter(l => !l.success).length,
-    piiHits: auditLogs.filter(l => l.pii_found).length,
-    uniqueTools: new Set(auditLogs.map(l => l.tool_name)).size,
-  };
+  const auditStats =
+    auditRead.status === "available" || auditRead.status === "degraded"
+      ? {
+          total: auditLogs.length,
+          success: auditLogs.filter(l => l.success).length,
+          failed: auditLogs.filter(l => !l.success).length,
+          piiHits: auditLogs.filter(l => l.pii_found).length,
+        }
+      : null;
 
   useEffect(() => {
-    load();
+    settlementAdmissionRef.current.lifecycle = "active";
+    void load();
+    return () => {
+      settlementAdmissionRef.current.lifecycle = "inactive";
+      settlementAdmissionRef.current.currentGeneration += 1;
+    };
   }, []);
 
   useEffect(() => {
@@ -203,15 +265,16 @@ export default function McpPage() {
     try {
       const manifests = parseTypedMcpManifests(manifestsText, name.trim());
       await registerMcpServer(name.trim(), command.trim(), args, manifests);
+      if (!isLifecycleActive()) return;
       setName("");
       setCommand("");
       setArgsText("");
       setManifestsText("");
       await load();
     } catch (e) {
-      setPageError("注册失败: " + String(e));
+      if (isLifecycleActive()) setPageError("注册失败: " + String(e));
     } finally {
-      setRegistering(false);
+      if (isLifecycleActive()) setRegistering(false);
     }
   };
 
@@ -221,9 +284,10 @@ export default function McpPage() {
     setPageError("");
     try {
       await unregisterMcpServer(n);
+      if (!isLifecycleActive()) return;
       await load();
     } catch (e) {
-      setPageError("删除失败: " + String(e));
+      if (isLifecycleActive()) setPageError("删除失败: " + String(e));
     }
   };
 
@@ -302,34 +366,18 @@ export default function McpPage() {
         selectedTemplate.manifests,
         env
       );
+      if (!isLifecycleActive()) return;
       setWizardStep("done");
       await load();
     } catch (e) {
-      setPageError("注册失败: " + String(e));
+      if (isLifecycleActive()) setPageError("注册失败: " + String(e));
     } finally {
-      setWizardRegistering(false);
+      if (isLifecycleActive()) setWizardRegistering(false);
     }
   };
 
   return (
     <div className="h-full overflow-auto bg-white p-6">
-      <ConfirmDangerDialog
-        open={confirmAuditCleanup}
-        title="确认清理 MCP 审计日志"
-        description="这会删除 7 天前的本地 MCP 审计日志。清理后这些审计记录将不再出现在安全审计中心。"
-        confirmLabel="清理日志"
-        busy={loading}
-        onConfirm={async () => {
-          setConfirmAuditCleanup(false);
-          try {
-            await clearMcpAuditLogs(7);
-            await load();
-          } catch (e) {
-            setPageError("清理审计日志失败: " + String(e));
-          }
-        }}
-        onCancel={() => setConfirmAuditCleanup(false)}
-      />
       <div className="max-w-4xl mx-auto space-y-8">
         <ErrorBanner message={pageError} onClose={() => setPageError("")} />
         <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
@@ -469,15 +517,27 @@ export default function McpPage() {
                 : "候选清单，仅供查看"}
             </div>
           </div>
-          {recommended.length === 0 ? (
+          {recommendationRead.status === "checking" ? (
+            <div
+              className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-500"
+              role="status"
+            >
+              正在核验推荐事实…
+            </div>
+          ) : recommendationRead.status === "unknown" ? (
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+              推荐事实状态未知；当前无法确认是否存在推荐工具。
+              <span className="ml-1 font-mono text-[11px]">{recommendationRead.reasonCode}</span>
+            </div>
+          ) : recommendationRead.entries.length === 0 ? (
             <EmptyState
               title="暂无推荐"
-              description="先补充目标和能力数据后，这里会给出更贴近当前阶段的工具建议。"
+              description="当前后端返回零条推荐工具。"
               className="py-4"
             />
           ) : (
             <div className="grid grid-cols-1 gap-3">
-              {recommended.map(manifest => (
+              {recommendationRead.entries.map(manifest => (
                 <div
                   key={manifest.name}
                   className="border rounded-lg p-4 bg-white flex items-start justify-between gap-4"
@@ -538,13 +598,25 @@ export default function McpPage() {
               安全审计中心
             </h3>
             <div className="flex items-center gap-2">
-              <button
-                onClick={() => setConfirmAuditCleanup(true)}
+              <Link
+                to="/settings"
                 className="text-xs border border-gray-200 rounded-lg px-3 py-1.5 hover:bg-gray-50"
               >
-                清理 7 天前日志
-              </button>
+                在隐私设置中管理审计保留
+              </Link>
             </div>
+          </div>
+          <div className="text-xs text-gray-500" role="status">
+            审计状态：
+            {auditRead.status === "available"
+              ? "可用"
+              : auditRead.status === "degraded"
+                ? "只读降级"
+                : auditRead.status === "unavailable"
+                  ? "不可用"
+                  : auditRead.status === "unknown"
+                    ? "未知"
+                    : "检查中"}
           </div>
 
           {/* Stats Cards */}
@@ -552,9 +624,11 @@ export default function McpPage() {
             <div className="rounded-lg border border-gray-200 bg-white p-3">
               <div className="flex items-center gap-1.5 text-xs text-gray-500">
                 <Activity size={12} />
-                总调用次数
+                本页记录
               </div>
-              <div className="mt-1 text-xl font-semibold text-gray-900">{auditStats.total}</div>
+              <div className="mt-1 text-xl font-semibold text-gray-900">
+                {auditStats?.total ?? "未知"}
+              </div>
             </div>
             <div className="rounded-lg border border-emerald-100 bg-emerald-50 p-3">
               <div className="flex items-center gap-1.5 text-xs text-emerald-600">
@@ -562,7 +636,7 @@ export default function McpPage() {
                 成功
               </div>
               <div className="mt-1 text-xl font-semibold text-emerald-700">
-                {auditStats.success}
+                {auditStats?.success ?? "未知"}
               </div>
             </div>
             <div className="rounded-lg border border-rose-100 bg-rose-50 p-3">
@@ -570,14 +644,18 @@ export default function McpPage() {
                 <X size={12} />
                 失败
               </div>
-              <div className="mt-1 text-xl font-semibold text-rose-700">{auditStats.failed}</div>
+              <div className="mt-1 text-xl font-semibold text-rose-700">
+                {auditStats?.failed ?? "未知"}
+              </div>
             </div>
             <div className="rounded-lg border border-amber-100 bg-amber-50 p-3">
               <div className="flex items-center gap-1.5 text-xs text-amber-600">
                 <AlertTriangle size={12} />
-                PII 拦截
+                PII 命中
               </div>
-              <div className="mt-1 text-xl font-semibold text-amber-700">{auditStats.piiHits}</div>
+              <div className="mt-1 text-xl font-semibold text-amber-700">
+                {auditStats?.piiHits ?? "未知"}
+              </div>
             </div>
           </div>
 
@@ -633,98 +711,120 @@ export default function McpPage() {
           </div>
 
           {/* Audit Logs */}
-          {auditLogs.length === 0 ? (
-            <EmptyState
-              title="暂无审计记录"
-              description="一旦触发 MCP 工具调用，这里会显示最近的执行记录和隐私命中情况。"
-              className="py-4"
-            />
+          {auditRead.status === "unavailable" ? (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+              审计事实暂不可用；这里不会把未知状态显示为零条记录。
+              <span className="ml-1 font-mono text-[11px]">{auditRead.reasonCode}</span>
+            </div>
+          ) : auditRead.status === "unknown" ? (
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+              审计事实状态未知；未确认的读取不会显示为成功或空列表。
+              <span className="ml-1 font-mono text-[11px]">{auditRead.reasonCode}</span>
+            </div>
+          ) : auditRead.status === "checking" ? (
+            <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-sm text-gray-500">
+              正在核验审计事实…
+            </div>
           ) : (
             <div className="space-y-3">
-              {auditLogs.map(log => {
-                const isExpanded = expandedLog === log.id;
-                return (
-                  <div
-                    key={log.id}
-                    className="rounded-lg border border-gray-200 bg-white overflow-hidden"
-                  >
-                    {/* Header - always visible */}
+              {auditRead.status === "degraded" && (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                  审计记录可读，但持久化健康状态为只读降级。
+                  <span className="ml-1 font-mono text-[11px]">{auditRead.reasonCode}</span>
+                </div>
+              )}
+              {auditLogs.length === 0 ? (
+                <EmptyState
+                  title="暂无审计记录"
+                  description="一旦触发 MCP 工具调用，这里会显示最近的执行记录和隐私命中情况。"
+                  className="py-4"
+                />
+              ) : (
+                auditLogs.map(log => {
+                  const isExpanded = expandedLog === log.id;
+                  return (
                     <div
-                      onClick={() => toggleLogExpand(log.id)}
-                      className="p-4 cursor-pointer hover:bg-gray-50 transition"
+                      key={log.id}
+                      className="rounded-lg border border-gray-200 bg-white overflow-hidden"
                     >
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="flex items-center gap-3">
-                          <div className="font-medium text-gray-900">{log.tool_name}</div>
-                          <span className="text-xs text-gray-400">
-                            {new Date(log.created_at).toLocaleString("zh-CN")}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={`text-[10px] px-2 py-0.5 rounded-full ${
-                              log.success
-                                ? "bg-emerald-100 text-emerald-700"
-                                : "bg-rose-100 text-rose-700"
-                            }`}
-                          >
-                            {log.success ? "成功" : "失败"}
-                          </span>
-                          {log.pii_found && (
-                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">
-                              敏感数据已脱敏
+                      {/* Header - always visible */}
+                      <div
+                        onClick={() => toggleLogExpand(log.id)}
+                        className="p-4 cursor-pointer hover:bg-gray-50 transition"
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-3">
+                            <div className="font-medium text-gray-900">{log.tool_name}</div>
+                            <span className="text-xs text-gray-400">
+                              {new Date(log.created_at).toLocaleString("zh-CN")}
                             </span>
-                          )}
-                          {isExpanded ? (
-                            <ChevronUp size={16} className="text-gray-400" />
-                          ) : (
-                            <ChevronDown size={16} className="text-gray-400" />
-                          )}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`text-[10px] px-2 py-0.5 rounded-full ${
+                                log.success
+                                  ? "bg-emerald-100 text-emerald-700"
+                                  : "bg-rose-100 text-rose-700"
+                              }`}
+                            >
+                              {log.success ? "成功" : "失败"}
+                            </span>
+                            {log.pii_found && (
+                              <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">
+                                检测到敏感数据
+                              </span>
+                            )}
+                            {isExpanded ? (
+                              <ChevronUp size={16} className="text-gray-400" />
+                            ) : (
+                              <ChevronDown size={16} className="text-gray-400" />
+                            )}
+                          </div>
+                        </div>
+                        {/* Preview line */}
+                        <div className="mt-2 text-xs text-gray-500 truncate">
+                          <span className="text-gray-400">收据预览：</span>
+                          {log.arguments.substring(0, 100)}
+                          {log.arguments.length > 100 && "..."}
                         </div>
                       </div>
-                      {/* Preview line */}
-                      <div className="mt-2 text-xs text-gray-500 truncate">
-                        <span className="text-gray-400">参数预览：</span>
-                        {log.arguments.substring(0, 100)}
-                        {log.arguments.length > 100 && "..."}
-                      </div>
-                    </div>
 
-                    {/* Expanded details */}
-                    {isExpanded && (
-                      <div className="border-t border-gray-100 px-4 py-4 bg-gray-50/50">
-                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                          <div className="space-y-2">
-                            <div className="flex items-center gap-2 text-xs font-medium text-gray-600">
-                              <FileText size={14} />
-                              请求参数
+                      {/* Expanded details */}
+                      {isExpanded && (
+                        <div className="border-t border-gray-100 px-4 py-4 bg-gray-50/50">
+                          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                            <div className="space-y-2">
+                              <div className="flex items-center gap-2 text-xs font-medium text-gray-600">
+                                <FileText size={14} />
+                                参数审计收据
+                              </div>
+                              <div className="rounded-md bg-slate-50 border border-slate-100 p-3">
+                                <pre className="text-xs text-gray-700 whitespace-pre-wrap break-all max-h-40 overflow-auto">
+                                  {log.arguments}
+                                </pre>
+                              </div>
                             </div>
-                            <div className="rounded-md bg-slate-50 border border-slate-100 p-3">
-                              <pre className="text-xs text-gray-700 whitespace-pre-wrap break-all max-h-40 overflow-auto">
-                                {log.arguments}
-                              </pre>
+                            <div className="space-y-2">
+                              <div className="flex items-center gap-2 text-xs font-medium text-gray-600">
+                                <CheckCircle size={14} />
+                                结果审计收据
+                              </div>
+                              <div className="rounded-md bg-slate-50 border border-slate-100 p-3">
+                                <pre className="text-xs text-gray-700 whitespace-pre-wrap break-all max-h-40 overflow-auto">
+                                  {log.result}
+                                </pre>
+                              </div>
                             </div>
                           </div>
-                          <div className="space-y-2">
-                            <div className="flex items-center gap-2 text-xs font-medium text-gray-600">
-                              <CheckCircle size={14} />
-                              执行结果
-                            </div>
-                            <div className="rounded-md bg-slate-50 border border-slate-100 p-3">
-                              <pre className="text-xs text-gray-700 whitespace-pre-wrap break-all max-h-40 overflow-auto">
-                                {log.result}
-                              </pre>
-                            </div>
+                          <div className="mt-3 flex items-center gap-4 text-[11px] text-gray-400">
+                            <span>调用 ID: {log.id}</span>
                           </div>
                         </div>
-                        <div className="mt-3 flex items-center gap-4 text-[11px] text-gray-400">
-                          <span>调用 ID: {log.id}</span>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
+                      )}
+                    </div>
+                  );
+                })
+              )}
             </div>
           )}
         </section>

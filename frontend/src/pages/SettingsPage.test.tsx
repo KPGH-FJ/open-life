@@ -367,6 +367,98 @@ describe("SettingsPage", () => {
     );
   });
 
+  it("uses the canonical filename and complete wording only for a complete audit export", async () => {
+    vi.mocked(save).mockResolvedValue("/tmp/openlife-mcp-audit.json");
+    vi.mocked(writeTextFile).mockResolvedValue(undefined);
+
+    renderSettings();
+    await clickTab("数据与恢复");
+    fireEvent.click(await screen.findByRole("button", { name: "导出审计" }));
+    fireEvent.click(await screen.findByRole("button", { name: "继续执行" }));
+
+    expect(await screen.findByText("已完整导出近 30 天 MCP 审计日志 0 条")).toBeInTheDocument();
+    expect(save).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultPath: "openlife-mcp-audit.json" })
+    );
+    const writeCalls = vi.mocked(writeTextFile).mock.calls;
+    const written = writeCalls[writeCalls.length - 1]?.[1];
+    expect(JSON.parse(String(written))).toEqual(
+      expect.objectContaining({
+        entry_count: 0,
+        complete: true,
+        truncated: false,
+        incomplete_reason: null,
+      })
+    );
+  });
+
+  it("saves and labels a bounded audit export as incomplete when the backend reports truncation", async () => {
+    const argumentsReceipt = JSON.stringify({
+      kind: "arguments",
+      payloadStored: false,
+      valueType: "object",
+      bytes: 2,
+      digest: "sha256:AT5/r7IBtLhordHw+cHDRUBlUanhoUXBpj8SXOOfjGs",
+    });
+    const resultReceipt = JSON.stringify({
+      kind: "result",
+      payloadStored: false,
+      valueType: "string",
+      bytes: 0,
+      digest: "sha256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU",
+    });
+    const entries = [
+      {
+        id: 1,
+        tool_name: "bounded.audit.read",
+        arguments: argumentsReceipt,
+        result: resultReceipt,
+        success: true,
+        pii_found: false,
+        created_at: "2026-07-14T08:30:00+08:00",
+      },
+    ];
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "export_mcp_audit_logs") {
+        return Promise.resolve({
+          exported_at: "2026-07-14T08:30:00+08:00",
+          entry_count: entries.length,
+          days: 30,
+          complete: false,
+          truncated: true,
+          incomplete_reason: "scan_limit",
+          entries,
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+    vi.mocked(save).mockResolvedValue("/tmp/openlife-mcp-audit.json");
+    vi.mocked(writeTextFile).mockResolvedValue(undefined);
+
+    renderSettings();
+    await clickTab("数据与恢复");
+    fireEvent.click(await screen.findByRole("button", { name: "导出审计" }));
+    fireEvent.click(await screen.findByRole("button", { name: "继续执行" }));
+
+    expect(
+      await screen.findByText(/扫描达到有界上限，仍有未检查日志，文件是不完整快照/)
+    ).toBeInTheDocument();
+    expect(save).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultPath: "openlife-mcp-audit-incomplete.json" })
+    );
+    const writeCalls = vi.mocked(writeTextFile).mock.calls;
+    const written = writeCalls[writeCalls.length - 1]?.[1];
+    expect(typeof written).toBe("string");
+    expect(JSON.parse(String(written))).toEqual(
+      expect.objectContaining({
+        entry_count: 1,
+        complete: false,
+        truncated: true,
+        incomplete_reason: "scan_limit",
+      })
+    );
+  });
+
   it("shows feedback evolution report as read-only candidates, not applied rules", async () => {
     renderSettings();
 

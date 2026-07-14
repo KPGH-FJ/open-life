@@ -202,7 +202,11 @@ fn restart_and_observe(path: &Path) -> ProductReadObservation {
     // an independently vulnerable export path.
     let export = McpAuditStore::with_key_materials(path, vec![material()])
         .map_err(|error| error.to_string())
-        .and_then(|store| store.export_logs(30).map_err(|error| error.to_string()));
+        .and_then(|store| {
+            store
+                .export_logs(McpAuditExportDays::try_from(30).expect("valid D068 export window"))
+                .map_err(|error| error.to_string())
+        });
     ProductReadObservation { list, export }
 }
 

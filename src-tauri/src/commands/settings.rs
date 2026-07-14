@@ -5,7 +5,7 @@ use openlife_core::llm::{
     chat_completions_url, default_base_for_provider, effective_api_key_for_endpoint,
     provider_label, ProviderInvocationReceipt, ProviderInvocationStatus,
 };
-use openlife_core::mcp_audit::AuditExport;
+use openlife_core::mcp_audit::{AuditExport, McpAuditExportDays, MCP_AUDIT_RETENTION_MAX_DAYS};
 use openlife_core::network_client::resolve_network_policy_decision;
 use openlife_core::privacy::PrivacyPolicy;
 use openlife_core::scheduler::InferenceScheduler;
@@ -1533,7 +1533,16 @@ async fn export_mcp_audit_logs_with_state(
     days: i64,
     state: &Arc<AppState>,
 ) -> Result<AuditExport, AppError> {
-    state.mcp_audit_read_gateway.export_logs(state, days).await
+    let window = McpAuditExportDays::try_from(days).map_err(|_| AppError::Config {
+        message: "mcp_audit_export_days_out_of_range".into(),
+        hint: Some(format!(
+            "days must be between 1 and {MCP_AUDIT_RETENTION_MAX_DAYS}"
+        )),
+    })?;
+    state
+        .mcp_audit_read_gateway
+        .export_logs(state, window)
+        .await
 }
 
 #[tauri::command]

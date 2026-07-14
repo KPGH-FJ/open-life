@@ -73,8 +73,7 @@ pub(crate) async fn get_system_diagnostics_with_state(
             registry.list_all_tools().len(),
         )
     };
-    let (mcp_recent_audit_count, mcp_recent_pii_count) =
-        state.mcp_audit_read_gateway.diagnostic_counts(state).await;
+    let mcp_audit_projection = state.mcp_audit_read_gateway.diagnostic_counts(state).await;
     let (
         memory_chunk_count,
         vector_corrupt_embedding_count,
@@ -462,8 +461,7 @@ pub(crate) async fn get_system_diagnostics_with_state(
         policy_router,
         mcp_server_count,
         mcp_tool_count,
-        mcp_recent_audit_count,
-        mcp_recent_pii_count,
+        mcp_audit_read: mcp_audit_projection,
         memory_chunk_count,
         vector_corrupt_embedding_count,
         vector_unknown_profile_count,

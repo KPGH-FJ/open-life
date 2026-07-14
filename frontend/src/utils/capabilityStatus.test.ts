@@ -28,8 +28,11 @@ function diagnostics(overrides: Partial<SystemDiagnostics> = {}): SystemDiagnost
     },
     mcp_server_count: 0,
     mcp_tool_count: 0,
-    mcp_recent_audit_count: 0,
-    mcp_recent_pii_count: 0,
+    mcp_audit_read: {
+      status: "available",
+      recentAuditCount: 0,
+      recentPiiCount: 0,
+    },
     memory_chunk_count: 0,
     unfinished_builder_sessions: 0,
     pending_builder_review_sessions: 0,

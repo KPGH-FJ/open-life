@@ -133,6 +133,12 @@ export default function PrivacyTab({
     await Promise.all([refreshSecurityState(), refreshProviderTransmissionHistory()]);
   };
 
+  const auditRead = diagnostics?.mcp_audit_read;
+  const auditFacts =
+    auditRead?.status === "available" || auditRead?.status === "degraded" ? auditRead : null;
+  const auditExportAllowed = auditRead?.status === "available" || auditRead?.status === "degraded";
+  const auditMutationAllowed = auditRead?.status === "available";
+
   return (
     <>
       <section className="space-y-4 border-t pt-4">
@@ -183,27 +189,37 @@ export default function PrivacyTab({
           <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
             <div className="text-sm font-semibold text-slate-800">本地审计</div>
             <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-600">
-              <div>近期审计：{diagnostics?.mcp_recent_audit_count ?? "-"}</div>
-              <div>PII 命中：{diagnostics?.mcp_recent_pii_count ?? "-"}</div>
+              <div>近期审计：{auditFacts?.recentAuditCount ?? "未知"}</div>
+              <div>PII 命中：{auditFacts?.recentPiiCount ?? "未知"}</div>
+              <div className="col-span-2">
+                审计状态：
+                {auditRead?.status === "available"
+                  ? "可用"
+                  : auditRead?.status === "degraded"
+                    ? "只读降级"
+                    : auditRead?.status === "unavailable"
+                      ? "不可用"
+                      : "未知"}
+              </div>
             </div>
             <div className="mt-3 flex flex-wrap gap-2">
               <button
                 onClick={handleExportAudit}
-                disabled={securityLoading}
+                disabled={securityLoading || !auditExportAllowed}
                 className="rounded-md bg-slate-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-900 disabled:opacity-50"
               >
                 导出审计
               </button>
               <button
                 onClick={handleCleanupAudit}
-                disabled={securityLoading}
+                disabled={securityLoading || !auditMutationAllowed}
                 className="rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-50 disabled:opacity-50"
               >
                 清理旧日志
               </button>
               <button
                 onClick={handleRotateAuditKey}
-                disabled={securityLoading}
+                disabled={securityLoading || !auditMutationAllowed}
                 className="rounded-md border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-700 hover:bg-amber-100 disabled:opacity-50"
               >
                 轮换密钥

@@ -236,11 +236,12 @@ pub async fn recommend_mcp_manifests(
 pub async fn list_mcp_audit_logs(
     limit: usize,
     state: State<'_, Arc<AppState>>,
-) -> Result<Vec<openlife_core::mcp_audit::McpLogEntry>, AppError> {
-    state
+) -> Result<crate::McpAuditReadProjection<crate::McpAuditLogListFacts>, AppError> {
+    let limit = crate::mcp_audit_read_gateway::McpAuditListLimit::try_from(limit)?;
+    Ok(state
         .mcp_audit_read_gateway
         .list_logs(state.inner(), limit)
-        .await
+        .await)
 }
 
 #[tauri::command]

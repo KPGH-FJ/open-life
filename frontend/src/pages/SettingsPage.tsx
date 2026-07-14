@@ -365,11 +365,23 @@ export default function SettingsPage() {
       const audit = await exportMcpAuditLogs(30);
       const path = await save({
         filters: [{ name: "JSON", extensions: ["json"] }],
-        defaultPath: "openlife-mcp-audit.json",
+        defaultPath: audit.complete
+          ? "openlife-mcp-audit.json"
+          : "openlife-mcp-audit-incomplete.json",
       });
       if (!path) return;
       await writeTextFile(path, JSON.stringify(audit, null, 2));
-      setSecurityMessage(`已导出近 ${audit.days} 天 MCP 审计日志 ${audit.entry_count} 条`);
+      const incompleteDetail =
+        audit.incomplete_reason === "scan_limit"
+          ? "扫描达到有界上限，仍有未检查日志"
+          : audit.incomplete_reason === "entry_limit"
+            ? "窗口内日志超过单文件条目上限"
+            : "扫描与单文件条目均达到上限";
+      setSecurityMessage(
+        audit.complete
+          ? `已完整导出近 ${audit.days} 天 MCP 审计日志 ${audit.entry_count} 条`
+          : `已导出近 ${audit.days} 天 MCP 审计日志 ${audit.entry_count} 条；${incompleteDetail}，文件是不完整快照`
+      );
     } catch (e: any) {
       setSecurityMessage("审计日志导出失败: " + readableError(e));
     } finally {
