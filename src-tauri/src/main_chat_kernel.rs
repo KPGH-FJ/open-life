@@ -7738,6 +7738,7 @@ async fn materialize_kernel_memory_governance(
     let mut memory_proposal_ids = Vec::new();
     let mut lifemodel_proposal_ids = Vec::new();
     let mut explicit_memory_receipts = Vec::new();
+    let mut explicit_memory_rollback_receipts = Vec::new();
     let mut canonical_memory_noop_ids = Vec::new();
     let mut pending_proposal_ids = Vec::new();
     let mut blockers = routing.blockers.clone();
@@ -7805,6 +7806,8 @@ async fn materialize_kernel_memory_governance(
             .map_err(|error| format!("explicit Memory write failed: {error}"))?;
             let terminal_historical = receipt.admission_outcome
                 == openlife_core::agent::MemoryAdmissionOutcome::TerminalHistorical;
+            let rollback_requested =
+                policy_decision.allows(AllowedCapability::ReversibleMemoryRollback);
             let direct_write_executed = receipt.newly_committed && receipt.canonical_committed;
             let receipt_metadata = serde_json::json!({
                 "memoryGovernanceArtifact": true,
@@ -7836,7 +7839,7 @@ async fn materialize_kernel_memory_governance(
                 "directWritesExecuted": direct_write_executed,
                 "acceptedDurableTruthWritten": direct_write_executed,
             });
-            if terminal_historical {
+            if terminal_historical && !rollback_requested {
                 push_unique_string(
                     &mut blockers,
                     "explicit_memory_admission_terminal_historical",
@@ -7879,12 +7882,118 @@ async fn materialize_kernel_memory_governance(
                     state,
                     Some(task_session_id),
                     ExecutionTranscriptEntryKind::FinalResult,
-                    "The current user explicitly committed a reversible Memory fact.",
+                    if terminal_historical {
+                        "The same explicit Memory admission already reached its terminal historical state."
+                    } else {
+                        "The current user explicitly committed a reversible Memory fact."
+                    },
                     receipt_metadata.clone(),
                 )
                 .await,
             );
             explicit_memory_receipts.push(receipt_metadata);
+            if rollback_requested {
+                let rollback_grant = match policy_decision.authorize_explicit_memory_rollback(
+                    source_kind,
+                    source_user_message,
+                    candidate,
+                    &receipt,
+                ) {
+                    Ok(grant) => grant,
+                    Err(error) => {
+                        push_unique_string(
+                            &mut blockers,
+                            "explicit_memory_rollback_preexisting_owner_protected",
+                        );
+                        execution_transcript.extend(
+                            append_main_chat_agent_transcript(
+                                state,
+                                Some(task_session_id),
+                                ExecutionTranscriptEntryKind::Error,
+                                "The requested rollback was not allowed to remove a pre-existing Memory owner.",
+                                serde_json::json!({
+                                    "memoryId": receipt.memory_id,
+                                    "admissionOutcome": receipt.admission_outcome,
+                                    "errorDigest": openlife_core::agent::metadata_safe_text_digest(&error.to_string()).1,
+                                    "directWritesExecuted": false,
+                                }),
+                            )
+                            .await,
+                        );
+                        continue;
+                    }
+                };
+                let rollback_action = enqueue_main_chat_agent_action(
+                    state,
+                    task_session_id,
+                    "memory.explicit_rollback",
+                    "Rollback the exact Memory owner created by this same current-user instruction.",
+                    execution_transcript,
+                )
+                .await?;
+                transition_main_chat_action(
+                    state,
+                    &rollback_action.id,
+                    ExecutionQueueStatus::Executing,
+                    None,
+                )
+                .await?;
+                let rollback_receipt =
+                    crate::memory_gateway::rollback_explicit_user_memory_for_turn_with_state(
+                        state,
+                        &receipt,
+                        rollback_grant,
+                        execution_epoch,
+                    )
+                    .await
+                    .map_err(|error| format!("explicit Memory rollback failed: {error}"))?;
+                let rollback_metadata = serde_json::json!({
+                    "memoryGovernanceArtifact": true,
+                    "artifactType": "explicit_memory_rollback",
+                    "receiptId": rollback_receipt.receipt_id,
+                    "memoryId": rollback_receipt.memory_id,
+                    "rollbackEventId": rollback_receipt.rollback_event_id,
+                    "outboxEventId": rollback_receipt.outbox_event_id,
+                    "projectionState": rollback_receipt.projection_state,
+                    "canonicalCommitted": rollback_receipt.canonical_committed,
+                    "replayed": rollback_receipt.replayed,
+                    "finalActive": rollback_receipt.final_active,
+                    "authoritySource": "current_authenticated_user_message",
+                    "policyVersion": policy_decision.policy_version,
+                    "policyReasonCode": policy_decision.reason_code,
+                    "authorizedCandidateId": candidate.candidate_id,
+                    "canonicalHsChanged": false,
+                    "directMemoryWrite": false,
+                    "directMemoryRollback": rollback_receipt.canonical_committed,
+                    "directWritesExecuted": rollback_receipt.canonical_committed && !rollback_receipt.replayed,
+                    "acceptedDurableTruthWritten": false,
+                });
+                transition_main_chat_action(
+                    state,
+                    &rollback_action.id,
+                    ExecutionQueueStatus::Observed,
+                    Some(rollback_metadata.clone()),
+                )
+                .await?;
+                transition_main_chat_action(
+                    state,
+                    &rollback_action.id,
+                    ExecutionQueueStatus::Completed,
+                    Some(rollback_metadata.clone()),
+                )
+                .await?;
+                execution_transcript.extend(
+                    append_main_chat_agent_transcript(
+                        state,
+                        Some(task_session_id),
+                        ExecutionTranscriptEntryKind::FinalResult,
+                        "The current user explicitly rolled back the exact Memory owner from this turn.",
+                        rollback_metadata.clone(),
+                    )
+                    .await,
+                );
+                explicit_memory_rollback_receipts.push(rollback_metadata);
+            }
             continue;
         }
         let proposal_authorized = match candidate.destination {
@@ -8024,6 +8133,7 @@ async fn materialize_kernel_memory_governance(
         &memory_proposal_ids,
         &lifemodel_proposal_ids,
         &explicit_memory_receipts,
+        &explicit_memory_rollback_receipts,
         &canonical_memory_noop_ids,
         &blockers,
     );
@@ -8199,10 +8309,23 @@ fn memory_governance_metadata(
     memory_proposal_ids: &[String],
     lifemodel_proposal_ids: &[String],
     explicit_memory_receipts: &[serde_json::Value],
+    explicit_memory_rollback_receipts: &[serde_json::Value],
     canonical_memory_noop_ids: &[String],
     blockers: &[String],
 ) -> serde_json::Value {
     let direct_memory_write = explicit_memory_receipts.iter().any(|receipt| {
+        receipt
+            .get("directWritesExecuted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    });
+    let memory_rollback_effect_present = explicit_memory_rollback_receipts.iter().any(|receipt| {
+        receipt
+            .get("canonicalCommitted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    });
+    let direct_memory_rollback = explicit_memory_rollback_receipts.iter().any(|receipt| {
         receipt
             .get("directWritesExecuted")
             .and_then(Value::as_bool)
@@ -8215,14 +8338,17 @@ fn memory_governance_metadata(
         "memoryProposalIds": memory_proposal_ids,
         "lifeModelProposalIds": lifemodel_proposal_ids,
         "explicitMemoryReceipts": explicit_memory_receipts,
+        "explicitMemoryRollbackReceipts": explicit_memory_rollback_receipts,
         "canonicalMemoryNoOpIds": canonical_memory_noop_ids,
         "sessionOnlyCandidateIds": routing.session_only_candidate_ids,
         "noOpCandidateIds": routing.no_op_candidate_ids,
         "blockers": blockers,
-        "directWritesExecuted": direct_memory_write,
+        "directWritesExecuted": direct_memory_write || direct_memory_rollback,
         "directLifeModelWrite": false,
         "directMemoryWrite": direct_memory_write,
-        "acceptedDurableTruthWritten": direct_memory_write,
+        "directMemoryRollback": direct_memory_rollback,
+        "acceptedDurableTruthWritten": direct_memory_write && !memory_rollback_effect_present,
+        "canonicalMemoryActive": direct_memory_write && !memory_rollback_effect_present,
         "localLifeEventCaptureExecuted": !life_event_ids.is_empty(),
     })
 }
@@ -8235,6 +8361,7 @@ fn empty_memory_governance_metadata() -> serde_json::Value {
         "memoryProposalIds": [],
         "lifeModelProposalIds": [],
         "explicitMemoryReceipts": [],
+        "explicitMemoryRollbackReceipts": [],
         "canonicalMemoryNoOpIds": [],
         "sessionOnlyCandidateIds": [],
         "noOpCandidateIds": [],
@@ -8242,6 +8369,8 @@ fn empty_memory_governance_metadata() -> serde_json::Value {
         "directWritesExecuted": false,
         "directLifeModelWrite": false,
         "directMemoryWrite": false,
+        "directMemoryRollback": false,
+        "canonicalMemoryActive": false,
         "acceptedDurableTruthWritten": false,
         "localLifeEventCaptureExecuted": false,
     })
@@ -8305,6 +8434,11 @@ fn synthesize_memory_governance_reply(memory_governance: &serde_json::Value) -> 
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or(&[]);
+    let explicit_memory_rollback_receipts = memory_governance
+        .get("explicitMemoryRollbackReceipts")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
     let canonical_memory_noop_count = memory_governance
         .get("canonicalMemoryNoOpIds")
         .and_then(Value::as_array)
@@ -8331,6 +8465,32 @@ fn synthesize_memory_governance_reply(memory_governance: &serde_json::Value) -> 
             receipt.get("admissionOutcome").and_then(Value::as_str) == Some("alias_linked")
         })
         .count();
+    let rollback_count = explicit_memory_rollback_receipts
+        .iter()
+        .filter(|receipt| {
+            receipt
+                .get("canonicalCommitted")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                && !receipt
+                    .get("replayed")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+        })
+        .count();
+    let recovered_rollback_count = explicit_memory_rollback_receipts
+        .iter()
+        .filter(|receipt| {
+            receipt
+                .get("canonicalCommitted")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                && receipt
+                    .get("replayed")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+        })
+        .count();
     let mut lines = Vec::new();
     if life_event_count > 0 {
         lines.push(format!("已记录到本地生活事件：{life_event_count} 条。"));
@@ -8346,6 +8506,16 @@ fn synthesize_memory_governance_reply(memory_governance: &serde_json::Value) -> 
     if explicit_memory_write_count > 0 {
         lines.push(format!(
             "已按你当前这条明确指令写入可撤销 Memory：{explicit_memory_write_count} 条（包含必要的保守治理升级）。"
+        ));
+    }
+    if rollback_count > 0 {
+        lines.push(format!(
+            "已按同一条明确指令撤销刚才的 Memory：{rollback_count} 条；当前没有 active Memory。"
+        ));
+    }
+    if recovered_rollback_count > 0 {
+        lines.push(format!(
+            "已恢复并核验此前的 Memory 撤销事实：{recovered_rollback_count} 条；当前没有 active Memory，本次没有重复写入或撤销。"
         ));
     }
     if exact_replay_count > 0 {
@@ -8366,8 +8536,13 @@ fn synthesize_memory_governance_reply(memory_governance: &serde_json::Value) -> 
     if lines.is_empty() {
         lines.push("这次没有产生可持久化的记忆治理产物。".into());
     }
-    if explicit_memory_write_count == 0 {
+    if explicit_memory_write_count == 0 && rollback_count == 0 {
         lines.push("没有执行直接 Memory 写入或 accepted LifeModel 写入。".into());
+    } else if rollback_count > 0 {
+        lines.push(
+            "没有修改 canonical LifeModel-HS；撤销事实已持久化，应用重启后仍应保持非 active。"
+                .into(),
+        );
     } else {
         lines.push("没有修改 canonical LifeModel-HS；Memory receipt 可用于撤销。".into());
     }

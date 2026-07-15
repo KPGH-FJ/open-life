@@ -1221,6 +1221,19 @@ fn isolated_command_surface_state_with_resource_runtime() -> std::sync::Arc<crat
     state
 }
 
+fn isolated_command_surface_state_with_persistent_memory(
+    db_path: &std::path::Path,
+) -> std::sync::Arc<crate::AppState> {
+    let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    std::sync::Arc::get_mut(&mut state)
+        .expect("isolated command-surface state must have one owner")
+        .memory_lifecycle_store = Some(std::sync::Arc::new(tokio::sync::Mutex::new(
+        openlife_core::agent::MemoryLifecycleStore::new(db_path)
+            .expect("create persistent command-surface MemoryLifecycleStore"),
+    )));
+    state
+}
+
 fn bind_markdown_resource_to_command_surface_state(
     state: &std::sync::Arc<crate::AppState>,
     operation_id: &str,
@@ -5287,6 +5300,246 @@ async fn roadshow_cc02_untrusted_attachment_instruction_cannot_authorize_file_or
     assert!(tasks
         .iter()
         .all(|task| task.title != INJECTION && task.title != CHINESE_INJECTION));
+}
+
+#[tokio::test]
+async fn roadshow_cc03_exact_prompt_commits_then_rolls_back_and_recovers_after_store_reopen() {
+    const PROMPT: &str =
+        "请记住：我的路演回答偏好是先给一句结论，再给三点证据。随后撤销这条记忆并重启检查。";
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let workspace = tempfile::tempdir().expect("CC03 persistent Memory workspace");
+    let memory_db = workspace.path().join("memory-lifecycle.sqlite");
+    let state = isolated_command_surface_state_with_persistent_memory(&memory_db);
+
+    let result = invoke_send_message_with_operation_id_for_kernel_goal_3(
+        state.clone(),
+        "roadshow-cc03-memory-commit-undo",
+        PROMPT,
+        operation_id.clone(),
+    )
+    .await;
+
+    assert_eq!(result["status"], "completed", "CC03 response: {result}");
+    assert_eq!(result["legacy_fallback_used"], false);
+    assert_eq!(result["model_invoked"], false);
+    assert_eq!(result["tool_invoked"], false);
+    assert!(result["tool_calls"].as_array().is_some_and(Vec::is_empty));
+    assert_eq!(
+        result["agent_ingress"]["selectedStrategy"],
+        "reversible_memory_commit"
+    );
+    assert_eq!(
+        result["agent_ingress"]["policyDecision"]["reasonCode"],
+        "explicit_reversible_memory_commit_then_rollback_authorized"
+    );
+    assert!(
+        result["agent_ingress"]["policyDecision"]["allowedCapabilities"]
+            .as_array()
+            .is_some_and(|capabilities| capabilities
+                .iter()
+                .any(|capability| capability == "reversible_memory_rollback"))
+    );
+    assert!(list_command_surface_proposals(&state).await.is_empty());
+
+    let governance = &result["reasoning_trace"]["generation_result"]["memoryGovernance"];
+    assert_eq!(governance["directWritesExecuted"], true);
+    assert_eq!(governance["directMemoryWrite"], true);
+    assert_eq!(governance["directMemoryRollback"], true);
+    assert_eq!(governance["acceptedDurableTruthWritten"], false);
+    assert_eq!(governance["canonicalMemoryActive"], false);
+    let commit_receipts = governance["explicitMemoryReceipts"]
+        .as_array()
+        .expect("CC03 explicit Memory commit receipts");
+    let rollback_receipts = governance["explicitMemoryRollbackReceipts"]
+        .as_array()
+        .expect("CC03 explicit Memory rollback receipts");
+    assert_eq!(commit_receipts.len(), 1);
+    assert_eq!(rollback_receipts.len(), 1);
+    assert_eq!(commit_receipts[0]["admissionOutcome"], "owner_created");
+    assert_eq!(commit_receipts[0]["newlyCommitted"], true);
+    assert_eq!(rollback_receipts[0]["canonicalCommitted"], true);
+    assert_eq!(rollback_receipts[0]["replayed"], false);
+    assert_eq!(rollback_receipts[0]["finalActive"], false);
+    assert_eq!(rollback_receipts[0]["projectionState"], "applied");
+    let serialized_receipts = serde_json::to_string(&(commit_receipts, rollback_receipts))
+        .expect("serialize CC03 metadata-only receipts");
+    assert!(
+        !serialized_receipts.contains("我的路演回答偏好")
+            && !serialized_receipts.contains("先给一句结论"),
+        "CC03 receipts must retain references and digests, not copy the Memory body"
+    );
+    assert!(result["reply"].as_str().is_some_and(|reply| {
+        reply.contains("写入可撤销 Memory")
+            && reply.contains("撤销刚才的 Memory")
+            && reply.contains("当前没有 active Memory")
+    }));
+
+    let memory_id = commit_receipts[0]["memoryId"]
+        .as_str()
+        .expect("CC03 canonical Memory id")
+        .to_string();
+    let actions = list_command_surface_actions(&state, &operation_id).await;
+    let governed_memory_actions = actions
+        .iter()
+        .filter(|action| action.action.action_type.starts_with("memory.explicit_"))
+        .map(|action| {
+            (
+                action.action.action_type.as_str(),
+                action.status,
+                action
+                    .observation_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.get("directWritesExecuted"))
+                    .and_then(serde_json::Value::as_bool),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        governed_memory_actions,
+        vec![
+            (
+                "memory.explicit_write",
+                openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Completed,
+                Some(true),
+            ),
+            (
+                "memory.explicit_rollback",
+                openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Completed,
+                Some(true),
+            ),
+        ]
+    );
+    {
+        let store = state
+            .memory_lifecycle_store
+            .as_ref()
+            .expect("CC03 MemoryLifecycleStore")
+            .lock()
+            .await;
+        assert!(store
+            .list_active_records(None, 20)
+            .expect("list CC03 active Memory")
+            .is_empty());
+        let record = store
+            .get_record(&memory_id)
+            .expect("load CC03 canonical record")
+            .expect("CC03 canonical record exists");
+        assert_eq!(
+            record.status,
+            openlife_core::agent::MemoryLifecycleStatus::RolledBack
+        );
+        assert!(record.runtime_context_excluded_at.is_some());
+        let events = store
+            .lifecycle_events(&memory_id)
+            .expect("list CC03 lifecycle events");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.rollback_event.is_some())
+                .count(),
+            1
+        );
+    }
+
+    // Reconstruct the runtime state around the same durable store and replay
+    // the same operation id. This proves persistent recovery without claiming
+    // that this in-process test restarted the desktop application process.
+    drop(state);
+    let recovered_state = isolated_command_surface_state_with_persistent_memory(&memory_db);
+    let recovered = invoke_send_message_with_operation_id_for_kernel_goal_3(
+        recovered_state.clone(),
+        "roadshow-cc03-memory-commit-undo",
+        PROMPT,
+        operation_id.clone(),
+    )
+    .await;
+    assert_eq!(
+        recovered["status"], "completed",
+        "CC03 recovery: {recovered}"
+    );
+    let recovered_governance =
+        &recovered["reasoning_trace"]["generation_result"]["memoryGovernance"];
+    assert_eq!(recovered_governance["directWritesExecuted"], false);
+    assert_eq!(recovered_governance["directMemoryWrite"], false);
+    assert_eq!(recovered_governance["directMemoryRollback"], false);
+    assert_eq!(recovered_governance["canonicalMemoryActive"], false);
+    assert_eq!(
+        recovered_governance["explicitMemoryReceipts"][0]["admissionOutcome"],
+        "terminal_historical"
+    );
+    assert_eq!(
+        recovered_governance["explicitMemoryRollbackReceipts"][0]["memoryId"],
+        memory_id
+    );
+    assert_eq!(
+        recovered_governance["explicitMemoryRollbackReceipts"][0]["replayed"],
+        true
+    );
+    assert!(recovered["reply"].as_str().is_some_and(|reply| {
+        reply.contains("恢复并核验此前的 Memory 撤销事实")
+            && reply.contains("本次没有重复写入或撤销")
+    }));
+    let store = recovered_state
+        .memory_lifecycle_store
+        .as_ref()
+        .expect("reopened CC03 MemoryLifecycleStore")
+        .lock()
+        .await;
+    assert!(store
+        .list_active_records(None, 20)
+        .expect("list recovered CC03 active Memory")
+        .is_empty());
+    assert_eq!(
+        store
+            .lifecycle_events(&memory_id)
+            .expect("list recovered CC03 lifecycle events")
+            .iter()
+            .filter(|event| event.rollback_event.is_some())
+            .count(),
+        1,
+        "same-operation recovery cannot append a second rollback"
+    );
+}
+
+#[tokio::test]
+async fn roadshow_cc03_cannot_rollback_a_preexisting_memory_owner() {
+    const CLAIM_ONLY: &str = "请记住：我的路演回答偏好是先给一句结论，再给三点证据。";
+    const COMMIT_THEN_ROLLBACK: &str =
+        "请记住：我的路演回答偏好是先给一句结论，再给三点证据。随后撤销这条记忆并重启检查。";
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let first_operation = uuid::Uuid::new_v4().to_string();
+    let first = invoke_send_message_with_operation_id_for_kernel_goal_3(
+        state.clone(),
+        "roadshow-cc03-existing-owner",
+        CLAIM_ONLY,
+        first_operation,
+    )
+    .await;
+    assert_eq!(first["status"], "completed");
+    assert_eq!(active_memory_record_count(&state).await, 1);
+
+    let second_operation = uuid::Uuid::new_v4().to_string();
+    let second = invoke_send_message_with_operation_id_for_kernel_goal_3(
+        state.clone(),
+        "roadshow-cc03-protected-owner",
+        COMMIT_THEN_ROLLBACK,
+        second_operation,
+    )
+    .await;
+    let governance = &second["reasoning_trace"]["generation_result"]["memoryGovernance"];
+    assert_eq!(
+        governance["explicitMemoryReceipts"][0]["admissionOutcome"],
+        "alias_linked"
+    );
+    assert!(governance["explicitMemoryRollbackReceipts"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    assert!(governance["blockers"].as_array().is_some_and(|blockers| {
+        blockers
+            .iter()
+            .any(|blocker| blocker == "explicit_memory_rollback_preexisting_owner_protected")
+    }));
+    assert_eq!(active_memory_record_count(&state).await, 1);
 }
 
 #[tokio::test]

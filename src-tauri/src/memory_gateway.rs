@@ -1,7 +1,9 @@
 use crate::errors::AppError;
 use crate::main_chat_preprocess::{filter_canonical_retrievable_memory_results, merge_memory_hits};
 use crate::AppState;
-use openlife_core::agent::main_chat_agent_v1::PolicyMemoryAdmissionProof;
+use openlife_core::agent::main_chat_agent_v1::{
+    PolicyMemoryAdmissionProof, PolicyMemoryRollbackGrant,
+};
 use openlife_core::agent::{
     AgentProposal, CanonicalMemoryFactDescriptor, ExplicitMemoryWriteInput,
     ExplicitMemoryWriteReceipt, MainChatMemoryCandidate, MemoryLifecycleAcceptanceInput,
@@ -148,6 +150,19 @@ pub(crate) struct MemoryGatewayWriteReport {
     pub embedding_profile: Option<EmbeddingProfile>,
     pub embedding_receipt: Option<EmbeddingInvocationReceipt>,
     pub embedding_projection_status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ExplicitMemoryRollbackReceipt {
+    pub receipt_id: String,
+    pub memory_id: String,
+    pub rollback_event_id: String,
+    pub outbox_event_id: String,
+    pub projection_state: ProjectionDeliveryState,
+    pub canonical_committed: bool,
+    pub replayed: bool,
+    pub final_active: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3146,6 +3161,14 @@ pub(crate) async fn rollback_memory_asset_with_state(
         .rollback_memory_asset(&memory_id, "user", reason)
         .map_err(|e| e.to_string())?;
     drop(store);
+    finish_memory_rollback_projection(state, &mut report).await?;
+    Ok(report)
+}
+
+async fn finish_memory_rollback_projection(
+    state: &Arc<AppState>,
+    report: &mut MemoryRollbackReport,
+) -> Result<(), String> {
     notify_canonical_outbox_background_worker(state);
     let reconciliation_error = reconcile_blocking_canonical_outbox_event_with_state(
         state,
@@ -3176,7 +3199,136 @@ pub(crate) async fn rollback_memory_asset_with_state(
                 Some(openlife_core::persistence_outbox::metadata_digest(&error));
         }
     }
-    Ok(report)
+    Ok(())
+}
+
+async fn recover_explicit_memory_rollback_receipt(
+    commit_receipt: &ExplicitMemoryWriteReceipt,
+    state: &Arc<AppState>,
+) -> Result<ExplicitMemoryRollbackReceipt, String> {
+    let lifecycle_store = state
+        .memory_lifecycle_store
+        .as_ref()
+        .ok_or_else(memory_lifecycle_store_missing)?;
+    let store = lifecycle_store.lock().await;
+    let record = store
+        .get_record(&commit_receipt.memory_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "explicit_memory_rollback_record_missing".to_string())?;
+    if record.status != openlife_core::agent::MemoryLifecycleStatus::RolledBack
+        || record.runtime_context_excluded_at.is_none()
+        || !record.proposal_id.starts_with("explicit_memory:")
+        || !record
+            .evidence_ids
+            .iter()
+            .any(|evidence| evidence == &commit_receipt.source_message_id)
+    {
+        return Err("explicit_memory_rollback_recovery_identity_mismatch".into());
+    }
+    let rollback_event_id = record
+        .rolled_back_by_event_id
+        .as_deref()
+        .ok_or_else(|| "explicit_memory_rollback_event_missing".to_string())?;
+    let rollback_event = store
+        .lifecycle_events(&record.memory_id)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find_map(|event| {
+            (event.event_id == rollback_event_id)
+                .then_some(event.rollback_event)
+                .flatten()
+        })
+        .ok_or_else(|| "explicit_memory_rollback_event_body_missing".to_string())?;
+    if rollback_event.memory_id != record.memory_id
+        || rollback_event.proposal_id != record.proposal_id
+        || rollback_event.next_status != openlife_core::agent::MemoryLifecycleStatus::RolledBack
+    {
+        return Err("explicit_memory_rollback_event_identity_mismatch".into());
+    }
+    let outbox_event_id = store
+        .latest_projection_event_id(&record.memory_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "explicit_memory_rollback_outbox_event_missing".to_string())?;
+    let projection_state = store
+        .projection_summary(&outbox_event_id)
+        .map_err(|error| error.to_string())?
+        .state();
+    Ok(ExplicitMemoryRollbackReceipt {
+        receipt_id: rollback_event.rollback_event_id.clone(),
+        memory_id: record.memory_id,
+        rollback_event_id: rollback_event.rollback_event_id,
+        outbox_event_id,
+        projection_state,
+        canonical_committed: true,
+        replayed: true,
+        final_active: false,
+    })
+}
+
+pub(crate) async fn rollback_explicit_user_memory_for_turn_with_state(
+    state: &Arc<AppState>,
+    commit_receipt: &ExplicitMemoryWriteReceipt,
+    rollback_grant: PolicyMemoryRollbackGrant,
+    execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
+) -> Result<ExplicitMemoryRollbackReceipt, String> {
+    let terminal_recovery = rollback_grant
+        .consume_for_explicit_receipt(commit_receipt)
+        .map_err(|error| error.to_string())?;
+    if terminal_recovery {
+        return recover_explicit_memory_rollback_receipt(commit_receipt, state).await;
+    }
+
+    require_persistence_write_string(state)?;
+    ensure_exact_memory_id(&commit_receipt.memory_id)?;
+    let lifecycle_store = state
+        .memory_lifecycle_store
+        .as_ref()
+        .ok_or_else(memory_lifecycle_store_missing)?;
+    let rollback_result = {
+        // Acquire the async store guard before entering the cancellation-fenced
+        // synchronous SQLite mutation. The deliberately !Send commit permit is
+        // always settled inside this block and is never held across an await.
+        let store = lifecycle_store.lock().await;
+        let commit_permit = execution_epoch
+            .begin_canonical_commit(
+                "memory",
+                format!("explicit_rollback:{}", commit_receipt.memory_id),
+            )
+            .map_err(|rejection| format!("explicit memory rollback rejected: {rejection:?}"))?;
+        let result = store
+            .rollback_memory_asset(
+                &commit_receipt.memory_id,
+                "user",
+                "user_requested_same_turn_explicit_memory_rollback",
+            )
+            .map_err(|error| error.to_string());
+        match &result {
+            Ok(report) if report.canonical_committed => commit_permit.finish_committed(),
+            Ok(_) => commit_permit.finish_not_modified(),
+            Err(_) => commit_permit.finish_failed(),
+        }
+        result
+    };
+
+    let mut report = match rollback_result {
+        Ok(report) => report,
+        Err(error) => {
+            return recover_explicit_memory_rollback_receipt(commit_receipt, state)
+                .await
+                .map_err(|recovery_error| format!("{error};{recovery_error}"));
+        }
+    };
+    finish_memory_rollback_projection(state, &mut report).await?;
+    Ok(ExplicitMemoryRollbackReceipt {
+        receipt_id: report.rollback_event.rollback_event_id.clone(),
+        memory_id: report.record.memory_id,
+        rollback_event_id: report.rollback_event.rollback_event_id,
+        outbox_event_id: report.canonical_mutation.event_id,
+        projection_state: report.projection_state,
+        canonical_committed: report.canonical_committed,
+        replayed: false,
+        final_active: false,
+    })
 }
 
 pub(crate) async fn rebuild_materialized_memory_view_with_state(

@@ -919,9 +919,9 @@
       "path": "src-tauri/src/memory_gateway.rs",
       "phase": 5,
       "disposition": "storage_only",
-      "reason": "MemoryGateway is the only production adapter allowed to write MemoryStore, VectorStore, and MemoryLifecycleStore.",
+      "reason": "MemoryGateway is the only production adapter allowed to write MemoryStore, VectorStore, and MemoryLifecycleStore, including the policy-bound explicit rollback path.",
       "match": "direct_memory_lifemodel_write",
-      "expected_count": 3
+      "expected_count": 4
     }
   ],
   "backend_readmodel_review_authority_surfaces": [

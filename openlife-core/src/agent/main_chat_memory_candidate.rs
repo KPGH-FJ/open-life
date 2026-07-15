@@ -340,10 +340,18 @@ pub fn extract_main_chat_memory_candidates(user_text: &str) -> Vec<MainChatMemor
                 (!previous_memory_spans.is_empty()).then(|| previous_memory_spans.join(" "))
             });
             if let Some(claim) = claim.filter(|value| meaningful_claim(value)) {
+                let claim_kind = if contains_any(
+                    &claim.to_ascii_lowercase(),
+                    &["偏好", "prefer", "preference"],
+                ) {
+                    MemoryCandidateKind::Preference
+                } else {
+                    MemoryCandidateKind::SemanticUserFact
+                };
                 push_candidate(
                     &mut candidates,
                     &span_id,
-                    MemoryCandidateKind::SemanticUserFact,
+                    claim_kind,
                     MemoryDestination::MemoryProposal,
                     &compact,
                     &claim,
