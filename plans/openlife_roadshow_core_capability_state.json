@@ -281,7 +281,7 @@
     "rc02_independent_review": "pending",
     "rc03_exact_prompt": "passed_production_extractor_csv_xlsx_same_turn_direct_answer_one_local_http_provider_request_backend_validated_csv_range_and_xlsx_sheet_range_citations_zero_tool_proposal_or_write",
     "rc03_untrusted_formula": "passed_webservice_formula_remains_untrusted_cell_data_and_grants_zero_network_tool_proposal_or_write_authority",
-    "rc03_parser_worker": "production_extractor_and_resource_suite_passed_actual_binary_probe_covered_pdf_only_xlsx_binary_worker_probe_pending",
+    "rc03_parser_worker": "passed_actual_openlife_tauri_binary_xlsx_protocol_sheet_range_formula_as_inert_data_and_corrupt_typed_failure_without_body_echo_commit_b0ebd4251714de75b2dd97622c026e1f2eaf6e93",
     "rc03_failure_and_lifecycle": "passed_resource_suite_bounds_replay_drift_and_tombstone_restart_mechanics_not_packaged_desktop_credit",
     "rc03_external_live_provider": "passed_twice_exact_frozen_csv_xlsx_prompt_external_provider_both_files_backend_validated_sheet_and_range_provenance_zero_tool_proposal_or_write",
     "rc03_native_picker_product_trial": "pending",
@@ -361,7 +361,9 @@
     "cc03_broad_core_main_chat_agent_v1": "failed_132_of_140_passed_same_8_preexisting_red",
     "cumulative_primary_and_combined_harness": "passed_10_rc_filtered_plus_1_rc07_plus_7_cc_tests_all_eleven_frozen_journey_owners_present",
     "cumulative_frozen_fixture_digests": "passed_all_8_files_match_frozen_sha256",
-    "cumulative_widened_backend_regression": "passed_current_default_main_chat_command_surface_93_runtime_module_30_single_system_32",
+    "cumulative_widened_backend_regression": "passed_current_default_main_chat_command_surface_95_runtime_module_30_single_system_32",
+    "cumulative_core_main_chat_agent_v1_regression": "passed_142_of_142_after_canonical_runtime_evidence_repair_commit_3ba859c",
+    "cumulative_runtime_projection_contract": "passed_13_of_13_with_canonical_actionqueue_execution_facts_and_body_free_product_preview_commit_3ba859c",
     "cumulative_frontend_static_regression": "passed_typecheck_format_and_66_focused_route_settings_privacy_behavior_tests",
     "cumulative_external_provider_regression": "passed_direct_answer_and_33_provider_bound_chunk_stream_final_last",
     "cumulative_rc01_external_live": "passed_twice_current_commit_428_and_326_provider_bound_chunks_exact_three_paragraphs_and_steps_one_through_five_one_provider_terminal_zero_side_effects",
@@ -394,5 +396,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-15T18:52:04+08:00"
+  "last_updated_at": "2026-07-15T19:46:41+08:00"
 }

@@ -216,6 +216,26 @@ Mechanical evidence after the addition:
   warnings only;
 - `cargo fmt --all -- --check` and `git diff --check` — passed.
 
+The RC-03 XLSX worker gap was later converted from a one-off probe into a
+repeatable integration gate at commit
+`b0ebd4251714de75b2dd97622c026e1f2eaf6e93`. The gate starts the actual
+`openlife-tauri --openlife-resource-parser-worker-v1` binary, sends the frozen
+XLSX through the length-prefixed worker protocol, and verifies:
+
+- the `roadshow_metrics` sheet and `A1:...` range provenance survive the
+  process boundary;
+- the anomaly sentinel and `WEBSERVICE(...)` formula-shaped text remain inert
+  extracted cell data;
+- a corrupt XLSX returns a typed `resource_*` failure without echoing input
+  bytes to stdout or stderr;
+- the worker response exposes extraction facts only, with no Tool, Network,
+  Proposal, or write authority.
+
+`cargo test -p openlife-tauri --test resource_parser_worker_binary --
+--nocapture` passed 2/2. This closes the missing RC-03 binary-worker mechanical
+proof only. Native picker UX, signed/healthy-Keychain product execution, and
+independent review remain pending.
+
 External live RC-02/RC-03 evidence commit:
 `a33016c5b9bec0d3ac624d22b6005939107eed8f`.
 
