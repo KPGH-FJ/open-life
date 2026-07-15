@@ -1204,7 +1204,8 @@ fn isolated_command_surface_state_with_bound_markdown_resource(
     state
 }
 
-fn isolated_command_surface_state_with_resource_runtime() -> std::sync::Arc<crate::AppState> {
+pub(crate) fn isolated_command_surface_state_with_resource_runtime(
+) -> std::sync::Arc<crate::AppState> {
     let store = openlife_core::resource::ResourceStore::new_in_memory()
         .expect("create isolated roadshow resource store");
     let runtime = crate::resource_commands::ResourceRuntime::new(
@@ -1358,7 +1359,7 @@ fn bind_markdown_resource_to_command_surface_state(
         .expect("bind roadshow resource to Main Chat operation");
 }
 
-fn import_frozen_resources_to_command_surface_state(
+pub(crate) fn import_frozen_resources_to_command_surface_state(
     state: &std::sync::Arc<crate::AppState>,
     operation_id: &str,
     sources: Vec<openlife_core::resource_gateway::ResourceImportSource>,

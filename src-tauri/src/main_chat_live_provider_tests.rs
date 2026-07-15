@@ -44,6 +44,7 @@ fn main_chat_live_provider_command_surface_tests_are_not_concentrated_in_lib_rs(
         "main_chat_live_provider_eval_harness_executes_local_http_provider_without_external_live_credit",
         "main_chat_live_provider_eval_harness_invokes_external_direct_answer_when_opted_in",
         "roadshow_rc01_external_live_exact_writing_and_plan_is_streamed_once",
+        "roadshow_rc02_rc03_external_live_resources_use_both_source_classes",
         "main_chat_live_provider_eval_harness_invokes_external_react_web_and_mcp_when_opted_in",
     ] {
         assert!(
@@ -885,6 +886,208 @@ async fn roadshow_rc01_external_live_exact_writing_and_plan_is_streamed_once() {
         durable_before_replay.len(),
         "same-operation terminal recovery cannot append or redispatch Provider facts"
     );
+}
+
+async fn run_external_live_resource_scenario(
+    session_id: &str,
+    prompt: &str,
+    sources: Vec<openlife_core::resource_gateway::ResourceImportSource>,
+) -> String {
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let state = crate::main_chat_command_surface_tests::isolated_command_surface_state_with_resource_runtime();
+    crate::main_chat_command_surface_tests::import_frozen_resources_to_command_surface_state(
+        &state,
+        &operation_id,
+        sources,
+    );
+    configure_live_provider_eval_state(&state).await;
+    let captured = Arc::new(std::sync::Mutex::new(
+        Vec::<(String, serde_json::Value)>::new(),
+    ));
+    let captured_events = Arc::clone(&captured);
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(240),
+        crate::main_chat_streaming::start_stream_message_with_operation_state(
+            operation_id.clone(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: prompt.into(),
+            }],
+            None,
+            &state,
+            move |event, payload| {
+                captured_events
+                    .lock()
+                    .expect("capture external live resource events")
+                    .push((event.to_string(), payload));
+            },
+        ),
+    )
+    .await
+    .expect("external live resource turn timeout")
+    .expect("external live resource structured terminal");
+
+    let events = captured
+        .lock()
+        .expect("read external live resource events")
+        .clone();
+    let provider_chunk_count = events
+        .iter()
+        .filter(|(event, payload)| {
+            event == "stream-message-chunk"
+                && payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|request_id| !request_id.trim().is_empty())
+        })
+        .count();
+    eprintln!(
+        "external live resource safe summary: {}",
+        serde_json::json!({
+            "sessionId": session_id,
+            "status": result["status"],
+            "replyBytes": result["reply"].as_str().map(str::len),
+            "providerChunkCount": provider_chunk_count,
+            "blockers": result["blockers"],
+            "eventTypeCounts": events.iter().fold(
+                std::collections::BTreeMap::<&str, usize>::new(),
+                |mut counts, (event, _)| {
+                    *counts.entry(event.as_str()).or_default() += 1;
+                    counts
+                },
+            ),
+        })
+    );
+
+    assert_eq!(
+        result["status"], "completed",
+        "live resource result: {result}"
+    );
+    assert_eq!(result["model_invoked"], true);
+    assert_eq!(result["tool_invoked"], false);
+    assert_eq!(result["legacy_fallback_used"], false);
+    assert!(result["blockers"]
+        .as_array()
+        .is_some_and(|blockers| blockers.is_empty()));
+    assert_eq!(
+        provider_chunk_count, 0,
+        "resource citations must validate before any Provider token becomes product-visible"
+    );
+    assert_eq!(
+        events.last().map(|(event, _)| event.as_str()),
+        Some("stream-message-done")
+    );
+    assert!(state
+        .proposal_store
+        .as_ref()
+        .expect("external live resource ProposalStore")
+        .lock()
+        .await
+        .list_pending_proposals(20)
+        .expect("list external live resource proposals")
+        .is_empty());
+
+    let durable = state
+        .main_chat_agent_event_store
+        .as_ref()
+        .expect("external live resource EventStore")
+        .lock()
+        .await
+        .list(&operation_id, 0, 250)
+        .expect("list external live resource facts");
+    for event_type in [
+        "provider.started",
+        "provider.completed",
+        "final_delivery.created",
+    ] {
+        assert_eq!(
+            durable
+                .iter()
+                .filter(|event| event.event_type == event_type)
+                .count(),
+            1,
+            "external live resource scenario requires exactly one {event_type}"
+        );
+    }
+    assert!(durable.iter().all(|event| {
+        !matches!(
+            event.event_type.as_str(),
+            "tool.started" | "tool.completed" | "review.staged" | "effect_committed"
+        )
+    }));
+
+    result["reply"]
+        .as_str()
+        .expect("external live resource cited reply")
+        .to_string()
+}
+
+#[tokio::test]
+#[ignore = "requires OPENLIFE_MAIN_CHAT_LIVE_PROVIDER_EVAL=1, network, and a real provider API key"]
+async fn roadshow_rc02_rc03_external_live_resources_use_both_source_classes() {
+    let rc02_reply =
+        run_external_live_resource_scenario(
+            "roadshow-rc02-external-live",
+            "比较这两份文件的核心主张、分歧和风险，并给出逐条引用。",
+            vec![
+                openlife_core::resource_gateway::ResourceImportSource {
+                    filename: "roadshow_compare.pdf".into(),
+                    declared_mime: "application/pdf".into(),
+                    bytes: include_bytes!(
+                        "../../plans/fixtures/openlife_roadshow_core/roadshow_compare.pdf"
+                    )
+                    .to_vec(),
+                },
+                openlife_core::resource_gateway::ResourceImportSource {
+                    filename: "roadshow_compare.docx".into(),
+                    declared_mime:
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                            .into(),
+                    bytes: include_bytes!(
+                        "../../plans/fixtures/openlife_roadshow_core/roadshow_compare.docx"
+                    )
+                    .to_vec(),
+                },
+            ],
+        )
+        .await;
+    assert!(rc02_reply.contains("来源（OpenLife 已核验）"));
+    assert!(rc02_reply.contains("roadshow\\_compare\\.pdf"));
+    assert!(rc02_reply.contains("roadshow\\_compare\\.docx"));
+    assert!(rc02_reply.contains("page "));
+    assert!(rc02_reply.contains("paragraphs "));
+
+    let rc03_reply = run_external_live_resource_scenario(
+        "roadshow-rc03-external-live",
+        "分析这两份表格的趋势、异常和可能的数据质量问题，并引用对应工作表和单元格范围。",
+        vec![
+            openlife_core::resource_gateway::ResourceImportSource {
+                filename: "roadshow_metrics.csv".into(),
+                declared_mime: "text/csv".into(),
+                bytes: include_bytes!(
+                    "../../plans/fixtures/openlife_roadshow_core/roadshow_metrics.csv"
+                )
+                .to_vec(),
+            },
+            openlife_core::resource_gateway::ResourceImportSource {
+                filename: "roadshow_metrics.xlsx".into(),
+                declared_mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    .into(),
+                bytes: include_bytes!(
+                    "../../plans/fixtures/openlife_roadshow_core/roadshow_metrics.xlsx"
+                )
+                .to_vec(),
+            },
+        ],
+    )
+    .await;
+    assert!(rc03_reply.contains("来源（OpenLife 已核验）"));
+    assert!(rc03_reply.contains("roadshow\\_metrics\\.csv"));
+    assert!(rc03_reply.contains("roadshow\\_metrics\\.xlsx"));
+    assert!(rc03_reply.contains("range "));
+    assert!(rc03_reply.contains("sheet roadshow_metrics"));
 }
 
 #[tokio::test]
