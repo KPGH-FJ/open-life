@@ -6913,7 +6913,11 @@ async fn build_successful_kernel_command_surface_result(
         append_main_chat_agent_transcript(
             state,
             Some(task_session_id),
-            ExecutionTranscriptEntryKind::Observation,
+            // This is a turn-level generation summary. Action-scoped tool
+            // observations are persisted separately by
+            // `record_kernel_tool_call_evidence`; classifying this summary as
+            // an Observation creates an unbound duplicate in product state.
+            ExecutionTranscriptEntryKind::FollowUp,
             if memory_governance_is_terminal_action {
                 "MainChatKernel materialized deterministic memory governance artifacts."
             } else if memory_governance_planned {

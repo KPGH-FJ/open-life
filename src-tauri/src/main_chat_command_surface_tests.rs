@@ -10224,6 +10224,11 @@ async fn send_message_registered_mcp_read_completes_through_agent_loop_not_fallb
     assert_product_tool_call_receipt_boundary(&response, SUCCESS_BODY, "succeeded");
     assert_transient_product_tool_call_has_no_unbound_output_receipt(&response);
     assert_no_internal_receipt_authority_in_product_ipc(&response);
+    assert_eq!(
+        response["agent_state"]["diagnostics"],
+        serde_json::json!([]),
+        "a successful canonical MCP read must not create an unbound duplicate observation"
+    );
     let task_session_id = response["agent_ingress"]["agentTaskSessionId"]
         .as_str()
         .expect("mcp AgentLoop task session id");
@@ -10645,6 +10650,11 @@ async fn start_stream_message_registered_mcp_read_completes_through_agent_loop_n
     assert_product_tool_call_receipt_boundary(&response, SUCCESS_BODY, "succeeded");
     assert_transient_product_tool_call_has_no_unbound_output_receipt(&response);
     assert_no_internal_receipt_authority_in_product_ipc(&response);
+    assert_eq!(
+        response["agent_state"]["diagnostics"],
+        serde_json::json!([]),
+        "a successful canonical MCP read must not create an unbound duplicate observation"
+    );
     let task_session_id = task_session_id_from_response(&response);
     let task_session_id = task_session_id.as_str();
     let canonical_run_id = response["run_id"]

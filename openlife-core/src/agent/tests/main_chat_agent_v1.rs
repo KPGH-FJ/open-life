@@ -15,10 +15,10 @@ use crate::agent::{
         MainChatAgentExecutionV1AcceptanceCommandSurfaceEvidence,
         MainChatAgentExecutionV1AcceptanceInput, MainChatAgentExecutionV1AcceptanceLiveEvidence,
         MainChatAgentStrategy, MainChatEvalCaseKind, MainChatEvalSuiteInput,
-        MainChatLiveProviderEvalPreflightInput, MainChatPolicyLevel, PolicyActionEffect,
-        PolicyConsentDisposition, PolicyGovernanceDisposition, PolicyGovernanceReviewDomain,
-        PolicyGovernanceReviewMode, PolicyRouteKind, PolicyRouter, TransientStateCommandKind,
-        TransientStateIntentDisposition, UntrustedInstructionSourceKind,
+        MainChatLiveProviderEvalPreflightInput, MainChatPolicyLevel, MainChatRuntimeEvalFailure,
+        PolicyActionEffect, PolicyConsentDisposition, PolicyGovernanceDisposition,
+        PolicyGovernanceReviewDomain, PolicyGovernanceReviewMode, PolicyRouteKind, PolicyRouter,
+        TransientStateCommandKind, TransientStateIntentDisposition, UntrustedInstructionSourceKind,
     },
     ActionExecutionContext, ActionExecutionStatus, ActionExecutorConfig, AgentActionRequest,
     AgentTaskKind, ToolGateway,
@@ -1509,7 +1509,7 @@ fn legacy_100_case_scaffold_eval_is_not_the_runtime_gate() {
 
     assert!(report.total_cases >= 100);
     assert_eq!(report.legacy_scaffold_case_count, report.total_cases);
-    assert_eq!(report.failed_cases, 0);
+    assert_eq!(report.failed_cases, 0, "failures={:#?}", report.failures);
     assert!(report.router_accuracy >= 0.85);
     assert!(report.policy_accuracy >= 0.95);
     assert!(report.supported_task_completion_rate >= 0.8);
@@ -1524,7 +1524,11 @@ fn runtime_eval_gate_executes_real_main_chat_harness_cases() {
     let report = run_main_chat_agent_v1_runtime_eval_suite(cases);
 
     assert!(report.total_cases >= 100);
-    assert_eq!(report.runtime_executed_case_count, report.total_cases);
+    assert_eq!(
+        report.runtime_executed_case_count, report.total_cases,
+        "failures={:#?}",
+        report.failures
+    );
     assert_eq!(report.deterministic_stub_case_count, 0);
     assert_eq!(report.failed_cases, 0);
     assert_eq!(report.silent_write_count, 0);
@@ -1873,6 +1877,16 @@ fn live_provider_overlay_never_erases_runtime_failures_or_fabricates_final_readi
         run_main_chat_agent_v1_runtime_eval_suite(main_chat_runtime_eval_cases());
     assert_eq!(runtime_report.live_provider_generation_coverage, 0.0);
     assert!(!runtime_report.final_completion_ready);
+    runtime_report.runtime_executed_case_count =
+        runtime_report.runtime_executed_case_count.saturating_sub(1);
+    runtime_report.passed_cases = runtime_report.passed_cases.saturating_sub(1);
+    runtime_report.failed_cases = 1;
+    runtime_report.failures.push(MainChatRuntimeEvalFailure {
+        case_id: 65_535,
+        name: "counterfactual runtime failure".into(),
+        reason_code: "counterfactual_runtime_failure".into(),
+        actual: "failed".into(),
+    });
     runtime_report
         .final_completion_blockers
         .push("provider_backed_web_agent_loop_not_executed".to_string());
@@ -2223,7 +2237,9 @@ fn agent_task_session_store_persists_resume_cancel_and_transcript() {
     let with_action = store
         .record_action_queue_id(&session.id, "mainchat_action_1")
         .expect("record action queue id");
-    assert_eq!(with_action.action_queue_ids, vec!["mainchat_action_1"]);
+    assert_eq!(with_action.action_queue_ids.len(), 1);
+    assert!(with_action.action_queue_ids[0].starts_with("action_queue_ref:bytes=17:hmac-sha256:"));
+    assert!(!with_action.action_queue_ids[0].contains("mainchat_action_1"));
     let with_blocker = store
         .set_pending_blockers(&session.id, vec!["proposal:pending".into()])
         .expect("set blockers");
@@ -2864,7 +2880,7 @@ async fn action_executor_web_search_policy_disabled_returns_governed_blocker() {
     assert_eq!(result.status, ActionExecutionStatus::Blocked);
     assert_eq!(
         result.stop_reason.as_deref(),
-        Some("network_policy_blocked")
+        Some("network_policy_disabled")
     );
     assert_eq!(result.action.status, "blocked");
     let structured = result
@@ -2878,7 +2894,7 @@ async fn action_executor_web_search_policy_disabled_returns_governed_blocker() {
     );
     assert_eq!(
         structured["permission_decision"],
-        serde_json::json!("network_policy_blocked")
+        serde_json::json!("network_policy_disabled")
     );
 }
 
@@ -2932,7 +2948,7 @@ async fn action_executor_mcp_call_tool_missing_read_target_returns_governed_bloc
     assert_eq!(result.status, ActionExecutionStatus::Blocked);
     assert_eq!(
         result.stop_reason.as_deref(),
-        Some("mcp_read_tool_not_registered")
+        Some("tool_gateway_mcp_target_manifest_not_found")
     );
     assert_eq!(result.action.status, "blocked");
     let structured = result
@@ -2943,7 +2959,7 @@ async fn action_executor_mcp_call_tool_missing_read_target_returns_governed_bloc
     assert_eq!(structured["status"], serde_json::json!("blocked"));
     assert_eq!(
         structured["blockerReason"],
-        serde_json::json!("mcp_read_tool_not_registered")
+        serde_json::json!("tool_gateway_mcp_target_manifest_not_found")
     );
     assert_eq!(structured["directWritesExecuted"], serde_json::json!(false));
 }
@@ -2965,13 +2981,17 @@ async fn action_executor_mcp_call_tool_registered_read_target_succeeds() {
     let audit_file = tempfile::NamedTempFile::new().unwrap();
     let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
     let privacy_engine = crate::privacy::PrivacyEngine::new();
+    let agent_run_store = crate::agent::AgentRunStore::new_in_memory().unwrap();
+    let agent_run = crate::agent::AgentRun::new_tool_execution_run("builtin_echo");
+    agent_run_store.create_run(&agent_run).unwrap();
     let ctx = ActionExecutionContext::new(
         &registry,
         &permission_store,
         &audit_store,
         &privacy_engine,
         &[],
-    );
+    )
+    .with_agent_run_store(&agent_run_store);
 
     let result = ToolGateway::from_executor_config(ActionExecutorConfig {
         allow_writes: false,
@@ -2989,7 +3009,7 @@ async fn action_executor_mcp_call_tool_registered_read_target_succeeds() {
                     }
                 }
             }),
-            source_run_id: Some("run-main-chat-mcp-registered-read".into()),
+            source_run_id: Some(agent_run.id.clone()),
             step_index: 0,
         },
         &ctx,
@@ -3007,6 +3027,14 @@ async fn action_executor_mcp_call_tool_registered_read_target_succeeds() {
             .map(|scope| scope.tool_name.as_str()),
         Some("builtin_echo")
     );
+    let trace = result
+        .action
+        .react_trace
+        .as_ref()
+        .expect("registered MCP read should retain its canonical trace");
+    assert_eq!(trace.tool_name, "builtin_echo");
+    assert_eq!(trace.tool_id, "builtin_echo");
+    assert!(trace.output_receipt.is_some());
     assert!(result
         .observation
         .content

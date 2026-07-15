@@ -469,7 +469,19 @@ fn main_chat_runtime_contract_assembles_snapshot_and_ordered_events_from_runtime
             Some(serde_json::json!({
                 "sourceKind": "file",
                 "sourceLabel": "plans/main_chat_runtime_contract_goal_spec.md",
-                "preview": "Main Chat Agent Productization v1 requires runtime-backed UI evidence."
+                "preview": "Main Chat Agent Productization v1 requires runtime-backed UI evidence.",
+                "structuredResult": {
+                    "readExecutionEvidence": {
+                        "kind": "file_system_read",
+                        "sourceKind": "file",
+                        "sourceLabel": "plans/main_chat_runtime_contract_goal_spec.md",
+                        "target": "plans/main_chat_runtime_contract_goal_spec.md",
+                        "realReadOnlyExecution": true,
+                        "fixtureBacked": false,
+                        "networkReadAttempted": false,
+                        "directWritesExecuted": false
+                    }
+                }
             })),
         )
         .expect("observed action");
@@ -521,6 +533,10 @@ fn main_chat_runtime_contract_assembles_snapshot_and_ordered_events_from_runtime
             }),
         })
         .expect("observation transcript");
+    assert!(
+        observation.metadata.get("structuredResult").is_none(),
+        "transcript minimization must not persist nested tool bodies or reconstruct execution truth"
+    );
     let final_entry = session_store
         .append_transcript_entry(ExecutionTranscriptEntryDraft {
             session_id: session.id.clone(),

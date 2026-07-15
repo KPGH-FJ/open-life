@@ -11537,13 +11537,13 @@ pub fn main_chat_runtime_eval_cases() -> Vec<MainChatRuntimeEvalCase> {
                 ),
                 5 => runtime_eval_case(
                     id,
-                    "memory proposal runtime",
+                    "reversible memory commit runtime",
                     &format!("Remember that Tuesday morning is best for planning case {id}."),
-                    MainChatAgentStrategy::MemoryProposal,
+                    MainChatAgentStrategy::ReversibleMemoryCommit,
+                    true,
                     false,
                     false,
-                    true,
-                    true,
+                    false,
                     exercises_resume_control,
                 ),
                 6 => runtime_eval_case(
@@ -12436,11 +12436,14 @@ fn run_one_main_chat_runtime_eval_case(
                         blocker_exercised = true;
                         match action_type.as_str() {
                             "web.search" | "web.fetch"
-                                if blocker_reason == "network_policy_blocked" =>
+                                if blocker_reason == "network_policy_disabled" =>
                             {
                                 web_policy_blocker_preserved = true;
                             }
-                            "mcp.read_only" if blocker_reason == "mcp_read_tool_not_registered" => {
+                            "mcp.read_only"
+                                if blocker_reason
+                                    == "tool_gateway_mcp_target_manifest_not_found" =>
+                            {
                                 mcp_missing_read_target_blocker_preserved = true;
                             }
                             _ => {}
@@ -13007,6 +13010,20 @@ fn runtime_eval_formal_executor_observation(
     let memory_store = crate::memory::MemoryStore::new_in_memory().map_err(|err| {
         runtime_eval_failure(case, "executor_memory_store_failed", &err.to_string())
     })?;
+    let memory_lifecycle_store =
+        crate::agent::MemoryLifecycleStore::new_in_memory().map_err(|err| {
+            runtime_eval_failure(case, "executor_lifecycle_store_failed", &err.to_string())
+        })?;
+    let memory_lifecycle_reader = memory_lifecycle_store.retrieval_reader();
+    let agent_run_store = crate::agent::AgentRunStore::new_in_memory().map_err(|err| {
+        runtime_eval_failure(case, "executor_agent_run_store_failed", &err.to_string())
+    })?;
+    let source_run_id = uuid::Uuid::new_v4().to_string();
+    let mut canonical_run = crate::agent::AgentRun::new_tool_execution_run(action_type);
+    canonical_run.id = source_run_id.clone();
+    agent_run_store.create_run(&canonical_run).map_err(|err| {
+        runtime_eval_failure(case, "executor_agent_run_create_failed", &err.to_string())
+    })?;
     let mcp_tool_permission_proposal_fixture =
         action_type == "mcp.read_only" && action_description.contains("ToolPermission proposal");
     let proposal_store = if mcp_tool_permission_proposal_fixture {
@@ -13037,6 +13054,11 @@ fn runtime_eval_formal_executor_observation(
     );
     let network_policy = crate::config::NetworkPolicy {
         enabled: web_success_fixture,
+        default_decision: if web_success_fixture {
+            "allow".into()
+        } else {
+            "ask".into()
+        },
         ..Default::default()
     };
     let mut safe_paths = Vec::<String>::new();
@@ -13048,7 +13070,7 @@ fn runtime_eval_formal_executor_observation(
                 "query": "energy planning",
                 "limit": 5,
             }),
-            source_run_id: Some(format!("runtime-eval-case-{}", case.id)),
+            source_run_id: Some(source_run_id.clone()),
             step_index: 0,
         }),
         "session.search" => Some(AgentActionRequest {
@@ -13059,7 +13081,7 @@ fn runtime_eval_formal_executor_observation(
                 "session_id": seeded_session_id,
                 "limit": 5,
             }),
-            source_run_id: Some(format!("runtime-eval-case-{}", case.id)),
+            source_run_id: Some(source_run_id.clone()),
             step_index: 0,
         }),
         "file.read" => {
@@ -13095,7 +13117,7 @@ fn runtime_eval_formal_executor_observation(
                         "path": file_path.to_string_lossy(),
                     }
                 }),
-                source_run_id: Some(format!("runtime-eval-case-{}", case.id)),
+                source_run_id: Some(source_run_id.clone()),
                 step_index: 0,
             })
         }
@@ -13108,7 +13130,7 @@ fn runtime_eval_formal_executor_observation(
                     "max_results": 3,
                 }
             }),
-            source_run_id: Some(format!("runtime-eval-case-{}", case.id)),
+            source_run_id: Some(source_run_id.clone()),
             step_index: 0,
         }),
         "mcp.read_only" => {
@@ -13176,7 +13198,7 @@ fn runtime_eval_formal_executor_observation(
                 action_type: "mcp_tool".into(),
                 target: target.into(),
                 input,
-                source_run_id: Some(format!("runtime-eval-case-{}", case.id)),
+                source_run_id: Some(source_run_id.clone()),
                 step_index: 0,
             })
         }
@@ -13195,6 +13217,8 @@ fn runtime_eval_formal_executor_observation(
         &safe_paths,
     )
     .with_memory_store(&memory_store)
+    .with_memory_lifecycle_retrieval_reader(&memory_lifecycle_reader)
+    .with_agent_run_store(&agent_run_store)
     .with_network_policy(&network_policy);
     if web_success_fixture {
         action_ctx = action_ctx.with_web_search_fixture_output(&web_fixture_output);
@@ -13307,11 +13331,7 @@ fn runtime_eval_formal_executor_observation(
             && executor_status == "succeeded"
             && action_description.contains("registered MCP"),
         "mcpToolPermissionProposalCreated": mcp_tool_permission_proposal_created,
-        "blockerReason": match action_type {
-            "web.search" | "web.fetch" if executor_status == "blocked" => "network_policy_blocked",
-            "mcp.read_only" if executor_status == "blocked" => "mcp_read_tool_not_registered",
-            _ => result.stop_reason.as_deref().unwrap_or(executor_status),
-        },
+        "blockerReason": result.stop_reason.as_deref().unwrap_or(executor_status),
         "directWritesExecuted": false,
     })))
 }
@@ -13391,7 +13411,7 @@ fn runtime_eval_multi_step_agent_loop_observation(
                 expected_permission_decision: if web_success_fixture {
                     None
                 } else {
-                    Some("network_policy_blocked")
+                    Some("network_policy_disabled")
                 },
                 expected_action_status: Some(if web_success_fixture {
                     "succeeded"
@@ -13490,6 +13510,13 @@ fn runtime_eval_multi_step_agent_loop_observation(
             runtime_eval_failure(case, "agent_loop_lifecycle_store_failed", &err.to_string())
         })?;
     let memory_lifecycle_reader = memory_lifecycle_store.retrieval_reader();
+    let agent_run_store = crate::agent::AgentRunStore::new_in_memory().map_err(|err| {
+        runtime_eval_failure(case, "agent_loop_run_store_failed", &err.to_string())
+    })?;
+    let canonical_run = crate::agent::AgentRun::new_chat_run(&task.session_id, &task.user_text);
+    agent_run_store.create_run(&canonical_run).map_err(|err| {
+        runtime_eval_failure(case, "agent_loop_run_create_failed", &err.to_string())
+    })?;
     memory_store
         .save_message(
             &proof.session_id,
@@ -13534,12 +13561,31 @@ fn runtime_eval_multi_step_agent_loop_observation(
                 )
             })?;
     }
+    if proof.web_successful_read_exercised {
+        permission_store
+            .grant(
+                "web.search",
+                "builtin",
+                "medium",
+                "read",
+                crate::tool_permissions::ToolPermissionPolicy::AllowOnce,
+                None,
+            )
+            .map_err(|err| {
+                runtime_eval_failure(case, "agent_loop_web_permission_failed", &err.to_string())
+            })?;
+    }
     let web_fixture_output = format!(
         "Search results for \"openlife main chat runtime eval\":\n1. OpenLife Main Chat AgentLoop fixture\n   URL: https://example.com/openlife-agent-loop-fixture\n   Snippet: Governed web AgentLoop fixture for runtime eval case {}.",
         case.id
     );
     let network_policy = crate::config::NetworkPolicy {
         enabled: proof.web_successful_read_exercised,
+        default_decision: if proof.web_successful_read_exercised {
+            "allow".into()
+        } else {
+            "ask".into()
+        },
         ..Default::default()
     };
     let mut action_ctx = ActionExecutionContext::new(
@@ -13551,18 +13597,24 @@ fn runtime_eval_multi_step_agent_loop_observation(
     )
     .with_memory_store(&memory_store)
     .with_memory_lifecycle_retrieval_reader(&memory_lifecycle_reader)
+    .with_agent_run_store(&agent_run_store)
     .with_network_policy(&network_policy);
     if proof.web_successful_read_exercised {
         action_ctx = action_ctx.with_web_search_fixture_output(&web_fixture_output);
     }
 
-    let result = runtime_eval_block_on(agent_loop.run(
-        &task,
-        &life_model,
-        proof.tools_prompt,
-        None,
-        privacy_engine.clone(),
-        &action_ctx,
+    let mut provider_progress = |_| Ok(());
+    let result = runtime_eval_block_on(agent_loop.run_existing_with_provider_observer(
+        crate::agent::AgentLoopRunRequest::new(
+            &task,
+            &life_model,
+            proof.tools_prompt,
+            None,
+            privacy_engine.clone(),
+            &action_ctx,
+        ),
+        canonical_run,
+        &mut provider_progress,
     ))
     .map_err(|err| runtime_eval_failure(case, "agent_loop_multistep_failed", &err.to_string()))?;
 
@@ -13576,8 +13628,13 @@ fn runtime_eval_multi_step_agent_loop_observation(
             ),
         ));
     }
+    let expected_recorded_action_type = match proof.loop_action_type {
+        "memory_search" => "memory.search",
+        "session_search" => "session.search",
+        action_type => action_type,
+    };
     if result.run.actions.len() != 1
-        || result.run.actions[0].action_type != proof.loop_action_type
+        || result.run.actions[0].action_type != expected_recorded_action_type
         || result.run.actions[0].target.as_deref() != Some(proof.tool_name)
         || result.run.observations.is_empty()
     {
@@ -13813,6 +13870,105 @@ fn claim_runtime_eval_replay_fixture(
         })
 }
 
+#[cfg(any(test, feature = "test-utils"))]
+fn project_runtime_eval_failed_read_fixture(
+    case: &MainChatRuntimeEvalCase,
+    action_queue: &ActionQueueStore,
+    action: &QueuedExecutionAction,
+) -> std::result::Result<QueuedExecutionAction, MainChatRuntimeEvalFailure> {
+    let mut manifest = crate::tool_manifest::ToolManifest::new(
+        "memory.search",
+        "Runtime eval retry fixture.",
+        serde_json::json!({"type": "object"}),
+        "low",
+        "1",
+        crate::tool_manifest::ToolSource::BuiltIn,
+    )
+    .with_capabilities(vec!["read".into()])
+    .with_idempotency_contract(ToolIdempotencyContract::Idempotent);
+    manifest.action_type = "read".into();
+    let input = serde_json::json!({"query": "runtime eval failed action retry"});
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let executor_action_id = format!("executor:{}", action.id);
+    let executor_action_type = "memory_search";
+    let receipt = ToolExecutionReceipt::test_gateway_failed_before_dispatch(
+        Some(run_id.clone()),
+        Some(manifest.id.clone()),
+        format!("runtime-eval-retry:{}", case.id),
+        ToolActionEffect::ReadOnly,
+        ToolIdempotencyContract::Idempotent,
+    );
+    if !receipt.test_bind_to_action(
+        &run_id,
+        &executor_action_id,
+        executor_action_type,
+        Some(&manifest.name),
+        &input,
+    ) {
+        return Err(runtime_eval_failure(
+            case,
+            "control_retry_receipt_binding_failed",
+            &action.id,
+        ));
+    }
+    let (input_length_bytes, input_hash) =
+        crate::agent::metadata_safe::metadata_safe_value_digest(&input);
+    let metadata = serde_json::json!({
+        "toolExecutionReceipt": receipt,
+        "replayExecutionEnvelope": {
+            "version": INITIAL_REPLAY_EXECUTION_ENVELOPE_VERSION,
+            "taskSessionId": action.session_id,
+            "runId": run_id,
+            "queueActionId": action.id,
+            "executorActionId": executor_action_id,
+            "queueActionType": action.action.action_type,
+            "executorActionType": executor_action_type,
+            "requestedTarget": manifest.name,
+            "resolvedTarget": manifest.name,
+            "manifestId": manifest.id,
+            "manifestName": manifest.name,
+            "manifestSource": manifest.source.to_string(),
+            "manifestContractDigest": manifest.execution_contract_digest(),
+            "actionEffect": receipt.action_effect,
+            "idempotencyContract": receipt.idempotency_contract,
+            "inputHash": input_hash,
+            "inputLengthBytes": input_length_bytes as u64,
+        },
+    });
+    action_queue
+        .project_initial_tool_execution_receipt(
+            &action.id,
+            action.status,
+            action.revision,
+            InitialToolExecutionProjection {
+                execution_status: ActionExecutionStatus::Failed,
+                receipt: &receipt,
+                observation_metadata: Some(metadata),
+                error: Some("runtime eval controlled pre-dispatch failure".into()),
+            },
+        )
+        .map_err(|err| {
+            runtime_eval_failure(
+                case,
+                "control_action_pre_dispatch_projection_failed",
+                &err.to_string(),
+            )
+        })
+}
+
+#[cfg(not(any(test, feature = "test-utils")))]
+fn project_runtime_eval_failed_read_fixture(
+    case: &MainChatRuntimeEvalCase,
+    _action_queue: &ActionQueueStore,
+    _action: &QueuedExecutionAction,
+) -> std::result::Result<QueuedExecutionAction, MainChatRuntimeEvalFailure> {
+    Err(runtime_eval_failure(
+        case,
+        "control_retry_receipt_fixture_unavailable",
+        "runtime eval replay fixtures are not part of the release authority surface",
+    ))
+}
+
 #[cfg(not(any(test, feature = "test-utils")))]
 fn claim_runtime_eval_replay_fixture(
     case: &MainChatRuntimeEvalCase,
@@ -13857,24 +14013,7 @@ fn exercise_runtime_eval_task_controls(
         .map_err(|err| {
             runtime_eval_failure(case, "control_action_enqueue_failed", &err.to_string())
         })?;
-    action_queue
-        .transition(&action.id, ExecutionQueueStatus::Executing, None)
-        .map_err(|err| {
-            runtime_eval_failure(case, "control_action_execute_failed", &err.to_string())
-        })?;
-    action_queue
-        .fail(
-            &action.id,
-            "runtime eval controlled failure",
-            Some(serde_json::json!({ "runtimeEval": true })),
-        )
-        .map_err(|err| {
-            runtime_eval_failure(case, "control_action_fail_failed", &err.to_string())
-        })?;
-    let failed = action_queue
-        .load(&action.id)
-        .map_err(|err| runtime_eval_failure(case, "control_action_load_failed", &err.to_string()))?
-        .ok_or_else(|| runtime_eval_failure(case, "control_action_missing", "missing"))?;
+    let failed = project_runtime_eval_failed_read_fixture(case, action_queue, &action)?;
     let retry_decision = evaluate_main_chat_action_retry(Some(&control_session), Some(&failed));
     if !retry_decision.allowed {
         return Err(runtime_eval_failure(
@@ -14147,7 +14286,7 @@ pub fn first_40_seed_eval_cases() -> Vec<MainChatEvalCase> {
             4,
             "memory preference",
             "Remember that I prefer short direct answers.",
-            MainChatAgentStrategy::MemoryProposal,
+            MainChatAgentStrategy::ReversibleMemoryCommit,
         ),
         router_case(
             5,
@@ -14387,7 +14526,7 @@ pub fn legacy_100_scaffold_eval_cases() -> Vec<MainChatEvalCase> {
             46,
             "state memory route",
             "Remember that Tuesday mornings are best for planning.",
-            MainChatAgentStrategy::MemoryProposal,
+            MainChatAgentStrategy::ReversibleMemoryCommit,
         ),
         router_case(
             47,

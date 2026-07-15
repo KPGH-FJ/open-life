@@ -894,16 +894,29 @@ impl super::ActionExecutor {
                     .into_iter()
                     .find(|m| m.name == target_name || m.id == target_name);
                 if let Some(target_manifest) = target_manifest {
+                    let target_source = canonical_tool_source(&target_manifest);
+                    observation.source = target_source.clone();
                     action.tool_scope = Some(ToolActionScope {
                         tool_name: target_manifest.name.clone(),
                         tool_id: target_manifest.id.clone(),
-                        source: canonical_tool_source(&target_manifest),
+                        source: target_source.clone(),
                         risk_level: target_manifest.risk_level.clone(),
                         capabilities: target_manifest.capabilities.clone(),
                         action_type: target_manifest.action_type.clone(),
                         requires_confirmation: false,
                         allowed: result.success,
                     });
+                    for trace in action
+                        .react_trace
+                        .iter_mut()
+                        .chain(observation.react_trace.iter_mut())
+                    {
+                        trace.tool_name = target_manifest.name.clone();
+                        trace.tool_id = target_manifest.id.clone();
+                        trace.tool_source = target_source.clone();
+                        trace.risk_level = target_manifest.risk_level.clone();
+                        trace.action_category = target_manifest.action_type.clone();
+                    }
                     target_permission_manifest = Some(target_manifest);
                 } else {
                     action.status = "blocked".to_string();
