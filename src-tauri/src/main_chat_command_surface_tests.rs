@@ -1308,8 +1308,8 @@ fn isolated_command_surface_state_with_persistent_main_chat_and_resources(
     root: &std::path::Path,
 ) -> std::sync::Arc<crate::AppState> {
     let mut state = isolated_command_surface_state_with_persistent_main_chat(root);
-    let resource_store = openlife_core::resource::ResourceStore::new_in_memory()
-        .expect("create process-restart ResourceStore");
+    let resource_store = openlife_core::resource::ResourceStore::new(root.join("resource.sqlite"))
+        .expect("open process-restart ResourceStore");
     let resource_runtime = crate::resource_commands::ResourceRuntime::new(
         openlife_core::resource_gateway::ResourceGateway::new(
             resource_store,
@@ -5946,6 +5946,286 @@ async fn roadshow_cc02_exact_prompt_creates_one_atomic_resource_task_batch_witho
         EXPECTED_TASKS.len(),
         "same-operation recovery cannot duplicate resource-derived tasks"
     );
+}
+
+#[test]
+fn roadshow_cc02_separate_process_replay_preserves_one_atomic_resource_task_batch() {
+    const TEST_NAME: &str = "main_chat_command_surface_tests::roadshow_cc02_separate_process_replay_preserves_one_atomic_resource_task_batch";
+    const PHASE_ENV: &str = "OPENLIFE_ROADSHOW_CC02_PROCESS_PHASE";
+    const ROOT_ENV: &str = "OPENLIFE_ROADSHOW_CC02_PROCESS_ROOT";
+    const OPERATION_ENV: &str = "OPENLIFE_ROADSHOW_CC02_PROCESS_OPERATION";
+    const SESSION_ID: &str = "roadshow-cc02-process-resource-task-batch";
+    const PROMPT: &str =
+        "从附件提取今天的准备事项，创建短期任务；如果要写文件，先等待我确认，然后继续。";
+    const EXPECTED_TASKS: [&str; 3] = [
+        "Verify projector and adapter before 15:00.",
+        "Verify offline fallback and local demo account.",
+        "Mark the transient task complete, then verify undo and expiry truth.",
+    ];
+
+    if let Ok(phase) = std::env::var(PHASE_ENV) {
+        let root = std::path::PathBuf::from(
+            std::env::var_os(ROOT_ENV).expect("CC02 child process store root"),
+        );
+        let operation_id = std::env::var(OPERATION_ENV).expect("CC02 child operation id");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("CC02 child Tokio runtime");
+        runtime.block_on(async move {
+            let state =
+                isolated_command_surface_state_with_persistent_main_chat_and_resources(&root);
+            let resource_store = state
+                .resource_runtime
+                .as_ref()
+                .expect("CC02 process ResourceRuntime")
+                .gateway()
+                .store();
+            let state_store = state
+                .state_store
+                .as_ref()
+                .expect("CC02 process StateStore");
+
+            match phase.as_str() {
+                "seed" => {
+                    bind_roadshow_checklist_docx_to_command_surface_state(
+                        &state,
+                        &operation_id,
+                        &[],
+                    );
+                    let result = invoke_send_message_with_operation_id_for_kernel_goal_3(
+                        state.clone(),
+                        SESSION_ID,
+                        PROMPT,
+                        operation_id.clone(),
+                    )
+                    .await;
+                    assert_eq!(result["status"], "completed", "CC02 seed: {result}");
+                    assert_eq!(result["legacy_fallback_used"], false);
+                    assert_eq!(result["model_invoked"], false);
+                    assert_eq!(result["tool_invoked"], false);
+                    assert_eq!(
+                        result["agent_ingress"]["selectedStrategy"],
+                        "transient_state_command"
+                    );
+                    assert_eq!(
+                        resource_store
+                            .list_context_chunks_for_message(&operation_id)
+                            .expect("CC02 seed Resource chunks")
+                            .len(),
+                        4
+                    );
+                    assert_eq!(
+                        state_store
+                            .list_daily_tasks(false)
+                            .expect("CC02 seed tasks")
+                            .iter()
+                            .map(|task| task.title.as_str())
+                            .collect::<Vec<_>>(),
+                        EXPECTED_TASKS
+                    );
+                    assert_eq!(
+                        state_store
+                            .resource_task_batch_receipt_for_operation(&operation_id, false)
+                            .expect("CC02 seed batch receipt")
+                            .expect("CC02 seed batch receipt exists")
+                            .assets
+                            .len(),
+                        3
+                    );
+                    assert!(list_command_surface_proposals(&state).await.is_empty());
+                    assert!(list_command_surface_actions(&state, &operation_id)
+                        .await
+                        .is_empty());
+                }
+                "verify" => {
+                    let before_chunks = resource_store
+                        .list_context_chunks_for_message(&operation_id)
+                        .expect("CC02 Resource chunks before replay");
+                    assert_eq!(
+                        before_chunks.len(),
+                        4,
+                        "the canonical Resource binding must survive the OS-process restart"
+                    );
+                    let before_tasks = state_store
+                        .list_daily_tasks(false)
+                        .expect("CC02 tasks before replay");
+                    let before_receipt = state_store
+                        .resource_task_batch_receipt_for_operation(&operation_id, false)
+                        .expect("CC02 receipt before replay")
+                        .expect("CC02 receipt survives restart");
+                    let before_events = state
+                        .main_chat_agent_event_store
+                        .as_ref()
+                        .expect("CC02 EventStore before replay")
+                        .lock()
+                        .await
+                        .list(&operation_id, 0, 250)
+                        .expect("CC02 events before replay");
+                    let before_messages = state
+                        .memory_store
+                        .lock()
+                        .await
+                        .export_all_messages()
+                        .expect("CC02 Conversation before replay");
+
+                    let replay = invoke_send_message_with_operation_id_for_kernel_goal_3(
+                        state.clone(),
+                        SESSION_ID,
+                        PROMPT,
+                        operation_id.clone(),
+                    )
+                    .await;
+                    assert_eq!(replay["status"], "completed", "CC02 replay: {replay}");
+                    assert_eq!(replay["run_id"], operation_id);
+                    assert_eq!(
+                        serde_json::to_value(
+                            state_store
+                                .list_daily_tasks(false)
+                                .expect("CC02 tasks after replay")
+                        )
+                        .expect("encode CC02 tasks after replay"),
+                        serde_json::to_value(&before_tasks)
+                            .expect("encode CC02 tasks before replay")
+                    );
+                    assert_eq!(
+                        state_store
+                            .resource_task_batch_receipt_for_operation(&operation_id, false)
+                            .expect("CC02 receipt after replay")
+                            .expect("CC02 receipt remains after replay"),
+                        before_receipt
+                    );
+                    assert_eq!(
+                        state
+                            .main_chat_agent_event_store
+                            .as_ref()
+                            .expect("CC02 EventStore after replay")
+                            .lock()
+                            .await
+                            .list(&operation_id, 0, 250)
+                            .expect("CC02 events after replay"),
+                        before_events
+                    );
+                    assert_eq!(
+                        serde_json::to_value(
+                            state
+                                .memory_store
+                                .lock()
+                                .await
+                                .export_all_messages()
+                                .expect("CC02 Conversation after replay")
+                        )
+                        .expect("encode CC02 Conversation after replay"),
+                        serde_json::to_value(&before_messages)
+                            .expect("encode CC02 Conversation before replay")
+                    );
+                    assert!(list_command_surface_proposals(&state).await.is_empty());
+                    assert!(list_command_surface_actions(&state, &operation_id)
+                        .await
+                        .is_empty());
+                }
+                "audit" => {
+                    let chunks = resource_store
+                        .list_context_chunks_for_message(&operation_id)
+                        .expect("CC02 audit Resource chunks");
+                    assert_eq!(chunks.len(), 4);
+                    assert!(chunks.iter().all(|chunk| {
+                        chunk.resource.digest
+                            == "sha256:12f4ee94fe85e98e24b82efafb84b6e109772dca4460e72c45db9ff7429deb66"
+                    }));
+                    let tasks = state_store
+                        .list_daily_tasks(false)
+                        .expect("CC02 audit tasks");
+                    assert_eq!(
+                        tasks
+                            .iter()
+                            .map(|task| task.title.as_str())
+                            .collect::<Vec<_>>(),
+                        EXPECTED_TASKS
+                    );
+                    let receipt = state_store
+                        .resource_task_batch_receipt_for_operation(&operation_id, false)
+                        .expect("CC02 audit receipt")
+                        .expect("CC02 audit receipt exists");
+                    assert_eq!(receipt.assets.len(), 3);
+                    let events = state
+                        .main_chat_agent_event_store
+                        .as_ref()
+                        .expect("CC02 audit EventStore")
+                        .lock()
+                        .await
+                        .list(&operation_id, 0, 250)
+                        .expect("CC02 audit events");
+                    assert_eq!(
+                        events
+                            .iter()
+                            .filter(|event| event.event_type == "effect_committed")
+                            .count(),
+                        3
+                    );
+                    assert_eq!(
+                        events
+                            .iter()
+                            .filter(|event| event.event_type == "final_delivery.created")
+                            .count(),
+                        1
+                    );
+                    assert_eq!(
+                        state
+                            .agent_run_store
+                            .as_ref()
+                            .expect("CC02 audit AgentRun store")
+                            .lock()
+                            .await
+                            .get_run(&operation_id)
+                            .expect("load CC02 audit run")
+                            .expect("CC02 audit run exists")
+                            .status,
+                        openlife_core::agent::AgentRunStatus::Completed
+                    );
+                    assert_eq!(
+                        state
+                            .memory_store
+                            .lock()
+                            .await
+                            .export_all_messages()
+                            .expect("CC02 audit Conversation")
+                            .len(),
+                        2
+                    );
+                    assert!(list_command_surface_proposals(&state).await.is_empty());
+                    assert!(list_command_surface_actions(&state, &operation_id)
+                        .await
+                        .is_empty());
+                }
+                _ => panic!("unexpected CC02 child phase: {phase}"),
+            }
+        });
+        return;
+    }
+
+    let workspace = tempfile::tempdir().expect("CC02 separate-process workspace");
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let executable = std::env::current_exe().expect("current Rust test executable");
+    for phase in ["seed", "verify", "audit"] {
+        let output = std::process::Command::new(&executable)
+            .arg("--exact")
+            .arg(TEST_NAME)
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env(PHASE_ENV, phase)
+            .env(ROOT_ENV, workspace.path())
+            .env(OPERATION_ENV, &operation_id)
+            .output()
+            .expect("spawn CC02 child test process");
+        assert!(
+            output.status.success(),
+            "CC02 {phase} child failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[tokio::test]
