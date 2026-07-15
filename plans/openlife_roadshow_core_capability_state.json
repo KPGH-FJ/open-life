@@ -1,7 +1,7 @@
 {
   "schema_version": "openlife-roadshow-core-capability-state-v1",
   "plan_id": "openlife-roadshow-core-capability-2026-07-14",
-  "status": "cumulative_integration_in_progress_rc01_rc04_rc08_cc01_cc02_cc03_local_mechanics_verified_live_product_restart_trial_review_pending_roadshow_no_go",
+  "status": "cumulative_integration_in_progress_rc01_through_rc08_cc01_through_cc03_local_mechanics_verified_live_product_restart_trial_review_pending_roadshow_no_go",
   "authority": {
     "kind": "time_bounded_execution_overlay",
     "subordinate_to": [
@@ -116,9 +116,9 @@
     },
     {
       "id": "CUMULATIVE_INTEGRATION",
-      "status": "in_progress_rc01_through_rc05_rc08_and_cc01_through_cc03_local_mechanics_verified_remaining_restart_combined_live_and_review_evidence_pending",
-      "completion_claim": "no_cumulative_completion_claim_rc01_through_rc05_rc08_cc01_cc02_cc03_local_mechanical_evidence_only",
-      "commit": "6c40b30f8c0659efd7d351fb31ea6fc234617861",
+      "status": "in_progress_rc01_through_rc08_and_cc01_through_cc03_local_mechanics_verified_remaining_restart_combined_live_and_review_evidence_pending",
+      "completion_claim": "no_cumulative_completion_claim_rc01_through_rc08_cc01_cc02_cc03_local_mechanical_evidence_only",
+      "commit": "bf06b0e9d5dc52f8c4fe48d2477dc26c8ba06470",
       "evidence": "plans/openlife_roadshow_cumulative_integration_evidence.md"
     },
     {
@@ -302,6 +302,18 @@
     "rc05_full_application_restart": "partial_three_backend_os_processes_passed_packaged_tauri_bootstrap_keychain_window_and_ui_pending",
     "rc05_native_product_ui_trial": "pending",
     "rc05_independent_review": "pending",
+    "rc06_exact_prompt": "passed_one_local_http_provider_request_one_canonical_path_bound_pending_proposal_zero_preaccept_file_confirmed_digest_exact_summary_and_completed_task",
+    "rc06_process_restart": "passed_three_independent_backend_test_processes_seed_wait_verify_accept_audit_reaccept_one_file_unchanged_mtime_no_stage_copy_two_conversation_messages_one_final",
+    "rc06_truth_boundary": "passed_waiting_permission_and_proposal_creation_are_not_file_completion_only_confirmed_observed_digest_receipt_is_completion",
+    "rc06_external_live_provider": "pending_local_http_provider_is_not_external_live_credit",
+    "rc06_native_review_center_trial": "pending",
+    "rc06_independent_review": "pending",
+    "rc07_exact_prompt": "passed_one_local_http_provider_request_two_pending_proposals_zero_preaccept_files_exact_markdown_csv_two_confirmed_receipts_completed_parent_and_idempotent_reaccept",
+    "rc07_restart_reconciliation": "passed_staged_recovery_rename_before_receipt_observation_and_prepared_without_bytes_retry_component_matrix",
+    "rc07_full_process_restart": "partial_exact_journey_and_component_restart_matrix_passed_separate_process_end_to_end_bundle_pending",
+    "rc07_external_live_provider": "pending_local_http_provider_is_not_external_live_credit",
+    "rc07_native_review_center_trial": "pending",
+    "rc07_independent_review": "pending",
     "rc08_exact_prompt": "passed_local_web_then_hanging_provider_cancel_under_one_second_remote_unknown_no_late_event_and_one_new_operation_retry",
     "rc08_governance": "passed_read_only_web_authority_zero_proposals_zero_effect_commits",
     "rc08_retry_dispatch": "passed_one_web_action_one_provider_synthesis_request_and_one_completed_retry_agentrun",
@@ -348,5 +360,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-15T13:24:42+08:00"
+  "last_updated_at": "2026-07-15T13:35:30+08:00"
 }

@@ -15,6 +15,9 @@
 - RC-04 has passed a single-command mechanical integration run.
 - RC-05 has passed a three-process create, complete, replay, undo, and final
   audit mechanical run against file-backed canonical stores.
+- RC-06 has passed a three-process wait-for-review, accept, replay, and final
+  audit run. RC-07 has passed its exact two-artifact journey and artifact crash
+  reconciliation matrix.
 - RC-08 has passed a local cancellation/new-operation-retry mechanical run.
 - CC-01 has passed a local Resource + Web + reviewed Markdown artifact
   mechanical run and a forged-Web-citation counterfactual.
@@ -23,13 +26,13 @@
 - CC-03 has passed a canonical explicit-Memory commit, rollback, and
   same-identity persistent-store reopen/recovery mechanical run, plus quoted-
   source and pre-existing-owner counterfactuals.
-- RC-01 through RC-05, RC-08, and CC-01 through CC-03 have **not** received
+- RC-01 through RC-08 and CC-01 through CC-03 have **not** received
   native desktop, external live-provider, repeated product-trial, or
   independent-review credit.
-- RC-08 full application-process restart remains pending. RC-05 and CC-03 now
-  have separate backend OS-process reopen proofs; packaged Tauri bootstrap,
-  window relaunch, native UI, and CC-03 production-keychain evidence remain
-  pending.
+- RC-08 full application-process restart remains pending. RC-05, RC-06, and
+  CC-03 now have separate backend OS-process reopen proofs; packaged Tauri
+  bootstrap, window relaunch, native UI, and CC-03 production-keychain evidence
+  remain pending.
 - The roadshow candidate remains **NO-GO**.
 
 ## RC-01 exact scenario
@@ -291,6 +294,66 @@ Mechanical evidence after the repair:
 - StateStore transaction/replay/concurrency/expiry filter — 19 passed;
 - transient-state Tauri/runtime filter — 4 passed;
 - full Main Chat command surface — 91 passed;
+- Main Chat runtime module — 30 passed;
+- single-system authority guards — 32 passed;
+- `cargo check -p openlife-tauri --tests` — passed with existing dead-code
+  warnings only;
+- `cargo fmt --all -- --check` and `git diff --check` — passed.
+
+## RC-06 and RC-07 reviewed artifacts
+
+Frozen prompts:
+
+> 把最终摘要保存到工作区的 roadshow-summary.md。
+
+> 生成一份 Markdown 路演摘要和一份 CSV 风险清单，并在我确认后保存。
+
+RC-06 now has one end-to-end three-process backend lifecycle over a shared
+file-backed ProposalStore, Conversation, AgentRun, TaskSession, TurnEvent, and
+safe workspace:
+
+1. the seed process makes one captured local HTTP Provider request, persists
+   one canonical-path-bound Proposal, proves the file is absent, and exits with
+   the task in `WaitingPermission`;
+2. the verify process reopens all stores, observes the same pending Proposal,
+   accepts it once, verifies the confirmed/observed digest and exact bytes,
+   and sees the task become `Completed`;
+3. the audit process reopens again and reaccepts the Proposal. It receives the
+   existing confirmed receipt, preserves the file modification time, leaves
+   exactly one final file and no stage copy, and retains one conversation turn
+   and one final delivery.
+
+The Proposal target remains the Rust-owned canonical
+`filesystem.<safe-root>/roadshow-summary.md` reference. Provider content cannot
+select or alter that path. Proposal creation and `WaitingPermission` are never
+reported as file completion.
+
+RC-07 reuses the V4 implementation rather than adding a second route. Its
+current exact command test proves one Provider request, two pending Proposals,
+zero pre-accept files, exact Markdown/CSV bytes, two confirmed digest receipts,
+one completed parent task, and idempotent reaccept with no stage copy. The
+artifact restart matrix separately proves staged recovery, rename-before-
+receipt observation, and retry only when no effect bytes exist.
+
+Evidence boundary:
+
+- RC-06 has separate backend OS-process wait/resume/replay evidence;
+- RC-07 has exact journey plus component-level crash/restart evidence, not a
+  single separate-process end-to-end bundle proof;
+- both use a local HTTP Provider fixture and mock Tauri command surface, not an
+  external cloud Provider, packaged desktop relaunch, or native Review Center
+  product trial.
+
+RC-06 cumulative evidence commit:
+`bf06b0e9d5dc52f8c4fe48d2477dc26c8ba06470`.
+
+Mechanical evidence after the addition:
+
+- three-process RC-06 wait/resume/replay lifecycle — passed;
+- exact RC-07 two-artifact lifecycle — passed;
+- artifact restart reconciliation — 3 passed;
+- complete Proposal command module — 66 passed;
+- full Main Chat command surface — 92 passed;
 - Main Chat runtime module — 30 passed;
 - single-system authority guards — 32 passed;
 - `cargo check -p openlife-tauri --tests` — passed with existing dead-code
@@ -627,6 +690,8 @@ are not hidden by the scoped green gates.
   repeated product trial.
 - RC-05 packaged Tauri relaunch, native task UI trial, and repeated product
   trial.
+- RC-06/RC-07 external live Provider, packaged/native Review Center and file
+  trial, plus RC-07 separate-process end-to-end bundle evidence.
 - RC-08 full application-process restart/reopen and native UI projection.
 - CC-03 packaged Tauri desktop restart and native UI projection.
 - full RC-01 through RC-08 cumulative harness, negative scans, single-system
