@@ -5867,6 +5867,7 @@ fn validate_persisted_provider_event_shape(event: &MainChatAgentDurableEvent) ->
         "payloadPurpose",
         &[
             "main_chat_direct_answer",
+            "main_chat_artifact_draft",
             "main_chat_react_ranking",
             "agent_loop_step",
             "agent_runtime_generation",

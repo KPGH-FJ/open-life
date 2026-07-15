@@ -229,11 +229,11 @@ impl WebCitationSet {
         self.entries.keys().cloned().collect()
     }
 
-    pub fn validate_and_render_model_output(
+    pub fn validate_model_output(
         &self,
         run_id: &str,
         model_output: &str,
-    ) -> Result<String> {
+    ) -> Result<Vec<WebCitation>> {
         if run_id != self.run_id {
             anyhow::bail!("web_citation_run_mismatch");
         }
@@ -241,13 +241,26 @@ impl WebCitationSet {
         if citation_ids.is_empty() {
             anyhow::bail!("web_citation_required");
         }
+        citation_ids
+            .into_iter()
+            .map(|citation_id| {
+                self.entries
+                    .get(&citation_id)
+                    .cloned()
+                    .with_context(|| format!("web_citation_unknown:{citation_id}"))
+            })
+            .collect()
+    }
+
+    pub fn validate_and_render_model_output(
+        &self,
+        run_id: &str,
+        model_output: &str,
+    ) -> Result<String> {
+        let citations = self.validate_model_output(run_id, model_output)?;
         let mut rendered = model_output.trim_end().to_string();
         rendered.push_str("\n\n来源（OpenLife 引用已绑定，内容未背书）");
-        for citation_id in citation_ids {
-            let citation = self
-                .entries
-                .get(&citation_id)
-                .with_context(|| format!("web_citation_unknown:{citation_id}"))?;
+        for citation in citations {
             rendered.push_str(&format!(
                 "\n- `{}` — [{}]({}) — {}",
                 citation.citation_id,

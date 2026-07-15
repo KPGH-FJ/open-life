@@ -632,6 +632,18 @@ struct MainChatKernelReadToolExecution {
     product_tool_projection: Option<crate::product_agent_dto::VerifiedProductToolCallProjection>,
 }
 
+struct MainChatKernelReadExecutionBatch {
+    executions: Vec<MainChatKernelReadToolExecution>,
+    tool_calls: Vec<MainChatKernelToolCall>,
+    blockers: Vec<String>,
+    canonical_tool_graphs: Vec<KernelCanonicalToolGraph>,
+}
+
+struct MainChatKernelWebEvidence {
+    citation_set: openlife_core::web_search::WebCitationSet,
+    context_blocks: Vec<BoundedContextBlock>,
+}
+
 #[async_trait]
 trait MainChatKernelReadToolExecutor: Send + Sync {
     async fn execute_read_tool(
@@ -3725,13 +3737,54 @@ fn validate_resource_model_output(
     citation_set: Option<&ResourceCitationSet>,
     request_id: &str,
     content: &str,
+    payload_purpose: ProviderPayloadPurpose,
 ) -> Result<String, String> {
     match citation_set {
+        Some(citation_set) if payload_purpose == ProviderPayloadPurpose::MainChatArtifactDraft => {
+            validate_resource_artifact_model_output(citation_set, request_id, content)
+        }
         Some(citation_set) => citation_set
             .validate_and_render_model_output(request_id, content)
             .map_err(|error| error.to_string()),
         None => Ok(content.to_string()),
     }
+}
+
+fn validate_resource_artifact_model_output(
+    citation_set: &ResourceCitationSet,
+    request_id: &str,
+    content: &str,
+) -> Result<String, String> {
+    let trimmed = content.trim();
+    let json = if trimmed.starts_with("```json") && trimmed.ends_with("```") {
+        trimmed
+            .strip_prefix("```json")
+            .and_then(|value| value.strip_suffix("```"))
+            .map(str::trim)
+            .ok_or_else(|| "artifact_generation_contract_invalid".to_string())?
+    } else {
+        trimmed
+    };
+    let mut envelope: Value = serde_json::from_str(json)
+        .map_err(|_| "artifact_generation_contract_invalid".to_string())?;
+    let object = envelope
+        .as_object_mut()
+        .ok_or_else(|| "artifact_generation_contract_invalid".to_string())?;
+    if let Some(markdown) = object.get("markdown").and_then(Value::as_str) {
+        let rendered = citation_set
+            .validate_and_render_model_output(request_id, markdown)
+            .map_err(|error| error.to_string())?;
+        object.insert("markdown".into(), Value::String(rendered));
+    } else if let Some(csv) = object.get("csv").and_then(Value::as_str) {
+        citation_set
+            .validate_model_output(request_id, csv)
+            .map_err(|error| error.to_string())?;
+    } else {
+        citation_set
+            .validate_model_output(request_id, content)
+            .map_err(|error| error.to_string())?;
+    }
+    serde_json::to_string(&envelope).map_err(|_| "artifact_generation_contract_invalid".into())
 }
 
 #[async_trait]
@@ -4066,6 +4119,7 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
                             resource_citation_set.as_ref(),
                             &request_id,
                             &reconstructed,
+                            payload_purpose,
                         ) {
                             Ok(content) => Ok(MainChatModelGeneration {
                                 content,
@@ -4131,6 +4185,7 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
                     resource_citation_set.as_ref(),
                     &request_id,
                     &reconstructed,
+                    payload_purpose,
                 ) {
                     Ok(content) => Ok(MainChatModelGeneration {
                         content,
@@ -4436,8 +4491,7 @@ where
             });
         }
 
-        let external_read_required = input.policy_decision.action_effect
-            == openlife_core::agent::main_chat_agent_v1::PolicyActionEffect::ReadOnly;
+        let external_read_required = policy_authorizes_kernel_read_lane(&input);
         let memory_governance = if input.runtime_fact_direct_answer || external_read_required {
             None
         } else {
@@ -4516,6 +4570,7 @@ where
                     context_metadata,
                     route_metadata,
                     outcome,
+                    read_tool_decisions,
                     event_sink,
                 )
                 .await;
@@ -4772,15 +4827,11 @@ where
         }
     }
 
-    async fn run_read_tool_turn<S>(
+    async fn execute_kernel_read_tools<S>(
         &self,
-        input: MainChatTurnInput,
-        mut system_prompt: String,
-        context_metadata: MainChatKernelContextMetadata,
-        mut route_metadata: MainChatRouteMetadata,
         decisions: Vec<MainChatKernelReadToolDecision>,
         event_sink: &mut S,
-    ) -> MainChatTurnResult
+    ) -> MainChatKernelReadExecutionBatch
     where
         S: MainChatEventSink + ?Sized,
     {
@@ -4868,6 +4919,80 @@ where
             })
             .collect::<Vec<_>>();
 
+        MainChatKernelReadExecutionBatch {
+            executions,
+            tool_calls,
+            blockers,
+            canonical_tool_graphs,
+        }
+    }
+
+    fn web_evidence_from_read_executions(
+        &self,
+        executions: &[MainChatKernelReadToolExecution],
+    ) -> Result<Option<MainChatKernelWebEvidence>, String> {
+        let web_executions = executions
+            .iter()
+            .filter(|execution| {
+                matches!(
+                    execution.decision.tool_name.as_str(),
+                    "web.search" | "web.fetch"
+                )
+            })
+            .collect::<Vec<_>>();
+        if web_executions.is_empty() {
+            return Ok(None);
+        }
+        let canonical_run_id = self
+            .canonical_run_id
+            .as_deref()
+            .ok_or_else(|| "canonical_run_identity_missing".to_string())?;
+        let observations = web_executions
+            .iter()
+            .map(|execution| {
+                if execution.decision.tool_name == "web.fetch" {
+                    openlife_core::web_search::WebSearchObservation::from_fetch_tool_output(
+                        &execution.observation_content,
+                    )
+                } else {
+                    openlife_core::web_search::WebSearchObservation::parse_tool_output(
+                        &execution.observation_content,
+                    )
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "web_search_observation_invalid".to_string())?;
+        let (citation_set, context_blocks) =
+            openlife_core::web_search::WebCitationSet::from_observations(
+                canonical_run_id,
+                &observations,
+            )
+            .map_err(|_| "web_search_observation_invalid".to_string())?;
+        Ok(Some(MainChatKernelWebEvidence {
+            citation_set,
+            context_blocks,
+        }))
+    }
+
+    async fn run_read_tool_turn<S>(
+        &self,
+        input: MainChatTurnInput,
+        mut system_prompt: String,
+        context_metadata: MainChatKernelContextMetadata,
+        mut route_metadata: MainChatRouteMetadata,
+        decisions: Vec<MainChatKernelReadToolDecision>,
+        event_sink: &mut S,
+    ) -> MainChatTurnResult
+    where
+        S: MainChatEventSink + ?Sized,
+    {
+        let MainChatKernelReadExecutionBatch {
+            executions,
+            tool_calls,
+            blockers,
+            canonical_tool_graphs,
+        } = self.execute_kernel_read_tools(decisions, event_sink).await;
+
         if !blockers.is_empty() {
             for code in &blockers {
                 event_sink.emit(MainChatKernelEvent::Blocker { code: code.clone() });
@@ -4888,16 +5013,31 @@ where
             };
         }
 
-        let web_executions = executions
-            .iter()
-            .filter(|execution| {
-                matches!(
-                    execution.decision.tool_name.as_str(),
-                    "web.search" | "web.fetch"
-                )
-            })
-            .collect::<Vec<_>>();
-        if !web_executions.is_empty() {
+        let web_evidence = match self.web_evidence_from_read_executions(&executions) {
+            Ok(evidence) => evidence,
+            Err(code) => {
+                event_sink.emit(MainChatKernelEvent::Blocker { code: code.clone() });
+                return MainChatTurnResult {
+                    assistant_message: None,
+                    blockers: vec![code],
+                    proposals: Vec::new(),
+                    tool_calls,
+                    write_outcome: None,
+                    memory_governance: None,
+                    route_metadata: Some(route_metadata),
+                    context_metadata: Some(context_metadata),
+                    direct_writes_executed: false,
+                    legacy_fallback_used: false,
+                    canonical_tool_graphs,
+                    canonical_supplemental_observations: Vec::new(),
+                };
+            }
+        };
+        if let Some(MainChatKernelWebEvidence {
+            citation_set,
+            context_blocks,
+        }) = web_evidence
+        {
             if !input
                 .policy_decision
                 .allows(AllowedCapability::ProviderGeneration)
@@ -4919,20 +5059,6 @@ where
                     canonical_supplemental_observations: Vec::new(),
                 };
             }
-            let observations = web_executions
-                .iter()
-                .map(|execution| {
-                    if execution.decision.tool_name == "web.fetch" {
-                        openlife_core::web_search::WebSearchObservation::from_fetch_tool_output(
-                            &execution.observation_content,
-                        )
-                    } else {
-                        openlife_core::web_search::WebSearchObservation::parse_tool_output(
-                            &execution.observation_content,
-                        )
-                    }
-                })
-                .collect::<Result<Vec<_>, _>>();
             let Some(canonical_run_id) = self.canonical_run_id.as_deref() else {
                 let code = "canonical_run_identity_missing".to_string();
                 event_sink.emit(MainChatKernelEvent::Blocker { code: code.clone() });
@@ -4950,32 +5076,6 @@ where
                     canonical_tool_graphs,
                     canonical_supplemental_observations: Vec::new(),
                 };
-            };
-            let (citation_set, context_blocks) = match observations.and_then(|observations| {
-                openlife_core::web_search::WebCitationSet::from_observations(
-                    canonical_run_id,
-                    &observations,
-                )
-            }) {
-                Ok(value) => value,
-                Err(_) => {
-                    let code = "web_search_observation_invalid".to_string();
-                    event_sink.emit(MainChatKernelEvent::Blocker { code: code.clone() });
-                    return MainChatTurnResult {
-                        assistant_message: None,
-                        blockers: vec![code],
-                        proposals: Vec::new(),
-                        tool_calls,
-                        write_outcome: None,
-                        memory_governance: None,
-                        route_metadata: Some(route_metadata),
-                        context_metadata: Some(context_metadata),
-                        direct_writes_executed: false,
-                        legacy_fallback_used: false,
-                        canonical_tool_graphs,
-                        canonical_supplemental_observations: Vec::new(),
-                    };
-                }
             };
             system_prompt.push_str("\n\n");
             system_prompt.push_str(openlife_core::web_search::WEB_SEARCH_PROVIDER_INSTRUCTION);
@@ -5215,6 +5315,7 @@ where
         context_metadata: MainChatKernelContextMetadata,
         mut route_metadata: MainChatRouteMetadata,
         mut outcome: MainChatKernelWriteOutcome,
+        read_tool_decisions: Vec<MainChatKernelReadToolDecision>,
         event_sink: &mut S,
     ) -> MainChatTurnResult
     where
@@ -5245,6 +5346,64 @@ where
                 event_sink,
             );
         };
+        let MainChatKernelReadExecutionBatch {
+            executions,
+            tool_calls,
+            blockers,
+            canonical_tool_graphs,
+        } = self
+            .execute_kernel_read_tools(read_tool_decisions, event_sink)
+            .await;
+        if !blockers.is_empty() {
+            for code in &blockers {
+                event_sink.emit(MainChatKernelEvent::Blocker { code: code.clone() });
+            }
+            return MainChatTurnResult {
+                assistant_message: None,
+                blockers,
+                proposals: Vec::new(),
+                tool_calls,
+                write_outcome: None,
+                memory_governance: None,
+                route_metadata: Some(route_metadata),
+                context_metadata: Some(context_metadata),
+                direct_writes_executed: false,
+                legacy_fallback_used: false,
+                canonical_tool_graphs,
+                canonical_supplemental_observations: Vec::new(),
+            };
+        }
+        let web_evidence = match self.web_evidence_from_read_executions(&executions) {
+            Ok(evidence) => evidence,
+            Err(code) => {
+                event_sink.emit(MainChatKernelEvent::Blocker { code: code.clone() });
+                return MainChatTurnResult {
+                    assistant_message: None,
+                    blockers: vec![code],
+                    proposals: Vec::new(),
+                    tool_calls,
+                    write_outcome: None,
+                    memory_governance: None,
+                    route_metadata: Some(route_metadata),
+                    context_metadata: Some(context_metadata),
+                    direct_writes_executed: false,
+                    legacy_fallback_used: false,
+                    canonical_tool_graphs,
+                    canonical_supplemental_observations: Vec::new(),
+                };
+            }
+        };
+        let (web_citation_set, supplemental_context_blocks) = match web_evidence {
+            Some(MainChatKernelWebEvidence {
+                citation_set,
+                context_blocks,
+            }) => {
+                system_prompt.push_str("\n\n");
+                system_prompt.push_str(openlife_core::web_search::WEB_SEARCH_PROVIDER_INSTRUCTION);
+                (Some(citation_set), context_blocks)
+            }
+            None => (None, Vec::new()),
+        };
         let instruction = generated_artifact_provider_instruction(&specs);
         let base_limit = MAX_SYSTEM_PROMPT_CHARS.saturating_sub(instruction.chars().count() + 2);
         system_prompt = format!(
@@ -5257,7 +5416,7 @@ where
             messages: input.messages,
             provider_authorization: input.provider_authorization,
             system_prompt,
-            supplemental_context_blocks: Vec::new(),
+            supplemental_context_blocks,
             context_snapshot_ref: context_metadata.context_snapshot_ref.clone(),
             selected_context_refs: context_metadata.selected_source_ids.clone(),
             raw_life_model_included: context_metadata.raw_life_model_yaml_included,
@@ -5344,8 +5503,12 @@ where
                     route_metadata = route_metadata_from_provider_receipt(route_metadata, receipt);
                     emit_provider_receipt(receipt, generation.provider_started_emitted, event_sink);
                 }
-                let artifacts = match parse_generated_artifact_envelope(&generation.content, &specs)
-                {
+                let artifacts = match parse_generated_artifact_envelope_with_web_citations(
+                    &generation.content,
+                    &specs,
+                    web_citation_set.as_ref(),
+                    self.canonical_run_id.as_deref(),
+                ) {
                     Ok(artifacts) => artifacts,
                     Err(code) => {
                         event_sink.emit(MainChatKernelEvent::Blocker { code: code.clone() });
@@ -5353,14 +5516,14 @@ where
                             assistant_message: None,
                             blockers: vec![code],
                             proposals: Vec::new(),
-                            tool_calls: Vec::new(),
+                            tool_calls,
                             write_outcome: None,
                             memory_governance: None,
                             route_metadata: Some(route_metadata),
                             context_metadata: Some(context_metadata),
                             direct_writes_executed: false,
                             legacy_fallback_used: false,
-                            canonical_tool_graphs: Vec::new(),
+                            canonical_tool_graphs,
                             canonical_supplemental_observations: Vec::new(),
                         };
                     }
@@ -5395,14 +5558,14 @@ where
                     }),
                     blockers: Vec::new(),
                     proposals: Vec::new(),
-                    tool_calls: Vec::new(),
+                    tool_calls,
                     write_outcome: Some(outcome),
                     memory_governance: None,
                     route_metadata: Some(route_metadata),
                     context_metadata: Some(context_metadata),
                     direct_writes_executed: false,
                     legacy_fallback_used: false,
-                    canonical_tool_graphs: Vec::new(),
+                    canonical_tool_graphs,
                     canonical_supplemental_observations: Vec::new(),
                 }
             }
@@ -5411,12 +5574,22 @@ where
                     route_metadata = route_metadata_from_provider_receipt(route_metadata, receipt);
                     emit_provider_receipt(receipt, generation.provider_started_emitted, event_sink);
                 }
-                self.governed_blocker(
-                    "artifact_generation_empty",
-                    context_metadata,
-                    route_metadata,
-                    event_sink,
-                )
+                let code = "artifact_generation_empty".to_string();
+                event_sink.emit(MainChatKernelEvent::Blocker { code: code.clone() });
+                MainChatTurnResult {
+                    assistant_message: None,
+                    blockers: vec![code],
+                    proposals: Vec::new(),
+                    tool_calls,
+                    write_outcome: None,
+                    memory_governance: None,
+                    route_metadata: Some(route_metadata),
+                    context_metadata: Some(context_metadata),
+                    direct_writes_executed: false,
+                    legacy_fallback_used: false,
+                    canonical_tool_graphs,
+                    canonical_supplemental_observations: Vec::new(),
+                }
             }
             Err(failure) => {
                 if let Some(receipt) = failure.provider_receipt.as_ref() {
@@ -5431,14 +5604,14 @@ where
                     assistant_message: None,
                     blockers: vec![code],
                     proposals: failure.proposal_ids,
-                    tool_calls: Vec::new(),
+                    tool_calls,
                     write_outcome: None,
                     memory_governance: None,
                     route_metadata: Some(route_metadata),
                     context_metadata: Some(context_metadata),
                     direct_writes_executed: false,
                     legacy_fallback_used: false,
-                    canonical_tool_graphs: Vec::new(),
+                    canonical_tool_graphs,
                     canonical_supplemental_observations: Vec::new(),
                 }
             }
@@ -7922,6 +8095,22 @@ async fn build_kernel_write_outcome_command_surface_result(
         outcome.kind.as_str()
     ));
 
+    append_kernel_canonical_tool_delta(
+        &mut agent_run,
+        std::mem::take(&mut kernel_result.canonical_tool_graphs),
+        std::mem::take(&mut kernel_result.canonical_supplemental_observations),
+    )?;
+    validate_kernel_tool_call_observation_bindings(&agent_run, &kernel_result.tool_calls)?;
+    let tool_calls = record_kernel_tool_call_evidence(
+        state,
+        task_session_id,
+        &kernel_result.tool_calls,
+        &agent_run.id,
+        execution_epoch,
+        &mut execution_transcript,
+    )
+    .await?;
+
     let mut queued_actions = Vec::with_capacity(expanded_outcomes.len());
     for expanded_outcome in &expanded_outcomes {
         queued_actions.push(
@@ -7939,7 +8128,6 @@ async fn build_kernel_write_outcome_command_surface_result(
         .first()
         .ok_or_else(|| "Main Chat kernel write outcome expansion was empty".to_string())?;
     let mut pending_blockers = Vec::new();
-    let tool_calls = Vec::new();
     let mut generated_proposals = Vec::new();
 
     if is_kernel_proposal_outcome(outcome.kind) {
@@ -8176,6 +8364,9 @@ async fn build_kernel_write_outcome_command_surface_result(
             .as_ref()
             .is_some_and(|metadata| metadata.proposal_policy_active),
         "kernelBackedProposalOnlyWrite": true,
+        "kernelBackedReadBeforeWriteProposal": !tool_calls.is_empty(),
+        "toolCallCount": tool_calls.len(),
+        "toolCalled": !tool_calls.is_empty(),
         "writeOutcomeKind": outcome.kind.as_str(),
         "proposalIds": generated_proposals,
         "pendingBlockerCount": pending_blockers.len(),
@@ -8198,7 +8389,7 @@ async fn build_kernel_write_outcome_command_surface_result(
         "providerEndpointKind": main_chat_provider_endpoint_kind(&scheduler, route_metadata.scripted_response_configured),
     });
     agent_run.tool_call_count = tool_calls.len() as u32;
-    agent_run.step_count = 1;
+    agent_run.step_count = agent_run.tool_call_count.saturating_add(1);
     agent_run.complete(&preview_text(&reply, 200), model_route, context_summary);
     let assistant_message = ChatMessage {
         role: "assistant".into(),
@@ -9544,9 +9735,7 @@ fn plan_kernel_read_tools(
     // PolicyRouter alone authorizes the read lane. Text matching below may
     // select a target inside that lane, but it must never upgrade DirectAnswer
     // or another policy route into tool execution.
-    if input.policy_decision.action_effect
-        != openlife_core::agent::main_chat_agent_v1::PolicyActionEffect::ReadOnly
-    {
+    if !policy_authorizes_kernel_read_lane(input) {
         return Vec::new();
     }
     let Some(user_text) = latest_user_text(&input.messages) else {
@@ -9589,6 +9778,36 @@ fn plan_kernel_read_tools(
     plan_kernel_read_tool(input, model_arguments_ignored)
         .into_iter()
         .collect()
+}
+
+fn policy_authorizes_kernel_read_lane(input: &MainChatTurnInput) -> bool {
+    let has_read_capability = [
+        AllowedCapability::WebSearch,
+        AllowedCapability::WebFetch,
+        AllowedCapability::WorkspaceFileRead,
+        AllowedCapability::SessionRead,
+        AllowedCapability::MemoryRead,
+        AllowedCapability::McpReadOnly,
+    ]
+    .into_iter()
+    .any(|capability| input.policy_decision.allows(capability));
+    if !has_read_capability {
+        return false;
+    }
+    if input.policy_decision.action_effect
+        == openlife_core::agent::main_chat_agent_v1::PolicyActionEffect::ReadOnly
+    {
+        return true;
+    }
+    input.policy_decision.route_kind == PolicyRouteKind::ProposalOnlyWrite
+        && input.policy_decision.action_effect
+            == openlife_core::agent::main_chat_agent_v1::PolicyActionEffect::ProposalOnly
+        && input
+            .policy_decision
+            .allows(AllowedCapability::FileWriteProposal)
+        && input
+            .policy_decision
+            .allows(AllowedCapability::ProviderGeneration)
 }
 
 fn enforce_kernel_read_capability(
@@ -10518,6 +10737,41 @@ fn parse_generated_artifact_envelope(
     provider_output: &str,
     specs: &[Value],
 ) -> Result<Vec<Value>, String> {
+    build_generated_artifacts(
+        decode_generated_artifact_provider_envelope(provider_output)?,
+        specs,
+    )
+}
+
+fn parse_generated_artifact_envelope_with_web_citations(
+    provider_output: &str,
+    specs: &[Value],
+    citation_set: Option<&openlife_core::web_search::WebCitationSet>,
+    canonical_run_id: Option<&str>,
+) -> Result<Vec<Value>, String> {
+    let mut envelope = decode_generated_artifact_provider_envelope(provider_output)?;
+    if let Some(citation_set) = citation_set {
+        let run_id = canonical_run_id
+            .filter(|run_id| !run_id.trim().is_empty())
+            .ok_or_else(|| "canonical_run_identity_missing".to_string())?;
+        if let Some(markdown) = envelope.markdown.as_mut() {
+            *markdown = citation_set
+                .validate_and_render_model_output(run_id, markdown)
+                .map_err(|_| "web_citation_validation_failed".to_string())?;
+        } else if let Some(csv) = envelope.csv.as_deref() {
+            citation_set
+                .validate_model_output(run_id, csv)
+                .map_err(|_| "web_citation_validation_failed".to_string())?;
+        } else {
+            return Err("artifact_generation_field_set_mismatch".into());
+        }
+    }
+    build_generated_artifacts(envelope, specs)
+}
+
+fn decode_generated_artifact_provider_envelope(
+    provider_output: &str,
+) -> Result<GeneratedArtifactProviderEnvelope, String> {
     let trimmed = provider_output.trim();
     let json = if trimmed.starts_with("```json") && trimmed.ends_with("```") {
         trimmed
@@ -10528,8 +10782,13 @@ fn parse_generated_artifact_envelope(
     } else {
         trimmed
     };
-    let envelope: GeneratedArtifactProviderEnvelope = serde_json::from_str(json)
-        .map_err(|_| "artifact_generation_contract_invalid".to_string())?;
+    serde_json::from_str(json).map_err(|_| "artifact_generation_contract_invalid".to_string())
+}
+
+fn build_generated_artifacts(
+    envelope: GeneratedArtifactProviderEnvelope,
+    specs: &[Value],
+) -> Result<Vec<Value>, String> {
     let expects_markdown = specs
         .iter()
         .any(|spec| spec.get("kind").and_then(Value::as_str) == Some("markdown"));

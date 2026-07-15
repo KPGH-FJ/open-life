@@ -67,6 +67,34 @@ pub(crate) async fn configure_live_resource_and_web_eval_state_with_citation_ech
     captured_requests
 }
 
+pub(crate) async fn configure_live_resource_and_web_artifact_eval_state_with_citation_echo_local_http_provider(
+    state: &Arc<AppState>,
+) -> Arc<std::sync::Mutex<Vec<String>>> {
+    let captured_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider_base = fake_local_chat_provider_endpoint(
+        "",
+        Some(Arc::clone(&captured_requests)),
+        LocalCitationEcho::ResourceAndWebArtifact,
+    )
+    .await;
+    configure_local_http_provider(state, provider_base).await;
+    captured_requests
+}
+
+pub(crate) async fn configure_live_resource_and_forged_web_artifact_eval_state_with_local_http_provider(
+    state: &Arc<AppState>,
+) -> Arc<std::sync::Mutex<Vec<String>>> {
+    let captured_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider_base = fake_local_chat_provider_endpoint(
+        "",
+        Some(Arc::clone(&captured_requests)),
+        LocalCitationEcho::ResourceAndForgedWebArtifact,
+    )
+    .await;
+    configure_local_http_provider(state, provider_base).await;
+    captured_requests
+}
+
 pub(crate) async fn configure_live_provider_eval_state_with_barriered_streaming_local_http_provider(
     state: &Arc<AppState>,
     chunks: Vec<(&'static str, std::time::Duration)>,
@@ -212,6 +240,8 @@ enum LocalCitationEcho {
     None,
     Web,
     ResourceAndWeb,
+    ResourceAndWebArtifact,
+    ResourceAndForgedWebArtifact,
 }
 
 impl LocalCitationEcho {
@@ -239,6 +269,32 @@ impl LocalCitationEcho {
                     ),
                     _ => "Both issued Resource and Web citations were not observed.".into(),
                 }
+            }
+            Self::ResourceAndWebArtifact => {
+                let resource = issued_citation("cite_", 29);
+                let web = issued_citation("webref_", 31);
+                match (resource, web) {
+                    (Some(resource), Some(web)) => serde_json::json!({
+                        "markdown": format!(
+                            "# 带引用的路演报告\n\n附件证据 [{resource}] 与公开网页证据 [{web}] 已共同纳入风险分析。"
+                        )
+                    })
+                    .to_string(),
+                    _ => serde_json::json!({
+                        "markdown": "Provider did not observe both issued citation classes."
+                    })
+                    .to_string(),
+                }
+            }
+            Self::ResourceAndForgedWebArtifact => {
+                let resource = issued_citation("cite_", 29)
+                    .unwrap_or_else(|| "cite_aaaaaaaaaaaaaaaaaaaaaaaa".into());
+                serde_json::json!({
+                    "markdown": format!(
+                        "# Forged citation report\n\nValid Resource [{resource}], forged Web [webref_aaaaaaaaaaaaaaaaaaaaaaaa]."
+                    )
+                })
+                .to_string()
             }
         }
     }

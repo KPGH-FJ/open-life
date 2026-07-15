@@ -2089,12 +2089,22 @@ fn policy_allowed_capabilities(
         PolicyRouteKind::ProposalOnlyWrite if intent.requests_lifemodel_change => {
             vec![AllowedCapability::LifeModelProposal]
         }
-        PolicyRouteKind::ProposalOnlyWrite if intent.requests_file_change => vec![
-            AllowedCapability::FileWriteProposal,
-            // Provider generation may draft bounded artifact content, but it
-            // cannot select the target path or authorize the later effect.
-            AllowedCapability::ProviderGeneration,
-        ],
+        PolicyRouteKind::ProposalOnlyWrite if intent.requests_file_change => {
+            let mut capabilities = vec![
+                AllowedCapability::FileWriteProposal,
+                // Provider generation may draft bounded artifact content, but it
+                // cannot select the target path or authorize the later effect.
+                AllowedCapability::ProviderGeneration,
+            ];
+            // A compound current-user request may require governed evidence
+            // collection before the artifact draft is staged. Reuse the same
+            // read-capability authority as the read-only route; this does not
+            // authorize the later file effect or bypass ReviewWorkflow.
+            if intent.requires_external_read {
+                capabilities.extend(requested_read_capabilities(intent));
+            }
+            capabilities
+        }
         PolicyRouteKind::ProposalOnlyWrite => vec![AllowedCapability::MemoryProposal],
         PolicyRouteKind::ConfirmationRequest => {
             vec![AllowedCapability::ExternalWriteConfirmation]
@@ -15552,6 +15562,8 @@ mod generated_artifact_policy_tests {
     use super::*;
 
     const RC07_PROMPT: &str = "生成一份 Markdown 路演摘要和一份 CSV 风险清单，并在我确认后保存。";
+    const CC01_PROMPT: &str =
+        "读取附件并查询公开网页，生成一份带引用的 Markdown 报告，等待我确认后保存。";
 
     #[test]
     fn current_user_artifact_request_gets_generation_and_proposal_capabilities() {
@@ -15576,6 +15588,43 @@ mod generated_artifact_policy_tests {
         assert!(!decision
             .policy_decision
             .allows(AllowedCapability::ExternalWriteConfirmation));
+    }
+
+    #[test]
+    fn exact_cc01_prompt_preserves_web_read_inside_file_review_route() {
+        let decision = AgentIngress::default().decide(
+            "roadshow-cc01-policy",
+            CC01_PROMPT,
+            None,
+            AgentTaskKind::Conversation,
+        );
+
+        assert!(decision.intent_frame.requires_external_read);
+        assert!(decision.intent_frame.requests_file_change);
+        assert_eq!(decision.policy_route, PolicyRouteKind::ProposalOnlyWrite);
+        assert_eq!(
+            decision.selected_strategy,
+            MainChatAgentStrategy::FileWriteProposal
+        );
+        assert_eq!(
+            decision.policy_decision.action_effect,
+            PolicyActionEffect::ProposalOnly
+        );
+        assert!(decision
+            .policy_decision
+            .allows(AllowedCapability::WebSearch));
+        assert!(decision
+            .policy_decision
+            .allows(AllowedCapability::ProviderGeneration));
+        assert!(decision
+            .policy_decision
+            .allows(AllowedCapability::FileWriteProposal));
+        assert!(!decision
+            .policy_decision
+            .allows(AllowedCapability::ExternalWriteConfirmation));
+        assert!(!decision
+            .policy_decision
+            .allows(AllowedCapability::ReversibleMemoryCommit));
     }
 
     #[test]

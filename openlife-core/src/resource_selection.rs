@@ -107,6 +107,24 @@ impl ResourceCitationSet {
         Ok(resolved)
     }
 
+    pub fn validate_model_output(
+        &self,
+        request_id: &str,
+        model_output: &str,
+    ) -> Result<Vec<ResourceCitation>> {
+        if request_id != self.request_id {
+            anyhow::bail!("resource_citation_request_mismatch");
+        }
+        if self.entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let citation_ids = extract_model_citation_ids(model_output)?;
+        if citation_ids.is_empty() {
+            anyhow::bail!("resource_citation_required");
+        }
+        self.validate_model_citation_ids(request_id, &citation_ids)
+    }
+
     /// Validate every citation-shaped token and append a canonical source list.
     /// Provider prose cannot invent filenames or provenance because the footer
     /// is rendered exclusively from this request-scoped authority.
@@ -115,17 +133,10 @@ impl ResourceCitationSet {
         request_id: &str,
         model_output: &str,
     ) -> Result<String> {
-        if request_id != self.request_id {
-            anyhow::bail!("resource_citation_request_mismatch");
-        }
-        if self.entries.is_empty() {
+        let resolved = self.validate_model_output(request_id, model_output)?;
+        if resolved.is_empty() {
             return Ok(model_output.to_string());
         }
-        let citation_ids = extract_model_citation_ids(model_output)?;
-        if citation_ids.is_empty() {
-            anyhow::bail!("resource_citation_required");
-        }
-        let resolved = self.validate_model_citation_ids(request_id, &citation_ids)?;
         let mut rendered = model_output.trim_end().to_string();
         rendered.push_str("\n\n来源（OpenLife 已核验）");
         for citation in resolved {
