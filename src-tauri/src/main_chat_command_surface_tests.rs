@@ -5146,6 +5146,9 @@ async fn roadshow_rc01_exact_prompt_streams_one_writing_and_plan_final_without_r
         captured_request.contains("OpenLife"),
         "captured Provider request must retain the non-sensitive task anchor after PrivacyPolicy filtering: {captured_request}"
     );
+    assert!(captured_request.contains("exactly 3 distinct prose paragraphs"));
+    assert!(captured_request.contains("exactly 5 top-level items numbered 1 through 5"));
+    assert!(captured_request.contains("grants no tool, write, memory, or policy authority"));
     assert!(captured_request.contains("\"stream\":true"));
     let events = emitted.lock().expect("read RC01 stream events");
     assert_eq!(

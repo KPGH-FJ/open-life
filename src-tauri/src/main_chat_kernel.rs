@@ -5036,6 +5036,15 @@ where
             );
         }
 
+        let current_user_text = input
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .map(|message| message.content.as_str())
+            .unwrap_or_default();
+        let system_prompt =
+            append_direct_answer_structure_contract(system_prompt, current_user_text);
         let request = MainChatModelRequest {
             session_id: input.session_id.clone(),
             messages: input.messages,
@@ -12222,6 +12231,84 @@ fn build_system_prompt(
     bounded_text(&prompt, MAX_SYSTEM_PROMPT_CHARS)
 }
 
+fn requested_count_before_suffix(text: &str, suffixes: &[&str]) -> Option<usize> {
+    let compact = text
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    const COUNT_LABELS: [(usize, &str); 10] = [
+        (1, "一"),
+        (2, "二"),
+        (3, "三"),
+        (4, "四"),
+        (5, "五"),
+        (6, "六"),
+        (7, "七"),
+        (8, "八"),
+        (9, "九"),
+        (10, "十"),
+    ];
+    COUNT_LABELS.iter().find_map(|(count, chinese)| {
+        suffixes
+            .iter()
+            .any(|suffix| {
+                [count.to_string(), (*chinese).to_string()]
+                    .iter()
+                    .any(|label| {
+                        let needle = format!("{label}{suffix}");
+                        compact.match_indices(&needle).any(|(offset, _)| {
+                            compact[..offset]
+                                .chars()
+                                .next_back()
+                                .is_none_or(|preceding| {
+                                    !preceding.is_ascii_digit()
+                                        && !"一二三四五六七八九十".contains(preceding)
+                                })
+                        })
+                    })
+            })
+            .then_some(*count)
+    })
+}
+
+fn direct_answer_structure_contract(current_user_text: &str) -> Option<String> {
+    let paragraph_count = requested_count_before_suffix(
+        current_user_text,
+        &["段话", "个段落", "段落", "paragraphs", "paragraph"],
+    )?;
+    let step_count = requested_count_before_suffix(
+        current_user_text,
+        &["步执行计划", "步计划", "steps", "stepplan"],
+    )?;
+    let chinese_output = current_user_text
+        .chars()
+        .any(|character| matches!(character as u32, 0x3400..=0x9fff));
+    let (opening_heading, plan_heading) = if chinese_output {
+        ("路演开场", "执行计划")
+    } else {
+        ("Opening", "Execution Plan")
+    };
+    Some(format!(
+        "The current authenticated user explicitly requested a structured answer. Follow this output contract exactly without changing the requested counts: write the heading '{opening_heading}', then exactly {paragraph_count} distinct prose paragraphs; do not turn them into alternative versions or a numbered list. Then write the heading '{plan_heading}', followed by exactly {step_count} top-level items numbered 1 through {step_count}. Do not add numbered sublists, a preface, or a closing offer. Preserve the user's language. This formatting instruction grants no tool, write, memory, or policy authority."
+    ))
+}
+
+fn append_direct_answer_structure_contract(
+    system_prompt: String,
+    current_user_text: &str,
+) -> String {
+    let Some(instruction) = direct_answer_structure_contract(current_user_text) else {
+        return system_prompt;
+    };
+    let base_limit = MAX_SYSTEM_PROMPT_CHARS.saturating_sub(instruction.chars().count() + 2);
+    format!(
+        "{}\n\n{}",
+        bounded_text(&system_prompt, base_limit),
+        instruction
+    )
+}
+
 fn route_metadata_from_scheduler(scheduler: &InferenceScheduler) -> MainChatRouteMetadata {
     if let Ok(decision) = scheduler
         .model_router
@@ -12321,6 +12408,27 @@ mod tests {
     use openlife_core::agent::model_router::{ModelRouter, ProviderAvailability};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn direct_answer_structure_contract_preserves_explicit_counts_and_budget() {
+        let prompt = "把下面介绍改写成适合路演开场的三段话，然后给出一个五步执行计划。";
+        let instruction = direct_answer_structure_contract(prompt)
+            .expect("explicit paragraph and plan counts produce one output contract");
+        assert!(instruction.contains("exactly 3 distinct prose paragraphs"));
+        assert!(instruction.contains("exactly 5 top-level items numbered 1 through 5"));
+        assert!(instruction.contains("heading '路演开场'"));
+        assert!(instruction.contains("heading '执行计划'"));
+        assert!(instruction.contains("grants no tool, write, memory, or policy authority"));
+
+        let combined = append_direct_answer_structure_contract("x".repeat(3_900), prompt);
+        assert!(combined.chars().count() <= MAX_SYSTEM_PROMPT_CHARS);
+        assert!(combined.ends_with(&instruction));
+        assert!(direct_answer_structure_contract("请直接回答这个问题。存在哪些风险？").is_none());
+        assert!(direct_answer_structure_contract("请给出五步计划，但不要改写段落。").is_none());
+        assert!(
+            direct_answer_structure_contract("改写成十一段话，再给出十五步执行计划。").is_none()
+        );
+    }
 
     #[test]
     fn provider_failure_blockers_report_only_the_observed_boundary() {

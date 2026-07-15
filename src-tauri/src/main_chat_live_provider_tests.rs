@@ -43,6 +43,7 @@ fn main_chat_live_provider_command_surface_tests_are_not_concentrated_in_lib_rs(
         "main_chat_live_provider_eval_harness_blocks_react_cases_before_command_invocation_when_preflight_fails",
         "main_chat_live_provider_eval_harness_executes_local_http_provider_without_external_live_credit",
         "main_chat_live_provider_eval_harness_invokes_external_direct_answer_when_opted_in",
+        "roadshow_rc01_external_live_exact_writing_and_plan_is_streamed_once",
         "main_chat_live_provider_eval_harness_invokes_external_react_web_and_mcp_when_opted_in",
     ] {
         assert!(
@@ -655,6 +656,235 @@ async fn main_chat_live_provider_eval_harness_invokes_external_direct_answer_whe
     assert!(!evidence.web_mcp_agent_loop_eval_executed);
     assert!(!evidence.proposal_permission_eval_executed);
     assert!(evidence.no_silent_writes);
+}
+
+#[tokio::test]
+#[ignore = "requires OPENLIFE_MAIN_CHAT_LIVE_PROVIDER_EVAL=1, network, and a real provider API key"]
+async fn roadshow_rc01_external_live_exact_writing_and_plan_is_streamed_once() {
+    const PROMPT: &str = "把下面这段产品介绍改写成适合路演开场的三段话，然后给出一个五步执行计划：OpenLife 是一个由私人 LifeModel 引导的本地优先个人 Agent。";
+    const SESSION_ID: &str = "roadshow-rc01-external-live";
+
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    configure_live_provider_eval_state(&state).await;
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let captured = Arc::new(std::sync::Mutex::new(
+        Vec::<(String, serde_json::Value)>::new(),
+    ));
+    let captured_events = Arc::clone(&captured);
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(240),
+        crate::main_chat_streaming::start_stream_message_with_operation_state(
+            operation_id.clone(),
+            SESSION_ID.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: PROMPT.into(),
+            }],
+            None,
+            &state,
+            move |event, payload| {
+                captured_events
+                    .lock()
+                    .expect("capture RC01 external live events")
+                    .push((event.to_string(), payload));
+            },
+        ),
+    )
+    .await
+    .expect("RC01 external live timeout")
+    .expect("RC01 external live structured terminal");
+
+    let reply = result["reply"].as_str().expect("RC01 external live reply");
+    let plan_heading = reply
+        .lines()
+        .map(str::trim)
+        .find(|line| {
+            line.chars().count() <= 40
+                && (line.contains("执行计划")
+                    || line.contains("行动计划")
+                    || line.to_ascii_lowercase().contains("execution plan"))
+        })
+        .expect("RC01 external live answer must include one explicit plan heading");
+    let plan_offset = reply
+        .find(plan_heading)
+        .expect("RC01 external live plan heading offset");
+    let opening = &reply[..plan_offset];
+    let plan = &reply[plan_offset..];
+    let numbered_plan_steps = plan
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line
+                .trim_start()
+                .trim_start_matches(&['*', '#', '-', ' '][..]);
+            (1..=5).find(|number| {
+                [
+                    format!("{number}."),
+                    format!("{number}、"),
+                    format!("{number})"),
+                ]
+                .iter()
+                .any(|prefix| trimmed.starts_with(prefix))
+            })
+        })
+        .collect::<Vec<_>>();
+    let prose_blocks = opening
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|block| {
+            let heading_text = block.trim_matches(&['#', '*', '_', ' '][..]).trim();
+            !block.is_empty()
+                && !block.starts_with('#')
+                && heading_text != "路演开场"
+                && !heading_text.eq_ignore_ascii_case("opening")
+                && !block.contains("执行计划")
+                && !block.contains("行动计划")
+        })
+        .count();
+    let events = captured
+        .lock()
+        .expect("read RC01 external live events")
+        .clone();
+    let provider_chunk_count = events
+        .iter()
+        .filter(|(event, payload)| {
+            event == "stream-message-chunk"
+                && payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|request_id| !request_id.trim().is_empty())
+        })
+        .count();
+    let event_type_counts = events.iter().fold(
+        std::collections::BTreeMap::<&str, usize>::new(),
+        |mut counts, (event, _)| {
+            *counts.entry(event.as_str()).or_default() += 1;
+            counts
+        },
+    );
+    eprintln!(
+        "RC01 external live safe summary: {}",
+        serde_json::json!({
+            "status": result["status"],
+            "replyBytes": reply.len(),
+            "containsOpenLife": reply.contains("OpenLife"),
+            "numberedPlanSteps": numbered_plan_steps,
+            "proseBlocksBeforePlan": prose_blocks,
+            "providerChunkCount": provider_chunk_count,
+            "eventTypeCounts": event_type_counts,
+            "blockers": result["blockers"],
+        })
+    );
+
+    assert_eq!(result["status"], "completed", "RC01 live result: {result}");
+    assert_eq!(result["model_invoked"], true);
+    assert_eq!(result["tool_invoked"], false);
+    assert_eq!(result["legacy_fallback_used"], false);
+    assert_eq!(result["agent_ingress"]["selectedStrategy"], "direct_answer");
+    assert!(result["blockers"]
+        .as_array()
+        .is_some_and(|blockers| blockers.is_empty()));
+    assert!(reply.contains("OpenLife"));
+    assert_eq!(
+        numbered_plan_steps,
+        vec![1, 2, 3, 4, 5],
+        "RC01 live answer must contain the requested five plan steps"
+    );
+    assert_eq!(
+        prose_blocks, 3,
+        "RC01 live answer must contain exactly three distinct opening paragraphs before the plan"
+    );
+    assert!(
+        provider_chunk_count > 0,
+        "RC01 live credit requires Provider-bound incremental chunks"
+    );
+    assert_eq!(
+        events.last().map(|(event, _)| event.as_str()),
+        Some("stream-message-done")
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|(event, _)| event == "stream-message-done")
+            .count(),
+        1
+    );
+
+    assert!(state
+        .proposal_store
+        .as_ref()
+        .expect("RC01 external live ProposalStore")
+        .lock()
+        .await
+        .list_pending_proposals(20)
+        .expect("list RC01 external live proposals")
+        .is_empty());
+    assert!(state
+        .plan_execute_session_store
+        .as_ref()
+        .expect("RC01 external live PlanExecute store")
+        .lock()
+        .await
+        .list_sessions(20)
+        .expect("list RC01 external live PlanExecute sessions")
+        .is_empty());
+
+    let durable_before_replay = state
+        .main_chat_agent_event_store
+        .as_ref()
+        .expect("RC01 external live EventStore")
+        .lock()
+        .await
+        .list(&operation_id, 0, 250)
+        .expect("list RC01 external live facts");
+    for event_type in [
+        "provider.started",
+        "provider.completed",
+        "final_delivery.created",
+    ] {
+        assert_eq!(
+            durable_before_replay
+                .iter()
+                .filter(|event| event.event_type == event_type)
+                .count(),
+            1,
+            "RC01 external live requires exactly one {event_type} fact"
+        );
+    }
+    assert!(durable_before_replay.iter().all(|event| {
+        !matches!(
+            event.event_type.as_str(),
+            "tool.started" | "tool.completed" | "review.staged" | "effect_committed"
+        )
+    }));
+
+    let replay = crate::main_chat_send::send_message_with_operation_state(
+        operation_id.clone(),
+        SESSION_ID.into(),
+        vec![openlife_core::llm::ChatMessage {
+            role: "user".into(),
+            content: PROMPT.into(),
+        }],
+        None,
+        &state,
+    )
+    .await
+    .expect("recover RC01 external live final");
+    assert_eq!(replay.status, "completed");
+    assert_eq!(replay.reply, reply);
+    let durable_after_replay = state
+        .main_chat_agent_event_store
+        .as_ref()
+        .expect("RC01 external live EventStore after replay")
+        .lock()
+        .await
+        .list(&operation_id, 0, 250)
+        .expect("relist RC01 external live facts");
+    assert_eq!(
+        durable_after_replay.len(),
+        durable_before_replay.len(),
+        "same-operation terminal recovery cannot append or redispatch Provider facts"
+    );
 }
 
 #[tokio::test]
