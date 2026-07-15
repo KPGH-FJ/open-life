@@ -8,9 +8,11 @@
 
 - Cumulative Integration is **in progress**.
 - RC-04 has passed a single-command mechanical integration run.
-- RC-04 has **not** received native desktop, external live-provider, repeated
-  product-trial, or independent-review credit.
-- RC-08 and CC-01 through CC-03 remain pending.
+- RC-08 has passed a local cancellation/new-operation-retry mechanical run.
+- RC-04 and RC-08 have **not** received native desktop, external live-provider,
+  repeated product-trial, or independent-review credit.
+- RC-08 full process-restart reconciliation and CC-01 through CC-03 remain
+  pending.
 - The roadshow candidate remains **NO-GO**.
 
 ## RC-04 exact scenario
@@ -74,14 +76,65 @@ model authorize the Web route.
 
 Implementation commit: `02fd7580a1078a57e6308921a5ed61f357e4e17d`.
 
+## RC-08 exact scenario
+
+Frozen prompt:
+
+> 分析附件并检索网页；在执行中取消，然后重试一次。
+
+The first UUIDv4 operation binds the frozen Markdown fixture, completes one
+governed Web read, and then reaches a deliberately hanging local HTTP Provider
+synthesis request. Cancellation is requested only after the HTTP request is
+observed.
+
+Observed first-attempt facts:
+
+- selected strategy is `re_act_tool_execution`;
+- one canonical `tool.completed` terminal precedes Provider cancellation;
+- local cancellation completes in less than one second and closes the local
+  HTTP connection;
+- durable order contains `provider.started`, `cancel_requested`,
+  `provider.remote_unknown`, and `local_aborted`;
+- `remoteCancellationConfirmed` remains false;
+- no `provider.completed` or `effect_committed` fact is created;
+- releasing the late Provider response changes zero durable events;
+- the AgentRun remains `Cancelled`.
+
+The harness then clears process-local Main Chat runtime facts and performs the
+explicit retry as a new UUIDv4 operation. The retry rebinds the same fixture,
+dispatches one Web action and one Provider synthesis request, validates both
+Resource and Web citations, creates zero proposals, and finishes one AgentRun
+as `Completed`. The raw Web body marker remains absent from product IPC and its
+execution receipt.
+
+This proves local runtime-state loss and a user-visible new-operation retry. It
+does **not** prove full application-process restart/reopen, native desktop UI,
+external live Web, or external cloud Provider behavior; those evidence
+dimensions remain pending.
+
+The exact Chinese `检索网页` phrase initially failed to authorize Web read
+capability. Policy intent classification now recognizes explicit search/query
+Web phrases while the existing webpage-design counterexample still receives no
+Web authority. The model cannot grant this capability.
+
+RC-08 implementation/evidence commit:
+`f84bed579b9e27bb0e3eb974cd66c38082a369b3`.
+
+Additional mechanical evidence:
+
+- exact RC-04, RC-06, and RC-08 roadshow command tests — 3 passed;
+- `roadshow_external_read_policy_tests` — 3 passed;
+- generic released-late-provider cancellation regression — passed;
+- full Main Chat command surface — 75 passed;
+- `cargo check -p openlife-tauri --tests` — passed with existing dead-code
+  warnings only.
+
 ## Remaining cumulative work
 
-- RC-08 cancellation, remote-unknown truth, one retry, restart, and no-late-
-  commit chain.
+- RC-08 full application-process restart/reopen and native UI projection.
 - CC-01 Resource + Web + reviewed Markdown artifact.
 - CC-02 Resource + transient tasks + conditional reviewed file write.
 - CC-03 explicit reversible Memory + undo + restart.
 - full RC-01 through RC-08 cumulative harness, negative scans, single-system
   guards, widened frontend/backend regression, reliability loops, live product
   rounds, and independent rereview.
-

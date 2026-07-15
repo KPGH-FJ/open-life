@@ -1,7 +1,7 @@
 {
   "schema_version": "openlife-roadshow-core-capability-state-v1",
   "plan_id": "openlife-roadshow-core-capability-2026-07-14",
-  "status": "cumulative_integration_in_progress_rc04_mechanically_verified_live_product_trial_review_pending_roadshow_no_go",
+  "status": "cumulative_integration_in_progress_rc04_rc08_local_mechanics_verified_live_product_restart_trial_review_pending_roadshow_no_go",
   "authority": {
     "kind": "time_bounded_execution_overlay",
     "subordinate_to": [
@@ -116,9 +116,9 @@
     },
     {
       "id": "CUMULATIVE_INTEGRATION",
-      "status": "in_progress_rc04_mechanically_verified_remaining_primary_combined_live_and_review_evidence_pending",
-      "completion_claim": "no_cumulative_completion_claim_rc04_local_mechanical_evidence_only",
-      "commit": "02fd7580a1078a57e6308921a5ed61f357e4e17d",
+      "status": "in_progress_rc04_and_rc08_local_mechanics_verified_remaining_restart_primary_combined_live_and_review_evidence_pending",
+      "completion_claim": "no_cumulative_completion_claim_rc04_rc08_local_mechanical_evidence_only",
+      "commit": "f84bed579b9e27bb0e3eb974cd66c38082a369b3",
       "evidence": "plans/openlife_roadshow_cumulative_integration_evidence.md"
     },
     {
@@ -269,7 +269,14 @@
     "rc04_native_product_trial": "pending",
     "rc04_external_live_provider_and_web": "pending",
     "rc04_independent_review": "pending",
-    "rc08": "pending",
+    "rc08_exact_prompt": "passed_local_web_then_hanging_provider_cancel_under_one_second_remote_unknown_no_late_event_and_one_new_operation_retry",
+    "rc08_governance": "passed_read_only_web_authority_zero_proposals_zero_effect_commits",
+    "rc08_retry_dispatch": "passed_one_web_action_one_provider_synthesis_request_and_one_completed_retry_agentrun",
+    "rc08_process_local_reset": "passed_durable_first_attempt_truth_after_main_chat_runtime_state_reset",
+    "rc08_full_process_restart": "pending",
+    "rc08_native_product_ui_trial": "pending",
+    "rc08_external_live_provider_and_web": "pending",
+    "rc08_independent_review": "pending",
     "cc01": "pending",
     "cc02": "pending",
     "cc03": "pending",
@@ -284,5 +291,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-15T07:43:50+08:00"
+  "last_updated_at": "2026-07-15T08:07:49+08:00"
 }
