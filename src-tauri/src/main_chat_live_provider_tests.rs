@@ -45,6 +45,7 @@ fn main_chat_live_provider_command_surface_tests_are_not_concentrated_in_lib_rs(
         "main_chat_live_provider_eval_harness_invokes_external_direct_answer_when_opted_in",
         "roadshow_rc01_external_live_exact_writing_and_plan_is_streamed_once",
         "roadshow_rc02_rc03_external_live_resources_use_both_source_classes",
+        "roadshow_rc06_rc07_external_live_drafts_wait_for_review_then_materialize_once",
         "main_chat_live_provider_eval_harness_invokes_external_react_web_and_mcp_when_opted_in",
     ] {
         assert!(
@@ -778,6 +779,13 @@ async fn roadshow_rc01_external_live_exact_writing_and_plan_is_streamed_once() {
     );
 
     assert_eq!(result["status"], "completed", "RC01 live result: {result}");
+    assert_eq!(
+        result["status"], "blocked",
+        "a draft waiting for Review Center approval is not a completed file effect"
+    );
+    assert!(result["blockers"]
+        .as_array()
+        .is_some_and(|blockers| !blockers.is_empty()));
     assert_eq!(result["model_invoked"], true);
     assert_eq!(result["tool_invoked"], false);
     assert_eq!(result["legacy_fallback_used"], false);
@@ -1088,6 +1096,353 @@ async fn roadshow_rc02_rc03_external_live_resources_use_both_source_classes() {
     assert!(rc03_reply.contains("roadshow\\_metrics\\.xlsx"));
     assert!(rc03_reply.contains("range "));
     assert!(rc03_reply.contains("sheet roadshow_metrics"));
+}
+
+async fn run_external_live_reviewed_artifact_scenario(
+    session_id: &str,
+    prompt: &str,
+    expected_files: &[(&str, &str)],
+) {
+    let workspace = tempfile::tempdir().expect("external live artifact workspace");
+    let safe_workspace = workspace
+        .path()
+        .canonicalize()
+        .expect("canonical external live artifact workspace");
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    configure_live_provider_eval_state(&state).await;
+    state.config.lock().await.system.safe_paths = vec![safe_workspace.display().to_string()];
+
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let captured = Arc::new(std::sync::Mutex::new(
+        Vec::<(String, serde_json::Value)>::new(),
+    ));
+    let captured_events = Arc::clone(&captured);
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(240),
+        crate::main_chat_streaming::start_stream_message_with_operation_state(
+            operation_id.clone(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: prompt.into(),
+            }],
+            None,
+            &state,
+            move |event, payload| {
+                captured_events
+                    .lock()
+                    .expect("capture external live artifact events")
+                    .push((event.to_string(), payload));
+            },
+        ),
+    )
+    .await
+    .expect("external live artifact turn timeout")
+    .expect("external live artifact structured terminal");
+
+    assert_eq!(result["model_invoked"], true);
+    assert_eq!(result["tool_invoked"], false);
+    assert_eq!(result["legacy_fallback_used"], false);
+    assert_eq!(
+        result["agent_ingress"]["selectedStrategy"],
+        "file_write_proposal"
+    );
+    assert_eq!(
+        result["reasoning_trace"]["generation_result"]["liveProviderInvoked"],
+        true
+    );
+    assert_eq!(
+        result["reasoning_trace"]["generation_result"]["providerPayloadPurpose"],
+        "main_chat_artifact_draft"
+    );
+    assert_eq!(
+        result["reasoning_trace"]["generation_result"]["writeOutcomeKind"],
+        "file_write_proposal"
+    );
+    assert_eq!(
+        result["reasoning_trace"]["generation_result"]["directWritesExecuted"],
+        false
+    );
+    assert_eq!(
+        result["reasoning_trace"]["generation_result"]["proposalIds"]
+            .as_array()
+            .expect("external live artifact proposal ids")
+            .len(),
+        expected_files.len()
+    );
+
+    let task_session_id = result["agent_ingress"]["agentTaskSessionId"]
+        .as_str()
+        .expect("external live artifact task session id");
+    let task_session = state
+        .main_chat_agent_session_store
+        .as_ref()
+        .expect("external live artifact task store")
+        .lock()
+        .await
+        .load_session(task_session_id)
+        .expect("load external live artifact task")
+        .expect("external live artifact task exists");
+    assert_eq!(
+        task_session.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+    );
+
+    let mut proposals = state
+        .proposal_store
+        .as_ref()
+        .expect("external live artifact ProposalStore")
+        .lock()
+        .await
+        .list_all_proposals(20, 0)
+        .expect("list external live artifact proposals")
+        .into_iter()
+        .filter(|proposal| proposal.source_detail.as_deref() == Some(task_session_id))
+        .collect::<Vec<_>>();
+    proposals.sort_by(|left, right| left.affected_path.cmp(&right.affected_path));
+    assert_eq!(proposals.len(), expected_files.len());
+
+    let expected_paths = expected_files
+        .iter()
+        .map(|(filename, _)| safe_workspace.join(filename))
+        .collect::<Vec<_>>();
+    for path in &expected_paths {
+        assert!(!path.exists(), "Proposal is not artifact completion");
+    }
+    for proposal in &proposals {
+        assert_eq!(
+            proposal.status,
+            openlife_core::agent::ProposalStatus::Pending
+        );
+        assert_eq!(proposal.after["providerMaySelectPath"], false);
+        assert_eq!(proposal.after["generatedByProvider"], true);
+        assert!(proposal.after["contentDigest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:")));
+        assert!(expected_paths.iter().any(|path| {
+            proposal.after["path"].as_str() == Some(path.to_string_lossy().as_ref())
+        }));
+    }
+
+    let events = captured
+        .lock()
+        .expect("read external live artifact events")
+        .clone();
+    let provider_chunk_count = events
+        .iter()
+        .filter(|(event, payload)| {
+            event == "stream-message-chunk"
+                && payload
+                    .get("request_id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|request_id| !request_id.trim().is_empty())
+        })
+        .count();
+    assert_eq!(
+        provider_chunk_count, 0,
+        "unreviewed artifact bytes must not leak through Provider token streaming"
+    );
+    assert_eq!(
+        events.last().map(|(event, _)| event.as_str()),
+        Some("stream-message-done")
+    );
+
+    let durable = state
+        .main_chat_agent_event_store
+        .as_ref()
+        .expect("external live artifact EventStore")
+        .lock()
+        .await
+        .list(&operation_id, 0, 250)
+        .expect("list external live artifact facts");
+    for event_type in [
+        "provider.started",
+        "provider.completed",
+        "final_delivery.created",
+    ] {
+        assert_eq!(
+            durable
+                .iter()
+                .filter(|event| event.event_type == event_type)
+                .count(),
+            1,
+            "external live artifact scenario requires exactly one {event_type}"
+        );
+    }
+    assert!(durable.iter().all(|event| {
+        !matches!(
+            event.event_type.as_str(),
+            "tool.started" | "tool.completed" | "effect_committed"
+        )
+    }));
+
+    let mut observed_contents = Vec::new();
+    let mut first_receipt = None;
+    for (proposal_index, proposal) in proposals.iter().enumerate() {
+        let accepted =
+            crate::commands::proposal::accept_proposal_with_state(proposal.id.clone(), &state)
+                .await
+                .expect("accept external live artifact proposal");
+        assert_eq!(accepted["effect_status"], "confirmed");
+        assert_eq!(accepted["artifactMaterialization"]["status"], "confirmed");
+        assert_eq!(
+            accepted["artifactMaterialization"]["contentDigest"],
+            accepted["artifactMaterialization"]["observedContentDigest"]
+        );
+        if first_receipt.is_none() {
+            first_receipt = Some(accepted["artifactMaterialization"].clone());
+        }
+        if proposal_index + 1 < proposals.len() {
+            let partially_accepted_task = state
+                .main_chat_agent_session_store
+                .as_ref()
+                .expect("external live artifact task store during partial acceptance")
+                .lock()
+                .await
+                .load_session(task_session_id)
+                .expect("reload partially accepted live artifact task")
+                .expect("partially accepted live artifact task remains");
+            assert_eq!(
+                partially_accepted_task.status,
+                openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission,
+                "the aggregate task cannot complete while another artifact still awaits review"
+            );
+        }
+    }
+
+    for (filename, kind) in expected_files {
+        let path = safe_workspace.join(filename);
+        let content = std::fs::read_to_string(&path).expect("read confirmed live artifact");
+        assert!(
+            content.len() >= 40,
+            "live artifact must contain useful content"
+        );
+        match *kind {
+            "markdown" => {
+                assert!(content
+                    .lines()
+                    .any(|line| line.trim_start().starts_with('#')));
+            }
+            "csv" => {
+                let mut reader = csv::ReaderBuilder::new()
+                    .has_headers(true)
+                    .flexible(false)
+                    .from_reader(content.as_bytes());
+                assert!(reader.headers().expect("live CSV header").len() >= 2);
+                assert!(reader
+                    .records()
+                    .next()
+                    .transpose()
+                    .expect("live CSV row")
+                    .is_some());
+            }
+            other => panic!("unsupported external live artifact kind: {other}"),
+        }
+        observed_contents.push(content);
+    }
+
+    let completed_task = state
+        .main_chat_agent_session_store
+        .as_ref()
+        .expect("external live artifact task store after acceptance")
+        .lock()
+        .await
+        .load_session(task_session_id)
+        .expect("reload external live artifact task")
+        .expect("external live artifact task remains");
+    assert_eq!(
+        completed_task.status,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
+    );
+
+    let product_result = serde_json::to_string(&result).expect("encode artifact product result");
+    let encoded_durable =
+        serde_json::to_string(&durable).expect("encode external live artifact facts");
+    let encoded_proposals =
+        serde_json::to_string(&proposals).expect("encode external live artifact proposals");
+    let run_id = result["run_id"]
+        .as_str()
+        .expect("external live artifact run id");
+    let stored_run = state
+        .agent_run_store
+        .as_ref()
+        .expect("external live artifact AgentRun store")
+        .lock()
+        .await
+        .get_run(run_id)
+        .expect("load external live artifact AgentRun")
+        .expect("external live artifact AgentRun exists");
+    let encoded_run = serde_json::to_string(&stored_run).expect("encode artifact AgentRun");
+    for content in &observed_contents {
+        assert!(!product_result.contains(content));
+        assert!(!encoded_durable.contains(content));
+        assert!(!encoded_proposals.contains(content));
+        assert!(!encoded_run.contains(content));
+    }
+
+    let before_retry = observed_contents.clone();
+    let retry =
+        crate::commands::proposal::accept_proposal_with_state(proposals[0].id.clone(), &state)
+            .await
+            .expect("idempotent external live artifact acceptance");
+    assert_eq!(
+        retry["artifactMaterialization"],
+        first_receipt.expect("first live artifact receipt")
+    );
+    for ((filename, _), before) in expected_files.iter().zip(before_retry) {
+        assert_eq!(
+            std::fs::read_to_string(safe_workspace.join(filename))
+                .expect("reread external live artifact"),
+            before
+        );
+    }
+    assert_eq!(
+        std::fs::read_dir(&safe_workspace)
+            .expect("list external live artifact workspace")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read external live artifact workspace entries")
+            .len(),
+        expected_files.len(),
+        "idempotent acceptance must not leave stage files"
+    );
+
+    eprintln!(
+        "external live reviewed artifact safe summary: {}",
+        serde_json::json!({
+            "sessionId": session_id,
+            "turnStatus": result["status"],
+            "proposalCount": proposals.len(),
+            "fileSizes": observed_contents.iter().map(String::len).collect::<Vec<_>>(),
+            "providerChunkCount": provider_chunk_count,
+            "eventTypeCounts": events.iter().fold(
+                std::collections::BTreeMap::<&str, usize>::new(),
+                |mut counts, (event, _)| {
+                    *counts.entry(event.as_str()).or_default() += 1;
+                    counts
+                },
+            ),
+        })
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires OPENLIFE_MAIN_CHAT_LIVE_PROVIDER_EVAL=1, network, and a real provider API key"]
+async fn roadshow_rc06_rc07_external_live_drafts_wait_for_review_then_materialize_once() {
+    run_external_live_reviewed_artifact_scenario(
+        "roadshow-rc06-external-live",
+        "把最终摘要保存到工作区的 roadshow-summary.md。",
+        &[("roadshow-summary.md", "markdown")],
+    )
+    .await;
+    run_external_live_reviewed_artifact_scenario(
+        "roadshow-rc07-external-live",
+        "生成一份 Markdown 路演摘要和一份 CSV 风险清单，并在我确认后保存。",
+        &[
+            ("roadshow-summary.md", "markdown"),
+            ("roadshow-risks.csv", "csv"),
+        ],
+    )
+    .await;
 }
 
 #[tokio::test]
