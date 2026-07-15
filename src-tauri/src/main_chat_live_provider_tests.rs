@@ -802,6 +802,141 @@ async fn main_chat_live_provider_stream_command_surface_emits_external_provider_
 }
 
 #[tokio::test]
+#[ignore = "requires OPENLIFE_MAIN_CHAT_LIVE_PROVIDER_EVAL=1, live Web access, and a real provider API key"]
+async fn roadshow_rc04_external_live_resource_web_and_provider_complete_with_bound_citations() {
+    const PROMPT: &str =
+        "结合附件中的产品数据和今天公开网页中的相关信息，给出有来源的路演风险摘要。";
+    const SESSION_ID: &str = "roadshow-rc04-external-live";
+
+    let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let resource_store = openlife_core::resource::ResourceStore::new_in_memory()
+        .expect("roadshow live ResourceStore");
+    let resource_runtime = crate::resource_commands::ResourceRuntime::new(
+        openlife_core::resource_gateway::ResourceGateway::new(
+            resource_store,
+            openlife_core::resource_gateway::ResourceParserProcess::for_current_executable()
+                .expect("roadshow live Resource parser process"),
+        ),
+    );
+    Arc::get_mut(&mut state)
+        .expect("roadshow live state must have one owner before ResourceRuntime attachment")
+        .resource_runtime = Some(Arc::new(resource_runtime));
+    configure_live_provider_eval_state(&state).await;
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let fixture =
+        include_bytes!("../../plans/fixtures/openlife_roadshow_core/roadshow_web_context.md");
+    let line_count = fixture.split(|byte| *byte == b'\n').count().max(1) as u32;
+    state
+        .resource_runtime
+        .as_ref()
+        .expect("roadshow live ResourceRuntime")
+        .gateway()
+        .store()
+        .commit_import_batch(openlife_core::resource::ResourceImportBatch {
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            message_id: operation_id.clone(),
+            resources: vec![openlife_core::resource::ResourceImportCandidate {
+                resource_id: uuid::Uuid::new_v4().to_string(),
+                filename: "roadshow_web_context.md".into(),
+                declared_mime: "text/markdown".into(),
+                detected_mime: "text/markdown".into(),
+                format: openlife_core::resource::ResourceFormat::Markdown,
+                bytes: fixture.to_vec(),
+                chunks: vec![openlife_core::resource::ResourceChunkDraft {
+                    content: String::from_utf8(fixture.to_vec())
+                        .expect("roadshow live Markdown fixture"),
+                    provenance: openlife_core::resource::ResourceProvenance::Text {
+                        start_line: 1,
+                        end_line: line_count,
+                    },
+                }],
+            }],
+        })
+        .expect("bind frozen RC04 Resource to live operation");
+
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(
+        Vec::<(String, serde_json::Value)>::new(),
+    ));
+    let captured_events = Arc::clone(&captured);
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(240),
+        crate::main_chat_streaming::start_stream_message_with_operation_state(
+            operation_id.clone(),
+            SESSION_ID.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: PROMPT.into(),
+            }],
+            None,
+            &state,
+            move |event, payload| {
+                captured_events
+                    .lock()
+                    .expect("capture RC04 live events")
+                    .push((event.to_string(), payload));
+            },
+        ),
+    )
+    .await
+    .expect("RC04 live turn timeout")
+    .expect("RC04 live structured terminal");
+
+    assert_eq!(result["status"], "completed", "RC04 live result: {result}");
+    assert_eq!(result["model_invoked"], true);
+    assert_eq!(result["tool_invoked"], true);
+    assert_eq!(result["legacy_fallback_used"], false);
+    assert!(result["blockers"]
+        .as_array()
+        .is_some_and(|blockers| blockers.is_empty()));
+    let reply = result["reply"].as_str().expect("RC04 live reply");
+    assert!(reply.contains("来源（OpenLife 引用已绑定，内容未背书）"));
+    assert!(reply.contains("来源（OpenLife 已核验）"));
+    assert!(reply.contains("webref_"));
+    assert!(reply.contains("cite_"));
+
+    let events = captured.lock().expect("read RC04 live events");
+    assert_eq!(
+        events.last().map(|(event, _)| event.as_str()),
+        Some("stream-message-done")
+    );
+    drop(events);
+
+    let durable = state
+        .main_chat_agent_event_store
+        .as_ref()
+        .expect("RC04 live EventStore")
+        .lock()
+        .await
+        .list(&operation_id, 0, 250)
+        .expect("RC04 live durable facts");
+    let provider_started = durable
+        .iter()
+        .find(|event| event.event_type == "provider.started")
+        .expect("RC04 live provider.started");
+    let provider_completed = durable
+        .iter()
+        .find(|event| event.event_type == "provider.completed")
+        .expect("RC04 live provider.completed");
+    assert!(provider_started.sequence < provider_completed.sequence);
+    assert_eq!(
+        durable
+            .iter()
+            .filter(|event| event.event_type == "tool.completed")
+            .count(),
+        1
+    );
+    assert!(state
+        .proposal_store
+        .as_ref()
+        .expect("RC04 live ProposalStore")
+        .lock()
+        .await
+        .list_pending_proposals(20)
+        .expect("RC04 live proposals")
+        .is_empty());
+}
+
+#[tokio::test]
 #[ignore = "requires OPENLIFE_MAIN_CHAT_LIVE_PROVIDER_EVAL=1, network, and a real provider API key"]
 async fn main_chat_live_provider_stream_command_surface_invokes_external_step6_web_when_opted_in() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
