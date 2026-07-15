@@ -452,7 +452,7 @@ fn assert_verified_product_tool_succeeded(call: &serde_json::Value) {
     assert_eq!(call["executionReceipt"]["outcome"], "succeeded");
 }
 
-async fn grant_command_surface_web_search_once(state: &std::sync::Arc<crate::AppState>) {
+pub(crate) async fn grant_command_surface_web_search_once(state: &std::sync::Arc<crate::AppState>) {
     state
         .tool_permission_store
         .lock()

@@ -5271,7 +5271,38 @@ where
                 self.read_tool_executor.as_ref(),
                 self.canonical_run_id.as_deref(),
             ) {
-                executor.execute_read_tool(decision, canonical_run_id).await
+                // Keep the network/ToolGateway future behind its own Tokio task
+                // boundary. Compound turns retain a large post-read continuation
+                // (for example citation validation plus reviewed artifact
+                // staging); polling the full network stack inline can otherwise
+                // exhaust the runtime worker stack before ToolGateway emits its
+                // first lifecycle event. JoinSet aborts the child if the parent
+                // turn is cancelled or dropped, so this boundary cannot detach a
+                // late tool execution from CancellationRegistry ownership.
+                let failed_decision = decision.clone();
+                let executor = Arc::clone(executor);
+                let canonical_run_id = canonical_run_id.to_string();
+                let mut execution_task = tokio::task::JoinSet::new();
+                execution_task.spawn(async move {
+                    executor
+                        .execute_read_tool(decision, &canonical_run_id)
+                        .await
+                });
+                match execution_task.join_next().await {
+                    Some(Ok(execution)) => execution,
+                    Some(Err(_error)) => blocked_kernel_read_tool_execution(
+                        failed_decision,
+                        "read_tool_execution_task_failed",
+                        "ToolGateway task failed before a terminal observation.",
+                        None,
+                    ),
+                    None => blocked_kernel_read_tool_execution(
+                        failed_decision,
+                        "read_tool_execution_task_missing",
+                        "ToolGateway task ended without a terminal observation.",
+                        None,
+                    ),
+                }
             } else if self.canonical_run_id.is_none() {
                 blocked_kernel_read_tool_execution(
                     decision,
@@ -12406,7 +12437,7 @@ fn bounded_text(value: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use openlife_core::agent::model_router::{ModelRouter, ProviderAvailability};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     #[test]
@@ -12838,6 +12869,33 @@ mod tests {
     struct StaticWebReadToolExecutor {
         observation: Option<String>,
         blocker: Option<&'static str>,
+    }
+
+    struct PendingReadToolExecutor {
+        started: Arc<tokio::sync::Notify>,
+        dropped: Arc<AtomicBool>,
+    }
+
+    struct PendingReadDropSignal(Arc<AtomicBool>);
+
+    impl Drop for PendingReadDropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl MainChatKernelReadToolExecutor for PendingReadToolExecutor {
+        async fn execute_read_tool(
+            &self,
+            _decision: MainChatKernelReadToolDecision,
+            _canonical_run_id: &str,
+        ) -> MainChatKernelReadToolExecution {
+            let _drop_signal = PendingReadDropSignal(Arc::clone(&self.dropped));
+            self.started.notify_one();
+            std::future::pending::<()>().await;
+            unreachable!("pending test executor can only finish by cancellation")
+        }
     }
 
     #[async_trait]
@@ -15357,6 +15415,64 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, MainChatKernelEvent::FinalAnswer { .. })));
         }
+    }
+
+    #[tokio::test]
+    async fn dropping_parent_turn_aborts_isolated_read_tool_task() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let model = ScriptedModelClient::ok("provider must not be called");
+        let kernel = test_kernel(model.clone(), Vec::new()).with_read_tool_executor(Arc::new(
+            PendingReadToolExecutor {
+                started: Arc::clone(&started),
+                dropped: Arc::clone(&dropped),
+            },
+        ));
+        let user_text = "What is the live weather in Shanghai right now?";
+        let ingress = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
+            "session-drop-parent-read-task",
+            user_text,
+            None,
+            openlife_core::agent::AgentTaskKind::Conversation,
+        );
+        let provider_authorization =
+            MainChatProviderAuthorization::from_ingress_decision(&ingress).unwrap();
+
+        {
+            let mut events = BufferedMainChatEventSink::default();
+            let turn = kernel.run_turn(
+                MainChatTurnInput {
+                    session_id: "session-drop-parent-read-task".into(),
+                    provider_authorization,
+                    messages: vec![user_message(user_text)],
+                    selected_skill_id: None,
+                    policy_decision: ingress.policy_decision,
+                    model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
+                },
+                &mut events,
+            );
+            tokio::pin!(turn);
+            tokio::select! {
+                _ = started.notified() => {}
+                _result = &mut turn => panic!("pending read tool unexpectedly finished"),
+                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+                    panic!("isolated read tool task did not start")
+                }
+            }
+        }
+
+        for _ in 0..100 {
+            if dropped.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "dropping the parent turn must abort and drop the isolated ToolGateway task"
+        );
+        assert_eq!(model.call_count(), 0);
     }
 
     #[tokio::test]
