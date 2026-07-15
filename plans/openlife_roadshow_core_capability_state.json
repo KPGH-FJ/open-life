@@ -1,7 +1,7 @@
 {
   "schema_version": "openlife-roadshow-core-capability-state-v1",
   "plan_id": "openlife-roadshow-core-capability-2026-07-14",
-  "status": "cumulative_integration_in_progress_rc04_rc08_cc01_cc02_cc03_local_mechanics_verified_live_product_restart_trial_review_pending_roadshow_no_go",
+  "status": "cumulative_integration_in_progress_rc01_rc04_rc08_cc01_cc02_cc03_local_mechanics_verified_live_product_restart_trial_review_pending_roadshow_no_go",
   "authority": {
     "kind": "time_bounded_execution_overlay",
     "subordinate_to": [
@@ -116,9 +116,9 @@
     },
     {
       "id": "CUMULATIVE_INTEGRATION",
-      "status": "in_progress_rc04_rc08_cc01_cc02_and_cc03_local_mechanics_verified_remaining_restart_combined_live_and_review_evidence_pending",
-      "completion_claim": "no_cumulative_completion_claim_rc04_rc08_cc01_cc02_cc03_local_mechanical_evidence_only",
-      "commit": "b080aaa051270318f86254987818d49809d9c568",
+      "status": "in_progress_rc01_rc04_rc08_cc01_cc02_and_cc03_local_mechanics_verified_remaining_restart_combined_live_and_review_evidence_pending",
+      "completion_claim": "no_cumulative_completion_claim_rc01_rc04_rc08_cc01_cc02_cc03_local_mechanical_evidence_only",
+      "commit": "664f96ff1f2cb4e4863a4af10aedfdecc83a17b9",
       "evidence": "plans/openlife_roadshow_cumulative_integration_evidence.md"
     },
     {
@@ -261,6 +261,16 @@
     "roadshow_release": "no_go"
   },
   "cumulative_integration_results": {
+    "rc01_exact_prompt": "passed_direct_answer_one_local_http_provider_request_three_incremental_chunks_final_last_three_paragraphs_five_steps_zero_proposal_tool_plan_session_or_durable_write",
+    "rc01_policy_authority": "passed_supplied_text_transformation_is_answer_content_explicit_tracked_plan_still_reaches_planexecute",
+    "rc01_memory_authority": "passed_supplied_source_text_zero_memory_authority_separate_real_preference_remains_eligible",
+    "rc01_provider_failure": "passed_observed_http_503_non_completed_terminal_with_blocker_and_zero_fake_plan_success",
+    "rc01_conversation_reload": "passed_same_operation_terminal_recovery_without_second_provider_dispatch_in_same_application_process",
+    "rc01_full_application_restart": "not_required_by_frozen_lifecycle_and_not_claimed",
+    "rc01_seed_router_contract": "failed_9_of_10_existing_legacy_eval_drift_not_counted_as_rc01_evidence",
+    "rc01_external_live_provider": "pending_local_http_adapter_is_not_external_live_credit",
+    "rc01_native_product_ui_trial": "pending",
+    "rc01_independent_review": "pending",
     "rc04_exact_prompt": "passed_one_main_chat_operation_one_web_action_one_provider_request_with_resource_and_web_context_and_two_validated_source_classes",
     "rc04_policy_authority": "passed_deterministic_current_user_public_web_evidence_route_with_webpage_design_counterexample",
     "rc04_event_truth": "passed_strict_canonical_resource_and_web_context_refs_without_body_copy",
@@ -314,5 +324,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-15T11:36:53+08:00"
+  "last_updated_at": "2026-07-15T12:30:06+08:00"
 }

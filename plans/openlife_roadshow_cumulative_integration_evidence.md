@@ -7,6 +7,8 @@
 ## Current verdict
 
 - Cumulative Integration is **in progress**.
+- RC-01 has passed a local captured-HTTP streaming, Provider-failure, and
+  same-operation terminal-recovery mechanical run.
 - RC-04 has passed a single-command mechanical integration run.
 - RC-08 has passed a local cancellation/new-operation-retry mechanical run.
 - CC-01 has passed a local Resource + Web + reviewed Markdown artifact
@@ -16,12 +18,87 @@
 - CC-03 has passed a canonical explicit-Memory commit, rollback, and
   same-identity persistent-store reopen/recovery mechanical run, plus quoted-
   source and pre-existing-owner counterfactuals.
-- RC-04, RC-08, CC-01, CC-02, and CC-03 have **not** received native desktop,
-  external live-provider, repeated product-trial, or independent-review
-  credit.
+- RC-01, RC-04, RC-08, CC-01, CC-02, and CC-03 have **not** received native
+  desktop, external live-provider, repeated product-trial, or independent-
+  review credit.
 - RC-08 and CC-03 full application-process restart/native UI evidence remains
   pending.
 - The roadshow candidate remains **NO-GO**.
+
+## RC-01 exact scenario
+
+Frozen prompt:
+
+> 把下面这段产品介绍改写成适合路演开场的三段话，然后给出一个五步执行计划：OpenLife 是一个由私人 LifeModel 引导的本地优先个人 Agent。
+
+This request asks for writing and plan decomposition as answer content. It does
+not authorize a tracked PlanExecute session, a Memory fact, a Proposal, or any
+other durable product effect. The exact command test sends the frozen prompt
+through the streaming Main Chat entrypoint and captures the real local HTTP
+OpenAI-compatible request.
+
+Observed positive facts:
+
+- Policy selects `direct_answer` and grants only `provider_generation`;
+- the Provider request crosses the HTTP adapter once with `stream=true` after
+  PrivacyPolicy filtering;
+- three distinct SSE content chunks reach the transport incrementally;
+- the reconstructed answer contains three paragraphs and exactly five plan
+  steps, and `stream-message-done` is last and emitted once;
+- no Tool, Proposal, tracked PlanExecute session, or durable write is created;
+- the same UUIDv4 operation recovered through the buffered command returns the
+  canonical final without a second Provider dispatch.
+
+Failure and counterfactual evidence:
+
+- an observed local HTTP 503 produces a non-completed terminal with a Provider
+  blocker; it does not return the hard-coded PlanExecute success text;
+- an explicit request to track a supplied-text plan still routes to
+  PlanExecute, so the repair does not remove tracked planning capability;
+- a transformation verb does not suppress a separate real user-preference
+  candidate, while the supplied source text itself grants no Memory authority;
+- the frozen 40-case set remains encoded and was not edited; its separate
+  10-case legacy router evaluator remains RED at 9/10 and is not counted as
+  RC-01 completion evidence.
+
+Root failures found and removed:
+
+1. Memory candidate extraction interpreted preference-shaped source text inside
+   a rewrite request as user Memory authority. Intent and Memory routing now
+   share one bounded `transformation verb + supplied text` predicate.
+2. Plan routing treated any `计划` token as authorization to create the fixed
+   weekly PlanExecute draft, replacing the requested subject and answer shape.
+   Supplied-text transformation output now remains side-effect-free unless the
+   current user explicitly asks to track, save, resume, or execute that plan.
+3. The first RC-01 harness used a JSON completion fixture for an SSE request,
+   creating a truthful `remote_unknown` instead of test credit. The acceptance
+   harness now captures a real three-chunk SSE response and separately injects
+   an observed 503 failure.
+
+This is local HTTP adapter and command-surface evidence. It is not external
+cloud-provider, native desktop UI, full application-process restart, product-
+trial, or independent-review credit. Same-operation recovery occurs in one
+application process and is classified only as conversation/terminal reload
+evidence.
+
+RC-01 implementation commit:
+`664f96ff1f2cb4e4863a4af10aedfdecc83a17b9`.
+
+Mechanical evidence after the repair:
+
+- exact RC-01 positive and Provider-failure tests — 2 passed;
+- supplied-text DirectAnswer and explicit tracked-plan counterfactuals — 2
+  passed;
+- Memory candidate suite — 19 passed;
+- first 40 case encoding guard — passed; the router-contract evaluator remains
+  9/10 RED and is classified as existing legacy eval drift;
+- full Main Chat command surface — 87 passed;
+- Main Chat runtime module — 30 passed;
+- single-system authority guards — 32 passed;
+- `cargo check -p openlife-tauri --tests` — passed with existing dead-code
+  warnings only;
+- `cargo fmt --all -- --check`, `git diff --check`, and staged diff check —
+  passed.
 
 ## RC-04 exact scenario
 
@@ -393,6 +470,7 @@ are not hidden by the scoped green gates.
 
 ## Remaining cumulative work
 
+- RC-01 external live Provider and native product UI trial.
 - RC-08 full application-process restart/reopen and native UI projection.
 - CC-03 full application-process restart/reopen and native UI projection.
 - full RC-01 through RC-08 cumulative harness, negative scans, single-system
