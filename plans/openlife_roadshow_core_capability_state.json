@@ -1,7 +1,7 @@
 {
   "schema_version": "openlife-roadshow-core-capability-state-v1",
   "plan_id": "openlife-roadshow-core-capability-2026-07-14",
-  "status": "reliability_and_trial_in_progress_rc01_rc02_rc03_rc04_rc06_rc07_cc01_external_live_local_mechanics_reliability_loops_release_bundle_and_native_shell_restart_verified_remaining_live_product_journeys_signed_release_and_review_pending_roadshow_no_go",
+  "status": "reliability_and_trial_in_progress_rc01_rc02_rc03_rc04_rc06_rc07_rc08_provider_cc01_external_live_local_mechanics_reliability_loops_release_bundle_and_native_shell_restart_verified_remaining_live_product_journeys_signed_release_and_review_pending_roadshow_no_go",
   "authority": {
     "kind": "time_bounded_execution_overlay",
     "subordinate_to": [
@@ -325,7 +325,10 @@
     "rc08_cancelled_action_projection": "passed_cancelled_actionqueue_projection_hidden_after_reopen_immutable_tool_completed_turnevent_remains_historical_authority",
     "rc08_full_process_restart": "partial_three_backend_os_processes_and_default_feature_packaged_shell_bootstrap_window_relaunch_passed_native_cancel_retry_projection_journey_pending",
     "rc08_native_product_ui_trial": "pending",
-    "rc08_external_live_provider_and_web": "pending",
+    "rc08_external_live_provider_cancel_retry": "passed_twice_external_provider_cancel_under_one_second_remote_unknown_no_late_durable_commit_then_new_uuid_retry_completed_with_governed_fixture_web_observation",
+    "rc08_external_live_provider_and_web": "partial_external_provider_cancel_retry_passed_twice_governed_fixture_web_only_external_live_web_pending_current_duckduckgo_endpoint_challenge_failed_closed_as_web_search_challenge_detected",
+    "rc08_final_delivery_fact_alignment": "passed_durable_current_run_tool_receipt_preserves_tool_invoked_truth_after_cancelled_kernel_output_is_dropped_without_crediting_not_attempted_or_wrong_run_receipts",
+    "rc08_resource_citation_contract": "passed_trusted_final_request_scoped_citation_allowlist_after_untrusted_resource_blocks_with_strict_validator_and_no_hidden_retry",
     "rc08_independent_review": "pending",
     "cc01_exact_prompt": "passed_one_resource_bound_operation_one_web_action_one_provider_request_one_pending_artifact_proposal_zero_preaccept_files_one_confirmed_cited_markdown",
     "cc01_policy_authority": "passed_proposal_only_write_with_typed_web_read_provider_generation_and_file_review_capabilities_no_direct_effect",
@@ -362,6 +365,7 @@
     "cumulative_rc01_external_live": "passed_twice_current_commit_428_and_326_provider_bound_chunks_exact_three_paragraphs_and_steps_one_through_five_one_provider_terminal_zero_side_effects",
     "cumulative_rc02_rc03_external_live": "passed_twice_current_evidence_commit_each_run_imported_canonical_frozen_resources_invoked_external_provider_validated_both_selected_resource_classes_before_delivery_and_created_one_provider_terminal_with_zero_side_effects",
     "cumulative_rc06_rc07_external_live": "passed_twice_current_evidence_commit_external_provider_drafts_remained_blocked_waiting_permission_with_zero_preaccept_files_and_zero_body_copy_then_confirmed_once_after_explicit_test_acceptance",
+    "cumulative_rc08_external_live_provider": "passed_twice_current_evidence_commit_real_external_provider_cancel_remote_unknown_no_late_durable_commit_and_one_new_uuid_retry_governed_fixture_web_only_no_external_live_web_credit",
     "cumulative_cc01_external_live": "passed_twice_current_commit_after_root_stack_repair_one_resource_one_real_web_action_one_external_provider_one_pending_cited_report_zero_preaccept_files_then_one_confirmed_idempotent_materialization",
     "cumulative_rc04_latest_control": "failed_closed_after_completed_real_web_and_external_provider_when_model_omitted_required_web_citation_not_counted_as_new_credit_prior_two_pass_evidence_retained",
     "cumulative_release_quarantine": "passed_default_release_extension_registry_mcp_a2a_plugin_ipc_and_scheduler_vector_background_routes_quarantined_backend_build_truth_drives_frontend_core_web_file_task_memory_retained",
@@ -388,5 +392,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-15T17:31:31+08:00"
+  "last_updated_at": "2026-07-15T18:26:18+08:00"
 }

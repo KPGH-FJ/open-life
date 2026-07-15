@@ -533,9 +533,36 @@ prevents a transient projection from being presented as canonical history.
 
 This proves recovery after loss of all backend process-local runtime/cache
 state and a user-visible new-operation retry. It does **not** prove packaged
-Tauri bootstrap, native window relaunch, native UI projection, external live
-Web, or external cloud Provider behavior; those evidence dimensions remain
-pending.
+Tauri bootstrap, native window relaunch, native UI projection, or external live
+Web behavior.
+
+The separate external Provider cancellation gate
+`roadshow_rc08_external_live_provider_cancel_remote_unknown_then_retry_new_operation_once`
+then passed twice on the current implementation. It uses the frozen Resource,
+a governed fixture Web observation, and a real external Provider. Cancellation
+was observed in about 37 ms in both credited runs, the first operation remained
+`remote_unknown` with no late durable commit after 1.5 seconds, and one new
+UUIDv4 operation completed through the external Provider. The first cancelled
+operation and the retry each retained exactly one current-run tool execution
+fact; the retry had one `provider.completed`, one final delivery, and zero
+proposals. The fixture Web body was absent from durable event JSON.
+
+This earns external Provider cancellation/retry credit only. It does **not**
+earn external live Web credit: the currently available DuckDuckGo HTML and Lite
+endpoints returned challenge pages, and the product stopped with the typed
+`web_search_challenge_detected` blocker. That failure was not converted into a
+fixture success. CC-01 retains its separate twice-passed real-Web evidence.
+
+Two production truth defects exposed by the external gate were corrected at
+their owners:
+
+- final delivery now derives `toolInvoked` from a current-run durable tool
+  execution receipt when cancellation drops the in-memory kernel tool list;
+  `not_attempted`, wrong-owner, and wrong-run receipts still receive no credit;
+- the Resource Provider output contract is appended after all untrusted
+  Resource blocks with the exact request-scoped citation allowlist and a
+  reserved bounded context budget. The citation validator remains strict and
+  no hidden retry was added.
 
 The exact Chinese `检索网页` phrase initially failed to authorize Web read
 capability. Policy intent classification now recognizes explicit search/query
@@ -548,12 +575,18 @@ RC-08 implementation/evidence commit:
 RC-08 separate-process evidence commit:
 `1b3ec4975f6947bcd7dcb01a085c11cb44fe8867`.
 
+RC-08 external Provider cancellation and truth-alignment commit:
+`f3c9e23`.
+
 Additional mechanical evidence:
 
 - exact RC-04, RC-06, and RC-08 roadshow command tests, including the RC-08
   three-process lifecycle — passed;
 - `roadshow_external_read_policy_tests` — 3 passed;
 - generic released-late-provider cancellation regression — passed;
+- external Provider RC-08 cancellation/retry gate — passed twice on the final
+  code, with governed fixture Web observation only;
+- Main Chat kernel suite — 73 passed;
 - full Main Chat command surface — 93 passed;
 - Main Chat runtime module — 30 passed;
 - single-system authority guards — 32 passed;
@@ -1006,8 +1039,10 @@ without an identity/keychain/data migration decision.
   Provider gates are now complete twice.
 - CC-01 native picker, live-Web report review, and file trial; its exact external
   live backend gate is now complete twice.
-- RC-08 native cancel/retry projection and external live Provider/Web journey;
-  generic shell bootstrap/relaunch is now evidenced separately.
+- RC-08 native cancel/retry projection and external live Web/search-provider
+  journey; external Provider cancellation/retry is now complete twice with a
+  governed fixture Web observation, and generic shell bootstrap/relaunch is
+  evidenced separately.
 - CC-03 native Memory commit/rollback projection on a healthy packaged
   application; generic shell bootstrap/relaunch is now evidenced separately.
 - signed/notarized release identity, healthy production Keychain access,
