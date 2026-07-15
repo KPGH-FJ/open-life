@@ -1797,45 +1797,6 @@ pub(crate) async fn touch_chat_session_with_state(
     store.touch_chat_session(session_id).map_err(AppError::from)
 }
 
-pub(crate) async fn record_state_entry_with_state(
-    operation_id: &str,
-    dimension_name: &str,
-    value: f64,
-    unit: &str,
-    note: Option<&str>,
-    min_threshold: Option<f32>,
-    max_threshold: Option<f32>,
-    alert_days: Option<u32>,
-    state: &Arc<AppState>,
-) -> Result<openlife_core::memory::CanonicalStateEntryWrite, AppError> {
-    require_persistence_write(state)?;
-    let decision = MemoryGateway::decide(MemoryGatewaySubject::HealthEvent);
-    debug_assert_eq!(
-        decision.status,
-        MemoryGatewayWriteStatus::LocalMemoryWritten
-    );
-    let store = state.memory_store.lock().await;
-    store
-        .record_state_entry_idempotent(
-            operation_id,
-            dimension_name,
-            value,
-            unit,
-            note,
-            min_threshold,
-            max_threshold,
-            alert_days,
-        )
-        .map_err(|error| {
-            let message = error.to_string();
-            if message.contains("operation id") || message.contains("payload is invalid") {
-                AppError::permission(message)
-            } else {
-                runtime_store_error(state, "MemoryStore", message)
-            }
-        })
-}
-
 pub(crate) async fn create_knowledge_note_with_state(
     operation_id: String,
     session_id: String,

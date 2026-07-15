@@ -9,7 +9,6 @@ import {
   draftEditMemoryProposal,
   editProposal,
   getStateHistory,
-  recordState,
   getMainChatRuntimeStatus,
   clearMainChatSkill,
   getMainChatSkillDetail,
@@ -368,27 +367,6 @@ describe("tauri command argument aliases", () => {
       expect.objectContaining({
         taskSessionId: "mainchat-task-1",
         task_session_id: "mainchat-task-1",
-      })
-    );
-  });
-
-  it("normalizes optional state arguments before invoke", async () => {
-    const stateOperationId = crypto.randomUUID();
-    await recordState(stateOperationId, "睡眠", 7.5, "小时", "昨晚", 6, 9, 2);
-
-    expect(invoke).toHaveBeenCalledWith(
-      "record_state",
-      expect.objectContaining({
-        operationId: stateOperationId,
-        operation_id: stateOperationId,
-        dimensionName: "睡眠",
-        dimension_name: "睡眠",
-        minThreshold: 6,
-        min_threshold: 6,
-        maxThreshold: 9,
-        max_threshold: 9,
-        alertDays: 2,
-        alert_days: 2,
       })
     );
   });

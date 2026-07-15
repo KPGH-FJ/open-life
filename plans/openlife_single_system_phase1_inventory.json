@@ -888,24 +888,6 @@
       "expected_count": 1
     },
     {
-      "id": "memory_lifemodel_write_state_commands",
-      "path": "src-tauri/src/commands/state.rs",
-      "phase": 5,
-      "disposition": "absorb_then_delete",
-      "reason": "State history remains a compatibility command behind MemoryGateway; daily-task product writes have moved to StateStore and the old goal mutation commands are deleted.",
-      "match": "direct_memory_lifemodel_write",
-      "expected_count": 1
-    },
-    {
-      "id": "lifemodel_write_lib_persist_helper",
-      "path": "src-tauri/src/lib.rs",
-      "phase": 5,
-      "disposition": "keep",
-      "reason": "Shared persist helper remains as a compatibility wrapper that delegates to LifeModelWriteGateway.",
-      "match": "direct_memory_lifemodel_write",
-      "expected_count": 1
-    },
-    {
       "id": "lifemodel_write_gateway_storage_adapter",
       "path": "src-tauri/src/life_model_write_gateway.rs",
       "phase": 5,

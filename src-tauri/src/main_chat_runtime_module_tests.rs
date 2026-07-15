@@ -480,6 +480,8 @@ fn transient_state_chat_authority_has_no_frontend_or_shipped_command_write_bypas
         "invoke(\"toggle_daily_goal\"",
         "invoke(\"update_daily_goal\"",
         "invoke(\"delete_daily_goal\"",
+        "export async function recordState",
+        "invoke(\"record_state\"",
     ] {
         assert!(
             !frontend_bridge.contains(retired_bridge),
@@ -492,6 +494,7 @@ fn transient_state_chat_authority_has_no_frontend_or_shipped_command_write_bypas
         "commands::state::toggle_daily_goal",
         "commands::state::update_daily_goal",
         "commands::state::delete_daily_goal",
+        "record_state,",
     ] {
         assert!(
             !shipped_handlers.contains(retired_command),
@@ -504,6 +507,8 @@ fn transient_state_chat_authority_has_no_frontend_or_shipped_command_write_bypas
         "pub async fn toggle_daily_goal",
         "pub async fn update_daily_goal",
         "pub async fn delete_daily_goal",
+        "pub async fn record_state",
+        "record_state_with_state",
     ] {
         assert!(
             !state_commands.contains(retired_implementation),

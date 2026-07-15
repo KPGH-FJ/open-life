@@ -307,22 +307,6 @@ async fn ensure_no_lifemodel_file_backlog_unlocked(state: &Arc<AppState>) -> Res
     Ok(())
 }
 
-pub(crate) async fn persist_life_model_with_gateway(
-    state: &Arc<AppState>,
-    life_model: LifeModel,
-    create_daily_snapshot: bool,
-    caller_context: LifeModelMaterializerCallerContext,
-) -> Result<LifeModel, String> {
-    persist_life_model_with_gateway_expected(
-        state,
-        life_model,
-        create_daily_snapshot,
-        caller_context,
-        None,
-    )
-    .await
-}
-
 pub(crate) async fn persist_life_model_with_gateway_expected(
     state: &Arc<AppState>,
     life_model: LifeModel,

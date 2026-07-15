@@ -3304,8 +3304,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         run_id: "run-1",
         warnings: [],
       } as T);
-    case "record_state":
-      return Promise.resolve(undefined as T);
     case "search_memory":
       return Promise.resolve({
         hits: [],

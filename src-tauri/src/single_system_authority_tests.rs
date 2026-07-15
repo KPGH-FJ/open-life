@@ -2083,7 +2083,6 @@ fn single_system_phase5_product_memory_lifemodel_writes_use_gateways() {
     for marker in [
         ".save_message_idempotent(",
         ".save_message_idempotent_with_proof(",
-        ".record_state_entry_idempotent(",
         ".save_knowledge_note_idempotent_with_outbox(",
         ".replace_all_messages(",
         ".rollback_memory_asset(",
@@ -2152,7 +2151,7 @@ fn single_system_phase5_product_memory_lifemodel_writes_use_gateways() {
     }
     assert!(
         !strip_cfg_test_module(&read_repo_file("src-tauri/src/lib.rs")).contains("manager.save("),
-        "Phase5 persist_life_model compatibility wrapper must not save directly"
+        "Phase5 lib.rs command wiring must not own LifeModel persistence"
     );
 
     let proposal_raw_source = read_repo_file("src-tauri/src/commands/proposal.rs");

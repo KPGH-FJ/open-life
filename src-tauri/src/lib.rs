@@ -1,12 +1,9 @@
 #[cfg(all(feature = "dev-extensions", not(debug_assertions)))]
 compile_error!("dev-extensions are forbidden in non-debug OpenLife builds");
 
-use openlife_core::life_model::LifeModel;
 use openlife_core::llm::ChatMessage;
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
-
-use crate::life_model_materializer_guard::LifeModelMaterializerCallerContext;
 
 pub mod a2a_server;
 pub mod a2a_sidecar;
@@ -205,7 +202,7 @@ use commands::settings::{
     export_all_data, get_config, get_danger_action_preflight, get_last_model_error,
     get_privacy_policy, import_all_data, save_config, set_privacy_policy, test_llm_connection,
 };
-use commands::state::{get_daily_goals, get_state_alerts, get_state_history, record_state};
+use commands::state::{get_daily_goals, get_state_alerts, get_state_history};
 use commands::version::{create_snapshot, diff_snapshots, list_snapshots, restore_snapshot};
 use life_state_projection::get_life_state_projection;
 use main_chat_event_stream::{get_main_chat_agent_state_snapshot, list_main_chat_agent_events};
@@ -425,20 +422,6 @@ pub struct SystemDiagnostics {
     pub runtime_route_evidence: main_chat_runtime_facts::RuntimeRouteEvidence,
 }
 
-pub(crate) async fn persist_life_model(
-    state: &Arc<AppState>,
-    life_model: LifeModel,
-    create_daily_snapshot: bool,
-    caller_context: LifeModelMaterializerCallerContext,
-) -> Result<LifeModel, String> {
-    life_model_write_gateway::persist_life_model_with_gateway(
-        state,
-        life_model,
-        create_daily_snapshot,
-        caller_context,
-    )
-    .await
-}
 #[tauri::command]
 async fn send_message(
     operation_id: String,
@@ -1068,7 +1051,6 @@ pub fn run() {
             create_chat_session,
             rename_chat_session,
             delete_chat_session,
-            record_state,
             get_state_history,
             get_state_alerts,
             get_daily_goals,

@@ -14,11 +14,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 use uuid::{Uuid, Version};
 
-const STATE_STORE_SCHEMA_VERSION: i64 = 3;
+const STATE_STORE_SCHEMA_VERSION: i64 = 4;
 const STATE_ASSET_AGGREGATE_KIND: &str = "transient_state_asset";
+const STATE_OBSERVATION_AGGREGATE_KIND: &str = "transient_state_observation";
 pub const LIFEMODEL_YAML_PROJECTION_TARGET: &str = "lifemodel_yaml_compat_v1";
 const PROJECTION_TARGETS: &[&str] = &[LIFEMODEL_YAML_PROJECTION_TARGET];
+const OBSERVATION_PROJECTION_TARGETS: &[&str] = &[];
 const MAX_TASK_TITLE_CHARS: usize = 512;
+const MAX_OBSERVATION_DIMENSION_CHARS: usize = 32;
+const MAX_OBSERVATION_UNIT_CHARS: usize = 16;
 const MAX_SOURCE_MESSAGE_REF_CHARS: usize = 256;
 const MAX_RESOURCE_TASK_BATCH_ITEMS: usize = 8;
 
@@ -26,6 +30,7 @@ const MAX_RESOURCE_TASK_BATCH_ITEMS: usize = 8;
 #[serde(rename_all = "snake_case")]
 pub enum StateAssetKind {
     DailyTask,
+    StateObservation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +49,13 @@ impl DailyTaskStatus {
             Self::Tombstoned => "tombstoned",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateObservationStatus {
+    Active,
+    Tombstoned,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,6 +166,28 @@ pub struct StateAsset {
     pub tombstone_reason: Option<StateMutationKind>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StateObservation {
+    pub observation_id: String,
+    pub version: u64,
+    pub dimension_name: String,
+    pub value: f64,
+    pub unit: String,
+    pub status: StateObservationStatus,
+    pub source_message_ref: String,
+    pub risk: StateRisk,
+    pub sensitivity: StateSensitivity,
+    pub source_kind: StateSourceKind,
+    pub confidence: f32,
+    pub privacy_class: StatePrivacyClass,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub tombstoned_at: Option<DateTime<Utc>>,
+    pub tombstone_reason: Option<StateMutationKind>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StateExecutionReceipt {
@@ -161,6 +195,7 @@ pub struct StateExecutionReceipt {
     pub receipt_id: String,
     pub operation_id: String,
     pub payload_digest: String,
+    pub asset_kind: StateAssetKind,
     pub asset_id: String,
     pub asset_version: u64,
     pub mutation_kind: StateMutationKind,
@@ -250,6 +285,34 @@ pub struct TransitionDailyTaskCommand {
 }
 
 #[derive(Debug, Clone)]
+pub struct CreateStateObservationCommand {
+    pub operation_id: String,
+    pub request_digest: Option<String>,
+    pub source_message_ref: String,
+    pub dimension_name: String,
+    pub value: f64,
+    pub unit: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub risk: StateRisk,
+    pub sensitivity: StateSensitivity,
+    pub source_kind: StateSourceKind,
+    pub confidence: f32,
+    pub privacy_class: StatePrivacyClass,
+}
+
+#[derive(Debug, Clone)]
+pub struct TransitionStateObservationCommand {
+    pub operation_id: String,
+    pub request_digest: Option<String>,
+    pub source_message_ref: String,
+    pub observation_id: String,
+    pub expected_version: u64,
+    pub mutation_kind: StateMutationKind,
+    pub occurred_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
 pub struct StateGatewayExecutionContext {
     pub occurred_at: DateTime<Utc>,
     /// Time-zone resolution is owned by the application boundary. The gateway
@@ -263,6 +326,7 @@ pub struct StateCommandOutcome {
     pub command_kind: crate::agent::main_chat_agent_v1::TransientStateCommandKind,
     pub receipt: Option<StateExecutionReceipt>,
     pub tasks: Vec<StateAsset>,
+    pub observations: Vec<StateObservation>,
     pub source_message_ref: String,
     pub source_message_digest: String,
     pub policy_contract_digest: String,
@@ -449,12 +513,28 @@ impl StateGateway {
         if intent.due_hint.is_some() != context.resolved_due_at.is_some() {
             anyhow::bail!("state_gateway_due_resolution_mismatch");
         }
+        // Expiry is a StateStore-owned lifecycle transition, not a user
+        // command. Reconcile it before every canonical product read/write so
+        // an application left open past the TTL cannot keep presenting an
+        // expired task or observation as active.
+        self.store.expire_due(context.occurred_at)?;
         if intent.command_kind.is_mutation() {
-            if let Some(receipt) = self.store.replay_request(&operation_id, &request_digest)? {
+            let replay = if matches!(
+                intent.command_kind,
+                TransientStateCommandKind::RecordStateObservation
+                    | TransientStateCommandKind::UndoStateObservation
+            ) {
+                self.store
+                    .replay_observation_request(&operation_id, &request_digest)?
+            } else {
+                self.store.replay_request(&operation_id, &request_digest)?
+            };
+            if let Some(receipt) = replay {
                 return Ok(StateCommandOutcome {
                     command_kind: intent.command_kind,
                     receipt: Some(receipt),
                     tasks: self.store.list_daily_tasks(false)?,
+                    observations: self.store.list_state_observations(false)?,
                     source_message_ref,
                     source_message_digest,
                     policy_contract_digest,
@@ -463,6 +543,9 @@ impl StateGateway {
         }
         let receipt = match intent.command_kind {
             TransientStateCommandKind::ListDailyTasks => {
+                if intent.observation.is_some() {
+                    anyhow::bail!("state_gateway_task_observation_payload_invalid");
+                }
                 if intent.command_kind.is_mutation() {
                     anyhow::bail!("state_gateway_list_contract_invalid");
                 }
@@ -470,6 +553,9 @@ impl StateGateway {
                 None
             }
             TransientStateCommandKind::CreateDailyTask => {
+                if intent.observation.is_some() {
+                    anyhow::bail!("state_gateway_task_observation_payload_invalid");
+                }
                 Some(self.store.create_daily_task_guarded(
                     CreateDailyTaskCommand {
                         operation_id,
@@ -491,6 +577,9 @@ impl StateGateway {
             }
             TransientStateCommandKind::CompleteDailyTask
             | TransientStateCommandKind::UndoDailyTask => {
+                if intent.observation.is_some() {
+                    anyhow::bail!("state_gateway_task_observation_payload_invalid");
+                }
                 let asset = resolve_active_task_target(&self.store, &intent.target)?;
                 let mutation_kind =
                     if intent.command_kind == TransientStateCommandKind::CompleteDailyTask {
@@ -511,11 +600,71 @@ impl StateGateway {
                     before_commit,
                 )?)
             }
+            TransientStateCommandKind::ListStateObservations => {
+                if intent.observation.is_some() || !intent.target.is_empty() {
+                    anyhow::bail!("state_gateway_observation_list_payload_invalid");
+                }
+                before_commit()?;
+                None
+            }
+            TransientStateCommandKind::RecordStateObservation => {
+                let observation = intent
+                    .observation
+                    .context("state_gateway_observation_payload_missing")?;
+                if intent.target != observation.dimension_name {
+                    anyhow::bail!("state_gateway_observation_target_mismatch");
+                }
+                Some(self.store.create_state_observation_guarded(
+                    CreateStateObservationCommand {
+                        operation_id,
+                        request_digest: Some(request_digest),
+                        source_message_ref: source_message_ref.clone(),
+                        dimension_name: observation.dimension_name,
+                        value: observation.value,
+                        unit: observation.unit,
+                        created_at: context.occurred_at,
+                        expires_at: context.occurred_at
+                            + Duration::days(i64::from(intent.expiry_days)),
+                        risk: StateRisk::Low,
+                        sensitivity: StateSensitivity::Internal,
+                        source_kind: StateSourceKind::CurrentAuthenticatedUserMessage,
+                        confidence: 1.0,
+                        privacy_class: StatePrivacyClass::Private,
+                    },
+                    before_commit,
+                )?)
+            }
+            TransientStateCommandKind::UndoStateObservation => {
+                if intent.observation.is_some() {
+                    anyhow::bail!("state_gateway_observation_undo_payload_invalid");
+                }
+                let observation = self
+                    .store
+                    .latest_active_state_observation(&intent.target)?
+                    .context("state_observation_target_not_found")?;
+                let prepared = PreparedObservationTransition::validate(
+                    TransitionStateObservationCommand {
+                        operation_id,
+                        request_digest: Some(request_digest),
+                        source_message_ref: source_message_ref.clone(),
+                        observation_id: observation.observation_id,
+                        expected_version: observation.version,
+                        mutation_kind: StateMutationKind::Undo,
+                        occurred_at: context.occurred_at,
+                    },
+                    StateSourceKind::CurrentAuthenticatedUserMessage,
+                )?;
+                Some(
+                    self.store
+                        .commit_observation_transition(prepared, before_commit)?,
+                )
+            }
         };
         Ok(StateCommandOutcome {
             command_kind: intent.command_kind,
             receipt,
             tasks: self.store.list_daily_tasks(false)?,
+            observations: self.store.list_state_observations(false)?,
             source_message_ref,
             source_message_digest,
             policy_contract_digest,
@@ -648,6 +797,60 @@ impl StateStore {
                 FOREIGN KEY(operation_id) REFERENCES state_resource_task_batch_operations(operation_id),
                 FOREIGN KEY(asset_id) REFERENCES state_assets(asset_id),
                 FOREIGN KEY(outbox_event_id) REFERENCES canonical_outbox_events(event_id)
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS state_observations (
+                observation_id TEXT PRIMARY KEY,
+                version INTEGER NOT NULL CHECK(version > 0),
+                dimension_name TEXT NOT NULL,
+                value REAL NOT NULL,
+                unit TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('active', 'tombstoned')),
+                source_message_ref TEXT NOT NULL,
+                risk TEXT NOT NULL CHECK(risk IN ('low')),
+                sensitivity TEXT NOT NULL CHECK(sensitivity IN ('internal')),
+                source_kind TEXT NOT NULL CHECK(source_kind IN (
+                    'current_authenticated_user_message', 'system_expiry'
+                )),
+                confidence REAL NOT NULL CHECK(confidence >= 0 AND confidence <= 1),
+                privacy_class TEXT NOT NULL CHECK(privacy_class IN ('private')),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                tombstoned_at TEXT,
+                tombstone_reason TEXT CHECK(tombstone_reason IS NULL OR tombstone_reason IN ('undo', 'expire'))
+             );
+             CREATE INDEX IF NOT EXISTS idx_state_observations_dimension_status_expiry
+             ON state_observations(dimension_name, status, expires_at, updated_at);
+             CREATE TABLE IF NOT EXISTS state_observation_versions (
+                observation_id TEXT NOT NULL,
+                version INTEGER NOT NULL CHECK(version > 0),
+                operation_id TEXT NOT NULL UNIQUE,
+                payload_digest TEXT NOT NULL,
+                mutation_kind TEXT NOT NULL CHECK(mutation_kind IN ('create', 'undo', 'expire')),
+                dimension_name TEXT NOT NULL,
+                value REAL NOT NULL,
+                unit TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('active', 'tombstoned')),
+                source_message_ref TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                tombstone_reason TEXT,
+                PRIMARY KEY(observation_id, version),
+                FOREIGN KEY(observation_id) REFERENCES state_observations(observation_id)
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS state_observation_operations (
+                operation_id TEXT PRIMARY KEY,
+                request_digest TEXT NOT NULL,
+                payload_digest TEXT NOT NULL,
+                receipt_id TEXT NOT NULL UNIQUE,
+                observation_id TEXT NOT NULL,
+                observation_version INTEGER NOT NULL CHECK(observation_version > 0),
+                mutation_kind TEXT NOT NULL CHECK(mutation_kind IN ('create', 'undo', 'expire')),
+                outbox_event_id TEXT NOT NULL UNIQUE,
+                committed_at TEXT NOT NULL,
+                FOREIGN KEY(observation_id) REFERENCES state_observations(observation_id),
+                FOREIGN KEY(outbox_event_id) REFERENCES canonical_outbox_events(event_id)
              ) WITHOUT ROWID;",
         )?;
         let existing_version = tx
@@ -671,17 +874,23 @@ impl StateStore {
                      SET request_digest = payload_digest
                      WHERE request_digest IS NULL;
                      UPDATE state_store_metadata
-                     SET value = '3'
+                     SET value = '4'
                      WHERE key = 'schema_version';",
                 )?;
             }
             Some("2") => {
                 tx.execute(
-                    "UPDATE state_store_metadata SET value = '3' WHERE key = 'schema_version'",
+                    "UPDATE state_store_metadata SET value = '4' WHERE key = 'schema_version'",
                     [],
                 )?;
             }
-            Some("3") => {}
+            Some("3") => {
+                tx.execute(
+                    "UPDATE state_store_metadata SET value = '4' WHERE key = 'schema_version'",
+                    [],
+                )?;
+            }
+            Some("4") => {}
             Some(other) => anyhow::bail!("state_store_schema_version_unsupported:{other}"),
         }
         tx.commit()?;
@@ -693,6 +902,110 @@ impl StateStore {
         command: CreateDailyTaskCommand,
     ) -> Result<StateExecutionReceipt> {
         self.create_daily_task_guarded(command, || Result::<()>::Ok(()))
+    }
+
+    pub fn create_state_observation(
+        &self,
+        command: CreateStateObservationCommand,
+    ) -> Result<StateExecutionReceipt> {
+        self.create_state_observation_guarded(command, || Result::<()>::Ok(()))
+    }
+
+    pub fn create_state_observation_guarded<F>(
+        &self,
+        command: CreateStateObservationCommand,
+        before_commit: F,
+    ) -> Result<StateExecutionReceipt>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        let prepared = PreparedObservationCreate::validate(command)?;
+        let mut before_commit = Some(before_commit);
+        let mut conn = self.lock_connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(receipt) =
+            replay_observation_operation(&tx, &prepared.operation_id, &prepared.payload_digest)?
+        {
+            before_commit
+                .take()
+                .context("state_observation_create_commit_guard_missing")?()?;
+            tx.rollback()?;
+            return Ok(receipt);
+        }
+        ensure_operation_namespace_available(&tx, &prepared.operation_id)?;
+        prepared.validate_new_effect_timing()?;
+
+        let observation_id = Uuid::new_v4().hyphenated().to_string();
+        let receipt_id = format!("state_observation_receipt:{}", Uuid::new_v4());
+        tx.execute(
+            "INSERT INTO state_observations (
+                observation_id, version, dimension_name, value, unit, status,
+                source_message_ref, risk, sensitivity, source_kind, confidence,
+                privacy_class, created_at, updated_at, expires_at,
+                tombstoned_at, tombstone_reason
+             ) VALUES (?1, 1, ?2, ?3, ?4, 'active', ?5, ?6, ?7, ?8, ?9,
+                       ?10, ?11, ?11, ?12, NULL, NULL)",
+            params![
+                observation_id,
+                prepared.dimension_name,
+                prepared.value,
+                prepared.unit,
+                prepared.source_message_ref,
+                prepared.risk.as_str(),
+                prepared.sensitivity.as_str(),
+                prepared.source_kind.as_str(),
+                f64::from(prepared.confidence),
+                prepared.privacy_class.as_str(),
+                prepared.created_at.to_rfc3339(),
+                prepared.expires_at.to_rfc3339(),
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO state_observation_versions (
+                observation_id, version, operation_id, payload_digest, mutation_kind,
+                dimension_name, value, unit, status, source_message_ref, source_kind,
+                created_at, expires_at, tombstone_reason
+             ) VALUES (?1, 1, ?2, ?3, 'create', ?4, ?5, ?6, 'active', ?7, ?8, ?9, ?10, NULL)",
+            params![
+                observation_id,
+                prepared.operation_id,
+                prepared.payload_digest,
+                prepared.dimension_name,
+                prepared.value,
+                prepared.unit,
+                prepared.source_message_ref,
+                prepared.source_kind.as_str(),
+                prepared.created_at.to_rfc3339(),
+                prepared.expires_at.to_rfc3339(),
+            ],
+        )?;
+        let outbox = crate::persistence_outbox::enqueue_mutation(
+            &tx,
+            STATE_OBSERVATION_AGGREGATE_KIND,
+            &observation_id,
+            StateMutationKind::Create.as_str(),
+            &prepared.payload_digest,
+            OBSERVATION_PROJECTION_TARGETS,
+        )?;
+        insert_observation_operation(
+            &tx,
+            &prepared.operation_id,
+            &prepared.request_digest,
+            &prepared.payload_digest,
+            &receipt_id,
+            &observation_id,
+            1,
+            StateMutationKind::Create,
+            &outbox.event_id,
+            prepared.created_at,
+        )?;
+        before_commit
+            .take()
+            .context("state_observation_create_commit_guard_missing")?()?;
+        tx.commit()?;
+        drop(conn);
+        self.observation_receipt_for_operation(&prepared.operation_id, false)?
+            .context("state_observation_create_receipt_missing_after_commit")
     }
 
     pub fn create_resource_task_batch(
@@ -736,6 +1049,7 @@ impl StateStore {
                 .resource_task_batch_receipt_for_operation(&prepared.operation_id, true)?
                 .context("state_resource_task_batch_replay_receipt_missing");
         }
+        ensure_operation_namespace_available(&tx, &prepared.operation_id)?;
         prepared.validate_new_effect_timing()?;
         let batch_receipt_id = format!("state_batch_receipt:{}", Uuid::new_v4());
         tx.execute(
@@ -818,10 +1132,9 @@ impl StateStore {
                 ],
             )?;
         }
-        let _commit_guard = before_commit
+        before_commit
             .take()
-            .context("state_resource_task_batch_commit_guard_missing")?(
-        )?;
+            .context("state_resource_task_batch_commit_guard_missing")?()?;
         tx.commit()?;
         drop(conn);
         self.resource_task_batch_receipt_for_operation(&prepared.operation_id, false)?
@@ -843,12 +1156,13 @@ impl StateStore {
         if let Some(receipt) =
             replay_operation(&tx, &prepared.operation_id, &prepared.payload_digest)?
         {
-            let _commit_guard = before_commit
+            before_commit
                 .take()
                 .context("state_create_commit_guard_missing")?()?;
             tx.rollback()?;
             return Ok(receipt);
         }
+        ensure_operation_namespace_available(&tx, &prepared.operation_id)?;
         prepared.validate_new_effect_timing()?;
 
         let asset_id = Uuid::new_v4().hyphenated().to_string();
@@ -913,7 +1227,7 @@ impl StateStore {
             &outbox.event_id,
             prepared.created_at,
         )?;
-        let _commit_guard = before_commit
+        before_commit
             .take()
             .context("state_create_commit_guard_missing")?()?;
         tx.commit()?;
@@ -963,6 +1277,126 @@ impl StateStore {
         self.commit_transition(prepared, before_commit)
     }
 
+    pub fn undo_state_observation(
+        &self,
+        command: TransitionStateObservationCommand,
+    ) -> Result<StateExecutionReceipt> {
+        if command.mutation_kind != StateMutationKind::Undo {
+            anyhow::bail!("state_observation_undo_mutation_kind_invalid");
+        }
+        let prepared = PreparedObservationTransition::validate(
+            command,
+            StateSourceKind::CurrentAuthenticatedUserMessage,
+        )?;
+        self.commit_observation_transition(prepared, || Result::<()>::Ok(()))
+    }
+
+    fn commit_observation_transition<F>(
+        &self,
+        prepared: PreparedObservationTransition,
+        before_commit: F,
+    ) -> Result<StateExecutionReceipt>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        let mut before_commit = Some(before_commit);
+        let mut conn = self.lock_connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(receipt) =
+            replay_observation_operation(&tx, &prepared.operation_id, &prepared.payload_digest)?
+        {
+            before_commit
+                .take()
+                .context("state_observation_transition_commit_guard_missing")?()?;
+            tx.rollback()?;
+            return Ok(receipt);
+        }
+        ensure_operation_namespace_available(&tx, &prepared.operation_id)?;
+        let current = load_state_observation(&tx, &prepared.observation_id)?
+            .ok_or_else(|| anyhow::anyhow!("state_observation_not_found"))?;
+        if current.version != prepared.expected_version {
+            anyhow::bail!("state_observation_version_conflict");
+        }
+        if current.status == StateObservationStatus::Tombstoned {
+            anyhow::bail!("state_observation_tombstoned");
+        }
+        if prepared.occurred_at < current.created_at {
+            anyhow::bail!("state_observation_transition_precedes_creation");
+        }
+        let next_version = current
+            .version
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("state_observation_version_overflow"))?;
+        let changed = tx.execute(
+            "UPDATE state_observations
+             SET version = ?3, status = 'tombstoned', updated_at = ?4,
+                 source_message_ref = ?5, source_kind = ?6,
+                 tombstoned_at = ?4, tombstone_reason = ?7
+             WHERE observation_id = ?1 AND version = ?2 AND status = 'active'",
+            params![
+                prepared.observation_id,
+                i64::try_from(prepared.expected_version)?,
+                i64::try_from(next_version)?,
+                prepared.occurred_at.to_rfc3339(),
+                prepared.source_message_ref,
+                prepared.source_kind.as_str(),
+                prepared.mutation_kind.as_str(),
+            ],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("state_observation_version_conflict");
+        }
+        tx.execute(
+            "INSERT INTO state_observation_versions (
+                observation_id, version, operation_id, payload_digest, mutation_kind,
+                dimension_name, value, unit, status, source_message_ref, source_kind,
+                created_at, expires_at, tombstone_reason
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'tombstoned', ?9, ?10, ?11, ?12, ?13)",
+            params![
+                prepared.observation_id,
+                i64::try_from(next_version)?,
+                prepared.operation_id,
+                prepared.payload_digest,
+                prepared.mutation_kind.as_str(),
+                current.dimension_name,
+                current.value,
+                current.unit,
+                prepared.source_message_ref,
+                prepared.source_kind.as_str(),
+                current.created_at.to_rfc3339(),
+                current.expires_at.to_rfc3339(),
+                prepared.mutation_kind.as_str(),
+            ],
+        )?;
+        let outbox = crate::persistence_outbox::enqueue_tombstone(
+            &tx,
+            STATE_OBSERVATION_AGGREGATE_KIND,
+            &prepared.observation_id,
+            Some(prepared.mutation_kind.as_str()),
+            OBSERVATION_PROJECTION_TARGETS,
+        )?;
+        let receipt_id = format!("state_observation_receipt:{}", Uuid::new_v4());
+        insert_observation_operation(
+            &tx,
+            &prepared.operation_id,
+            &prepared.request_digest,
+            &prepared.payload_digest,
+            &receipt_id,
+            &prepared.observation_id,
+            next_version,
+            prepared.mutation_kind,
+            &outbox.event_id,
+            prepared.occurred_at,
+        )?;
+        before_commit
+            .take()
+            .context("state_observation_transition_commit_guard_missing")?()?;
+        tx.commit()?;
+        drop(conn);
+        self.observation_receipt_for_operation(&prepared.operation_id, false)?
+            .context("state_observation_transition_receipt_missing_after_commit")
+    }
+
     pub fn expire_due(&self, now: DateTime<Utc>) -> Result<Vec<StateExecutionReceipt>> {
         let due = {
             let conn = self.lock_connection()?;
@@ -999,6 +1433,43 @@ impl StateStore {
                 Err(error) => return Err(error),
             }
         }
+        let due_observations = {
+            let conn = self.lock_connection()?;
+            let mut statement = conn.prepare(
+                "SELECT observation_id, version FROM state_observations
+                 WHERE status = 'active' AND expires_at <= ?1
+                 ORDER BY expires_at ASC, observation_id ASC",
+            )?;
+            let rows = statement
+                .query_map([now.to_rfc3339()], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+        for (observation_id, version) in due_observations {
+            let prepared = PreparedObservationTransition::validate(
+                TransitionStateObservationCommand {
+                    operation_id: Uuid::new_v4().hyphenated().to_string(),
+                    request_digest: None,
+                    source_message_ref: format!("system_expiry:{observation_id}"),
+                    observation_id,
+                    expected_version: u64::try_from(version)
+                        .context("state_observation_expiry_version_invalid")?,
+                    mutation_kind: StateMutationKind::Expire,
+                    occurred_at: now,
+                },
+                StateSourceKind::SystemExpiry,
+            )?;
+            match self.commit_observation_transition(prepared, || Result::<()>::Ok(())) {
+                Ok(receipt) => receipts.push(receipt),
+                Err(error)
+                    if error
+                        .to_string()
+                        .contains("state_observation_version_conflict") => {}
+                Err(error) => return Err(error),
+            }
+        }
         Ok(receipts)
     }
 
@@ -1016,13 +1487,13 @@ impl StateStore {
         if let Some(receipt) =
             replay_operation(&tx, &prepared.operation_id, &prepared.payload_digest)?
         {
-            let _commit_guard = before_commit
+            before_commit
                 .take()
-                .context("state_transition_commit_guard_missing")?(
-            )?;
+                .context("state_transition_commit_guard_missing")?()?;
             tx.rollback()?;
             return Ok(receipt);
         }
+        ensure_operation_namespace_available(&tx, &prepared.operation_id)?;
         let current = load_asset(&tx, &prepared.asset_id)?
             .ok_or_else(|| anyhow::anyhow!("state_asset_not_found"))?;
         if current.version != prepared.expected_version {
@@ -1129,7 +1600,7 @@ impl StateStore {
             &outbox.event_id,
             prepared.occurred_at,
         )?;
-        let _commit_guard = before_commit
+        before_commit
             .take()
             .context("state_transition_commit_guard_missing")?()?;
         tx.commit()?;
@@ -1183,6 +1654,61 @@ impl StateStore {
         Ok(rows)
     }
 
+    pub fn get_state_observation(&self, observation_id: &str) -> Result<Option<StateObservation>> {
+        validate_uuid_v4("state_observation_id", observation_id)?;
+        let conn = self.lock_connection()?;
+        load_state_observation(&conn, observation_id)
+    }
+
+    pub fn list_state_observations(
+        &self,
+        include_tombstoned: bool,
+    ) -> Result<Vec<StateObservation>> {
+        let conn = self.lock_connection()?;
+        let mut statement = conn.prepare(if include_tombstoned {
+            "SELECT observation_id, version, dimension_name, value, unit, status,
+                    source_message_ref, risk, sensitivity, source_kind, confidence,
+                    privacy_class, created_at, updated_at, expires_at,
+                    tombstoned_at, tombstone_reason
+             FROM state_observations
+             ORDER BY created_at ASC, observation_id ASC"
+        } else {
+            "SELECT observation_id, version, dimension_name, value, unit, status,
+                    source_message_ref, risk, sensitivity, source_kind, confidence,
+                    privacy_class, created_at, updated_at, expires_at,
+                    tombstoned_at, tombstone_reason
+             FROM state_observations
+             WHERE status = 'active'
+             ORDER BY created_at ASC, observation_id ASC"
+        })?;
+        let rows = statement
+            .query_map([], state_observation_from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn latest_active_state_observation(
+        &self,
+        dimension_name: &str,
+    ) -> Result<Option<StateObservation>> {
+        validate_observation_dimension(dimension_name)?;
+        let conn = self.lock_connection()?;
+        conn.query_row(
+            "SELECT observation_id, version, dimension_name, value, unit, status,
+                    source_message_ref, risk, sensitivity, source_kind, confidence,
+                    privacy_class, created_at, updated_at, expires_at,
+                    tombstoned_at, tombstone_reason
+             FROM state_observations
+             WHERE status = 'active' AND dimension_name = ?1
+             ORDER BY created_at DESC, observation_id DESC
+             LIMIT 1",
+            [dimension_name],
+            state_observation_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn receipt_for_operation(
         &self,
         operation_id: &str,
@@ -1191,6 +1717,16 @@ impl StateStore {
         validate_uuid_v4("state_operation_id", operation_id)?;
         let conn = self.lock_connection()?;
         operation_receipt(&conn, operation_id, replayed)
+    }
+
+    pub fn observation_receipt_for_operation(
+        &self,
+        operation_id: &str,
+        replayed: bool,
+    ) -> Result<Option<StateExecutionReceipt>> {
+        validate_uuid_v4("state_observation_operation_id", operation_id)?;
+        let conn = self.lock_connection()?;
+        observation_operation_receipt(&conn, operation_id, replayed)
     }
 
     pub fn resource_task_batch_receipt_for_operation(
@@ -1242,6 +1778,19 @@ impl StateStore {
         }
         let conn = self.lock_connection()?;
         replay_operation_request(&conn, operation_id, request_digest)
+    }
+
+    fn replay_observation_request(
+        &self,
+        operation_id: &str,
+        request_digest: &str,
+    ) -> Result<Option<StateExecutionReceipt>> {
+        validate_uuid_v4("state_observation_operation_id", operation_id)?;
+        if !is_sha256_digest(request_digest) {
+            anyhow::bail!("state_observation_operation_request_digest_invalid");
+        }
+        let conn = self.lock_connection()?;
+        replay_observation_operation_request(&conn, operation_id, request_digest)
     }
 
     pub fn list_replayable_projection_deliveries(
@@ -1467,6 +2016,93 @@ impl PreparedCreate {
     }
 }
 
+struct PreparedObservationCreate {
+    operation_id: String,
+    request_digest: String,
+    source_message_ref: String,
+    dimension_name: String,
+    value: f64,
+    unit: String,
+    created_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    risk: StateRisk,
+    sensitivity: StateSensitivity,
+    source_kind: StateSourceKind,
+    confidence: f32,
+    privacy_class: StatePrivacyClass,
+    payload_digest: String,
+}
+
+impl PreparedObservationCreate {
+    fn validate(command: CreateStateObservationCommand) -> Result<Self> {
+        validate_uuid_v4("state_observation_operation_id", &command.operation_id)?;
+        validate_bounded_ref(
+            "state_observation_source_message_ref",
+            &command.source_message_ref,
+        )?;
+        validate_observation_dimension(&command.dimension_name)?;
+        validate_observation_unit(&command.unit)?;
+        if !command.value.is_finite() || command.value.abs() > 1_000_000_000.0 {
+            anyhow::bail!("state_observation_value_invalid");
+        }
+        if command.source_kind != StateSourceKind::CurrentAuthenticatedUserMessage {
+            anyhow::bail!("state_observation_create_source_not_current_user");
+        }
+        let ttl = command.expires_at - command.created_at;
+        if ttl < Duration::hours(24) || ttl > Duration::days(7) {
+            anyhow::bail!("state_observation_ttl_out_of_range");
+        }
+        if !command.confidence.is_finite() || !(0.0..=1.0).contains(&command.confidence) {
+            anyhow::bail!("state_observation_confidence_invalid");
+        }
+        let dimension_name = command.dimension_name.trim().to_string();
+        let unit = command.unit.trim().to_string();
+        let payload_digest = digest_json(&serde_json::json!({
+            "schema": "openlife.state-observation-create-payload.v1",
+            "operationId": command.operation_id,
+            "sourceMessageRef": command.source_message_ref,
+            "dimensionName": dimension_name,
+            "value": command.value,
+            "unit": unit,
+            "ttlSeconds": ttl.num_seconds(),
+            "risk": command.risk,
+            "sensitivity": command.sensitivity,
+            "sourceKind": command.source_kind,
+            "confidence": command.confidence,
+            "privacyClass": command.privacy_class,
+        }))?;
+        let request_digest = command
+            .request_digest
+            .unwrap_or_else(|| payload_digest.clone());
+        if !is_sha256_digest(&request_digest) {
+            anyhow::bail!("state_observation_operation_request_digest_invalid");
+        }
+        Ok(Self {
+            operation_id: command.operation_id,
+            request_digest,
+            source_message_ref: command.source_message_ref,
+            dimension_name,
+            value: command.value,
+            unit,
+            created_at: command.created_at,
+            expires_at: command.expires_at,
+            risk: command.risk,
+            sensitivity: command.sensitivity,
+            source_kind: command.source_kind,
+            confidence: command.confidence,
+            privacy_class: command.privacy_class,
+            payload_digest,
+        })
+    }
+
+    fn validate_new_effect_timing(&self) -> Result<()> {
+        if self.expires_at <= self.created_at {
+            anyhow::bail!("state_observation_expiry_invalid");
+        }
+        Ok(())
+    }
+}
+
 struct PreparedTransition {
     operation_id: String,
     request_digest: String,
@@ -1524,6 +2160,66 @@ impl PreparedTransition {
     }
 }
 
+struct PreparedObservationTransition {
+    operation_id: String,
+    request_digest: String,
+    source_message_ref: String,
+    observation_id: String,
+    expected_version: u64,
+    mutation_kind: StateMutationKind,
+    occurred_at: DateTime<Utc>,
+    source_kind: StateSourceKind,
+    payload_digest: String,
+}
+
+impl PreparedObservationTransition {
+    fn validate(
+        command: TransitionStateObservationCommand,
+        source_kind: StateSourceKind,
+    ) -> Result<Self> {
+        validate_uuid_v4("state_observation_operation_id", &command.operation_id)?;
+        validate_bounded_ref(
+            "state_observation_source_message_ref",
+            &command.source_message_ref,
+        )?;
+        validate_uuid_v4("state_observation_id", &command.observation_id)?;
+        if command.expected_version == 0 {
+            anyhow::bail!("state_observation_expected_version_invalid");
+        }
+        match (source_kind, command.mutation_kind) {
+            (StateSourceKind::CurrentAuthenticatedUserMessage, StateMutationKind::Undo)
+            | (StateSourceKind::SystemExpiry, StateMutationKind::Expire) => {}
+            _ => anyhow::bail!("state_observation_transition_source_kind_mismatch"),
+        }
+        let payload_digest = digest_json(&serde_json::json!({
+            "schema": "openlife.state-observation-transition-payload.v1",
+            "operationId": command.operation_id,
+            "sourceMessageRef": command.source_message_ref,
+            "observationId": command.observation_id,
+            "expectedVersion": command.expected_version,
+            "mutationKind": command.mutation_kind,
+            "sourceKind": source_kind,
+        }))?;
+        let request_digest = command
+            .request_digest
+            .unwrap_or_else(|| payload_digest.clone());
+        if !is_sha256_digest(&request_digest) {
+            anyhow::bail!("state_observation_operation_request_digest_invalid");
+        }
+        Ok(Self {
+            operation_id: command.operation_id,
+            request_digest,
+            source_message_ref: command.source_message_ref,
+            observation_id: command.observation_id,
+            expected_version: command.expected_version,
+            mutation_kind: command.mutation_kind,
+            occurred_at: command.occurred_at,
+            source_kind,
+            payload_digest,
+        })
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn insert_operation(
     tx: &Transaction<'_>,
@@ -1557,6 +2253,62 @@ fn insert_operation(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn insert_observation_operation(
+    tx: &Transaction<'_>,
+    operation_id: &str,
+    request_digest: &str,
+    payload_digest: &str,
+    receipt_id: &str,
+    observation_id: &str,
+    observation_version: u64,
+    mutation_kind: StateMutationKind,
+    outbox_event_id: &str,
+    committed_at: DateTime<Utc>,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO state_observation_operations (
+            operation_id, request_digest, payload_digest, receipt_id,
+            observation_id, observation_version, mutation_kind,
+            outbox_event_id, committed_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            operation_id,
+            request_digest,
+            payload_digest,
+            receipt_id,
+            observation_id,
+            i64::try_from(observation_version)?,
+            mutation_kind.as_str(),
+            outbox_event_id,
+            committed_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn ensure_operation_namespace_available(conn: &Connection, operation_id: &str) -> Result<()> {
+    let owner = conn
+        .query_row(
+            "SELECT owner FROM (
+                SELECT 'daily_task' AS owner FROM state_operations WHERE operation_id = ?1
+                UNION ALL
+                SELECT 'resource_task_batch' AS owner
+                FROM state_resource_task_batch_operations WHERE operation_id = ?1
+                UNION ALL
+                SELECT 'state_observation' AS owner
+                FROM state_observation_operations WHERE operation_id = ?1
+             ) LIMIT 1",
+            [operation_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if let Some(owner) = owner {
+        anyhow::bail!("state_operation_namespace_conflict:{owner}");
+    }
+    Ok(())
+}
+
 fn replay_operation_request(
     conn: &Connection,
     operation_id: &str,
@@ -1578,6 +2330,27 @@ fn replay_operation_request(
     operation_receipt(conn, operation_id, true)
 }
 
+fn replay_observation_operation_request(
+    conn: &Connection,
+    operation_id: &str,
+    request_digest: &str,
+) -> Result<Option<StateExecutionReceipt>> {
+    let existing_digest = conn
+        .query_row(
+            "SELECT request_digest FROM state_observation_operations WHERE operation_id = ?1",
+            [operation_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(existing_digest) = existing_digest else {
+        return Ok(None);
+    };
+    if existing_digest != request_digest {
+        anyhow::bail!("state_observation_operation_request_drift");
+    }
+    observation_operation_receipt(conn, operation_id, true)
+}
+
 fn replay_operation(
     conn: &Connection,
     operation_id: &str,
@@ -1597,6 +2370,27 @@ fn replay_operation(
         anyhow::bail!("state_operation_payload_drift");
     }
     operation_receipt(conn, operation_id, true)
+}
+
+fn replay_observation_operation(
+    conn: &Connection,
+    operation_id: &str,
+    payload_digest: &str,
+) -> Result<Option<StateExecutionReceipt>> {
+    let existing_digest = conn
+        .query_row(
+            "SELECT payload_digest FROM state_observation_operations WHERE operation_id = ?1",
+            [operation_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(existing_digest) = existing_digest else {
+        return Ok(None);
+    };
+    if existing_digest != payload_digest {
+        anyhow::bail!("state_observation_operation_payload_drift");
+    }
+    observation_operation_receipt(conn, operation_id, true)
 }
 
 fn resource_task_batch_receipt(
@@ -1752,8 +2546,87 @@ fn operation_receipt(
         receipt_id,
         operation_id: operation_id.to_string(),
         payload_digest,
+        asset_kind: StateAssetKind::DailyTask,
         asset_id,
         asset_version: u64::try_from(asset_version).context("state_receipt_version_invalid")?,
+        mutation_kind: parse_mutation_kind(&mutation_kind)?,
+        canonical_status: "committed".into(),
+        projection_status: match projection.state() {
+            crate::persistence_outbox::ProjectionDeliveryState::Pending => {
+                StateProjectionStatus::Pending
+            }
+            crate::persistence_outbox::ProjectionDeliveryState::Degraded => {
+                StateProjectionStatus::Degraded
+            }
+            crate::persistence_outbox::ProjectionDeliveryState::Applied
+            | crate::persistence_outbox::ProjectionDeliveryState::Superseded
+            | crate::persistence_outbox::ProjectionDeliveryState::Compensated => {
+                StateProjectionStatus::Applied
+            }
+        },
+        outbox_event_id,
+        tombstone_id: outbox.tombstone_id,
+        committed_at: parse_time(&committed_at)?,
+        expires_at: parse_time(&expires_at)?,
+        replayed,
+    }))
+}
+
+fn observation_operation_receipt(
+    conn: &Connection,
+    operation_id: &str,
+    replayed: bool,
+) -> Result<Option<StateExecutionReceipt>> {
+    let row = conn
+        .query_row(
+            "SELECT operations.receipt_id, operations.payload_digest,
+                    operations.observation_id, operations.observation_version,
+                    operations.mutation_kind, operations.outbox_event_id,
+                    operations.committed_at, observations.expires_at
+             FROM state_observation_operations operations
+             JOIN state_observations observations
+               ON observations.observation_id = operations.observation_id
+             WHERE operations.operation_id = ?1",
+            [operation_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((
+        receipt_id,
+        payload_digest,
+        observation_id,
+        observation_version,
+        mutation_kind,
+        outbox_event_id,
+        committed_at,
+        expires_at,
+    )) = row
+    else {
+        return Ok(None);
+    };
+    let outbox = crate::persistence_outbox::mutation_by_event_id(conn, &outbox_event_id)?
+        .context("state_observation_operation_outbox_event_missing")?;
+    let projection = crate::persistence_outbox::projection_summary(conn, &outbox_event_id)?;
+    Ok(Some(StateExecutionReceipt {
+        schema: "openlife.state-execution-receipt.v1".into(),
+        receipt_id,
+        operation_id: operation_id.to_string(),
+        payload_digest,
+        asset_kind: StateAssetKind::StateObservation,
+        asset_id: observation_id,
+        asset_version: u64::try_from(observation_version)
+            .context("state_observation_receipt_version_invalid")?,
         mutation_kind: parse_mutation_kind(&mutation_kind)?,
         canonical_status: "committed".into(),
         projection_status: match projection.state() {
@@ -1789,6 +2662,50 @@ fn load_asset(conn: &Connection, asset_id: &str) -> Result<Option<StateAsset>> {
     )
     .optional()
     .map_err(Into::into)
+}
+
+fn load_state_observation(
+    conn: &Connection,
+    observation_id: &str,
+) -> Result<Option<StateObservation>> {
+    conn.query_row(
+        "SELECT observation_id, version, dimension_name, value, unit, status,
+                source_message_ref, risk, sensitivity, source_kind, confidence,
+                privacy_class, created_at, updated_at, expires_at,
+                tombstoned_at, tombstone_reason
+         FROM state_observations WHERE observation_id = ?1",
+        [observation_id],
+        state_observation_from_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn state_observation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StateObservation> {
+    let version = row.get::<_, i64>(1)?;
+    let confidence = row.get::<_, f64>(10)?;
+    Ok(StateObservation {
+        observation_id: row.get(0)?,
+        version: u64::try_from(version).map_err(sql_conversion_error)?,
+        dimension_name: row.get(2)?,
+        value: row.get(3)?,
+        unit: row.get(4)?,
+        status: parse_observation_status_sql(&row.get::<_, String>(5)?)?,
+        source_message_ref: row.get(6)?,
+        risk: parse_risk_sql(&row.get::<_, String>(7)?)?,
+        sensitivity: parse_sensitivity_sql(&row.get::<_, String>(8)?)?,
+        source_kind: parse_source_kind_sql(&row.get::<_, String>(9)?)?,
+        confidence: confidence as f32,
+        privacy_class: parse_privacy_sql(&row.get::<_, String>(11)?)?,
+        created_at: parse_time_sql(row.get::<_, String>(12)?)?,
+        updated_at: parse_time_sql(row.get::<_, String>(13)?)?,
+        expires_at: parse_time_sql(row.get::<_, String>(14)?)?,
+        tombstoned_at: parse_optional_time_sql(row.get::<_, Option<String>>(15)?)?,
+        tombstone_reason: row
+            .get::<_, Option<String>>(16)?
+            .map(|value| parse_mutation_kind_sql(&value))
+            .transpose()?,
+    })
 }
 
 fn state_asset_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StateAsset> {
@@ -1914,6 +2831,28 @@ fn validate_bounded_ref(label: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_observation_dimension(value: &str) -> Result<()> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().count() > MAX_OBSERVATION_DIMENSION_CHARS
+        || trimmed.chars().any(char::is_control)
+    {
+        anyhow::bail!("state_observation_dimension_invalid");
+    }
+    Ok(())
+}
+
+fn validate_observation_unit(value: &str) -> Result<()> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().count() > MAX_OBSERVATION_UNIT_CHARS
+        || trimmed.chars().any(char::is_control)
+    {
+        anyhow::bail!("state_observation_unit_invalid");
+    }
+    Ok(())
+}
+
 fn digest_json(value: &serde_json::Value) -> Result<String> {
     Ok(crate::persistence_outbox::metadata_digest(
         &serde_json::to_string(value)?,
@@ -1948,8 +2887,19 @@ fn sql_conversion_error(error: impl std::fmt::Display + Send + Sync + 'static) -
 fn parse_asset_kind_sql(value: &str) -> rusqlite::Result<StateAssetKind> {
     match value {
         "daily_task" => Ok(StateAssetKind::DailyTask),
+        "state_observation" => Ok(StateAssetKind::StateObservation),
         other => Err(sql_conversion_error(format!(
             "state_asset_kind_invalid:{other}"
+        ))),
+    }
+}
+
+fn parse_observation_status_sql(value: &str) -> rusqlite::Result<StateObservationStatus> {
+    match value {
+        "active" => Ok(StateObservationStatus::Active),
+        "tombstoned" => Ok(StateObservationStatus::Tombstoned),
+        other => Err(sql_conversion_error(format!(
+            "state_observation_status_invalid:{other}"
         ))),
     }
 }
@@ -2037,6 +2987,29 @@ mod tests {
             source_message_ref: Uuid::new_v4().hyphenated().to_string(),
             title: title.into(),
             due_at: Some(at(15)),
+            created_at: at(9),
+            expires_at: at(9) + Duration::days(1),
+            risk: StateRisk::Low,
+            sensitivity: StateSensitivity::Internal,
+            source_kind: StateSourceKind::CurrentAuthenticatedUserMessage,
+            confidence: 1.0,
+            privacy_class: StatePrivacyClass::Private,
+        }
+    }
+
+    fn observation_command(
+        operation_id: String,
+        dimension_name: &str,
+        value: f64,
+        unit: &str,
+    ) -> CreateStateObservationCommand {
+        CreateStateObservationCommand {
+            operation_id,
+            request_digest: None,
+            source_message_ref: format!("conversation://state-tests/message/{}", Uuid::new_v4()),
+            dimension_name: dimension_name.into(),
+            value,
+            unit: unit.into(),
             created_at: at(9),
             expires_at: at(9) + Duration::days(1),
             risk: StateRisk::Low,
@@ -2360,6 +3333,41 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_same_observation_operation_has_one_canonical_winner() {
+        let store = Arc::new(StateStore::new_in_memory().unwrap());
+        let operation_id = Uuid::new_v4().hyphenated().to_string();
+        let command = observation_command(operation_id, "专注度", 8.0, "分");
+        let barrier = Arc::new(Barrier::new(3));
+        let handles = (0..2)
+            .map(|_| {
+                let store = Arc::clone(&store);
+                let command = command.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    store.create_state_observation(command).unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let receipts = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(receipts[0].asset_id, receipts[1].asset_id);
+        assert_eq!(
+            receipts.iter().filter(|receipt| !receipt.replayed).count(),
+            1
+        );
+        assert_eq!(
+            receipts.iter().filter(|receipt| receipt.replayed).count(),
+            1
+        );
+        assert_eq!(store.list_state_observations(false).unwrap().len(), 1);
+    }
+
+    #[test]
     fn concurrent_distinct_completion_operations_enforce_version_cas() {
         let store = Arc::new(StateStore::new_in_memory().unwrap());
         let created = store
@@ -2419,6 +3427,42 @@ mod tests {
     }
 
     #[test]
+    fn observation_value_ttl_and_source_boundaries_fail_closed() {
+        let store = StateStore::new_in_memory().unwrap();
+        let mut short =
+            observation_command(Uuid::new_v4().hyphenated().to_string(), "专注度", 8.0, "分");
+        short.expires_at = short.created_at + Duration::hours(23);
+        assert!(store
+            .create_state_observation(short)
+            .unwrap_err()
+            .to_string()
+            .contains("state_observation_ttl_out_of_range"));
+
+        let mut untrusted_source =
+            observation_command(Uuid::new_v4().hyphenated().to_string(), "专注度", 8.0, "分");
+        untrusted_source.source_kind = StateSourceKind::SystemExpiry;
+        assert!(store
+            .create_state_observation(untrusted_source)
+            .unwrap_err()
+            .to_string()
+            .contains("state_observation_create_source_not_current_user"));
+
+        let mut non_finite = observation_command(
+            Uuid::new_v4().hyphenated().to_string(),
+            "专注度",
+            f64::NAN,
+            "分",
+        );
+        non_finite.request_digest = None;
+        assert!(store
+            .create_state_observation(non_finite)
+            .unwrap_err()
+            .to_string()
+            .contains("state_observation_value_invalid"));
+        assert!(store.list_state_observations(true).unwrap().is_empty());
+    }
+
+    #[test]
     fn state_gateway_consumes_policy_grant_and_reuses_same_operation_receipt() {
         let store = StateStore::new_in_memory().unwrap();
         let gateway = StateGateway::new(store.clone());
@@ -2461,6 +3505,333 @@ mod tests {
         assert!(late_error
             .to_string()
             .contains("state_daily_task_due_at_out_of_range"));
+    }
+
+    #[test]
+    fn state_gateway_records_typed_observation_in_canonical_statestore() {
+        let store = StateStore::new_in_memory().unwrap();
+        let gateway = StateGateway::new(store);
+        let operation_id = Uuid::new_v4().hyphenated().to_string();
+
+        let outcome = gateway
+            .execute(
+                state_grant(&operation_id, "/state 专注度 8 分"),
+                StateGatewayExecutionContext {
+                    occurred_at: at(9),
+                    resolved_due_at: None,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(outcome.observations.len(), 1);
+        assert_eq!(outcome.observations[0].dimension_name, "专注度");
+        assert_eq!(outcome.observations[0].value, 8.0);
+        assert_eq!(outcome.observations[0].unit, "分");
+        assert_eq!(
+            outcome.receipt.as_ref().unwrap().canonical_status,
+            "committed"
+        );
+    }
+
+    #[test]
+    fn observation_receipt_is_minimal_and_exact_replay_has_one_effect() {
+        let store = StateStore::new_in_memory().unwrap();
+        let command =
+            observation_command(Uuid::new_v4().hyphenated().to_string(), "专注度", 8.0, "分");
+        let source_message_ref = command.source_message_ref.clone();
+
+        let first = store.create_state_observation(command.clone()).unwrap();
+        let replay = store.create_state_observation(command).unwrap();
+
+        assert!(!first.replayed);
+        assert!(replay.replayed);
+        assert_eq!(first.asset_kind, StateAssetKind::StateObservation);
+        assert_eq!(first.asset_id, replay.asset_id);
+        assert_eq!(store.list_state_observations(false).unwrap().len(), 1);
+        assert_eq!(first.projection_status, StateProjectionStatus::Applied);
+        assert!(store
+            .list_replayable_projection_deliveries(10)
+            .unwrap()
+            .is_empty());
+
+        let receipt_json = serde_json::to_string(&first).unwrap();
+        for sensitive_copy in ["专注度", "分", &source_message_ref] {
+            assert!(!receipt_json.contains(sensitive_copy));
+        }
+        let outbox_metadata = {
+            let conn = store.lock_connection().unwrap();
+            conn.query_row(
+                "SELECT aggregate_kind || ':' || mutation_kind || ':' || payload_digest
+                 FROM canonical_outbox_events WHERE event_id = ?1",
+                [&first.outbox_event_id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+        };
+        for sensitive_copy in ["专注度", "分", &source_message_ref] {
+            assert!(!outbox_metadata.contains(sensitive_copy));
+        }
+    }
+
+    #[test]
+    fn observation_payload_and_request_drift_fail_without_second_effect() {
+        let store = StateStore::new_in_memory().unwrap();
+        let operation_id = Uuid::new_v4().hyphenated().to_string();
+        let mut command = observation_command(operation_id.clone(), "精力", 7.0, "分");
+        let source_message_ref = command.source_message_ref.clone();
+        store.create_state_observation(command.clone()).unwrap();
+
+        command.value = 9.0;
+        assert!(store
+            .create_state_observation(command)
+            .unwrap_err()
+            .to_string()
+            .contains("state_observation_operation_payload_drift"));
+        assert_eq!(store.list_state_observations(true).unwrap().len(), 1);
+
+        let gateway = StateGateway::new(store.clone());
+        let gateway_operation = Uuid::new_v4().hyphenated().to_string();
+        gateway
+            .execute(
+                state_grant(&gateway_operation, "/state 心情 6 分"),
+                StateGatewayExecutionContext {
+                    occurred_at: at(9),
+                    resolved_due_at: None,
+                },
+            )
+            .unwrap();
+        let request_drift = gateway
+            .execute(
+                state_grant(&gateway_operation, "/state 心情 9 分"),
+                StateGatewayExecutionContext {
+                    occurred_at: at(10),
+                    resolved_due_at: None,
+                },
+            )
+            .unwrap_err();
+        assert!(request_drift
+            .to_string()
+            .contains("state_observation_operation_request_drift"));
+        assert_eq!(store.list_state_observations(true).unwrap().len(), 2);
+        assert!(store
+            .list_state_observations(true)
+            .unwrap()
+            .iter()
+            .any(|observation| observation.source_message_ref == source_message_ref));
+    }
+
+    #[test]
+    fn observation_undo_and_expiry_survive_restart_as_tombstones() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state-observations.db");
+        let (undone_id, expired_id) = {
+            let store = StateStore::new(&path).unwrap();
+            let undone = store
+                .create_state_observation(observation_command(
+                    Uuid::new_v4().hyphenated().to_string(),
+                    "专注度",
+                    8.0,
+                    "分",
+                ))
+                .unwrap();
+            let undone_observation = store
+                .get_state_observation(&undone.asset_id)
+                .unwrap()
+                .unwrap();
+            let undo_receipt = store
+                .undo_state_observation(TransitionStateObservationCommand {
+                    operation_id: Uuid::new_v4().hyphenated().to_string(),
+                    request_digest: None,
+                    source_message_ref: format!(
+                        "conversation://state-tests/message/{}",
+                        Uuid::new_v4()
+                    ),
+                    observation_id: undone.asset_id.clone(),
+                    expected_version: undone_observation.version,
+                    mutation_kind: StateMutationKind::Undo,
+                    occurred_at: at(10),
+                })
+                .unwrap();
+            assert!(undo_receipt.tombstone_id.is_some());
+
+            let expired = store
+                .create_state_observation(observation_command(
+                    Uuid::new_v4().hyphenated().to_string(),
+                    "精力",
+                    5.0,
+                    "分",
+                ))
+                .unwrap();
+            store.expire_due(at(9) + Duration::days(2)).unwrap();
+            (undone.asset_id, expired.asset_id)
+        };
+
+        let restarted = StateStore::new(&path).unwrap();
+        let undone = restarted
+            .get_state_observation(&undone_id)
+            .unwrap()
+            .unwrap();
+        let expired = restarted
+            .get_state_observation(&expired_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(undone.status, StateObservationStatus::Tombstoned);
+        assert_eq!(undone.tombstone_reason, Some(StateMutationKind::Undo));
+        assert_eq!(expired.status, StateObservationStatus::Tombstoned);
+        assert_eq!(expired.tombstone_reason, Some(StateMutationKind::Expire));
+        assert!(restarted.list_state_observations(false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn observation_guard_failure_rolls_back_canonical_version_operation_and_outbox() {
+        let store = StateStore::new_in_memory().unwrap();
+        let operation_id = Uuid::new_v4().hyphenated().to_string();
+        let error = store
+            .create_state_observation_guarded(
+                observation_command(operation_id.clone(), "专注度", 8.0, "分"),
+                || anyhow::bail!("observation_cancelled_before_commit"),
+            )
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("observation_cancelled_before_commit"));
+        assert!(store.list_state_observations(true).unwrap().is_empty());
+        assert!(store
+            .observation_receipt_for_operation(&operation_id, false)
+            .unwrap()
+            .is_none());
+        let counts = {
+            let conn = store.lock_connection().unwrap();
+            conn.query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM state_observation_versions),
+                    (SELECT COUNT(*) FROM state_observation_operations),
+                    (SELECT COUNT(*) FROM canonical_outbox_events)",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .unwrap()
+        };
+        assert_eq!(counts, (0, 0, 0));
+    }
+
+    #[test]
+    fn operation_uuid_cannot_cross_state_owner_namespaces() {
+        let store = StateStore::new_in_memory().unwrap();
+        let operation_id = Uuid::new_v4().hyphenated().to_string();
+        store
+            .create_state_observation(observation_command(
+                operation_id.clone(),
+                "专注度",
+                8.0,
+                "分",
+            ))
+            .unwrap();
+        let task_error = store
+            .create_daily_task(create_command(operation_id.clone(), "冲突任务"))
+            .unwrap_err();
+        assert!(task_error
+            .to_string()
+            .contains("state_operation_namespace_conflict:state_observation"));
+
+        let task_operation = Uuid::new_v4().hyphenated().to_string();
+        store
+            .create_daily_task(create_command(task_operation.clone(), "已有任务"))
+            .unwrap();
+        let observation_error = store
+            .create_state_observation(observation_command(task_operation, "精力", 6.0, "分"))
+            .unwrap_err();
+        assert!(observation_error
+            .to_string()
+            .contains("state_operation_namespace_conflict:daily_task"));
+    }
+
+    #[test]
+    fn state_gateway_lists_and_undoes_latest_matching_observation() {
+        let store = StateStore::new_in_memory().unwrap();
+        let gateway = StateGateway::new(store.clone());
+        gateway
+            .execute(
+                state_grant(
+                    &Uuid::new_v4().hyphenated().to_string(),
+                    "/state 专注度 8 分",
+                ),
+                StateGatewayExecutionContext {
+                    occurred_at: at(9),
+                    resolved_due_at: None,
+                },
+            )
+            .unwrap();
+        let listed = gateway
+            .execute(
+                state_grant(&Uuid::new_v4().hyphenated().to_string(), "/state"),
+                StateGatewayExecutionContext {
+                    occurred_at: at(10),
+                    resolved_due_at: None,
+                },
+            )
+            .unwrap();
+        assert!(listed.receipt.is_none());
+        assert_eq!(listed.observations.len(), 1);
+
+        let undone = gateway
+            .execute(
+                state_grant(
+                    &Uuid::new_v4().hyphenated().to_string(),
+                    "/state undo 专注度",
+                ),
+                StateGatewayExecutionContext {
+                    occurred_at: at(11),
+                    resolved_due_at: None,
+                },
+            )
+            .unwrap();
+        assert!(undone.observations.is_empty());
+        assert_eq!(
+            undone.receipt.as_ref().unwrap().mutation_kind,
+            StateMutationKind::Undo
+        );
+        assert!(store.list_state_observations(false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn state_gateway_reconciles_expiry_before_product_read() {
+        let store = StateStore::new_in_memory().unwrap();
+        let gateway = StateGateway::new(store.clone());
+        gateway
+            .execute(
+                state_grant(
+                    &Uuid::new_v4().hyphenated().to_string(),
+                    "/state 专注度 8 分",
+                ),
+                StateGatewayExecutionContext {
+                    occurred_at: at(9),
+                    resolved_due_at: None,
+                },
+            )
+            .unwrap();
+
+        let listed = gateway
+            .execute(
+                state_grant(&Uuid::new_v4().hyphenated().to_string(), "/state"),
+                StateGatewayExecutionContext {
+                    occurred_at: at(9) + Duration::days(2),
+                    resolved_due_at: None,
+                },
+            )
+            .unwrap();
+
+        assert!(listed.observations.is_empty());
+        let history = store.list_state_observations(true).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].status, StateObservationStatus::Tombstoned);
+        assert_eq!(history[0].tombstone_reason, Some(StateMutationKind::Expire));
     }
 
     #[test]
@@ -2689,6 +4060,38 @@ mod tests {
     }
 
     #[test]
+    fn committed_observation_recovery_opens_no_second_write_admission_window() {
+        let store = StateStore::new_in_memory().unwrap();
+        let gateway = StateGateway::new(store);
+        let operation_id = Uuid::new_v4().hyphenated().to_string();
+        let prompt = "/state 专注度 8 分";
+        let context = StateGatewayExecutionContext {
+            occurred_at: at(9),
+            resolved_due_at: None,
+        };
+        let committed = gateway
+            .execute(state_grant(&operation_id, prompt), context.clone())
+            .unwrap();
+        let rejecting_admission = RejectingWriteAdmission {
+            calls: AtomicUsize::new(0),
+        };
+
+        let recovered = gateway
+            .execute_with_admission(
+                state_grant(&operation_id, prompt),
+                context,
+                &rejecting_admission,
+            )
+            .unwrap();
+        assert!(recovered.receipt.as_ref().unwrap().replayed);
+        assert_eq!(
+            recovered.receipt.as_ref().unwrap().receipt_id,
+            committed.receipt.as_ref().unwrap().receipt_id
+        );
+        assert_eq!(rejecting_admission.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn schema_v1_migrates_request_digest_without_losing_operation_truth() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state-v1.db");
@@ -2733,7 +4136,7 @@ mod tests {
             .unwrap()
             .iter()
             .any(|column| column == "request_digest");
-        assert_eq!(version, "3");
+        assert_eq!(version, "4");
         assert!(request_digest_column_exists);
     }
 
@@ -2774,12 +4177,60 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(version, "3");
+        assert_eq!(version, "4");
         assert_eq!(
             tables,
             [
                 "state_resource_task_batch_items",
                 "state_resource_task_batch_operations"
+            ]
+        );
+    }
+
+    #[test]
+    fn schema_v3_adds_typed_observation_tables_before_advancing_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state-v3.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE state_store_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                 ) WITHOUT ROWID;
+                 INSERT INTO state_store_metadata (key, value)
+                 VALUES ('schema_version', '3');",
+            )
+            .unwrap();
+        }
+
+        let store = StateStore::new(&path).unwrap();
+        let conn = store.lock_connection().unwrap();
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM state_store_metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let tables = conn
+            .prepare(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'table' AND name LIKE 'state_observation%'
+                 ORDER BY name ASC",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(version, "4");
+        assert_eq!(
+            tables,
+            [
+                "state_observation_operations",
+                "state_observation_versions",
+                "state_observations"
             ]
         );
     }
@@ -2805,6 +4256,31 @@ mod tests {
         assert!(store.list_daily_tasks(true).unwrap().is_empty());
         assert!(store
             .receipt_for_operation(&operation_id, false)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn state_gateway_observation_commit_guard_failure_leaves_no_canonical_effect() {
+        let store = StateStore::new_in_memory().unwrap();
+        let gateway = StateGateway::new(store.clone());
+        let operation_id = Uuid::new_v4().hyphenated().to_string();
+        let error = gateway
+            .execute_guarded(
+                state_grant(&operation_id, "/state 专注度 8 分"),
+                StateGatewayExecutionContext {
+                    occurred_at: at(9),
+                    resolved_due_at: None,
+                },
+                || anyhow::bail!("state_observation_cancelled_before_commit"),
+            )
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("state_observation_cancelled_before_commit"));
+        assert!(store.list_state_observations(true).unwrap().is_empty());
+        assert!(store
+            .observation_receipt_for_operation(&operation_id, false)
             .unwrap()
             .is_none());
     }

@@ -195,11 +195,14 @@ pub enum TransientStateCommandKind {
     CreateDailyTask,
     CompleteDailyTask,
     UndoDailyTask,
+    ListStateObservations,
+    RecordStateObservation,
+    UndoStateObservation,
 }
 
 impl TransientStateCommandKind {
     pub fn is_mutation(self) -> bool {
-        !matches!(self, Self::ListDailyTasks)
+        !matches!(self, Self::ListDailyTasks | Self::ListStateObservations)
     }
 
     pub fn as_str(self) -> &'static str {
@@ -208,6 +211,9 @@ impl TransientStateCommandKind {
             Self::CreateDailyTask => "create_daily_task",
             Self::CompleteDailyTask => "complete_daily_task",
             Self::UndoDailyTask => "undo_daily_task",
+            Self::ListStateObservations => "list_state_observations",
+            Self::RecordStateObservation => "record_state_observation",
+            Self::UndoStateObservation => "undo_state_observation",
         }
     }
 }
@@ -227,12 +233,22 @@ pub struct TransientStateDueHint {
     pub local_minute: u8,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransientStateObservationIntent {
+    pub dimension_name: String,
+    pub value: f64,
+    pub unit: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransientStateIntent {
     pub command_kind: TransientStateCommandKind,
     pub target: String,
     pub due_hint: Option<TransientStateDueHint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<TransientStateObservationIntent>,
     pub expiry_days: u8,
     pub disposition: TransientStateIntentDisposition,
     pub reason_code: String,
@@ -14990,6 +15006,7 @@ fn extract_transient_state_intent(
             command_kind: TransientStateCommandKind::ListDailyTasks,
             target: String::new(),
             due_hint: None,
+            observation: None,
             expiry_days: 1,
             disposition: TransientStateIntentDisposition::Direct,
             reason_code: "explicit_daily_task_list".into(),
@@ -15000,6 +15017,7 @@ fn extract_transient_state_intent(
             command_kind: TransientStateCommandKind::ListDailyTasks,
             target: String::new(),
             due_hint: None,
+            observation: None,
             expiry_days: 1,
             disposition: TransientStateIntentDisposition::Direct,
             reason_code: "explicit_daily_task_help".into(),
@@ -15030,6 +15048,7 @@ fn extract_transient_state_intent(
                 command_kind,
                 target,
                 due_hint: parse_transient_state_due_hint(lower),
+                observation: None,
                 expiry_days: 1,
                 disposition,
                 reason_code: if disposition
@@ -15045,14 +15064,89 @@ fn extract_transient_state_intent(
         }
     }
 
-    if trimmed_lower == "/state" || trimmed_lower.starts_with("/state ") {
+    if trimmed_lower == "/state" {
         return Some(TransientStateIntent {
-            command_kind: TransientStateCommandKind::CreateDailyTask,
+            command_kind: TransientStateCommandKind::ListStateObservations,
             target: String::new(),
             due_hint: None,
+            observation: None,
             expiry_days: 1,
-            disposition: TransientStateIntentDisposition::ReviewRequired,
-            reason_code: "state_observation_requires_typed_statestore_slice".into(),
+            disposition: TransientStateIntentDisposition::Direct,
+            reason_code: "explicit_state_observation_list".into(),
+        });
+    }
+    if trimmed_lower.starts_with("/state ") {
+        let parts = trimmed.split_whitespace().collect::<Vec<_>>();
+        if parts.len() == 3 && parts[1].eq_ignore_ascii_case("undo") {
+            let target = parts[2].trim().to_string();
+            let bounded_target = !target.is_empty() && target.chars().count() <= 32;
+            let disposition = if !bounded_target {
+                TransientStateIntentDisposition::ClarificationRequired
+            } else {
+                reviewed_disposition
+            };
+            return Some(TransientStateIntent {
+                command_kind: TransientStateCommandKind::UndoStateObservation,
+                target,
+                due_hint: None,
+                observation: None,
+                expiry_days: 1,
+                disposition,
+                reason_code: if disposition
+                    == TransientStateIntentDisposition::ClarificationRequired
+                {
+                    "state_observation_dimension_invalid".into()
+                } else if disposition == TransientStateIntentDisposition::ReviewRequired {
+                    "state_observation_sensitive_requires_review".into()
+                } else {
+                    "explicit_state_observation_undo".into()
+                },
+            });
+        }
+
+        let parsed_observation = (parts.len() == 4)
+            .then(|| {
+                let dimension_name = parts[1].trim();
+                let value = parts[2].parse::<f64>().ok()?;
+                let unit = parts[3].trim();
+                if dimension_name.is_empty()
+                    || dimension_name.chars().count() > 32
+                    || unit.is_empty()
+                    || unit.chars().count() > 16
+                    || !value.is_finite()
+                    || value.abs() > 1_000_000_000.0
+                {
+                    return None;
+                }
+                Some(TransientStateObservationIntent {
+                    dimension_name: dimension_name.to_string(),
+                    value,
+                    unit: unit.to_string(),
+                })
+            })
+            .flatten();
+        let disposition = if parsed_observation.is_none() {
+            TransientStateIntentDisposition::ClarificationRequired
+        } else {
+            reviewed_disposition
+        };
+        return Some(TransientStateIntent {
+            command_kind: TransientStateCommandKind::RecordStateObservation,
+            target: parsed_observation
+                .as_ref()
+                .map(|observation| observation.dimension_name.clone())
+                .unwrap_or_default(),
+            due_hint: None,
+            observation: parsed_observation,
+            expiry_days: 1,
+            disposition,
+            reason_code: if disposition == TransientStateIntentDisposition::ClarificationRequired {
+                "state_observation_requires_dimension_numeric_value_and_unit".into()
+            } else if disposition == TransientStateIntentDisposition::ReviewRequired {
+                "state_observation_sensitive_requires_review".into()
+            } else {
+                "explicit_typed_state_observation".into()
+            },
         });
     }
 
@@ -15081,6 +15175,7 @@ fn extract_transient_state_intent(
             // but attachment text is never copied here as write authority.
             target: String::new(),
             due_hint: None,
+            observation: None,
             expiry_days: 1,
             disposition: TransientStateIntentDisposition::Direct,
             reason_code: "explicit_resource_daily_task_batch".into(),
@@ -15100,6 +15195,7 @@ fn extract_transient_state_intent(
             command_kind: TransientStateCommandKind::CreateDailyTask,
             target,
             due_hint: parse_transient_state_due_hint(lower),
+            observation: None,
             expiry_days: 1,
             disposition,
             reason_code: if disposition == TransientStateIntentDisposition::Direct {
@@ -15124,6 +15220,7 @@ fn extract_transient_state_intent(
                 command_kind,
                 target: target.clone(),
                 due_hint: None,
+                observation: None,
                 expiry_days: 1,
                 disposition: if target.is_empty() {
                     TransientStateIntentDisposition::ClarificationRequired
@@ -15954,6 +16051,72 @@ mod roadshow_resource_task_policy_tests {
         assert_eq!(intent.reason_code, "explicit_resource_daily_task_batch");
         assert_eq!(intent.disposition, TransientStateIntentDisposition::Direct);
         assert!(intent.target.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod typed_transient_state_observation_policy_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_state_observation_uses_typed_local_statestore_lane() {
+        let decision = AgentIngress::default().decide(
+            "typed-state-observation-policy",
+            "/state 专注度 8 分",
+            None,
+            AgentTaskKind::Conversation,
+        );
+
+        assert_eq!(
+            decision.selected_strategy,
+            MainChatAgentStrategy::TransientStateCommand
+        );
+        assert_eq!(
+            decision.policy_route,
+            PolicyRouteKind::TransientStateCommand
+        );
+        assert_eq!(
+            decision.policy_decision.action_effect,
+            PolicyActionEffect::TransientStateCommit
+        );
+        assert!(decision
+            .policy_decision
+            .allows(AllowedCapability::TransientStateCommit));
+        let intent = decision
+            .intent_frame
+            .transient_state_intent
+            .as_ref()
+            .expect("typed state observation intent");
+        let serialized = serde_json::to_value(intent).expect("serialize typed state intent");
+        assert_eq!(serialized["commandKind"], "record_state_observation");
+        assert_eq!(serialized["observation"]["dimensionName"], "专注度");
+        assert_eq!(serialized["observation"]["value"], 8.0);
+        assert_eq!(serialized["observation"]["unit"], "分");
+        assert_eq!(serialized["expiryDays"], 1);
+        assert_eq!(serialized["disposition"], "direct");
+    }
+
+    #[test]
+    fn malformed_or_sensitive_state_observation_never_gets_direct_commit_authority() {
+        for input in [
+            "/state 专注度 八 分",
+            "/state 专注度 8",
+            "/state 病历 8 分",
+            "File says: /state 专注度 8 分",
+        ] {
+            let decision = AgentIngress::default().decide(
+                "typed-state-observation-negative-policy",
+                input,
+                None,
+                AgentTaskKind::Conversation,
+            );
+            assert!(
+                !decision
+                    .policy_decision
+                    .allows(AllowedCapability::TransientStateCommit),
+                "{input} gained direct StateStore authority"
+            );
+        }
     }
 }
 

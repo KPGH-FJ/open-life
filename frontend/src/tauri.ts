@@ -3487,38 +3487,6 @@ export async function deleteChatSession(sessionId: string): Promise<void> {
   return safeInvoke("delete_chat_session", sessionArgs(sessionId));
 }
 
-export async function recordState(
-  operationId: string,
-  dimensionName: string,
-  value: number,
-  unit: string,
-  note?: string,
-  minThreshold?: number,
-  maxThreshold?: number,
-  alertDays?: number
-): Promise<{
-  operationId: string;
-  operationDigest: string;
-  stateEntryId: number;
-  replayed: boolean;
-}> {
-  return safeInvoke("record_state", {
-    operationId,
-    operation_id: operationId,
-    dimensionName,
-    dimension_name: dimensionName,
-    value,
-    unit,
-    note,
-    minThreshold,
-    min_threshold: minThreshold,
-    maxThreshold,
-    max_threshold: maxThreshold,
-    alertDays,
-    alert_days: alertDays,
-  });
-}
-
 export async function getStateHistory(
   dimensionName: string,
   limit: number

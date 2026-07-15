@@ -2439,6 +2439,29 @@ fn synthesize_transient_state_reply(
         TransientStateCommandKind::UndoDailyTask => {
             "已撤销该今日任务。本地 canonical 状态保留了可审计的 tombstone，没有把撤销伪装成物理删除。".into()
         }
+        TransientStateCommandKind::ListStateObservations => {
+            if outcome.observations.is_empty() {
+                return "当前没有有效的短期状态记录。你可以用“/state 维度 数值 单位”记录一条 24 小时后自动过期、可撤销的本地状态。".into();
+            }
+            let lines = outcome
+                .observations
+                .iter()
+                .map(|observation| {
+                    format!(
+                        "- {}：{} {}",
+                        observation.dimension_name, observation.value, observation.unit
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("当前有效的短期状态：\n{lines}")
+        }
+        TransientStateCommandKind::RecordStateObservation => {
+            "已记录这条短期状态。它只写入本地 canonical StateStore，24 小时后自动过期，也可以随时撤销；没有写入长期 Memory 或 LifeModel。".into()
+        }
+        TransientStateCommandKind::UndoStateObservation => {
+            "已撤销该短期状态。本地 canonical StateStore 保留了可审计的 tombstone，没有写入长期 Memory 或 LifeModel。".into()
+        }
     }
 }
 
@@ -2512,22 +2535,32 @@ where
         .execute_with_admission(grant, execution_context, execution_epoch)
         .map_err(|error| format!("transient_state_gateway_failed:{error}"))?;
     if let Some(receipt) = outcome.receipt.as_ref() {
-        if let Err(error) =
-            crate::state_projection::reconcile_state_store_lifemodel_projection(state).await
-        {
-            log::warn!("[StateProjection] {error}");
-            state_store
-                .mark_projection_degraded(
-                    &receipt.outbox_event_id,
-                    "state_projection_reconciliation_failed",
-                )
-                .map_err(|mark_error| {
-                    format!("mark transient state projection degraded failed: {mark_error}")
-                })?;
-        }
-        outcome.receipt = state_store
-            .receipt_for_operation(canonical_run_id, receipt.replayed)
-            .map_err(|error| format!("reload transient state receipt failed: {error}"))?;
+        let replayed = receipt.replayed;
+        outcome.receipt = match receipt.asset_kind {
+            openlife_core::state_store::StateAssetKind::DailyTask => {
+                if let Err(error) =
+                    crate::state_projection::reconcile_state_store_lifemodel_projection(state).await
+                {
+                    log::warn!("[StateProjection] {error}");
+                    state_store
+                        .mark_projection_degraded(
+                            &receipt.outbox_event_id,
+                            "state_projection_reconciliation_failed",
+                        )
+                        .map_err(|mark_error| {
+                            format!("mark transient state projection degraded failed: {mark_error}")
+                        })?;
+                }
+                state_store
+                    .receipt_for_operation(canonical_run_id, replayed)
+                    .map_err(|error| format!("reload transient state receipt failed: {error}"))?
+            }
+            openlife_core::state_store::StateAssetKind::StateObservation => state_store
+                .observation_receipt_for_operation(canonical_run_id, replayed)
+                .map_err(|error| {
+                    format!("reload transient state observation receipt failed: {error}")
+                })?,
+        };
     }
 
     let mut durable_events = Vec::new();
@@ -2554,7 +2587,13 @@ where
                     // the canonical effect committed with projection work
                     // enqueued. Current projection truth remains in the
                     // outbox-backed receipt/read model and may change later.
-                    "projectionStatus": "pending",
+                    "projectionStatus": if receipt.asset_kind
+                        == openlife_core::state_store::StateAssetKind::DailyTask
+                    {
+                        "pending"
+                    } else {
+                        "applied"
+                    },
                     "replayed": false,
                 }),
             )
@@ -2581,6 +2620,7 @@ where
         "canonicalOwner": "state_store",
         "stateCommandKind": outcome.command_kind,
         "stateReceiptId": receipt.map(|value| value.receipt_id.as_str()),
+        "stateAssetKind": receipt.map(|value| value.asset_kind),
         "stateAssetId": receipt.map(|value| value.asset_id.as_str()),
         "stateAssetVersion": receipt.map(|value| value.asset_version),
         "statePayloadDigest": receipt.map(|value| value.payload_digest.as_str()),
@@ -2588,6 +2628,7 @@ where
         "stateProjectionStatus": receipt.map(|value| transient_state_projection_status_label(value.projection_status)),
         "stateOperationReplayed": receipt.is_some_and(|value| value.replayed),
         "taskCount": outcome.tasks.len(),
+        "observationCount": outcome.observations.len(),
         "kernelEventSink": event_sink_label,
         "kernelEventCount": kernel_events.len(),
         "modelGenerated": false,
@@ -2607,7 +2648,7 @@ where
         append_main_chat_agent_transcript(
             state,
             Some(task_session_id),
-            ExecutionTranscriptEntryKind::Observation,
+            ExecutionTranscriptEntryKind::FollowUp,
             if receipt.is_some() {
                 "StateGateway committed a canonical transient-state effect."
             } else {
@@ -2622,7 +2663,9 @@ where
                 "projectionStatus": receipt.map(|value| transient_state_projection_status_label(value.projection_status)),
                 "replayed": receipt.is_some_and(|value| value.replayed),
                 "taskCount": outcome.tasks.len(),
+                "observationCount": outcome.observations.len(),
                 "rawTaskBodiesStored": false,
+                "rawObservationBodiesStored": false,
             }),
         )
         .await,

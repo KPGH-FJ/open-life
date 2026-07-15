@@ -7224,6 +7224,155 @@ fn roadshow_rc05_separate_process_create_complete_undo_preserves_one_task_histor
 }
 
 #[tokio::test]
+async fn typed_state_observation_send_list_and_stream_undo_use_one_canonical_runtime() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let session_id = "roadshow-typed-state-observation";
+    let create_operation = uuid::Uuid::new_v4().to_string();
+    let created = invoke_send_message_with_operation_id_for_kernel_goal_3(
+        state.clone(),
+        session_id,
+        "/state 专注度 8 分",
+        create_operation.clone(),
+    )
+    .await;
+
+    assert_eq!(created["status"], "completed", "create result: {created}");
+    assert_eq!(created["legacy_fallback_used"], false);
+    assert_eq!(created["model_invoked"], false);
+    assert_eq!(created["tool_invoked"], false);
+    assert_eq!(
+        created["agent_ingress"]["selectedStrategy"],
+        "transient_state_command"
+    );
+    assert_eq!(
+        created["reasoning_trace"]["generation_result"]["stateCommandKind"],
+        "record_state_observation"
+    );
+    assert_eq!(
+        created["reasoning_trace"]["generation_result"]["stateAssetKind"],
+        "state_observation"
+    );
+    assert_eq!(
+        created["reasoning_trace"]["generation_result"]["stateProjectionStatus"],
+        "applied"
+    );
+    assert!(created["reply"]
+        .as_str()
+        .is_some_and(|reply| reply.contains("StateStore") && reply.contains("没有写入长期")));
+    assert!(created["tool_calls"].as_array().is_some_and(Vec::is_empty));
+    assert!(list_command_surface_proposals(&state).await.is_empty());
+    assert!(list_command_surface_actions(&state, &create_operation)
+        .await
+        .is_empty());
+
+    let store = state.state_store.as_ref().expect("typed StateStore");
+    let observations = store
+        .list_state_observations(false)
+        .expect("list canonical observations");
+    assert_eq!(observations.len(), 1);
+    assert_eq!(observations[0].dimension_name, "专注度");
+    assert_eq!(observations[0].value, 8.0);
+    assert_eq!(observations[0].unit, "分");
+    let receipt = store
+        .observation_receipt_for_operation(&create_operation, false)
+        .expect("load observation receipt")
+        .expect("observation receipt exists");
+    assert_eq!(
+        receipt.asset_kind,
+        openlife_core::state_store::StateAssetKind::StateObservation
+    );
+    assert_eq!(
+        receipt.projection_status,
+        openlife_core::state_store::StateProjectionStatus::Applied
+    );
+    let receipt_json = serde_json::to_string(&receipt).expect("serialize observation receipt");
+    for raw_body in ["专注度", "8 分"] {
+        assert!(!receipt_json.contains(raw_body));
+    }
+
+    let durable_events = crate::main_chat_event_stream::list_main_chat_agent_events_with_state(
+        &state,
+        create_operation.clone(),
+        None,
+        Some(250),
+    )
+    .await
+    .expect("list observation events");
+    let effects = durable_events
+        .iter()
+        .filter(|event| event.event_type == "effect_committed")
+        .collect::<Vec<_>>();
+    assert_eq!(effects.len(), 1);
+    assert_eq!(effects[0].payload["projectionStatus"], "applied");
+    let event_json = serde_json::to_string(&effects[0].payload).expect("serialize effect event");
+    for raw_body in ["专注度", "8 分"] {
+        assert!(!event_json.contains(raw_body));
+    }
+
+    let list_operation = uuid::Uuid::new_v4().to_string();
+    let listed = crate::main_chat_streaming::start_stream_message_with_operation_state(
+        list_operation,
+        session_id.into(),
+        vec![openlife_core::llm::ChatMessage {
+            role: "user".into(),
+            content: "/state".into(),
+        }],
+        None,
+        &state,
+        |_event, _payload| {},
+    )
+    .await
+    .expect("stream list state observations");
+    assert_eq!(listed["status"], "completed");
+    assert_eq!(listed["model_invoked"], false);
+    assert_eq!(listed["tool_invoked"], false);
+    assert!(listed["reply"]
+        .as_str()
+        .is_some_and(|reply| reply.contains("专注度：8 分")));
+
+    let undo_operation = uuid::Uuid::new_v4().to_string();
+    let undone = crate::main_chat_streaming::start_stream_message_with_operation_state(
+        undo_operation.clone(),
+        session_id.into(),
+        vec![openlife_core::llm::ChatMessage {
+            role: "user".into(),
+            content: "/state undo 专注度".into(),
+        }],
+        None,
+        &state,
+        |_event, _payload| {},
+    )
+    .await
+    .expect("stream undo state observation");
+    assert_eq!(undone["status"], "completed");
+    assert_eq!(undone["model_invoked"], false);
+    assert_eq!(undone["tool_invoked"], false);
+    assert!(undone["reply"]
+        .as_str()
+        .is_some_and(|reply| reply.contains("tombstone") && reply.contains("没有写入长期")));
+    assert!(store
+        .list_state_observations(false)
+        .expect("active observations after undo")
+        .is_empty());
+    let history = store
+        .list_state_observations(true)
+        .expect("observation history after undo");
+    assert_eq!(history.len(), 1);
+    assert_eq!(
+        history[0].status,
+        openlife_core::state_store::StateObservationStatus::Tombstoned
+    );
+    assert_eq!(
+        history[0].tombstone_reason,
+        Some(openlife_core::state_store::StateMutationKind::Undo)
+    );
+    assert!(list_command_surface_actions(&state, &undo_operation)
+        .await
+        .is_empty());
+    assert!(list_command_surface_proposals(&state).await.is_empty());
+}
+
+#[tokio::test]
 async fn roadshow_cc03_cannot_rollback_a_preexisting_memory_owner() {
     const CLAIM_ONLY: &str = "请记住：我的路演回答偏好是先给一句结论，再给三点证据。";
     const COMMIT_THEN_ROLLBACK: &str =
