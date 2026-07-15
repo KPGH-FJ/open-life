@@ -1288,6 +1288,10 @@ fn isolated_command_surface_state_with_persistent_main_chat(
         openlife_core::agent::MemoryLifecycleStore::new(root.join("memory-lifecycle.sqlite"))
             .expect("open process-restart MemoryLifecycle store"),
     )));
+    state.state_store = Some(std::sync::Arc::new(
+        openlife_core::state_store::StateStore::new(root.join("state-store.sqlite"))
+            .expect("open process-restart StateStore"),
+    ));
     state.life_model_manager = std::sync::Arc::new(tokio::sync::Mutex::new(
         openlife_core::life_model::LifeModelManager::new(root.join("life-model").join("current")),
     ));
@@ -6085,6 +6089,293 @@ fn roadshow_cc03_separate_process_reopen_preserves_one_rollback_and_one_final() 
         assert!(
             output.status.success(),
             "CC03 {phase} child failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn roadshow_rc05_separate_process_create_complete_undo_preserves_one_task_history() {
+    const TEST_NAME: &str = "main_chat_command_surface_tests::roadshow_rc05_separate_process_create_complete_undo_preserves_one_task_history";
+    const PHASE_ENV: &str = "OPENLIFE_ROADSHOW_RC05_PROCESS_PHASE";
+    const ROOT_ENV: &str = "OPENLIFE_ROADSHOW_RC05_PROCESS_ROOT";
+    const CREATE_ENV: &str = "OPENLIFE_ROADSHOW_RC05_CREATE_OPERATION";
+    const COMPLETE_ENV: &str = "OPENLIFE_ROADSHOW_RC05_COMPLETE_OPERATION";
+    const UNDO_ENV: &str = "OPENLIFE_ROADSHOW_RC05_UNDO_OPERATION";
+    const SESSION_ID: &str = "roadshow-rc05-daily-task-restart";
+    const CREATE_PROMPT: &str = "今天下午三点前提醒我完成路演设备检查，完成后我还要能撤销。";
+    const COMPLETE_PROMPT: &str = "完成任务 完成路演设备检查";
+    const UNDO_PROMPT: &str = "撤销任务 完成路演设备检查";
+
+    if let Ok(phase) = std::env::var(PHASE_ENV) {
+        let root = std::path::PathBuf::from(
+            std::env::var_os(ROOT_ENV).expect("RC05 child process store root"),
+        );
+        let create_operation = std::env::var(CREATE_ENV).expect("RC05 child create operation id");
+        let complete_operation =
+            std::env::var(COMPLETE_ENV).expect("RC05 child complete operation id");
+        let undo_operation = std::env::var(UNDO_ENV).expect("RC05 child undo operation id");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("RC05 child Tokio runtime");
+        runtime.block_on(async move {
+            let state = isolated_command_surface_state_with_persistent_main_chat(&root);
+            let local_test_clock =
+                format!("{}T09:00:00+08:00", chrono::Local::now().format("%Y-%m-%d"));
+            *state.runtime_clock_source.lock().await =
+                crate::main_chat_runtime_facts::MainChatRuntimeClockSource::Fixed(
+                    chrono::DateTime::parse_from_rfc3339(&local_test_clock)
+                        .expect("RC05 fixed local clock"),
+                );
+            let store = state
+                .state_store
+                .as_ref()
+                .expect("RC05 file-backed StateStore");
+
+            match phase.as_str() {
+                "seed" => {
+                    assert!(store
+                        .list_daily_tasks(true)
+                        .expect("RC05 initial tasks")
+                        .is_empty());
+                    let created = invoke_send_message_with_operation_id_for_kernel_goal_3(
+                        state.clone(),
+                        SESSION_ID,
+                        CREATE_PROMPT,
+                        create_operation.clone(),
+                    )
+                    .await;
+                    assert_eq!(created["status"], "completed", "RC05 create: {created}");
+                    assert_eq!(created["legacy_fallback_used"], false);
+                    assert_eq!(created["model_invoked"], false);
+                    assert_eq!(created["tool_invoked"], false);
+                    assert_eq!(
+                        created["agent_ingress"]["selectedStrategy"],
+                        "transient_state_command"
+                    );
+
+                    let completed = invoke_send_message_with_operation_id_for_kernel_goal_3(
+                        state.clone(),
+                        SESSION_ID,
+                        COMPLETE_PROMPT,
+                        complete_operation.clone(),
+                    )
+                    .await;
+                    assert_eq!(
+                        completed["status"], "completed",
+                        "RC05 complete: {completed}"
+                    );
+                    assert_eq!(completed["model_invoked"], false);
+                    assert_eq!(completed["tool_invoked"], false);
+
+                    let tasks = store.list_daily_tasks(true).expect("RC05 completed task");
+                    assert_eq!(tasks.len(), 1);
+                    assert_eq!(tasks[0].title, "完成路演设备检查");
+                    assert_eq!(tasks[0].version, 2);
+                    assert_eq!(
+                        tasks[0].status,
+                        openlife_core::state_store::DailyTaskStatus::Completed
+                    );
+                    assert!(list_command_surface_proposals(&state).await.is_empty());
+                }
+                "verify" => {
+                    let before = store
+                        .list_daily_tasks(true)
+                        .expect("RC05 tasks before recovery");
+                    assert_eq!(before.len(), 1);
+                    assert_eq!(before[0].version, 2);
+                    assert_eq!(
+                        before[0].status,
+                        openlife_core::state_store::DailyTaskStatus::Completed
+                    );
+                    let before_create_events = state
+                        .main_chat_agent_event_store
+                        .as_ref()
+                        .expect("RC05 EventStore")
+                        .lock()
+                        .await
+                        .list(&create_operation, 0, 250)
+                        .expect("RC05 create events before replay");
+                    let before_complete_events = state
+                        .main_chat_agent_event_store
+                        .as_ref()
+                        .expect("RC05 EventStore")
+                        .lock()
+                        .await
+                        .list(&complete_operation, 0, 250)
+                        .expect("RC05 complete events before replay");
+
+                    let create_replay = invoke_send_message_with_operation_id_for_kernel_goal_3(
+                        state.clone(),
+                        SESSION_ID,
+                        CREATE_PROMPT,
+                        create_operation.clone(),
+                    )
+                    .await;
+                    let complete_replay = invoke_send_message_with_operation_id_for_kernel_goal_3(
+                        state.clone(),
+                        SESSION_ID,
+                        COMPLETE_PROMPT,
+                        complete_operation.clone(),
+                    )
+                    .await;
+                    assert_eq!(create_replay["status"], "completed");
+                    assert_eq!(complete_replay["status"], "completed");
+                    assert_eq!(
+                        before_create_events,
+                        state
+                            .main_chat_agent_event_store
+                            .as_ref()
+                            .expect("RC05 EventStore")
+                            .lock()
+                            .await
+                            .list(&create_operation, 0, 250)
+                            .expect("RC05 create events after replay")
+                    );
+                    assert_eq!(
+                        before_complete_events,
+                        state
+                            .main_chat_agent_event_store
+                            .as_ref()
+                            .expect("RC05 EventStore")
+                            .lock()
+                            .await
+                            .list(&complete_operation, 0, 250)
+                            .expect("RC05 complete events after replay")
+                    );
+
+                    let undone = invoke_send_message_with_operation_id_for_kernel_goal_3(
+                        state.clone(),
+                        SESSION_ID,
+                        UNDO_PROMPT,
+                        undo_operation.clone(),
+                    )
+                    .await;
+                    assert_eq!(undone["status"], "completed", "RC05 undo: {undone}");
+                    assert!(undone["reply"]
+                        .as_str()
+                        .is_some_and(|reply| reply.contains("tombstone")));
+                    let undo_replay = invoke_send_message_with_operation_id_for_kernel_goal_3(
+                        state.clone(),
+                        SESSION_ID,
+                        UNDO_PROMPT,
+                        undo_operation.clone(),
+                    )
+                    .await;
+                    assert_eq!(undo_replay["status"], "completed");
+                    assert_eq!(undo_replay["run_id"], undone["run_id"]);
+
+                    let after = store.list_daily_tasks(true).expect("RC05 tombstoned task");
+                    assert_eq!(after.len(), 1);
+                    assert_eq!(after[0].asset_id, before[0].asset_id);
+                    assert_eq!(after[0].version, 3);
+                    assert_eq!(
+                        after[0].status,
+                        openlife_core::state_store::DailyTaskStatus::Tombstoned
+                    );
+                    assert!(store
+                        .list_daily_tasks(false)
+                        .expect("RC05 active tasks after undo")
+                        .is_empty());
+                }
+                "audit" => {
+                    let tasks = store.list_daily_tasks(true).expect("RC05 audit tasks");
+                    assert_eq!(tasks.len(), 1);
+                    assert_eq!(tasks[0].version, 3);
+                    assert_eq!(
+                        tasks[0].status,
+                        openlife_core::state_store::DailyTaskStatus::Tombstoned
+                    );
+                    assert!(store
+                        .list_daily_tasks(false)
+                        .expect("RC05 audit active tasks")
+                        .is_empty());
+                    for (operation_id, expected_version) in [
+                        (&create_operation, 1_u64),
+                        (&complete_operation, 2_u64),
+                        (&undo_operation, 3_u64),
+                    ] {
+                        let receipt = store
+                            .receipt_for_operation(operation_id, true)
+                            .expect("RC05 audit receipt")
+                            .expect("RC05 durable operation receipt");
+                        assert_eq!(receipt.asset_id, tasks[0].asset_id);
+                        assert_eq!(receipt.asset_version, expected_version);
+                        let events = state
+                            .main_chat_agent_event_store
+                            .as_ref()
+                            .expect("RC05 audit EventStore")
+                            .lock()
+                            .await
+                            .list(operation_id, 0, 250)
+                            .expect("RC05 audit events");
+                        assert_eq!(
+                            events
+                                .iter()
+                                .filter(|event| event.event_type == "effect_committed")
+                                .count(),
+                            1
+                        );
+                        assert_eq!(
+                            events
+                                .iter()
+                                .filter(|event| event.event_type == "final_delivery.created")
+                                .count(),
+                            1
+                        );
+                        assert!(
+                            list_command_surface_actions(&state, operation_id)
+                                .await
+                                .is_empty(),
+                            "StateGateway mutation must not fabricate a Tool/ActionQueue execution"
+                        );
+                    }
+                    assert_eq!(
+                        state
+                            .memory_store
+                            .lock()
+                            .await
+                            .export_all_messages()
+                            .expect("RC05 audit Conversation")
+                            .len(),
+                        6
+                    );
+                    assert!(crate::commands::state::get_daily_goals_with_state(&state)
+                        .await
+                        .expect("RC05 audit task projection")
+                        .is_empty());
+                    assert!(list_command_surface_proposals(&state).await.is_empty());
+                }
+                _ => panic!("unexpected RC05 child phase: {phase}"),
+            }
+        });
+        return;
+    }
+
+    let workspace = tempfile::tempdir().expect("RC05 separate-process workspace");
+    let create_operation = uuid::Uuid::new_v4().to_string();
+    let complete_operation = uuid::Uuid::new_v4().to_string();
+    let undo_operation = uuid::Uuid::new_v4().to_string();
+    let executable = std::env::current_exe().expect("current Rust test executable");
+    for phase in ["seed", "verify", "audit"] {
+        let output = std::process::Command::new(&executable)
+            .arg("--exact")
+            .arg(TEST_NAME)
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env(PHASE_ENV, phase)
+            .env(ROOT_ENV, workspace.path())
+            .env(CREATE_ENV, &create_operation)
+            .env(COMPLETE_ENV, &complete_operation)
+            .env(UNDO_ENV, &undo_operation)
+            .output()
+            .expect("spawn RC05 child test process");
+        assert!(
+            output.status.success(),
+            "RC05 {phase} child failed\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );

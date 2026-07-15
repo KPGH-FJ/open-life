@@ -6008,8 +6008,23 @@ mod turn_admission_tests {
             "TurnEventStore must retain state refs and digests without copying the task body"
         );
         assert_eq!(effect.payload["status"], "committed");
-        assert_eq!(effect.payload["projectionStatus"], "applied");
+        assert_eq!(
+            effect.payload["projectionStatus"], "pending",
+            "the immutable transaction-time event cannot be rewritten as later projection truth"
+        );
         drop(event_store);
+        let create_receipt = state
+            .state_store
+            .as_ref()
+            .unwrap()
+            .receipt_for_operation(&create_operation, true)
+            .unwrap()
+            .expect("current canonical create receipt");
+        assert_eq!(
+            create_receipt.projection_status,
+            openlife_core::state_store::StateProjectionStatus::Applied,
+            "current projection truth belongs to the StateStore receipt/read model"
+        );
         let projected = state.life_model_manager.lock().await.load().unwrap();
         assert!(projected.goals.daily.is_empty());
         assert!(crate::commands::state::get_daily_goals_with_state(&state)
