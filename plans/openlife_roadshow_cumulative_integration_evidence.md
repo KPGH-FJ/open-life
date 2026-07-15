@@ -426,11 +426,30 @@ one completed parent task, and idempotent reaccept with no stage copy. The
 artifact restart matrix separately proves staged recovery, rename-before-
 receipt observation, and retry only when no effect bytes exist.
 
+RC-07 now also has one end-to-end three-process backend lifecycle over a shared
+file-backed ProposalStore, Conversation, AgentRun, TaskSession, TurnEvent, and
+safe workspace:
+
+1. `seed` makes one local HTTP Provider request, creates exactly two pending
+   canonical-path-bound Proposals, leaves both files absent, and exits with the
+   parent task in `WaitingPermission`;
+2. `verify` reopens the stores, accepts only the CSV, confirms its intended and
+   observed digests, leaves the Markdown absent, keeps the parent task in
+   `WaitingPermission`, and proves reaccept does not change the file mtime;
+3. `audit` reopens again, observes one accepted and one pending Proposal,
+   accepts the Markdown, sees the parent become `Completed`, then reaccepts both
+   without changing either mtime or leaving stage/duplicate files.
+
+The ActionQueue contains exactly two completed `proposal.create` governance
+facts. Their immutable observation metadata records no direct write, no
+external write, and no file write at proposal time; they are not Tool or file
+effect credit.
+
 Evidence boundary:
 
 - RC-06 has separate backend OS-process wait/resume/replay evidence;
-- RC-07 has exact journey plus component-level crash/restart evidence, not a
-  single separate-process end-to-end bundle proof;
+- RC-07 has separate backend OS-process partial-accept/resume/replay evidence
+  plus the component-level crash/restart matrix;
 - both use a local HTTP Provider fixture and mock Tauri command surface, not an
   external cloud Provider, packaged desktop relaunch, or native Review Center
   product trial.
@@ -438,16 +457,20 @@ Evidence boundary:
 RC-06 cumulative evidence commit:
 `bf06b0e9d5dc52f8c4fe48d2477dc26c8ba06470`.
 
+RC-07 separate-process evidence commit:
+`8d1e6628431c98068b275b4c66b6a5eb6eb77cc0`.
+
 Mechanical evidence after the addition:
 
 - three-process RC-06 wait/resume/replay lifecycle — passed;
+- three-process RC-07 partial-accept/resume/replay lifecycle — passed;
 - exact RC-07 two-artifact lifecycle — passed;
 - artifact restart reconciliation — 3 passed;
 - complete Proposal command module — 66 passed;
-- full Main Chat command surface — 92 passed;
+- full Main Chat command surface — 95 passed;
 - Main Chat runtime module — 30 passed;
 - single-system authority guards — 32 passed;
-- `cargo check -p openlife-tauri --tests` — passed with existing dead-code
+- `cargo check -p openlife-tauri --tests --locked` — passed with existing dead-code
   warnings only;
 - `cargo fmt --all -- --check` and `git diff --check` — passed.
 
@@ -1051,9 +1074,9 @@ without an identity/keychain/data migration decision.
   trial; their exact external live Provider gates are now complete twice.
 - RC-05 native task journey and repeated product trial on a healthy packaged
   application; generic shell bootstrap/relaunch is now evidenced separately.
-- RC-06/RC-07 packaged/native Review Center and file trial, plus RC-07
-  separate-process end-to-end bundle evidence; their exact external live
-  Provider gates are now complete twice.
+- RC-06/RC-07 packaged/native Review Center and file trial; their exact external
+  live Provider gates are complete twice, and both backend OS-process
+  wait/resume journeys are now complete.
 - CC-01 native picker, live-Web report review, and file trial; its exact external
   live backend gate is now complete twice.
 - CC-02 native picker/parser, transient-task projection, and healthy packaged

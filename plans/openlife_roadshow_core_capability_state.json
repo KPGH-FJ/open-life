@@ -313,7 +313,8 @@
     "rc06_independent_review": "pending",
     "rc07_exact_prompt": "passed_one_local_http_provider_request_two_pending_proposals_zero_preaccept_files_exact_markdown_csv_two_confirmed_receipts_completed_parent_and_idempotent_reaccept",
     "rc07_restart_reconciliation": "passed_staged_recovery_rename_before_receipt_observation_and_prepared_without_bytes_retry_component_matrix",
-    "rc07_full_process_restart": "partial_exact_journey_and_component_restart_matrix_passed_separate_process_end_to_end_bundle_pending",
+    "rc07_backend_os_process_restart": "passed_three_independent_backend_test_processes_seed_two_pending_verify_one_confirmed_parent_waiting_audit_two_confirmed_parent_completed_exact_bytes_unchanged_mtime_no_stage_copy_two_governed_proposal_actions",
+    "rc07_full_process_restart": "partial_backend_os_process_end_to_end_and_component_restart_matrix_passed_packaged_native_review_center_journey_pending",
     "rc07_external_live_provider": "passed_twice_exact_frozen_markdown_csv_prompt_external_provider_two_pending_proposals_zero_preaccept_files_partial_accept_still_waiting_then_two_confirmed_idempotent_materializations",
     "rc07_native_review_center_trial": "pending",
     "rc07_independent_review": "pending",
@@ -393,5 +394,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-15T18:44:18+08:00"
+  "last_updated_at": "2026-07-15T18:52:04+08:00"
 }
