@@ -1833,6 +1833,7 @@ impl<'a> OpenLifeTurnRuntime<'a> {
             &canonical_run_id,
             &task_session_id,
             Some(kernel_event_count),
+            &durable_events,
             durable_event_count,
         )?;
         let final_event = persist_openlife_turn_final_delivery_receipt(
@@ -5220,6 +5221,7 @@ pub(crate) fn finalize_openlife_turn_result(
     canonical_run_id: &str,
     canonical_task_session_id: &str,
     kernel_event_count: Option<usize>,
+    durable_events: &[MainChatAgentDurableEvent],
     durable_event_count: usize,
 ) -> Result<OpenLifeTurnTerminal, String> {
     let generation = result.reasoning_trace.generation_result.as_ref();
@@ -5246,7 +5248,7 @@ pub(crate) fn finalize_openlife_turn_result(
                 openlife_core::tool_execution_receipt::ToolTransportStatus::NotAttempted
             )
         })
-    });
+    }) || durable_tool_invocation_observed(durable_events, canonical_run_id);
     let pending_permission = result.tool_calls.iter().any(|call| {
         call.requires_confirmation
             || matches!(call.status, crate::ToolCallStatus::NeedsConfirmation)
@@ -5317,6 +5319,25 @@ pub(crate) fn finalize_openlife_turn_result(
     };
     result.turn_terminal = Some(terminal.clone());
     Ok(terminal)
+}
+
+/// Cancellation can drop the kernel future after ToolGateway has already
+/// completed and durably recorded a receipt. In that path `tool_calls` is
+/// intentionally empty because no live product projection survived the drop.
+/// The minimal durable receipt remains the canonical invocation fact and must
+/// keep the final delivery/IPC truth aligned with the execution boundary.
+fn durable_tool_invocation_observed(
+    events: &[MainChatAgentDurableEvent],
+    canonical_run_id: &str,
+) -> bool {
+    events.iter().any(|event| {
+        event.run_id == canonical_run_id
+            && event.object_type == "tool_execution_receipt"
+            && matches!(
+                event.payload.get("transportStatus").and_then(Value::as_str),
+                Some("dispatched" | "response_observed" | "local_aborted" | "remote_unknown")
+            )
+    })
 }
 
 fn emit_stream_send_message_result(
@@ -5779,12 +5800,59 @@ fn bounded_preview(value: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod turn_admission_tests {
+    use crate::main_chat_event_stream::MainChatAgentDurableEvent;
+
     use super::{
-        fail_main_chat_once_after_durable_final_for_test,
+        durable_tool_invocation_observed, fail_main_chat_once_after_durable_final_for_test,
         fail_main_chat_once_after_message_commit_for_test,
         install_main_chat_pre_registration_barrier_for_test, validate_openlife_turn_admission,
         MainChatTurnStreamMode, OpenLifeTurnAdmissionError, OpenLifeTurnInput,
     };
+
+    fn durable_tool_transport_event(transport_status: &str) -> MainChatAgentDurableEvent {
+        MainChatAgentDurableEvent {
+            event_id: format!("event-{transport_status}"),
+            task_session_id: "task-1".into(),
+            run_id: "run-1".into(),
+            sequence: 1,
+            event_type: "tool.completed".into(),
+            object_type: "tool_execution_receipt".into(),
+            object_id: "receipt-1".into(),
+            created_at: chrono::Utc::now(),
+            source: "test".into(),
+            payload_digest: format!("sha256:{}", "a".repeat(64)),
+            payload: serde_json::json!({ "transportStatus": transport_status }),
+            backfilled: false,
+        }
+    }
+
+    #[test]
+    fn durable_tool_receipt_keeps_final_invocation_truth_after_kernel_drop() {
+        assert!(!durable_tool_invocation_observed(
+            &[durable_tool_transport_event("not_attempted")],
+            "run-1"
+        ));
+        for status in [
+            "dispatched",
+            "response_observed",
+            "local_aborted",
+            "remote_unknown",
+        ] {
+            assert!(
+                durable_tool_invocation_observed(&[durable_tool_transport_event(status)], "run-1"),
+                "durable ToolGateway transport {status} must count as an invocation"
+            );
+        }
+
+        let mut wrong_owner = durable_tool_transport_event("response_observed");
+        wrong_owner.object_type = "provider_request".into();
+        assert!(!durable_tool_invocation_observed(&[wrong_owner], "run-1"));
+
+        assert!(!durable_tool_invocation_observed(
+            &[durable_tool_transport_event("response_observed")],
+            "run-2"
+        ));
+    }
 
     #[derive(Clone)]
     struct D050FileBackedStorePaths {
