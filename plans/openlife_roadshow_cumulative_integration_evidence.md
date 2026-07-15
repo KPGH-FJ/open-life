@@ -27,9 +27,10 @@
 - CC-03 has passed a canonical explicit-Memory commit, rollback, and
   same-identity persistent-store reopen/recovery mechanical run, plus quoted-
   source and pre-existing-owner counterfactuals.
-- RC-01 through RC-08 and CC-01 through CC-03 have **not** received
-  native desktop, external live-provider, repeated product-trial, or
-  independent-review credit.
+- RC-04 has now received two consecutive external live Provider + Web runs for
+  its frozen Resource/Web prompt. The other journeys have not received their
+  required external live credit, and no journey has received native desktop,
+  repeated product-trial, or independent-review credit.
 - RC-05, RC-06, RC-08, and CC-03 now have separate backend OS-process reopen
   proofs. Packaged Tauri bootstrap, window relaunch, native UI, and CC-03
   production-keychain evidence remain pending.
@@ -204,8 +205,17 @@ Observed product facts:
 - the raw Web body marker is absent from product IPC and its receipt;
 - legacy fallback remains false.
 
-This is local fixture plus local HTTP adapter evidence. It is not external live
-Web or cloud-provider evidence.
+The original deterministic run uses a local Web fixture and captured local HTTP
+Provider. A separate ignored live gate binds the same frozen Resource bytes to
+the exact RC-04 prompt, executes a non-fixture network Web search, and invokes
+the configured external Provider. After the citation contract repair below,
+that full external path passed twice consecutively. Both runs contained a
+completed Web action, ordered durable Provider start/completion facts, backend-
+validated `cite_` and `webref_` references, zero Proposals, and one final
+delivery.
+
+This is external backend-command evidence, not native file-picker, packaged
+desktop, window, or visual product-trial evidence.
 
 ## Root failures found and removed
 
@@ -218,6 +228,13 @@ Web or cloud-provider evidence.
    Policy intent classification now recognizes explicit synthesis from public
    Web evidence while a public-webpage design counterexample remains outside
    Web authority.
+3. The Provider instruction described citation tokens but did not make the
+   per-source requirement an output invariant. The external Provider therefore
+   intermittently omitted the Resource citation and the backend correctly
+   blocked with `resource_citation_validation_failed`. Resource and Web system
+   instructions now require at least one exact supplied token whenever that
+   evidence class is present. The validator was not weakened and no automatic
+   retry was added.
 
 Neither repair removes context evidence, broadens write authority, or lets a
 model authorize the Web route.
@@ -229,6 +246,13 @@ model authorize the Web route.
 - `cargo test -p openlife-core roadshow_external_read_policy_tests -- --nocapture`
   — 2 passed.
 - exact RC-04 command-surface test — passed.
+- exact RC-04 external Resource + Web + Provider gate — passed twice
+  consecutively after the citation-contract repair.
+- external DirectAnswer gate — passed; external streaming gate — passed with
+  33 Provider-bound chunks and final-last delivery.
+- historical Step6 meta-prompt Web gate — remains RED because the user message
+  requests a tool JSON envelope rather than a cited final answer; it is not
+  counted as RC-04 evidence and was not edited.
 - `cargo test -p openlife-tauri main_chat_command_surface_tests:: -- --nocapture`
   — 74 passed.
 - `cargo test -p openlife-tauri main_chat_kernel::tests:: -- --nocapture` —
@@ -239,6 +263,9 @@ model authorize the Web route.
 - `cargo fmt --all -- --check` and `git diff --check` — passed.
 
 Implementation commit: `02fd7580a1078a57e6308921a5ed61f357e4e17d`.
+
+External live citation-contract commit:
+`3ea25fd295763a3dce5720253d73f97e3af10084`.
 
 ## RC-05 exact daily-task lifecycle
 
@@ -718,6 +745,11 @@ are not hidden by the scoped green gates.
   trial, plus RC-07 separate-process end-to-end bundle evidence.
 - RC-08 packaged Tauri bootstrap/window relaunch and native UI projection.
 - CC-03 packaged Tauri desktop restart and native UI projection.
-- full RC-01 through RC-08 cumulative harness, negative scans, single-system
-  guards, widened frontend/backend regression, reliability loops, live product
-  rounds, and independent rereview.
+- release quarantine repair for remaining MCP, Scheduler automation, and Vector
+  product surfaces; single-system/absence guards must prove the resulting
+  default-release boundary.
+- widened frontend behavioral regression, reliability loops, packaged/native
+  live product rounds, and independent rereview. The combined deterministic
+  gate already ran all primary/combined test owners (10 RC-filtered + 1 RC-07 +
+  7 CC tests), the 93-test command surface, runtime/authority guards, frontend
+  typecheck/format, and all eight frozen fixture digests.
