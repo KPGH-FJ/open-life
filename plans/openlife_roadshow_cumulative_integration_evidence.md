@@ -12,7 +12,8 @@
   external live Provider runs for the exact frozen prompt.
 - RC-02 and RC-03 have passed frozen multi-file production-extractor,
   deterministic-selection, captured-HTTP Provider, and backend citation-
-  validation mechanical runs.
+  validation mechanical runs, plus two consecutive external live Provider runs
+  for both exact frozen prompts.
 - RC-04 has passed a single-command mechanical integration run.
 - RC-05 has passed a three-process create, complete, replay, undo, and final
   audit mechanical run against file-backed canonical stores.
@@ -28,11 +29,11 @@
 - CC-03 has passed a canonical explicit-Memory commit, rollback, and
   same-identity persistent-store reopen/recovery mechanical run, plus quoted-
   source and pre-existing-owner counterfactuals.
-- RC-01 and RC-04 have now each received two consecutive external live runs for
-  their exact frozen prompts; RC-04 includes real Web evidence. The other
-  journeys have not received their required external live credit, and no
-  journey has received native desktop, repeated product-trial, or independent-
-  review credit.
+- RC-01, RC-02, RC-03, and RC-04 have now each received two consecutive external
+  live runs for their exact frozen prompts; RC-04 includes real Web evidence.
+  The remaining journeys have not received their required external live credit,
+  and no journey has received native desktop, repeated product-trial, or
+  independent-review credit.
 - RC-05, RC-06, RC-08, and CC-03 now have separate backend OS-process reopen
   proofs. Packaged Tauri bootstrap, window relaunch, native UI, and CC-03
   production-keychain evidence remain pending.
@@ -212,6 +213,34 @@ Mechanical evidence after the addition:
 - `cargo check -p openlife-tauri --tests` — passed with existing dead-code
   warnings only;
 - `cargo fmt --all -- --check` and `git diff --check` — passed.
+
+External live RC-02/RC-03 evidence commit:
+`a33016c5b9bec0d3ac624d22b6005939107eed8f`.
+
+The live gate reuses the production import parser, canonical ResourceStore,
+operation binding, deterministic selection, ordinary streaming Main Chat
+entrypoint, PrivacyPolicy-filtered Provider request, backend citation validator,
+and backend-owned source footer. It does not introduce a test-only resource or
+Provider route. Two consecutive runs on the final evidence code observed, for
+each of RC-02 and RC-03:
+
+- a completed external Provider-backed turn with exactly one
+  `provider.started`, one `provider.completed`, and one
+  `final_delivery.created` durable fact;
+- both selected filenames in the backend-verified source footer;
+- PDF page plus DOCX paragraph provenance for RC-02, and CSV/XLSX range plus
+  worksheet provenance for RC-03;
+- zero Tool, Proposal, review, or durable effect;
+- citation validation before product-visible Provider token delivery, with
+  `stream-message-done` last.
+
+Reply sizes differed across the two runs (RC-02: 3509 then 2602 bytes; RC-03:
+4121 then 2821 bytes), while all invariant checks remained green. This rules out
+fixed-answer or same-output cache credit but does not by itself prove answer
+helpfulness. The exact external gate passed twice, the two local exact attachment
+tests passed, Main Chat command surface passed 93/93, and single-system guards
+passed 32/32. Native file-picker UX, packaged healthy-Keychain behavior,
+repeated product trial, and independent review remain pending.
 
 ## RC-04 exact scenario
 
@@ -893,8 +922,8 @@ without an identity/keychain/data migration decision.
 
 - RC-01 native product UI trial; its exact external live Provider gate is now
   complete twice on the current implementation.
-- RC-02/RC-03 native picker, external live Provider, healthy packaged restart,
-  and repeated product trial.
+- RC-02/RC-03 native picker, healthy packaged restart, and repeated product
+  trial; their exact external live Provider gates are now complete twice.
 - RC-05 native task journey and repeated product trial on a healthy packaged
   application; generic shell bootstrap/relaunch is now evidenced separately.
 - RC-06/RC-07 external live Provider, packaged/native Review Center and file

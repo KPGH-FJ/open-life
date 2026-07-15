@@ -1,7 +1,7 @@
 {
   "schema_version": "openlife-roadshow-core-capability-state-v1",
   "plan_id": "openlife-roadshow-core-capability-2026-07-14",
-  "status": "reliability_and_trial_in_progress_rc01_rc04_external_live_local_mechanics_reliability_loops_release_bundle_and_native_shell_restart_verified_remaining_live_product_journeys_signed_release_and_review_pending_roadshow_no_go",
+  "status": "reliability_and_trial_in_progress_rc01_rc02_rc03_rc04_external_live_local_mechanics_reliability_loops_release_bundle_and_native_shell_restart_verified_remaining_live_product_journeys_signed_release_and_review_pending_roadshow_no_go",
   "authority": {
     "kind": "time_bounded_execution_overlay",
     "subordinate_to": [
@@ -87,8 +87,8 @@
     },
     {
       "id": "V1_RESOURCE",
-      "status": "implementation_verified_live_trial_and_independent_review_pending",
-      "completion_claim": "mechanical_gates_green_external_live_and_native_product_trial_pending",
+      "status": "implementation_and_external_live_verified_native_trial_and_independent_review_pending",
+      "completion_claim": "mechanical_and_external_live_attachment_gates_green_native_product_trial_pending",
       "commit": "25080680b8a458ca7fdd9229098f9c012650bed7",
       "evidence": "plans/openlife_roadshow_v1_resource_evidence.md"
     },
@@ -116,16 +116,16 @@
     },
     {
       "id": "CUMULATIVE_INTEGRATION",
-      "status": "in_progress_primary_combined_local_rc01_rc04_external_live_release_quarantine_reliability_and_default_feature_packaged_shell_verified_remaining_live_product_journeys_signed_release_and_review_evidence_pending",
-      "completion_claim": "no_cumulative_completion_claim_scoped_mechanical_live_rc01_rc04_reliability_release_quarantine_and_packaged_shell_evidence_only",
-      "commit": "157f466e9f56fe52a8408c423410abfdf823cbea",
+      "status": "in_progress_primary_combined_local_rc01_rc02_rc03_rc04_external_live_release_quarantine_reliability_and_default_feature_packaged_shell_verified_remaining_live_product_journeys_signed_release_and_review_evidence_pending",
+      "completion_claim": "no_cumulative_completion_claim_scoped_mechanical_live_rc01_rc02_rc03_rc04_reliability_release_quarantine_and_packaged_shell_evidence_only",
+      "commit": "a33016c5b9bec0d3ac624d22b6005939107eed8f",
       "evidence": "plans/openlife_roadshow_cumulative_integration_evidence.md"
     },
     {
       "id": "RELIABILITY_AND_TRIAL",
-      "status": "in_progress_reliability_loops_rc01_rc04_external_live_and_default_feature_packaged_shell_start_restart_verified_native_capability_journeys_signed_release_and_independent_review_pending",
-      "completion_claim": "no_phase_completion_claim_reliability_rc01_rc04_external_live_and_packaged_shell_only",
-      "commit": "157f466e9f56fe52a8408c423410abfdf823cbea",
+      "status": "in_progress_reliability_loops_rc01_rc02_rc03_rc04_external_live_and_default_feature_packaged_shell_start_restart_verified_native_capability_journeys_signed_release_and_independent_review_pending",
+      "completion_claim": "no_phase_completion_claim_reliability_rc01_rc02_rc03_rc04_external_live_and_packaged_shell_only",
+      "commit": "a33016c5b9bec0d3ac624d22b6005939107eed8f",
       "evidence": "plans/openlife_roadshow_cumulative_integration_evidence.md"
     }
   ],
@@ -199,7 +199,7 @@
     "frontend_attachment_flow": "passed_114_of_114_focused_tests_and_typecheck",
     "lost_response_reconciliation": "passed_import_status_receipt_and_same_id_detach_retry",
     "native_product_trial": "pending",
-    "external_live_provider_attachment": "pending",
+    "external_live_provider_attachment": "passed_twice_exact_frozen_pdf_docx_and_csv_xlsx_prompts_external_provider_backend_validated_both_selected_resource_citation_classes_zero_tool_proposal_or_write",
     "independent_read_only_review": "pending_coderabbit_cli_unavailable",
     "roadshow_release": "no_go"
   },
@@ -276,14 +276,14 @@
     "rc02_selection_truth": "passed_relevant_claim_disagreement_and_risk_chunks_from_both_resources_without_forcing_irrelevant_sentinel_content",
     "rc02_parser_worker": "passed_separate_actual_openlife_tauri_binary_protocol_probe_two_pdf_page_chunks_exit_zero_exact_command_test_uses_in_process_production_extractor",
     "rc02_failure_and_lifecycle": "passed_resource_suite_wrong_mime_corrupt_ooxml_timeout_cancel_replay_drift_and_tombstone_restart_mechanics_not_packaged_desktop_credit",
-    "rc02_external_live_provider": "pending_local_citation_echo_adapter_is_not_external_live_credit",
+    "rc02_external_live_provider": "passed_twice_exact_frozen_pdf_docx_prompt_external_provider_both_files_backend_validated_page_and_paragraph_provenance_zero_tool_proposal_or_write",
     "rc02_native_picker_product_trial": "pending",
     "rc02_independent_review": "pending",
     "rc03_exact_prompt": "passed_production_extractor_csv_xlsx_same_turn_direct_answer_one_local_http_provider_request_backend_validated_csv_range_and_xlsx_sheet_range_citations_zero_tool_proposal_or_write",
     "rc03_untrusted_formula": "passed_webservice_formula_remains_untrusted_cell_data_and_grants_zero_network_tool_proposal_or_write_authority",
     "rc03_parser_worker": "production_extractor_and_resource_suite_passed_actual_binary_probe_covered_pdf_only_xlsx_binary_worker_probe_pending",
     "rc03_failure_and_lifecycle": "passed_resource_suite_bounds_replay_drift_and_tombstone_restart_mechanics_not_packaged_desktop_credit",
-    "rc03_external_live_provider": "pending_local_citation_echo_adapter_is_not_external_live_credit",
+    "rc03_external_live_provider": "passed_twice_exact_frozen_csv_xlsx_prompt_external_provider_both_files_backend_validated_sheet_and_range_provenance_zero_tool_proposal_or_write",
     "rc03_native_picker_product_trial": "pending",
     "rc03_independent_review": "pending",
     "rc04_exact_prompt": "passed_one_main_chat_operation_one_web_action_one_provider_request_with_resource_and_web_context_and_two_validated_source_classes",
@@ -360,6 +360,7 @@
     "cumulative_frontend_static_regression": "passed_typecheck_format_and_66_focused_route_settings_privacy_behavior_tests",
     "cumulative_external_provider_regression": "passed_direct_answer_and_33_provider_bound_chunk_stream_final_last",
     "cumulative_rc01_external_live": "passed_twice_current_commit_428_and_326_provider_bound_chunks_exact_three_paragraphs_and_steps_one_through_five_one_provider_terminal_zero_side_effects",
+    "cumulative_rc02_rc03_external_live": "passed_twice_current_evidence_commit_each_run_imported_canonical_frozen_resources_invoked_external_provider_validated_both_selected_resource_classes_before_delivery_and_created_one_provider_terminal_with_zero_side_effects",
     "cumulative_release_quarantine": "passed_default_release_extension_registry_mcp_a2a_plugin_ipc_and_scheduler_vector_background_routes_quarantined_backend_build_truth_drives_frontend_core_web_file_task_memory_retained",
     "cumulative_release_quarantine_dev_build": "passed_dev_extensions_tauri_test_compile",
     "cumulative_reliability_deterministic_loops": "passed_50_rounds_900_of_900_assertions",
@@ -384,5 +385,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-15T16:39:27+08:00"
+  "last_updated_at": "2026-07-15T16:52:44+08:00"
 }
