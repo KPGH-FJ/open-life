@@ -1,7 +1,7 @@
 {
   "schema_version": "openlife-roadshow-core-capability-state-v1",
   "plan_id": "openlife-roadshow-core-capability-2026-07-14",
-  "status": "reliability_and_trial_in_progress_rc01_rc02_rc03_rc04_rc06_rc07_external_live_local_mechanics_reliability_loops_release_bundle_and_native_shell_restart_verified_remaining_live_product_journeys_signed_release_and_review_pending_roadshow_no_go",
+  "status": "reliability_and_trial_in_progress_rc01_rc02_rc03_rc04_rc06_rc07_cc01_external_live_local_mechanics_reliability_loops_release_bundle_and_native_shell_restart_verified_remaining_live_product_journeys_signed_release_and_review_pending_roadshow_no_go",
   "authority": {
     "kind": "time_bounded_execution_overlay",
     "subordinate_to": [
@@ -94,8 +94,8 @@
     },
     {
       "id": "V2_WEB",
-      "status": "implementation_verified_live_search_passed_live_fetch_environment_blocked_external_provider_product_trial_and_independent_review_pending",
-      "completion_claim": "scoped_mechanical_and_real_search_gates_green_remaining_live_and_product_evidence_explicit",
+      "status": "implementation_verified_live_search_and_external_provider_passed_generic_live_fetch_environment_blocked_native_product_trial_and_independent_review_pending",
+      "completion_claim": "scoped_mechanical_real_search_and_external_provider_gates_green_remaining_generic_fetch_and_native_product_evidence_explicit",
       "commit": "a40605579cfed02b310cfaa0f7be2bbea82af596",
       "evidence": "plans/openlife_roadshow_v2_web_evidence.md"
     },
@@ -116,16 +116,16 @@
     },
     {
       "id": "CUMULATIVE_INTEGRATION",
-      "status": "in_progress_primary_combined_local_rc01_rc02_rc03_rc04_rc06_rc07_external_live_release_quarantine_reliability_and_default_feature_packaged_shell_verified_remaining_live_product_journeys_signed_release_and_review_evidence_pending",
-      "completion_claim": "no_cumulative_completion_claim_scoped_mechanical_live_rc01_rc02_rc03_rc04_rc06_rc07_reliability_release_quarantine_and_packaged_shell_evidence_only",
-      "commit": "296c912f9969c2946c012f5c8e89958ba283ee4b",
+      "status": "in_progress_primary_combined_local_rc01_rc02_rc03_rc04_rc06_rc07_cc01_external_live_release_quarantine_reliability_and_default_feature_packaged_shell_verified_remaining_live_product_journeys_signed_release_and_review_evidence_pending",
+      "completion_claim": "no_cumulative_completion_claim_scoped_mechanical_live_rc01_rc02_rc03_rc04_rc06_rc07_cc01_reliability_release_quarantine_and_packaged_shell_evidence_only",
+      "commit": "1bd986a1cac70325128087231dabd304516324e3",
       "evidence": "plans/openlife_roadshow_cumulative_integration_evidence.md"
     },
     {
       "id": "RELIABILITY_AND_TRIAL",
-      "status": "in_progress_reliability_loops_rc01_rc02_rc03_rc04_rc06_rc07_external_live_and_default_feature_packaged_shell_start_restart_verified_native_capability_journeys_signed_release_and_independent_review_pending",
-      "completion_claim": "no_phase_completion_claim_reliability_rc01_rc02_rc03_rc04_rc06_rc07_external_live_and_packaged_shell_only",
-      "commit": "296c912f9969c2946c012f5c8e89958ba283ee4b",
+      "status": "in_progress_reliability_loops_rc01_rc02_rc03_rc04_rc06_rc07_cc01_external_live_and_default_feature_packaged_shell_start_restart_verified_native_capability_journeys_signed_release_and_independent_review_pending",
+      "completion_claim": "no_phase_completion_claim_reliability_rc01_rc02_rc03_rc04_rc06_rc07_cc01_external_live_and_packaged_shell_only",
+      "commit": "1bd986a1cac70325128087231dabd304516324e3",
       "evidence": "plans/openlife_roadshow_cumulative_integration_evidence.md"
     }
   ],
@@ -215,7 +215,7 @@
     "reasoning_strategy_canonicalization": "passed_direct_react_memory_governance_round_trip",
     "real_duckduckgo_local_provider_chain": "passed_network_read_provider_adapter_receipt_durable_events_final_last",
     "generic_live_fetch": "blocked_current_mac_fake_ip_proxy_environment_without_ssrf_policy_relaxation",
-    "external_live_cloud_provider": "pending_environment_unconfigured",
+    "external_live_cloud_provider": "passed_rc04_twice_and_cc01_twice_with_real_web_external_provider_and_backend_citation_validation_latest_additional_rc04_control_failed_closed_on_model_citation_noncompliance",
     "native_product_trial": "pending",
     "independent_read_only_review": "pending_coderabbit_cli_unavailable",
     "main_chat_kernel": "failed_60_of_68_passed_same_8_preexisting_red",
@@ -332,7 +332,7 @@
     "cc01_citation_truth": "passed_backend_owned_resource_and_web_footers_forged_web_citation_blocks_before_proposal",
     "cc01_receipt_minimization": "passed_raw_web_body_absent_from_product_ipc_and_execution_receipt",
     "cc01_native_product_trial": "pending",
-    "cc01_external_live_provider_and_web": "pending",
+    "cc01_external_live_provider_and_web": "passed_twice_exact_frozen_prompt_production_pdf_real_web_external_provider_both_citation_classes_one_pending_review_zero_preaccept_files_then_one_confirmed_idempotent_materialization",
     "cc01_independent_review": "pending",
     "cc02_exact_prompt": "passed_one_resource_bound_operation_one_atomic_three_task_commit_ordered_projection_and_zero_file_proposal_tool_or_provider_effect",
     "cc02_policy_authority": "passed_current_user_explicit_resource_task_batch_grant_attachment_text_is_data_not_authority",
@@ -362,6 +362,8 @@
     "cumulative_rc01_external_live": "passed_twice_current_commit_428_and_326_provider_bound_chunks_exact_three_paragraphs_and_steps_one_through_five_one_provider_terminal_zero_side_effects",
     "cumulative_rc02_rc03_external_live": "passed_twice_current_evidence_commit_each_run_imported_canonical_frozen_resources_invoked_external_provider_validated_both_selected_resource_classes_before_delivery_and_created_one_provider_terminal_with_zero_side_effects",
     "cumulative_rc06_rc07_external_live": "passed_twice_current_evidence_commit_external_provider_drafts_remained_blocked_waiting_permission_with_zero_preaccept_files_and_zero_body_copy_then_confirmed_once_after_explicit_test_acceptance",
+    "cumulative_cc01_external_live": "passed_twice_current_commit_after_root_stack_repair_one_resource_one_real_web_action_one_external_provider_one_pending_cited_report_zero_preaccept_files_then_one_confirmed_idempotent_materialization",
+    "cumulative_rc04_latest_control": "failed_closed_after_completed_real_web_and_external_provider_when_model_omitted_required_web_citation_not_counted_as_new_credit_prior_two_pass_evidence_retained",
     "cumulative_release_quarantine": "passed_default_release_extension_registry_mcp_a2a_plugin_ipc_and_scheduler_vector_background_routes_quarantined_backend_build_truth_drives_frontend_core_web_file_task_memory_retained",
     "cumulative_release_quarantine_dev_build": "passed_dev_extensions_tauri_test_compile",
     "cumulative_reliability_deterministic_loops": "passed_50_rounds_900_of_900_assertions",
@@ -386,5 +388,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-15T17:04:18+08:00"
+  "last_updated_at": "2026-07-15T17:31:31+08:00"
 }
