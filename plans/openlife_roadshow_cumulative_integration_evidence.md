@@ -9,6 +9,9 @@
 - Cumulative Integration is **in progress**.
 - RC-01 has passed a local captured-HTTP streaming, Provider-failure, and
   same-operation terminal-recovery mechanical run.
+- RC-02 and RC-03 have passed frozen multi-file production-extractor,
+  deterministic-selection, captured-HTTP Provider, and backend citation-
+  validation mechanical runs.
 - RC-04 has passed a single-command mechanical integration run.
 - RC-08 has passed a local cancellation/new-operation-retry mechanical run.
 - CC-01 has passed a local Resource + Web + reviewed Markdown artifact
@@ -18,9 +21,9 @@
 - CC-03 has passed a canonical explicit-Memory commit, rollback, and
   same-identity persistent-store reopen/recovery mechanical run, plus quoted-
   source and pre-existing-owner counterfactuals.
-- RC-01, RC-04, RC-08, CC-01, CC-02, and CC-03 have **not** received native
-  desktop, external live-provider, repeated product-trial, or independent-
-  review credit.
+- RC-01 through RC-04, RC-08, and CC-01 through CC-03 have **not** received
+  native desktop, external live-provider, repeated product-trial, or
+  independent-review credit.
 - RC-08 full application-process restart remains pending. CC-03 now has a
   separate backend OS-process reopen proof; packaged Tauri bootstrap, keychain,
   window relaunch, and native UI evidence remain pending.
@@ -100,6 +103,75 @@ Mechanical evidence after the repair:
   warnings only;
 - `cargo fmt --all -- --check`, `git diff --check`, and staged diff check —
   passed.
+
+## RC-02 and RC-03 exact attachment scenarios
+
+Frozen prompts:
+
+> 比较这两份文件的核心主张、分歧和风险，并给出逐条引用。
+
+> 分析这两份表格的趋势、异常和可能的数据质量问题，并引用对应工作表和单元格范围。
+
+The exact command tests parse the frozen PDF/DOCX and CSV/XLSX bytes with the
+production bounded extractor, commit the resulting bytes/chunks/provenance to
+the canonical ResourceStore under the same UUIDv4 turn identity, and send the
+frozen prompt through ordinary Main Chat. One captured local HTTP Provider
+request receives the deterministically selected, explicitly untrusted blocks.
+The local Provider harness returns every backend-issued Resource citation; the
+backend validates those ids before rendering the canonical source footer.
+
+Observed RC-02 facts:
+
+- Policy selects side-effect-free `direct_answer`; legacy fallback is false;
+- selected context contains relevant PDF and DOCX evidence rather than forcing
+  irrelevant sentinel paragraphs into the request;
+- the rendered answer resolves citations to both `roadshow_compare.pdf` pages
+  and `roadshow_compare.docx` paragraph ranges;
+- the turn executes zero Tool, Proposal, or durable product write.
+
+Observed RC-03 facts:
+
+- selected context contains the anomaly row and formula-shaped data from both
+  CSV and XLSX;
+- the rendered answer resolves citations to CSV ranges and the
+  `roadshow_metrics` XLSX sheet/ranges;
+- `WEBSERVICE(...)` remains untrusted cell text and grants no Network, Tool,
+  Proposal, or write authority;
+- the turn executes zero Tool, Proposal, or durable product write.
+
+Evidence boundaries and counterfactuals:
+
+- the exact command tests use the production extractor in-process because a
+  Rust libtest executable is not the shipped Tauri parser-worker entrypoint;
+- a separate direct binary-protocol probe started
+  `target/debug/openlife-tauri --openlife-resource-parser-worker-v1`, parsed the
+  frozen PDF, exited zero, and returned two page-provenance chunks;
+- the 21-test Resource suite separately proves wrong MIME/corrupt OOXML failure,
+  bounded selection, replay/drift rejection, tombstone restart behavior, and
+  kill/reap on parser cancellation or timeout;
+- these local fixtures and the citation-echo Provider do not prove native file
+  picker UX, external live-provider answer quality, packaged desktop restart,
+  or product-trial usability.
+
+No new parser, Resource store, selector, vector route, or provider-specific
+upload path was introduced. This slice closes the missing cumulative vertical
+journeys on the V1 architecture; it does not claim that all RC-02/RC-03 live
+and lifecycle evidence is complete.
+
+RC-02/RC-03 cumulative evidence commit:
+`cf269e536425198139fcb865355cb3165e2992df`.
+
+Mechanical evidence after the addition:
+
+- exact RC-02 and RC-03 command tests — 2 passed;
+- Resource parser/gateway/store/selection filter — 21 passed;
+- production parser-worker binary protocol probe — passed;
+- full Main Chat command surface — 90 passed;
+- Main Chat runtime module — 30 passed;
+- single-system authority guards — 32 passed;
+- `cargo check -p openlife-tauri --tests` — passed with existing dead-code
+  warnings only;
+- `cargo fmt --all -- --check` and `git diff --check` — passed.
 
 ## RC-04 exact scenario
 
@@ -488,6 +560,8 @@ are not hidden by the scoped green gates.
 ## Remaining cumulative work
 
 - RC-01 external live Provider and native product UI trial.
+- RC-02/RC-03 native picker, external live Provider, packaged restart, and
+  repeated product trial.
 - RC-08 full application-process restart/reopen and native UI projection.
 - CC-03 packaged Tauri desktop restart and native UI projection.
 - full RC-01 through RC-08 cumulative harness, negative scans, single-system

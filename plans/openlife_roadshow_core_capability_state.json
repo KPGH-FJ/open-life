@@ -116,9 +116,9 @@
     },
     {
       "id": "CUMULATIVE_INTEGRATION",
-      "status": "in_progress_rc01_rc04_rc08_cc01_cc02_and_cc03_local_mechanics_verified_remaining_restart_combined_live_and_review_evidence_pending",
-      "completion_claim": "no_cumulative_completion_claim_rc01_rc04_rc08_cc01_cc02_cc03_local_mechanical_evidence_only",
-      "commit": "b4c15abf8ceceeebb142a1f0ba4a9a9d575650cb",
+      "status": "in_progress_rc01_rc02_rc03_rc04_rc08_cc01_cc02_and_cc03_local_mechanics_verified_remaining_restart_combined_live_and_review_evidence_pending",
+      "completion_claim": "no_cumulative_completion_claim_rc01_rc02_rc03_rc04_rc08_cc01_cc02_cc03_local_mechanical_evidence_only",
+      "commit": "cf269e536425198139fcb865355cb3165e2992df",
       "evidence": "plans/openlife_roadshow_cumulative_integration_evidence.md"
     },
     {
@@ -271,6 +271,20 @@
     "rc01_external_live_provider": "pending_local_http_adapter_is_not_external_live_credit",
     "rc01_native_product_ui_trial": "pending",
     "rc01_independent_review": "pending",
+    "rc02_exact_prompt": "passed_production_extractor_pdf_docx_same_turn_direct_answer_one_local_http_provider_request_backend_validated_page_and_paragraph_citations_zero_tool_proposal_or_write",
+    "rc02_selection_truth": "passed_relevant_claim_disagreement_and_risk_chunks_from_both_resources_without_forcing_irrelevant_sentinel_content",
+    "rc02_parser_worker": "passed_separate_actual_openlife_tauri_binary_protocol_probe_two_pdf_page_chunks_exit_zero_exact_command_test_uses_in_process_production_extractor",
+    "rc02_failure_and_lifecycle": "passed_resource_suite_wrong_mime_corrupt_ooxml_timeout_cancel_replay_drift_and_tombstone_restart_mechanics_not_packaged_desktop_credit",
+    "rc02_external_live_provider": "pending_local_citation_echo_adapter_is_not_external_live_credit",
+    "rc02_native_picker_product_trial": "pending",
+    "rc02_independent_review": "pending",
+    "rc03_exact_prompt": "passed_production_extractor_csv_xlsx_same_turn_direct_answer_one_local_http_provider_request_backend_validated_csv_range_and_xlsx_sheet_range_citations_zero_tool_proposal_or_write",
+    "rc03_untrusted_formula": "passed_webservice_formula_remains_untrusted_cell_data_and_grants_zero_network_tool_proposal_or_write_authority",
+    "rc03_parser_worker": "production_extractor_and_resource_suite_passed_actual_binary_probe_covered_pdf_only_xlsx_binary_worker_probe_pending",
+    "rc03_failure_and_lifecycle": "passed_resource_suite_bounds_replay_drift_and_tombstone_restart_mechanics_not_packaged_desktop_credit",
+    "rc03_external_live_provider": "pending_local_citation_echo_adapter_is_not_external_live_credit",
+    "rc03_native_picker_product_trial": "pending",
+    "rc03_independent_review": "pending",
     "rc04_exact_prompt": "passed_one_main_chat_operation_one_web_action_one_provider_request_with_resource_and_web_context_and_two_validated_source_classes",
     "rc04_policy_authority": "passed_deterministic_current_user_public_web_evidence_route_with_webpage_design_counterexample",
     "rc04_event_truth": "passed_strict_canonical_resource_and_web_context_refs_without_body_copy",
@@ -325,5 +339,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-15T12:47:36+08:00"
+  "last_updated_at": "2026-07-15T13:09:30+08:00"
 }
