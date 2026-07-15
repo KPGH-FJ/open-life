@@ -3,6 +3,7 @@ use crate::agent::main_chat_governance_intent::{
     extract_main_chat_intent_signals, MainChatBlockerRequirement, MainChatDurableWriteRequirement,
     MainChatIntentSignals,
 };
+use crate::agent::main_chat_memory_candidate::is_supplied_text_transformation_request;
 use crate::agent::types::{AgentRunReceiptKey, AgentTaskKind};
 use crate::agent::{
     ActionExecutionContext, ActionExecutionStatus, ActionExecutorConfig, AgentActionRequest,
@@ -297,6 +298,8 @@ impl IntentFrame {
             has_embedded_untrusted_instruction,
             advice_only,
         );
+        let supplied_text_transformation_only = is_supplied_text_transformation_request(&lower)
+            && !is_explicit_tracked_plan_request(&lower);
 
         let requests_memory_change = governance_intent.durable_write_requirement
             == Some(MainChatDurableWriteRequirement::MemoryProposal)
@@ -323,6 +326,7 @@ impl IntentFrame {
             && is_conditional_observation_memory_review_request(&lower);
         let requests_plan_task = transient_state_intent.is_none()
             && is_plan_execute_intent(&lower)
+            && !supplied_text_transformation_only
             && !is_habitual_preference_statement_without_plan_request(&lower)
             && !requests_durable_write
             && !requires_external_read
@@ -349,6 +353,7 @@ impl IntentFrame {
             && !is_habitual_preference_statement_without_plan_request(&lower)
             && !requests_durable_write
             && !requires_external_read
+            && !supplied_text_transformation_only
             && !advice_only
         {
             ambiguity_reasons.push("planning_goal_missing_scope".into());
@@ -15516,6 +15521,24 @@ fn is_plan_execute_intent(lower: &str) -> bool {
         ],
     ) || is_current_work_arrangement_intent(lower)
         || is_conditional_arrangement_plan_intent(lower)
+}
+
+fn is_explicit_tracked_plan_request(lower: &str) -> bool {
+    contains_any(
+        lower,
+        &[
+            "tracked plan",
+            "track this plan",
+            "save this plan",
+            "resume this plan",
+            "execute this plan",
+            "可跟踪的计划",
+            "跟踪这个计划",
+            "保存这个计划",
+            "继续这个计划",
+            "执行这个计划",
+        ],
+    )
 }
 
 fn is_habitual_preference_statement_without_plan_request(lower: &str) -> bool {

@@ -4711,6 +4711,199 @@ async fn main_chat_kernel_chinese_weather_send_stream_answers_only_after_fixture
 }
 
 #[tokio::test]
+async fn roadshow_rc01_exact_prompt_streams_one_writing_and_plan_final_without_redispatch() {
+    const PROMPT: &str = "把下面这段产品介绍改写成适合路演开场的三段话，然后给出一个五步执行计划：OpenLife 是一个由私人 LifeModel 引导的本地优先个人 Agent。";
+    const REPLY: &str = "OpenLife 让私人 LifeModel 成为每次协作的长期指南。\n\n它优先在本地处理个人上下文，同时保留经治理的云端能力。\n\n这不是只会聊天的界面，而是能把计划推进为可核验行动的个人 Agent。\n\n1. 冻结路演主张。\n2. 验证核心闭环。\n3. 演练失败恢复。\n4. 准备离线备份。\n5. 完成现场复盘。";
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let session_id = "roadshow-rc01-writing-plan";
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let captured_requests = crate::main_chat_acceptance_test_support::configure_live_provider_eval_state_with_captured_streaming_local_http_provider(
+        &state,
+        vec![
+            ("OpenLife 让私人 LifeModel 成为每次协作的长期指南。\n\n", std::time::Duration::from_millis(1)),
+            ("它优先在本地处理个人上下文，同时保留经治理的云端能力。\n\n这不是只会聊天的界面，而是能把计划推进为可核验行动的个人 Agent。\n\n", std::time::Duration::from_millis(1)),
+            ("1. 冻结路演主张。\n2. 验证核心闭环。\n3. 演练失败恢复。\n4. 准备离线备份。\n5. 完成现场复盘。", std::time::Duration::from_millis(1)),
+        ],
+    )
+    .await;
+    let emitted = std::sync::Arc::new(std::sync::Mutex::new(
+        Vec::<(String, serde_json::Value)>::new(),
+    ));
+    let captured_events = std::sync::Arc::clone(&emitted);
+
+    let done = crate::main_chat_streaming::start_stream_message_with_operation_state(
+        operation_id.clone(),
+        session_id.into(),
+        vec![openlife_core::llm::ChatMessage {
+            role: "user".into(),
+            content: PROMPT.into(),
+        }],
+        None,
+        &state,
+        move |event, payload| {
+            captured_events
+                .lock()
+                .expect("capture RC01 stream events")
+                .push((event.into(), payload));
+        },
+    )
+    .await
+    .expect("RC01 exact writing and plan turn");
+
+    assert_eq!(done["status"], "completed", "RC01 result: {done}");
+    assert_eq!(done["reply"], REPLY);
+    assert_eq!(done["legacy_fallback_used"], false);
+    assert_eq!(done["model_invoked"], true);
+    assert_eq!(done["tool_invoked"], false);
+    assert_eq!(
+        done["agent_ingress"]["selectedStrategy"], "direct_answer",
+        "RC01 asks for answer content; it does not authorize a persisted PlanExecute draft"
+    );
+    assert!(done["tool_calls"].as_array().is_some_and(Vec::is_empty));
+    assert!(list_command_surface_proposals(&state).await.is_empty());
+    let plan_sessions = state
+        .plan_execute_session_store
+        .as_ref()
+        .expect("RC01 PlanExecute store")
+        .lock()
+        .await
+        .list_sessions(10)
+        .expect("list RC01 PlanExecute sessions");
+    assert!(
+        plan_sessions.is_empty(),
+        "a writing and plan-decomposition answer cannot silently create a tracked PlanExecute session"
+    );
+    assert_eq!(
+        captured_requests
+            .lock()
+            .expect("captured RC01 Provider requests")
+            .len(),
+        1
+    );
+    let captured_request = captured_requests
+        .lock()
+        .expect("read captured RC01 Provider request")
+        .first()
+        .cloned()
+        .expect("one captured RC01 Provider request");
+    assert!(
+        captured_request.contains("OpenLife"),
+        "captured Provider request must retain the non-sensitive task anchor after PrivacyPolicy filtering: {captured_request}"
+    );
+    assert!(captured_request.contains("\"stream\":true"));
+    let events = emitted.lock().expect("read RC01 stream events");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|(event, _)| event == "stream-message-chunk")
+            .count(),
+        3,
+        "RC01 must expose each of the three Provider chunks incrementally"
+    );
+    assert_eq!(
+        events.last().map(|(event, _)| event.as_str()),
+        Some("stream-message-done"),
+        "RC01 final must be the last transport event"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|(event, _)| event == "stream-message-done")
+            .count(),
+        1
+    );
+    drop(events);
+
+    let replay = crate::main_chat_send::send_message_with_operation_state(
+        operation_id.clone(),
+        session_id.into(),
+        vec![openlife_core::llm::ChatMessage {
+            role: "user".into(),
+            content: PROMPT.into(),
+        }],
+        None,
+        &state,
+    )
+    .await
+    .expect("recover RC01 durable final");
+    assert_eq!(replay.status, "completed");
+    assert_eq!(replay.reply, REPLY);
+    assert_eq!(replay.run_id.as_deref(), Some(operation_id.as_str()));
+    assert_eq!(
+        captured_requests
+            .lock()
+            .expect("captured RC01 Provider requests after recovery")
+            .len(),
+        1,
+        "same-operation terminal recovery cannot redispatch Provider"
+    );
+}
+
+#[tokio::test]
+async fn roadshow_rc01_provider_failure_is_terminal_and_never_becomes_plan_success() {
+    const PROMPT: &str = "把下面这段产品介绍改写成适合路演开场的三段话，然后给出一个五步执行计划：OpenLife 是一个由私人 LifeModel 引导的本地优先个人 Agent。";
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    let captured_requests = crate::main_chat_acceptance_test_support::configure_live_provider_eval_state_with_failing_local_http_provider(&state).await;
+    let mut emitted = Vec::<(String, serde_json::Value)>::new();
+
+    let result = crate::main_chat_streaming::start_stream_message_with_operation_state(
+        uuid::Uuid::new_v4().to_string(),
+        "roadshow-rc01-provider-failure".into(),
+        vec![openlife_core::llm::ChatMessage {
+            role: "user".into(),
+            content: PROMPT.into(),
+        }],
+        None,
+        &state,
+        |event, payload| emitted.push((event.into(), payload)),
+    )
+    .await
+    .expect("RC01 Provider failure remains a typed terminal result");
+
+    assert_ne!(
+        result["status"], "completed",
+        "failure cannot become success"
+    );
+    assert_eq!(result["agent_ingress"]["selectedStrategy"], "direct_answer");
+    assert_eq!(result["model_invoked"], true);
+    assert_ne!(
+        result["turn_terminal"]["providerInvocationStatus"],
+        "completed"
+    );
+    assert!(result["blockers"]
+        .as_array()
+        .is_some_and(|blockers| !blockers.is_empty()));
+    assert!(list_command_surface_proposals(&state).await.is_empty());
+    assert!(state
+        .plan_execute_session_store
+        .as_ref()
+        .expect("RC01 failure PlanExecute store")
+        .lock()
+        .await
+        .list_sessions(10)
+        .expect("list RC01 failure PlanExecute sessions")
+        .is_empty());
+    assert_eq!(
+        captured_requests
+            .lock()
+            .expect("captured failing RC01 request")
+            .len(),
+        1
+    );
+    assert_eq!(
+        emitted.last().map(|(event, _)| event.as_str()),
+        Some("stream-message-done")
+    );
+    assert_eq!(
+        emitted
+            .iter()
+            .filter(|(event, _)| event == "stream-message-done")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn roadshow_rc04_exact_prompt_combines_bound_resource_and_observed_web_in_one_turn() {
     let operation_id = uuid::Uuid::new_v4().to_string();
     let state = isolated_command_surface_state_with_bound_markdown_resource(&operation_id);

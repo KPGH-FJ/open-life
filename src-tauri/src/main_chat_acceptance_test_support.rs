@@ -100,11 +100,42 @@ pub(crate) async fn configure_live_provider_eval_state_with_barriered_streaming_
     chunks: Vec<(&'static str, std::time::Duration)>,
 ) -> Arc<std::sync::atomic::AtomicBool> {
     let release_remaining_chunks = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let provider_base =
-        fake_streaming_local_chat_provider_endpoint(chunks, Arc::clone(&release_remaining_chunks))
-            .await;
+    let provider_base = fake_streaming_local_chat_provider_endpoint(
+        chunks,
+        Arc::clone(&release_remaining_chunks),
+        None,
+    )
+    .await;
     configure_local_http_provider(state, provider_base).await;
     release_remaining_chunks
+}
+
+pub(crate) async fn configure_live_provider_eval_state_with_captured_streaming_local_http_provider(
+    state: &Arc<AppState>,
+    chunks: Vec<(&'static str, std::time::Duration)>,
+) -> Arc<std::sync::Mutex<Vec<String>>> {
+    use std::sync::atomic::AtomicBool;
+
+    let captured_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let release_remaining_chunks = Arc::new(AtomicBool::new(true));
+    let provider_base = fake_streaming_local_chat_provider_endpoint(
+        chunks,
+        Arc::clone(&release_remaining_chunks),
+        Some(Arc::clone(&captured_requests)),
+    )
+    .await;
+    configure_local_http_provider(state, provider_base).await;
+    captured_requests
+}
+
+pub(crate) async fn configure_live_provider_eval_state_with_failing_local_http_provider(
+    state: &Arc<AppState>,
+) -> Arc<std::sync::Mutex<Vec<String>>> {
+    let captured_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider_base =
+        fake_failing_local_chat_provider_endpoint(Arc::clone(&captured_requests)).await;
+    configure_local_http_provider(state, provider_base).await;
+    captured_requests
 }
 
 pub(crate) async fn configure_live_provider_eval_state_with_hanging_local_http_provider(
@@ -303,6 +334,7 @@ impl LocalCitationEcho {
 async fn fake_streaming_local_chat_provider_endpoint(
     chunks: Vec<(&'static str, std::time::Duration)>,
     release_remaining_chunks: Arc<std::sync::atomic::AtomicBool>,
+    captured_requests: Option<Arc<std::sync::Mutex<Vec<String>>>>,
 ) -> String {
     use std::sync::atomic::Ordering;
 
@@ -351,6 +383,12 @@ async fn fake_streaming_local_chat_provider_endpoint(
                 }
                 Err(_) => break,
             }
+        }
+        if let Some(captured_requests) = captured_requests.as_ref() {
+            captured_requests
+                .lock()
+                .expect("capture local streaming provider request")
+                .push(String::from_utf8_lossy(&request_bytes).into_owned());
         }
 
         let body = chunks
@@ -407,6 +445,73 @@ async fn fake_streaming_local_chat_provider_endpoint(
         std::io::Write::write_all(&mut stream, b"data: [DONE]\n\n")
             .expect("write streaming provider completion");
         std::io::Write::flush(&mut stream).expect("flush streaming provider completion");
+    });
+    format!("http://{addr}/v1")
+}
+
+async fn fake_failing_local_chat_provider_endpoint(
+    captured_requests: Arc<std::sync::Mutex<Vec<String>>>,
+) -> String {
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("bind local failing chat provider");
+    let addr = listener.local_addr().expect("local failing provider addr");
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept failing provider request");
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+        let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(2)));
+        let mut request_bytes = Vec::new();
+        let mut buffer = [0u8; 8192];
+        loop {
+            match std::io::Read::read(&mut stream, &mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    request_bytes.extend_from_slice(&buffer[..read]);
+                    let request = String::from_utf8_lossy(&request_bytes);
+                    let complete = request.find("\r\n\r\n").is_some_and(|header_end| {
+                        let content_length = request[..header_end]
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        request_bytes.len() >= header_end + 4 + content_length
+                    });
+                    if complete {
+                        break;
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        captured_requests
+            .lock()
+            .expect("capture failing local provider request")
+            .push(String::from_utf8_lossy(&request_bytes).into_owned());
+        let body = serde_json::json!({
+            "error": {
+                "type": "roadshow_provider_unavailable",
+                "message": "injected provider failure"
+            }
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+        let _ = std::io::Write::flush(&mut stream);
     });
     format!("http://{addr}/v1")
 }

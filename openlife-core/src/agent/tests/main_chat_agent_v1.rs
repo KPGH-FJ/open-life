@@ -312,6 +312,55 @@ fn habitual_work_preference_is_not_misclassified_as_a_plan_command() {
 }
 
 #[test]
+fn supplied_text_transformation_with_plan_output_stays_a_side_effect_free_direct_answer() {
+    const PROMPT: &str = "把下面这段产品介绍改写成适合路演开场的三段话，然后给出一个五步执行计划：OpenLife 是一个由私人 LifeModel 引导的本地优先个人 Agent。";
+
+    let intent = IntentFrame::from_user_message(PROMPT);
+    assert!(
+        !intent.requests_plan_task,
+        "a plan requested as part of transforming supplied text is answer content, not authorization to create a PlanExecute session"
+    );
+    assert!(!intent.requests_durable_write);
+
+    let decision = AgentIngress::default().decide(
+        "roadshow-rc01-writing-plan",
+        PROMPT,
+        None,
+        AgentTaskKind::Conversation,
+    );
+    assert_eq!(decision.policy_route, PolicyRouteKind::DirectAnswer);
+    assert_eq!(
+        decision.selected_strategy,
+        MainChatAgentStrategy::DirectAnswer
+    );
+    assert!(decision
+        .policy_decision
+        .allows(AllowedCapability::ProviderGeneration));
+    assert!(!decision
+        .policy_decision
+        .allows(AllowedCapability::PlanDraft));
+}
+
+#[test]
+fn supplied_text_transformation_does_not_suppress_an_explicit_tracked_plan_request() {
+    let decision = AgentIngress::default().decide(
+        "tracked-plan-after-rewrite",
+        "Rewrite this text, then create a tracked plan for carrying it out: OpenLife is a personal Agent.",
+        None,
+        AgentTaskKind::Conversation,
+    );
+
+    assert_eq!(decision.policy_route, PolicyRouteKind::PlanDraft);
+    assert_eq!(
+        decision.selected_strategy,
+        MainChatAgentStrategy::PlanExecute
+    );
+    assert!(decision
+        .policy_decision
+        .allows(AllowedCapability::PlanDraft));
+}
+
+#[test]
 fn policy_router_owns_file_write_routing_before_the_kernel() {
     let decision = AgentIngress::default().decide(
         "policy-file-write",
