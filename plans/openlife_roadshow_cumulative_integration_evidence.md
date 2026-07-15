@@ -19,7 +19,8 @@
   audit mechanical run against file-backed canonical stores.
 - RC-06 has passed a three-process wait-for-review, accept, replay, and final
   audit run. RC-07 has passed its exact two-artifact journey and artifact crash
-  reconciliation matrix.
+  reconciliation matrix. Both exact frozen prompts have also passed two
+  consecutive external live Provider runs.
 - RC-08 has passed both a local cancellation/new-operation-retry run and a
   three-process cancel, reopen, explicit retry, and audit mechanical run.
 - CC-01 has passed a local Resource + Web + reviewed Markdown artifact
@@ -29,11 +30,11 @@
 - CC-03 has passed a canonical explicit-Memory commit, rollback, and
   same-identity persistent-store reopen/recovery mechanical run, plus quoted-
   source and pre-existing-owner counterfactuals.
-- RC-01, RC-02, RC-03, and RC-04 have now each received two consecutive external
-  live runs for their exact frozen prompts; RC-04 includes real Web evidence.
-  The remaining journeys have not received their required external live credit,
-  and no journey has received native desktop, repeated product-trial, or
-  independent-review credit.
+- RC-01, RC-02, RC-03, RC-04, RC-06, and RC-07 have now each received two
+  consecutive external live runs for their exact frozen prompts; RC-04 includes
+  real Web evidence. The remaining applicable journeys have not received their
+  required external live credit, and no journey has received native desktop,
+  repeated product-trial, or independent-review credit.
 - RC-05, RC-06, RC-08, and CC-03 now have separate backend OS-process reopen
   proofs. Packaged Tauri bootstrap, window relaunch, native UI, and CC-03
   production-keychain evidence remain pending.
@@ -448,6 +449,38 @@ Mechanical evidence after the addition:
 - `cargo check -p openlife-tauri --tests` — passed with existing dead-code
   warnings only;
 - `cargo fmt --all -- --check` and `git diff --check` — passed.
+
+External live RC-06/RC-07 evidence commit:
+`296c912f9969c2946c012f5c8e89958ba283ee4b`.
+
+The ignored external gate uses the ordinary streaming Main Chat entrypoint and
+configured external Provider, but otherwise keeps the same V4 owners: Rust
+selects the safe paths, validates the bounded artifact envelope, stages bytes,
+creates Proposal records, and materializes only through the existing Proposal
+acceptance command. Two consecutive runs on the final evidence code observed:
+
+- RC-06 produced one pending Markdown Proposal; RC-07 produced one Markdown and
+  one CSV Proposal;
+- each turn remained truthfully `blocked` with its canonical task in
+  `WaitingPermission`, zero files before acceptance, zero Tool/effect events,
+  and exactly one Provider start/completion/final lifecycle;
+- unreviewed Provider bytes produced zero Provider-bound product token chunks
+  and were absent from the product result, Proposal JSON, AgentRun, and durable
+  TurnEvent JSON;
+- each accepted artifact had matching intended and observed digests; RC-07
+  remained `WaitingPermission` after its first acceptance and became
+  `Completed` only after both were confirmed;
+- reaccepting the first Proposal reused the original receipt and left no stage
+  file or second final artifact.
+
+The two RC-06 Markdown outputs were 1445 and 1119 bytes. The two RC-07 runs
+produced Markdown/CSV sizes of 1346/628 and 1023/563 bytes. Different generated
+bytes with invariant lifecycle results rule out fixed-output cache credit but do
+not replace a human helpfulness review. The two local exact artifact tests,
+Main Chat command surface 93/93, single-system guards 32/32, format checks, and
+the live-test module ownership guard all passed. Native Review Center UX,
+packaged healthy-Keychain behavior, signed release, repeated product trial, and
+independent review remain pending.
 
 ## RC-08 exact scenario
 
@@ -926,8 +959,9 @@ without an identity/keychain/data migration decision.
   trial; their exact external live Provider gates are now complete twice.
 - RC-05 native task journey and repeated product trial on a healthy packaged
   application; generic shell bootstrap/relaunch is now evidenced separately.
-- RC-06/RC-07 external live Provider, packaged/native Review Center and file
-  trial, plus RC-07 separate-process end-to-end bundle evidence.
+- RC-06/RC-07 packaged/native Review Center and file trial, plus RC-07
+  separate-process end-to-end bundle evidence; their exact external live
+  Provider gates are now complete twice.
 - RC-08 native cancel/retry projection and external live Provider/Web journey;
   generic shell bootstrap/relaunch is now evidenced separately.
 - CC-03 native Memory commit/rollback projection on a healthy packaged
