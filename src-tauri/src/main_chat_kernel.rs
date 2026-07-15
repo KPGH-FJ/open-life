@@ -2492,6 +2492,22 @@ where
         .state_store
         .as_ref()
         .ok_or_else(|| "state_store_unavailable_degraded".to_string())?;
+    if intent.reason_code == "explicit_resource_daily_task_batch" {
+        return build_kernel_resource_daily_task_batch_result(
+            session_id,
+            canonical_run_id,
+            execution_epoch,
+            state,
+            main_chat_agent_turn,
+            execution_transcript,
+            provider_runtime,
+            event_sink,
+            event_sink_label,
+            grant,
+            execution_context,
+        )
+        .await;
+    }
     let mut outcome = openlife_core::state_store::StateGateway::new((**state_store).clone())
         .execute_with_admission(grant, execution_context, execution_epoch)
         .map_err(|error| format!("transient_state_gateway_failed:{error}"))?;
@@ -2534,8 +2550,12 @@ where
                     "mutationKind": receipt.mutation_kind,
                     "payloadDigest": receipt.payload_digest,
                     "outboxEventId": receipt.outbox_event_id,
-                    "projectionStatus": transient_state_projection_status_label(receipt.projection_status),
-                    "replayed": receipt.replayed,
+                    // The immutable event records the transaction-time fact:
+                    // the canonical effect committed with projection work
+                    // enqueued. Current projection truth remains in the
+                    // outbox-backed receipt/read model and may change later.
+                    "projectionStatus": "pending",
+                    "replayed": false,
                 }),
             )
             .await
@@ -2685,6 +2705,392 @@ where
                 "canonicalWriteCommitted": receipt.is_some(),
                 "receiptId": receipt.map(|value| value.receipt_id.as_str()),
                 "projectionStatus": receipt.map(|value| transient_state_projection_status_label(value.projection_status)),
+            }),
+        )
+        .await,
+    );
+    let agent_state =
+        assemble_main_chat_agent_state_for_turn(state, Some(task_session_id), Some(&agent_run.id))
+            .await;
+    durable_events
+        .extend(materialize_optional_main_chat_agent_events(state, agent_state.as_ref()).await?);
+
+    Ok(MainChatKernelCommandSurfaceResult {
+        reply,
+        reasoning_trace,
+        tool_calls: Vec::new(),
+        run_id: Some(agent_run.id),
+        agent_ingress: Some(main_chat_agent_turn.decision.clone()),
+        agent_state,
+        execution_transcript,
+        legacy_fallback_used: false,
+        durable_events,
+        kernel_events,
+    })
+}
+
+fn is_resource_task_control_line(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    normalized.starts_with("ignore previous")
+        || normalized.starts_with("ignore all previous")
+        || normalized.starts_with("system:")
+        || normalized.starts_with("developer:")
+        || normalized.starts_with("assistant:")
+        || normalized.starts_with("tool:")
+        || normalized.starts_with("忽略之前")
+        || normalized.starts_with("忽略以上")
+        || normalized.starts_with("系统:")
+        || normalized.starts_with("系统：")
+        || normalized.starts_with("开发者:")
+        || normalized.starts_with("开发者：")
+        || normalized.starts_with("助手:")
+        || normalized.starts_with("助手：")
+        || normalized.starts_with("工具:")
+        || normalized.starts_with("工具：")
+        || normalized.contains("<tool_call")
+        || normalized.contains("</tool_call")
+}
+
+fn normalize_resource_task_line(value: &str) -> Option<String> {
+    let mut value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    for prefix in ["- ", "* ", "• ", "☐ ", "[ ] "] {
+        if let Some(stripped) = value.strip_prefix(prefix) {
+            value = stripped.trim();
+            break;
+        }
+    }
+    let numbered_prefix_len = value
+        .char_indices()
+        .take_while(|(_, character)| character.is_ascii_digit())
+        .map(|(index, character)| index + character.len_utf8())
+        .last()
+        .filter(|length| {
+            value
+                .get(*length..)
+                .is_some_and(|suffix| suffix.starts_with(". ") || suffix.starts_with(") "))
+        });
+    if let Some(length) = numbered_prefix_len {
+        value = value.get(length + 2..).map(str::trim).unwrap_or_default();
+    }
+    if value.is_empty()
+        || (value.ends_with("_SENTINEL")
+            && value
+                .chars()
+                .all(|character| character.is_ascii_uppercase() || character == '_'))
+        || is_resource_task_control_line(value)
+    {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+fn extract_resource_daily_task_drafts(
+    chunks: Vec<openlife_core::resource::ResourceContextChunk>,
+) -> Result<Vec<openlife_core::state_store::ResourceDailyTaskDraft>, String> {
+    const MAX_RESOURCE_CONTEXT_CHUNKS: usize = 64;
+    const MAX_RESOURCE_TASK_BATCH_ITEMS: usize = 8;
+
+    if chunks.is_empty() {
+        return Err("resource_daily_task_batch_context_missing".into());
+    }
+    if chunks.len() > MAX_RESOURCE_CONTEXT_CHUNKS {
+        return Err("resource_daily_task_batch_context_too_large".into());
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut tasks = Vec::new();
+    for context in chunks {
+        if !matches!(
+            context.resource.format,
+            openlife_core::resource::ResourceFormat::Text
+                | openlife_core::resource::ResourceFormat::Markdown
+                | openlife_core::resource::ResourceFormat::Pdf
+                | openlife_core::resource::ResourceFormat::Docx
+        ) {
+            return Err("resource_daily_task_batch_format_unsupported".into());
+        }
+        for line in context.chunk.content.lines() {
+            let Some(title) = normalize_resource_task_line(line) else {
+                continue;
+            };
+            let dedup_key = title.to_lowercase();
+            if !seen.insert(dedup_key) {
+                continue;
+            }
+            if tasks.len() == MAX_RESOURCE_TASK_BATCH_ITEMS {
+                return Err("resource_daily_task_batch_item_limit_exceeded".into());
+            }
+            tasks.push(openlife_core::state_store::ResourceDailyTaskDraft {
+                title,
+                resource_id: context.resource.resource_id.clone(),
+                chunk_ordinal: context.chunk.ordinal,
+                content_digest: context.chunk.content_digest.clone(),
+            });
+        }
+    }
+    if tasks.is_empty() {
+        return Err("resource_daily_task_batch_empty".into());
+    }
+    Ok(tasks)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_kernel_resource_daily_task_batch_result<S>(
+    session_id: &str,
+    canonical_run_id: &str,
+    execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
+    state: &Arc<AppState>,
+    main_chat_agent_turn: &MainChatAgentTurn,
+    mut execution_transcript: Vec<ExecutionTranscriptEntry>,
+    provider_runtime: &crate::state::ProviderRuntimeSnapshot,
+    event_sink: &mut S,
+    event_sink_label: &'static str,
+    grant: openlife_core::agent::main_chat_agent_v1::PolicyTransientStateGrant,
+    execution_context: openlife_core::state_store::StateGatewayExecutionContext,
+) -> Result<MainChatKernelCommandSurfaceResult, String>
+where
+    S: MainChatEventSink + ?Sized,
+{
+    let task_session_id = main_chat_agent_turn
+        .decision
+        .agent_task_session_id
+        .as_deref()
+        .ok_or_else(|| "Main Chat kernel task session missing".to_string())?;
+    let state_store = state
+        .state_store
+        .as_ref()
+        .ok_or_else(|| "state_store_unavailable_degraded".to_string())?;
+    let gateway = openlife_core::state_store::StateGateway::new((**state_store).clone());
+    let mut receipt = if let Some(replayed) = gateway
+        .replay_resource_task_batch(&grant)
+        .map_err(|error| format!("resource_task_batch_replay_failed:{error}"))?
+    {
+        replayed
+    } else {
+        let resource_store = state
+            .resource_runtime
+            .as_ref()
+            .ok_or_else(|| "resource_runtime_unavailable_degraded".to_string())?
+            .gateway()
+            .store()
+            .clone();
+        let resource_message_id = task_session_id.to_string();
+        let chunks = tokio::task::spawn_blocking(move || {
+            resource_store.list_context_chunks_for_message(&resource_message_id)
+        })
+        .await
+        .map_err(|error| format!("resource_daily_task_batch_join_failed:{error}"))?
+        .map_err(|error| format!("resource_daily_task_batch_load_failed:{error}"))?;
+        let drafts = extract_resource_daily_task_drafts(chunks)?;
+        gateway
+            .execute_resource_task_batch_with_admission(
+                grant,
+                drafts,
+                execution_context,
+                execution_epoch,
+            )
+            .map_err(|error| format!("resource_task_batch_gateway_failed:{error}"))?
+    };
+
+    if let Err(error) =
+        crate::state_projection::reconcile_state_store_lifemodel_projection(state).await
+    {
+        log::warn!("[StateProjection] {error}");
+        for asset in &receipt.assets {
+            state_store
+                .mark_projection_degraded(
+                    &asset.outbox_event_id,
+                    "state_projection_reconciliation_failed",
+                )
+                .map_err(|mark_error| {
+                    format!("mark resource task projection degraded failed: {mark_error}")
+                })?;
+        }
+    }
+    receipt = state_store
+        .resource_task_batch_receipt_for_operation(canonical_run_id, receipt.replayed)
+        .map_err(|error| format!("reload resource task batch receipt failed: {error}"))?
+        .ok_or_else(|| "resource_task_batch_receipt_missing_after_commit".to_string())?;
+
+    let mut durable_events = Vec::with_capacity(receipt.assets.len());
+    for asset in &receipt.assets {
+        durable_events.push(
+            append_main_chat_agent_runtime_event(
+                state,
+                task_session_id,
+                canonical_run_id,
+                "effect_committed",
+                "state_effect",
+                &asset.receipt_id,
+                "state_gateway",
+                serde_json::json!({
+                    "status": "committed",
+                    "receiptId": asset.receipt_id,
+                    "operationId": receipt.operation_id,
+                    "assetId": asset.asset_id,
+                    "assetVersion": asset.asset_version,
+                    "mutationKind": "create",
+                    "payloadDigest": asset.payload_digest,
+                    "outboxEventId": asset.outbox_event_id,
+                    // Keep transaction-time projection and replay facts
+                    // immutable; current projection truth is in the receipt.
+                    "projectionStatus": "pending",
+                    "replayed": false,
+                }),
+            )
+            .await
+            .map_err(|error| format!("persist resource task effect event failed: {error}"))?,
+        );
+    }
+
+    let task_count = receipt.assets.len();
+    let projection_degraded = receipt
+        .assets
+        .iter()
+        .any(|asset| transient_state_projection_status_label(asset.projection_status) != "applied");
+    let reply = if projection_degraded {
+        format!(
+            "已从附件创建 {task_count} 个今日短期任务。任务已写入本地 canonical 状态，兼容视图仍在同步；本次不需要写文件，因此没有创建文件审批项。"
+        )
+    } else {
+        format!(
+            "已从附件创建 {task_count} 个今日短期任务，并同步到任务视图；本次不需要写文件，因此没有创建文件审批项。"
+        )
+    };
+    event_sink.emit(MainChatKernelEvent::FinalAnswer {
+        content_preview: bounded_label(&reply, MAX_ASSISTANT_PREVIEW_CHARS),
+        content_chars: reply.chars().count(),
+    });
+    let kernel_events = event_sink.events().to_vec();
+    let generation_metadata = serde_json::json!({
+        "text": reply,
+        "mainChatAgentV1": true,
+        "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
+        "policyRoute": main_chat_agent_turn.decision.policy_decision.route_kind.as_str(),
+        "legacyFallbackUsed": false,
+        "directWritesExecuted": true,
+        "canonicalWriteCommitted": true,
+        "canonicalOwner": "state_store",
+        "stateCommandKind": "createDailyTask",
+        "stateBatchReceiptId": receipt.receipt_id,
+        "stateBatchPayloadDigest": receipt.payload_digest,
+        "stateOperationReplayed": receipt.replayed,
+        "taskCount": task_count,
+        "resourceTaskProvenanceStored": true,
+        "rawTaskBodiesStoredInReceipt": false,
+        "fileWriteRequested": false,
+        "fileProposalCreated": false,
+        "kernelEventSink": event_sink_label,
+        "kernelEventCount": kernel_events.len(),
+        "modelGenerated": false,
+        "schedulerGenerationCalled": false,
+        "turnProviderRuntimeGeneration": provider_runtime.scheduler.provider_config_generation(),
+        "providerGenerationPath": "main_chat_kernel_resource_task_batch_gateway",
+        "provider": "none",
+        "model": "deterministic_resource_task_extractor",
+        "routeType": "direct",
+        "routeReason": "policy_authorized_resource_daily_task_batch",
+        "providerReceiptStatus": "not_attempted",
+        "liveProviderInvoked": false,
+        "toolCalled": false,
+        "toolCallCount": 0,
+    });
+    execution_transcript.extend(
+        append_main_chat_agent_transcript(
+            state,
+            Some(task_session_id),
+            ExecutionTranscriptEntryKind::Observation,
+            "StateGateway committed one atomic resource-derived transient-task batch.",
+            serde_json::json!({
+                "receiptId": receipt.receipt_id,
+                "operationId": receipt.operation_id,
+                "payloadDigest": receipt.payload_digest,
+                "replayed": receipt.replayed,
+                "taskCount": task_count,
+                "resourceProvenanceStored": true,
+                "rawTaskBodiesStored": false,
+                "fileProposalCreated": false,
+            }),
+        )
+        .await,
+    );
+
+    let mut agent_run = load_existing_canonical_main_chat_agent_run(
+        state,
+        canonical_run_id,
+        task_session_id,
+        session_id,
+    )
+    .await?;
+    agent_run.reasoning_strategy = Some("main_chat_agent_v1_resource_task_batch_gateway".into());
+    agent_run.tool_call_count = 0;
+    agent_run.step_count = 1;
+    agent_run.complete(
+        &preview_text(&reply, 200),
+        ModelRouteTrace {
+            provider: "none".into(),
+            model: "deterministic_resource_task_extractor".into(),
+            route_type: "direct".into(),
+            prefer_local: true,
+            local_model: String::new(),
+            reason: "policy_authorized_resource_daily_task_batch".into(),
+            privacy_level: RedactionLevel::LocalOnly,
+            latency_ms: None,
+            retry_count: 0,
+            fallback_reason: None,
+            provider_health_is_estimated: Some(false),
+        },
+        ContextSummary {
+            life_model_empty: true,
+            included_life_model_sections: Vec::new(),
+            memory_hit_count: 0,
+            memory_sources: Vec::new(),
+            used_tools_prompt: false,
+            redaction_applied: false,
+            redaction_level: RedactionLevel::LocalOnly,
+        },
+    );
+    let assistant_message = ChatMessage {
+        role: "assistant".into(),
+        content: reply.clone(),
+    };
+    let mut reasoning_trace = ReasoningTrace {
+        generation_result: Some(generation_metadata),
+        ..Default::default()
+    };
+    finalize_chat_agent_run(
+        session_id,
+        &assistant_message,
+        &reply,
+        &mut reasoning_trace,
+        &mut agent_run,
+        state,
+    )
+    .await?;
+    complete_main_chat_agent_turn_session(
+        state,
+        main_chat_agent_turn,
+        "StateGateway committed the policy-authorized resource task batch.",
+    )
+    .await?;
+    execution_transcript.extend(
+        append_main_chat_agent_transcript(
+            state,
+            Some(task_session_id),
+            ExecutionTranscriptEntryKind::FinalResult,
+            "MainChatKernel delivered the canonical resource-task result.",
+            serde_json::json!({
+                "runId": agent_run.id,
+                "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
+                "legacyFallbackUsed": false,
+                "providerInvoked": false,
+                "toolInvoked": false,
+                "canonicalWriteCommitted": true,
+                "receiptId": receipt.receipt_id,
+                "taskCount": task_count,
+                "fileProposalCreated": false,
             }),
         )
         .await,

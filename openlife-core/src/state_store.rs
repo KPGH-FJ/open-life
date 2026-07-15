@@ -8,17 +8,19 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 use uuid::{Uuid, Version};
 
-const STATE_STORE_SCHEMA_VERSION: i64 = 2;
+const STATE_STORE_SCHEMA_VERSION: i64 = 3;
 const STATE_ASSET_AGGREGATE_KIND: &str = "transient_state_asset";
 pub const LIFEMODEL_YAML_PROJECTION_TARGET: &str = "lifemodel_yaml_compat_v1";
 const PROJECTION_TARGETS: &[&str] = &[LIFEMODEL_YAML_PROJECTION_TARGET];
 const MAX_TASK_TITLE_CHARS: usize = 512;
 const MAX_SOURCE_MESSAGE_REF_CHARS: usize = 256;
+const MAX_RESOURCE_TASK_BATCH_ITEMS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -172,6 +174,52 @@ pub struct StateExecutionReceipt {
 }
 
 #[derive(Debug, Clone)]
+pub struct ResourceDailyTaskDraft {
+    pub title: String,
+    pub resource_id: String,
+    pub chunk_ordinal: u32,
+    pub content_digest: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateResourceDailyTaskBatchCommand {
+    pub operation_id: String,
+    pub request_digest: String,
+    pub source_message_ref: String,
+    pub tasks: Vec<ResourceDailyTaskDraft>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StateBatchAssetReceipt {
+    pub receipt_id: String,
+    pub asset_id: String,
+    pub asset_version: u64,
+    pub payload_digest: String,
+    pub outbox_event_id: String,
+    pub projection_status: StateProjectionStatus,
+    pub resource_id: String,
+    pub chunk_ordinal: u32,
+    pub content_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StateBatchExecutionReceipt {
+    pub schema: String,
+    pub receipt_id: String,
+    pub operation_id: String,
+    pub payload_digest: String,
+    pub canonical_status: String,
+    pub assets: Vec<StateBatchAssetReceipt>,
+    pub committed_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub replayed: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct CreateDailyTaskCommand {
     pub operation_id: String,
     /// Sealed user-request identity. Gateway callers provide the policy-bound
@@ -289,6 +337,79 @@ impl StateGateway {
                     permit.finish_committed();
                 }
                 Ok(outcome)
+            }
+            Err(error) => {
+                if let Some(permit) = permit {
+                    permit.finish_failed();
+                }
+                Err(error)
+            }
+        }
+    }
+
+    pub fn replay_resource_task_batch(
+        &self,
+        grant: &crate::agent::main_chat_agent_v1::PolicyTransientStateGrant,
+    ) -> Result<Option<StateBatchExecutionReceipt>> {
+        validate_resource_task_batch_grant(grant)?;
+        let Some(receipt) = self.store.resource_task_batch_receipt_for_request(
+            grant.operation_id(),
+            grant.intent_digest(),
+            true,
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(receipt))
+    }
+
+    pub fn execute_resource_task_batch_with_admission(
+        &self,
+        grant: crate::agent::main_chat_agent_v1::PolicyTransientStateGrant,
+        tasks: Vec<ResourceDailyTaskDraft>,
+        context: StateGatewayExecutionContext,
+        admission: &dyn crate::agent::CanonicalWriteAdmission,
+    ) -> Result<StateBatchExecutionReceipt> {
+        validate_resource_task_batch_grant(&grant)?;
+        if context.resolved_due_at.is_some() {
+            anyhow::bail!("state_resource_task_batch_due_time_unsupported");
+        }
+        let operation_id = grant.operation_id().to_string();
+        let mut permit: Option<Box<dyn crate::agent::CanonicalWritePermit>> = None;
+        let receipt = self.store.create_resource_task_batch_guarded(
+            CreateResourceDailyTaskBatchCommand {
+                operation_id: operation_id.clone(),
+                request_digest: grant.intent_digest().to_string(),
+                source_message_ref: grant.source_user_message_id().to_string(),
+                tasks,
+                created_at: context.occurred_at,
+                expires_at: context.occurred_at
+                    + Duration::days(i64::from(grant.intent().expiry_days)),
+            },
+            || {
+                permit = Some(
+                    admission
+                        .acquire(crate::agent::CanonicalWriteAdmissionRequest::new(
+                            "state_store.resource_task_batch",
+                            operation_id.clone(),
+                        ))
+                        .map_err(anyhow::Error::from)?,
+                );
+                Ok(())
+            },
+        );
+        match receipt {
+            Ok(receipt) => {
+                if receipt.replayed && permit.is_none() {
+                    return Ok(receipt);
+                }
+                let permit = permit.context("state_resource_task_batch_commit_permit_missing")?;
+                if receipt.replayed {
+                    permit.finish_noop();
+                } else {
+                    permit.finish_committed();
+                }
+                Ok(receipt)
             }
             Err(error) => {
                 if let Some(permit) = permit {
@@ -502,6 +623,31 @@ impl StateStore {
                 committed_at TEXT NOT NULL,
                 FOREIGN KEY(asset_id) REFERENCES state_assets(asset_id),
                 FOREIGN KEY(outbox_event_id) REFERENCES canonical_outbox_events(event_id)
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS state_resource_task_batch_operations (
+                operation_id TEXT PRIMARY KEY,
+                request_digest TEXT NOT NULL,
+                payload_digest TEXT NOT NULL,
+                receipt_id TEXT NOT NULL UNIQUE,
+                item_count INTEGER NOT NULL CHECK(item_count > 0 AND item_count <= 8),
+                committed_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS state_resource_task_batch_items (
+                operation_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL CHECK(ordinal >= 0 AND ordinal < 8),
+                receipt_id TEXT NOT NULL UNIQUE,
+                asset_id TEXT NOT NULL UNIQUE,
+                asset_version INTEGER NOT NULL CHECK(asset_version > 0),
+                payload_digest TEXT NOT NULL,
+                outbox_event_id TEXT NOT NULL UNIQUE,
+                resource_id TEXT NOT NULL,
+                chunk_ordinal INTEGER NOT NULL CHECK(chunk_ordinal >= 0),
+                content_digest TEXT NOT NULL,
+                PRIMARY KEY(operation_id, ordinal),
+                FOREIGN KEY(operation_id) REFERENCES state_resource_task_batch_operations(operation_id),
+                FOREIGN KEY(asset_id) REFERENCES state_assets(asset_id),
+                FOREIGN KEY(outbox_event_id) REFERENCES canonical_outbox_events(event_id)
              ) WITHOUT ROWID;",
         )?;
         let existing_version = tx
@@ -525,11 +671,17 @@ impl StateStore {
                      SET request_digest = payload_digest
                      WHERE request_digest IS NULL;
                      UPDATE state_store_metadata
-                     SET value = '2'
+                     SET value = '3'
                      WHERE key = 'schema_version';",
                 )?;
             }
-            Some("2") => {}
+            Some("2") => {
+                tx.execute(
+                    "UPDATE state_store_metadata SET value = '3' WHERE key = 'schema_version'",
+                    [],
+                )?;
+            }
+            Some("3") => {}
             Some(other) => anyhow::bail!("state_store_schema_version_unsupported:{other}"),
         }
         tx.commit()?;
@@ -541,6 +693,139 @@ impl StateStore {
         command: CreateDailyTaskCommand,
     ) -> Result<StateExecutionReceipt> {
         self.create_daily_task_guarded(command, || Result::<()>::Ok(()))
+    }
+
+    pub fn create_resource_task_batch(
+        &self,
+        command: CreateResourceDailyTaskBatchCommand,
+    ) -> Result<StateBatchExecutionReceipt> {
+        self.create_resource_task_batch_guarded(command, || Result::<()>::Ok(()))
+    }
+
+    pub fn create_resource_task_batch_guarded<F>(
+        &self,
+        command: CreateResourceDailyTaskBatchCommand,
+        before_commit: F,
+    ) -> Result<StateBatchExecutionReceipt>
+    where
+        F: FnOnce() -> Result<()>,
+    {
+        let prepared = PreparedResourceTaskBatch::validate(command)?;
+        let mut before_commit = Some(before_commit);
+        let mut conn = self.lock_connection()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some((existing_request_digest, existing_payload_digest)) = tx
+            .query_row(
+                "SELECT request_digest, payload_digest
+                 FROM state_resource_task_batch_operations
+                 WHERE operation_id = ?1",
+                [&prepared.operation_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+        {
+            if existing_request_digest != prepared.request_digest {
+                anyhow::bail!("state_resource_task_batch_request_drift");
+            }
+            if existing_payload_digest != prepared.payload_digest {
+                anyhow::bail!("state_resource_task_batch_payload_drift");
+            }
+            tx.rollback()?;
+            drop(conn);
+            return self
+                .resource_task_batch_receipt_for_operation(&prepared.operation_id, true)?
+                .context("state_resource_task_batch_replay_receipt_missing");
+        }
+        prepared.validate_new_effect_timing()?;
+        let batch_receipt_id = format!("state_batch_receipt:{}", Uuid::new_v4());
+        tx.execute(
+            "INSERT INTO state_resource_task_batch_operations (
+                operation_id, request_digest, payload_digest, receipt_id,
+                item_count, committed_at, expires_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                prepared.operation_id,
+                prepared.request_digest,
+                prepared.payload_digest,
+                batch_receipt_id,
+                i64::try_from(prepared.tasks.len())?,
+                prepared.created_at.to_rfc3339(),
+                prepared.expires_at.to_rfc3339(),
+            ],
+        )?;
+        for (ordinal, task) in prepared.tasks.iter().enumerate() {
+            let asset_id = Uuid::new_v4().hyphenated().to_string();
+            let asset_receipt_id = format!("state_receipt:{}", Uuid::new_v4());
+            let asset_operation_id = Uuid::new_v4().hyphenated().to_string();
+            tx.execute(
+                "INSERT INTO state_assets (
+                    asset_id, kind, version, title, status, due_at,
+                    source_message_ref, risk, sensitivity, source_kind, confidence,
+                    privacy_class, created_at, updated_at, expires_at,
+                    tombstoned_at, tombstone_reason
+                 ) VALUES (?1, 'daily_task', 1, ?2, 'pending', NULL, ?3,
+                           'low', 'internal', 'current_authenticated_user_message', 1.0,
+                           'private', ?4, ?4, ?5, NULL, NULL)",
+                params![
+                    asset_id,
+                    task.title,
+                    prepared.source_message_ref,
+                    prepared.created_at.to_rfc3339(),
+                    prepared.expires_at.to_rfc3339(),
+                ],
+            )?;
+            tx.execute(
+                "INSERT INTO state_asset_versions (
+                    asset_id, version, operation_id, payload_digest, mutation_kind,
+                    status, title, due_at, source_message_ref, source_kind,
+                    created_at, expires_at, tombstone_reason
+                 ) VALUES (?1, 1, ?2, ?3, 'create', 'pending', ?4, NULL, ?5,
+                           'current_authenticated_user_message', ?6, ?7, NULL)",
+                params![
+                    asset_id,
+                    asset_operation_id,
+                    task.payload_digest,
+                    task.title,
+                    prepared.source_message_ref,
+                    prepared.created_at.to_rfc3339(),
+                    prepared.expires_at.to_rfc3339(),
+                ],
+            )?;
+            let outbox = crate::persistence_outbox::enqueue_mutation(
+                &tx,
+                STATE_ASSET_AGGREGATE_KIND,
+                &asset_id,
+                StateMutationKind::Create.as_str(),
+                &task.payload_digest,
+                PROJECTION_TARGETS,
+            )?;
+            tx.execute(
+                "INSERT INTO state_resource_task_batch_items (
+                    operation_id, ordinal, receipt_id, asset_id, asset_version,
+                    payload_digest, outbox_event_id, resource_id, chunk_ordinal,
+                    content_digest
+                 ) VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    prepared.operation_id,
+                    i64::try_from(ordinal)?,
+                    asset_receipt_id,
+                    asset_id,
+                    task.payload_digest,
+                    outbox.event_id,
+                    task.resource_id,
+                    i64::from(task.chunk_ordinal),
+                    task.content_digest,
+                ],
+            )?;
+        }
+        let _commit_guard = before_commit
+            .take()
+            .context("state_resource_task_batch_commit_guard_missing")?(
+        )?;
+        tx.commit()?;
+        drop(conn);
+        self.resource_task_batch_receipt_for_operation(&prepared.operation_id, false)?
+            .context("state_resource_task_batch_receipt_missing_after_commit")
     }
 
     pub fn create_daily_task_guarded<F>(
@@ -862,19 +1147,35 @@ impl StateStore {
     pub fn list_daily_tasks(&self, include_tombstoned: bool) -> Result<Vec<StateAsset>> {
         let conn = self.lock_connection()?;
         let mut statement = conn.prepare(if include_tombstoned {
-            "SELECT asset_id, kind, version, title, status, due_at,
-                    source_message_ref, risk, sensitivity, source_kind, confidence,
-                    privacy_class, created_at, updated_at, expires_at,
-                    tombstoned_at, tombstone_reason
-             FROM state_assets WHERE kind = 'daily_task'
-             ORDER BY created_at ASC, asset_id ASC"
+            "SELECT assets.asset_id, assets.kind, assets.version, assets.title,
+                    assets.status, assets.due_at, assets.source_message_ref,
+                    assets.risk, assets.sensitivity, assets.source_kind,
+                    assets.confidence, assets.privacy_class, assets.created_at,
+                    assets.updated_at, assets.expires_at, assets.tombstoned_at,
+                    assets.tombstone_reason
+             FROM state_assets assets
+             LEFT JOIN state_resource_task_batch_items batch
+               ON batch.asset_id = assets.asset_id
+             WHERE assets.kind = 'daily_task'
+             ORDER BY assets.created_at ASC,
+                      batch.operation_id ASC,
+                      batch.ordinal ASC,
+                      assets.asset_id ASC"
         } else {
-            "SELECT asset_id, kind, version, title, status, due_at,
-                    source_message_ref, risk, sensitivity, source_kind, confidence,
-                    privacy_class, created_at, updated_at, expires_at,
-                    tombstoned_at, tombstone_reason
-             FROM state_assets WHERE kind = 'daily_task' AND status != 'tombstoned'
-             ORDER BY created_at ASC, asset_id ASC"
+            "SELECT assets.asset_id, assets.kind, assets.version, assets.title,
+                    assets.status, assets.due_at, assets.source_message_ref,
+                    assets.risk, assets.sensitivity, assets.source_kind,
+                    assets.confidence, assets.privacy_class, assets.created_at,
+                    assets.updated_at, assets.expires_at, assets.tombstoned_at,
+                    assets.tombstone_reason
+             FROM state_assets assets
+             LEFT JOIN state_resource_task_batch_items batch
+               ON batch.asset_id = assets.asset_id
+             WHERE assets.kind = 'daily_task' AND assets.status != 'tombstoned'
+             ORDER BY assets.created_at ASC,
+                      batch.operation_id ASC,
+                      batch.ordinal ASC,
+                      assets.asset_id ASC"
         })?;
         let rows = statement
             .query_map([], state_asset_from_row)?
@@ -890,6 +1191,44 @@ impl StateStore {
         validate_uuid_v4("state_operation_id", operation_id)?;
         let conn = self.lock_connection()?;
         operation_receipt(&conn, operation_id, replayed)
+    }
+
+    pub fn resource_task_batch_receipt_for_operation(
+        &self,
+        operation_id: &str,
+        replayed: bool,
+    ) -> Result<Option<StateBatchExecutionReceipt>> {
+        validate_uuid_v4("state_resource_task_batch_operation_id", operation_id)?;
+        let conn = self.lock_connection()?;
+        resource_task_batch_receipt(&conn, operation_id, replayed)
+    }
+
+    pub fn resource_task_batch_receipt_for_request(
+        &self,
+        operation_id: &str,
+        request_digest: &str,
+        replayed: bool,
+    ) -> Result<Option<StateBatchExecutionReceipt>> {
+        validate_uuid_v4("state_resource_task_batch_operation_id", operation_id)?;
+        if !is_sha256_digest(request_digest) {
+            anyhow::bail!("state_resource_task_batch_request_digest_invalid");
+        }
+        let conn = self.lock_connection()?;
+        let existing = conn
+            .query_row(
+                "SELECT request_digest FROM state_resource_task_batch_operations
+                 WHERE operation_id = ?1",
+                [operation_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(existing) = existing else {
+            return Ok(None);
+        };
+        if existing != request_digest {
+            anyhow::bail!("state_resource_task_batch_request_drift");
+        }
+        resource_task_batch_receipt(&conn, operation_id, replayed)
     }
 
     fn replay_request(
@@ -936,6 +1275,108 @@ impl StateStore {
         self.conn
             .lock()
             .map_err(|error| anyhow::anyhow!("StateStore mutex poisoned: {error}"))
+    }
+}
+
+struct PreparedResourceTaskBatch {
+    operation_id: String,
+    request_digest: String,
+    source_message_ref: String,
+    tasks: Vec<PreparedResourceTask>,
+    created_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    payload_digest: String,
+}
+
+struct PreparedResourceTask {
+    title: String,
+    resource_id: String,
+    chunk_ordinal: u32,
+    content_digest: String,
+    payload_digest: String,
+}
+
+impl PreparedResourceTaskBatch {
+    fn validate(command: CreateResourceDailyTaskBatchCommand) -> Result<Self> {
+        validate_uuid_v4(
+            "state_resource_task_batch_operation_id",
+            &command.operation_id,
+        )?;
+        validate_bounded_ref("state_source_message_ref", &command.source_message_ref)?;
+        if !is_sha256_digest(&command.request_digest) {
+            anyhow::bail!("state_resource_task_batch_request_digest_invalid");
+        }
+        if command.tasks.is_empty() || command.tasks.len() > MAX_RESOURCE_TASK_BATCH_ITEMS {
+            anyhow::bail!("state_resource_task_batch_size_invalid");
+        }
+        let ttl = command.expires_at - command.created_at;
+        if ttl < Duration::hours(24) || ttl > Duration::days(7) {
+            anyhow::bail!("state_resource_task_batch_ttl_out_of_range");
+        }
+        let mut normalized_titles = BTreeSet::new();
+        let mut tasks = Vec::with_capacity(command.tasks.len());
+        for (ordinal, task) in command.tasks.into_iter().enumerate() {
+            validate_uuid_v4("state_resource_task_resource_id", &task.resource_id)?;
+            if !is_sha256_digest(&task.content_digest) {
+                anyhow::bail!("state_resource_task_content_digest_invalid");
+            }
+            let title = task.title.trim().to_string();
+            if title.is_empty()
+                || title.chars().count() > MAX_TASK_TITLE_CHARS
+                || title.chars().any(char::is_control)
+            {
+                anyhow::bail!("state_resource_task_title_invalid");
+            }
+            if !normalized_titles.insert(title.to_lowercase()) {
+                anyhow::bail!("state_resource_task_title_duplicate");
+            }
+            let payload_digest = digest_json(&serde_json::json!({
+                "schema": "openlife.state-resource-task-item.v1",
+                "batchOperationId": command.operation_id,
+                "ordinal": ordinal,
+                "sourceMessageRef": command.source_message_ref,
+                "title": title,
+                "resourceId": task.resource_id,
+                "chunkOrdinal": task.chunk_ordinal,
+                "contentDigest": task.content_digest,
+                "ttlSeconds": ttl.num_seconds(),
+            }))?;
+            tasks.push(PreparedResourceTask {
+                title,
+                resource_id: task.resource_id,
+                chunk_ordinal: task.chunk_ordinal,
+                content_digest: task.content_digest,
+                payload_digest,
+            });
+        }
+        let payload_digest = digest_json(&serde_json::json!({
+            "schema": "openlife.state-resource-task-batch.v1",
+            "operationId": command.operation_id,
+            "sourceMessageRef": command.source_message_ref,
+            "tasks": tasks.iter().map(|task| serde_json::json!({
+                "payloadDigest": task.payload_digest,
+                "resourceId": task.resource_id,
+                "chunkOrdinal": task.chunk_ordinal,
+                "contentDigest": task.content_digest,
+            })).collect::<Vec<_>>(),
+            "ttlSeconds": ttl.num_seconds(),
+        }))?;
+        Ok(Self {
+            operation_id: command.operation_id,
+            request_digest: command.request_digest,
+            source_message_ref: command.source_message_ref,
+            tasks,
+            created_at: command.created_at,
+            expires_at: command.expires_at,
+            payload_digest,
+        })
+    }
+
+    fn validate_new_effect_timing(&self) -> Result<()> {
+        if self.expires_at <= self.created_at {
+            anyhow::bail!("state_resource_task_batch_expiry_invalid");
+        }
+        Ok(())
     }
 }
 
@@ -1158,6 +1599,109 @@ fn replay_operation(
     operation_receipt(conn, operation_id, true)
 }
 
+fn resource_task_batch_receipt(
+    conn: &Connection,
+    operation_id: &str,
+    replayed: bool,
+) -> Result<Option<StateBatchExecutionReceipt>> {
+    let batch = conn
+        .query_row(
+            "SELECT receipt_id, payload_digest, item_count, committed_at, expires_at
+             FROM state_resource_task_batch_operations WHERE operation_id = ?1",
+            [operation_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((receipt_id, payload_digest, item_count, committed_at, expires_at)) = batch else {
+        return Ok(None);
+    };
+    let rows = {
+        let mut statement = conn.prepare(
+            "SELECT receipt_id, asset_id, asset_version, payload_digest,
+                    outbox_event_id, resource_id, chunk_ordinal, content_digest
+             FROM state_resource_task_batch_items
+             WHERE operation_id = ?1 ORDER BY ordinal ASC",
+        )?;
+        let rows = statement
+            .query_map([operation_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows
+    };
+    if rows.len() != usize::try_from(item_count).context("state_batch_item_count_invalid")? {
+        anyhow::bail!("state_resource_task_batch_item_count_mismatch");
+    }
+    let mut assets = Vec::with_capacity(rows.len());
+    for (
+        receipt_id,
+        asset_id,
+        asset_version,
+        payload_digest,
+        outbox_event_id,
+        resource_id,
+        chunk_ordinal,
+        content_digest,
+    ) in rows
+    {
+        let projection = crate::persistence_outbox::projection_summary(conn, &outbox_event_id)?;
+        let projection_status = match projection.state() {
+            crate::persistence_outbox::ProjectionDeliveryState::Pending => {
+                StateProjectionStatus::Pending
+            }
+            crate::persistence_outbox::ProjectionDeliveryState::Degraded => {
+                StateProjectionStatus::Degraded
+            }
+            crate::persistence_outbox::ProjectionDeliveryState::Applied
+            | crate::persistence_outbox::ProjectionDeliveryState::Superseded
+            | crate::persistence_outbox::ProjectionDeliveryState::Compensated => {
+                StateProjectionStatus::Applied
+            }
+        };
+        assets.push(StateBatchAssetReceipt {
+            receipt_id,
+            asset_id,
+            asset_version: u64::try_from(asset_version)
+                .context("state_batch_asset_version_invalid")?,
+            payload_digest,
+            outbox_event_id,
+            projection_status,
+            resource_id,
+            chunk_ordinal: u32::try_from(chunk_ordinal)
+                .context("state_batch_chunk_ordinal_invalid")?,
+            content_digest,
+        });
+    }
+    Ok(Some(StateBatchExecutionReceipt {
+        schema: "openlife.state-batch-execution-receipt.v1".into(),
+        receipt_id,
+        operation_id: operation_id.to_string(),
+        payload_digest,
+        canonical_status: "committed".into(),
+        assets,
+        committed_at: parse_time(&committed_at)?,
+        expires_at: parse_time(&expires_at)?,
+        replayed,
+    }))
+}
+
 fn operation_receipt(
     conn: &Connection,
     operation_id: &str,
@@ -1283,6 +1827,29 @@ fn configure_connection(conn: &Connection) -> Result<()> {
     if conn.path().is_some() {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
+    }
+    Ok(())
+}
+
+fn validate_resource_task_batch_grant(
+    grant: &crate::agent::main_chat_agent_v1::PolicyTransientStateGrant,
+) -> Result<()> {
+    use crate::agent::main_chat_agent_v1::TransientStateCommandKind;
+
+    let intent = grant.intent();
+    if intent.command_kind != TransientStateCommandKind::CreateDailyTask
+        || intent.reason_code != "explicit_resource_daily_task_batch"
+        || !intent.target.is_empty()
+        || intent.due_hint.is_some()
+        || intent.expiry_days != 1
+    {
+        anyhow::bail!("state_resource_task_batch_policy_grant_invalid");
+    }
+    if !is_sha256_digest(grant.intent_digest())
+        || !is_sha256_digest(grant.source_user_message_digest())
+        || !is_sha256_digest(grant.policy_contract_digest())
+    {
+        anyhow::bail!("state_resource_task_batch_policy_digest_invalid");
     }
     Ok(())
 }
@@ -1477,6 +2044,32 @@ mod tests {
             source_kind: StateSourceKind::CurrentAuthenticatedUserMessage,
             confidence: 1.0,
             privacy_class: StatePrivacyClass::Private,
+        }
+    }
+
+    fn resource_task_batch_command(
+        operation_id: String,
+        titles: &[&str],
+    ) -> CreateResourceDailyTaskBatchCommand {
+        CreateResourceDailyTaskBatchCommand {
+            operation_id,
+            request_digest: digest_json(&serde_json::json!({
+                "prompt": "create bounded tasks from current resource"
+            }))
+            .unwrap(),
+            source_message_ref: format!("conversation://state-tests/message/{}", Uuid::new_v4()),
+            tasks: titles
+                .iter()
+                .enumerate()
+                .map(|(ordinal, title)| ResourceDailyTaskDraft {
+                    title: (*title).into(),
+                    resource_id: Uuid::new_v4().hyphenated().to_string(),
+                    chunk_ordinal: u32::try_from(ordinal).unwrap(),
+                    content_digest: digest_json(&serde_json::json!({"content": title})).unwrap(),
+                })
+                .collect(),
+            created_at: at(9),
+            expires_at: at(9) + Duration::days(1),
         }
     }
 
@@ -1871,6 +2464,129 @@ mod tests {
     }
 
     #[test]
+    fn resource_task_batch_commits_atomically_replays_and_rejects_drift() {
+        let store = StateStore::new_in_memory().unwrap();
+        let operation_id = Uuid::new_v4().hyphenated().to_string();
+        let command = resource_task_batch_command(
+            operation_id.clone(),
+            &["检查投影器", "检查离线演示账号", "验证撤销与过期"],
+        );
+        let first = store.create_resource_task_batch(command.clone()).unwrap();
+        let replay = store.create_resource_task_batch(command.clone()).unwrap();
+
+        assert_eq!(first.assets.len(), 3);
+        assert!(!first.replayed);
+        assert!(replay.replayed);
+        assert_eq!(first.receipt_id, replay.receipt_id);
+        assert_eq!(first.assets, replay.assets);
+        let tasks = store.list_daily_tasks(false).unwrap();
+        assert_eq!(tasks.len(), 3);
+        assert_eq!(
+            tasks
+                .iter()
+                .map(|task| task.title.as_str())
+                .collect::<Vec<_>>(),
+            ["检查投影器", "检查离线演示账号", "验证撤销与过期"]
+        );
+        let encoded_receipt = serde_json::to_string(&first).unwrap();
+        for title in ["检查投影器", "检查离线演示账号", "验证撤销与过期"] {
+            assert!(!encoded_receipt.contains(title));
+        }
+
+        let mut payload_drift = command.clone();
+        payload_drift.tasks[0].title = "不同任务".into();
+        assert!(store
+            .create_resource_task_batch(payload_drift)
+            .unwrap_err()
+            .to_string()
+            .contains("state_resource_task_batch_payload_drift"));
+
+        let mut request_drift = command;
+        request_drift.request_digest = digest_json(&serde_json::json!({
+            "prompt": "different current-user request"
+        }))
+        .unwrap();
+        assert!(store
+            .create_resource_task_batch(request_drift)
+            .unwrap_err()
+            .to_string()
+            .contains("state_resource_task_batch_request_drift"));
+    }
+
+    #[test]
+    fn concurrent_same_resource_task_batch_has_one_canonical_commit() {
+        let store = StateStore::new_in_memory().unwrap();
+        let operation_id = Uuid::new_v4().hyphenated().to_string();
+        let command = resource_task_batch_command(
+            operation_id.clone(),
+            &["检查投影器", "检查离线演示账号", "验证撤销与过期"],
+        );
+        let barrier = Arc::new(Barrier::new(3));
+        let handles = (0..2)
+            .map(|_| {
+                let store = store.clone();
+                let command = command.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    store.create_resource_task_batch(command).unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let receipts = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(receipts[0].receipt_id, receipts[1].receipt_id);
+        assert_eq!(
+            receipts.iter().filter(|receipt| !receipt.replayed).count(),
+            1
+        );
+        assert_eq!(
+            receipts.iter().filter(|receipt| receipt.replayed).count(),
+            1
+        );
+        assert_eq!(store.list_daily_tasks(false).unwrap().len(), 3);
+        assert_eq!(
+            store
+                .resource_task_batch_receipt_for_operation(&operation_id, false)
+                .unwrap()
+                .unwrap()
+                .assets
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn resource_task_batch_guard_failure_leaves_zero_partial_assets_or_receipt() {
+        let store = StateStore::new_in_memory().unwrap();
+        let operation_id = Uuid::new_v4().hyphenated().to_string();
+        let command =
+            resource_task_batch_command(operation_id.clone(), &["任务 A", "任务 B", "任务 C"]);
+
+        let error = store
+            .create_resource_task_batch_guarded(command, || {
+                anyhow::bail!("resource_task_batch_cancelled_before_commit")
+            })
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("resource_task_batch_cancelled_before_commit"));
+        assert!(store.list_daily_tasks(true).unwrap().is_empty());
+        assert!(store
+            .resource_task_batch_receipt_for_operation(&operation_id, false)
+            .unwrap()
+            .is_none());
+        assert!(store
+            .list_replayable_projection_deliveries(10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn state_gateway_replays_complete_and_undo_after_current_state_changes() {
         let store = StateStore::new_in_memory().unwrap();
         let gateway = StateGateway::new(store.clone());
@@ -2017,8 +2733,55 @@ mod tests {
             .unwrap()
             .iter()
             .any(|column| column == "request_digest");
-        assert_eq!(version, "2");
+        assert_eq!(version, "3");
         assert!(request_digest_column_exists);
+    }
+
+    #[test]
+    fn schema_v2_adds_resource_task_batch_tables_before_advancing_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state-v2.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE state_store_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                 ) WITHOUT ROWID;
+                 INSERT INTO state_store_metadata (key, value)
+                 VALUES ('schema_version', '2');",
+            )
+            .unwrap();
+        }
+
+        let store = StateStore::new(&path).unwrap();
+        let conn = store.lock_connection().unwrap();
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM state_store_metadata WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let tables = conn
+            .prepare(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'table' AND name LIKE 'state_resource_task_batch_%'
+                 ORDER BY name ASC",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(version, "3");
+        assert_eq!(
+            tables,
+            [
+                "state_resource_task_batch_items",
+                "state_resource_task_batch_operations"
+            ]
+        );
     }
 
     #[test]

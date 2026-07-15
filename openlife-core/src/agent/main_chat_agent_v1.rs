@@ -14771,6 +14771,37 @@ fn extract_transient_state_intent(
         });
     }
 
+    let requests_resource_task_batch =
+        contains_any(lower, &["附件", "attached file", "attachment"])
+            && contains_any(lower, &["提取", "extract"])
+            && contains_any(lower, &["今天", "今日", "today"])
+            && contains_any(
+                lower,
+                &["准备事项", "事项", "checklist", "preparation item"],
+            )
+            && contains_any(
+                lower,
+                &[
+                    "创建短期任务",
+                    "创建任务",
+                    "create short-term tasks",
+                    "create tasks",
+                ],
+            );
+    if requests_resource_task_batch {
+        return Some(TransientStateIntent {
+            command_kind: TransientStateCommandKind::CreateDailyTask,
+            // Titles are derived later from the current turn's canonical
+            // Resource binding. The user message authorizes the bounded batch,
+            // but attachment text is never copied here as write authority.
+            target: String::new(),
+            due_hint: None,
+            expiry_days: 1,
+            disposition: TransientStateIntentDisposition::Direct,
+            reason_code: "explicit_resource_daily_task_batch".into(),
+        });
+    }
+
     if contains_any(lower, &["提醒我", "remind me"])
         && contains_any(lower, &["今天", "今日", "今晚", "today", "tonight"])
     {
@@ -15555,6 +15586,58 @@ fn stable_id(prefix: &str, parts: &[&str]) -> String {
 
 fn digest_hex(content: &str) -> String {
     stable_id("digest", &[content])
+}
+
+#[cfg(test)]
+mod roadshow_resource_task_policy_tests {
+    use super::*;
+
+    const CC02_PROMPT: &str =
+        "从附件提取今天的准备事项，创建短期任务；如果要写文件，先等待我确认，然后继续。";
+
+    #[test]
+    fn exact_cc02_prompt_authorizes_bounded_resource_task_batch_without_file_effect() {
+        let decision = AgentIngress::default().decide(
+            "roadshow-cc02-policy",
+            CC02_PROMPT,
+            None,
+            AgentTaskKind::Conversation,
+        );
+
+        assert_eq!(
+            decision.selected_strategy,
+            MainChatAgentStrategy::TransientStateCommand
+        );
+        assert_eq!(
+            decision.policy_route,
+            PolicyRouteKind::TransientStateCommand
+        );
+        assert_eq!(
+            decision.policy_decision.action_effect,
+            PolicyActionEffect::TransientStateCommit
+        );
+        assert!(decision
+            .policy_decision
+            .allows(AllowedCapability::TransientStateCommit));
+        assert!(!decision
+            .policy_decision
+            .allows(AllowedCapability::FileWriteProposal));
+        assert!(!decision
+            .policy_decision
+            .allows(AllowedCapability::ProviderGeneration));
+        let intent = decision
+            .intent_frame
+            .transient_state_intent
+            .as_ref()
+            .expect("CC02 resource task batch intent");
+        assert_eq!(
+            intent.command_kind,
+            TransientStateCommandKind::CreateDailyTask
+        );
+        assert_eq!(intent.reason_code, "explicit_resource_daily_task_batch");
+        assert_eq!(intent.disposition, TransientStateIntentDisposition::Direct);
+        assert!(intent.target.is_empty());
+    }
 }
 
 #[cfg(test)]
