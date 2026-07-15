@@ -734,6 +734,52 @@ pre-existing RED, matching the already-recorded H2 baseline debt. Those stale
 MCP/network/eval/minimization assertions are not counted as CC-03 evidence and
 are not hidden by the scoped green gates.
 
+## Default-release quarantine
+
+Commit `a53688fe8da834bfd8bab528cdf2a1049caf45f9` closes the roadshow
+release-path exposure without removing the basic Agent capabilities used by
+the frozen journeys:
+
+- the default bootstrap registry retains governed Web, file, task, and Memory
+  manifests, but excludes `builtin_echo`, generic `mcp.call_tool`, and A2A;
+- MCP registration, inspection, listing, recommendation, audit administration,
+  and Plugin administration commands are compiled into the Tauri handler only
+  with `dev-extensions`;
+- A2A remains build-gated and the frontend MCP/A2A routes, menu entries, audit
+  controls, and Plugin administration consume backend `devExtensionsEnabled`
+  truth and fail closed while that truth is missing or false;
+- Scheduler execution and periodic Vector tier maintenance no longer start in
+  the default release. They start only in the isolated development-extension
+  build;
+- direct Provider-route preferences keep their existing compatibility command
+  names because they are part of ordinary model selection, not Scheduler-backed
+  automation;
+- explicit Memory search, diagnostics, and user-confirmed repair remain core
+  product capabilities. They are not the quarantined attachment route. The
+  ResourceGateway selector remains deterministic and does not call VectorStore.
+
+Mechanical evidence:
+
+- release registry capability/absence tests — passed;
+- release handler, bootstrap, background-worker, capability, and runtime-build
+  guards — 7 relevant Phase0 tests passed;
+- actual release bootstrap replay/recovery test with the extension echo utility
+  absent — passed;
+- `cargo check -p openlife-tauri --tests --features dev-extensions` — passed,
+  proving the isolated development surface still compiles;
+- current default Main Chat command surface — 89 passed;
+- Main Chat runtime module — 30 passed;
+- single-system authority guards — 32 passed;
+- focused frontend route/settings/privacy tests — 66 passed;
+- frontend typecheck and format check — passed.
+
+The broader Phase0 filter also exposed two pre-existing documentation/inventory
+failures: a stale immutable fingerprint for `BR4-D044`, and a frozen
+traceability reference to the removed test name
+`registry_requires_typed_contract_and_executes_matching_mcp_manifest`. Neither
+failure is counted as quarantine credit or changed to obtain a green result.
+They remain explicit historical-governance debt outside this roadshow slice.
+
 ## Remaining cumulative work
 
 - RC-01 external live Provider and native product UI trial.
@@ -745,11 +791,8 @@ are not hidden by the scoped green gates.
   trial, plus RC-07 separate-process end-to-end bundle evidence.
 - RC-08 packaged Tauri bootstrap/window relaunch and native UI projection.
 - CC-03 packaged Tauri desktop restart and native UI projection.
-- release quarantine repair for remaining MCP, Scheduler automation, and Vector
-  product surfaces; single-system/absence guards must prove the resulting
-  default-release boundary.
 - widened frontend behavioral regression, reliability loops, packaged/native
   live product rounds, and independent rereview. The combined deterministic
   gate already ran all primary/combined test owners (10 RC-filtered + 1 RC-07 +
-  7 CC tests), the 93-test command surface, runtime/authority guards, frontend
-  typecheck/format, and all eight frozen fixture digests.
+  7 CC tests), the current 89-test default command surface, runtime/authority
+  guards, frontend typecheck/format, and all eight frozen fixture digests.

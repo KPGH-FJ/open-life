@@ -116,9 +116,9 @@
     },
     {
       "id": "CUMULATIVE_INTEGRATION",
-      "status": "in_progress_primary_and_combined_local_mechanics_and_rc04_external_live_verified_remaining_quarantine_product_reliability_and_review_evidence_pending",
-      "completion_claim": "no_cumulative_completion_claim_primary_combined_local_mechanics_and_rc04_external_live_evidence_only",
-      "commit": "3ea25fd295763a3dce5720253d73f97e3af10084",
+      "status": "in_progress_primary_combined_local_rc04_external_live_and_release_quarantine_verified_remaining_product_reliability_and_review_evidence_pending",
+      "completion_claim": "no_cumulative_completion_claim_primary_combined_local_rc04_external_live_and_release_quarantine_evidence_only",
+      "commit": "a53688fe8da834bfd8bab528cdf2a1049caf45f9",
       "evidence": "plans/openlife_roadshow_cumulative_integration_evidence.md"
     },
     {
@@ -355,10 +355,12 @@
     "cc03_broad_core_main_chat_agent_v1": "failed_132_of_140_passed_same_8_preexisting_red",
     "cumulative_primary_and_combined_harness": "passed_10_rc_filtered_plus_1_rc07_plus_7_cc_tests_all_eleven_frozen_journey_owners_present",
     "cumulative_frozen_fixture_digests": "passed_all_8_files_match_frozen_sha256",
-    "cumulative_widened_backend_regression": "passed_main_chat_command_surface_93_runtime_module_30_single_system_32",
-    "cumulative_frontend_static_regression": "passed_typecheck_and_format_check_after_locked_dependency_install",
+    "cumulative_widened_backend_regression": "passed_current_default_main_chat_command_surface_89_runtime_module_30_single_system_32",
+    "cumulative_frontend_static_regression": "passed_typecheck_format_and_66_focused_route_settings_privacy_behavior_tests",
     "cumulative_external_provider_regression": "passed_direct_answer_and_33_provider_bound_chunk_stream_final_last",
-    "cumulative_release_quarantine": "failed_h0_default_release_mcp_scheduler_automation_and_vector_product_surfaces_remain",
+    "cumulative_release_quarantine": "passed_default_release_extension_registry_mcp_a2a_plugin_ipc_and_scheduler_vector_background_routes_quarantined_backend_build_truth_drives_frontend_core_web_file_task_memory_retained",
+    "cumulative_release_quarantine_dev_build": "passed_dev_extensions_tauri_test_compile",
+    "cumulative_historical_phase0_debt": "failed_preexisting_br4_d044_fingerprint_and_removed_mcp_test_reference_not_counted_as_quarantine_credit",
     "cumulative_completion": "forbidden",
     "roadshow_release": "no_go"
   },
@@ -370,5 +372,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-15T14:18:54+08:00"
+  "last_updated_at": "2026-07-15T14:52:36+08:00"
 }
