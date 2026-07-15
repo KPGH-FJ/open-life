@@ -67,6 +67,20 @@ pub(crate) async fn configure_live_resource_and_web_eval_state_with_citation_ech
     captured_requests
 }
 
+pub(crate) async fn configure_live_resource_eval_state_with_all_citations_local_http_provider(
+    state: &Arc<AppState>,
+) -> Arc<std::sync::Mutex<Vec<String>>> {
+    let captured_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider_base = fake_local_chat_provider_endpoint(
+        "",
+        Some(Arc::clone(&captured_requests)),
+        LocalCitationEcho::AllResources,
+    )
+    .await;
+    configure_local_http_provider(state, provider_base).await;
+    captured_requests
+}
+
 pub(crate) async fn configure_live_resource_and_web_artifact_eval_state_with_citation_echo_local_http_provider(
     state: &Arc<AppState>,
 ) -> Arc<std::sync::Mutex<Vec<String>>> {
@@ -270,6 +284,7 @@ async fn fake_local_chat_provider_endpoint(
 enum LocalCitationEcho {
     None,
     Web,
+    AllResources,
     ResourceAndWeb,
     ResourceAndWebArtifact,
     ResourceAndForgedWebArtifact,
@@ -291,6 +306,30 @@ impl LocalCitationEcho {
             Self::Web => issued_citation("webref_", 31)
                 .map(|citation| format!("The retrieved Web evidence is available [{citation}]."))
                 .unwrap_or_else(|| "No issued Web citation was observed.".into()),
+            Self::AllResources => {
+                let citations = request_text
+                    .match_indices("cite_")
+                    .filter_map(|(start, _)| {
+                        let candidate = request_text.get(start..start.checked_add(29)?)?;
+                        candidate[5..]
+                            .bytes()
+                            .all(|byte| byte.is_ascii_hexdigit())
+                            .then(|| candidate.to_string())
+                    })
+                    .collect::<std::collections::BTreeSet<_>>();
+                if citations.is_empty() {
+                    "No issued Resource citation was observed.".into()
+                } else {
+                    format!(
+                        "The bounded comparison and analysis used every selected Resource citation: {}.",
+                        citations
+                            .into_iter()
+                            .map(|citation| format!("[{citation}]"))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    )
+                }
+            }
             Self::ResourceAndWeb => {
                 let resource = issued_citation("cite_", 29);
                 let web = issued_citation("webref_", 31);
