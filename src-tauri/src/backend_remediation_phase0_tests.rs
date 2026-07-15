@@ -519,6 +519,20 @@ fn backend_remediation_phase0_high_risk_commands_are_dev_only() {
         "execute_tool_call",
         "register_mcp_server",
         "unregister_mcp_server",
+        "inspect_mcp_call",
+        "list_mcp_servers",
+        "list_mcp_tools",
+        "list_mcp_templates",
+        "recommend_mcp_manifests",
+        "list_mcp_audit_logs",
+        "clear_mcp_audit_logs",
+        "export_mcp_audit_logs",
+        "cleanup_mcp_audit_logs",
+        "rotate_mcp_audit_key",
+        "list_plugins",
+        "reload_plugins",
+        "enable_plugin",
+        "disable_plugin",
     ] {
         let guarded = format!("#[cfg(feature = \"dev-extensions\")]\n            {command},");
         assert!(
@@ -532,6 +546,14 @@ fn backend_remediation_phase0_high_risk_commands_are_dev_only() {
     assert!(!source.contains("falling back to embedded a2a server"));
     assert!(!source.contains("OPENLIFE_AUTOSTART_FILESYSTEM_MCP"));
     assert!(source.contains("#[cfg(debug_assertions)]\nfn runtime_dev_url()"));
+    assert!(source.contains(
+        "#[cfg(feature = \"dev-extensions\")]\n            start_dev_extension_background_workers"
+    ));
+
+    let bootstrap = read_repo_file("src-tauri/src/bootstrap.rs");
+    assert!(bootstrap.contains(
+        "#[cfg(not(feature = \"dev-extensions\"))]\n    let mcp_registry = McpRegistry::new_release_product();"
+    ));
 
     let sidecar = read_repo_file("src-tauri/src/a2a_sidecar.rs");
     assert!(sidecar.contains("A2A_PARENT_PIPE_GUARD_ENV"));
@@ -582,12 +604,25 @@ fn backend_remediation_phase0_a2a_has_one_router_and_no_embedded_server_owner() 
 
 #[test]
 fn backend_remediation_phase0_release_registry_does_not_expose_a2a_execution() {
-    let mut registry = openlife_core::mcp::McpRegistry::new();
+    let registry = openlife_core::mcp::McpRegistry::new_release_product();
     assert!(!registry
         .list_manifests()
         .iter()
         .any(|manifest| manifest.name == "a2a.call_agent"));
+    assert!(!registry
+        .list_manifests()
+        .iter()
+        .any(|manifest| manifest.name == "mcp.call_tool"));
+    assert!(!registry
+        .list_manifests()
+        .iter()
+        .any(|manifest| manifest.name == "builtin_echo"));
+    assert!(registry
+        .list_manifests()
+        .iter()
+        .any(|manifest| manifest.name == "web.search"));
 
+    let mut registry = openlife_core::mcp::McpRegistry::new();
     registry.register_dev_a2a_tool();
     assert!(registry
         .list_manifests()

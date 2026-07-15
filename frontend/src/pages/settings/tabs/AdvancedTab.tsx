@@ -21,6 +21,7 @@ interface AdvancedTabProps {
   policyRouterStatus: PolicyRouterStatus | null;
   modelRouterStatus: ModelRouterStatus | null;
   showInternalDebug: boolean;
+  devExtensionsEnabled: boolean;
   pluginSection: ReactNode;
   experimentalSection?: ReactNode;
 }
@@ -33,6 +34,7 @@ export default function AdvancedTab({
   policyRouterStatus,
   modelRouterStatus,
   showInternalDebug,
+  devExtensionsEnabled,
   pluginSection,
   experimentalSection,
 }: AdvancedTabProps) {
@@ -41,39 +43,41 @@ export default function AdvancedTab({
 
   return (
     <>
-      <section className="space-y-4 border-t pt-4">
-        <div>
-          <h3 className="text-sm font-medium text-gray-700">高级连接</h3>
-          <p className="mt-1 text-xs text-gray-500">
-            MCP / A2A / Plugin 是开发者和高级用户入口；普通用户默认只需要在 Tools & Permissions
-            看能力和授权。
-          </p>
-        </div>
-        <div className="grid gap-3 md:grid-cols-3">
-          <Link
-            to={advancedRoutePath("McpTools")}
-            className="rounded-lg border border-stone-200 bg-white p-4 text-sm hover:bg-stone-50"
-          >
-            <div className="font-semibold text-stone-950">MCP / Tools</div>
-            <div className="mt-1 text-xs text-stone-500">
-              {diagnostics?.mcp_server_count ?? 0} servers · {diagnostics?.mcp_tool_count ?? 0}{" "}
-              tools
-            </div>
-          </Link>
-          <Link
-            to={advancedRoutePath("A2A")}
-            className="rounded-lg border border-stone-200 bg-white p-4 text-sm hover:bg-stone-50"
-          >
-            <div className="font-semibold text-stone-950">A2A</div>
-            <div className="mt-1 text-xs text-stone-500">外部 Agent 连接与发送确认。</div>
-          </Link>
-          <div className="rounded-lg border border-stone-200 bg-white p-4 text-sm">
-            <div className="font-semibold text-stone-950">Plugins</div>
-            <div className="mt-1 text-xs text-stone-500">本地插件和 manifest 诊断。</div>
+      {devExtensionsEnabled && (
+        <section className="space-y-4 border-t pt-4">
+          <div>
+            <h3 className="text-sm font-medium text-gray-700">高级连接</h3>
+            <p className="mt-1 text-xs text-gray-500">
+              MCP / A2A / Plugin 是开发者和高级用户入口；普通用户默认只需要在 Tools & Permissions
+              看能力和授权。
+            </p>
           </div>
-        </div>
-        {pluginSection}
-      </section>
+          <div className="grid gap-3 md:grid-cols-3">
+            <Link
+              to={advancedRoutePath("McpTools")}
+              className="rounded-lg border border-stone-200 bg-white p-4 text-sm hover:bg-stone-50"
+            >
+              <div className="font-semibold text-stone-950">MCP / Tools</div>
+              <div className="mt-1 text-xs text-stone-500">
+                {diagnostics?.mcp_server_count ?? 0} servers · {diagnostics?.mcp_tool_count ?? 0}{" "}
+                tools
+              </div>
+            </Link>
+            <Link
+              to={advancedRoutePath("A2A")}
+              className="rounded-lg border border-stone-200 bg-white p-4 text-sm hover:bg-stone-50"
+            >
+              <div className="font-semibold text-stone-950">A2A</div>
+              <div className="mt-1 text-xs text-stone-500">外部 Agent 连接与发送确认。</div>
+            </Link>
+            <div className="rounded-lg border border-stone-200 bg-white p-4 text-sm">
+              <div className="font-semibold text-stone-950">Plugins</div>
+              <div className="mt-1 text-xs text-stone-500">本地插件和 manifest 诊断。</div>
+            </div>
+          </div>
+          {pluginSection}
+        </section>
+      )}
 
       <section className="space-y-4 border-t pt-4">
         <h3 className="text-sm font-medium text-gray-700">PolicyRouter authority</h3>

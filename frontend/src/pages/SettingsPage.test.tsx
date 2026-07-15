@@ -340,6 +340,16 @@ describe("SettingsPage", () => {
   });
 
   it("shows audit action preflights on first click before final commands", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string, args?: Record<string, any>) => {
+      const result = (await mockInvoke(cmd, args)) as Record<string, unknown>;
+      if (cmd === "get_system_diagnostics") {
+        return {
+          ...result,
+          runtime_build_info: { devExtensionsEnabled: true },
+        };
+      }
+      return result;
+    });
     renderSettings();
 
     await clickTab("数据与恢复");
@@ -365,6 +375,21 @@ describe("SettingsPage", () => {
     expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "rotate_mcp_audit_key")).toBe(
       false
     );
+  });
+
+  it("does not call or render extension administration in a release runtime", async () => {
+    renderSettings();
+
+    await clickTab("数据与恢复");
+    expect(screen.queryByRole("button", { name: "导出审计" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "清理旧日志" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "轮换密钥" })).not.toBeInTheDocument();
+
+    await clickTab("高级扩展");
+    expect(screen.queryByText("MCP / Tools")).not.toBeInTheDocument();
+    expect(screen.queryByText("A2A")).not.toBeInTheDocument();
+    expect(screen.queryByText("Plugins")).not.toBeInTheDocument();
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "list_plugins")).toBe(false);
   });
 
   it("shows feedback evolution report as read-only candidates, not applied rules", async () => {

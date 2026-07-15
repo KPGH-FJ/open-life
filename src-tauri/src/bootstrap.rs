@@ -2305,7 +2305,7 @@ fn bootstrap_with_secret_store(
         registry
     };
     #[cfg(not(feature = "dev-extensions"))]
-    let mcp_registry = McpRegistry::new();
+    let mcp_registry = McpRegistry::new_release_product();
     let tool_permission_store = init_store(
         || {
             openlife_core::tool_permissions::ToolPermissionStore::new(

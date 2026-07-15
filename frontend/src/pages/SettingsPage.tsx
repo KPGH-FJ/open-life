@@ -141,6 +141,7 @@ export default function SettingsPage() {
     null
   );
   const showInternalDebug = isInternalDebugSurfaceEnabled();
+  const devExtensionsEnabled = diagnostics?.runtime_build_info?.devExtensionsEnabled === true;
 
   useEffect(() => {
     getConfig()
@@ -165,10 +166,11 @@ export default function SettingsPage() {
   }, [activeTab, showInternalDebug]);
 
   const refreshAllDiagnostics = async () => {
+    const diag = await getSystemDiagnostics().catch(() => null);
+    const extensionsEnabled = diag?.runtime_build_info?.devExtensionsEnabled === true;
     const [
       policyRouter,
       modelRouter,
-      diag,
       projection,
       memoryEnvelope,
       providerBoundaryEnvelope,
@@ -180,14 +182,13 @@ export default function SettingsPage() {
     ] = await Promise.all([
       getPolicyRouterStatus().catch(() => null),
       getModelRouterStatus().catch(() => null),
-      getSystemDiagnostics().catch(() => null),
       getLifeStateProjection().catch(() => null),
       getMemoryViewModel().catch(() => null),
       getProviderPrivacyBoundarySummary().catch(() => null),
       getHotCache().catch(() => null),
       getPrivacyPolicy().catch(() => null),
       listToolPermissions().catch(() => []),
-      listPlugins().catch(() => []),
+      extensionsEnabled ? listPlugins().catch(() => []) : Promise.resolve([]),
       listToolManifests().catch(() => []),
     ]);
     setPolicyRouterStatus(policyRouter);
@@ -641,6 +642,7 @@ export default function SettingsPage() {
               refreshSecurityState={refreshSecurityState}
               toolManifests={toolManifests}
               handleSavePrivacyPolicy={handleSavePrivacyPolicy}
+              devExtensionsEnabled={devExtensionsEnabled}
             />
             <DataTab
               handleExport={handleExport}
@@ -689,6 +691,7 @@ export default function SettingsPage() {
             policyRouterStatus={policyRouterStatus}
             modelRouterStatus={modelRouterStatus}
             showInternalDebug={showInternalDebug}
+            devExtensionsEnabled={devExtensionsEnabled}
             pluginSection={
               <PluginSection
                 plugins={plugins}

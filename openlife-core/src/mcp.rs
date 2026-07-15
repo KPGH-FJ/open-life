@@ -807,6 +807,41 @@ impl McpRegistry {
         reg
     }
 
+    /// Build the registry used by the default product release.
+    ///
+    /// Core governed capabilities remain available, including Web, bounded
+    /// file reads, tasks, and Memory proposals. Test utilities and generic
+    /// extension dispatch stay out of the release product path.
+    pub fn new_release_product() -> Self {
+        let mut registry = Self::new();
+        registry.remove_builtin_by_name("builtin_echo");
+        registry.remove_builtin_by_name("mcp.call_tool");
+        registry
+    }
+
+    fn remove_builtin_by_name(&mut self, name: &str) {
+        let removed = self
+            .builtin_manifests
+            .iter()
+            .filter(|manifest| manifest.name == name)
+            .cloned()
+            .collect::<Vec<_>>();
+        for manifest in &removed {
+            if let Some(gate) = self
+                .execution_instance_gates
+                .remove(&registry_execution_instance_key(manifest))
+            {
+                gate.retire();
+            }
+            self.builtins.remove(&manifest.name);
+        }
+        self.builtin_manifests
+            .retain(|manifest| manifest.name != name);
+        if !removed.is_empty() {
+            self.registry_generation = self.registry_generation.saturating_add(1);
+        }
+    }
+
     pub(crate) fn register_default_builtins(&mut self) {
         // Built-in: echo (test utility)
         let echo_manifest = ToolManifest {
@@ -2156,6 +2191,23 @@ mod tests {
             violations.is_empty(),
             "legacy product terms leaked in MCP manifest copy: {violations:?}"
         );
+    }
+
+    #[test]
+    fn release_product_registry_keeps_core_capabilities_without_extension_dispatch() {
+        let registry = McpRegistry::new_release_product();
+        let names = registry
+            .list_manifests()
+            .into_iter()
+            .map(|manifest| manifest.name)
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert!(names.contains("web.search"));
+        assert!(names.contains("file.read"));
+        assert!(names.contains("memory.propose_write"));
+        assert!(!names.contains("builtin_echo"));
+        assert!(!names.contains("mcp.call_tool"));
+        assert!(!names.contains("a2a.call_agent"));
     }
 
     #[test]

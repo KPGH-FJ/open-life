@@ -66,6 +66,7 @@ pub(crate) async fn get_system_diagnostics_with_state(
     let persistence_health = state.persistence_coordinator.snapshot();
     let policy_router = current_policy_router_status();
     let provider_runtime = state.provider_runtime_snapshot().await;
+    #[cfg(feature = "dev-extensions")]
     let (mcp_server_count, mcp_tool_count) = {
         let registry = state.mcp_registry.lock().await;
         (
@@ -73,6 +74,9 @@ pub(crate) async fn get_system_diagnostics_with_state(
             registry.list_all_tools().len(),
         )
     };
+    #[cfg(not(feature = "dev-extensions"))]
+    let (mcp_server_count, mcp_tool_count) = (0, 0);
+    #[cfg(feature = "dev-extensions")]
     let (mcp_recent_audit_count, mcp_recent_pii_count) = {
         if state
             .persistence_coordinator
@@ -91,6 +95,8 @@ pub(crate) async fn get_system_diagnostics_with_state(
             (0, 0)
         }
     };
+    #[cfg(not(feature = "dev-extensions"))]
+    let (mcp_recent_audit_count, mcp_recent_pii_count) = (0, 0);
     let (
         memory_chunk_count,
         vector_corrupt_embedding_count,

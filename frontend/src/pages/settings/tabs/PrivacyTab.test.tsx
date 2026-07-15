@@ -73,6 +73,7 @@ describe("PrivacyTab", () => {
     toolManifests: [] as any[],
     safeMode: false,
     handleSavePrivacyPolicy: vi.fn(),
+    devExtensionsEnabled: true,
   };
 
   it("renders security governance section", async () => {
@@ -86,6 +87,14 @@ describe("PrivacyTab", () => {
     await screen.findByText(/旧 run 可能未接入/);
     expect(screen.getAllByText(/本地审计/).length).toBeGreaterThan(0);
     expect(screen.getByText(/PII 与隐私策略/)).toBeInTheDocument();
+  });
+
+  it("does not expose MCP audit actions when development extensions are disabled", async () => {
+    render(<PrivacyTab {...baseProps} devExtensionsEnabled={false} />);
+    await screen.findByText(/旧 run 可能未接入/);
+    expect(screen.queryByText("导出审计")).not.toBeInTheDocument();
+    expect(screen.queryByText("清理旧日志")).not.toBeInTheDocument();
+    expect(screen.queryByText("轮换密钥")).not.toBeInTheDocument();
   });
 
   it("does not render tool permissions in the privacy tab", async () => {

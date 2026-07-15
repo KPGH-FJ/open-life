@@ -981,11 +981,30 @@ async fn startup_projects_prepared_replay_unknown_before_claim_recovery() {
     );
     {
         let mut registry = state.mcp_registry.lock().await;
+        assert!(
+            registry
+                .list_manifests()
+                .iter()
+                .all(|manifest| manifest.id != "builtin_echo"),
+            "release bootstrap must not provide the development echo utility"
+        );
         let mut remote_manifest = registry
             .list_manifests()
             .into_iter()
-            .find(|manifest| manifest.id == "builtin_echo")
-            .expect("typed echo manifest for remote crash fixture");
+            .find(|manifest| manifest.id == "web.search")
+            .expect("release registry retains a typed read manifest for the crash fixture");
+        remote_manifest.id = "builtin_echo".into();
+        remote_manifest.name = "builtin_echo".into();
+        remote_manifest.description = "Test-only remote crash fixture".into();
+        remote_manifest.parameters = serde_json::json!({
+            "type": "object",
+            "properties": { "text": { "type": "string" } },
+            "required": ["text"]
+        });
+        remote_manifest.permission_level = "low".into();
+        remote_manifest.risk_level = "low".into();
+        remote_manifest.capabilities = vec!["read".into()];
+        remote_manifest.action_type = "read".into();
         remote_manifest.source = openlife_core::tool_manifest::ToolSource::Mcp {
             server_name: "startup-prepared-remote-fixture".into(),
         };
