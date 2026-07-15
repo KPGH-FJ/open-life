@@ -21,8 +21,9 @@
 - RC-01, RC-04, RC-08, CC-01, CC-02, and CC-03 have **not** received native
   desktop, external live-provider, repeated product-trial, or independent-
   review credit.
-- RC-08 and CC-03 full application-process restart/native UI evidence remains
-  pending.
+- RC-08 full application-process restart remains pending. CC-03 now has a
+  separate backend OS-process reopen proof; packaged Tauri bootstrap, keychain,
+  window relaunch, and native UI evidence remain pending.
 - The roadshow candidate remains **NO-GO**.
 
 ## RC-01 exact scenario
@@ -413,6 +414,18 @@ one rollback event. This is persistent-store reopen and response-loss recovery;
 it is not evidence that the desktop application process was actually stopped
 and relaunched.
 
+A separate backend OS-process harness now starts the same Rust test executable
+twice against one file-backed AppState store set. The seed process executes the
+exact CC-03 turn and exits. A distinct verify process reopens Conversation,
+AgentRun, TaskSession, ActionQueue, TurnEvent, MemoryLifecycle, and LifeModel
+storage, then invokes the same operation identity. Before and after recovery it
+observes exactly two conversation messages, two Memory actions, one rolled-back
+Memory owner, one rollback event, and one `final_delivery.created` event, with
+no active Memory, Proposal, Provider, or Tool effect. This proves backend
+recovery after loss of all process-local runtime/cache state. It does not prove
+packaged Tauri bootstrap, production keychain integration, window relaunch, or
+native UI projection.
+
 Counterfactual evidence:
 
 - the same text quoted from File, Web, MCP/tool, or Assistant content grants
@@ -446,16 +459,20 @@ Root failures found and removed:
 CC-03 implementation commit:
 `b080aaa051270318f86254987818d49809d9c568`.
 
+CC-03 separate-process evidence commit:
+`b4c15abf8ceceeebb142a1f0ba4a9a9d575650cb`.
+
 Mechanical evidence after the repair:
 
-- exact CC-03 positive/reopen and pre-existing-owner tests — 2 passed;
+- exact CC-03 positive/reopen, pre-existing-owner, and separate OS-process
+  recovery tests — 3 passed;
 - CC-03 Policy positive and four-source quoted counterfactual matrix — 2
   passed;
 - Memory candidate tests — 18 passed;
 - Memory lifecycle transaction/concurrency/migration tests — 37 passed;
 - MemoryGateway tests — 27 passed;
 - Main Chat kernel-filtered regression — 99 passed;
-- full Main Chat command surface — 85 passed;
+- full Main Chat command surface — 88 passed;
 - Main Chat runtime module — 30 passed;
 - single-system authority guards — 32 passed;
 - `cargo check -p openlife-tauri --tests` — passed with existing dead-code
@@ -472,7 +489,7 @@ are not hidden by the scoped green gates.
 
 - RC-01 external live Provider and native product UI trial.
 - RC-08 full application-process restart/reopen and native UI projection.
-- CC-03 full application-process restart/reopen and native UI projection.
+- CC-03 packaged Tauri desktop restart and native UI projection.
 - full RC-01 through RC-08 cumulative harness, negative scans, single-system
   guards, widened frontend/backend regression, reliability loops, live product
   rounds, and independent rereview.

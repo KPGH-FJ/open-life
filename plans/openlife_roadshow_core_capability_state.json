@@ -118,7 +118,7 @@
       "id": "CUMULATIVE_INTEGRATION",
       "status": "in_progress_rc01_rc04_rc08_cc01_cc02_and_cc03_local_mechanics_verified_remaining_restart_combined_live_and_review_evidence_pending",
       "completion_claim": "no_cumulative_completion_claim_rc01_rc04_rc08_cc01_cc02_cc03_local_mechanical_evidence_only",
-      "commit": "664f96ff1f2cb4e4863a4af10aedfdecc83a17b9",
+      "commit": "b4c15abf8ceceeebb142a1f0ba4a9a9d575650cb",
       "evidence": "plans/openlife_roadshow_cumulative_integration_evidence.md"
     },
     {
@@ -309,7 +309,8 @@
     "cc03_receipt_minimization": "passed_commit_and_rollback_receipts_reference_digest_and_status_only_without_memory_body_copy",
     "cc03_response_loss_recovery": "passed_same_session_message_and_operation_identity_store_reopen_terminal_historical_receipt_replay_zero_duplicate_write_or_rollback",
     "cc03_process_store_reopen": "passed_process_local_runtime_reconstruction_around_persistent_memory_store_not_full_application_process_restart_credit",
-    "cc03_full_application_restart": "pending",
+    "cc03_backend_os_process_restart": "passed_two_independent_test_processes_one_file_backed_appstate_same_operation_zero_conversation_action_event_or_memory_growth",
+    "cc03_full_application_restart": "partial_backend_os_process_passed_packaged_tauri_bootstrap_keychain_and_window_relaunch_pending",
     "cc03_native_product_ui_trial": "pending",
     "cc03_independent_review": "pending",
     "cc03_broad_core_main_chat_agent_v1": "failed_132_of_140_passed_same_8_preexisting_red",
@@ -324,5 +325,5 @@
     "product_trial",
     "independent_review"
   ],
-  "last_updated_at": "2026-07-15T12:30:06+08:00"
+  "last_updated_at": "2026-07-15T12:47:36+08:00"
 }
