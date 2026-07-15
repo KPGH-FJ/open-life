@@ -4034,6 +4034,315 @@ fn roadshow_rc06_separate_process_wait_then_accept_reuses_one_materialization() 
     }
 }
 
+#[test]
+fn roadshow_rc07_separate_process_partial_accept_resumes_two_artifacts_once() {
+    const TEST_NAME: &str = "main_chat_command_surface_tests::roadshow_rc07_separate_process_partial_accept_resumes_two_artifacts_once";
+    const PHASE_ENV: &str = "OPENLIFE_ROADSHOW_RC07_PROCESS_PHASE";
+    const ROOT_ENV: &str = "OPENLIFE_ROADSHOW_RC07_PROCESS_ROOT";
+    const WORKSPACE_ENV: &str = "OPENLIFE_ROADSHOW_RC07_SAFE_WORKSPACE";
+    const OPERATION_ENV: &str = "OPENLIFE_ROADSHOW_RC07_OPERATION";
+    const SESSION_ID: &str = "roadshow-rc07-process-partial-review-resume";
+    const PROMPT: &str = "生成一份 Markdown 路演摘要和一份 CSV 风险清单，并在我确认后保存。";
+    const MARKDOWN: &str = "# OpenLife 路演摘要\n\n跨进程审批保持一个父任务与两个精确制品。";
+    const CSV: &str =
+        "risk,severity,mitigation\nprovider outage,high,fail closed\ndisk full,medium,show degraded state";
+
+    if let Ok(phase) = std::env::var(PHASE_ENV) {
+        let root = std::path::PathBuf::from(
+            std::env::var_os(ROOT_ENV).expect("RC07 child process store root"),
+        );
+        let safe_workspace = std::path::PathBuf::from(
+            std::env::var_os(WORKSPACE_ENV).expect("RC07 child safe workspace"),
+        )
+        .canonicalize()
+        .expect("canonical RC07 child safe workspace");
+        let operation_id = std::env::var(OPERATION_ENV).expect("RC07 child operation id");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("RC07 child Tokio runtime");
+        runtime.block_on(async move {
+            let state = isolated_command_surface_state_with_persistent_main_chat(&root);
+            state.config.lock().await.system.safe_paths =
+                vec![safe_workspace.display().to_string()];
+            let summary_path = safe_workspace.join("roadshow-summary.md");
+            let risks_path = safe_workspace.join("roadshow-risks.csv");
+
+            match phase.as_str() {
+                "seed" => {
+                    let provider_fixture =
+                        configure_command_surface_sequenced_local_http_provider(
+                            &state,
+                            vec![
+                                "unused ranking response".into(),
+                                serde_json::json!({"markdown": MARKDOWN, "csv": CSV}).to_string(),
+                            ],
+                        )
+                        .await;
+                    let response = invoke_send_message_with_operation_id_for_kernel_goal_3(
+                        state.clone(),
+                        SESSION_ID,
+                        PROMPT,
+                        operation_id.clone(),
+                    )
+                    .await;
+                    assert_eq!(response["status"], "blocked", "RC07 seed: {response}");
+                    assert_eq!(response["legacy_fallback_used"], false);
+                    assert_eq!(response["model_invoked"], true);
+                    assert_eq!(response["tool_invoked"], false);
+                    assert_eq!(task_session_id_from_response(&response), operation_id);
+                    assert_eq!(
+                        provider_fixture
+                            .request_count
+                            .load(std::sync::atomic::Ordering::SeqCst),
+                        1
+                    );
+                    let proposals = list_command_surface_proposals(&state).await;
+                    assert_eq!(proposals.len(), 2);
+                    assert!(proposals.iter().all(|proposal| {
+                        proposal.status == openlife_core::agent::ProposalStatus::Pending
+                    }));
+                    assert!(proposals.iter().any(|proposal| {
+                        proposal.affected_path == format!("filesystem.{}", summary_path.display())
+                    }));
+                    assert!(proposals.iter().any(|proposal| {
+                        proposal.affected_path == format!("filesystem.{}", risks_path.display())
+                    }));
+                    assert!(!summary_path.exists());
+                    assert!(!risks_path.exists());
+                    assert_eq!(
+                        load_command_surface_session(&state, &operation_id)
+                            .await
+                            .status,
+                        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
+                    );
+                    let actions = list_command_surface_actions(&state, &operation_id).await;
+                    assert_eq!(actions.len(), 2);
+                    assert!(actions.iter().all(|queued| {
+                        queued.action.action_type == "proposal.create"
+                            && queued.observation_metadata.as_ref().is_some_and(|metadata| {
+                                metadata["directWritesExecuted"] == false
+                                    && metadata["externalWritesExecuted"] == false
+                                    && metadata["fileWritten"] == false
+                                    && metadata["reviewStatus"] == "pending"
+                            })
+                    }));
+                }
+                "verify" => {
+                    let proposals = list_command_surface_proposals(&state).await;
+                    assert_eq!(proposals.len(), 2);
+                    let risks_proposal = proposals
+                        .iter()
+                        .find(|proposal| proposal.affected_path.ends_with("/roadshow-risks.csv"))
+                        .expect("RC07 pending CSV Proposal");
+                    let summary_proposal = proposals
+                        .iter()
+                        .find(|proposal| proposal.affected_path.ends_with("/roadshow-summary.md"))
+                        .expect("RC07 pending Markdown Proposal");
+                    assert_eq!(
+                        risks_proposal.status,
+                        openlife_core::agent::ProposalStatus::Pending
+                    );
+                    assert_eq!(
+                        summary_proposal.status,
+                        openlife_core::agent::ProposalStatus::Pending
+                    );
+                    assert!(!summary_path.exists());
+                    assert!(!risks_path.exists());
+
+                    let accepted = crate::commands::proposal::accept_proposal_with_state(
+                        risks_proposal.id.clone(),
+                        &state,
+                    )
+                    .await
+                    .expect("accept RC07 CSV after process restart");
+                    assert_eq!(accepted["effect_status"], "confirmed");
+                    assert_eq!(accepted["artifactMaterialization"]["status"], "confirmed");
+                    assert_eq!(
+                        accepted["artifactMaterialization"]["contentDigest"],
+                        accepted["artifactMaterialization"]["observedContentDigest"]
+                    );
+                    assert_eq!(std::fs::read_to_string(&risks_path).unwrap(), CSV);
+                    assert!(!summary_path.exists());
+                    assert_eq!(
+                        load_command_surface_session(&state, &operation_id)
+                            .await
+                            .status,
+                        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission,
+                        "one confirmed child cannot complete the two-artifact parent"
+                    );
+
+                    let before_modified = std::fs::metadata(&risks_path)
+                        .unwrap()
+                        .modified()
+                        .unwrap();
+                    let replay = crate::commands::proposal::accept_proposal_with_state(
+                        risks_proposal.id.clone(),
+                        &state,
+                    )
+                    .await
+                    .expect("reaccept RC07 CSV in verify process");
+                    assert_eq!(
+                        replay["artifactMaterialization"],
+                        accepted["artifactMaterialization"]
+                    );
+                    assert_eq!(
+                        std::fs::metadata(&risks_path)
+                            .unwrap()
+                            .modified()
+                            .unwrap(),
+                        before_modified,
+                        "confirmed RC07 CSV replay cannot rewrite bytes"
+                    );
+                }
+                "audit" => {
+                    let proposals = list_command_surface_proposals(&state).await;
+                    assert_eq!(proposals.len(), 2);
+                    let risks_proposal = proposals
+                        .iter()
+                        .find(|proposal| proposal.affected_path.ends_with("/roadshow-risks.csv"))
+                        .expect("RC07 accepted CSV Proposal");
+                    let summary_proposal = proposals
+                        .iter()
+                        .find(|proposal| proposal.affected_path.ends_with("/roadshow-summary.md"))
+                        .expect("RC07 pending Markdown Proposal");
+                    assert_eq!(
+                        risks_proposal.status,
+                        openlife_core::agent::ProposalStatus::Accepted
+                    );
+                    assert_eq!(
+                        summary_proposal.status,
+                        openlife_core::agent::ProposalStatus::Pending
+                    );
+                    assert_eq!(std::fs::read_to_string(&risks_path).unwrap(), CSV);
+                    assert!(!summary_path.exists());
+
+                    let accepted = crate::commands::proposal::accept_proposal_with_state(
+                        summary_proposal.id.clone(),
+                        &state,
+                    )
+                    .await
+                    .expect("accept RC07 Markdown after second process restart");
+                    assert_eq!(accepted["effect_status"], "confirmed");
+                    assert_eq!(accepted["artifactMaterialization"]["status"], "confirmed");
+                    assert_eq!(
+                        accepted["artifactMaterialization"]["contentDigest"],
+                        accepted["artifactMaterialization"]["observedContentDigest"]
+                    );
+                    assert_eq!(std::fs::read_to_string(&summary_path).unwrap(), MARKDOWN);
+                    assert_eq!(std::fs::read_to_string(&risks_path).unwrap(), CSV);
+                    assert_eq!(
+                        load_command_surface_session(&state, &operation_id)
+                            .await
+                            .status,
+                        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
+                    );
+
+                    let summary_modified = std::fs::metadata(&summary_path)
+                        .unwrap()
+                        .modified()
+                        .unwrap();
+                    let risks_modified = std::fs::metadata(&risks_path)
+                        .unwrap()
+                        .modified()
+                        .unwrap();
+                    for proposal in &proposals {
+                        let replay = crate::commands::proposal::accept_proposal_with_state(
+                            proposal.id.clone(),
+                            &state,
+                        )
+                        .await
+                        .expect("reaccept confirmed RC07 artifact");
+                        assert_eq!(replay["effect_status"], "confirmed");
+                        assert_eq!(replay["artifactMaterialization"]["status"], "confirmed");
+                    }
+                    assert_eq!(
+                        std::fs::metadata(&summary_path)
+                            .unwrap()
+                            .modified()
+                            .unwrap(),
+                        summary_modified
+                    );
+                    assert_eq!(
+                        std::fs::metadata(&risks_path)
+                            .unwrap()
+                            .modified()
+                            .unwrap(),
+                        risks_modified
+                    );
+                    assert_eq!(
+                        std::fs::read_dir(&safe_workspace)
+                            .unwrap()
+                            .collect::<Result<Vec<_>, _>>()
+                            .unwrap()
+                            .len(),
+                        2,
+                        "RC07 replay cannot leave a stage copy or duplicate artifact"
+                    );
+                    let events = state
+                        .main_chat_agent_event_store
+                        .as_ref()
+                        .expect("RC07 audit EventStore")
+                        .lock()
+                        .await
+                        .list(&operation_id, 0, 250)
+                        .expect("RC07 audit events");
+                    assert_eq!(
+                        events
+                            .iter()
+                            .filter(|event| event.event_type == "final_delivery.created")
+                            .count(),
+                        1
+                    );
+                    assert_eq!(
+                        state
+                            .memory_store
+                            .lock()
+                            .await
+                            .export_all_messages()
+                            .expect("RC07 audit Conversation")
+                            .len(),
+                        2
+                    );
+                    let actions = list_command_surface_actions(&state, &operation_id).await;
+                    assert_eq!(actions.len(), 2);
+                    assert!(actions
+                        .iter()
+                        .all(|queued| queued.action.action_type == "proposal.create"));
+                }
+                _ => panic!("unexpected RC07 child phase: {phase}"),
+            }
+        });
+        return;
+    }
+
+    let root = tempfile::tempdir().expect("RC07 separate-process root");
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("create RC07 safe workspace");
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let executable = std::env::current_exe().expect("current Rust test executable");
+    for phase in ["seed", "verify", "audit"] {
+        let output = std::process::Command::new(&executable)
+            .arg("--exact")
+            .arg(TEST_NAME)
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env(PHASE_ENV, phase)
+            .env(ROOT_ENV, root.path())
+            .env(WORKSPACE_ENV, &workspace)
+            .env(OPERATION_ENV, &operation_id)
+            .output()
+            .expect("spawn RC07 child test process");
+        assert!(
+            output.status.success(),
+            "RC07 {phase} child failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
 #[tokio::test]
 async fn generated_artifact_without_safe_workspace_returns_structured_blocker_not_ipc_failure() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
